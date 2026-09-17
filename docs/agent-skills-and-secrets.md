@@ -239,17 +239,19 @@ value-free экран завершения с просьбой закрыть е
 предупреждает, что browser-копия не нужна и при предложении сохранения следует
 выбрать «Нет, спасибо».
 
-Reusable credentials/session обязательно хранятся зашифрованно, вне Workspace/Git/plugin/package cache
+Reusable credentials/session хранятся вне Workspace/Git/plugin/package cache
 в стабильном owner-only namespace `skill/company/member/connection`, без
-версии runtime в ключе. Навык должен описывать сохраняемые поля, реальную
-защиту каждой поддерживаемой OS, условия unlock/reuse/expiry и замену/удаление.
-Local-only и owner-only ACL сами по себе не означают encryption или защиту от
-процесса под тем же OS user. Нельзя обещать Keychain, DPAPI, Windows Hello либо
-encrypted container, если они не реализованы и не проверены. Защита охватывает
-также cookies, tokens и авторизованный browser/SDK state: plaintext profile
-или session file недопустим. Нужен encrypted container либо in-memory context
-с AEAD snapshot, OS-protected key и отдельным подтверждением владельца.
-Отсутствие защиты блокирует setup/read без plaintext/silent-unlock fallback.
+версии runtime в ключе. По умолчанию они зашифрованы. Явное исключение –
+обычный отдельный Chromium profile browser-мессенджера: это честно заявленный
+provider profile, а не encrypted vault. Навык должен описывать сохраняемые поля,
+реальную защиту каждой поддерживаемой OS, условия unlock/reuse/expiry и
+замену/удаление. Local-only и owner-only ACL сами по себе не означают encryption
+или защиту от процесса под тем же OS user. Нельзя обещать Keychain, DPAPI,
+Windows Hello либо encrypted container, если они не реализованы и не проверены.
+Для остальных навыков защита охватывает также cookies, tokens и авторизованный
+browser/SDK state: нужен encrypted container либо in-memory context с AEAD
+snapshot, OS-protected key и предусмотренным владельцем unlock. Отсутствие
+заявленной защиты блокирует setup/read без plaintext/silent-unlock fallback.
 
 Браузерная процедура использует один headed browser от первого запуска до
 завершения; headless auth/probe перед fallback запрещён. Команды и размышления
@@ -257,16 +259,27 @@ encrypted container, если они не реализованы и не про�
 Отдельная setup-вкладка допустима в этом же процессе. API/SDK flow не требует
 фиктивного браузера; штатные OAuth/QR/passkey handoff сохраняются.
 
-Локальный доступ к личному credential/session имеет абсолютный срок не больше
-30 минут от начала, включая setup, OS unlock, ожидание и сон. Команды,
-reconnect, новый Run или CLI не продлевают его. После результата доступ
-закрывается сразу; новая сессия требует нового системного действия владельца,
-не автоматического переоткрытия агентом. Независимый native supervisor с
-continuous clock завершает owned browser/worker/SDK client при expiry/crash/hang;
-JS-only таймер недостаточен. После wake expired command блокируется; точное
-исполнение кода во сне/при выключенной ОС не обещается. Company Agent Secrets
-сохраняют отдельный, возможно более короткий grant lifetime. Ciphertext может
-жить дольше аренды, а локальное закрытие не отзывает token у provider-а.
+Browser skill объявляет в signed package optional `browserSession` descriptor:
+`apiVersion=1`, один из классов `messenger-profile`, `protected-snapshot` или
+`delegated-ephemeral`, absolute `leaseMs` и `manualAssist`. Descriptor требует
+capabilities `browser` + `local-session`. Host перед запуском создаёт trusted
+binding, передаёт общий module URL/policy/start/deadline и независимо завершает
+process по deadline. Общие browser discovery, Playwright runtime, lifecycle,
+profile lock и cleanup не содержат provider URL, selectors или mutation
+semantics.
+
+Lease по умолчанию равна 30 минутам; signed skill может выбрать от минуты до
+6 часов. Команды, reconnect, новый Run, worker или CLI не продлевают исходный
+deadline. `manualAssist=true` разрешает provider-у открыть ручной fallback
+только в той же session/profile/lease; exact operation binding, обычное
+подтверждение и запрет blind retry после ambiguous result остаются у adapter-а.
+При `manualAssist=false` общий слой отклоняет ручной flow. Чувствительные навыки
+могут и должны сохранять меньший native deadline, continuous-clock barrier,
+OS-protected storage и fresh unlock независимо от общего потолка. После wake
+expired command блокируется; точное исполнение кода во сне или при выключенной
+ОС не обещается. Company Agent Secrets сохраняют отдельный, возможно более
+короткий grant lifetime. Ciphertext может жить дольше аренды, а локальное
+закрытие не отзывает token у provider-а.
 
 Новые реализации проверяются на реальных macOS и Windows, включая AEAD,
 ACL, wrong identity/key, fresh unlock, reuse одной формы/PID и native

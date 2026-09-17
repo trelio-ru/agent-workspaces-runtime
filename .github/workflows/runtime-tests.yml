@@ -61,6 +61,7 @@ jobs:
       - name: Run host runtime tests
         run: |
           node tests/context-budget.test.mjs
+          node tests/trelio-browser-session.test.mjs
           node tests/trelio-codex-routing.test.mjs
           node tests/trelio-company-encryption.test.mjs
           node tests/trelio-context-search-matching.test.mjs

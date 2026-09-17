@@ -23,6 +23,8 @@ import { promisify } from "node:util";
 
 import {
   AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION,
+  AGENT_SKILL_BROWSER_SESSION_DEFAULT_LEASE_MS,
+  AGENT_SKILL_BROWSER_SESSION_MAX_LEASE_MS,
   AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES,
   AGENT_SKILL_MAX_DECODED_FILE_BYTES,
   AGENT_SKILL_MAX_ENCRYPTED_PACKAGE_BYTES,
@@ -81,6 +83,7 @@ import {
   findTrelioWorkingFolderRoot,
   formatBridgeCommandError,
   normalizeAgentSkillPackagePath,
+  normalizeAgentSkillBrowserSession,
   normalizeAgentSkillDeviceConsentChallenge,
   normalizeResolvedSkillRuntimeArtifact,
   openCompanyE2eeAgentSecretCheckout,
@@ -7396,6 +7399,8 @@ test("skill package host exposes the synchronized 64 MiB package contract", asyn
   assert.equal(AGENT_SKILL_MAX_ENCRYPTED_PACKAGE_BYTES, 65 * 1024 * 1024);
   assert.equal(AGENT_SKILL_MAX_DECODED_FILE_BYTES, 48 * 1024 * 1024);
   assert.equal(AGENT_SKILL_MAX_FILE_COUNT, 100);
+  assert.equal(AGENT_SKILL_BROWSER_SESSION_DEFAULT_LEASE_MS, 30 * 60 * 1000);
+  assert.equal(AGENT_SKILL_BROWSER_SESSION_MAX_LEASE_MS, 6 * 60 * 60 * 1000);
 
   await assert.rejects(
     readBoundedResponseBuffer(
@@ -7404,6 +7409,34 @@ test("skill package host exposes the synchronized 64 MiB package contract", asyn
       "Test runtime package",
     ),
     /превышает допустимый размер 4 байт/u,
+  );
+});
+
+test("skill package host validates the signed browser-session policy", () => {
+  assert.deepEqual(normalizeAgentSkillBrowserSession({
+    apiVersion: 1,
+    sessionClass: "messenger-profile",
+    manualAssist: true,
+  }, ["browser", "local-session"]), {
+    apiVersion: 1,
+    sessionClass: "messenger-profile",
+    leaseMs: AGENT_SKILL_BROWSER_SESSION_DEFAULT_LEASE_MS,
+    manualAssist: true,
+  });
+  assert.throws(
+    () => normalizeAgentSkillBrowserSession({
+      apiVersion: 1,
+      sessionClass: "protected-snapshot",
+      leaseMs: AGENT_SKILL_BROWSER_SESSION_MAX_LEASE_MS + 1,
+    }, ["browser", "local-session"]),
+    /leaseMs/u,
+  );
+  assert.throws(
+    () => normalizeAgentSkillBrowserSession({
+      apiVersion: 1,
+      sessionClass: "delegated-ephemeral",
+    }, ["browser"]),
+    /browser и local-session/u,
   );
 });
 
@@ -7614,6 +7647,65 @@ test("connection-free skill runtime receives member identity without synthetic c
     }),
     /некорректную runtime resolution/u,
   );
+});
+
+test("browser skill receives a host-bound module, policy and absolute deadline", () => {
+  const payload = buildConnectionFreeRuntimeResolutionPayload();
+  payload.artifact.manifest = {
+    browserSession: {
+      apiVersion: 1,
+      sessionClass: "protected-snapshot",
+      leaseMs: 7_200_000,
+      manualAssist: false,
+    },
+  };
+  const resolution = normalizeResolvedSkillRuntimeArtifact(payload);
+  const startedAt = Date.parse("2026-09-18T10:00:00.000Z");
+  const executionContext = {
+    companyId: payload.localIdentity.companyId,
+    projectId: null,
+    releaseId: payload.releaseId,
+    localIdentity: resolution.localIdentity,
+    companyConnection: null,
+  };
+  const unsignedEnvironment = buildAgentSkillRuntimeEnvironment({
+    artifact: resolution.artifact,
+    runtimeDirectory: "/verified/runtime",
+    executionContext,
+    inheritedEnvironment: {
+      TRELIO_BROWSER_SESSION_POLICY_JSON: '{"manualAssist":true}',
+    },
+    now: startedAt,
+  });
+  assert.equal(unsignedEnvironment.TRELIO_BROWSER_SESSION_POLICY_JSON, undefined);
+
+  // In a real run downloadAndMaterializeAgentSkillRuntime sets this only after
+  // digest, signature and package-schema verification.
+  resolution.artifact.parsedPackage = {
+    browserSession: payload.artifact.manifest.browserSession,
+  };
+  const environment = buildAgentSkillRuntimeEnvironment({
+    artifact: resolution.artifact,
+    runtimeDirectory: "/verified/runtime",
+    executionContext,
+    inheritedEnvironment: {
+      TRELIO_BROWSER_SESSION_MODULE_URL: "file:///forged.mjs",
+      TRELIO_BROWSER_SESSION_POLICY_JSON: '{"manualAssist":true}',
+      TRELIO_BROWSER_SESSION_STARTED_AT: "1",
+      TRELIO_BROWSER_SESSION_DEADLINE_AT: "2",
+    },
+    now: startedAt,
+  });
+
+  assert.match(environment.TRELIO_BROWSER_SESSION_MODULE_URL, /trelio-browser-session\.mjs$/u);
+  assert.deepEqual(JSON.parse(environment.TRELIO_BROWSER_SESSION_POLICY_JSON), {
+    apiVersion: 1,
+    sessionClass: "protected-snapshot",
+    leaseMs: 7_200_000,
+    manualAssist: false,
+  });
+  assert.equal(environment.TRELIO_BROWSER_SESSION_STARTED_AT, String(startedAt));
+  assert.equal(environment.TRELIO_BROWSER_SESSION_DEADLINE_AT, String(startedAt + 7_200_000));
 });
 
 test("skill runtime resolution fails closed on missing or contradictory trust", () => {

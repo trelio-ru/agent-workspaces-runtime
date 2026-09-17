@@ -30,6 +30,12 @@ publication tooling также остаются вне этого публичн
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.
+- Browser-навыки используют общий host-owned `browser-session-v1`: signed
+  descriptor выбирает класс хранения, absolute lease и opt-in manual assist;
+  host один раз реализует browser discovery, Playwright bootstrap, process
+  lifecycle и profile lock. Provider-specific navigation, selectors, read
+  guards и mutation authority в generic host не переносятся; профили разных
+  навыков не объединяются.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 
 ## Граница plugin/runtime

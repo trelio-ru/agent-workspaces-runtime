@@ -86,6 +86,9 @@ import {
 const execFileAsync = promisify(execFile);
 export const BRIDGE_VERSION = "2.3.1";
 const BRIDGE_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
+const BROWSER_SESSION_MODULE_URL = pathToFileURL(
+  path.join(path.dirname(BRIDGE_ENTRYPOINT_PATH), "trelio-browser-session.mjs"),
+).href;
 const LOADED_CODEX_PLUGIN_DIRECTORY = process.env.TRELIO_PLUGIN_ROOT
   ? path.resolve(process.env.TRELIO_PLUGIN_ROOT)
   // Direct source-tree tests do not pass loader environment. The packaged
@@ -458,6 +461,13 @@ export const AGENT_SKILL_MAX_ENCRYPTED_PACKAGE_BYTES =
   AGENT_SKILL_MAX_PACKAGE_BYTES + 1024 * 1024;
 export const AGENT_SKILL_MAX_DECODED_FILE_BYTES = 48 * 1024 * 1024;
 export const AGENT_SKILL_MAX_FILE_COUNT = 100;
+export const AGENT_SKILL_BROWSER_SESSION_DEFAULT_LEASE_MS = 30 * 60 * 1000;
+export const AGENT_SKILL_BROWSER_SESSION_MAX_LEASE_MS = 6 * 60 * 60 * 1000;
+const AGENT_SKILL_BROWSER_SESSION_CLASSES = new Set([
+  "messenger-profile",
+  "protected-snapshot",
+  "delegated-ephemeral",
+]);
 const AGENT_SKILL_SIGNING_KEY_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const AGENT_SKILL_ALLOWED_CAPABILITIES = new Set([
   "browser",
@@ -465,6 +475,60 @@ const AGENT_SKILL_ALLOWED_CAPABILITIES = new Set([
   "network",
   "secret-checkout",
 ]);
+
+export const normalizeAgentSkillBrowserSession = (
+  value,
+  capabilities = [],
+) => {
+  if (value === undefined || value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Runtime package browserSession должен быть объектом.");
+  }
+  const allowedKeys = new Set([
+    "apiVersion",
+    "sessionClass",
+    "leaseMs",
+    "manualAssist",
+  ]);
+  const unexpectedKeys = Object.keys(value).filter((key) => !allowedKeys.has(key));
+  if (unexpectedKeys.length > 0) {
+    throw new Error(
+      `Runtime package browserSession содержит неизвестные поля: ${unexpectedKeys.join(", ")}.`,
+    );
+  }
+  if (value.apiVersion !== 1) {
+    throw new Error("Runtime package browserSession.apiVersion должен быть равен 1.");
+  }
+  if (!AGENT_SKILL_BROWSER_SESSION_CLASSES.has(value.sessionClass)) {
+    throw new Error("Runtime package browserSession.sessionClass не поддерживается.");
+  }
+  const leaseMs = value.leaseMs === undefined
+    ? AGENT_SKILL_BROWSER_SESSION_DEFAULT_LEASE_MS
+    : value.leaseMs;
+  if (
+    !Number.isInteger(leaseMs)
+    || leaseMs < 60_000
+    || leaseMs > AGENT_SKILL_BROWSER_SESSION_MAX_LEASE_MS
+  ) {
+    throw new Error(
+      `Runtime package browserSession.leaseMs должен быть от 60000 до ${AGENT_SKILL_BROWSER_SESSION_MAX_LEASE_MS}.`,
+    );
+  }
+  if (value.manualAssist !== undefined && typeof value.manualAssist !== "boolean") {
+    throw new Error("Runtime package browserSession.manualAssist должен быть boolean.");
+  }
+  if (!capabilities.includes("browser") || !capabilities.includes("local-session")) {
+    throw new Error(
+      "Runtime package browserSession требует capabilities browser и local-session.",
+    );
+  }
+  return Object.freeze({
+    apiVersion: 1,
+    sessionClass: value.sessionClass,
+    leaseMs,
+    manualAssist: value.manualAssist === true,
+  });
+};
 const WORKSPACE_OBJECT_POINTER_VERSION = "https://trelio.ru/spec/workspace-object/v1";
 const MAX_INLINE_TEXT_BYTES = 4 * 1024 * 1024;
 const TARGET_INLINE_GIT_TREE_BYTES = 48 * 1024 * 1024;
@@ -5229,6 +5293,10 @@ export const parseAndValidateAgentSkillPackage = (
   const capabilities = Array.isArray(runtimePackage?.capabilities)
     ? runtimePackage.capabilities.map(String)
     : [];
+  const browserSession = normalizeAgentSkillBrowserSession(
+    runtimePackage?.browserSession,
+    capabilities,
+  );
   const files = runtimePackage?.files;
 
   if (runtimePackage?.format !== AGENT_SKILL_PACKAGE_FORMAT) {
@@ -5332,6 +5400,7 @@ export const parseAndValidateAgentSkillPackage = (
       interpreter,
     },
     capabilities,
+    browserSession,
     files: parsedFiles,
     packageSha256: crypto.createHash("sha256").update(packageBytes).digest("hex"),
     packageSizeBytes: packageBytes.byteLength,
@@ -5403,6 +5472,7 @@ export const buildAgentSkillPackage = async ({
   entrypointPath,
   interpreter,
   capabilities = [],
+  browserSession = null,
 }) => {
   if (!SKILL_ID_PATTERN.test(String(skillId || ""))) {
     throw new Error("Параметр --skill должен содержать lowercase kebab-case id.");
@@ -5424,6 +5494,10 @@ export const buildAgentSkillPackage = async ({
   ) {
     throw new Error("Параметр --capability содержит неподдерживаемое значение.");
   }
+  const normalizedBrowserSession = normalizeAgentSkillBrowserSession(
+    browserSession,
+    uniqueCapabilities,
+  );
 
   const sourceStat = await fs.lstat(sourceDirectory);
 
@@ -5469,6 +5543,9 @@ export const buildAgentSkillPackage = async ({
       interpreter,
     },
     capabilities: uniqueCapabilities,
+    ...(normalizedBrowserSession
+      ? { browserSession: normalizedBrowserSession }
+      : {}),
     files: packageFiles,
   })}\n`, "utf8");
 
@@ -5659,6 +5736,9 @@ const inspectEncryptedAgentSkillRuntimeForConsent = async ({
       },
       entrypoint: parsedPackage.entrypoint,
       capabilities: [...parsedPackage.capabilities].sort(),
+      ...(parsedPackage.browserSession
+        ? { browserSession: parsedPackage.browserSession }
+        : {}),
       files: parsedPackage.files.map((file) => ({
         path: file.path,
         mode: file.mode,
@@ -5738,6 +5818,9 @@ const downloadAndMaterializeAgentSkillRuntime = async ({
       },
       entrypoint: artifact.parsedPackage.entrypoint,
       capabilities: [...artifact.parsedPackage.capabilities].sort(),
+      ...(artifact.parsedPackage.browserSession
+        ? { browserSession: artifact.parsedPackage.browserSession }
+        : {}),
       files: artifact.parsedPackage.files.map((file) => ({
         path: file.path,
         mode: file.mode,
@@ -6388,6 +6471,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
   executionContext,
   inheritedEnvironment = process.env,
   grantedEnvironment = {},
+  now = Date.now(),
 }) => {
   // Эти переменные являются доверенной границей package host. Удаляем
   // одноимённые значения из родительского окружения, чтобы старый shell или
@@ -6403,11 +6487,20 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_SKILL_MEMBER_ID: _staleMemberId,
     TRELIO_SKILL_CONNECTION_ID: _staleConnectionId,
     TRELIO_SKILL_CONNECTION_CONFIG_JSON: _staleConnectionConfig,
+    TRELIO_BROWSER_SESSION_MODULE_URL: _staleBrowserSessionModuleUrl,
+    TRELIO_BROWSER_SESSION_POLICY_JSON: _staleBrowserSessionPolicy,
+    TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
+    TRELIO_BROWSER_SESSION_DEADLINE_AT: _staleBrowserSessionDeadlineAt,
     ...cleanEnvironment
   } = sanitizeAgentSkillInheritedEnvironment(inheritedEnvironment);
   const connectionConfigJson = executionContext.companyConnection
     ? JSON.stringify(executionContext.companyConnection.config)
     : null;
+  // Only the descriptor parsed from the digest- and signature-verified package
+  // may enable this capability. Resolve metadata is useful for consent UI but
+  // cannot independently grant a browser session to package code.
+  const browserSession = artifact.parsedPackage?.browserSession || null;
+  const browserSessionStartedAt = Number.isSafeInteger(now) ? now : Date.now();
 
   const grantedEntries = Object.entries(grantedEnvironment || {});
   if (grantedEntries.length > 1) {
@@ -6478,6 +6571,16 @@ export const buildAgentSkillRuntimeEnvironment = ({
           TRELIO_SKILL_CONNECTION_CONFIG_JSON: connectionConfigJson,
         }
       : {}),
+    ...(browserSession
+      ? {
+          TRELIO_BROWSER_SESSION_MODULE_URL: BROWSER_SESSION_MODULE_URL,
+          TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify(browserSession),
+          TRELIO_BROWSER_SESSION_STARTED_AT: String(browserSessionStartedAt),
+          TRELIO_BROWSER_SESSION_DEADLINE_AT: String(
+            browserSessionStartedAt + browserSession.leaseMs,
+          ),
+        }
+      : {}),
     // A server-authorized checkout is not ambient parent environment. It is
     // supplied only by this process's secret-exec -> exact skill-run handoff
     // below, after live release resolution, and cannot override host identity.
@@ -6496,6 +6599,10 @@ const runMaterializedAgentSkill = async ({
   grantedStdin = null,
   prepareSetupEnvironment = null,
 }) => {
+  // The absolute browser lease covers setup/credential preparation too. A
+  // slow owner handoff must consume the same signed budget instead of starting
+  // a fresh window only after the setup step returns.
+  const runtimeStartedAt = Date.now();
   const entrypointPath = path.join(
     runtimeDirectory,
     ...artifact.parsedPackage.entrypoint.path.split("/"),
@@ -6521,20 +6628,52 @@ const runMaterializedAgentSkill = async ({
   // Resolve the interpreter before delivering a value; setup is authorized
   // immediately before spawn and cannot reuse a previous invocation's secret.
   if (prepareSetupEnvironment) grantedEnvironment = await prepareSetupEnvironment();
+  const runtimeEnvironment = buildAgentSkillRuntimeEnvironment({
+    artifact,
+    runtimeDirectory,
+    executionContext,
+    grantedEnvironment,
+    now: runtimeStartedAt,
+  });
+  const browserSessionDeadlineAt = Number(
+    runtimeEnvironment.TRELIO_BROWSER_SESSION_DEADLINE_AT || 0,
+  );
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: runtimeDirectory,
-      env: buildAgentSkillRuntimeEnvironment({
-        artifact,
-        runtimeDirectory,
-        executionContext,
-        grantedEnvironment,
-      }),
+      env: runtimeEnvironment,
       shell: false,
       stdio: [grantedStdin === null ? "inherit" : "pipe", "inherit", "inherit"],
     });
-    child.once("error", reject);
+    let deadlineTimer = null;
+    let forceTimer = null;
+    let deadlineExceeded = false;
+    const clearSupervision = () => {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (forceTimer) clearTimeout(forceTimer);
+    };
+    if (Number.isSafeInteger(browserSessionDeadlineAt) && browserSessionDeadlineAt > 0) {
+      deadlineTimer = setTimeout(() => {
+        deadlineExceeded = true;
+        child.kill("SIGTERM");
+        // Browser-session runtimes receive SIGTERM first so the shared layer
+        // can close Playwright and release the exact profile. A bounded hard
+        // stop keeps a broken adapter from extending its signed lease.
+        forceTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+        forceTimer.unref?.();
+      }, Math.max(1, browserSessionDeadlineAt - Date.now()));
+      deadlineTimer.unref?.();
+    }
+    child.once("error", (error) => {
+      clearSupervision();
+      reject(error);
+    });
     child.once("exit", (code, signal) => {
+      clearSupervision();
+      if (deadlineExceeded) {
+        reject(new Error("Browser-session runtime превысил подписанный lease."));
+        return;
+      }
       if (signal) {
         reject(new Error(`Runtime процесса завершён сигналом ${signal}.`));
         return;
