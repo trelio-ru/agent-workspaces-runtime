@@ -252,11 +252,11 @@ fi
 if [[ -d "${TASK_THREE_WORKTREE}" ]] \
   || git -C "${CANONICAL_REPOSITORY}" show-ref --verify --quiet \
     refs/heads/codex/guard-test-three; then
-  printf 'Released plugin task worktree survived guarded cleanup.\n' >&2
+  printf 'Released runtime task worktree survived guarded cleanup.\n' >&2
   exit 1
 fi
 
-if [[ -d "${CANONICAL_REPOSITORY}/.git/trelio-agent-workspaces-main-update.lock" ]]; then
+if [[ -d "${CANONICAL_REPOSITORY}/.git/trelio-agent-workspaces-runtime-main-update.lock" ]]; then
   printf 'Git guard left the shared main lock active.\n' >&2
   exit 1
 fi

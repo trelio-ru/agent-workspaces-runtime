@@ -31,7 +31,7 @@ if ($Child) {
 
   $testFile = Join-Path `
     $repositoryPath `
-    "plugins\trelio-agent-workspaces\tests\trelio-workspace.test.mjs"
+    "tests\trelio-workspace.test.mjs"
   & $nodePath `
     --test `
     "--test-name-pattern=Windows bridge applies" `
@@ -39,7 +39,7 @@ if ($Child) {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   # Download snapshots use the same current-user private DACL helpers. Verify
   # that actual file materialization also works without administrator rights.
-  & $nodePath (Join-Path $repositoryPath "plugins\trelio-agent-workspaces\tests\trelio-local-attachments.test.mjs")
+  & $nodePath (Join-Path $repositoryPath "tests\trelio-local-attachments.test.mjs")
   exit $LASTEXITCODE
 }
 

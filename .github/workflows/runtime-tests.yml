@@ -1,0 +1,161 @@
+name: Host runtime tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT: ${{ github.workspace }}/_contracts/agent-workspaces/plugins/trelio-agent-workspaces
+
+jobs:
+  git-main-guard:
+    name: Canonical main Git guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out runtime repository
+        uses: actions/checkout@v4
+
+      - name: Run canonical main guard regressions
+        run: bash scripts/git-main-guard.test.sh
+
+  node-tests:
+    name: Runtime tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out runtime repository
+        uses: actions/checkout@v4
+
+      # Cross-repository tests consume the real stable shell. The checkout is
+      # read-only test input and is never copied into a runtime package.
+      - name: Check out plugin contract
+        uses: actions/checkout@v4
+        with:
+          repository: trelio-ru/agent-workspaces
+          path: _contracts/agent-workspaces
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+
+      - name: Install pinned report dependencies
+        run: npm ci --ignore-scripts
+
+      # Execute files directly: a parent node:test process has intermittently
+      # corrupted serialized child IPC under load on hosted runners.
+      - name: Run host runtime tests
+        run: |
+          node tests/context-budget.test.mjs
+          node tests/trelio-codex-routing.test.mjs
+          node tests/trelio-company-encryption.test.mjs
+          node tests/trelio-context-search-matching.test.mjs
+          node tests/trelio-context-search-ranking.test.mjs
+          node tests/trelio-encrypted-workspace-storage.test.mjs
+          node tests/trelio-git.test.mjs
+          node tests/trelio-host-runtime-entry.test.mjs
+          node tests/trelio-local-attachments.test.mjs
+          node tests/trelio-local-context.test.mjs
+          node tests/trelio-mcp-results.test.mjs
+          node tests/trelio-remote-mcp.test.mjs
+          node tests/trelio-runtime-policy.test.mjs
+          node tests/trelio-runtime-session-timeout.test.mjs
+          node tests/trelio-runtime-session.test.mjs
+          node tests/trelio-secret-browser-native.test.mjs
+          node tests/trelio-secret-chat.test.mjs
+          node tests/trelio-secret-generate.test.mjs
+          node tests/trelio-skill-admission.test.mjs
+          node tests/trelio-skill-secret-setup.test.mjs
+          node tests/trelio-workspace-action-process.test.mjs
+          node tests/trelio-workspace-directory.test.mjs
+          node tests/trelio-workspace-files.test.mjs
+          node tests/trelio-workspace.test.mjs
+
+      - name: Build deterministic runtime packages
+        shell: bash
+        run: |
+          node scripts/build-host-runtime-package.mjs --runtime-version 0.0.0 --output "$RUNNER_TEMP/runtime-a.skillpkg"
+          node scripts/build-host-runtime-package.mjs --runtime-version 0.0.0 --output "$RUNNER_TEMP/runtime-b.skillpkg"
+          cmp "$RUNNER_TEMP/runtime-a.skillpkg" "$RUNNER_TEMP/runtime-b.skillpkg"
+
+  windows-acl:
+    name: Windows runtime and private ACL
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out runtime repository
+        uses: actions/checkout@v4
+
+      - name: Check out plugin contract
+        uses: actions/checkout@v4
+        with:
+          repository: trelio-ru/agent-workspaces
+          path: _contracts/agent-workspaces
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+
+      - name: Run admission cache boundary regressions
+        run: node tests/trelio-skill-admission.test.mjs
+
+      - name: Run signed setup boundary regressions
+        run: node tests/trelio-skill-secret-setup.test.mjs
+
+      - name: Run Windows ACL regressions
+        run: >-
+          node --test
+          --test-name-pattern="Windows ACL command|Windows bridge applies|Windows Node resolver|Windows Remote MCP launcher"
+          tests/trelio-workspace.test.mjs
+
+      - name: Run Windows Git prerequisite regressions
+        run: node --test tests/trelio-git.test.mjs
+
+      - name: Run Windows private attachment delivery regressions
+        run: node tests/trelio-local-attachments.test.mjs
+
+      - name: Run Windows encrypted Workspace file delivery regressions
+        run: node tests/trelio-workspace-files.test.mjs
+
+      - name: Run Windows Workspace subprocess regressions
+        run: node tests/trelio-workspace-action-process.test.mjs
+
+      - name: Run Windows Workspace directory selection regressions
+        run: node tests/trelio-workspace-directory.test.mjs
+
+      - name: Run Windows embedded browser transport regressions
+        run: node tests/trelio-secret-browser-native.test.mjs
+
+      - name: Run Windows hook launcher regression
+        run: >-
+          node --test
+          --test-name-pattern="configured platform hook launcher|resume and compact|bounded cleanup"
+          tests/trelio-runtime-session.test.mjs
+
+      - name: Run Windows hook timeout regressions
+        run: node tests/trelio-runtime-session-timeout.test.mjs
+
+      - name: Run Windows Remote MCP handshake regression
+        run: >-
+          node --test
+          --test-name-pattern="stdio initialize is not blocked by Codex plugin retention"
+          tests/trelio-remote-mcp.test.mjs
+
+      - name: Run Windows ACL regression as a standard user
+        shell: pwsh
+        run: ./.github/scripts/run-windows-acl-standard-user.ps1

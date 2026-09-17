@@ -383,7 +383,7 @@ blocker, а не подтверждение сохранённого draft и н
 ## Финальная проверка контекста
 
 До итогового ответа после содержательной работы агент выполняет
-[`workspace-context-review.md`](../plugins/trelio-agent-workspaces/skills/trelio-workspace-worker/references/workspace-context-review.md).
+[`workspace-context-review.md`](https://github.com/trelio-ru/agent-workspaces/blob/main/plugins/trelio-agent-workspaces/skills/trelio-workspace-worker/references/workspace-context-review.md).
 Этот шаг доступен через MCP initialize, worker и каталог даже после внешнего
 поиска без task/Run. Exact effective rules или pinned snapshot задают разрешение
 записи; неизвестная или legacy policy не становится maintain.

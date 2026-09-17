@@ -1,340 +1,91 @@
-# Trelio Agent Workspaces
+# Trelio Agent Workspaces Runtime
 
-Официальный плагин Trelio для работы Codex и Claude с управляемыми Agent
-Workspaces и актуальными навыками компании и проектов.
+Публичный generic host runtime для Trelio Agent Workspaces. Он выполняет
+локальный Git/data plane, lifecycle hooks, local MCP, encrypted-company
+материализацию и общие security/credential primitives.
 
-Плагин подключает:
+Устанавливаемый плагин находится в отдельном репозитории
+[`trelio-ru/agent-workspaces`](https://github.com/trelio-ru/agent-workspaces).
+Пользователи устанавливают именно его: runtime загружается stable shell-ом как
+подписанный content-addressed package и не устанавливается вручную.
 
-- Trelio MCP с личной OAuth 2.1-авторизацией;
-- встроенную диагностику plugin, hooks, MCP/OAuth, Node.js, Git и локального
-  bridge без вывода tokens, pairing IDs и runtime keys;
-- один канонический воркспейс задачи и именованные воркспейсы компании/проектов
-  с версионированием, many-to-many связями и проверкой прав;
-- навыки, назначенные компанией или конкретным проектом;
-- создание и публикацию приватных навыков владельцем или администратором через
-  отдельные plan/apply-инструменты;
-- локальный Git bridge для открытия рабочего контекста, переносимого `pause` и
-  единого `finish` без потери параллельных изменений;
-- локальную расшифровку Git-контекста зашифрованной компании без передачи
-  ключа или plaintext backend-у;
-- подписанные runtime-пакеты и декларативные Remote MCP-интеграции;
-- защищённую работу с Agent Secrets и локальными личными подключениями;
-- переносимый контекст между запусками, задачами и компьютерами.
+## Граница репозиториев
 
-Этот репозиторий является единственным каноническим источником клиентского
-дистрибутива. Backend и пользовательский интерфейс находятся в основном
-репозитории Trelio. Исходники provider-specific runtime-ов, их тесты и
-внутренние maintainer/release-инструкции ведутся вместе с backend в закрытом
-контуре и не входят ни в этот публичный repository, ни в устанавливаемый
-plugin bundle.
+Этот репозиторий владеет:
 
-Исполняемый навык может быть проверен Trelio либо загружен администратором
-конкретной компании. Во втором случае агент показывает автора и причину
-публикации, а plugin до materialization и исполнения package требует отдельное
-прямое согласие пользователя в защищённой локальной форме. Для E2EE plugin
-может заранее получить только ciphertext и расшифровать его во временной папке,
-чтобы показать реальные capabilities. Новая публикация всегда требует нового
-согласия, даже если package bytes не изменились.
+- исходниками `host-runtime/**`;
+- deterministic package builder;
+- runtime tests для Linux, macOS и Windows;
+- cross-repository contract tests со stable plugin shell;
+- offline context-budget report.
 
-## Управление приватными навыками
+Plugin-репозиторий владеет manifests, hooks, launchers, loader/verifier, bundled
+skills и assets. Backend Trelio владеет Ed25519 signing, публикацией descriptor и
+package, compatibility gates и atomic activation. Signing key никогда не попадает
+в GitHub Actions или этот репозиторий.
 
-Владелец или администратор может попросить агента создать приватный навык
-компании либо выпустить его новую версию. Поддерживаются сразу три варианта:
-Markdown-инструкция, декларативный Remote MCP и локальный `.skillpkg`. Агент
-сначала показывает неизменяемый план, endpoint/auth/tool policy или параметры
-package и его точный SHA-256; публикация выполняется только отдельным действием
-после явного подтверждения этого плана.
+Runtime и plugin выпускаются независимо. Совместимый runtime release не меняет
+plugin version и не требует marketplace update. Новый plugin release нужен только
+при изменении stable shell или их публичного ABI.
 
-В зашифрованной компании bridge шифрует тексты, Remote MCP config, manifest и
-package bytes локально до отправки. Ключ шифрования и plaintext не попадают в
-Trelio backend, MCP output, prompt, argv или environment. После успешного apply
-агент возвращает точную ссылку на страницу навыка в Trelio. Создание только
-устанавливает навык в компанию: назначение всей компании или проектам остаётся
-отдельным решением администратора.
+## Публичный ABI
 
-## Установка в Codex
+Stable shell передаёт runtime:
 
-Сначала создайте или откройте локальный проект в Codex и добавьте основную
-папку. Лучше использовать отдельную пустую папку без `.git` и вне другого Git
-worktree. Начните задачу внутри этого проекта: чат без локального проекта не
-подходит, потому что Trelio-контекст некуда сохранить для следующих задач.
+- один entrypoint с режимами `bridge`, `hook` и `mcp`;
+- exact `TRELIO_PLUGIN_ROOT` и `TRELIO_PLUGIN_VERSION`;
+- exact `TRELIO_HOST_RUNTIME_VERSION` и immutable runtime source directory;
+- bounded signed package descriptor с `minimumPluginVersion`;
+- существующие HTTP headers и typed compatibility/upgrade errors.
 
-Добавьте официальный marketplace и явно установите плагин из него:
+Runtime не сканирует plugin cache и не предполагает, что оба source tree лежат в
+одном репозитории.
+
+## Локальная разработка
+
+Требуются Node.js 22+ и standalone Git 2.28+.
 
 ```bash
-codex plugin marketplace add trelio-ru/agent-workspaces
-codex plugin add trelio-agent-workspaces@trelio-plugins
+npm ci
+export TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT=/absolute/path/to/agent-workspaces/plugins/trelio-agent-workspaces
+node tests/trelio-host-runtime-entry.test.mjs
+node tests/trelio-workspace.test.mjs
+npm run test:context-budget
 ```
 
-После установки onboarding завершает OAuth и сам выполняет первый обязательный
-read-only `get_agent_instructions`. Если текущие hooks уже были одобрены,
-`PreToolUse` добавляет proof и настройка продолжается без паузы. Для новой либо
-неодобренной definition protected content не возвращается; после
-`TRELIO_RUNTIME_HOOK_REQUIRED` с `reason=missing` агент попросит проверить
-Hooks. В Codex Desktop откройте настройки `Trelio Agent Workspaces`, просмотрите
-текущую конфигурацию в разделе Hooks и включите её. В Codex CLI откройте
-`/hooks`, выберите источник `Trelio Agent Workspaces`, проверьте текущую
-конфигурацию и отметьте её доверенной. Codex не доверяет plugin-bundled hooks
-автоматически и пропускает новую либо изменённую definition до такого review;
-bypass-флаг для онбординга не используется.
+Полный список direct test invocations закреплён в
+[runtime-tests.yml](.github/workflows/runtime-tests.yml). Tests запускаются
+отдельными Node processes: это исключает нестабильность parent `node --test` IPC
+на hosted runners.
 
-До первого protected read onboarding также вызывает локальный read-only
-`plan_codex_trelio_hook_routing`. Если в
-`features.code_mode.direct_only_tool_namespaces` нет `mcp__trelio` или
-`mcp__trelio_remote_skills`, агент показывает точную добавку и `planHash`, а
-затем отдельно спрашивает разрешение изменить пользовательский `config.toml`.
-Так Trelio MCP остаются direct tools, и Codex вызывает `PreToolUse` даже когда
-остальные инструменты идут через Code Mode. Если CLI Codex 0.154 ранее записал
-legacy `[features] code_mode = true|false`, apply переносит то же значение в
-`[features.code_mode] enabled`, не включая и не выключая feature. Остальные
-настройки и существующие namespaces сохраняются; Hooks не включаются и не
-одобряются за пользователя.
-После подтверждения `apply_codex_trelio_hook_routing` применяет exact plan.
-После этого нужен полный перезапуск Codex/ChatGPT и продолжение в новой задаче.
-Диагностика использует тот же plan/apply flow и без подтверждения ничего не
-меняет.
-
-Codex CLI регистрирует marketplace и устанавливает plugin разными операциями,
-поэтому сообщение об успешно добавленном источнике ещё не означает готовую
-установку. Policy `INSTALLED_BY_DEFAULT` остаётся ускорением для host-ов,
-которые применяют её автоматически, но чистый CLI-flow всегда выполняет
-`codex plugin add` и проверяет результат через `codex plugin list --json`.
-Policy `authentication=ON_INSTALL` просит Codex открыть страницу входа в
-Trelio. Вход и подтверждение доступа проходят в одном OAuth-окне без возврата
-в чат между этапами. Если окно не открылось, выполните в той же задаче:
+Deterministic unsigned package:
 
 ```bash
-codex mcp login trelio
+npm run build:host-runtime -- \
+  --runtime-version 0.0.0 \
+  --output /tmp/trelio-host-runtime.skillpkg
 ```
 
-После авторизации агент сначала повторно проверяет инструменты и продолжает в
-текущей задаче. Новая нужна только если инструменты в ней фактически не
-появились.
+Builder включает только исполняемые runtime sources. Maintainer report
+`report-context-budget.mjs`, tests и plugin checkout в package не попадают.
 
-Ручное открытие `Plugins` ради OAuth не является основным fallback. Полный
-перезапуск Codex нужен только тогда, когда новая задача по-прежнему не видит
-инструменты Trelio или использует старую версию плагина.
-
-Для настройки выберите предложенный плагином starter prompt – перепечатывать
-его вручную не нужно:
-
-```text
-Настрой Trelio Agent Workspaces для текущей рабочей папки
-```
-
-Агент сначала подтвердит основную папку и остановится без установки или OAuth,
-если задача открыта без неё. Это должна быть отдельная обычная папка контекста
-обычно без Git: связь с Trelio задаётся правилами компании и проекта, задачей, воркспейсом
-или их Agent Workspace, а не Git-репозиторием. Если Codex успел создать в
-пустой папке только служебную Git-оболочку без коммитов, remote-адресов и файлов
-кроме инструкций и `.gitignore`, onboarding сохранит `.git` на месте. Агент сам
-исключит весь `workspaces/` из Git корневой папки и проверит, что рабочие данные
-не попали в её index или снимки. Удалять или переименовывать `.git` вручную не
-нужно. Проверенные технические снимки Codex с инструкциями этому не мешают. Существующий или
-неоднозначный репозиторий он не меняет и просит открыть отдельную папку без Git.
-Затем агент проверит доступную компанию, безопасно создаст или дополнит
-Trelio-блок в корневом `AGENTS.md` и создаст обычный `CLAUDE.md` с импортом
-`@AGENTS.md`, не заменяя существующие инструкции. Блок требует проверять Trelio
-до ответа или внешнего поиска, но повторно использует уже загруженный контекст,
-пока тема и требования к актуальности не изменились. После этого агент подключит
-локальный компонент без тестового рабочего запуска и предложит настроить нужные навыки. Для
-зашифрованной компании onboarding отдельно создаст/проверит local encryption
-device, откроет company envelope и выполнит локальный `TRELIOE1` self-test без
-создания Run. Общая
-конфигурация компании и личные данные входа разделены; пароли, токены и коды
-авторизации не запрашиваются в чате.
-
-Локальному компоненту нужны Node.js 22+ и standalone Git 2.28+. Это отдельный
-runtime prerequisite bridge для временных и Run-репозиториев; папка онбординга
-сама Git-репозиторием не становится. В Codex bundled
-launcher использует штатный Node runtime даже при отсутствующей команде `node`
-или ошибке создания PATH aliases, а затем проверяет системную установку. На
-Windows он также учитывает durable PATH и Program Files. Onboarding проверяет
-Git настоящим временным `init → add → commit`, находит Homebrew, стандартные
-macOS/Windows пути и постоянный Windows PATH даже при устаревшем PATH процесса
-Codex. Если Git отсутствует, сразу запускается штатная установка:
-`brew install git` либо Apple Command Line Tools на macOS и Git for Windows
-через `winget` на Windows. Пользователь подтверждает только обычное системное
-окно или approval; после установки настройка продолжается без restart.
-
-Agent Workspaces поэтому работает на desktop macOS/Windows/Linux. Сам
-браузерный Trelio для зашифрованной компании может работать также в актуальных
-браузерах Android и iOS при наличии HTTPS, Web Crypto, IndexedDB и WebAssembly.
-
-Если ни bundled, ни системного Node.js 22+ нет, onboarding объяснит причину и
-предложит установку штатным package manager, но не будет менять систему без
-явного подтверждения пользователя. Отдельно устанавливать глобальную команду
-`trelio-workspace` не нужно.
-
-Если установка уже есть, но Trelio не работает, выберите отдельный starter
-prompt:
-
-```text
-Проверь установку Trelio Agent Workspaces и объясни, что мешает работе
-```
-
-Диагностика независимо проверяет установленную и фактически загруженную версии,
-целостность hook definition, remote MCP/OAuth и локальные prerequisites. Она не
-считает целый `hooks.json` доказательством его одобрения клиентом и не выдаёт
-ошибку внутри уже запущенного `PreToolUse` за выключенные Hooks. Runtime hooks
-запускаются через bundled Node launcher и не зависят от наличия команды `node`
-в PATH процесса Codex; для Windows используется отдельный `commandWindows`.
-При доверенных Hooks и отсутствующем proof она отдельно проверяет direct routing
-Trelio в Code Mode, а не предлагает включить Hooks повторно.
-
-## Установка в Claude Code и Claude Cowork
-
-В Claude Code сначала откройте терминал в постоянной рабочей папке и запустите
-`claude` из неё. Используйте отдельную обычную папку без `.git` и вне другого
-Git worktree. В Cowork создайте задачу с доступом к выбранной папке.
-
-Подключите marketplace этого же репозитория и установите плагин:
-
-```text
-/plugin marketplace add trelio-ru/agent-workspaces
-/plugin install trelio-agent-workspaces@trelio-plugins
-```
-
-Выполните `/reload-plugins`. Для OAuth выберите в `/mcp` сервер
-`plugin:trelio-agent-workspaces:trelio` либо выполните в терминале:
+Offline context-budget report:
 
 ```bash
-claude mcp login plugin:trelio-agent-workspaces:trelio
+npm run report:context-budget -- \
+  --plugin-root /absolute/path/to/agent-workspaces/plugins/trelio-agent-workspaces
 ```
 
-После авторизации начните новую сессию `claude` из той же папки и попросите:
-`Настрой Trelio Agent Workspaces для текущей рабочей папки`. Если
-`claude mcp list` уже показывает Trelio как `Connected`, а старая сессия не
-видит `list_companies`, login повторять не нужно – этой сессии недоступен
-обновлённый набор инструментов.
+## Релизы
 
-Plugin bundle хранит MCP-регистрацию Codex и Claude раздельно. Поэтому Claude
-разрешает bundled launcher через `${CLAUDE_PLUGIN_ROOT}` независимо от текущей
-рабочей папки, а Codex продолжает использовать собственные относительные пути
-и timeout/env allowlist. Если `claude mcp list` показывает URL `trelio` без
-`type` либо `ENOENT` для literal `./scripts/launch-trelio-node`, обновите plugin
-и выполните `/reload-plugins`; OAuth и pairing сбрасывать не нужно.
-
-OAuth-доступ каждый пользователь подтверждает лично. Администратор управляемой
-рабочей области может заранее импортировать marketplace и назначить плагин
-нужным ролям, но это не обходит политику рабочей области или личный consent.
-
-## Чтение принятого Workspace без Run
-
-Если нужно только прочитать или проверить уже сохранённые материалы воркспейса,
-агент вызывает `prepare_agent_workspace_read`, затем выполняет точную
-локальную команду `trelio-workspace inspect`. Bridge повторно проверяет ACL,
-закрепляет current accepted head и материализует его вместе с актуальными
-правилами и личным профилем в private read-only каталоге. Для encrypted-компании
-ciphertext расшифровывается только локально. Agent Run, lease, checkpoint,
-статус задачи и другие записи в Trelio не создаются; открывать задачу в браузере
-и вручную запускать Run только ради чтения не нужно.
-
-Принятый encrypted Workspace получает отдельную подписанную файловую проекцию:
-server видит только opaque UUID и ciphertext ranges. Browser расшифровывает
-manifest после раскрытия раздела, а затем получает выбранные файлы по одному;
-дерево, preview/download и локально собранный ZIP остаются такими же, как в
-обычной компании, без передачи путей на backend.
-
-## Первый Agent Run
-
-При первом локальном открытии bridge создаёт короткую pairing-заявку. Агент
-передаёт её уже авторизованному Trelio MCP и повторяет исходную команду. Если
-политика клиента требует подтверждения tool-вызова, клиент сам покажет штатную
-кнопку.
-
-MCP token не передаётся bridge. Вместо него на устройстве сохраняется отдельная
-узкая device-session с приватными правами доступа. Она переиспользуется в
-следующих Agent Run и может быть отозвана независимо от основного OAuth.
-
-Run готовится одним `prepare_agent_workspace_run`, а результат завершается
-одной bridge-командой `finish`: она проверяет полный candidate delta, включая
-уже сохранённый draft checkpoint, сохраняет понятный handoff и отправляет
-candidate без искусственной финальной правки. Если рабочая область успела
-измениться после старта, Trelio отклоняет запись с `WORKSPACE_OUTDATED`, чтобы
-изменения были перенесены в новую версию осознанно. После принятого task Run
-системный комментарий остаётся техническим контекстом для агентов, а отдельный
-human-facing proposal
-готовится для людей и публикуется только явным действием пользователя.
-
-Если сохранение нового объёма остановлено кодом
-`COMPANY_STORAGE_BALANCE_REQUIRED`, bridge оставляет локальные файлы и текущий
-Agent Run на месте, не запускает автоматические повторы и печатает точный
-следующий шаг. После пополнения баланса нужно повторить ту же команду, а не
-отменять Run и не создавать новый.
-
-## Обновление
-
-Marketplace без `--ref` отслеживает default branch официального репозитория.
-Обновить его можно командой:
-
-```bash
-codex plugin marketplace upgrade trelio-plugins
-```
-
-Если источник раньше добавлялся с `--ref vX.Y.Z`, один раз переподключите его
-без фиксации версии:
-
-```bash
-codex plugin marketplace remove trelio-plugins
-codex plugin marketplace add trelio-ru/agent-workspaces
-```
-
-Trelio проверяет отдельно совместимость стабильной оболочки плагина и локального
-host runtime. Обычные исправления bridge, hooks и локального MCP доставляются
-как подписанный content-addressed runtime в приватный каталог вне Codex plugin
-cache. Loader выбирает уже проверенную версию автоматически; агент не принимает
-решение об обновлении и не получает package или его metadata в model context.
-Оболочка и host runtime имеют разные release artifacts и rollout lifecycle.
-Исходник runtime остаётся в том же клиентском репозитории, но физически живёт в
-`host-runtime/` и не попадает в plugin artifact. Установленный плагин содержит
-только manifest, launchers, loader и минимальный verifier package; bundled
-исполняемого fallback больше нет. Первая установка один раз получает и проверяет
-подписанный runtime перед запуском, затем использует immutable локальный cache.
-Открытая задача продолжает использовать неизменяемый каталог, поэтому обычный
-runtime rollout не требует новой задачи или перезапуска Codex. Если backend
-поднял минимальную runtime-версию между двумя вызовами, loader дожидается
-подписанного обновления и один раз сам перезапускает exact bridge-команду.
-
-Marketplace обновляется автоматически только при настоящем hard gate оболочки:
-когда меняется manifest, hook definition, MCP surface либо минимальный shell ABI.
-Фиксация marketplace на tag подходит только для краткой диагностики или rollback.
-
-В v1.13 `PreToolUse` definition впервые ограничена только Trelio MCP, а
-lifecycle matchers оставлены совместимыми с будущими событиями клиента. При
-обновлении с v1.12 клиент может один раз попросить заново проверить Hooks.
-Дальнейшие исправления runtime-скрипта не требуют менять definition и повторять
-это одобрение.
-
-Runtime package содержит только исполняемый код. Company data, ключи E2EE,
-credentials и локальные сессии остаются в прежних owner-only хранилищах и не
-копируются в runtime cache. Для зашифрованной компании дешифрование по-прежнему
-происходит только локально и без plaintext fallback.
-
-Если инструменту потребуется новый OAuth scope, Trelio инициирует стандартную
-повторную авторизацию. Пользователь лично проверяет и подтверждает новые права;
-ранее выданные поддерживаемые scopes сохраняются.
+Source split и обычный merge в `main` не являются runtime release. Stable tag и
+production publication выполняются только по отдельному решению о выпуске новой
+runtime version. Production flow строит package из exact commit этого
+репозитория, подписывает его только в защищённом backend-контуре и проверяет
+descriptor/package read-back до activation.
 
 ## Безопасность
 
-- MCP-запросы проходят OAuth и обычные проверки доступа компании, проекта и
-  задачи.
-- Bridge использует отдельную узкую device-session, а не основной MCP token.
-- Agent Secrets обычной компании шифруются Trelio Vault, а в зашифрованной
-  компании browser/bridge отправляет только company-E2EE ciphertext, который
-  Trelio не может открыть; одноразовый grant всегда привязан к точному
-  локальному executable, Run и версии.
-- Личные PAT, почтовые данные и сессии мессенджеров хранятся локально вне Git и
-  Agent Workspace.
-- Подписанные runtime-пакеты проверяются по Ed25519 и SHA-256 и запускаются без
-  shell.
-
-Не публикуйте токены, локальные данные входа или содержимое рабочих областей в
-issues и pull requests. Об уязвимостях сообщайте по правилам из
-[`SECURITY.md`](SECURITY.md).
-
-## Документация
-
-- [Подробная документация плагина](plugins/trelio-agent-workspaces/README.md)
-- [Политика безопасности](SECURITY.md)
-- [История релизов](https://github.com/trelio-ru/agent-workspaces/releases)
+См. [SECURITY.md](SECURITY.md). Не публикуйте credentials, company content,
+runtime sessions, E2EE keys, signing material и production package URLs в issue,
+fixture или log.

@@ -32,13 +32,17 @@ const tokenEncoder = get_encoding(CONTEXT_TOKENIZER.encoding);
 process.once("exit", () => tokenEncoder.free());
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const pluginRoot = path.resolve(
-  scriptDirectory,
-  "..",
-  "..",
-  "plugins",
-  "trelio-agent-workspaces",
-);
+const defaultPluginRoot = process.env.TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT
+  ? path.resolve(process.env.TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT)
+  : path.resolve(
+    scriptDirectory,
+    "..",
+    "..",
+    "..",
+    "agent-workspaces",
+    "plugins",
+    "trelio-agent-workspaces",
+  );
 
 // Это не список всех reference-файлов plugin. Он описывает именно обычный
 // task-scoped Run: discovery, lifecycle и три обязательных post-acceptance
@@ -149,7 +153,7 @@ export const sumMeasurements = (measurements) => {
   };
 };
 
-const readMeasuredFile = async (relativePath) => {
+const readMeasuredFile = async (relativePath, pluginRoot) => {
   const text = await readFile(path.join(pluginRoot, relativePath), "utf8");
 
   return {
@@ -266,7 +270,13 @@ const buildLocalResponseMeasurements = async () => {
   };
 };
 
-export const buildPluginContextBudgetReport = async () => {
+export const buildPluginContextBudgetReport = async ({
+  pluginRoot = defaultPluginRoot,
+} = {}) => {
+  // The runtime and plugin deliberately live in different repositories. The
+  // report accepts the exact plugin checkout instead of recreating or vendoring
+  // its model-visible files inside the runtime repository.
+  const resolvedPluginRoot = path.resolve(pluginRoot);
   const listed = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const localTools = listed.result.tools.filter(isModelVisibleLocalTool);
   const taskRunLocalTools = localTools.filter((tool) => tool.name === TRELIO_WORKSPACE_ACTION_TOOL.name);
@@ -276,10 +286,18 @@ export const buildPluginContextBudgetReport = async () => {
   ));
   const localResponses = await buildLocalResponseMeasurements();
   const requiredSkillFiles = await Promise.all(
-    TASK_RUN_REQUIRED_SKILL_PATHS.map(readMeasuredFile),
+    TASK_RUN_REQUIRED_SKILL_PATHS.map((relativePath) => (
+      readMeasuredFile(relativePath, resolvedPluginRoot)
+    )),
   );
-  const proposalBundleFile = await readMeasuredFile(TASK_RUN_PROPOSAL_BUNDLE_PATH);
-  const localCompanyContextFile = await readMeasuredFile(LOCAL_COMPANY_CONTEXT_PATH);
+  const proposalBundleFile = await readMeasuredFile(
+    TASK_RUN_PROPOSAL_BUNDLE_PATH,
+    resolvedPluginRoot,
+  );
+  const localCompanyContextFile = await readMeasuredFile(
+    LOCAL_COMPANY_CONTEXT_PATH,
+    resolvedPluginRoot,
+  );
   const localProviderToolSchemas = {
     id: "local-provider-tool-schemas",
     source: "scripts/trelio-local-context.mjs#local-provider-tools",
@@ -419,9 +437,23 @@ const isEntrypoint = process.argv[1]
   && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (isEntrypoint) {
-  const report = await buildPluginContextBudgetReport();
+  const rawArguments = process.argv.slice(2);
+  const pluginRootFlagIndex = rawArguments.indexOf("--plugin-root");
+  const pluginRoot = pluginRootFlagIndex === -1
+    ? defaultPluginRoot
+    : rawArguments[pluginRootFlagIndex + 1];
 
-  if (process.argv.slice(2).includes("--json")) {
+  if (!pluginRoot || rawArguments.some((argument, index) => (
+    argument !== "--json"
+    && argument !== "--plugin-root"
+    && index !== pluginRootFlagIndex + 1
+  ))) {
+    throw new Error("Use [--json] [--plugin-root /path/to/plugin].");
+  }
+
+  const report = await buildPluginContextBudgetReport({ pluginRoot });
+
+  if (rawArguments.includes("--json")) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   } else {
     process.stdout.write(`${formatPluginContextBudgetReport(report)}\n`);

@@ -32,7 +32,7 @@ onboarding, а не как стандартный путь ordinary operation.
 не доказывает вход; неизвестный результат и сетевой сбой не означают утрату
 авторизации. Итог содержит состояние и следующий шаг для каждого навыка.
 Полная процедура и границы исполнения – в
-[onboarding](../plugins/trelio-agent-workspaces/skills/trelio-project-onboarding/SKILL.md#offer-the-live-trelio-skills).
+[onboarding](https://github.com/trelio-ru/agent-workspaces/blob/main/plugins/trelio-agent-workspaces/skills/trelio-project-onboarding/SKILL.md#offer-the-live-trelio-skills).
 
 Из compact ranked результатов агент загружает procedure через
 `get_agent_procedure`, а skill – через default compact `get_agent_skill`.

@@ -220,7 +220,7 @@ agent_workspaces_acquire_main_lock() {
   common_directory="$(
     agent_workspaces_git_common_directory "${repository_path}"
   )" || return 1
-  lock_directory="${common_directory}/trelio-agent-workspaces-main-update.lock"
+  lock_directory="${common_directory}/trelio-agent-workspaces-runtime-main-update.lock"
   current_host="$(uname -n)"
 
   if mkdir "${lock_directory}" 2>/dev/null; then
@@ -270,7 +270,7 @@ agent_workspaces_release_main_lock() {
 
   if [[ -z "${lock_directory}" ]] \
     || [[ "$(basename "${lock_directory}")" != \
-      "trelio-agent-workspaces-main-update.lock" ]] \
+      "trelio-agent-workspaces-runtime-main-update.lock" ]] \
     || [[ ! -d "${lock_directory}" ]]; then
     return 0
   fi

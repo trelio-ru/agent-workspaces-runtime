@@ -1,4 +1,0 @@
-interface:
-  display_name: "Trelio Workspace Worker"
-  short_description: "Выполняет связанную работу в Trelio"
-  default_prompt: "Используй $trelio-workspace-worker для работы с Trelio и безопасного сохранения результата."

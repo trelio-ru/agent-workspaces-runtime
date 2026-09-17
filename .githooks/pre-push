@@ -15,11 +15,11 @@ done
 
 if [[ "${protected_ref_seen}" -eq 1 ]] && [[ "${guarded_push}" != "1" ]]; then
   cat >&2 <<'EOF'
-ERROR: direct push to origin/main or a stable plugin tag is disabled.
+ERROR: direct push to origin/main or a stable runtime tag is disabled.
 Use the guarded entrypoint so remote read-back and canonical-main sync cannot be skipped:
   npm run git:push-main
 
-For a plugin release use:
+For a runtime release use:
   npm run git:push-main -- --tag vX.Y.Z
 EOF
   exit 1

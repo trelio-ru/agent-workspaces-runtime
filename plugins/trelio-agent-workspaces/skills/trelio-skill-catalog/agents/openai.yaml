@@ -1,4 +1,0 @@
-interface:
-  display_name: "Каталог навыков Trelio"
-  short_description: "Проверяет навыки Trelio до сторонних интеграций."
-  default_prompt: "Используй $trelio-skill-catalog, чтобы перед подключением внешней интеграции проверить навыки Trelio в выбранной компании или проекте."

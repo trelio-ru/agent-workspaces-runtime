@@ -2,632 +2,75 @@
 
 ## Назначение репозитория
 
-Этот публичный репозиторий – единственный канонический источник устанавливаемого
-клиентского плагина `Trelio Agent Workspaces` для Codex и Claude и независимо
-публикуемого generic Trelio host runtime.
+Этот публичный репозиторий – канонический источник generic Trelio host runtime.
+Устанавливаемая stable plugin shell живёт отдельно в
+[`trelio-ru/agent-workspaces`](https://github.com/trelio-ru/agent-workspaces).
 
-В публичный контур входят только:
+В этот репозиторий входят только:
 
-- marketplace manifests и client metadata;
-- `plugins/trelio-agent-workspaces/**` со stable shell, hooks, MCP registration,
-  bootstrap/control-plane skills, tests и пользовательской документацией;
-- `host-runtime/**` с generic bridge, hook implementation, local MCP и общими
-  security/runtime primitives; этот source собирается в signed package и не
-  копируется в plugin artifact;
-- публичные инструкции по установке, использованию и безопасности;
-- plugin CI.
+- `host-runtime/**` – bridge, lifecycle hook implementation, local MCP и общие
+  security/runtime primitives;
+- `scripts/build-host-runtime-package.mjs` – deterministic unsigned package
+  builder; production signing и activation принадлежат backend Trelio;
+- runtime и cross-repository compatibility tests;
+- runtime CI и документация.
 
-Provider-specific runtimes, их исходники и тесты, backend-код, внутренние
-maintainer/release-инструкции и production publication tooling ведутся в
-закрытом backend/provider repository. Не возвращай их, `platform-skills/**`,
-provider-tag workflow или внутренние release playbooks в этот репозиторий.
+Marketplace manifests, plugin hooks, launchers, loader/verifier, skills и assets
+сюда не копируются. Provider-specific runtimes, backend, signing keys и production
+publication tooling также остаются вне этого публичного репозитория.
 
 ## Общие правила
 
-- Подробно комментируй нетривиальный код, особенно security/transport решения,
-  причина которых не очевидна из синтаксиса.
-- Не добавляй токены, credentials, cookies, локальные sessions, содержимое
-  workspace и другие секреты в Git, fixtures, логи или release notes.
-- Отсутствие подходящего назначенного навыка после успешного catalog search
-  разрешает совместимый личный коннектор; transport/setup/access failure не
-  приравнивается к отсутствию навыка.
-- Не ослабляй ACL, exact confirmation, idempotency/CAS, bounds, attestation и
-  secret boundaries ради упрощения текста или кода.
-- Onboarding не предлагает отключить согласования отправки и не сохраняет
-  разрешение оператора для будущих разговоров. Provider-specific команды и
-  проверки отдельной отправки остаются в актуальном выбранном навыке.
-- После неоднозначной mutation сначала установи live state; blind retry
-  запрещён.
-- Не удаляй compatibility/legacy path без доказательства, что он больше не
-  нужен поддерживаемым клиентам и rollback.
-- Server-returned пути и команды трактуй буквально. Не сканируй plugin cache,
-  не выбирай другую установленную версию и не подменяй exact executable.
-- Сохраняй чужие изменения в рабочем дереве и отделяй scope текущей задачи.
+- Подробно комментируй нетривиальный код, особенно security, transport, ACL,
+  credential и cross-platform решения.
+- Не добавляй tokens, credentials, cookies, sessions, workspace content, signing
+  keys или production runtime packages в Git, fixtures и logs.
+- Не ослабляй exact confirmation, idempotency/CAS, bounds, attestation, package
+  verification и encrypted-company fail-closed behavior.
+- После неоднозначной mutation сначала установи live state; blind retry запрещён.
+- Server-returned paths и commands трактуются буквально. Runtime не сканирует
+  plugin cache и не выбирает похожую установленную версию.
+- Сохраняй чужие изменения и отделяй scope текущей задачи.
 
-## Обязательный Git-workflow
+## Граница plugin/runtime
 
-- Канонический checkout регистрируется один раз через
-  `npm run git:configure-main` и постоянно остаётся чистым worktree с
-  checked-out `main`. Обычные task-правки и commits в нём запрещены; tracked
-  hooks блокируют прямой commit в `main`, raw push в `origin/main` и отдельный
-  push стабильного plugin tag.
-- Перед нетривиальной правкой выполни `git fetch --prune origin`, проверь
-  `git status -sb` и `git rev-list --left-right --count HEAD...@{upstream}`.
-  Новую задачу начинай от свежего `origin/main` в отдельной ветке и отдельном
-  physical worktree через `npm run git:new-worktree -- codex/<task-slug>`.
-  Не редактируй канонический checkout вручную.
-- Обычная завершённая правка получает commit в task-ветке и интегрируется
-  только через `npm run git:push-main`. Guard принимает лишь clean source,
-  fast-forward от свежего `origin/main`, делает exact remote read-back и затем
-  fast-forward канонического локального `main`. `git push origin main`,
-  `git push origin HEAD:main` и эквивалентные raw refspec запрещены.
-- После подтверждённой интеграции задача не завершена, пока из чистого
-  канонического `main` не выполнен
-  `npm run git:finish-worktree -- <absolute-task-worktree>`. Helper удаляет
-  только clean `codex/*` worktree и exact local branch, уже достижимую из
-  свежего `origin/main`; squash/rebase merge требует отдельного
-  `--merged-pr <number-or-url>`. `git:new-worktree` fail-closed блокирует новую
-  задачу, если обычный merged worktree оставлен.
-- Непосредственно перед guarded push выполни `npm run check:worktree` и не
-  пушь при непустом status. Если canonical либо source содержит чужие tracked
-  или untracked изменения, сохрани их и остановись до выяснения scope.
-- Stable plugin tag публикуется атомарно с соответствующим `main` только через
-  `npm run git:push-main -- --tag vX.Y.Z`. Это не заменяет явную команду
-  пользователя на plugin release и остальные release-проверки.
-- `.gitignore` намеренно скрывает только системные метаданные, dependency cache
-  и generated Python bytecode. `platform-skills/**` целиком не игнорируется:
-  попытка вернуть provider source в публичный репозиторий должна оставаться
-  видимой в `git status` и блокировать guarded flow.
+- Plugin shell и host runtime имеют независимые release histories и versions.
+  Изменение runtime само по себе не требует plugin release.
+- Публичный ABI между ними включает signed package format, три entrypoint mode
+  `bridge|hook|mcp`, descriptor fields, `minimumPluginVersion`, environment
+  variables, headers и typed upgrade errors.
+- Production loader передаёт exact `TRELIO_PLUGIN_ROOT`,
+  `TRELIO_PLUGIN_VERSION`, `TRELIO_HOST_RUNTIME_VERSION` и immutable runtime
+  source directory. Runtime не предполагает совместное source tree.
+- `host-runtime/scripts/report-context-budget.mjs` – maintainer-only report и не
+  входит в package. Он принимает exact plugin checkout через `--plugin-root` либо
+  `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; plugin source не vendored.
+- Cross-repository tests используют реальный plugin checkout через
+  `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
+  не попадает в package.
+- Production runtime source меняется только вместе с targeted tests и актуальным
+  контрактом. Generated package вручную не редактируется и не коммитится.
 
-## Архитектурная граница
+## Git workflow
 
-- Trelio MCP – control plane; independently published host runtime – локальный
-  Git/data plane.
-- Plugin является консервативной stable shell. В нём остаются manifests,
-  launchers, loader/signature verifier, lifecycle hook definition,
-  bootstrap/control-plane skills и assets. Исполняемого bundled runtime fallback
-  нет; first install обязан получить signed package либо завершиться fail-closed.
-- Generic host implementation, runtime admission/pairing и общие
-  security/credential/browser primitives находятся только в `host-runtime/**`.
-- Bundled skill может настраивать Trelio, читать каталог и вести Workspace/Run,
-  но не реализует команды конкретного внешнего provider.
-- Внешние provider integrations доставляются независимо backend-managed
-  instruction, declarative Remote MCP либо immutable signed package. Provider
-  change сам по себе не меняет plugin version или global compatibility policy.
-- Provider-specific ID, команды, parser, DOM/API fixtures, login exceptions и
-  capability matrices не добавляются в plugin instructions, README или tests.
-  Generic regression использует synthetic integration identity и проверяет
-  только host protocol/security semantics.
-- Remote MCP schema v1 сохраняет exact allowlist. Schema v2
-  `toolPolicy.mode=all_read_only` допустима только с `authentication.type=none`
-  и требует host `>=1.13.3`: перед doctor и каждым call host заново читает
-  bounded `tools/list`, допускает tool только при валидном уникальном имени,
-  отсутствии write-like имени и exact annotations `readOnlyHint=true`,
-  `destructiveHint=false`. Остальные tools игнорируются по одному; если
-  безопасных нет, операция fail closed. V1 fingerprint и поведение не менять.
-- Company owner/admin управляет private Agent Skills только через четыре
-  локальных plan/apply tool `trelio-remote-skills` и capability
-  `agent-skill:manage`. Create устанавливает, но не назначает навык; apply
-  всегда требует отдельного подтверждения exact plan hash и возвращает
-  server-built settings URL. Markdown, Remote MCP и `.skillpkg` поддерживаются
-  одним контуром. В encrypted-компании bridge шифрует semantic metadata,
-  declaration, manifest и package bytes локально; backend получает только
-  markers/`TRELIOE1`, а host расшифровывает их локально перед исполнением.
-- Local credentials, sessions, profiles и policy живут вне workspace, plugin
-  cache и runtime package в стабильном `skill/company/member/connection`
-  namespace.
-- При изменении personal credential flow соблюдай
-  [базовый контракт локальной настройки](docs/agent-skills-and-secrets.md#personal-local-setup):
-  user-only browser-first ввод, reuse готового подключения и отдельный OS unlock.
-  Личные credentials/session требуют encrypted storage, fresh OS unlock и
-  независимой native аренды до 30 минут без продления. Браузерный flow headed
-  от первого запуска и переиспользует один process/context; API/SDK не требует
-  фиктивного браузера. Старые stores не считаются автоматически мигрированными.
-  Markdown без trusted helper-а не обещает защищённую форму, а owner-only
-  storage не называется encrypted без соответствующей реализации и проверок.
+- Канонический checkout регистрируется через `npm run git:configure-main` и
+  остаётся clean на `main`.
+- Перед правкой выполни `git fetch --prune origin`, `git status -sb` и
+  `git rev-list --left-right --count HEAD...@{upstream}`.
+- Работай в отдельном worktree/ветке `codex/*`, созданном через
+  `npm run git:new-worktree -- codex/<task-slug>`.
+- Завершённая правка получает commit на русском и интегрируется только через
+  `npm run git:push-main`; raw push в `main` запрещён.
+- После интеграции выполни из canonical checkout
+  `npm run git:finish-worktree -- <absolute-task-worktree>`.
+- Stable runtime tag создаётся только по явной команде на runtime release и
+  пушится атомарно через `npm run git:push-main -- --tag vX.Y.Z`.
 
-## Работа с plugin-кодом
+## Проверки
 
-- Перед финальным ответом о содержательном результате общий routing и catalog
-  ведут к проверке сохранения контекста даже без task/Run. Критерии accepted
-  evidence и границы полномочий заданы в
-  [workspace runtime](docs/agent-workspace-runtime.md#workspace-context-review).
-
-- Канонический текст bundled `SKILL.md`, их references и MCP routing rules
-  пишется по-русски, чтобы обязательная дословная цитата была понятна
-  пользователю. Не поддерживай параллельную английскую копию правил. Имена
-  tools, commands, fields, codes, enums и существующие link anchors сохраняй;
-  перевод не меняет ACL, подтверждения, порядок повторов или fail-closed границы.
-  По умолчанию ответы тоже русские, но явный выбор языка пользователя важнее.
-  Объяснение ограничения начинается с причины и следующего шага; обязательные
-  точные цитаты/ссылки сохраняются, перевод цитаты явно помечается.
-- При изменении `plugins/trelio-agent-workspaces/**` полностью прочитай
-  соответствующий `SKILL.md` и только относящиеся к сценарию references.
-- Working-folder onboarding сохраняет проверенную служебную `.git` хоста.
-  Exact Codex turn-diff refs допустимы
-  лишь как прямые tree snapshots без пользовательской истории и других файлов
-  по [onboarding-контракту](plugins/trelio-agent-workspaces/skills/trelio-project-onboarding/SKILL.md);
-  общий `refs/codex/` не является allowlist. После exact company resolve и до
-  content/binding агент без вопроса сохраняет корневое исключение `/workspaces/`
-  в `.gitignore`, проверяет effective rule, пустой index и допустимые snapshots.
-  Исторические копии workspace data блокируют flow даже после ignore.
-- Отказ rename `.git`, включая Windows `Access is denied` с `-Force`, не
-  требует повторной очистки: после полной проверки shell/isolation onboarding
-  продолжается. Rename/delete, reset прав, config/hooks/refs mutations и обход
-  client rejection запрещены. ACL diagnostics нужен при отказе необходимого
-  чтения или записи `.gitignore`, а не ради необязательного удаления Git.
-- Working-folder onboarding разрешает company scope только по exact slug из
-  live `list_companies`, по единственному exact display-name match либо при
-  единственной доступной компании без явного selector. Имя/путь папки,
-  repository name, соседние файлы и fuzzy similarity не являются company
-  evidence. Недоступный explicit slug и несколько кандидатов блокируют
-  `get_agent_instructions` и запись локальной привязки до выбора пользователя.
-- До итогового списка навыков onboarding автоматически выполняет объявленные
-  безопасные проверки подключений и показывает подтверждённое состояние каждого.
-  Границы проверки, setup и причины пропуска заданы в
-  [onboarding-контракте](plugins/trelio-agent-workspaces/skills/trelio-project-onboarding/SKILL.md#offer-the-live-trelio-skills).
-- Управляемый onboarding-блок является единственным filesystem anchor для
-  folder-local layout. Новый task или named Workspace создаётся в
-  `<binding-root>/workspaces/<workspace-id>/`, агент работает только в выданном
-  `workspace/` и не кладёт `tmp/`, `output/` или материалы рядом с корневым
-  `AGENTS.md`. Уже существующие global/registered/custom roots не переносятся;
-  без managed binding сохраняется fallback `~/Trelio Workspaces/`.
-- Plugin change допустим для общего security/fail-closed defect,
-  несовместимости Codex/Claude/MCP/OAuth/hooks, дефекта generic host либо нового
-  общего primitive, который нельзя безопасно доставить независимым runtime.
-- Provider API/DOM, provider-команда, parser, dependency, instruction или тест
-  одного provider не являются основанием менять plugin.
-- Default `get_agent_skill` возвращает compact scope/release/readiness summary.
-  До первого external action запросить `sections=[instructions,execution]`;
-  connection/publication – только для setup/provenance. `knownInstructionKey`
-  переиспользует полный Markdown между связанными ходами до 12 часов лишь пока
-  exact company/project/skill/release и текст остаются в текущем context.
-  Перечитать при compaction/утрате текста, expiry, смене контекста, снятии
-  blocker либо RELEASE_CHANGED.
-  Host владеет отдельным non-sliding admission cache; его bindings, задержка
-  отзыва и исключения заданы в
-  [README](plugins/trelio-agent-workspaces/README.md#повторное-использование-agent-skill).
-  Подпись/package integrity, provider policy и E2EE fence сохраняются.
-- Один известный exact task читается через `get_task`, а 2-20 distinct exact
-  targets – одним `get_tasks`; последовательные `get_task` для уже известного
-  набора запрещены. Task-read schema v3 хранит уникальные Markdown-слои один
-  раз в `effectiveInstructions.layers`, а каждый `tasks[]` item применяет только
-  собственный exact `instructionScope.orderedLayerKeys` в указанном порядке.
-  Каждый item содержит одну structured compact `task`, без производного
-  `document.text`; тяжёлые данные перечислены в `task.deferredSections` и
-  выбираются одним `get_task_sections` только для exact нужного subset.
-  Supplemental read не повторяет authority, core, connections или related workspaces,
-  а `content` остаётся компактным summary. Company/project/personal layer
-  нельзя переносить на непривязанную задачу. Schema v1/v2 больше не являются
-  поддерживаемым task-read ABI: их получение означает version mismatch и
-  требует обновления плагина/backend, а не client-side fallback.
-  `nextReadArguments` используется только для полных layers ещё в контексте;
-  refs разрешаются через новые layers и same-context `reusedLayerKeys`.
-  После потери bytes или compaction ключи опускаются. Post-result
-  `get_task_review_context` заменяет повтор core/sections/proposal-context reads,
-  сохраняя ACL и независимые решения карточек; контракт –
-  [workspace runtime](docs/agent-workspace-runtime.md).
-  Manual comments в encrypted mirror являются полным search subset, но не
-  полным discussion history: без authoritative `commentsPagination.total`
-  compact `deferredSections.comments.itemCount` обязан быть `null`, а не длиной
-  этого subset.
-- Encrypted local exact `fetch`, legacy `get_task` и native exact reads,
-  возвращающие `effectiveInstructions.nextReadArguments`, используют те же
-  same-context layer keys. Полный Markdown возвращается при первом чтении,
-  изменении revision и после compaction; один hash без доступных model bytes
-  не считается authority.
-- Новый task control по умолчанию `shared`, когда он фиксирует объективную
-  контрольную точку задачи; `personal` допустим только для явно частной проверки.
-  Update сохраняет текущую visibility без прямой команды изменить аудиторию, а
-  недоступный по ACL `shared` нельзя молча заменять скрытым `personal`.
-- Structured `MCP_SEARCH_TIMEOUT` является подтверждённым backend-ом
-  превышением бюджета read-only поиска, а не transport 504. Bundled discovery
-  и diagnostics не применяют к нему три одинаковых network retry: допустим один
-  строго более узкий повтор с exact company scope, максимум двумя независимыми
-  формулировками и только уже известной project boundary, затем остановка. Bare
-  HTTP 504 сохраняет обычный bounded network-retry contract. Regression живёт
-  в generic plugin suite, а compact runtime instructions обязаны сохранять тот
-  же invariant.
-- После exact read одной задачи и одного воркспейса Worker самостоятельно создаёт
-  долговременную task/workspace связь без формального подтверждения, только если
-  совпадение подтверждено минимум двумя независимыми идентификаторами, нет
-  конкурирующей цели и весь воркспейс подходит аудитории задачи. После mutation
-  он сообщает пользователю причину и access effect: task reader получает read,
-  а task editor – write/Run, но не relation management. Несколько
-  кандидатов, один признак, временная релевантность или сомнение в раскрытии
-  всего воркспейса требуют вопроса; weak hit игнорируется, partial fit получает более
-  узкий контекст.
-- Именованный воркспейс имеет одного primary owner – проект или компанию – и
-  может быть явно связан с несколькими проектами и задачами той же компании.
-  ACL является union этих связей: exact read объекта даёт read воркспейса,
-  exact edit даёт write/Run; observer остаётся read-only. Derived access не даёт
-  transfer/link/reshare прав. Primary project продолжает задавать pinned rules,
-  а registry/contact/meeting связи остаются semantic и сами доступ не расширяют.
-- Meeting transcript flow не заканчивается после `create_meeting`: агент читает
-  server-returned `workflowStage` / `requiredNextAction` / `mayFinish`, сам
-  фиксирует `agent_checked` итог и проверяет актуальный контекст. До первого
-  решения пользователя он явно называет current meeting access и один раз
-  неблокирующе предлагает назвать дополнительных читателей; viewer можно
-  дать только уже подтверждённому exact participant, а имя внутри transcript не
-  является подтверждением. Optional предложение добавить доступ не блокирует
-  итог. Empty distribution plan допустим только как явный
-  `completed_no_context_updates` с `noContextUpdatesSummary`. Meeting plan
-  содержит только context updates и task creation; comment/status/checklist/
-  control-clear идут через native proposal-flow, прочие task mutations требуют
-  отдельного exact подтверждения. До первой proposal-write агент
-  инвентаризирует весь post-meeting action set; terminal meeting stage закрывает
-  только meeting-distribution branch и не завершает отдельные proposals или
-  mutations.
-- Завершение task-scoped Run всегда включает отдельную оценку готовности всей
-  задачи перед финальным ответом. Отсутствующий необязательный срок,
-  исполнитель, контроль или будущая профилактика сами по себе не являются
-  незавершённостью: если требования задачи и transition policy выполнены,
-  агент обязан подготовить отдельный status proposal, не подменяя его вопросом
-  про пустое metadata-поле либо comment proposal.
-- Начало task-scoped Run имеет отдельный one-shot intent `work_started`: сразу
-  после успешного bridge `open` агент один раз читает server
-  `workStartProposal` и только при `state=eligible` показывает exact semantic
-  `queue -> active` карточку, не ожидая решения перед продолжением. Durable
-  marker уже показанного start, pending и dismiss в той же status epoch
-  подавляют повторы даже после замены completion-карточкой; checkpoint,
-  очередной tool, новый ход или новый Run не являются новым поводом.
-  `whole_task_ready` после
-  завершения заменяет pending start draft, поэтому одновременно существует
-  только одна status proposal карточка exact task+member. Suppressed или
-  ineligible start-decision остаётся внутренним control-plane результатом: если
-  карточка не создана, status-related error отсутствует и от пользователя не
-  требуется действие, агент молча продолжает работу и не объясняет отсутствие
-  proposal в progress update или финальном ответе.
-- Compact `propose_task_comment` является create-only маршрутом первого
-  известного private draft exact задачи. Если в текущей переписке уже был
-  proposal или backend возвращает `UNPUBLISHED_DRAFT_REQUIRES_CONTEXT`, агент
-  обязан один раз прочитать `get_task_comment_proposal_context` и заменить
-  draft через `render_task_comment_proposal`. Schema v4 намеренно не возвращает
-  `currentDraft.bodyText`: новый текст заново синтезируется только из
-  `authoringBasis`, где `publicCommentsSnapshot.comments` содержит реальные
-  manual comments, а `pendingHumanUpdateBasis.acceptedRuns` – ещё не прошедшие
-  reviewed boundary результаты Run в хронологическом порядке. Поздний Run
-  заменяет конфликтующий ранний; любой draft, в том числе запомненный из истории
-  переписки, нельзя склеивать, исправлять или считать предыдущей публичной
-  репликой.
-- Runtime admission proof создаёт только approved hook. Агент не формирует, не
-  копирует и не обходит proof другим MCP, HTTP, browser или script.
-- `hooks/hooks.json` является стабильной client-trust границей: lifecycle
-  matchers остаются wildcard, а `PreToolUse` охватывает direct Trelio MCP в
-  Codex, plugin-qualified Trelio MCP в Claude Code и только exact local facade
-  `continue_trelio_local_action`, который переносит proof в защищённый native
-  вызов. Остальные local/unrelated tools не матчить. Behavior-only recovery и
-  lifecycle-улучшения вноси в `trelio-runtime-session.mjs`; definition меняй
-  только при реальной несовместимости host contract, потому что новый hash
-  требует повторного review пользователя.
-- Внешний `PreToolUse.timeout` равен 30 секундам и включает Windows cold
-  start, private ACL, ожидание lock и сохранение state; внутренние 11 секунд
-  регистрации не являются полным бюджетом hook. Lock считается устаревшим
-  только после 45 секунд, позже внешнего лимита; runtime и doctor используют
-  общие константы. Проверяй медленный запуск, штатный abort с удалением lock и
-  защиту ещё живого lock на Windows, macOS и Linux.
-- Bundled doctor диагностирует только exact загруженный plugin и выводит
-  value-free статусы. Он не сканирует cache, не раскрывает token, pairing/session
-  ID или private key и не объявляет Hooks включёнными: client approval остаётся
-  `client_managed_unknown` до отдельного client/live-read подтверждения.
-- Codex onboarding после подтверждённой установки плагина, OAuth и exact company
-  resolve сначала выполняет обязательный read-only `get_agent_instructions` как
-  live-проверку Hooks. Ранее одобренный `PreToolUse` сам добавляет proof, поэтому
-  предварительный пользовательский checkpoint не нужен. Новая либо неодобренная
-  definition fail-closed не раскрывает content; только
-  `TRELIO_RUNTIME_HOOK_REQUIRED` с `reason=missing` при неподтверждённом review
-  направляет пользователя в Hooks настроек плагина или `/hooks`. Установка либо
-  enable плагина не считаются доверием к его hooks; агент не автоматизирует
-  approval, не использует bypass-флаг и не подменяет live proof результатом
-  doctor-а. Уже наблюдённый `PreToolUse` не требует повторного review в той же
-  задаче, а стандартный `TRELIO_RUNTIME_HOOK_REQUIRED` остаётся fail-closed
-  сигналом отсутствующего proof, но сам по себе не доказывает, что Hooks выключены. При уже
-  подтверждённом trust агент не повторяет enable-инструкцию: он проверяет exact
-  matcher, dispatch и хронологию plugin/trust относительно owning App Server.
-  Подтверждённый `hook/started` направляет диагностику к завершению и timeout
-  hook, а не к restart по версии core. При отсутствии dispatch у Codex
-  core/App Server до `0.154.0-alpha.2`, не перечитывающего config после
-  установки, owner старше plugin/trust требует полностью завершить все
-  процессы Codex/ChatGPT, открыть приложение заново и проверить один protected
-  read в новой задаче; закрытие окна или новая задача в прежнем owner-процессе
-  restart-ом не считаются.
-- Codex Code Mode routing проверяется до первого protected read общим local
-  `plan_codex_trelio_hook_routing` в onboarding и diagnostics. План value-free
-  и добавляет только отсутствующие `mcp__trelio` и
-  `mcp__trelio_remote_skills` в
-  `features.code_mode.direct_only_tool_namespaces`, сохраняя остальные
-  namespaces/config. Legacy `[features] code_mode = true|false`, который ещё
-  пишет CLI Codex 0.154, мигрируется в `[features.code_mode]` с тем же
-  `enabled`; состояние feature не меняется.
-  `apply_codex_trelio_hook_routing` требует отдельного явного подтверждения
-  exact CAS-bound `planHash`; общий запрос настройки или исправления его не
-  заменяет. Stale/unsafe/неоднозначный TOML fail closed.
-  После apply нужен полный restart owning Codex/ChatGPT App Server и новая
-  задача. Этот flow исправляет dispatch `PreToolUse` для direct Trelio MCP, но
-  не включает Hooks, не меняет trust и не создаёт runtime proof.
-- Bundled JavaScript entrypoints и локальный `trelio-remote-skills` запускаются
-  только через парные `scripts/launch-trelio-node` / `.cmd`: launcher требует
-  Node.js 22+, сначала использует host-owned подсказки и bundled runtime Codex,
-  затем системный Node. MCP registration разделена по host-контракту: Codex
-  manifest содержит inline `mcpServers`, где plugin-root задаётся относительными
-  путями и `cwd`, а Claude автоматически читает корневой `.mcp.json`, где remote
-  server имеет explicit `type: http`, а bundled paths используют
-  `${CLAUDE_PLUGIN_ROOT}`. Сводить эти определения в один companion-файл,
-  возвращать bare `node`, машинный absolute path или менять `hooks.json` ради
-  PATH-совместимости нельзя. Retention exact загруженной Codex plugin-version
-  запускается только после записи MCP `initialize` response и никогда не входит
-  в handshake/output queue: медленный или конкурентный cache snapshot не должен
-  расходовать ограниченное startup-время локального server.
-- Запуск bridge из долгоживущего local facade использует explicit child `cwd`
-  по [контракту runtime](docs/agent-workspace-runtime.md#запуск-локального-bridge).
-  Нельзя менять `cwd` общего host-процесса, выбирать другую plugin-version либо
-  скрывать требование restart после удаления файлов загруженного плагина.
-- Неоднозначные зарегистрированные roots обрабатываются по
-  [контракту выбора папки](docs/agent-workspace-runtime.md#выбор-локальной-папки):
-  exact Run и однозначный текущий root сохраняют приоритет, а новый Run из
-  exact managed binding может выбрать только его единственный канонический
-  `<binding>/workspaces/<workspace-id>`; structured recovery использует
-  `parameters.directory` и не отменяет live/Git preflight.
-- Agent Secret, TOTP, browser-fill и recovery/setup credential передаются
-  только exact executable через scoped one-use delivery. Стабильный
-  installation-managed API key/client secret может повторно использоваться
-  лишь когда backend явно вернул `time_bound` policy, в том же Run/release и
-  до exact `expiresAt`; plugin сам не расширяет policy и не кеширует value.
-  Любой credential не попадает в model-visible output, argv, ambient
-  environment, workspace, comments, checkpoints, handoff или logs.
-- Настройка всех видов Agent Skill не требует задачи, Workspace или Run по
-  [общему контракту](docs/agent-skills-and-secrets.md#setup-without-run).
-  Отсутствие безопасного setup transport блокирует навык, а не требует фиктивного Run.
-- Exact setup-команды signed package могут получать одно company connection
-  field без Run по `docs/agent-skills-and-secrets.md#signed-setup-без-agent-run`.
-  Это generic host primitive для класса интеграций с company key и личным
-  входом; provider runtime не получает bridge credentials. Live проверки и
-  process-only доставка обязательны, admission/value cache не применяется.
-  Catalog направляет такие setup-команды в exact runtime action без checkout grant.
-- Browser fill использует встроенный браузер по умолчанию; generic AX/UIA
-  helper готовится до consume, Chrome допустим только как pre-delivery fallback.
-  Native id binding относится к полям и кнопкам; финальная кнопка без id требует
-  embedded fill без submit и штатного клика в той же вкладке без чтения полей.
-  После выдачи значения браузер не меняется и secret повторно не отправляется.
-  Native helpers, prerequisites, exact app/URL/field binding и ограничения
-  описаны в [Agent Secrets](docs/agent-skills-and-secrets.md#agent-secrets).
-  Не обходить host/site policy, Accessibility permission и запреты UI tools.
-- Run-bound Agent Secret write context, browser-fill context, запись значения, consume и browser
-  outcome используют тот же `workspaceOrigin`, что и Workspace: для encrypted
-  company – выбранный E2EE data plane, для plain – canonical origin. Отсутствие
-  узкого API route на сервере нельзя обходить переносом ciphertext на основной
-  host; после неопределённого consume запрещён повтор на другом host.
-- Уже присланные chat values сохраняются только через local
-  `continue_trelio_local_action`/`save_known_agent_secret` после прямой storage
-  просьбы, company opt-in, manage/create ACL и active Run. В обоих режимах это
-  полный bundle; E2EE metadata/value шифруются в памяти до atomic publication.
-  Secret input не проходит generic content uploader, mirror или shell/file.
-  Схема и recovery описаны в
-  `plugins/trelio-agent-workspaces/skills/trelio-workspace-worker/references/agent-secrets.md`.
-- Для зашифрованной компании bridge получает ключ шифрования только через
-  одноразовую loopback-форму `127.0.0.1`, создаёт отдельную device identity и
-  сохраняет её wrapped private bundle вместе с локальным unlock key только в
-  owner-only private config. Ключ шифрования нельзя просить в chat/prompt,
-  передавать через MCP/HTTP, argv, environment, stdin, clipboard или писать в
-  Workspace. Повторные setup/inspect/Run обязаны использовать remembered device
-  без нового ввода; access pending завершается явным owner-grant blocker-ом без
-  plaintext fallback.
-- Folder onboarding всегда сверяет компанию по metadata-only `list_companies`,
-  сохраняет exact явно указанный slug и не подменяет его похожим именем либо
-  названием папки. Для любого non-`plain` `encryptionState` он не вызывает
-  remote `get_agent_instructions`/`list_agent_skills`. Published Agent
-  Procedures входят только в локально расшифрованный manifest; единый
-  `search_agent_guidance` и exact `get_agent_procedure` не отправляют query,
-  snippets, draft или comments на backend. Для exact `encrypted`
-  после binding/pairing он обязан выполнить отдельный `encryption setup` через
-  bridge и считать доступ готовым только после открытого owner envelope и
-  локального `TRELIOE1` self-test; transitional state блокирует content work.
-  Успешный `login` сам по себе не доказывает encryption readiness.
-- Shared local-file upload обслуживает задачи и страницы базы знаний. Exact
-  `nativeTool` выбирает owner locator, encryption AAD и recovery namespace;
-  local path остаётся в local tool, bytes не входят в model context; task ABI сохраняется.
-  Право `mcp:tasks:update` не заменяет `mcp:knowledge-base:write` и page manage ACL.
-- Encrypted Agent Workspace materialize-ится и индексируется только локальным
-  bridge. Protocol 2 передаёт opaque `TRELIOE1` files/manifests и Git full/delta
-  частями по 8 МиБ с durable retry cache; HTTP 429 обрабатывается bounded
-  Retry-After retry логической операции с read-back до mutation.
-  Неизменённые файлы переиспользуются
-  только из exact accepted base. Подписанная browser-проекция содержит UUID и
-  ciphertext digests, а paths/MIME/plaintext hashes – только encrypted manifest.
-  Legacy full bundle/pack остаются читаемыми. Лимиты и recovery описаны в
-  [runtime-контракте](docs/agent-workspace-runtime.md#инкрементальное-encrypted-хранилище).
-  Accepted candidate без проекции запрещён. Локальный bridge перед upload
-  заново проверяет bounds, paths, file types, protected control files и
-  очевидные private-key/credential patterns. Server bundle/search/object path
-  fallback для encrypted workspace запрещён.
-- В переиспользуемом persistent root dependency-каталоги `context/company`,
-  `context/project` и `context/related/*` всегда соответствуют exact
-  `contextHeadsJson` текущего Run: исчезнувшие slots удаляются только после
-  успешной materialization нового набора, без затрагивания authority snapshots.
-  Retention считает открытыми только `running`, `waiting_for_human` и `review`;
-  `expired` sibling не блокирует terminal root, но собственный expired root
-  сохраняется для claim. Отдельный preflight нового Run может переиспользовать
-  тот же root лишь когда expired Run неактивен минимум 48 часов, не имеет
-  server draft/checkpoint/candidate/blocker/handoff, а локальная история,
-  working tree, ignored и top-level entries независимо доказаны чистыми.
-  Иначе возвращается exact reclaim существующего Run; один возраст никогда не
-  разрешает потерю данных. Не расширяй cleanup на legacy-каталоги без текущей
-  `.trelio-run.json` metadata.
-- Новая initial revision содержит только `WORKSPACE_CONTEXT.md`; технический
-  README, `.trelio/workspace.json` и пустые category markers не создаются.
-  Корневой `README.md`, если его создали пользователь или агент, остаётся
-  обычным редактируемым материалом в поиске, browser-проекции, истории и
-  proposal attachments; не включай его в список protected/hidden paths.
-  Формат журнала живёт в read-only `context/worklog-format.md`, а `finish`
-  создаёт одну детерминированную запись `worklog/` из handoff. Совместимость
-  старых проекций описана в
-  [файловом контракте](docs/agent-workspace-runtime.md#контекст-и-файлы).
-- Extraction manifests encrypted candidate bridge проверяет по exact committed
-  Git blobs до шифрования. Paths, source digest, type, method и manifest идут
-  только в field-bound company payload; server получает signed structural
-  inventory и повторно сверяет его digest с Run/head/fence при acceptance.
-  Exact overview и verify-result гидратируются local provider. Статус
-  `human_verified` разрешён лишь после явного post-creation подтверждения
-  человеком конкретной пары source/artifact.
-- `list_companies.contentProvider` и structured `providerSelection` – только
-  backend-selected routes. Agent не выводит provider из metadata: plain остаётся
-  native, а детали exact local context/proposal route загружаются только из lazy
-  worker reference после такого ответа. Always-visible schemas provider-neutral.
-- Encrypted routing принимает только explicit capabilities: current content read,
-  exact local action, proposal, local Workspace revision list, accepted-Run
-  diff/file read, restore/cancel либо logical
-  bridge checkpoint. Local action повторно запускает исходный native handler с
-  прежними schema/scope/ACL/idempotency/CAS только после проверки bridge session,
-  runtime proof и field-bound payload markers; неизвестный method fail-closed и
-  не маскируется generic local search.
-  Server read-fence `get_task_sections` автоматически выбрасывает только
-  доказанно устаревшую RAM generation, bounded дожидается свежего mirror и ровно
-  один раз повторяет read-only запрос; повторный конфликт остаётся fail-closed.
-  Workspace-only query имеет exact company scope; current-head file, revision
-  metadata и accepted-Run history читаются локально, audited restore проходит
-  local Run, а server-side historical Git diff/read не получают plaintext
-  fallback.
-- Combined encrypted proposal bundle выбирает provider до per-card preparation,
-  canonicalize-ит historical project aliases локально и отклоняет mixed-company
-  payload до первого save; confirmed card error не блокирует независимых siblings.
-  Encrypted comment publish replay принимает новый randomized marker только
-  через verified bridge и возвращает success лишь после local plaintext
-  comparison с фактически сохранённым hydrated comment.
-  Local proposal ABI разделён: `get_trelio_local_proposal_context` – headless
-  read без UI metadata и с exact local `nextCall`; только
-  `render_trelio_local_proposal` монтирует current App после `save`. Короткий
-  owner-private route marker первого подтверждённого local company read
-  останавливает ошибочный native renderer до MCP/App и не содержит company
-  content. Hidden review capability действует до 30 дней; owner-private key вне
-  workspace позволяет карточке пережить restart local MCP. Она не разрешает
-  mutation. Перед кнопкой App повторяет live provider/ACL/CAS read и получает
-  одноразовую action capability на 5 минут для exact action и редактируемого
-  input. Успех расходует grant exact карточки; состояние читается до review TTL.
-  При потере process-local action grant App один раз повторяет preflight.
-  Повторная запись и stale revision отклоняются; ответ не кешируется вместо live
-  read, ручной текст сохраняется, raw capability error пользователю не показывается.
-  App-only aliases скрыты от модели, а v9/v5/v4/v3 сохраняются для
-  старых карточек. Bundle использует sandboxed `srcdoc` без `data:` frame CSP.
-- Чистое чтение уже принятого Workspace использует
-  `prepare_agent_workspace_read` и локальный `trelio-workspace inspect` без
-  создания Run, lease, checkpoint или task mutation. Bridge materialize-ит
-  exact accepted head и текущие instruction/profile snapshots в private
-  read-only state; агент не просит пользователя вручную запускать Run только
-  ради чтения и не превращает inspection-каталог в writable workspace.
-- Signed runtime запускается после authenticated exact-release admission либо
-  его допустимого 12-часового snapshot по контракту выше,
-  проверки signature/package/files/paths и с host-authored allowlist окружения.
-  Если обычный глобальный package получает company connection config как E2EE
-  marker, bridge гидратирует его только для exact `platform_verified`
-  publication/artifact без device consent; marker обязан быть привязан к
-  `config_json` и той же company, иначе resolution fail-closed.
-- `company_unverified` runtime, загруженный owner/admin компании, не становится
-  проверенным из-за backend Ed25519-подписи: подпись гарантирует только
-  целостность доставки. До package URL/bytes bridge обязан объявить capability
-  `x-trelio-agent-skill-device-consent: v1`, получить bounded challenge и
-  открыть защищённую одноразовую форму на `127.0.0.1` с компанией, publisher,
-  summary, обязательной причиной, diff, capabilities и hash-ами. Только прямой
-  POST пользователя из формы создаёт grant exact
-  user/device/publication/release/artifact/package/instruction; chat reply,
-  CLI approval flag, browser automation и действие агента запрещены. Любой
-  новый publication, включая unchanged package, instruction-only update,
-  rollback или reactivation, требует нового disclosure и consent; cancel и
-  timeout не скачивают package. Runtime resolve обязан вернуть explicit trust:
-  отсутствие trust fail closed, а `platform_verified` publication не может
-  ссылаться на `company_unverified` artifact. Обратная комбинация допустима
-  только как company publication поверх ранее проверенных bytes и всё равно
-  требует exact consent. Loopback decision резервируется атомарно только после
-  bounded body + nonce validation: из параллельных accept/decline POST ровно
-  один получает право на результат, остальные отклоняются до remote grant.
-- User login, CAPTCHA, passkey, OTP и иные protected account steps выполняет
-  сам пользователь в разрешённом browser handoff. Агент не вводит и не читает
-  credential.
-
-- Удаление именованного Workspace следует [процедуре удаления](plugins/trelio-agent-workspaces/skills/trelio-workspace-worker/references/workspace-deletion.md)
-  навыка worker: только явная просьба/согласие пользователя и его обязательная
-  причина; повторное подтверждение уже прямой просьбы не требуется.
-
-## Документация
-
-- Общая установка и обновление: [`README.md`](README.md).
-- Документация plugin bundle:
-  [`plugins/trelio-agent-workspaces/README.md`](plugins/trelio-agent-workspaces/README.md).
-- Публичные runtime и security contracts: [`docs/`](docs/).
-- Политика раскрытия уязвимостей: [`SECURITY.md`](SECURITY.md).
-
-Публичная документация объясняет пользователю доступный продуктовый контракт,
-но не содержит внутренних production credentials, publication commands,
-закрытых source paths или maintainer playbooks.
-
-## Локальные скачанные вложения
-
-- Server-selected encrypted `download_attachment` расшифровывает только уже
-  разрешённый ACL-read и возвращает `delivery=local-file`, path, имя/MIME,
-  размер/SHA-256 и срок очистки; plaintext bytes/base64 не входят в MCP.
-- Копия до 24 MiB живёт в отдельном `attachment-downloads` внутри private bridge
-  config, вне Git и encrypted mirror. Каталог/файл принадлежат только текущему
-  пользователю: POSIX `0700/0600`, Windows exact private DACL. Исходное имя файла
-  не становится path; symlink, oversized, abort и crypto/write failure не имеют
-  fallback. RAM-буферы обнуляются, незавершённая копия удаляется.
-- Через час работающий host удаляет снимок; после выхода процесса просроченные
-  lease-каталоги удаляются при следующем локальном скачивании. Это локальная
-  копия пользователя, не remotely revocable storage. Долговечные материалы
-  сохраняются отдельно только в разрешённый Workspace.
-
-## Проверки и релизы
-
-- Изменение model-visible результата требует проверки
-  [контракта MCP-проекции](docs/agent-mcp-responses.md): одинаковая семантика
-  native/local после hydration, рабочий exact read отложенных данных и
-  сохранение ошибок, human decisions, meaningful notes и pinned snapshots.
-  Сгенерированный `trelio-agent-response-projection.mjs` вручную не редактируется.
-
-- Постоянный model-visible слой типового task-scoped Run измеряется командой
-  `npm run report:context-budget`; JSON для объединённого backend-отчёта
-  возвращает `npm run --silent report:context-budget -- --json`. Перед отчётом
-  и тестами установи закреплённые devDependencies через `npm ci --ignore-scripts`.
-  Метрики – UTF-8 bytes и `tokensO200kBase`: точная токенизация обычного текста
-  офлайн-кодировкой `o200k_base` из `tiktoken@1.0.22`. Итоги складывают
-  независимо измеренные части без неизвестного framing клиента; это не billing
-  и не утверждение о кодировке текущей модели. Метаданные `tokenizer` задают
-  кодировку, пакет, aggregation и scope; backend принимает только совпадающий
-  контракт. Старое JSON-поле `estimatedTokensUtf8Div4` остаётся байтовой
-  эвристикой. `context-budget.test.mjs` фиксирует независимые byte/token regression
-  ceilings отдельно для runtime `AGENTS.md`, worker `SKILL.md`, обязательных
-  task Run references, варианта с proposal bundle, compact provider-neutral
-  schemas и отдельных plain/encrypted company scenarios. Дополнительно отчёт
-  измеряет local `initialize`, все model-visible local schemas и их вариант с
-  повтором initialize в каждом description, exact local action обычного Run,
-  реальные builders proposal-ответов и fixture скачивания 1 MiB. App-only tools
-  и hidden capabilities не считаются model context. Binary bytes остаются в
-  локальном файле, а успешный JSON не дублируется в `content` и `structuredContent`.
-  `local-company-context.md` запрещено включать в plain required path. Эти потолки не являются
-  целевыми размерами: осознанное увеличение требует объяснения, а оптимизация
-  должна уменьшать фактический отчёт без удаления security-инвариантов.
-  Runtime `AGENTS.md` хранит только неизменяемое safety/lifecycle-ядро, а
-  `trelio-workspace-worker/SKILL.md` остаётся коротким router. Подробная процедура
-  хранится в своём reference; router и lifecycle ссылаются на него без повторного
-  изложения. Это не отменяет полного чтения подходящих references. Процедуры setup
-  и recovery Run, изменений durable relations, внешних сервисов и Agent Secrets
-  находятся в отдельных references и не добавляются в `TASK_RUN_REQUIRED_SKILL_PATHS`: агент обязан
-  загружать их полностью только при соответствующем сценарии.
-- Для изменённого bundled skill запусти его tests, `validate-skill` при наличии
-  и `skill-creator/scripts/quick_validate.py`.
-- Для manifest используй штатный `plugin-creator` validator. Для
-  bridge/host/hooks/MCP запускай релевантные generic regressions на Node.js 22+
-  на поддерживаемых платформах.
-- Release CI фиксирует exact Node.js `22.23.2`: macOS cache для плавающего
-  `node-version: 22` мог выбрать `22.23.1`, где native test runner повреждал
-  serialized IPC stream и падал до assertion с `Unable to deserialize cloned
-  data`. Generic test files запускаются отдельными прямыми `node <test-file>`,
-  без parent `node --test`: сбой serialized child IPC остаётся редким и на
-  `22.23.2` под нагрузкой. Linux, macOS и Windows jobs не должны расходиться по
-  patch version.
-- `BRIDGE_VERSION`, Codex manifest, Claude manifest, marketplace entry и exact
-  version assertions должны оставаться синхронны.
-- Stable plugin version и tag `vX.Y.Z` выпускаются вместе. Не меняй version, не
-  создавай tag/GitHub Release и не публикуй production без явной команды на
-  релиз.
-- Перед коммитом выполни `git diff --check`, проверь staged scope и отсутствие
-  секретов/generated cache. Коммиты, descriptions и release notes пиши
-  по-русски.
+- Сначала запускай узкие изменённые tests, затем весь список direct Node tests из
+  `.github/workflows/runtime-tests.yml`.
+- Package builder проверяй двумя сборками одной версии и byte comparison.
+- Cross-repository tests запускай с exact plugin root. Ошибка отсутствующего
+  plugin checkout – setup failure, а не повод копировать plugin source.
+- Перед commit проверь `git diff --check`, полный diff и clean status после commit.

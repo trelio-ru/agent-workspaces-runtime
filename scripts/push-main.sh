@@ -22,7 +22,7 @@ Usage: bash scripts/push-main.sh [--source <ref>] [--tag vX.Y.Z]
 
 Pushes one clean fast-forward source to origin/main, performs exact remote
 read-back and then fast-forwards the configured canonical main worktree. With
---tag, main and the existing local stable plugin tag are pushed atomically.
+--tag, main and the existing local stable runtime tag are pushed atomically.
 EOF
 }
 
