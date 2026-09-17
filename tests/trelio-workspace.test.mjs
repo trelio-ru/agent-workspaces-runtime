@@ -5478,20 +5478,24 @@ test("Windows Remote MCP launcher uses the Codex Node runtime without PATH", {
   skip: process.platform !== "win32",
   timeout: 15_000,
 }, async () => {
-  // Match the manifest's plugin working-directory contract for the launcher.
-  // The probe belongs to this runtime repository, so pass its exact absolute
-  // path instead of assuming that runtime fixtures are vendored by the plugin.
-  const probePath = path.join(testDirectory, "fixtures", "node-launcher-probe.mjs");
+  // Keep both command arguments relative to one explicit cwd. This avoids
+  // cmd.exe's special /s quote stripping while still proving that the launcher
+  // can execute a target owned by the separate runtime checkout.
+  const runtimeRepositoryRoot = path.resolve(testDirectory, "..");
+  const launcherPath = path.relative(
+    runtimeRepositoryRoot,
+    path.join(pluginDirectory, "scripts", "launch-trelio-node.cmd"),
+  );
   const command = [
-    "scripts\\launch-trelio-node.cmd",
-    `"${probePath}"`,
+    launcherPath,
+    "tests\\fixtures\\node-launcher-probe.mjs",
     "remote-argument",
   ].join(" ");
   const { stdout } = await execFileAsync(
     process.env.ComSpec || "cmd.exe",
     ["/d", "/s", "/c", command],
     {
-      cwd: pluginDirectory,
+      cwd: runtimeRepositoryRoot,
       encoding: "utf8",
       env: {
         ...process.env,
