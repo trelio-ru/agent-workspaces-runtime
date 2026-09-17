@@ -521,6 +521,64 @@ test("stdio initialize is not blocked by Codex plugin retention", async () => {
   }
 });
 
+test("stdio host routes a server elicitation request back to the waiting tool call", async () => {
+  const harness = createStdioHarness(async (
+    _origin,
+    _toolName,
+    _arguments,
+    { clientCapabilities, requestClient, signal },
+  ) => {
+    assert.deepEqual(clientCapabilities, { elicitation: { form: {} } });
+    const answer = await requestClient("elicitation/create", {
+      mode: "form",
+      message: "Проверить предложение",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          decision: { type: "string", enum: ["keep", "apply"], default: "keep" },
+        },
+        required: ["decision"],
+      },
+    }, { signal });
+    return {
+      structuredContent: answer,
+      content: [{ type: "text", text: JSON.stringify(answer) }],
+    };
+  });
+
+  try {
+    harness.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: { form: {} } },
+        clientInfo: { name: "elicitation-regression", version: "1.0.0" },
+      },
+    });
+    await harness.waitForFrame(({ id }) => id === 1);
+    harness.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "render_trelio_local_proposal", arguments: {} },
+    });
+    const elicitation = await harness.waitForFrame(({ method }) => method === "elicitation/create");
+    assert.equal(elicitation.params.requestedSchema.properties.decision.default, "keep");
+    harness.send({
+      jsonrpc: "2.0",
+      id: elicitation.id,
+      result: { action: "accept", content: { decision: "apply" } },
+    });
+    const toolResult = await harness.waitForFrame(({ id }) => id === 2);
+    assert.equal(toolResult.result.structuredContent.action, "accept");
+    assert.equal(toolResult.result.structuredContent.content.decision, "apply");
+  } finally {
+    await harness.close();
+  }
+});
+
 test("Remote MCP browser handoff verifies the form GET and uses a private macOS fallback", async () => {
   const setupUrl = "http://127.0.0.1:45678/?nonce=must-stay-local";
   const attempts = [];
@@ -2027,6 +2085,110 @@ test("local proposal render returns a real MCP App result instead of JSON text o
     new RegExp(result._meta["trelio/taskProposalApp"].capabilityToken, "u"),
   );
 
+});
+
+test("local proposal render uses form elicitation when the host cannot render MCP Apps", async (t) => {
+  const configDirectory = await createProposalCapabilityConfigDirectory(t);
+  const proposalId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const itemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const requests = [];
+  const result = await buildLocalProposalRenderResult({
+    origin: "https://trelio.example",
+    companySlug: "protected-company",
+    kind: "checklist",
+    operation: "save",
+    configDirectory,
+    clientCapabilities: { elicitation: { form: {} } },
+    requestClient: async (method, params) => {
+      requests.push({ method, params });
+      return {
+        action: "accept",
+        content: {
+          proposal_1_decision: "apply",
+          proposal_1_items: [itemId],
+        },
+      };
+    },
+    result: {
+      provider: "local_company_context",
+      proposal: {
+        schemaVersion: 1,
+        project: { name: "Защищённый проект" },
+        task: { number: 12, title: "Проверить результат" },
+        currentDraft: {
+          proposalId,
+          revision: 3,
+          items: [{
+            itemId,
+            checklistTitle: "Приёмка",
+            content: "Проверить отчёт",
+          }],
+        },
+      },
+    },
+  });
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, "elicitation/create");
+  assert.deepEqual(
+    requests[0].params.requestedSchema.properties.proposal_1_items.default,
+    [itemId],
+  );
+  assert.deepEqual(result.structuredContent.interactiveReview.nextActions, [{
+    kind: "checklist",
+    proposalId,
+    decision: "apply",
+    toolName: "render_trelio_local_proposal",
+    arguments: {
+      operation: "action",
+      companySlug: "protected-company",
+      kind: "checklist",
+      payload: {
+        proposalId,
+        expectedRevision: 3,
+        confirmed: true,
+        action: "apply",
+        itemIds: [itemId],
+      },
+    },
+  }]);
+  assert.match(result.content[0].text, /structuredContent/u);
+});
+
+test("local proposal render keeps MCP Apps primary over elicitation", async (t) => {
+  const configDirectory = await createProposalCapabilityConfigDirectory(t);
+  let requested = false;
+  const result = await buildLocalProposalRenderResult({
+    origin: "https://trelio.example",
+    companySlug: "protected-company",
+    kind: "comment",
+    operation: "save",
+    configDirectory,
+    clientCapabilities: {
+      elicitation: { form: {} },
+      extensions: { "io.modelcontextprotocol/ui": {} },
+    },
+    requestClient: async () => {
+      requested = true;
+      return { action: "cancel" };
+    },
+    result: {
+      provider: "local_company_context",
+      proposal: {
+        schemaVersion: 3,
+        project: { name: "Проект" },
+        task: { number: 1, title: "Задача" },
+        currentDraft: {
+          proposalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          revision: 1,
+          bodyText: "Готово",
+        },
+      },
+    },
+  });
+
+  assert.equal(requested, false);
+  assert.equal(result.structuredContent.interactiveReview, undefined);
 });
 
 test("local proposal context returns structured data without App metadata", async () => {

@@ -3830,6 +3830,305 @@ const readLocalProposalAppCapabilityTarget = async (
   return { capability: { ...capability, schemaVersion: 1 }, target };
 };
 
+const MCP_APP_CLIENT_EXTENSION = "io.modelcontextprotocol/ui";
+
+const boundedProposalFormText = (value, maximum = 180) => {
+  const normalized = typeof value === "string"
+    ? value.replace(/\s+/gu, " ").trim()
+    : "";
+  if (normalized.length <= maximum) return normalized;
+  return `${normalized.slice(0, Math.max(0, maximum - 1))}…`;
+};
+
+const proposalFormLabel = (proposal) => {
+  const taskNumber = typeof proposal?.task?.number === "string"
+    || typeof proposal?.task?.number === "number"
+    ? ` #${String(proposal.task.number)}`
+    : "";
+  return boundedProposalFormText([
+    boundedProposalFormText(proposal?.project?.name, 80),
+    `${taskNumber} ${boundedProposalFormText(proposal?.task?.title, 100)}`.trim(),
+  ].filter(Boolean).join(" / "), 180) || "Задача Trelio";
+};
+
+const proposalKindFromBlockType = (type) => (
+  type === "commentProposal"
+    ? "comment"
+    : type === "statusProposal"
+      ? "status"
+      : type === "controlClearProposal"
+        ? "control_clear"
+        : type === "checklistProposal"
+          ? "checklist"
+          : null
+);
+
+const buildLocalProposalDecisionSchema = (kind, title, description) => ({
+  type: "string",
+  title,
+  description,
+  oneOf: [
+    { const: "keep", title: "Оставить без действия" },
+    {
+      const: kind === "comment" ? "publish" : "apply",
+      title: kind === "comment" ? "Опубликовать" : "Применить",
+    },
+    { const: "dismiss", title: "Отклонить предложение" },
+  ],
+  default: "keep",
+});
+
+/**
+ * MCP elicitation permits only flat primitive fields. Translate the richer
+ * proposal cards into one bounded form while retaining exact proposal IDs,
+ * revisions and selectable item IDs exclusively in this in-memory descriptor.
+ */
+const prepareLocalProposalElicitation = (structuredContent) => {
+  if (structuredContent?.localOperation !== "save" || !Array.isArray(structuredContent?.blocks)) {
+    return null;
+  }
+  const properties = {};
+  const required = [];
+  const cards = [];
+  const messages = [];
+
+  for (const block of structuredContent.blocks) {
+    if (block?.status !== "ready" || !block.proposal) continue;
+    const kind = proposalKindFromBlockType(block.type);
+    const draft = block.proposal.currentDraft;
+    if (
+      !kind
+      || !draft
+      || !UUID_PATTERN.test(String(draft.proposalId || ""))
+      || !Number.isSafeInteger(draft.revision)
+      || draft.revision < 1
+    ) continue;
+
+    const cardNumber = cards.length + 1;
+    const prefix = `proposal_${cardNumber}`;
+    const decisionField = `${prefix}_decision`;
+    const label = proposalFormLabel(block.proposal);
+    const description = kind === "comment"
+      ? "Отредактируйте текст ниже и выберите, публиковать ли его."
+      : kind === "status"
+        ? boundedProposalFormText(
+            `Новый статус: ${boundedProposalFormText(draft.targetStatus?.name, 80)}. ${boundedProposalFormText(draft.reason, 220)}`,
+            320,
+          )
+        : kind === "control_clear"
+          ? "Выберите контроли и подтвердите их снятие либо оставьте предложение без действия."
+          : "Выберите пункты чек-листа и подтвердите изменения либо оставьте предложение без действия.";
+    properties[decisionField] = buildLocalProposalDecisionSchema(
+      kind,
+      `${cardNumber}. ${label}`,
+      description,
+    );
+    required.push(decisionField);
+    messages.push(`${cardNumber}. ${label}`);
+
+    const card = {
+      kind,
+      proposalId: String(draft.proposalId).toLowerCase(),
+      revision: draft.revision,
+      companySlug: draft.localCompanySlug,
+      decisionField,
+    };
+    if (typeof card.companySlug !== "string" || !card.companySlug) continue;
+
+    if (kind === "comment") {
+      const bodyField = `${prefix}_body`;
+      properties[bodyField] = {
+        type: "string",
+        title: `Текст комментария ${cardNumber}`,
+        description: "Используется только если выбрано «Опубликовать».",
+        minLength: 1,
+        maxLength: 20_000,
+        default: typeof draft.bodyText === "string" ? draft.bodyText : "",
+      };
+      required.push(bodyField);
+      card.bodyField = bodyField;
+
+      const choices = (Array.isArray(draft.attachments) ? draft.attachments : [])
+        .flatMap((attachment) => (
+          UUID_PATTERN.test(String(attachment?.id || ""))
+            ? [{
+                const: String(attachment.id).toLowerCase(),
+                title: boundedProposalFormText(attachment.fileName, 120) || String(attachment.id),
+              }]
+            : []
+        ));
+      if (choices.length > 0) {
+        const selectionField = `${prefix}_attachments`;
+        properties[selectionField] = {
+          type: "array",
+          title: `Файлы комментария ${cardNumber}`,
+          description: "Снимите выбор с файлов, которые не нужно прикладывать.",
+          minItems: 0,
+          maxItems: choices.length,
+          items: { anyOf: choices },
+          default: choices.map((choice) => choice.const),
+        };
+        card.selectionField = selectionField;
+        card.allowedSelectionIds = new Set(choices.map((choice) => choice.const));
+      }
+    } else if (kind === "status") {
+      card.fixedTargetStatusCode = typeof draft.targetStatus?.code === "string"
+        ? draft.targetStatus.code.trim()
+        : "";
+    } else {
+      const idField = kind === "control_clear" ? "controlId" : "itemId";
+      const choices = (Array.isArray(draft.items) ? draft.items : []).flatMap((item) => {
+        if (!UUID_PATTERN.test(String(item?.[idField] || ""))) return [];
+        const title = kind === "control_clear"
+          ? [boundedProposalFormText(item.controlDate, 20), boundedProposalFormText(item.note, 120)]
+              .filter(Boolean).join(" · ")
+          : [boundedProposalFormText(item.checklistTitle, 80), boundedProposalFormText(item.content, 120)]
+              .filter(Boolean).join(": ");
+        return [{ const: String(item[idField]).toLowerCase(), title: title || String(item[idField]) }];
+      });
+      if (choices.length > 0) {
+        const selectionField = `${prefix}_${kind === "control_clear" ? "controls" : "items"}`;
+        properties[selectionField] = {
+          type: "array",
+          title: kind === "control_clear"
+            ? `Контроли ${cardNumber}`
+            : `Пункты чек-листа ${cardNumber}`,
+          minItems: 1,
+          maxItems: choices.length,
+          items: { anyOf: choices },
+          default: choices.map((choice) => choice.const),
+        };
+        required.push(selectionField);
+        card.selectionField = selectionField;
+        card.allowedSelectionIds = new Set(choices.map((choice) => choice.const));
+      }
+    }
+    cards.push(card);
+  }
+
+  if (cards.length === 0) return null;
+  return {
+    cards,
+    params: {
+      mode: "form",
+      message: [
+        "Проверьте предложения Trelio. Каждая строка – отдельное решение; по умолчанию ничего не меняется.",
+        ...messages,
+      ].join("\n"),
+      requestedSchema: { type: "object", properties, required },
+    },
+  };
+};
+
+const readLocalProposalFormSelection = (content, card) => {
+  if (!card.selectionField || !card.allowedSelectionIds) return [];
+  const value = content?.[card.selectionField];
+  if (!Array.isArray(value)) return null;
+  const selected = value.map((item) => String(item || "").toLowerCase());
+  if (
+    selected.some((item) => !UUID_PATTERN.test(item) || !card.allowedSelectionIds.has(item))
+    || new Set(selected).size !== selected.length
+  ) return null;
+  return selected;
+};
+
+const buildLocalProposalFormNextAction = (card, content) => {
+  const decision = content?.[card.decisionField];
+  if (decision === "keep" || typeof decision !== "string") return null;
+  const payload = {
+    proposalId: card.proposalId,
+    expectedRevision: card.revision,
+    confirmed: true,
+    action: decision === "dismiss"
+      ? "dismiss"
+      : card.kind === "comment"
+        ? "publish"
+        : "apply",
+  };
+
+  if (decision !== "dismiss") {
+    if (card.kind === "comment" && decision === "publish") {
+      const bodyText = content?.[card.bodyField];
+      const attachmentIds = readLocalProposalFormSelection(content, card);
+      if (
+        typeof bodyText !== "string"
+        || !bodyText.trim()
+        || bodyText.length > 20_000
+        || attachmentIds === null
+      ) return null;
+      payload.bodyText = bodyText;
+      if (card.selectionField) payload.attachmentIds = attachmentIds;
+    } else if (card.kind === "status" && decision === "apply" && card.fixedTargetStatusCode) {
+      payload.targetStatusCode = card.fixedTargetStatusCode;
+    } else if (card.kind === "control_clear" && decision === "apply") {
+      const controlIds = readLocalProposalFormSelection(content, card);
+      if (!controlIds?.length) return null;
+      payload.controlIds = controlIds;
+    } else if (card.kind === "checklist" && decision === "apply") {
+      const itemIds = readLocalProposalFormSelection(content, card);
+      if (!itemIds?.length) return null;
+      payload.itemIds = itemIds;
+    } else {
+      return null;
+    }
+  }
+
+  return {
+    kind: card.kind,
+    proposalId: card.proposalId,
+    decision: decision === "dismiss" ? "dismiss" : "apply",
+    toolName: TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name,
+    arguments: {
+      operation: "action",
+      companySlug: card.companySlug,
+      kind: card.kind,
+      payload,
+    },
+  };
+};
+
+const maybeElicitLocalProposalReview = async ({
+  structuredContent,
+  clientCapabilities,
+  requestClient,
+  signal,
+}) => {
+  if (
+    clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]
+    || !clientCapabilities?.elicitation?.form
+    || typeof requestClient !== "function"
+  ) return null;
+
+  const prepared = prepareLocalProposalElicitation(structuredContent);
+  if (!prepared) return null;
+  let result;
+  try {
+    result = await requestClient("elicitation/create", prepared.params, { signal });
+  } catch {
+    // A declared but broken form capability cannot turn a successful proposal
+    // save into a tool error or an inferred rejection. The existing text result
+    // remains available to the host and the draft stays pending.
+    return null;
+  }
+  const nextActions = result?.action === "accept"
+    ? prepared.cards.flatMap((card) => {
+        const action = buildLocalProposalFormNextAction(card, result.content);
+        return action ? [action] : [];
+      })
+    : [];
+  return {
+    schemaVersion: 1,
+    provider: "mcp_elicitation",
+    action: ["accept", "decline", "cancel"].includes(result?.action)
+      ? result.action
+      : "cancel",
+    nextActions,
+    instruction: result?.action === "accept"
+      ? "The user submitted this exact interactive form. Execute each nextActions tool once with the unchanged arguments; do not ask for another confirmation. Cards without a next action remain pending."
+      : "No proposal decision was recorded. Do not treat decline or cancel as an explicit rejection and do not call apply, publish, or dismiss actions.",
+  };
+};
+
 const buildLocalProposalRenderPayload = ({ result, companySlug, kind, operation }) => {
   if (result?.provider === "native_trelio") return result;
 
@@ -3913,12 +4212,21 @@ export const buildLocalProposalRenderResult = async ({
   operation,
   origin = null,
   configDirectory,
+  clientCapabilities = null,
+  requestClient = null,
+  signal,
 }) => {
   const structuredContent = buildLocalProposalRenderPayload({
     result,
     companySlug,
     kind,
     operation,
+  });
+  const interactiveReview = await maybeElicitLocalProposalReview({
+    structuredContent,
+    clientCapabilities,
+    requestClient,
+    signal,
   });
   const capability = await createLocalProposalAppCapability(
     origin,
@@ -3930,7 +4238,10 @@ export const buildLocalProposalRenderResult = async ({
   // comments and accepted-run evidence back to the model only repeats context.
   // Keep the full payload in root _meta, which the host reserves for Apps, and
   // return a useful text-client receipt with draft text and exact decisions.
-  const modelReceipt = buildLocalProposalModelReceipt(structuredContent);
+  const modelReceipt = {
+    ...buildLocalProposalModelReceipt(structuredContent),
+    ...(interactiveReview ? { interactiveReview } : {}),
+  };
   return compactLocalMcpResult({
     structuredContent: modelReceipt,
     content: [{ type: "text", text: JSON.stringify(modelReceipt) }],
@@ -4444,6 +4755,8 @@ export const handleToolCall = async (
     proposalOperation = handleTrelioLocalProposalOperation,
     proposalProviderSelectionRecorder = null,
     proposalCapabilityConfigDirectory,
+    clientCapabilities = null,
+    requestClient = null,
     codexRoutingPlan = planCodexTrelioHookRouting,
     codexRoutingApply = applyCodexTrelioHookRouting,
   } = {},
@@ -4526,6 +4839,9 @@ export const handleToolCall = async (
       operation: rawArguments?.operation,
       origin,
       configDirectory: proposalCapabilityConfigDirectory,
+      clientCapabilities,
+      requestClient,
+      signal,
     });
   }
   if (
@@ -4674,6 +4990,8 @@ export const handleLocalMcpMessage = async (
     readResource = readLocalProposalAppResource,
     proposalProviderSelectionRecorder = persistLocalProposalProviderSelection,
     proposalCapabilityConfigDirectory,
+    clientCapabilities = null,
+    requestClient = null,
     signal,
   } = {},
 ) => {
@@ -4765,6 +5083,8 @@ export const handleLocalMcpMessage = async (
             signal,
             proposalProviderSelectionRecorder,
             proposalCapabilityConfigDirectory,
+            clientCapabilities,
+            requestClient,
           },
         )),
       };
@@ -4818,8 +5138,11 @@ export const runStdioHost = async ({
     terminal: false,
   });
   const activeToolCalls = new Map();
+  const pendingClientRequests = new Map();
   const inFlightDispatches = new Set();
   let retentionStarted = false;
+  let clientCapabilities = null;
+  let clientRequestSequence = 0;
   let outputQueue = Promise.resolve();
 
   const startRetentionAfterHandshake = () => {
@@ -4849,7 +5172,58 @@ export const runStdioHost = async ({
     return outputQueue;
   };
 
+  const requestClient = (method, params, { signal } = {}) => {
+    if (signal?.aborted) return Promise.reject(createCancellationError());
+    clientRequestSequence += 1;
+    const id = `trelio-client-request-${clientRequestSequence}`;
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        if (!pendingClientRequests.delete(id)) return;
+        void enqueueResponse({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { requestId: id, reason: "Parent tool call was cancelled." },
+        });
+        reject(createCancellationError());
+      };
+      const cleanup = () => signal?.removeEventListener("abort", onAbort);
+      pendingClientRequests.set(id, {
+        resolve: (value) => {
+          cleanup();
+          resolve(value);
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      void enqueueResponse({ jsonrpc: "2.0", id, method, params }).catch((error) => {
+        if (!pendingClientRequests.delete(id)) return;
+        cleanup();
+        reject(error);
+      });
+    });
+  };
+
   const dispatch = async (message) => {
+    if (
+      message?.jsonrpc === "2.0"
+      && message.method === undefined
+      && message.id !== undefined
+      && message.id !== null
+      && (Object.hasOwn(message, "result") || Object.hasOwn(message, "error"))
+    ) {
+      const pending = pendingClientRequests.get(message.id);
+      if (!pending) return;
+      pendingClientRequests.delete(message.id);
+      if (message.error) {
+        pending.reject(new Error(String(message.error.message || "Client request failed.")));
+      } else {
+        pending.resolve(message.result);
+      }
+      return;
+    }
     if (
       message?.jsonrpc === "2.0"
       && (
@@ -4877,12 +5251,17 @@ export const runStdioHost = async ({
       activeToolCalls.get(message.id)?.abort(createCancellationError());
       activeToolCalls.set(message.id, controller);
     }
+    if (message?.jsonrpc === "2.0" && message.method === "initialize") {
+      clientCapabilities = message.params?.capabilities || {};
+    }
 
     try {
       await enqueueResponse(await handleMessage(message, {
         origin,
         callTool,
         signal: controller?.signal,
+        clientCapabilities,
+        requestClient,
       }));
       if (message?.jsonrpc === "2.0" && message.method === "initialize") {
         startRetentionAfterHandshake();
@@ -4923,6 +5302,10 @@ export const runStdioHost = async ({
   // loopback listeners, sockets and opener children cannot outlive the host.
   for (const controller of activeToolCalls.values()) {
     controller.abort(createCancellationError());
+  }
+  for (const [id, pending] of pendingClientRequests) {
+    pendingClientRequests.delete(id);
+    pending.reject(new Error("MCP transport closed before the client answered."));
   }
   await Promise.allSettled([...inFlightDispatches]);
   await outputQueue;

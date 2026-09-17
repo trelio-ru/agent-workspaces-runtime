@@ -460,9 +460,17 @@ write не выполняется, ручной ввод сохраняется,
 не попадают в model context, а v5 kind-specific tools остаются resource-level
 совместимостью уже сохранённых карточек.
 
-MCP App даёт редактируемый текст и кнопку «Опубликовать»; text-only клиент
-публикует только после явной команды. В proposal включаются только важные
-итоговые и действительно полезные промежуточные файлы. Пользователь может
+MCP App даёт редактируемый текст и кнопку «Опубликовать». Если current host не
+заявил `io.modelcontextprotocol/ui`, но заявил `elicitation.form`, local MCP
+отправляет ему flat native form с independent decision каждой карточки,
+редактируемым comment body и выбором файлов/контролей/пунктов. Двунаправленный
+stdio dispatcher связывает server request с исходным tool call и отменяет его
+вместе с родительским вызовом. Submit возвращает exact
+`render_trelio_local_proposal(operation=action)` в model-visible receipt, но не
+выполняет mutation внутри render. `decline`, `cancel`, transport error и
+отсутствие обеих capabilities оставляют proposal pending; последний случай
+использует прежний text-only flow с явной командой. В proposal включаются только
+важные итоговые и действительно полезные промежуточные файлы. Пользователь может
 убрать любой; attachments создаются при публикации, а не при подготовке.
 
 Если вся задача готова, агент независимо читает
