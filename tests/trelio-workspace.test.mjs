@@ -4966,102 +4966,28 @@ test("Claude OAuth recovery keeps the plugin-qualified MCP server name", async (
   }
 });
 
-test("onboarding host-shell isolation excludes private siblings and survives parent Git snapshots", async () => {
+test("folder onboarding keeps Git and file mechanics in the host runtime", async () => {
   const onboardingSkill = await readFile(
     path.join(pluginDirectory, "skills", "trelio-project-onboarding", "SKILL.md"),
     "utf8",
   );
-  const ignoreBlock = onboardingSkill.match(/```gitignore\n([\s\S]*?)\n```/u)?.[1];
-  assert.ok(ignoreBlock, "exercise the actual ignore block agents are instructed to write");
-  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-host-shell-"));
-  const root = path.join(temporaryDirectory, "Print Trelio");
-  const relativeContext = `workspaces/${companyWorkspaceId}/context/company.md`;
-  const relativeMetadata = `workspaces/${companyWorkspaceId}/.trelio-run.json`;
-  const workspace = path.join(root, "workspaces", companyWorkspaceId, "workspace");
-  const gitEnvironment = { ...process.env };
-  // The fixture must not borrow the invoking checkout's Git directory/index,
-  // user hooks or excludes. No network, real identity or company data is used.
-  for (const name of Object.keys(gitEnvironment)) {
-    if (name.startsWith("GIT_")) delete gitEnvironment[name];
-  }
-  Object.assign(gitEnvironment, {
-    GIT_CONFIG_GLOBAL: os.devNull,
-    GIT_CONFIG_SYSTEM: os.devNull,
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_TERMINAL_PROMPT: "0",
-  });
-  const git = (args, env = {}) => execFileAsync("git", args, {
-    cwd: root,
-    env: { ...gitEnvironment, ...env },
-    encoding: "utf8",
-  });
-  const metadataDigest = async () => {
-    const hash = createHash("sha256");
-    const visit = async (directory, prefix = "") => {
-      const entries = await readdir(directory, { withFileTypes: true });
-      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-        const relativePath = `${prefix}${entry.name}`;
-        const filePath = path.join(directory, entry.name);
-        hash.update(relativePath);
-        if (entry.isDirectory()) await visit(filePath, `${relativePath}/`);
-        else hash.update(await readFile(filePath));
-      }
-    };
-    await visit(path.join(root, ".git"));
-    return hash.digest("hex");
-  };
+  const runtimeSource = await readFile(
+    path.resolve(testDirectory, "../host-runtime/scripts/trelio-folder-onboarding.mjs"),
+    "utf8",
+  );
 
-  try {
-    await mkdir(path.dirname(path.join(root, relativeContext)), { recursive: true });
-    await mkdir(workspace, { recursive: true });
-    await git(["init", "--initial-branch=main"]);
-    await git(["-C", workspace, "init", "--initial-branch=main"]);
-    await writeFile(path.join(root, "AGENTS.md"), "# Synthetic binding\n");
-    await writeFile(path.join(root, relativeContext), "Synthetic private context\n");
-    await writeFile(path.join(root, relativeMetadata), '{"fixture":true}\n');
-    await writeFile(path.join(workspace, "result.txt"), "Synthetic work product\n");
-    // Existing user rules remain intact. The managed rule must come last:
-    // otherwise this negation would re-expose sibling context and Run metadata.
-    const existingRules = "# User rules\n!/workspaces/\n";
-    await writeFile(path.join(root, ".gitignore"), existingRules);
-    assert.match((await git(["ls-files", "--others", "--exclude-standard"])).stdout,
-      /context\/company\.md/u);
-    const beforeIsolation = await metadataDigest();
-    await writeFile(path.join(root, ".gitignore"), `${existingRules}${ignoreBlock}\n`);
-    assert.ok((await readFile(path.join(root, ".gitignore"), "utf8")).startsWith(existingRules));
+  assert.match(onboardingSkill, /`intent=folder_onboarding`/u);
+  assert.match(onboardingSkill, /`folder_onboarding_apply`/u);
+  assert.match(onboardingSkill, /не воспроизводи эти проверки shell-командами/iu);
+  assert.doesNotMatch(onboardingSkill, /```gitignore|git cat-file|git ls-tree|git check-ignore/u);
+  assert.doesNotMatch(onboardingSkill, /refs\/codex\/turn-diffs\/checkpoints/u);
 
-    const probes = ["workspaces/", "workspaces/.trelio-onboarding-probe", relativeContext, relativeMetadata];
-    const ignored = (await git(["check-ignore", "--no-index", "--verbose", "--", ...probes])).stdout;
-    const lines = ignored.trimEnd().split(/\r?\n/u);
-    assert.equal(lines.length, probes.length);
-    for (const line of lines) assert.match(line, /^\.gitignore:\d+:\/workspaces\/\t/u);
-    assert.equal((await git(["ls-files", "--stage", "-z", "--", "workspaces"])).stdout, "");
-    assert.doesNotMatch((await git(["ls-files", "--others", "--exclude-standard"])).stdout,
-      /workspaces\//u);
-    assert.equal(await metadataDigest(), beforeIsolation,
-      "writing and verifying root isolation must not mutate protected host Git metadata");
-
-    // Codex builds tree snapshots with a temporary index. Model that effect
-    // with real Git, including an unborn nested repo: ignoring only its .git
-    // would miss context/ and .trelio-run.json beside workspace/.
-    const snapshotEnvironment = { GIT_INDEX_FILE: path.join(temporaryDirectory, "snapshot-index") };
-    await git(["add", "--all", "--"], snapshotEnvironment);
-    const tree = (await git(["write-tree"], snapshotEnvironment)).stdout.trim();
-    const snapshotPaths = (await git(["ls-tree", "-r", "--name-only", tree])).stdout.trim().split(/\r?\n/u);
-    assert.deepEqual(snapshotPaths, [".gitignore", "AGENTS.md"]);
-    assert.equal((await git(["ls-files", "--stage", "-z"])).stdout, "",
-      "host snapshots must not be mistaken for real staged user content");
-
-    // A positive ignore result is insufficient once content was force-added.
-    // The onboarding contract therefore also rejects the real index, and it
-    // independently inspects old snapshot trees before calling the shell safe.
-    await git(["add", "--force", "--", relativeContext]);
-    assert.notEqual((await git(["ls-files", "--stage", "-z", "--", "workspaces"])).stdout, "");
-    assert.match((await git(["check-ignore", "--no-index", "--verbose", "--", relativeContext])).stdout,
-      /^\.gitignore:\d+:\/workspaces\/\t/u);
-  } finally {
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  }
+  assert.match(runtimeSource, /refs\\\/codex\\\/turn-diffs\\\/checkpoints/u);
+  assert.match(runtimeSource, /--batch-all-objects/u);
+  assert.match(runtimeSource, /check-ignore/u);
+  assert.match(runtimeSource, /\/workspaces\//u);
+  assert.match(runtimeSource, /TRELIO_FOLDER_ONBOARDING_PLAN_STALE/u);
+  assert.match(runtimeSource, /restoreWrittenFile/u);
 });
 
 test("plugin exposes folder-first onboarding and delegates local setup decisions to runtime", async () => {
@@ -5082,9 +5008,6 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
     "utf8",
   );
   const normalized = onboardingSkill.replace(/\s+/gu, " ");
-  const managedBindingBlock = onboardingSkill.match(
-    /```markdown\n(<!-- trelio-agent-workspaces:start -->[\s\S]*?<!-- trelio-agent-workspaces:end -->)\n```/u,
-  )?.[1];
 
   assert.deepEqual(codexManifest.interface.defaultPrompt, [
     "Настрой Trelio Agent Workspaces для текущей рабочей папки.",
@@ -5094,22 +5017,22 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   const folderGateIndex = onboardingSkill.indexOf('id="confirm-the-working-folder-first"');
   const prerequisiteIndex = onboardingSkill.indexOf('id="check-prerequisites"');
   const diagnosticIndex = onboardingSkill.indexOf("diagnose_trelio_installation");
-  const companyResolutionIndex = onboardingSkill.indexOf("До `get_agent_instructions`");
+  const companyResolutionIndex = onboardingSkill.indexOf("Выбери компанию только");
   assert.ok(folderGateIndex >= 0);
   assert.ok(prerequisiteIndex > folderGateIndex);
-  assert.ok(diagnosticIndex > prerequisiteIndex);
-  assert.ok(companyResolutionIndex > diagnosticIndex);
+  assert.ok(diagnosticIndex > folderGateIndex && diagnosticIndex < prerequisiteIndex);
+  assert.ok(companyResolutionIndex > prerequisiteIndex);
 
-  // Folder isolation remains plugin policy because it governs the user-selected
-  // binding root rather than host-runtime prerequisites.
-  assert.match(onboardingSkill, /локальный проект с доступной основной папкой/u);
-  assert.match(onboardingSkill, /обычная папка контекста без Git/u);
-  assert.match(onboardingSkill, /`HEAD` ещё не создан \(unborn\)/u);
-  assert.match(onboardingSkill, /Не переименовывай\/удаляй `\.git`/u);
-  assert.match(onboardingSkill, /отдельную обычную папку проекта без Git/u);
-  assert.match(normalized, /git check-ignore --no-index --verbose/u);
-  assert.match(normalized, /git ls-files --stage -z -- workspaces/u);
-  assert.match(normalized, /добавление ignore не удаляет исторические копии/u);
+  // The plugin owns user choices; the runtime owns Git/file classification.
+  assert.match(onboardingSkill, /основная папка открытого локального проекта/u);
+  assert.match(onboardingSkill, /"intent":"folder_onboarding"/u);
+  assert.match(onboardingSkill, /единственная каноническая классификация папки/u);
+  assert.match(onboardingSkill, /отдельную обычную\s+папку проекта без Git/u);
+  assert.doesNotMatch(normalized, /git check-ignore|git ls-files|git cat-file|git ls-tree/u);
+  assert.match(onboardingSkill, /`plan\.preview\.managedBlock`/u);
+  assert.match(onboardingSkill, /`folder_onboarding_apply`/u);
+  assert.match(onboardingSkill, /без изменения operation\/parameters/u);
+  assert.match(onboardingSkill, /stale\/CAS conflict/u);
 
   // Runtime owns the local state machine and returns actions with explicit
   // authority instead of asking the model to combine doctor fields.
@@ -5126,20 +5049,17 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   ]) {
     assert.ok(onboardingSkill.includes(`\`${code}\``), `${code} must remain an explicit action code`);
   }
-  assert.match(onboardingSkill, /Не повторяй отдельно doctor или Codex routing plan/u);
-  assert.match(onboardingSkill, /отдельное явное подтверждение именно этой локальной/u);
-  assert.match(onboardingSkill, /Stale plan перечитай и согласуй заново/u);
-  assert.match(onboardingSkill, /полностью заверши все\s+процессы Codex\/ChatGPT/u);
+  assert.match(onboardingSkill, /второй doctor не запускай/u);
+  assert.match(onboardingSkill, /после отдельного подтверждения вызови exact apply/u);
+  assert.match(onboardingSkill, /Stale plan\s+перечитай/u);
+  assert.match(onboardingSkill, /полностью перезапусти Codex\/ChatGPT/u);
   assert.match(onboardingSkill, /bootstrap fallback/u);
   assert.match(onboardingSkill, /trelio-host-runtime-loader\.mjs bridge doctor --json/u);
-  assert.match(onboardingSkill, /не сканируй cache/u);
-  assert.match(onboardingSkill, /Node\.js 22\+/u);
-  assert.match(onboardingSkill, /standalone Git 2\.28\+/u);
-  assert.match(onboardingSkill, /не ищи глобальную команду `trelio-workspace`/u);
+  assert.match(onboardingSkill, /Не сканируй caches/u);
+  assert.match(onboardingSkill, /Node\.js LTS ≥22/u);
+  assert.match(onboardingSkill, /`INSTALL_STANDALONE_GIT`/u);
+  assert.match(onboardingSkill, /не ищи глобальный `trelio-workspace`/u);
 
-  assert.match(onboardingSkill, /`codex mcp list --json`/u);
-  assert.match(onboardingSkill, /`codex plugin list --json`/u);
-  assert.match(onboardingSkill, /`claude mcp list`/u);
   assert.match(onboardingSkill, /`claude mcp login plugin:trelio-agent-workspaces:trelio`/u);
   assert.doesNotMatch(onboardingSkill, /`claude mcp login trelio`/u);
   assert.match(onboardingSkill, /`Connected`/u);
@@ -5148,31 +5068,24 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   assert.match(onboardingSkill, /`\/reload-plugins`/u);
 
   // OAuth, hook trust and company selection remain independent live decisions.
-  assert.match(onboardingSkill, /успех – live-проверка OAuth/u);
-  assert.match(onboardingSkill, /Установка\/включение plugin shell не создают hook trust/u);
-  assert.match(onboardingSkill, /`TRELIO_RUNTIME_HOOK_REQUIRED` только отсутствие\s+proof доказано/u);
-  assert.match(onboardingSkill, /`--dangerously-bypass-hook-trust`/u);
-  assert.match(onboardingSkill, /явный slug – только полное совпадение/u);
-  assert.match(onboardingSkill, /display name – только единственное точное совпадение/u);
-  assert.match(onboardingSkill, /имя папки\/repository[\s\S]{0,100}не являются\s+evidence/u);
-  assert.match(onboardingSkill, /Для `plain` и точного `encrypted` вызови `get_agent_instructions`/u);
-  assert.match(onboardingSkill, /успешный login доказывает только обычную device session/u);
+  assert.match(onboardingSkill, /Проверь OAuth свежим `list_companies`/u);
+  assert.match(onboardingSkill, /Если сам Trelio\s+вернул `TRELIO_RUNTIME_HOOK_REQUIRED`/u);
+  assert.match(onboardingSkill, /Не автоматизируй\s+доверие/u);
+  assert.match(onboardingSkill, /явный slug – полное совпадение/u);
+  assert.match(onboardingSkill, /display name – единственное точное совпадение/u);
+  assert.match(onboardingSkill, /имя папки\/repository[\s\S]{0,100}не являются\s+evidence/iu);
+  assert.match(onboardingSkill, /Для `plain` и точного `encrypted` прочитай `get_agent_instructions`/u);
   assert.match(onboardingSkill, /`operation=encryption_setup`/u);
-  assert.match(onboardingSkill, /`encryptionState=encrypted` и `selfTest\.status=passed`/u);
+  assert.match(onboardingSkill, /`encryptionState=encrypted` и\s+`selfTest\.status=passed`/u);
 
-  assert.ok(managedBindingBlock);
-  assert.match(managedBindingBlock, /Папка привязана к компании/u);
-  assert.match(managedBindingBlock, /workspaces\/<workspace-id>\//u);
-  assert.match(managedBindingBlock, /для точной задачи вызови `get_task`/u);
-  assert.match(managedBindingBlock, /`search` с `companySlugs: \["company-slug"\]`/u);
-  assert.match(onboardingSkill, /ровно `@AGENTS\.md` и один перевод строки/u);
-  assert.match(onboardingSkill, /импортируй `@AGENTS\.override\.md` вместо него/u);
-  assert.match(onboardingSkill, /Не называй инструкции незакоммиченными и не предлагай commit/u);
+  assert.doesNotMatch(onboardingSkill, /<!-- trelio-agent-workspaces:start -->/u);
+  assert.match(onboardingSkill, /Их канонический текст принадлежит runtime/u);
+  assert.match(onboardingSkill, /Не предлагай commit/u);
 
-  assert.match(normalized, /Для каждого оставшегося навыка один раз вызови `get_agent_skill`/u);
-  assert.match(onboardingSkill, /требуется настройка администратором компании/u);
-  assert.match(onboardingSkill, /enabledThroughProjectMembership=true/u);
-  assert.match(onboardingSkill, /лишь отсутствующие\s+строго проектные навыки будут предложены/u);
+  assert.match(normalized, /Остальные загрузи через `get_agent_skill`/u);
+  assert.match(onboardingSkill, /`setup_required` – администраторская настройка/u);
+  assert.match(onboardingSkill, /`project_membership`/u);
+  assert.match(onboardingSkill, /строго проектные навыки появятся/u);
   assert.doesNotMatch(onboardingSkill, /\[TODO:/u);
   assert.match(onboardingAgentMetadata, /Настройка Trelio в папке/u);
   assert.match(onboardingAgentMetadata, /\$trelio-project-onboarding/u);

@@ -46,6 +46,12 @@ host-owned doctor Node/Git/plugin/session/pairing с Codex direct-routing plan �
 возвращает ordered typed actions. Tool не устанавливает компоненты, не применяет
 Codex config, не запускает login и не объявляет hook одобренным; OAuth и runtime
 proof подтверждаются отдельными live reads.
+Тот же tool с `intent=folder_onboarding` классифицирует один exact
+client-selected root, служебный Git и активные instruction-файлы. После выбора
+company/project он возвращает preview и CAS-bound `folder_onboarding_apply` для
+trusted host. Модель не анализирует refs/objects и не пишет
+`AGENTS.md`/`CLAUDE.md`/`.gitignore` самостоятельно; runtime проверяет итог и
+откатывает ещё принадлежащие ему записи при ошибке.
 Небезопасный или неподдерживаемый Codex TOML не скрывает остальные результаты:
 plan возвращает отдельное manual-only действие и по-прежнему не раскрывает путь
 либо содержимое config.
@@ -55,6 +61,11 @@ Command-only ответы старого backend проходят через
 разбирает exact command/argv и проверяет executable, public operation и флаги.
 Модель не ищет launcher и не интерпретирует quoting; legacy secret input этим
 маршрутом запрещён.
+
+Local company search и Workspace-file search возвращают один компактный
+`nextCall`: exact continuation tool/operation плюс mapping полей выбранного
+результата. Plugin reference хранит только authority/fail-closed правила, а не
+дублирует устройство mirror, ranking и fetch routing.
 
 ## Локальная разработка
 

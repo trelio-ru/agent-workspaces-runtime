@@ -239,6 +239,16 @@ Binding ищется от текущего `cwd` вверх только по о
 folder-local roots и созданный bridge каталог `workspaces/` получают owner-only
 права; существующий `workspaces/` обязан быть обычным каталогом, а не symlink.
 
+Создание binding выполняет host-side `folder_onboarding` state machine. Read-only
+plan принимает только exact client-selected absolute root, fail-closed проверяет
+standalone Git, top-level layout, refs/objects/worktrees/hooks/config и file
+types, затем после exact company/project строит managed instruction/import/ignore
+delta. Apply принимает только текущий plan hash и explicit setup assertion,
+повторяет классификацию и file CAS, сначала доказывает изоляцию служебного Git,
+затем активирует инструкции и перечитывает итог. При сбое runtime откатывает
+только файлы, которые всё ещё совпадают с записанным им digest; конкурентную
+правку он не перезаписывает. Plugin/model не повторяют этот алгоритм shell-кодом.
+
 Следующие Run переиспользуют тот же `workspace/`, а не создают копию по
 `run-id`. Перед `start` или `claim` bridge получает live server overview,
 проверяет terminal status предыдущего локального Run и чистоту Git, сравнивает
@@ -425,6 +435,13 @@ accepted task Run агент отдельно вызывает `propose_task_com
 snapshot и optimistic proposal revision. Для сложной коррекции, сравнения с
 публичной дискуссией или нового mention сохраняется двухшаговый
 context/render-flow.
+
+Local company search и Workspace-file search получают один top-level
+`nextCall`. Он фиксирует exact local continuation и
+`copyFromSelectedResult` для `fetch` либо accepted-head file read, не повторяя
+route на каждом результате. Модель выбирает один hit и копирует только
+объявленные поля; внутреннее устройство mirror и provider fallback в plugin
+instructions не воспроизводятся.
 
 Для encrypted company exact task read дополнительно возвращает компактный
 `proposalProvider=local_company_context` с canonical task target и двумя exact

@@ -67,6 +67,7 @@ jobs:
           node tests/trelio-context-search-matching.test.mjs
           node tests/trelio-context-search-ranking.test.mjs
           node tests/trelio-encrypted-workspace-storage.test.mjs
+          node tests/trelio-folder-onboarding.test.mjs
           node tests/trelio-git.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
           node tests/trelio-local-attachments.test.mjs

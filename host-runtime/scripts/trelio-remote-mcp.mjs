@@ -54,6 +54,7 @@ import {
   TrelioInstallationDiagnosticError,
   buildTrelioInstallationDiagnostic,
 } from "./trelio-installation-diagnostic.mjs";
+import { prepareTrelioFolderOnboarding } from "./trelio-folder-onboarding.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   buildCompanyEncryptedJsonMarker,
@@ -3310,8 +3311,8 @@ const LOCAL_TOOLS = [
   ...LOCAL_PROPOSAL_APP_TOOLS,
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
-    title: "Проверить установку и подготовить план настройки Trelio",
-    description: "Read-only: одним вызовом проверьте exact загруженный plugin shell, Node.js, standalone Git, локальные runtime sessions и pairing; для Codex также получите текущий direct-routing plan. Результат разделяет локальную готовность, OAuth и hook trust, возвращает typed requiredActions и ничего не устанавливает, не применяет и не авторизует.",
+    title: "Проверить установку или подготовить настройку папки Trelio",
+    description: "Read-only: diagnostics/onboarding проверяет загруженный plugin shell, Node.js, standalone Git, runtime sessions, pairing и direct routing; folder_onboarding классифицирует одну client-selected папку и возвращает exact CAS-bound file plan с apply action. Ничего не устанавливает, не применяет и не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -3324,8 +3325,14 @@ const LOCAL_TOOLS = [
         },
         intent: {
           type: "string",
-          enum: ["diagnostics", "onboarding"],
-          description: "diagnostics не требует pairing сам по себе; onboarding включает bridge connection в requiredActions.",
+          enum: ["diagnostics", "onboarding", "folder_onboarding"],
+          description: "folder_onboarding использует folderOnboarding и не запускает общую диагностику.",
+        },
+        // The skill supplies the compact typed shape, while the trusted planner
+        // performs the complete nested allowlist/bounds validation. Repeating it
+        // here would charge every MCP initialize for an onboarding-only schema.
+        folderOnboarding: {
+          type: "object",
         },
       },
     },
@@ -3525,6 +3532,56 @@ const buildTextResult = (payload) => ({
     text: JSON.stringify(payload),
   }],
 });
+
+/**
+ * Put provider-selected follow-up routing beside encrypted search results.
+ * The route remains a template until the model/user selects one result, so a
+ * five-result search pays for one compact continuation instead of five copies.
+ * Field mappings name only values already returned by the trusted local host.
+ */
+export const attachLocalContextNextCall = (providerResult, rawArguments) => {
+  if (
+    !providerResult
+    || typeof providerResult !== "object"
+    || providerResult.provider !== "local_company_context"
+  ) return providerResult;
+  const operation = rawArguments?.operation;
+  if (operation === "search") {
+    return {
+      ...providerResult,
+      nextCall: {
+        when: "after_selecting_one_result",
+        server: "trelio-remote-skills",
+        tool: TRELIO_LOCAL_CONTEXT_TOOL.name,
+        arguments: {
+          operation: "fetch",
+          companySlug: rawArguments.companySlug,
+        },
+        copyFromSelectedResult: { resultId: "id" },
+      },
+    };
+  }
+  if (operation === "search_workspace_files") {
+    return {
+      ...providerResult,
+      nextCall: {
+        when: "after_selecting_one_file",
+        server: "trelio-remote-skills",
+        tool: TRELIO_LOCAL_CONTEXT_TOOL.name,
+        arguments: {
+          operation: "get_workspace_file",
+          companySlug: rawArguments.companySlug,
+        },
+        copyFromSelectedResult: {
+          workspaceId: "workspaceId",
+          workspaceHead: "workspaceHead",
+          filePath: "filePath",
+        },
+      },
+    };
+  }
+  return providerResult;
+};
 
 const rememberLocalProposalRoute = (key, route) => {
   // Proposal ids and Run ids are opaque routing metadata, not decrypted
@@ -4791,17 +4848,18 @@ export const handleToolCall = async (
     clientCapabilities = null,
     requestClient = null,
     localPrerequisiteDiagnosis = diagnoseLocalPrerequisites,
+    folderOnboardingPrepare = prepareTrelioFolderOnboarding,
     codexRoutingPlan = planCodexTrelioHookRouting,
     codexRoutingApply = applyCodexTrelioHookRouting,
   } = {},
 ) => {
   throwIfAborted(signal);
   if (name === TRELIO_LOCAL_CONTEXT_TOOL.name) {
-    const providerResult = await localContextOperation(
+    const providerResult = attachLocalContextNextCall(await localContextOperation(
       origin,
       rawArguments,
       { signal },
-    );
+    ), rawArguments);
     // The first bridge-selected local company read is already authoritative
     // provider evidence. Persisting its opaque company selector protects even
     // a later model that skips the dedicated proposal context after compaction.
@@ -4909,18 +4967,26 @@ export const handleToolCall = async (
     ));
   }
   if (name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME) {
+    const folderOnboardingIntent = rawArguments?.intent === "folder_onboarding";
     if (
       !rawArguments
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
-      || Object.keys(rawArguments).some((key) => !["clientKind", "intent"].includes(key))
+      || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding"].includes(key))
       || !["codex", "claude-code"].includes(rawArguments.clientKind)
-      || !["diagnostics", "onboarding"].includes(rawArguments.intent)
+      || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
+      || (folderOnboardingIntent !== (
+        rawArguments.folderOnboarding !== undefined
+        && rawArguments.folderOnboarding !== null
+      ))
     ) {
       throw new TrelioInstallationDiagnosticError(
         "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT",
-        "Диагностика установки принимает только clientKind и intent.",
+        "Диагностика принимает clientKind/intent; folder_onboarding дополнительно требует folderOnboarding.",
       );
+    }
+    if (folderOnboardingIntent) {
+      return buildTextResult(await folderOnboardingPrepare(rawArguments.folderOnboarding));
     }
     const local = await localPrerequisiteDiagnosis({ origin });
     let codexRouting = null;

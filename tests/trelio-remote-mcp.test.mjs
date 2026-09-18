@@ -12,6 +12,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import {
   AGENT_SKILL_ROUTING_INSTRUCTIONS,
   RemoteMcpHostError,
+  attachLocalContextNextCall,
   assertExactReadOnlyToolList,
   buildLocalProposalAppResourceMeta,
   buildLocalProposalRenderResult,
@@ -1890,6 +1891,10 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     installationDiagnosticTool.inputSchema.properties.clientKind.enum,
     ["codex", "claude-code"],
   );
+  assert.deepEqual(
+    installationDiagnosticTool.inputSchema.properties.intent.enum,
+    ["diagnostics", "onboarding", "folder_onboarding"],
+  );
   assert.doesNotMatch(JSON.stringify(response), /personal-test-token/u);
 });
 
@@ -1996,6 +2001,72 @@ test("installation diagnostic centralizes local and Codex routing decisions with
   assert.equal(payload.local.plugin.hooks.definitionSha256, undefined);
   assert.equal(payload.local.plugin.hooks.events, undefined);
   assert.equal(applyCalls, 0);
+});
+
+test("folder onboarding intent delegates only to the host-side read-only planner", async () => {
+  let plannerInput = null;
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    {
+      clientKind: "codex",
+      intent: "folder_onboarding",
+      folderOnboarding: {
+        folderPath: "/tmp/work",
+        company: { name: "Компания", slug: "company" },
+      },
+    },
+    {
+      folderOnboardingPrepare: async (input) => {
+        plannerInput = input;
+        return { schemaVersion: 1, kind: "trelio-folder-onboarding", plan: { status: "ready" } };
+      },
+      localPrerequisiteDiagnosis: async () => {
+        throw new Error("general diagnostics must not run");
+      },
+      codexRoutingPlan: async () => {
+        throw new Error("Codex routing must not run");
+      },
+    },
+  );
+  assert.deepEqual(plannerInput, {
+    folderPath: "/tmp/work",
+    company: { name: "Компания", slug: "company" },
+  });
+  assert.equal(JSON.parse(result.content[0].text).kind, "trelio-folder-onboarding");
+});
+
+test("local search results carry one exact provider continuation template", () => {
+  const base = {
+    schemaVersion: 1,
+    provider: "local_company_context",
+    results: [{ id: "task:company/project/1" }],
+  };
+  const search = attachLocalContextNextCall(base, {
+    operation: "search",
+    companySlug: "company",
+  });
+  assert.deepEqual(search.nextCall, {
+    when: "after_selecting_one_result",
+    server: "trelio-remote-skills",
+    tool: "continue_trelio_local_context",
+    arguments: { operation: "fetch", companySlug: "company" },
+    copyFromSelectedResult: { resultId: "id" },
+  });
+
+  const files = attachLocalContextNextCall(base, {
+    operation: "search_workspace_files",
+    companySlug: "company",
+  });
+  assert.deepEqual(files.nextCall.copyFromSelectedResult, {
+    workspaceId: "workspaceId",
+    workspaceHead: "workspaceHead",
+    filePath: "filePath",
+  });
+  assert.strictEqual(attachLocalContextNextCall({ provider: "native_trelio" }, {
+    operation: "search",
+    companySlug: "company",
+  }).nextCall, undefined);
 });
 
 test("diagnostic intent reports bridge state without turning pairing into a required repair", async () => {

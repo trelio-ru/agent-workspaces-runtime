@@ -72,6 +72,10 @@ import {
   buildLocalAttachmentFileResult,
   materializeLocalAttachment,
 } from "./trelio-local-attachments.mjs";
+import {
+  TRELIO_FOLDER_ONBOARDING_OPERATION,
+  applyTrelioFolderOnboarding,
+} from "./trelio-folder-onboarding.mjs";
 
 // Version 7 stores backend-defined search projections and keeps full task and
 // domain payloads out of the durable company mirror. Exact reads are hydrated
@@ -149,6 +153,7 @@ const WORKSPACE_RUN_LEASE_FAILURE_CODES = [
   "STALE_FENCING_TOKEN",
 ];
 const TRELIO_WORKSPACE_ACTION_OPERATIONS = new Set([
+  TRELIO_FOLDER_ONBOARDING_OPERATION,
   "legacy_command",
   "doctor",
   "login",
@@ -8662,6 +8667,79 @@ const normalizeWorkspaceActionAbsolutePath = (value, fieldName, { required = tru
   return path.resolve(rawPath);
 };
 
+const normalizeFolderOnboardingParty = (value, fieldName) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      `${fieldName} must contain name and slug.`,
+    );
+  }
+  assertWorkspaceActionKeys(value, new Set(["name", "slug"]));
+  return {
+    name: normalizeWorkspaceActionString(value.name, `${fieldName}.name`, { maximumLength: 200 }),
+    slug: normalizeWorkspaceActionString(value.slug, `${fieldName}.slug`, { maximumLength: 120 }),
+  };
+};
+
+const buildFolderOnboardingActionInvocation = (parameters) => {
+  assertWorkspaceActionKeys(parameters, new Set([
+    "folderPath",
+    "instructionTarget",
+    "company",
+    "project",
+    "planHash",
+    "userExplicitlyRequestedFolderSetup",
+  ]));
+  const instructionTarget = normalizeWorkspaceActionString(
+    parameters.instructionTarget,
+    "parameters.instructionTarget",
+    { maximumLength: 32 },
+  );
+  if (!["AGENTS.md", "AGENTS.override.md"].includes(instructionTarget)) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      "parameters.instructionTarget must identify the active Codex instruction file.",
+    );
+  }
+  const planHash = normalizeWorkspaceActionString(
+    parameters.planHash,
+    "parameters.planHash",
+    { maximumLength: 64 },
+  );
+  if (!/^[0-9a-f]{64}$/u.test(planHash)) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      "parameters.planHash must be one exact SHA-256 plan hash.",
+    );
+  }
+  if (parameters.userExplicitlyRequestedFolderSetup !== true) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      "Folder onboarding apply requires the explicit setup assertion returned by the reviewed plan.",
+    );
+  }
+  const normalized = {
+    folderPath: normalizeWorkspaceActionAbsolutePath(parameters.folderPath, "parameters.folderPath"),
+    instructionTarget,
+    company: normalizeFolderOnboardingParty(parameters.company, "parameters.company"),
+    ...(parameters.project === undefined
+      ? {}
+      : { project: normalizeFolderOnboardingParty(parameters.project, "parameters.project") }),
+    planHash,
+    userExplicitlyRequestedFolderSetup: true,
+  };
+  // This action terminates inside the trusted host. Keeping argv empty is a
+  // deliberate boundary: no company label or local path reaches a subprocess.
+  return {
+    operation: TRELIO_FOLDER_ONBOARDING_OPERATION,
+    parameters: normalized,
+    actionParameters: normalized,
+    workingDirectory: null,
+    argumentsList: [],
+    localRuntimeAction: true,
+  };
+};
+
 const appendWorkspaceActionOption = (argumentsList, name, value) => {
   if (value === null || value === undefined || value === false) return;
   argumentsList.push(`--${name}`);
@@ -8854,6 +8932,9 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
   );
   let argumentsList;
 
+  if (operation === TRELIO_FOLDER_ONBOARDING_OPERATION) {
+    return buildFolderOnboardingActionInvocation(parameters);
+  }
   if (operation === "download_file") {
     assertWorkspaceActionKeys(parameters, new Set(["workspaceId", "workspaceHead", "filePath"]));
     // Protected paths stay in this process; they never enter child argv or env.
@@ -9428,9 +9509,17 @@ const workspaceRunHeartbeatManager = createWorkspaceRunHeartbeatManager({
 export const handleTrelioWorkspaceActionOperation = async (
   origin,
   rawInput,
-  { signal, runBridge = runWorkspaceBridge, runHeartbeatManager } = {},
+  {
+    signal,
+    runBridge = runWorkspaceBridge,
+    runHeartbeatManager,
+    folderOnboardingApply = applyTrelioFolderOnboarding,
+  } = {},
 ) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
+  if (invocation.operation === TRELIO_FOLDER_ONBOARDING_OPERATION) {
+    return folderOnboardingApply(invocation.parameters);
+  }
   if (invocation.operation === "download_file") {
     return downloadAcceptedWorkspaceFile(origin, invocation.parameters, { signal });
   }
@@ -10923,7 +11012,7 @@ export const handleTrelioLocalWorkspaceOperation = async (
 
 export const TRELIO_LOCAL_CONTEXT_TOOL = {
   name: "continue_trelio_local_context",
-  description: "Continue a selected local read.",
+  description: "Follow the selected local read.",
   inputSchema: {
     type: "object",
     additionalProperties: false,

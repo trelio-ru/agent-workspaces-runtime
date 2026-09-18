@@ -163,6 +163,50 @@ test("typed Workspace dispatcher covers every public bridge operation without sh
   }
 });
 
+test("folder onboarding apply stays inside the host and never reaches bridge argv", async () => {
+  const parameters = {
+    folderPath: actionWorkingDirectory,
+    instructionTarget: "AGENTS.md",
+    company: { name: "Компания", slug: "company" },
+    project: { name: "Проект", slug: "project" },
+    planHash: "a".repeat(64),
+    userExplicitlyRequestedFolderSetup: true,
+  };
+  const invocation = buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "folder_onboarding_apply",
+    parameters,
+  });
+  assert.equal(invocation.localRuntimeAction, true);
+  assert.deepEqual(invocation.argumentsList, []);
+
+  let bridgeCalled = false;
+  let applied = null;
+  const result = await handleTrelioWorkspaceActionOperation(
+    "https://trelio.example",
+    { schemaVersion: 1, operation: "folder_onboarding_apply", parameters },
+    {
+      runBridge: async () => {
+        bridgeCalled = true;
+        throw new Error("bridge must not run");
+      },
+      folderOnboardingApply: async (input) => {
+        applied = input;
+        return { schemaVersion: 1, status: "applied" };
+      },
+    },
+  );
+  assert.equal(bridgeCalled, false);
+  assert.deepEqual(applied, parameters);
+  assert.equal(result.status, "applied");
+
+  assert.throws(() => buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "folder_onboarding_apply",
+    parameters: { ...parameters, userExplicitlyRequestedFolderSetup: false },
+  }), (error) => error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
+});
+
 test("legacy command-only responses are parsed and allowlisted inside the runtime", async () => {
   const summary = "Готово; $(touch never-runs)";
   const invocation = buildTrelioWorkspaceActionInvocation({
