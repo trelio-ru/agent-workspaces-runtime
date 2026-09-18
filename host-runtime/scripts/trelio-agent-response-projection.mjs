@@ -4,14 +4,15 @@ export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
     "get_contact", "get_registry", "get_knowledge_base_page", "get_project_meta",
     "get_task_create_meta", "get_regular_work", "list_recent_activity", "list_agent_skills",
     "get_agent_skill", "get_agent_workspace", "get_agent_workspace_by_scope",
-    "list_agent_secrets",
+    "list_agent_secrets", "get_agent_instructions", "get_workspace", "fetch",
+    "list_company_activity",
 ]);
 export const MCP_RESPONSE_FIELD_TOOLS = {
-    get_contact: ["options"],
+    get_contact: ["richText", "options"],
     get_project_meta: ["taskCustomFields", "taskTemplates", "members", "memberGroups"],
-    get_registry: ["history", "comments", "commentsPagination", "mentionableMembers"],
-    get_knowledge_base_page: ["pages"],
-    get_regular_work: ["history", "preparation", "options", "mentionableMembers"],
+    get_registry: ["richText", "history", "comments", "commentsPagination", "mentionableMembers"],
+    get_knowledge_base_page: ["richText", "pages"],
+    get_regular_work: ["richText", "history", "preparation", "options", "mentionableMembers"],
     list_recent_activity: ["feeds", "filterOptions"],
 };
 // These two project reads resolve the same current authority for the same
@@ -19,6 +20,9 @@ export const MCP_RESPONSE_FIELD_TOOLS = {
 // pair, but only while the exact revision key and the full previous bytes still
 // exist in the current model context.
 export const MCP_EFFECTIVE_INSTRUCTION_REUSE_TOOLS = new Set([
+    "get_agent_instructions",
+    "get_workspace",
+    "fetch",
     "get_project_meta",
     "get_task_create_meta",
 ]);
@@ -248,17 +252,32 @@ const projectTaskPayload = (payload) => mapFields(payload, {
         return Object.fromEntries(Object.entries(sections).map(([name, section]) => [name, task(section)]));
     },
 });
-const addDeferred = (payload, fields, readBack, rawArguments = {}) => {
+const addDeferred = (payload, fields, readBack, rawArguments = {}, virtualFields = []) => {
     if (own(payload, "deferredData"))
         return payload;
     const present = fields.filter((field) => own(payload, field));
     const requested = new Set(stringArray(rawArguments.responseFields));
-    const deferredFields = present.filter((field) => !requested.has(field));
+    let result = { ...payload };
+    const virtualDeferredFields = [];
+    for (const virtual of virtualFields) {
+        if (requested.has(virtual.field))
+            continue;
+        const projected = virtual.project(result);
+        if (!equal(projected, result)) {
+            result = projected;
+            virtualDeferredFields.push(virtual.field);
+        }
+    }
+    const deferredFields = [
+        ...virtualDeferredFields,
+        ...present.filter((field) => !requested.has(field)),
+    ];
     if (!deferredFields.length)
         return payload;
-    const result = { ...payload };
-    for (const field of deferredFields)
-        delete result[field];
+    for (const field of present) {
+        if (!requested.has(field))
+            delete result[field];
+    }
     const deferred = {
         ...result,
         deferredData: {
@@ -275,14 +294,50 @@ const addDeferred = (payload, fields, readBack, rawArguments = {}) => {
     // чтение. Это также не заставляет агента делать второй call ради пары записей.
     // Сравниваем только изменённую часть: повторная сериализация всех registry
     // rows ради маленького history/sidebar не должна удваивать память ответа.
-    const omitted = Object.fromEntries(deferredFields.map((field) => [field, payload[field]]));
+    const omitted = Object.fromEntries(deferredFields
+        .filter((field) => own(payload, field))
+        .map((field) => [field, payload[field]]));
     // Explicit selection is a semantic projection, not merely a size hint:
     // never reintroduce a small unrequested field because it serialized cheaply.
     // The default path may still inline a tiny collection to avoid a net increase.
-    return requested.size > 0
+    return virtualDeferredFields.length > 0 || requested.size > 0
         || JSON.stringify({ deferredData: deferred.deferredData }).length < JSON.stringify(omitted).length
         ? deferred : payload;
 };
+// Rich-text JSON is necessary for editor-preserving writes, but ordinary model
+// reasoning needs only the already-derived semantic text. Strip a rich field
+// only when its sibling plain-text representation is present; an unfamiliar
+// shape therefore remains lossless until explicitly reviewed.
+const withoutRichTextWhenPlain = (value, richField, plainField) => {
+    const source = record(value);
+    if (!source || typeof source[plainField] !== "string" || !own(source, richField))
+        return value;
+    const result = { ...source };
+    delete result[richField];
+    return result;
+};
+const projectCommentSemanticText = (value) => (withoutRichTextWhenPlain(value, "content", "bodyPlainText"));
+const projectContactSemanticText = (payload) => mapFields(payload, {
+    contact: (value) => {
+        const compact = record(withoutRichTextWhenPlain(value, "descriptionJson", "descriptionPlainText"));
+        return compact ? mapFields(compact, { activity: list(projectCommentSemanticText) }) : value;
+    },
+});
+const projectRegistrySemanticText = (payload) => mapFields(payload, {
+    comments: list(projectCommentSemanticText),
+});
+const projectKnowledgePageSemanticText = (payload) => mapFields(payload, {
+    page: (value) => {
+        const compact = record(withoutRichTextWhenPlain(value, "bodyJson", "bodyPlainText"));
+        return compact ? mapFields(compact, { comments: list(projectCommentSemanticText) }) : value;
+    },
+});
+const projectRegularWorkSemanticText = (payload) => mapFields(payload, {
+    // Regular-work rows expose the task template fields directly with a
+    // task-prefixed name; the nested `task` shape exists only in mutation input.
+    items: list((value) => withoutRichTextWhenPlain(value, "taskDescriptionJson", "taskDescriptionPlainText")),
+    comments: list(projectCommentSemanticText),
+});
 const taskLocator = (payload, argumentsObject) => {
     const document = record(payload.document);
     const metadata = record(document?.metadata);
@@ -433,6 +488,69 @@ const projectEffectiveInstructionReuse = (payload, args) => {
         },
     };
 };
+const withoutInstructionMarkdown = (value) => {
+    const source = record(value);
+    if (!source || !own(source, "instructionsMarkdown"))
+        return value;
+    const result = { ...source };
+    delete result.instructionsMarkdown;
+    return result;
+};
+const projectAgentInstructionSettings = (payload, args) => {
+    const revisionKey = payload.instructionRevisionKey;
+    const effective = record(payload.effective);
+    const personalProfile = record(payload.personalProfile);
+    const personalEffective = record(personalProfile?.effective);
+    // This route intentionally keeps current/inherited/history source revisions:
+    // they are needed to plan an exact replacement. Only duplicate authority
+    // fragments inside the compiled effective snapshots are compacted.
+    if (typeof revisionKey !== "string"
+        || revisionKey.length !== 64
+        || !effective
+        || typeof effective.compiledMarkdown !== "string"
+        || !personalProfile
+        || !personalEffective
+        || typeof personalEffective.compiledMarkdown !== "string") {
+        return payload;
+    }
+    const compactEffective = mapFields(effective, {
+        platform: (value) => {
+            const source = record(value);
+            if (!source || !own(source, "rulesMarkdown"))
+                return value;
+            const result = { ...source };
+            delete result.rulesMarkdown;
+            return result;
+        },
+        company: withoutInstructionMarkdown,
+        project: withoutInstructionMarkdown,
+        followUpPolicy: withoutInstructionMarkdown,
+        managedWorkPolicy: withoutInstructionMarkdown,
+    });
+    const profileSnapshot = record(personalEffective.profile);
+    const compactPersonalEffective = {
+        ...personalEffective,
+        ...(profileSnapshot ? { profile: withoutInstructionMarkdown(profileSnapshot) } : {}),
+    };
+    const nextReadArguments = { knownInstructionRevisionKey: revisionKey };
+    if (args.knownInstructionRevisionKey !== revisionKey) {
+        return {
+            ...payload,
+            effective: compactEffective,
+            personalProfile: { ...personalProfile, effective: compactPersonalEffective },
+            nextReadArguments,
+        };
+    }
+    const { compiledMarkdown: _workingRulesMarkdown, ...effectiveIdentity } = compactEffective;
+    const { compiledMarkdown: _personalProfileMarkdown, ...personalEffectiveIdentity } = compactPersonalEffective;
+    return {
+        ...payload,
+        effective: effectiveIdentity,
+        personalProfile: { ...personalProfile, effective: personalEffectiveIdentity },
+        reusedInstructionRevisionKey: revisionKey,
+        nextReadArguments,
+    };
+};
 const projectProjectMeta = (payload, args) => {
     let result = mapFields(payload, {
         members: persons,
@@ -493,7 +611,90 @@ const deferRegularWorkDetail = (value, args) => {
     return addDeferred(payload, ["history", "preparation", "options", "mentionableMembers"], {
         tool: "get_regular_work",
         arguments: { companySlug, projectSlug, setId },
-    }, args);
+    }, args, [{ field: "richText", project: projectRegularWorkSemanticText }]);
+};
+const ACTIVITY_ENTITY_FIELDS = ["actor", "project", "task", "workspace"];
+const internActivityItems = (payload, items, replaceItems) => {
+    if (own(payload, "activityEntities"))
+        return payload;
+    const tables = Object.fromEntries(ACTIVITY_ENTITY_FIELDS.map((field) => [field, []]));
+    const indexes = Object.fromEntries(ACTIVITY_ENTITY_FIELDS.map((field) => [field, new Map()]));
+    let failed = false;
+    const compactItems = items.map((value) => {
+        const item = record(value);
+        if (!item || ACTIVITY_ENTITY_FIELDS.some((field) => own(item, `${field}Ref`))) {
+            failed = true;
+            return value;
+        }
+        const compact = { ...item };
+        for (const field of ACTIVITY_ENTITY_FIELDS) {
+            if (!own(item, field))
+                continue;
+            const entity = item[field];
+            delete compact[field];
+            if (entity === null) {
+                compact[`${field}Ref`] = null;
+                continue;
+            }
+            if (!record(entity)) {
+                failed = true;
+                return value;
+            }
+            const key = JSON.stringify(entity);
+            let index = indexes[field].get(key);
+            if (index === undefined) {
+                index = tables[field].length;
+                indexes[field].set(key, index);
+                tables[field].push(entity);
+            }
+            compact[`${field}Ref`] = index;
+        }
+        return compact;
+    });
+    if (failed)
+        return payload;
+    const activityEntities = Object.fromEntries(ACTIVITY_ENTITY_FIELDS
+        .filter((field) => tables[field].length > 0)
+        .map((field) => [`${field}s`, tables[field]]));
+    if (!Object.keys(activityEntities).length)
+        return payload;
+    const candidate = {
+        ...replaceItems(compactItems),
+        activityEntities,
+    };
+    // A one-row page or a page without repetition can grow after adding the
+    // dictionaries. Use references only when the exact serialized response wins.
+    return JSON.stringify(candidate).length < JSON.stringify(payload).length ? candidate : payload;
+};
+const projectRecentActivity = (payload) => {
+    const events = record(payload.events);
+    let projected;
+    if (events && Array.isArray(events.items)) {
+        projected = mapFields(payload, {
+            events: (value) => mapFields(value, {
+                items: list((item) => mapFields(item, { actor: person, author: person })),
+            }),
+        });
+        const projectedEvents = record(projected.events);
+        return internActivityItems(projected, projectedEvents.items, (items) => ({
+            ...projected,
+            events: { ...projectedEvents, items },
+        }));
+    }
+    projected = mapFields(payload, {
+        events: list((item) => mapFields(item, { actor: person, author: person })),
+    });
+    return Array.isArray(projected.events)
+        ? internActivityItems(projected, projected.events, (items) => ({ ...projected, events: items }))
+        : projected;
+};
+const projectCompanyActivity = (payload) => {
+    const projected = mapFields(payload, {
+        items: list((item) => mapFields(item, { actor: person })),
+    });
+    return Array.isArray(projected.items)
+        ? internActivityItems(projected, projected.items, (items) => ({ ...projected, items }))
+        : projected;
 };
 const projectCatalogSkill = (value) => {
     const skill = record(value);
@@ -756,6 +957,11 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
         return value;
     if (toolName === "get_agent_skill")
         return projectAgentSkillDetail(payload, args);
+    if (toolName === "get_agent_instructions")
+        return projectAgentInstructionSettings(payload, args);
+    if (toolName === "get_workspace" || toolName === "fetch") {
+        return projectEffectiveInstructionReuse(payload, args);
+    }
     if (toolName === "get_agent_workspace" || toolName === "get_agent_workspace_by_scope")
         return projectWorkspaceOverview(payload);
     if (toolName === "list_agent_secrets")
@@ -819,7 +1025,9 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
         if (contactRecord && typeof contactRecord.id === "string" && typeof company?.slug === "string") {
             result = addDeferred(result, ["options"], { tool: "get_contact", arguments: {
                     companySlug: company.slug, contactId: contactRecord.id,
-                } }, args);
+                } }, args, toolName === "get_contact"
+                ? [{ field: "richText", project: projectContactSemanticText }]
+                : []);
         }
         return result;
     }
@@ -839,7 +1047,9 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
             const readFields = new Set(["companySlug", "projectSlug", "registrySlug", "query", "filters", "sortKey", "sortDirection", "offset", "limit", "includeArchivedRows", "historyLimit", "responseDetail"]);
             result = addDeferred(result, ["history", "comments", "commentsPagination", "mentionableMembers"], {
                 tool: "get_registry", arguments: Object.fromEntries(Object.entries(readArgs).filter(([key]) => readFields.has(key))),
-            }, args);
+            }, args, toolName === "get_registry"
+                ? [{ field: "richText", project: projectRegistrySemanticText }]
+                : []);
         }
         return result;
     }
@@ -861,17 +1071,17 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
             } };
     }
     if (toolName === "get_knowledge_base_page") {
-        const page = record(payload.page);
         const company = record(payload.company);
         let result = mapFields(payload, { page: (item) => mapFields(item, { createdBy: person, updatedBy: person }) });
+        const page = record(result.page);
         if (typeof page?.slug === "string" && typeof company?.slug === "string")
             result = addDeferred(result, ["pages"], {
                 tool: "get_knowledge_base_page", arguments: { companySlug: company.slug, pageSlug: page.slug },
-            }, args);
+            }, args, [{ field: "richText", project: projectKnowledgePageSemanticText }]);
         return result;
     }
     if (toolName === "list_recent_activity") {
-        let result = mapFields(payload, { events: list((item) => mapFields(item, { actor: person, author: person })) });
+        let result = projectRecentActivity(payload);
         if (typeof args.companySlug === "string")
             result = addDeferred(result, ["feeds", "filterOptions"], {
                 tool: "list_recent_activity", arguments: {
@@ -881,7 +1091,7 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
         return result;
     }
     if (toolName === "list_company_activity")
-        return mapFields(payload, { items: list((item) => mapFields(item, { actor: person })) });
+        return projectCompanyActivity(payload);
     // Неизвестный tool/shape сохраняется целиком. Generic provider responses,
     // instructions, snapshots, approval boundaries и arbitrary JSON не обрезаются.
     return value;
