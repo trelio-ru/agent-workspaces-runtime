@@ -176,6 +176,96 @@ test("local task mutation returns a compact receipt with an exact section contin
   assert.ok(JSON.stringify(compact).length < JSON.stringify(payload).length * 0.25);
 });
 
+test("local task update plan preserves the decision surface without the repeated full task", () => {
+  const payload = {
+    dryRun: true,
+    ok: false,
+    task: {
+      id: "task-id",
+      number: 61,
+      permissions: { canEditTask: true },
+      descriptionPlainText: "Полное описание\n".repeat(500),
+      descriptionJson: { type: "doc", content: [{ type: "paragraph" }] },
+      commentsIncluded: true,
+      commentsPagination: { total: 40 },
+      comments: Array.from({ length: 5 }, (_, index) => ({ id: `comment-${index}`, content: "Контекст" })),
+      availableMembers: Array.from({ length: 20 }, (_, index) => ({ memberId: `member-${index}`, displayName: `Участник ${index}` })),
+      templates: Array.from({ length: 10 }, (_, index) => ({ id: `template-${index}` })),
+    },
+    requestedChanges: [{ field: "dueAt", value: "2026-09-20" }],
+    validationMessages: ["Missing update scope"],
+    absenceConflicts: [{ memberId: "member-1", startsAt: "2026-09-19", endsAt: "2026-09-21" }],
+    requiresAbsenceConflictAcknowledgement: true,
+  };
+  const compact = projectMcpAgentPayload("plan_task_update", payload, {
+    companySlug: "demo", projectSlug: "mobile", taskNumber: 61,
+  });
+  assert.deepEqual(compact.requestedChanges, payload.requestedChanges);
+  assert.deepEqual(compact.validationMessages, payload.validationMessages);
+  assert.deepEqual(compact.absenceConflicts, payload.absenceConflicts);
+  assert.equal(compact.task.comments, undefined);
+  assert.equal(compact.task.availableMembers, undefined);
+  assert.equal(compact.task.templates, undefined);
+  assert.equal(compact.task.deferredSections.tool, "get_task_sections");
+  assert.equal(compact.task.deferredSections.available.find(({ name }) => name === "comments").itemCount, 40);
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(payload).length * 0.3);
+});
+
+test("local project reads defer specialist metadata and reuse only exact authority bytes", () => {
+  const revisionKey = "a".repeat(64);
+  const effectiveInstructions = {
+    schemaVersion: 1,
+    status: "loaded",
+    revisionKey,
+    workingRules: {
+      platformRevision: { id: "platform", version: 1, sha256: "b".repeat(64) },
+      companyRevision: null,
+      projectRevision: null,
+      compiledMarkdown: "Точные правила\n".repeat(500),
+    },
+    personalProfile: { revisionId: "profile", version: 1, compiledMarkdown: "Профиль\n".repeat(100) },
+  };
+  const statuses = [{ id: "status", code: "queue" }];
+  const payload = {
+    effectiveInstructions,
+    company: { slug: "demo" },
+    project: { slug: "mobile" },
+    statuses,
+    taskCreate: { statuses, defaults: { statusCode: "queue", urgency: 0 } },
+    taskCustomFields: { companyFields: Array.from({ length: 20 }, (_, index) => ({ id: `field-${index}` })) },
+    taskTemplates: Array.from({ length: 20 }, (_, index) => ({ id: `template-${index}` })),
+    availableMembers: [{ memberId: "member", displayName: "Анна" }],
+    availableMemberGroups: [],
+    members: [{ memberId: "member", displayName: "Анна" }],
+    memberGroups: [],
+  };
+  const cold = projectMcpAgentPayload("get_project_meta", payload, {
+    companySlug: "demo", projectSlug: "mobile",
+  });
+  assert.equal(cold.taskTemplates, undefined);
+  assert.equal(cold.taskCustomFields, undefined);
+  assert.equal(cold.members, undefined);
+  assert.equal(cold.taskCreate.statuses, undefined);
+  assert.deepEqual(cold.effectiveInstructions.nextReadArguments, { knownInstructionRevisionKey: revisionKey });
+
+  const warm = projectMcpAgentPayload("get_project_meta", payload, {
+    companySlug: "demo", projectSlug: "mobile", knownInstructionRevisionKey: revisionKey,
+  });
+  assert.equal(warm.effectiveInstructions.workingRules.compiledMarkdown, undefined);
+  assert.equal(warm.effectiveInstructions.personalProfile.compiledMarkdown, undefined);
+  assert.equal(warm.effectiveInstructions.reusedInstructionRevisionKey, revisionKey);
+
+  const stale = projectMcpAgentPayload("get_task_create_meta", {
+    effectiveInstructions,
+    project: { slug: "mobile" },
+    statuses,
+    availableMembers: [],
+    availableMemberGroups: [],
+  }, { knownInstructionRevisionKey: "c".repeat(64) });
+  assert.equal(stale.effectiveInstructions.workingRules.compiledMarkdown, effectiveInstructions.workingRules.compiledMarkdown);
+  assert.equal(stale.effectiveInstructions.reusedInstructionRevisionKey, undefined);
+});
+
 test("local regular-work detail uses the generated native response projection", () => {
   const payload = {
     company: { slug: "demo" },

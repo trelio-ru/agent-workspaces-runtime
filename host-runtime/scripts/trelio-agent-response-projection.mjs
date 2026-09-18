@@ -8,11 +8,20 @@ export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
 ]);
 export const MCP_RESPONSE_FIELD_TOOLS = {
     get_contact: ["options"],
+    get_project_meta: ["taskCustomFields", "taskTemplates", "members", "memberGroups"],
     get_registry: ["history", "comments", "commentsPagination", "mentionableMembers"],
     get_knowledge_base_page: ["pages"],
     get_regular_work: ["history", "preparation", "options", "mentionableMembers"],
     list_recent_activity: ["feeds", "filterOptions"],
 };
+// These two project reads resolve the same current authority for the same
+// authenticated member. The caller may reuse that immutable payload across the
+// pair, but only while the exact revision key and the full previous bytes still
+// exist in the current model context.
+export const MCP_EFFECTIVE_INSTRUCTION_REUSE_TOOLS = new Set([
+    "get_project_meta",
+    "get_task_create_meta",
+]);
 export const MCP_AGENT_SKILL_SECTION_NAMES = [
     "instructions", "connection", "execution", "publication",
 ];
@@ -347,7 +356,7 @@ const projectTaskMutationCore = (currentTask, locator) => {
             tool: "get_task_sections",
             arguments: { ...locator, sections: TASK_SECTION_NAMES },
             available: TASK_SECTION_NAMES.map((name) => ({ name, itemCount: taskSectionItemCount(currentTask, name) })),
-            instruction: "После mutation загружайте одним get_task_sections только нужные sections; повторять mutation или полное чтение задачи для этого запрещено.",
+            instruction: "После этого ответа загружайте одним get_task_sections только нужные sections; повторять plan/mutation или полное чтение задачи для этого запрещено.",
         },
     };
 };
@@ -372,6 +381,92 @@ const projectTaskMutation = (payload, argumentsObject) => {
         delete result.descriptionJsonExample;
     }
     return result;
+};
+const projectTaskUpdatePlan = (payload, argumentsObject) => {
+    const result = projectTaskPayload(payload);
+    const currentTask = record(result.task);
+    const locator = taskLocator(result, argumentsObject);
+    // Validation messages, absence conflicts, requested diff, permissions and
+    // every unknown top-level field remain intact. Only the same ten typed heavy
+    // task sections that exact reads already expose through get_task_sections are
+    // replaced with an explicit continuation.
+    if (!currentTask || !locator)
+        return result;
+    return { ...result, task: projectTaskMutationCore(currentTask, locator) };
+};
+const projectEffectiveInstructionReuse = (payload, args) => {
+    const effectiveInstructions = record(payload.effectiveInstructions);
+    const revisionKey = effectiveInstructions?.revisionKey;
+    const workingRules = record(effectiveInstructions?.workingRules);
+    const personalProfile = effectiveInstructions?.personalProfile === null
+        ? null : record(effectiveInstructions?.personalProfile);
+    // Unknown/new envelopes are preserved whole until their semantics are
+    // reviewed. A requires_scope envelope has no authority bytes to cache.
+    if (effectiveInstructions?.status !== "loaded"
+        || typeof revisionKey !== "string"
+        || !workingRules
+        || (effectiveInstructions.personalProfile !== null && !personalProfile)) {
+        return payload;
+    }
+    const nextReadArguments = { knownInstructionRevisionKey: revisionKey };
+    if (args.knownInstructionRevisionKey !== revisionKey) {
+        return {
+            ...payload,
+            effectiveInstructions: { ...effectiveInstructions, nextReadArguments },
+        };
+    }
+    const { compiledMarkdown: _workingRulesMarkdown, ...workingRulesIdentity } = workingRules;
+    const compactPersonalProfile = personalProfile
+        ? (() => {
+            const { compiledMarkdown: _personalMarkdown, ...profileIdentity } = personalProfile;
+            return profileIdentity;
+        })()
+        : null;
+    return {
+        ...payload,
+        effectiveInstructions: {
+            ...effectiveInstructions,
+            workingRules: workingRulesIdentity,
+            personalProfile: compactPersonalProfile,
+            reusedInstructionRevisionKey: revisionKey,
+            nextReadArguments,
+        },
+    };
+};
+const projectProjectMeta = (payload, args) => {
+    let result = mapFields(payload, {
+        members: persons,
+        memberGroups: persons,
+        availableMembers: persons,
+        availableMemberGroups: persons,
+    });
+    // getProjectSettings and getTaskCreateOptions are independent ACL-aware
+    // builders. Alias the nested status list only when their serialized DTOs are
+    // byte-for-byte equal; otherwise both policy views remain visible.
+    const taskCreate = record(result.taskCreate);
+    if (taskCreate && Array.isArray(result.statuses) && Array.isArray(taskCreate.statuses)
+        && equal(result.statuses, taskCreate.statuses)) {
+        const { statuses: _duplicateStatuses, ...taskCreateCore } = taskCreate;
+        result = {
+            ...result,
+            taskCreate: taskCreateCore,
+            collectionAliases: {
+                ...(record(result.collectionAliases) ?? {}),
+                "taskCreate.statuses": "statuses",
+            },
+        };
+    }
+    result = projectEffectiveInstructionReuse(result, args);
+    const company = record(result.company);
+    const project = record(result.project);
+    const companySlug = company?.slug ?? args.companySlug;
+    const projectSlug = project?.slug ?? args.projectSlug;
+    if (typeof companySlug !== "string" || typeof projectSlug !== "string")
+        return result;
+    return addDeferred(result, ["taskCustomFields", "taskTemplates", "members", "memberGroups"], {
+        tool: "get_project_meta",
+        arguments: { companySlug, projectSlug },
+    }, args);
 };
 const projectRegularWorkDetail = (value) => mapFields(value, {
     mentionableMembers: persons,
@@ -671,6 +766,8 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
         return projectMcpContextSearch(payload);
     if (taskMutationTools.has(toolName))
         return projectTaskMutation(payload, args);
+    if (toolName === "plan_task_update")
+        return projectTaskUpdatePlan(payload, args);
     if (toolName === "batch_update_tasks") {
         return mapFields(payload, { results: list((item) => {
                 const result = record(item);
@@ -681,7 +778,7 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
                 const operation = Array.isArray(args.operations) && typeof result.index === "number"
                     ? record(args.operations[result.index]) ?? {} : {};
                 return { ...result, payload: payload.dryRun === false
-                        ? projectTaskMutation(nested, operation) : projectTaskPayload(nested) };
+                        ? projectTaskMutation(nested, operation) : projectTaskUpdatePlan(nested, operation) };
             }) });
     }
     if (taskReadTools.has(toolName))
@@ -689,6 +786,8 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
     if (toolName === "create_comment" || toolName === "update_comment")
         return mapFields(payload, { comment });
     if (peopleTools.has(toolName)) {
+        if (toolName === "get_project_meta")
+            return projectProjectMeta(payload, args);
         let result = mapFields(payload, {
             members: persons, groups: persons, memberGroups: persons,
             availableMembers: persons, availableMemberGroups: persons, mentionableMembers: persons,
@@ -704,6 +803,9 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
         }
         if (Object.keys(aliases).length)
             result = { ...result, collectionAliases: aliases };
+        if (toolName === "get_task_create_meta") {
+            result = projectEffectiveInstructionReuse(result, args);
+        }
         return result;
     }
     if (contactTools.has(toolName)) {
