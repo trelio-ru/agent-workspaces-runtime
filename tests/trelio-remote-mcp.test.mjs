@@ -1826,7 +1826,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     && name !== "continue_trelio_workspace_action"
   ));
   assert.equal(Buffer.byteLength(JSON.stringify(establishedProviderTools), "utf8") <= 3_000, true);
-  assert.equal(Buffer.byteLength(JSON.stringify(actionTool), "utf8") <= 900, true);
+  assert.equal(Buffer.byteLength(JSON.stringify(actionTool), "utf8") <= 1_000, true);
   assert.equal(Buffer.byteLength(JSON.stringify(workspaceActionTool), "utf8") <= 900, true);
   assert.equal(actionTool._meta?.["trelio/sensitiveInput"], true);
   assert.doesNotMatch(JSON.stringify(providerTools), /encrypt|e2ee|cipher|private key/iu);
@@ -2049,9 +2049,18 @@ test("local search results carry one exact provider continuation template", () =
   assert.deepEqual(search.nextCall, {
     when: "after_selecting_one_result",
     server: "trelio-remote-skills",
-    tool: "continue_trelio_local_context",
-    arguments: { operation: "fetch", companySlug: "company" },
-    copyFromSelectedResult: { resultId: "id" },
+    tool: "continue_trelio_local_action",
+    arguments: {
+      schemaVersion: 1,
+      route: "context",
+      parameters: {
+        operation: "native_read",
+        companySlug: "company",
+        nativeTool: "fetch",
+        arguments: {},
+      },
+    },
+    copyFromSelectedResult: { "parameters.arguments.id": "id" },
   });
 
   const files = attachLocalContextNextCall(base, {
@@ -2059,14 +2068,103 @@ test("local search results carry one exact provider continuation template", () =
     companySlug: "company",
   });
   assert.deepEqual(files.nextCall.copyFromSelectedResult, {
-    workspaceId: "workspaceId",
-    workspaceHead: "workspaceHead",
-    filePath: "filePath",
+    "parameters.arguments.workspaceId": "workspaceId",
+    "parameters.arguments.workspaceHead": "workspaceHead",
+    "parameters.arguments.filePath": "filePath",
   });
   assert.strictEqual(attachLocalContextNextCall({ provider: "native_trelio" }, {
     operation: "search",
     companySlug: "company",
   }).nextCall, undefined);
+});
+
+test("one local dispatcher preserves exact native inputs across route families", async () => {
+  const calls = [];
+  const contextResult = await handleToolCall(
+    "https://trelio.example",
+    "continue_trelio_local_action",
+    {
+      schemaVersion: 1,
+      route: "context",
+      parameters: {
+        companySlug: "protected-company",
+        nativeTool: "get_task",
+        operation: "native_read",
+        arguments: { projectSlug: "energy", taskNumber: 33 },
+      },
+    },
+    {
+      localContextOperation: async (_origin, input) => {
+        calls.push(["context", input]);
+        return { provider: "local_company_context", task: { number: 33 } };
+      },
+    },
+  );
+  assert.deepEqual(calls[0], ["context", {
+    companySlug: "protected-company",
+    nativeTool: "get_task",
+    operation: "native_read",
+    arguments: { projectSlug: "energy", taskNumber: 33 },
+  }]);
+  assert.equal(JSON.parse(contextResult.content[0].text).task.number, 33);
+
+  await handleToolCall(
+    "https://trelio.example",
+    "continue_trelio_local_action",
+    {
+      schemaVersion: 1,
+      route: "proposal_context",
+      parameters: {
+        companySlug: "protected-company",
+        nativeTool: "get_task_status_proposal_context",
+        arguments: { runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+      },
+    },
+    {
+      proposalOperation: async (_origin, input) => {
+        calls.push(["proposal", input]);
+        return {
+          provider: "local_company_context",
+          proposal: { schemaVersion: 1, task: { title: "Проверить" } },
+        };
+      },
+    },
+  );
+  assert.deepEqual(calls[1], ["proposal", {
+    companySlug: "protected-company",
+    kind: "status",
+    payload: { target: { runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } },
+    operation: "context",
+  }]);
+
+  await handleToolCall(
+    "https://trelio.example",
+    "continue_trelio_local_action",
+    {
+      schemaVersion: 1,
+      route: "workspace",
+      parameters: {
+        companySlug: "protected-company",
+        nativeTool: "get_workspace_revision_diff",
+        operation: "get_revision_diff",
+        runtimeSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        arguments: { runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", filePath: "result.md" },
+      },
+    },
+    {
+      localWorkspaceOperation: async (_origin, input) => {
+        calls.push(["workspace", input]);
+        return { kind: "workspace-diff" };
+      },
+    },
+  );
+  assert.deepEqual(calls[2], ["workspace", {
+    runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    filePath: "result.md",
+    companySlug: "protected-company",
+    operation: "get_revision_diff",
+    runtimeSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  }]);
 });
 
 test("diagnostic intent reports bridge state without turning pairing into a required repair", async () => {

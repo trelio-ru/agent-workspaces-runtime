@@ -11012,66 +11012,12 @@ export const handleTrelioLocalWorkspaceOperation = async (
 
 export const TRELIO_LOCAL_CONTEXT_TOOL = {
   name: "continue_trelio_local_context",
-  description: "Follow the selected local read.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["operation", "companySlug"],
-    properties: {
-      operation: {
-        type: "string",
-        enum: [
-          "native_read",
-          "search",
-          "search_workspace_files",
-          "list",
-          "get_task",
-          "fetch",
-          "get_workspace_file",
-        ],
-      },
-      companySlug: { type: "string", minLength: 1, maxLength: 120 },
-      nativeTool: {
-        type: "string",
-        pattern: "^[a-z][a-z0-9_]{0,127}$",
-      },
-      arguments: {
-        type: "object",
-      },
-      projectSlug: { type: "string", minLength: 1, maxLength: 120 },
-      taskNumber: { type: "integer", minimum: 1 },
-      queries: {
-        type: "array",
-        minItems: 1,
-        maxItems: MAX_SEARCH_QUERIES,
-        items: { type: "string", minLength: 1, maxLength: 500 },
-      },
-      limit: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS },
-      resultId: { type: "string", minLength: 1, maxLength: 4096 },
-      knownInstructionLayerKeys: {
-        type: "array",
-        maxItems: 8,
-        items: { type: "string", minLength: 1, maxLength: 160 },
-      },
-      workspaceId: { type: "string", minLength: 36, maxLength: 36 },
-      workspaceHead: { type: "string", minLength: 40, maxLength: 64 },
-      filePath: { type: "string", minLength: 1, maxLength: 2048 },
-      resource: {
-        type: "string",
-        enum: [
-          "projects",
-          "tasks",
-          "workspaces",
-          "knowledge_pages",
-          "contacts",
-          "registries",
-          "meetings",
-          "regular_work",
-        ],
-      },
-      offset: { type: "integer", minimum: 0 },
-    },
-  },
+  description: "Compatibility alias for a previously selected local read. New routes use continue_trelio_local_action.",
+  // The trusted runtime still validates the complete legacy input below.  The
+  // alias intentionally stays schema-light during the independent backend /
+  // runtime rollout so old providerSelection payloads remain callable without
+  // charging every plain-company chat for an obsolete operation catalog.
+  inputSchema: { type: "object" },
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -11082,26 +11028,6 @@ export const TRELIO_LOCAL_CONTEXT_TOOL = {
 const TRELIO_LOCAL_PROPOSAL_KIND_SCHEMA = {
   type: "string",
   enum: ["comment", "status", "control_clear", "checklist"],
-};
-
-const TRELIO_LOCAL_PROPOSAL_TARGET_SCHEMA = {
-  type: "object",
-  properties: {
-    runId: { type: "string" },
-    projectSlug: { type: "string" },
-    taskNumber: { type: "integer" },
-  },
-  oneOf: [
-    { required: ["runId"] },
-    { required: ["projectSlug", "taskNumber"] },
-  ],
-};
-
-const TRELIO_LOCAL_PROPOSAL_CONTEXT_PAYLOAD_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["target"],
-  properties: { target: TRELIO_LOCAL_PROPOSAL_TARGET_SCHEMA },
 };
 
 const TRELIO_LOCAL_PROPOSAL_RENDER_PAYLOAD_SCHEMA = {
@@ -11131,17 +11057,8 @@ const TRELIO_LOCAL_PROPOSAL_RENDER_PAYLOAD_SCHEMA = {
 
 export const TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL = {
   name: "get_trelio_local_proposal_context",
-  description: "Read local proposal context without an App; follow nextCall instead of a native renderer.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["companySlug", "kind", "payload"],
-    properties: {
-      companySlug: { type: "string", minLength: 1, maxLength: 120 },
-      kind: TRELIO_LOCAL_PROPOSAL_KIND_SCHEMA,
-      payload: TRELIO_LOCAL_PROPOSAL_CONTEXT_PAYLOAD_SCHEMA,
-    },
-  },
+  description: "Compatibility alias for local proposal context. New routes use continue_trelio_local_action.",
+  inputSchema: { type: "object" },
   annotations: {
     readOnlyHint: true,
   },
@@ -11180,34 +11097,8 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
 
 export const TRELIO_LOCAL_WORKSPACE_TOOL = {
   name: "continue_trelio_local_workspace",
-  description: "Continue the selected local Workspace route.",
-  inputSchema: {
-    type: "object",
-    additionalProperties: false,
-    required: ["operation", "companySlug"],
-    properties: {
-      operation: {
-        type: "string",
-        enum: [
-          "list_revisions",
-          "get_revision_diff",
-          "read_revision_file",
-          "restore_revision",
-          "cancel_run",
-        ],
-      },
-      companySlug: { type: "string", minLength: 1, maxLength: 120 },
-      workspaceId: { type: "string", format: "uuid" },
-      runId: { type: "string", format: "uuid" },
-      arguments: {
-        type: "object",
-      },
-      expectedHead: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
-      targetHead: { type: "string", pattern: "^[0-9a-f]{40,64}$" },
-      reason: { type: "string", minLength: 1, maxLength: 2000 },
-      runtimeSessionId: { type: "string", format: "uuid" },
-    },
-  },
+  description: "Compatibility alias for a selected local Workspace route. New routes use continue_trelio_local_action.",
+  inputSchema: { type: "object" },
   annotations: {
     readOnlyHint: false,
     destructiveHint: true,
@@ -11240,14 +11131,25 @@ export const TRELIO_WORKSPACE_ACTION_TOOL = {
 
 export const TRELIO_LOCAL_ACTION_TOOL = {
   name: "continue_trelio_local_action",
-  title: "Continue a Trelio local action route",
-  description: "Continue one Trelio action locally. Task/knowledge-base upload: pass localFilePath, omit bytes/size/hash. save_known_agent_secret and generate_agent_secret: follow the Agent Secrets reference.",
+  title: "Continue a Trelio local route",
+  description: "Run one exact server-returned local route. Pass schemaVersion, route and parameters unchanged; legacy direct action input remains supported during rollout.",
   _meta: { "trelio/sensitiveInput": true },
   inputSchema: {
     type: "object",
-    additionalProperties: false,
-    required: ["companySlug", "nativeTool", "arguments"],
+    anyOf: [
+      { required: ["schemaVersion", "route", "parameters"] },
+      { required: ["companySlug", "nativeTool", "arguments"] },
+    ],
     properties: {
+      schemaVersion: { type: "integer", const: 1 },
+      route: {
+        type: "string",
+        enum: ["context", "action", "proposal_context", "workspace"],
+      },
+      parameters: { type: "object" },
+      // Compatibility fields are deliberately optional. New provider routes
+      // put them under parameters; old backend versions still call the same
+      // tool directly with this shape until their rollout window closes.
       companySlug: { type: "string", minLength: 1, maxLength: 120 },
       nativeTool: {
         type: "string",
@@ -11262,7 +11164,6 @@ export const TRELIO_LOCAL_ACTION_TOOL = {
         type: "string",
         minLength: 1,
         maxLength: 8192,
-        description: "Local-only absolute attachment path.",
       },
     },
   },

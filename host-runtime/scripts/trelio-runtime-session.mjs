@@ -510,7 +510,7 @@ const writeDeniedLocalProposalRenderer = () => {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
-      permissionDecisionReason: "Bridge уже выбрал local proposal provider для этой цели. Native renderer остановлен до запуска, чтобы хост не смонтировал лишнюю App-карточку. Используй уже полученный get_trelio_local_proposal_context или вызови его для exact цели, затем следуй его nextCall к trelio-remote-skills.render_trelio_local_proposal с целью внутри payload.target.",
+      permissionDecisionReason: "Bridge уже выбрал local proposal provider для этой цели. Native renderer остановлен до запуска, чтобы хост не смонтировал лишнюю App-карточку. Используй уже полученный continue_trelio_local_action с route=proposal_context или вызови его для exact цели, затем следуй его nextCall к trelio-remote-skills.render_trelio_local_proposal с целью внутри payload.target.",
     },
   })}\n`);
 };

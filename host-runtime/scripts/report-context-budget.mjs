@@ -9,6 +9,7 @@ import { compactRemoteDoctorPayload } from "./trelio-mcp-results.mjs";
 
 import { AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN } from "./trelio-workspace.mjs";
 import {
+  TRELIO_LOCAL_ACTION_TOOL,
   TRELIO_LOCAL_CONTEXT_TOOL,
   TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
@@ -304,7 +305,12 @@ export const buildPluginContextBudgetReport = async ({
   const localProviderToolSchemas = {
     id: "local-provider-tool-schemas",
     source: "scripts/trelio-local-context.mjs#local-provider-tools",
+    // Count the dispatcher, App renderer, ordinary Workspace bridge and the
+    // three schema-light rollout aliases exactly as the MCP server advertises
+    // them.  Omitting aliases here would make the plain-company saving look
+    // larger than the model-visible compatibility surface really is.
     ...measureContextText(JSON.stringify([
+      TRELIO_LOCAL_ACTION_TOOL,
       TRELIO_LOCAL_CONTEXT_TOOL,
       TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL,
       TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,

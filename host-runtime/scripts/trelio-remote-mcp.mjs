@@ -3546,36 +3546,52 @@ export const attachLocalContextNextCall = (providerResult, rawArguments) => {
     || providerResult.provider !== "local_company_context"
   ) return providerResult;
   const operation = rawArguments?.operation;
-  if (operation === "search") {
+  const nativeTool = rawArguments?.nativeTool;
+  if (operation === "search" || (operation === "native_read" && nativeTool === "search")) {
     return {
       ...providerResult,
       nextCall: {
         when: "after_selecting_one_result",
         server: "trelio-remote-skills",
-        tool: TRELIO_LOCAL_CONTEXT_TOOL.name,
+        tool: TRELIO_LOCAL_ACTION_TOOL.name,
         arguments: {
-          operation: "fetch",
-          companySlug: rawArguments.companySlug,
+          schemaVersion: 1,
+          route: "context",
+          parameters: {
+            operation: "native_read",
+            companySlug: rawArguments.companySlug,
+            nativeTool: "fetch",
+            arguments: {},
+          },
         },
-        copyFromSelectedResult: { resultId: "id" },
+        copyFromSelectedResult: { "parameters.arguments.id": "id" },
       },
     };
   }
-  if (operation === "search_workspace_files") {
+  if (
+    operation === "search_workspace_files"
+    || (operation === "native_read" && nativeTool === "search_agent_workspace_files")
+  ) {
     return {
       ...providerResult,
       nextCall: {
         when: "after_selecting_one_file",
         server: "trelio-remote-skills",
-        tool: TRELIO_LOCAL_CONTEXT_TOOL.name,
+        tool: TRELIO_LOCAL_ACTION_TOOL.name,
         arguments: {
-          operation: "get_workspace_file",
-          companySlug: rawArguments.companySlug,
+          schemaVersion: 1,
+          route: "context",
+          parameters: {
+            operation: "native_read",
+            companySlug: rawArguments.companySlug,
+            nativeTool: "get_agent_workspace_file",
+            arguments: {},
+          },
         },
         copyFromSelectedResult: {
-          workspaceId: "workspaceId",
-          workspaceHead: "workspaceHead",
-          filePath: "filePath",
+          "parameters.arguments.workspaceId": "workspaceId",
+          "parameters.arguments.workspaceHead": "workspaceHead",
+          "parameters.arguments.filePath": "filePath",
         },
       },
     };
@@ -4842,6 +4858,9 @@ export const handleToolCall = async (
   {
     signal,
     localContextOperation = handleTrelioLocalContextOperation,
+    localActionOperation = handleTrelioLocalActionOperation,
+    localWorkspaceOperation = handleTrelioLocalWorkspaceOperation,
+    workspaceActionOperation = handleTrelioWorkspaceActionOperation,
     proposalOperation = handleTrelioLocalProposalOperation,
     proposalProviderSelectionRecorder = null,
     proposalCapabilityConfigDirectory,
@@ -4854,38 +4873,45 @@ export const handleToolCall = async (
   } = {},
 ) => {
   throwIfAborted(signal);
-  if (name === TRELIO_LOCAL_CONTEXT_TOOL.name) {
+  const runLocalContextRoute = async (routeArguments) => {
     const providerResult = attachLocalContextNextCall(await localContextOperation(
       origin,
-      rawArguments,
+      routeArguments,
       { signal },
-    ), rawArguments);
+    ), routeArguments);
     // The first bridge-selected local company read is already authoritative
     // provider evidence. Persisting its opaque company selector protects even
     // a later model that skips the dedicated proposal context after compaction.
     await proposalProviderSelectionRecorder?.({
       origin,
-      companySlug: rawArguments?.companySlug,
+      companySlug: routeArguments?.companySlug,
       target: null,
       provider: providerResult?.provider,
     });
     const result = buildTextResult(providerResult);
-    const nativeTool = rawArguments?.operation === "native_read"
-      ? rawArguments.nativeTool : rawArguments?.operation === "get_task" ? "get_task" : "";
-    return compactLocalNativeMcpResult(nativeTool, result, rawArguments?.arguments ?? rawArguments);
-  }
-  if (name === TRELIO_LOCAL_ACTION_TOOL.name) {
+    const nativeTool = routeArguments?.operation === "native_read"
+      ? routeArguments.nativeTool : routeArguments?.operation === "get_task" ? "get_task" : "";
+    return compactLocalNativeMcpResult(
+      nativeTool,
+      result,
+      routeArguments?.arguments ?? routeArguments,
+    );
+  };
+  const runLocalNativeActionRoute = async (routeArguments) => {
     // Unlike the read/search helpers this continuation must preserve the
     // native CallToolResult envelope, including isError, structuredContent
     // and MCP App metadata. The local handler hydrates only protected values.
-    return compactLocalNativeMcpResult(rawArguments?.nativeTool,
-      await handleTrelioLocalActionOperation(origin, rawArguments, { signal }), rawArguments?.arguments);
-  }
-  if (name === TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL.name) {
+    return compactLocalNativeMcpResult(
+      routeArguments?.nativeTool,
+      await localActionOperation(origin, routeArguments, { signal }),
+      routeArguments?.arguments,
+    );
+  };
+  const runLocalProposalContextRoute = async (routeArguments) => {
     const result = await proposalOperation(
       origin,
       {
-        ...rawArguments,
+        ...routeArguments,
         // The headless descriptor cannot be used to save or decide a draft.
         // Fixing the operation here keeps the no-UI boundary independent from
         // model-supplied JSON and makes the readOnlyHint true in practice.
@@ -4893,10 +4919,10 @@ export const handleToolCall = async (
       },
       { signal },
     );
-    const target = rawArguments?.payload?.target;
+    const target = routeArguments?.payload?.target;
     await proposalProviderSelectionRecorder?.({
       origin,
-      companySlug: rawArguments?.companySlug,
+      companySlug: routeArguments?.companySlug,
       target,
       provider: result?.provider,
     });
@@ -4904,10 +4930,109 @@ export const handleToolCall = async (
       ? buildTextResult(result)
       : buildLocalProposalChildResult({
           result,
-          companySlug: rawArguments?.companySlug,
-          kind: rawArguments?.kind,
+          companySlug: routeArguments?.companySlug,
+          kind: routeArguments?.kind,
           continuationTarget: target,
         });
+  };
+  if (name === TRELIO_LOCAL_CONTEXT_TOOL.name) {
+    return runLocalContextRoute(rawArguments);
+  }
+  if (name === TRELIO_LOCAL_ACTION_TOOL.name) {
+    if (rawArguments?.route === undefined) {
+      // Direct local-action input is the stable compatibility ABI used by
+      // already returned provider selections while backend and runtime release
+      // independently. New routes always enter through the typed envelope.
+      return runLocalNativeActionRoute(rawArguments);
+    }
+    if (
+      rawArguments?.schemaVersion !== 1
+      || !rawArguments.parameters
+      || typeof rawArguments.parameters !== "object"
+      || Array.isArray(rawArguments.parameters)
+    ) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_INVALID_INPUT",
+        "The local route requires schemaVersion=1 and an object parameters payload.",
+      );
+    }
+    const parameters = rawArguments.parameters;
+    const nativeArguments = parameters.arguments;
+    if (
+      !nativeArguments
+      || typeof nativeArguments !== "object"
+      || Array.isArray(nativeArguments)
+    ) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_INVALID_INPUT",
+        "The server-selected local route requires the exact native arguments object.",
+      );
+    }
+    if (rawArguments.route === "context") {
+      return runLocalContextRoute({
+        companySlug: parameters.companySlug,
+        nativeTool: parameters.nativeTool,
+        operation: parameters.operation,
+        arguments: nativeArguments,
+      });
+    }
+    if (rawArguments.route === "action") {
+      return runLocalNativeActionRoute({
+        companySlug: parameters.companySlug,
+        nativeTool: parameters.nativeTool,
+        arguments: nativeArguments,
+        ...(parameters.localFilePath !== undefined
+          ? { localFilePath: parameters.localFilePath }
+          : {}),
+      });
+    }
+    if (rawArguments.route === "proposal_context") {
+      const proposalKindByNativeTool = new Map([
+        ["get_task_comment_proposal_context", "comment"],
+        ["get_task_status_proposal_context", "status"],
+        ["get_task_control_clear_proposal_context", "control_clear"],
+        ["get_task_checklist_proposal_context", "checklist"],
+      ]);
+      const kind = proposalKindByNativeTool.get(parameters.nativeTool);
+      if (!kind) {
+        throw new TrelioLocalContextError(
+          "LOCAL_CONTEXT_INVALID_INPUT",
+          "The selected native tool is not a local proposal-context read.",
+        );
+      }
+      const target = typeof nativeArguments.runId === "string"
+        ? { runId: nativeArguments.runId }
+        : {
+            projectSlug: nativeArguments.projectSlug,
+            taskNumber: nativeArguments.taskNumber,
+          };
+      return runLocalProposalContextRoute({
+        companySlug: parameters.companySlug,
+        kind,
+        payload: { target },
+      });
+    }
+    if (rawArguments.route === "workspace") {
+      return buildTextResult(await localWorkspaceOperation(
+        origin,
+        {
+          ...nativeArguments,
+          companySlug: parameters.companySlug,
+          operation: parameters.operation,
+          ...(parameters.runtimeSessionId
+            ? { runtimeSessionId: parameters.runtimeSessionId }
+            : {}),
+        },
+        { signal },
+      ));
+    }
+    throw new TrelioLocalContextError(
+      "LOCAL_CONTEXT_INVALID_INPUT",
+      "The selected local route is not supported by this runtime.",
+    );
+  }
+  if (name === TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL.name) {
+    return runLocalProposalContextRoute(rawArguments);
   }
   if (name === TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name) {
     if (!["save", "action"].includes(rawArguments?.operation)) {
@@ -4953,14 +5078,14 @@ export const handleToolCall = async (
     );
   }
   if (name === TRELIO_LOCAL_WORKSPACE_TOOL.name) {
-    return buildTextResult(await handleTrelioLocalWorkspaceOperation(
+    return buildTextResult(await localWorkspaceOperation(
       origin,
       rawArguments,
       { signal },
     ));
   }
   if (name === TRELIO_WORKSPACE_ACTION_TOOL.name) {
-    return buildTextResult(await handleTrelioWorkspaceActionOperation(
+    return buildTextResult(await workspaceActionOperation(
       origin,
       rawArguments,
       { signal },

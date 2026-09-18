@@ -51,6 +51,13 @@ publication tooling также остаются вне этого публичн
 - `host-runtime/scripts/report-context-budget.mjs` – maintainer-only report и не
   входит в package. Он принимает exact plugin checkout через `--plugin-root` либо
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; plugin source не vendored.
+- Все non-UI local-company continuations используют один model-visible
+  `continue_trelio_local_action` envelope (`route` + exact native
+  `parameters.arguments`). Новый native MCP-метод добавляется в backend
+  capability matrix и runtime dispatcher без изменения plugin shell. Отдельный
+  `render_trelio_local_proposal` сохраняется только из-за MCP App metadata, а
+  typed `continue_trelio_workspace_action` – как bridge ABI. Legacy local aliases
+  остаются schema-light только на совместимый rollout window.
 - Cross-repository tests используют реальный plugin checkout через
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
   не попадает в package.
