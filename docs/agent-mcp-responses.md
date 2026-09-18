@@ -31,6 +31,16 @@ MCP App не изменяются. Поля пользовательских д�
   `runs[].snapshotRefs`. Это полные снимки внутри одного ответа, а не cache:
   каждый Run сохраняет свои pinned правила и их revision. Различные authority
   fields не объединяются и не заменяются текущими инструкциями.
+- Task lists используют тот же lossless dictionary contract, что native MCP:
+  envelope company/project заменяет exact дубли строк, а общие project/status/
+  actor DTO лежат в `taskListEntities` и адресуются zero-based refs. Словарь
+  применяется только при net savings; task fields, controls, порядок и pagination
+  сохраняются.
+- Model-facing proposal context заменяет повторяемые статические authoring prose
+  на content-addressed instruction key с источником `tool_description`.
+  Combined review дополнительно выносит одинаковые run/context/company/project/
+  task в `proposalEntities`, но оставляет `stateRevision`, snapshot/CAS hashes,
+  permissions и decision state внутри каждого независимого proposal.
 - Успешный JSON не дублируется в `content`/`structuredContent`. File text
   удаляется только из доказанной второй копии; revision, coverage, диапазоны,
   hash и media остаются. Errors, самостоятельный текст и hidden `_meta`

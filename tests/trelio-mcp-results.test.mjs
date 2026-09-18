@@ -58,6 +58,60 @@ test("local projection preserves hydrated notes, explicit states and arbitrary d
   }
 });
 
+test("local task lists and proposal reviews use the generated shared-entity contracts", () => {
+  const company = { id: "company", slug: "demo", name: "Demo" };
+  const project = { id: "project", slug: "mobile", name: "Mobile" };
+  const status = { id: "status", code: "active", name: "В работе", kind: "active" };
+  const actor = { memberId: "member", displayName: "Анна", username: "anna", profileNote: "Закупки" };
+  const tasks = Array.from({ length: 10 }, (_, index) => ({
+    id: `task-${index}`, number: index + 1, title: `Задача ${index + 1}`,
+    company, project, status, createdBy: actor, assignee: actor, participants: [actor],
+  }));
+  const listEnvelope = { content: [{ type: "text", text: JSON.stringify({
+    company, project, tasks, pagination: { total: tasks.length, hasMore: false },
+  }) }] };
+  const compactList = JSON.parse(compactLocalNativeMcpResult(
+    "list_project_tasks", listEnvelope, { companySlug: "demo", projectSlug: "mobile" },
+  ).content[0].text);
+  assert.deepEqual(compactList.sharedTaskFields, ["company", "project"]);
+  assert.equal(compactList.taskListEntities.statuses.length, 1);
+  assert.equal(compactList.taskListEntities.actors.length, 1);
+  assert.equal(compactList.tasks[0].statusRef, 0);
+  assert.equal(compactList.tasks[0].participantRefs[0], 0);
+
+  const run = { id: "run", status: "accepted" };
+  const contextRequest = { runId: "run" };
+  const task = { id: "task-1", number: 1, currentStatus: status };
+  const instruction = "Static proposal instruction ".repeat(40);
+  const comment = {
+    schemaVersion: 4, run, contextRequest, company, project, task,
+    stateRevision: 7, currentDraft: null,
+    proposalAuthoring: { voice: "first_person", instruction },
+    authoringBasis: { snapshotSha256: "a".repeat(64), instruction },
+  };
+  const reviewEnvelope = { content: [{ type: "text", text: JSON.stringify({
+    schemaVersion: 1,
+    task: { id: "task-1", status }, controls: [], checklists: [],
+    proposalContexts: {
+      comment,
+      checklist: { schemaVersion: 1, run, contextRequest, company, project, task,
+        stateRevision: 8, currentDraft: null },
+    },
+    instruction,
+  }) }] };
+  const compactReview = JSON.parse(compactLocalNativeMcpResult(
+    "get_task_review_context", reviewEnvelope, { runId: "run", proposalKinds: ["comment", "checklist"] },
+  ).content[0].text);
+  assert.equal(compactReview.proposalContexts.comment.stateRevision, 7);
+  assert.equal(compactReview.proposalContexts.checklist.stateRevision, 8);
+  assert.equal(compactReview.proposalContexts.comment.authoringBasis.snapshotSha256, "a".repeat(64));
+  assert.equal(compactReview.proposalContexts.comment.task, undefined);
+  assert.equal(compactReview.proposalEntities.tasks[compactReview.proposalContexts.comment.taskRef].id, "task-1");
+  assert.match(compactReview.proposalContexts.comment.proposalAuthoring.instructionKey,
+    /^task-proposal-instruction-sha256:[0-9a-f]{64}$/u);
+  assert.equal(compactReview.proposalInstructionSource, "tool_description");
+});
+
 test("local exact reads restore selected deferred fields without changing errors or human App results", () => {
   const payload = { company: { slug: "demo" }, contact: { id: "contact", description: "Details" }, options: { contacts: ["Другой контакт\n".repeat(100)] } };
   const envelope = { content: [{ type: "text", text: JSON.stringify(payload) }] };

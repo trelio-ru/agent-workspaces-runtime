@@ -1,5 +1,6 @@
 // Generated portable Trelio response contract. Do not edit by hand.
-export const MCP_RESPONSE_PROJECTION_VERSION = 1;
+import { createHash } from "node:crypto";
+export const MCP_RESPONSE_PROJECTION_VERSION = 2;
 export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
     "get_contact", "get_registry", "get_knowledge_base_page", "get_project_meta",
     "get_task_create_meta", "get_regular_work", "list_recent_activity", "list_agent_skills",
@@ -100,6 +101,191 @@ const task = (value) => mapFields(value, {
     attachments: list(attachment), deletedAttachments: list(attachment),
     subscriptions: list(memberLink), substitution: (item) => mapFields(item, { member: person }),
 });
+const TASK_LIST_ENTITY_FIELDS = {
+    project: "projects",
+    status: "statuses",
+    createdBy: "actors",
+    assignee: "actors",
+};
+/**
+ * Списки задач повторяют один и тот же project/status/member DTO десятки раз.
+ * Словарь остаётся полностью обратимым: в него попадает exact projected JSON,
+ * а строка получает zero-based ref. Неизвестные поля сущности не теряются.
+ */
+const projectTaskListPayload = (value) => {
+    if (!Array.isArray(value.tasks) || value.tasks.length < 2 || record(value.taskListEntities)) {
+        return value;
+    }
+    const topLevelCompany = record(value.company);
+    const topLevelProject = record(value.project);
+    const dictionaries = {
+        projects: [],
+        statuses: [],
+        actors: [],
+    };
+    const indexes = {
+        projects: new Map(),
+        statuses: new Map(),
+        actors: new Map(),
+    };
+    const intern = (dictionaryName, entity) => {
+        const serialized = JSON.stringify(entity);
+        const dictionaryIndex = indexes[dictionaryName];
+        const dictionary = dictionaries[dictionaryName];
+        const existing = dictionaryIndex.get(serialized);
+        if (existing !== undefined)
+            return existing;
+        const index = dictionary.length;
+        dictionary.push(entity);
+        dictionaryIndex.set(serialized, index);
+        return index;
+    };
+    const sharedTaskFields = new Set();
+    const tasks = value.tasks.map((rawTask) => {
+        const source = record(rawTask);
+        if (!source)
+            return rawTask;
+        const result = { ...source };
+        // Company/project already present on the envelope are the canonical value
+        // for rows with the exact same bytes. A mismatch remains inline fail-safe.
+        if (own(source, "company") && topLevelCompany && equal(source.company, topLevelCompany)) {
+            delete result.company;
+            sharedTaskFields.add("company");
+        }
+        if (own(source, "project") && topLevelProject && equal(source.project, topLevelProject)) {
+            delete result.project;
+            sharedTaskFields.add("project");
+        }
+        for (const [field, dictionaryName] of Object.entries(TASK_LIST_ENTITY_FIELDS)) {
+            if (!own(result, field) || source[field] === null || !record(source[field]))
+                continue;
+            result[`${field}Ref`] = intern(dictionaryName, source[field]);
+            delete result[field];
+        }
+        if (Array.isArray(source.participants) && source.participants.every((item) => record(item))) {
+            result.participantRefs = source.participants.map((item) => intern("actors", item));
+            delete result.participants;
+        }
+        return result;
+    });
+    const taskListEntities = Object.fromEntries(Object.entries(dictionaries).filter(([, entities]) => entities.length > 0));
+    const candidate = {
+        ...value,
+        tasks,
+        ...(Object.keys(taskListEntities).length ? { taskListEntities, taskListRefBase: 0 } : {}),
+        ...(sharedTaskFields.size ? { sharedTaskFields: [...sharedTaskFields] } : {}),
+    };
+    // Маленькая страница может стать больше из-за заголовка словарей. В таком
+    // случае возвращаем прежний lossless payload, а не навязываем новый формат.
+    return JSON.stringify(candidate).length < JSON.stringify(value).length ? candidate : value;
+};
+const proposalInstructionKey = (instruction) => (`task-proposal-instruction-sha256:${createHash("sha256").update(instruction).digest("hex")}`);
+const projectInstructionField = (value) => {
+    const source = record(value);
+    if (!source || typeof source.instruction !== "string")
+        return value;
+    const { instruction, ...rest } = source;
+    return { ...rest, instructionKey: proposalInstructionKey(instruction) };
+};
+/**
+ * Эти prose-инструкции статичны и уже входят в versioned tool description /
+ * выбранный skill. В model-facing ответе достаточно content-addressed key:
+ * изменение хотя бы одного байта автоматически создаёт другую версию.
+ */
+const projectProposalInstructions = (value, includeEnvelopeInstruction = false) => {
+    const hasProjectedInstruction = [
+        value.proposalAuthoring,
+        value.authoringBasis,
+        value.publicCommentsSnapshot,
+        value.pendingHumanUpdateBasis,
+    ].some((item) => typeof record(item)?.instruction === "string")
+        || (includeEnvelopeInstruction && typeof value.instruction === "string");
+    let result = mapFields(value, {
+        proposalAuthoring: projectInstructionField,
+        authoringBasis: projectInstructionField,
+        publicCommentsSnapshot: projectInstructionField,
+        pendingHumanUpdateBasis: projectInstructionField,
+    });
+    if (includeEnvelopeInstruction && typeof result.instruction === "string") {
+        const instruction = result.instruction;
+        result = { ...result, instructionKey: proposalInstructionKey(instruction) };
+        delete result.instruction;
+    }
+    return hasProjectedInstruction
+        ? { ...result, proposalInstructionSource: "tool_description" }
+        : result;
+};
+const PROPOSAL_SHARED_ENTITY_FIELDS = {
+    run: "runs",
+    contextRequest: "contextRequests",
+    company: "companies",
+    project: "projects",
+    task: "tasks",
+};
+/**
+ * Bundle сохраняет независимые stateRevision/CAS/snapshot поля inline. Только
+ * одинаковые координаты цели переносятся в общие словари и заменяются ref.
+ */
+const projectTaskReviewContext = (value) => {
+    const rawContexts = record(value.proposalContexts);
+    if (!rawContexts || record(value.proposalEntities))
+        return value;
+    const projectedContexts = Object.fromEntries(Object.entries(rawContexts).map(([kind, contextValue]) => {
+        const context = record(contextValue);
+        return [kind, context ? projectProposalInstructions(context) : contextValue];
+    }));
+    const counts = new Map();
+    for (const contextValue of Object.values(projectedContexts)) {
+        const context = record(contextValue);
+        if (!context)
+            continue;
+        for (const field of Object.keys(PROPOSAL_SHARED_ENTITY_FIELDS)) {
+            if (!own(context, field) || context[field] === null || !record(context[field]))
+                continue;
+            const key = `${field}:${JSON.stringify(context[field])}`;
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+    }
+    const dictionaries = {};
+    const indexes = new Map();
+    const contexts = Object.fromEntries(Object.entries(projectedContexts).map(([kind, contextValue]) => {
+        const context = record(contextValue);
+        if (!context)
+            return [kind, contextValue];
+        const result = { ...context };
+        for (const [field, dictionaryName] of Object.entries(PROPOSAL_SHARED_ENTITY_FIELDS)) {
+            if (!own(context, field) || context[field] === null || !record(context[field]))
+                continue;
+            const serialized = JSON.stringify(context[field]);
+            const identity = `${field}:${serialized}`;
+            if ((counts.get(identity) ?? 0) < 2)
+                continue;
+            const entities = dictionaries[dictionaryName] ??= [];
+            let index = indexes.get(identity);
+            if (index === undefined) {
+                index = entities.length;
+                entities.push(context[field]);
+                indexes.set(identity, index);
+            }
+            result[`${field}Ref`] = index;
+            delete result[field];
+        }
+        return [kind, result];
+    }));
+    const candidate = projectProposalInstructions({
+        ...value,
+        proposalContexts: contexts,
+        ...(Object.keys(dictionaries).length ? {
+            proposalEntities: dictionaries,
+            proposalEntityRefBase: 0,
+        } : {}),
+    }, true);
+    return JSON.stringify(candidate).length < JSON.stringify(value).length ? candidate : value;
+};
+const proposalContextTools = new Set([
+    "get_task_comment_proposal_context", "get_task_status_proposal_context",
+    "get_task_control_clear_proposal_context", "get_task_checklist_proposal_context",
+]);
 const taskMutationTools = new Set([
     "create_task", "apply_task_patch", "update_task_title", "update_task_description",
     "update_task_status", "update_task_due_date", "update_task_urgency", "update_task_assignee",
@@ -986,6 +1172,15 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
                 return { ...result, payload: payload.dryRun === false
                         ? projectTaskMutation(nested, operation) : projectTaskUpdatePlan(nested, operation) };
             }) });
+    }
+    if (toolName === "list_my_tasks" || toolName === "list_project_tasks") {
+        return projectTaskListPayload(projectTaskPayload(payload));
+    }
+    if (toolName === "get_task_review_context") {
+        return projectTaskReviewContext(projectTaskPayload(payload));
+    }
+    if (proposalContextTools.has(toolName)) {
+        return projectProposalInstructions(projectTaskPayload(payload));
     }
     if (taskReadTools.has(toolName))
         return projectTaskPayload(payload);
