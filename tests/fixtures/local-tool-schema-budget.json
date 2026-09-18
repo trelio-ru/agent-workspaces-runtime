@@ -38,10 +38,17 @@
     },
     "continue_trelio_workspace_action": {
       "modelVisible": true,
-      "baselineBytes": 474,
+      "baselineBytes": 523,
       "maxBytes": 576,
-      "baselineTokens": 101,
+      "baselineTokens": 111,
       "maxTokens": 128
+    },
+    "diagnose_trelio_installation": {
+      "modelVisible": true,
+      "baselineBytes": 1246,
+      "maxBytes": 1344,
+      "baselineTokens": 220,
+      "maxTokens": 240
     },
     "get_task_proposal_app_state": {
       "modelVisible": false,

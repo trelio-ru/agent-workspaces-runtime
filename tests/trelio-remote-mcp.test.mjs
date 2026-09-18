@@ -34,6 +34,7 @@ import {
   validateResolvedRemoteMcp,
   validateRemoteMcpPublicationConfig,
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { CodexRoutingConfigError } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
 } from "../host-runtime/scripts/trelio-proposal-route-guard.mjs";
@@ -1791,6 +1792,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     "get_task_checklist_proposal_context",
     "apply_task_checklist_proposal",
     "dismiss_task_checklist_proposal",
+    "diagnose_trelio_installation",
     "plan_codex_trelio_hook_routing",
     "apply_codex_trelio_hook_routing",
     "plan_company_private_agent_skill_create",
@@ -1876,7 +1878,218 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   assert.equal(routingApplyTool.annotations.readOnlyHint, false);
   assert.equal(routingApplyTool.inputSchema.properties.confirmed.const, true);
   assert.match(routingApplyTool.description, /полный перезапуск Codex\/ChatGPT/u);
+  const installationDiagnosticTool = response.result.tools.find(
+    ({ name }) => name === "diagnose_trelio_installation",
+  );
+  assert.equal(installationDiagnosticTool.annotations.readOnlyHint, true);
+  assert.deepEqual(
+    installationDiagnosticTool.inputSchema.required,
+    ["clientKind", "intent"],
+  );
+  assert.deepEqual(
+    installationDiagnosticTool.inputSchema.properties.clientKind.enum,
+    ["codex", "claude-code"],
+  );
   assert.doesNotMatch(JSON.stringify(response), /personal-test-token/u);
+});
+
+const readyLocalInstallationDiagnosis = {
+  schemaVersion: 1,
+  status: "ready",
+  platform: "darwin",
+  node: {
+    status: "ready",
+    nodePath: "/usr/local/bin/node",
+    version: "v22.23.2",
+    minimumMajorVersion: 22,
+  },
+  git: {
+    status: "ready",
+    gitPath: "/usr/bin/git",
+    version: "2.49.0",
+    minimumVersion: "2.28.0",
+    processPathReady: true,
+  },
+  plugin: {
+    status: "ready",
+    loadedVersion: "2.3.1",
+    issues: [],
+    hooks: {
+      status: "ready",
+      approvalStatus: "client_managed_unknown",
+      definitionSha256: "a".repeat(64),
+      events: {
+        PreToolUse: { matcher: "mcp__trelio__.*", timeout: 120 },
+      },
+    },
+  },
+  runtimeSessions: {
+    status: "ready",
+    activeCount: 1,
+    pendingCount: 0,
+    expiredCount: 0,
+    invalidCount: 0,
+    registrationLockCount: 0,
+    staleRegistrationLockCount: 0,
+    omittedCount: 0,
+  },
+  connection: {
+    status: "not_configured",
+    deviceSessionConfigured: false,
+    pendingPairing: false,
+    issue: null,
+  },
+  issues: [],
+};
+
+test("installation diagnostic centralizes local and Codex routing decisions without applying them", async () => {
+  let applyCalls = 0;
+  const routingPlan = {
+    schemaVersion: 1,
+    status: "action_required",
+    planHash: "b".repeat(64),
+    missingNamespaces: ["mcp__trelio"],
+    change: {
+      table: "features.code_mode",
+      key: "direct_only_tool_namespaces",
+      add: ["mcp__trelio"],
+      migratesLegacyBoolean: false,
+    },
+    restartRequired: true,
+    verification: "protected_read_in_new_task",
+  };
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    { clientKind: "codex", intent: "onboarding" },
+    {
+      localPrerequisiteDiagnosis: async ({ origin }) => {
+        assert.equal(origin, "https://trelio.ru");
+        return readyLocalInstallationDiagnosis;
+      },
+      codexRoutingPlan: async () => routingPlan,
+      codexRoutingApply: async () => {
+        applyCalls += 1;
+        return { status: "applied" };
+      },
+    },
+  );
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.equal(payload.status, "action_required");
+  assert.deepEqual(payload.requiredActions.map(({ code }) => code), [
+    "REVIEW_CODEX_DIRECT_ROUTING",
+    "START_BRIDGE_PAIRING",
+  ]);
+  assert.equal(
+    payload.requiredActions[0].apply.argumentsAfterConfirmation.planHash,
+    routingPlan.planHash,
+  );
+  assert.equal(payload.requiredActions[1].call.arguments.operation, "login");
+  assert.equal(payload.liveVerification.oauth.nextTool, "list_companies");
+  assert.deepEqual(payload.liveVerification.hook.nextTools, [
+    "get_agent_instructions",
+    "get_task",
+  ]);
+  assert.equal(payload.local.node.nodePath, undefined);
+  assert.equal(payload.local.git.gitPath, undefined);
+  assert.equal(payload.local.plugin.hooks.definitionSha256, undefined);
+  assert.equal(payload.local.plugin.hooks.events, undefined);
+  assert.equal(applyCalls, 0);
+});
+
+test("diagnostic intent reports bridge state without turning pairing into a required repair", async () => {
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    { clientKind: "claude-code", intent: "diagnostics" },
+    {
+      localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexRoutingPlan: async () => {
+        throw new Error("Claude diagnostics must not read Codex config.");
+      },
+    },
+  );
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.equal(payload.status, "ready_for_live_verification");
+  assert.deepEqual(payload.requiredActions, []);
+  assert.equal(payload.warnings[0].code, "BRIDGE_CONNECTION_NOT_READY");
+  assert.equal(payload.codexRouting, null);
+  assert.equal(
+    payload.clientInspection.mcpInventory.remoteServerName,
+    "plugin:trelio-agent-workspaces:trelio",
+  );
+});
+
+test("installation diagnostic preserves local results when Codex routing is unsafe", async () => {
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    { clientKind: "codex", intent: "diagnostics" },
+    {
+      localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexRoutingPlan: async () => {
+        throw new CodexRoutingConfigError(
+          "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE",
+          "Пользовательский config.toml Codex должен быть обычным файлом, не ссылкой.",
+        );
+      },
+    },
+  );
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.equal(payload.local.plugin.status, "ready");
+  assert.equal(payload.codexRouting.status, "blocked");
+  assert.deepEqual(payload.requiredActions.map(({ code }) => code), [
+    "REPAIR_CODEX_DIRECT_ROUTING_MANUALLY",
+  ]);
+  assert.equal(
+    payload.requiredActions[0].reasonCode,
+    "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE",
+  );
+  assert.equal(payload.requiredActions[0].authority, "manual_user_edit_required");
+});
+
+test("installation diagnostic preserves exact prerequisite repair plans", async () => {
+  const local = structuredClone(readyLocalInstallationDiagnosis);
+  local.status = "action_required";
+  local.node.status = "action_required";
+  local.git = {
+    status: "not_found",
+    code: "TRELIO_GIT_REQUIRED",
+    minimumVersion: "2.28.0",
+    install: {
+      strategy: "winget",
+      executable: "C:\\Windows\\winget.exe",
+      args: ["install", "--id", "Git.Git", "-e"],
+      displayCommand: "winget install --id Git.Git -e",
+    },
+  };
+  local.plugin.status = "action_required";
+  local.plugin.issues = ["RUNTIME_HOOK_CONTRACT_MISMATCH"];
+  local.issues = ["TRELIO_NODE_22_REQUIRED", "TRELIO_GIT_REQUIRED", "RUNTIME_HOOK_CONTRACT_MISMATCH"];
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    { clientKind: "claude-code", intent: "diagnostics" },
+    { localPrerequisiteDiagnosis: async () => local },
+  );
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.deepEqual(payload.requiredActions.map(({ code }) => code), [
+    "INSTALL_NODE_RUNTIME",
+    "INSTALL_STANDALONE_GIT",
+    "REPAIR_LOADED_PLUGIN_SHELL",
+  ]);
+  assert.deepEqual(
+    payload.requiredActions[1].installationPlan,
+    local.git.install,
+  );
+  assert.deepEqual(
+    payload.requiredActions[2].issues,
+    ["RUNTIME_HOOK_CONTRACT_MISMATCH"],
+  );
 });
 
 test("local MCP keeps Codex routing behind a separate plan/apply confirmation", async () => {
@@ -3304,7 +3517,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.match(frames[0].result.instructions, /Для старых command-ответов – его процедура совместимости/u);
   assert.match(frames[0].result.instructions, /Native Trelio не требует каталога/u);
-  assert.equal(frames[1].result.tools.length, 30);
+  assert.equal(frames[1].result.tools.length, 31);
 });
 
 test("Remote MCP admission expires absolutely and never caches protected wire declarations", { timeout: 15000 }, async () => {

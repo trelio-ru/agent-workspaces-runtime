@@ -148,6 +148,7 @@ const WORKSPACE_RUN_LEASE_FAILURE_CODES = [
   "STALE_FENCING_TOKEN",
 ];
 const TRELIO_WORKSPACE_ACTION_OPERATIONS = new Set([
+  "legacy_command",
   "doctor",
   "login",
   "encryption_setup",
@@ -210,6 +211,69 @@ const TRELIO_WORKSPACE_ACTION_MAX_ARGUMENT_LENGTH = 16 * 1024;
 const TRELIO_WORKSPACE_ACTION_MAX_ARGV_BYTES = 256 * 1024;
 const MAX_LOCAL_WORKSPACE_INLINE_TEXT_BYTES = 4 * 1024 * 1024;
 const MAX_LOCAL_WORKSPACE_HISTORY_PATCH_CHARS = 100_000;
+
+// Old Trelio responses exposed only a display command. Compatibility stays
+// bounded to the public bridge surface and is parsed here without a shell so
+// the model never has to interpret quoting, executable lookup or CLI flags.
+const LEGACY_WORKSPACE_ACTION_ROUTES = new Map([
+  ["doctor", { operation: "doctor", options: ["json"], flags: ["json"] }],
+  ["login", { operation: "login", options: ["legacy-oauth"], flags: ["legacy-oauth"] }],
+  ["encryption setup", { operation: "encryption_setup", options: ["company", "json"], flags: ["json"] }],
+  ["inspect", { operation: "inspect", options: ["workspace"] }],
+  ["open", { operation: "open", options: ["workspace", "run", "dir", "runtime-session"] }],
+  ["status", { operation: "status", workingDirectory: true }],
+  ["heartbeat", { operation: "heartbeat", workingDirectory: true }],
+  ["context sync", { operation: "context_sync", workingDirectory: true }],
+  ["context attach", { operation: "context_attach", options: ["workspace"], workingDirectory: true }],
+  ["context fetch", { operation: "context_fetch", options: ["path"], workingDirectory: true }],
+  ["clean", {
+    operation: "clean",
+    options: ["dry-run"],
+    flags: ["dry-run"],
+    requiredOptions: ["dry-run"],
+  }],
+  ["checkpoint", {
+    operation: "checkpoint",
+    options: ["type", "summary", "evidence", "file", "question", "next-action", "task-outcome", "message"],
+    repeatable: ["evidence", "file", "question"],
+    workingDirectory: true,
+  }],
+  ["pause", {
+    operation: "pause",
+    options: ["summary", "evidence", "file", "question", "next-action", "task-outcome", "message"],
+    repeatable: ["evidence", "file", "question"],
+    workingDirectory: true,
+  }],
+  ["finish", {
+    operation: "finish",
+    options: ["summary", "evidence", "file", "question", "next-action", "task-outcome", "message"],
+    repeatable: ["evidence", "file", "question"],
+    workingDirectory: true,
+  }],
+  ["submit", { operation: "submit", options: ["message"], workingDirectory: true }],
+  ["skill pack", {
+    operation: "skill_pack",
+    options: ["skill", "runtime-version", "source", "entry", "interpreter", "output", "capability"],
+    repeatable: ["capability"],
+  }],
+  ["skill run", {
+    operation: "skill_run",
+    options: ["company", "project", "skill", "release", "runtime-session"],
+    childArguments: true,
+  }],
+  ["secret exec", {
+    operation: "secret_exec",
+    options: ["grant"],
+    childArguments: true,
+    childArgumentsRequired: true,
+    workingDirectory: true,
+  }],
+  ["secret browser-fill", {
+    operation: "secret_browser_fill",
+    options: ["grant", "target", "browser"],
+    workingDirectory: true,
+  }],
+]);
 // The local action route intentionally accepts the ordinary native tool name,
 // so future backend methods do not require another crypto-aware schema.  Treat
 // an unknown verb as mutating: an unnecessary refresh is cheaper and safer
@@ -8340,6 +8404,248 @@ const normalizeWorkspaceActionStringArray = (
   ));
 };
 
+/**
+ * Parse the historical display-command format as plain data. This is not a
+ * shell parser: expansion, substitutions and operators have no meaning, while
+ * quotes/backslashes are handled only to recover the argv the server encoded.
+ */
+const tokenizeLegacyWorkspaceCommand = (rawCommand) => {
+  const command = normalizeWorkspaceActionString(
+    rawCommand,
+    "parameters.command",
+    { maximumLength: TRELIO_WORKSPACE_ACTION_MAX_ARGV_BYTES, trim: false },
+  );
+  if (/\r|\n/u.test(command)) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+      "Legacy Trelio Workspace command must be one line.",
+    );
+  }
+
+  const tokens = [];
+  let token = "";
+  let tokenStarted = false;
+  let quote = null;
+  let escaped = false;
+  const flush = () => {
+    if (!tokenStarted) return;
+    tokens.push(token);
+    token = "";
+    tokenStarted = false;
+  };
+
+  for (const character of command) {
+    if (escaped) {
+      token += character;
+      tokenStarted = true;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      tokenStarted = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      else token += character;
+      tokenStarted = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      tokenStarted = true;
+    } else if (/\s/u.test(character)) {
+      flush();
+    } else {
+      token += character;
+      tokenStarted = true;
+    }
+  }
+  if (escaped || quote) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+      "Legacy Trelio Workspace command contains unfinished quoting.",
+    );
+  }
+  flush();
+  return tokens;
+};
+
+const resolveLegacyWorkspaceRoute = (argumentsList) => {
+  const [command, possibleSubcommand] = argumentsList;
+  const compound = ["encryption", "context", "skill", "secret"].includes(command);
+  const routeKey = compound ? `${command} ${possibleSubcommand || ""}` : command;
+  const route = LEGACY_WORKSPACE_ACTION_ROUTES.get(routeKey);
+  if (!route) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_UNSUPPORTED",
+      "Legacy command is not part of the supported public Trelio Workspace bridge surface.",
+    );
+  }
+  return { route, optionTokens: argumentsList.slice(compound ? 2 : 1) };
+};
+
+const parseLegacyWorkspaceOptions = (route, tokens) => {
+  const allowed = new Set(route.options || []);
+  const flags = new Set(route.flags || []);
+  const repeatable = new Set(route.repeatable || []);
+  const values = new Map();
+  let childArguments = null;
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--") {
+      if (!route.childArguments) {
+        throw new TrelioLocalContextError(
+          "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+          "Legacy command does not support child argv.",
+        );
+      }
+      childArguments = tokens.slice(index + 1);
+      break;
+    }
+    if (!token.startsWith("--") || token === "--") {
+      throw new TrelioLocalContextError(
+        "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+        "Legacy command contains an unexpected positional argument.",
+      );
+    }
+    const equalsIndex = token.indexOf("=");
+    const name = token.slice(2, equalsIndex >= 0 ? equalsIndex : undefined);
+    if (!allowed.has(name)) {
+      throw new TrelioLocalContextError(
+        "TRELIO_WORKSPACE_LEGACY_COMMAND_UNSUPPORTED",
+        `Legacy command option --${name} is not supported.`,
+      );
+    }
+    if (values.has(name) && !repeatable.has(name)) {
+      throw new TrelioLocalContextError(
+        "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+        `Legacy command option --${name} must not be repeated.`,
+      );
+    }
+
+    let value;
+    if (flags.has(name)) {
+      if (equalsIndex >= 0) {
+        throw new TrelioLocalContextError(
+          "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+          `Legacy command flag --${name} must not have a value.`,
+        );
+      }
+      value = true;
+    } else if (equalsIndex >= 0) {
+      value = token.slice(equalsIndex + 1);
+    } else {
+      value = tokens[index + 1];
+      if (value === undefined || value.startsWith("--")) {
+        throw new TrelioLocalContextError(
+          "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+          `Legacy command option --${name} requires one value.`,
+        );
+      }
+      index += 1;
+    }
+    normalizeWorkspaceActionString(String(value), `legacy --${name}`, {
+      maximumLength: TRELIO_WORKSPACE_ACTION_MAX_ARGUMENT_LENGTH,
+      trim: false,
+      allowEmpty: false,
+    });
+    const current = values.get(name) || [];
+    current.push(value);
+    values.set(name, current);
+  }
+
+  if (route.childArgumentsRequired && (!childArguments || childArguments.length === 0)) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+      "Legacy command requires an exact child argv after --.",
+    );
+  }
+  for (const requiredName of route.requiredOptions || []) {
+    if (!values.has(requiredName)) {
+      throw new TrelioLocalContextError(
+        "TRELIO_WORKSPACE_LEGACY_COMMAND_UNSUPPORTED",
+        `Legacy command requires --${requiredName} on this compatibility path.`,
+      );
+    }
+  }
+  return { values, childArguments };
+};
+
+const buildLegacyWorkspaceActionInvocation = (parameters, rawWorkingDirectory) => {
+  assertWorkspaceActionKeys(parameters, new Set(["command", "argv"]));
+  const hasCommand = Object.hasOwn(parameters, "command");
+  const hasArgv = Object.hasOwn(parameters, "argv");
+  if (hasCommand === hasArgv) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+      "Legacy compatibility requires exactly one of parameters.command or parameters.argv.",
+    );
+  }
+  const fullArguments = hasArgv
+    ? normalizeWorkspaceActionStringArray(parameters.argv, "parameters.argv", {
+        allowEmptyValues: true,
+      })
+    : tokenizeLegacyWorkspaceCommand(parameters.command);
+  if (fullArguments[0] !== "trelio-workspace") {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+      "Legacy command executable must equal trelio-workspace.",
+    );
+  }
+  for (const [index, value] of fullArguments.entries()) {
+    normalizeWorkspaceActionString(value, `legacy argv[${index}]`, {
+      maximumLength: TRELIO_WORKSPACE_ACTION_MAX_ARGUMENT_LENGTH,
+      trim: false,
+      allowEmpty: index > 0,
+    });
+  }
+  const argumentsList = fullArguments.slice(1);
+  const totalBytes = argumentsList.reduce(
+    (sum, value) => sum + Buffer.byteLength(value, "utf8") + 1,
+    0,
+  );
+  if (
+    argumentsList.length === 0
+    || argumentsList.length > TRELIO_WORKSPACE_ACTION_MAX_ARGUMENTS
+    || totalBytes > TRELIO_WORKSPACE_ACTION_MAX_ARGV_BYTES
+  ) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_LEGACY_COMMAND_INVALID",
+      "Legacy command argv exceeds the supported bounds.",
+    );
+  }
+
+  const { route, optionTokens } = resolveLegacyWorkspaceRoute(argumentsList);
+  const parsed = parseLegacyWorkspaceOptions(route, optionTokens);
+  const workingDirectory = normalizeWorkspaceActionAbsolutePath(
+    rawWorkingDirectory,
+    "workingDirectory",
+    { required: route.workingDirectory === true },
+  );
+  const first = (name) => parsed.values.get(name)?.[0];
+  const actionParameters = {};
+  if (route.operation === "open") {
+    actionParameters.workspaceId = normalizeWorkspaceActionUuid(first("workspace"), "legacy --workspace");
+    if (first("run") !== undefined) {
+      actionParameters.runId = normalizeWorkspaceActionUuid(first("run"), "legacy --run");
+    }
+  } else if (route.operation === "checkpoint") {
+    actionParameters.type = first("type") || "draft";
+  }
+
+  return {
+    operation: route.operation,
+    parameters: actionParameters,
+    actionParameters,
+    workingDirectory,
+    argumentsList,
+    legacyCompatibility: true,
+  };
+};
+
 const normalizeWorkspaceActionAbsolutePath = (value, fieldName, { required = true } = {}) => {
   const rawPath = normalizeWorkspaceActionString(value, fieldName, {
     required,
@@ -8524,6 +8830,9 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
       "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
       `${unknownEnvelopeKey} is not supported by the action envelope.`,
     );
+  }
+  if (operation === "legacy_command") {
+    return buildLegacyWorkspaceActionInvocation(parameters, rawInput.workingDirectory);
   }
   if (
     rawInput.workingDirectory !== undefined
@@ -8811,7 +9120,13 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
     );
   }
 
-  return { operation, argumentsList, workingDirectory };
+  return {
+    operation,
+    parameters,
+    actionParameters: parameters,
+    argumentsList,
+    workingDirectory,
+  };
 };
 
 const truncateWorkspaceActionOutput = (value) => {
@@ -9119,10 +9434,10 @@ export const handleTrelioWorkspaceActionOperation = async (
     return downloadAcceptedWorkspaceFile(origin, invocation.parameters, { signal });
   }
   const recoveryWorkspaceId = invocation.operation === "open"
-    ? normalizeWorkspaceActionUuid(rawInput.parameters.workspaceId, "parameters.workspaceId")
+    ? normalizeWorkspaceActionUuid(invocation.parameters.workspaceId, "parameters.workspaceId")
     : null;
-  const recoveryRunId = invocation.operation === "open" && rawInput.parameters.runId !== undefined
-    ? normalizeWorkspaceActionUuid(rawInput.parameters.runId, "parameters.runId")
+  const recoveryRunId = invocation.operation === "open" && invocation.parameters.runId !== undefined
+    ? normalizeWorkspaceActionUuid(invocation.parameters.runId, "parameters.runId")
     : null;
   const heartbeatManager = runHeartbeatManager
     ?? (runBridge === runWorkspaceBridge ? workspaceRunHeartbeatManager : null);
@@ -9176,7 +9491,7 @@ export const handleTrelioWorkspaceActionOperation = async (
       heartbeatManager.markActionSuccess(
         activeHeartbeatEntry,
         invocation.operation,
-        rawInput.parameters,
+        invocation.actionParameters ?? rawInput.parameters,
       );
     }
     return {
@@ -10811,7 +11126,7 @@ export const TRELIO_LOCAL_WORKSPACE_TOOL = {
 
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
-  description: "Run one exact server-returned Trelio bridge action; keep operation and parameters unchanged.",
+  description: "Run bridge action. Legacy command/argv use operation=legacy_command; no shell/PATH.",
   inputSchema: {
     type: "object",
     additionalProperties: false,

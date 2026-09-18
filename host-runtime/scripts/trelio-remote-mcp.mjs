@@ -34,6 +34,7 @@ import {
   AGENT_SKILL_MAX_PACKAGE_BYTES,
   AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
   BRIDGE_VERSION,
+  diagnoseLocalPrerequisites,
   ensureBridgeCompatibility,
   ensureCompanyEncryptionContext,
   ensurePrivateDirectory,
@@ -48,6 +49,11 @@ import {
   resolveWorkspaceBridgeConfigDirectory,
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
+import {
+  TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
+  TrelioInstallationDiagnosticError,
+  buildTrelioInstallationDiagnostic,
+} from "./trelio-installation-diagnostic.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   buildCompanyEncryptedJsonMarker,
@@ -3303,6 +3309,33 @@ const LOCAL_TOOLS = [
   TRELIO_WORKSPACE_ACTION_TOOL,
   ...LOCAL_PROPOSAL_APP_TOOLS,
   {
+    name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
+    title: "Проверить установку и подготовить план настройки Trelio",
+    description: "Read-only: одним вызовом проверьте exact загруженный plugin shell, Node.js, standalone Git, локальные runtime sessions и pairing; для Codex также получите текущий direct-routing plan. Результат разделяет локальную готовность, OAuth и hook trust, возвращает typed requiredActions и ничего не устанавливает, не применяет и не авторизует.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["clientKind", "intent"],
+      properties: {
+        clientKind: {
+          type: "string",
+          enum: ["codex", "claude-code"],
+          description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
+        },
+        intent: {
+          type: "string",
+          enum: ["diagnostics", "onboarding"],
+          description: "diagnostics не требует pairing сам по себе; onboarding включает bridge connection в requiredActions.",
+        },
+      },
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
     name: CODEX_ROUTING_PLAN_TOOL_NAME,
     title: "Проверить direct routing Trelio в Codex",
     description: "Read-only: проверьте пользовательский config.toml Codex и подготовьте exact planHash для добавления только отсутствующих Trelio MCP namespaces в features.code_mode.direct_only_tool_namespaces. Legacy boolean Code Mode переносится в table без изменения enabled. Содержимое и путь config не возвращаются. Если нужна правка, покажите план пользователю и запросите отдельное явное подтверждение до apply.",
@@ -4757,6 +4790,7 @@ export const handleToolCall = async (
     proposalCapabilityConfigDirectory,
     clientCapabilities = null,
     requestClient = null,
+    localPrerequisiteDiagnosis = diagnoseLocalPrerequisites,
     codexRoutingPlan = planCodexTrelioHookRouting,
     codexRoutingApply = applyCodexTrelioHookRouting,
   } = {},
@@ -4873,6 +4907,48 @@ export const handleToolCall = async (
       rawArguments,
       { signal },
     ));
+  }
+  if (name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME) {
+    if (
+      !rawArguments
+      || typeof rawArguments !== "object"
+      || Array.isArray(rawArguments)
+      || Object.keys(rawArguments).some((key) => !["clientKind", "intent"].includes(key))
+      || !["codex", "claude-code"].includes(rawArguments.clientKind)
+      || !["diagnostics", "onboarding"].includes(rawArguments.intent)
+    ) {
+      throw new TrelioInstallationDiagnosticError(
+        "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT",
+        "Диагностика установки принимает только clientKind и intent.",
+      );
+    }
+    const local = await localPrerequisiteDiagnosis({ origin });
+    let codexRouting = null;
+    if (rawArguments.clientKind === "codex") {
+      try {
+        codexRouting = await codexRoutingPlan();
+      } catch (error) {
+        if (!(error instanceof CodexRoutingConfigError)) throw error;
+        // The local prerequisite report remains useful even when the focused
+        // TOML editor refuses an unsafe or unsupported representation. Preserve
+        // the exact safe error as a manual action instead of hiding all other
+        // diagnostic facts behind one failed sub-check.
+        codexRouting = {
+          schemaVersion: 1,
+          status: "blocked",
+          error: {
+            code: error.code,
+            message: error.message,
+          },
+        };
+      }
+    }
+    return buildTextResult(buildTrelioInstallationDiagnostic({
+      clientKind: rawArguments.clientKind,
+      intent: rawArguments.intent,
+      local,
+      codexRouting,
+    }));
   }
   if (COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(name)) {
     return handleCompanySkillManagementTool(

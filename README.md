@@ -41,6 +41,21 @@ Stable shell передаёт runtime:
 Runtime не сканирует plugin cache и не предполагает, что оба source tree лежат в
 одном репозитории.
 
+Local MCP предоставляет read-only `diagnose_trelio_installation`: он объединяет
+host-owned doctor Node/Git/plugin/session/pairing с Codex direct-routing plan и
+возвращает ordered typed actions. Tool не устанавливает компоненты, не применяет
+Codex config, не запускает login и не объявляет hook одобренным; OAuth и runtime
+proof подтверждаются отдельными live reads.
+Небезопасный или неподдерживаемый Codex TOML не скрывает остальные результаты:
+plan возвращает отдельное manual-only действие и по-прежнему не раскрывает путь
+либо содержимое config.
+
+Command-only ответы старого backend проходят через
+`continue_trelio_workspace_action(operation=legacy_command)`: runtime без shell
+разбирает exact command/argv и проверяет executable, public operation и флаги.
+Модель не ищет launcher и не интерпретирует quoting; legacy secret input этим
+маршрутом запрещён.
+
 ## Локальная разработка
 
 Требуются Node.js 22+ и standalone Git 2.28+.

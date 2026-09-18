@@ -84,14 +84,17 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   plainCompanyTaskRunPluginLayerBytes: 89_000,
   encryptedCompanyTaskRunPluginLayerBytes: 105_500,
   localMcpInstructionsBytes: 4_200,
-  // Two intentionally model-visible Codex routing tools keep the diagnostic
-  // read-only while preserving a separate exact-confirmation apply boundary.
+  // One read-only installation diagnostic plus the two Codex routing tools
+  // centralize host decisions while preserving a separate exact-confirmation
+  // apply boundary. Its bounded schema is intentionally always visible; the
+  // much larger client/Node/Git/pairing decision tree is no longer duplicated
+  // in each triggered onboarding or diagnostics skill.
   // The prefixed ceiling counts the client's worst-case repetition of the
   // initialize instructions once per schema, not extra runtime instructions.
-  modelVisibleLocalToolSchemasBytes: 16_500,
+  modelVisibleLocalToolSchemasBytes: 17_700,
   // +schemaToolName lets doctor load one exact schema instead of every schema;
   // skill section routing adds one bounded initialize prefix, not response data.
-  clientPrefixedLocalToolSchemasBytes: 82_500,
+  clientPrefixedLocalToolSchemasBytes: 86_000,
   clientPrefixedTaskRunLocalToolSchemasBytes: 4_700,
   representativeLocalProposalResultBytes: 14_500,
   representativeLocalAttachmentResultBytes: 1_400,
@@ -111,8 +114,8 @@ export const PLUGIN_CONTEXT_TOKEN_LIMITS = Object.freeze({
   encryptedCompanyTaskRunPluginLayer: 17_600,
   localProviderToolSchemas: 1_100,
   localMcpInstructions: 650,
-  modelVisibleLocalToolSchemas: 3_750,
-  clientPrefixedLocalToolSchemas: 14_000,
+  modelVisibleLocalToolSchemas: 4_000,
+  clientPrefixedLocalToolSchemas: 15_000,
   clientPrefixedTaskRunLocalToolSchemas: 750,
   representativeLocalProposalResult: 1_650,
   representativeLocalAttachmentResult: 200,

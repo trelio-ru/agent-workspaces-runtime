@@ -163,6 +163,88 @@ test("typed Workspace dispatcher covers every public bridge operation without sh
   }
 });
 
+test("legacy command-only responses are parsed and allowlisted inside the runtime", async () => {
+  const summary = "Готово; $(touch never-runs)";
+  const invocation = buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "legacy_command",
+    parameters: {
+      command: `trelio-workspace checkpoint --type draft --summary "${summary}" --evidence 'one two'`,
+    },
+    workingDirectory: actionWorkingDirectory,
+  });
+  assert.equal(invocation.operation, "checkpoint");
+  assert.deepEqual(invocation.argumentsList, [
+    "checkpoint",
+    "--type",
+    "draft",
+    "--summary",
+    summary,
+    "--evidence",
+    "one two",
+  ]);
+  assert.deepEqual(invocation.actionParameters, { type: "draft" });
+
+  let captured = null;
+  const result = await handleTrelioWorkspaceActionOperation(
+    "https://trelio.example",
+    {
+      schemaVersion: 1,
+      operation: "legacy_command",
+      parameters: {
+        argv: [
+          "trelio-workspace",
+          "open",
+          "--workspace",
+          actionWorkspaceId,
+          "--run",
+          actionRunId,
+        ],
+      },
+    },
+    {
+      runBridge: async (origin, argumentsList, options) => {
+        captured = { origin, argumentsList, options };
+        return { stdout: "Workspace открыт\n", stderr: "" };
+      },
+    },
+  );
+  assert.deepEqual(captured, {
+    origin: "https://trelio.example",
+    argumentsList: [
+      "open",
+      "--workspace",
+      actionWorkspaceId,
+      "--run",
+      actionRunId,
+    ],
+    options: { signal: undefined },
+  });
+  assert.equal(result.operation, "open");
+});
+
+test("legacy command compatibility rejects shell lookup, unknown flags and secret input", () => {
+  for (const command of [
+    "./trelio-workspace status",
+    "trelio-workspace inspect --workspace 11111111-1111-4111-8111-111111111111 --shell sh",
+    "trelio-workspace secret set --secret 55555555-5555-4555-8555-555555555555",
+    "trelio-workspace clean",
+    "trelio-workspace status ; touch never-runs",
+    "trelio-workspace checkpoint --summary 'unfinished",
+  ]) {
+    assert.throws(
+      () => buildTrelioWorkspaceActionInvocation({
+        schemaVersion: 1,
+        operation: "legacy_command",
+        parameters: { command },
+        workingDirectory: actionWorkingDirectory,
+      }),
+      (error) => error?.code?.startsWith("TRELIO_WORKSPACE_LEGACY_COMMAND_"),
+      command,
+    );
+  }
+});
+
 test("typed Workspace dispatcher rejects undeclared flags and implicit destructive cleanup", () => {
   assert.throws(
     () => buildTrelioWorkspaceActionInvocation({
