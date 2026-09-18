@@ -8394,16 +8394,24 @@ const normalizeWorkspaceActionBoolean = (value, fieldName, defaultValue = false)
 const normalizeWorkspaceActionStringArray = (
   value,
   fieldName,
-  { maximumItems = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENTS, allowEmptyValues = false } = {},
+  {
+    maximumItems = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENTS,
+    allowEmptyValues = false,
+    allowSingleString = false,
+  } = {},
 ) => {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > maximumItems) {
+  // Older model clients occasionally projected a repeatable CLI flag as one
+  // scalar JSON string. Accept that unambiguous one-item form only where the
+  // operation explicitly opts in; all other typed action arrays stay strict.
+  const values = allowSingleString && typeof value === "string" ? [value] : value;
+  if (!Array.isArray(values) || values.length > maximumItems) {
     throw new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
       `${fieldName} must contain at most ${maximumItems} strings.`,
     );
   }
-  return value.map((item, index) => normalizeWorkspaceActionString(
+  return values.map((item, index) => normalizeWorkspaceActionString(
     item,
     `${fieldName}[${index}]`,
     { trim: !allowEmptyValues, allowEmpty: allowEmptyValues },
@@ -8800,6 +8808,7 @@ const buildWorkspaceCheckpointActionArguments = (operation, parameters) => {
     "summary",
     "evidence",
     "filePaths",
+    "files",
     "questions",
     "nextAction",
     "taskOutcome",
@@ -8807,6 +8816,12 @@ const buildWorkspaceCheckpointActionArguments = (operation, parameters) => {
   ]);
   if (operation === "checkpoint") commonKeys.add("type");
   assertWorkspaceActionKeys(parameters, commonKeys);
+  if (parameters.filePaths !== undefined && parameters.files !== undefined) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      "parameters.filePaths and parameters.files cannot be combined.",
+    );
+  }
 
   const argumentsList = [operation];
   if (operation === "checkpoint") {
@@ -8833,20 +8848,30 @@ const buildWorkspaceCheckpointActionArguments = (operation, parameters) => {
     "evidence",
     normalizeWorkspaceActionStringArray(parameters.evidence, "parameters.evidence", {
       maximumItems: 50,
+      allowSingleString: true,
     }),
   );
+  const fileParameterName = parameters.filePaths !== undefined
+    ? "filePaths"
+    : "files";
   appendWorkspaceActionValues(
     argumentsList,
     "file",
-    normalizeWorkspaceActionStringArray(parameters.filePaths, "parameters.filePaths", {
-      maximumItems: 1_000,
-    }),
+    normalizeWorkspaceActionStringArray(
+      parameters[fileParameterName],
+      `parameters.${fileParameterName}`,
+      {
+        maximumItems: 1_000,
+        allowSingleString: true,
+      },
+    ),
   );
   appendWorkspaceActionValues(
     argumentsList,
     "question",
     normalizeWorkspaceActionStringArray(parameters.questions, "parameters.questions", {
       maximumItems: 50,
+      allowSingleString: true,
     }),
   );
   appendWorkspaceActionOption(

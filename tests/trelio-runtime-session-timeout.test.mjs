@@ -181,6 +181,21 @@ test("hook definition and doctor budget cover cold startup, registration and loc
   assert.equal(report.hooks.events.PreToolUse.timeout, PRE_TOOL_USE_TIMEOUT_SECONDS);
 });
 
+test("plugin doctor compares manifests with the loaded shell version", async () => {
+  const codexManifest = JSON.parse(await readFile(
+    path.join(pluginDirectory, ".codex-plugin", "plugin.json"),
+    "utf8",
+  ));
+  const report = await inspectBundledPlugin({
+    pluginDirectory,
+    loadedPluginVersion: codexManifest.version,
+  });
+
+  assert.equal(report.status, "ready");
+  assert.equal(report.loadedVersion, codexManifest.version);
+  assert.deepEqual(report.issues, []);
+});
+
 test("cold startup and slow registration produce a proof after the former 15-second cutoff", async (t) => {
   const fixture = await createFixture(t, { registrationDelayMilliseconds: 7_500 });
   const result = await fixture.run(8_500);

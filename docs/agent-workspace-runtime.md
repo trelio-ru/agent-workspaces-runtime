@@ -20,6 +20,11 @@ Local MCP facade запускает bundled bridge через текущий `pr
 корень загруженного плагина. Удалённый после обновления `cwd` долгоживущего
 host-процесса не наследуется; `cwd` самого host не меняется.
 
+Loader передаёт shell-версию отдельно в `TRELIO_PLUGIN_VERSION`, а версию
+подписанного runtime – в `TRELIO_HOST_RUNTIME_VERSION`. Doctor сравнивает Codex
+и Claude manifests именно с shell-версией; внутренний fallback bridge ABI не
+может создать ложное требование переустановить уже согласованный plugin shell.
+
 Перед запуском проверяется наличие той же папки плагина и файла entrypoint.
 Если их больше нет, `trelio_workspace_action` возвращает
 `TRELIO_PLUGIN_RESTART_REQUIRED` с `requiredAction: restart_client` и
@@ -351,6 +356,10 @@ clean Git и принятый head проверяются обычным preflig
 4. Завершённая дельта сохраняется до дальнейшей работы, ожидания, compaction,
    передачи и границы хода. Если она сразу завершается, достаточно `finish`:
    он уже создаёт handoff checkpoint; отдельный draft перед ним не нужен.
+   Canonical typed action использует `filePaths`, а `evidence`, `filePaths` и
+   `questions` передаются массивами строк. На rollout runtime совместимо
+   принимает одиночную строку как массив из одного элемента и alias `files` для
+   `filePaths`; одновременные `files` и `filePaths` отклоняются как неоднозначные.
    Непосредственно перед финальным ответом агент выполняет returned
    `bridge.actions.turnCheck` (`status`) из opened directory. `dirty=true`
    требует `checkpoint`, `pause` либо `finish`; ошибка сохранения становится

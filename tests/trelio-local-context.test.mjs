@@ -163,6 +163,46 @@ test("typed Workspace dispatcher covers every public bridge operation without sh
   }
 });
 
+test("typed checkpoint actions normalize scalar lists and the legacy files alias", () => {
+  const invocation = buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "finish",
+    workingDirectory: actionWorkingDirectory,
+    parameters: {
+      summary: "Подготовлен итог",
+      evidence: "Проверка прошла",
+      files: ["WORKSPACE_CONTEXT.md", "artifacts/result.md"],
+      questions: "Нужна ли дополнительная проверка?",
+      nextAction: "Передать результат",
+      taskOutcome: "no_status_change",
+    },
+  });
+  assert.deepEqual(invocation.argumentsList, [
+    "finish",
+    "--summary", "Подготовлен итог",
+    "--evidence", "Проверка прошла",
+    "--file", "WORKSPACE_CONTEXT.md",
+    "--file", "artifacts/result.md",
+    "--question", "Нужна ли дополнительная проверка?",
+    "--next-action", "Передать результат",
+    "--task-outcome", "no_status_change",
+  ]);
+
+  assert.throws(() => buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "finish",
+    workingDirectory: actionWorkingDirectory,
+    parameters: {
+      summary: "Подготовлен итог",
+      filePaths: ["canonical.md"],
+      files: ["alias.md"],
+    },
+  }), (error) => (
+    error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"
+    && /cannot be combined/u.test(error.message)
+  ));
+});
+
 test("folder onboarding apply stays inside the host and never reaches bridge argv", async () => {
   const parameters = {
     folderPath: actionWorkingDirectory,

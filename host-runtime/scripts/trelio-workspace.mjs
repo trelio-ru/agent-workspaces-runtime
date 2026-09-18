@@ -895,6 +895,7 @@ const readObservedRuntimeHookContract = (hooksManifest, eventName) => {
  */
 export const inspectBundledPlugin = async ({
   pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
+  loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION || BRIDGE_VERSION,
 } = {}) => {
   const [codexManifest, claudeManifest, hooksManifest] = await Promise.all([
     readDiagnosticJsonFile(path.join(pluginDirectory, ".codex-plugin", "plugin.json")),
@@ -908,11 +909,18 @@ export const inspectBundledPlugin = async ({
   const claudeVersion = typeof claudeManifest.value?.version === "string"
     ? claudeManifest.value.version
     : null;
+  const normalizedLoadedPluginVersion = typeof loadedPluginVersion === "string"
+    && STABLE_VERSION_PATTERN.test(loadedPluginVersion)
+    ? loadedPluginVersion
+    : null;
 
-  if (codexVersion !== BRIDGE_VERSION) {
+  if (!normalizedLoadedPluginVersion) {
+    issues.push("LOADED_PLUGIN_VERSION_INVALID");
+  }
+  if (codexVersion !== normalizedLoadedPluginVersion) {
     issues.push("CODEX_MANIFEST_VERSION_MISMATCH");
   }
-  if (claudeVersion !== BRIDGE_VERSION) {
+  if (claudeVersion !== normalizedLoadedPluginVersion) {
     issues.push("CLAUDE_MANIFEST_VERSION_MISMATCH");
   }
 
@@ -933,7 +941,7 @@ export const inspectBundledPlugin = async ({
 
   return {
     status: issues.length === 0 ? "ready" : "action_required",
-    loadedVersion: BRIDGE_VERSION,
+    loadedVersion: normalizedLoadedPluginVersion,
     manifests: {
       codexVersion,
       claudeVersion,
@@ -1114,6 +1122,7 @@ export const inspectLocalBridgeConnection = async ({
 export const diagnoseLocalPrerequisites = async (options = {}) => {
   const {
     pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
+    loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION || BRIDGE_VERSION,
     configDirectory = CONFIG_DIRECTORY,
     origin = DEFAULT_ORIGIN,
     nodePath = process.execPath,
@@ -1123,7 +1132,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   } = options;
   const [git, plugin, runtimeSessions, connection] = await Promise.all([
     verifyGitRuntime(gitOptions),
-    inspectBundledPlugin({ pluginDirectory }),
+    inspectBundledPlugin({ pluginDirectory, loadedPluginVersion }),
     inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
     inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
   ]);

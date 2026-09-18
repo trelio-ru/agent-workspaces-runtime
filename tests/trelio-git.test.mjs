@@ -268,6 +268,10 @@ test("real Git runtime completes init, add and commit on the current OS", async 
 });
 
 test("bridge doctor exposes machine-readable local prerequisite status", async () => {
+  const pluginManifest = JSON.parse(await readFile(
+    path.join(pluginDirectory, ".codex-plugin", "plugin.json"),
+    "utf8",
+  ));
   const { stdout } = await execFileAsync(
     process.execPath,
     [bridgePath, "doctor", "--json"],
@@ -278,6 +282,7 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
         // Production loader supplies the exact installed shell root. Tests do
         // the same explicitly now that runtime and plugin sources are separate.
         TRELIO_PLUGIN_ROOT: pluginDirectory,
+        TRELIO_PLUGIN_VERSION: pluginManifest.version,
       },
     },
   );
@@ -289,7 +294,7 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
   assert.equal(report.git.status, "ready");
   assert.equal(report.git.smokeTest, "ready");
   assert.equal(report.plugin.status, "ready");
-  assert.equal(report.plugin.loadedVersion, "2.3.1");
+  assert.equal(report.plugin.loadedVersion, pluginManifest.version);
   assert.equal(report.plugin.hooks.status, "ready");
   assert.equal(report.plugin.hooks.preToolUseScope, "trelio_mcp");
   assert.equal(report.plugin.hooks.approvalStatus, "client_managed_unknown");
