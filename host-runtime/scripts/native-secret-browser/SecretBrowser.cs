@@ -44,6 +44,7 @@ public sealed class Step {
     public string targetOrigin { get; set; }
     public string targetUrlSha256 { get; set; }
     public Field[] fields { get; set; }
+    public string activationId { get; set; }
     public string submitId { get; set; }
 }
 public sealed class Request {
@@ -211,6 +212,39 @@ internal sealed class Session {
         button = step.submitId == null ? null : Find(nodes, doc, step.submitId, true);
         return result;
     }
+    private static AutomationElement[] PreparedControls(AutomationElement doc, Step step, out AutomationElement button) {
+        var clock = Stopwatch.StartNew();
+        bool activated = step.activationId == null;
+        while (clock.Elapsed.TotalSeconds < 20) {
+            if (!activated) {
+                var nodes = Walk(doc, true);
+                var matches = nodes.Where(element => element.Current.AutomationId == step.activationId
+                    && Belongs(element, doc)).ToArray();
+                if (matches.Length > 1) throw new Stop("field_ambiguous");
+                if (matches.Length == 0 || !matches[0].Current.IsEnabled || matches[0].Current.IsOffscreen
+                    || matches[0].Current.BoundingRectangle.IsEmpty) {
+                    Thread.Sleep(100);
+                    continue;
+                }
+                object pattern;
+                if (!matches[0].TryGetCurrentPattern(InvokePattern.Pattern, out pattern)) {
+                    throw new Stop("field_write_failed");
+                }
+                // This exact value-free action belongs to the signed grant. It
+                // runs once, before any credential enters the helper process.
+                ((InvokePattern)pattern).Invoke();
+                activated = true;
+                Thread.Sleep(100);
+            }
+            try { return Controls(doc, step, out button); }
+            catch (Stop error) {
+                if (error.Reason != "field_not_found") throw;
+                Thread.Sleep(100);
+            }
+        }
+        button = null;
+        throw new Stop("field_not_found");
+    }
     internal Session(Request request) {
         lease = new NativeLease();
         if (request.clientFamily != "codex" && request.clientFamily != "claude-code") throw new Stop("client_unsupported", true);
@@ -252,7 +286,7 @@ internal sealed class Session {
         document = candidates[0].Item3;
         container = TreeWalker.RawViewWalker.GetParent(document);
         if (container == null || Documents(container).Count != 1) throw new Stop("accessibility_unavailable", true);
-        targets = Controls(document, steps[0], out button);
+        targets = PreparedControls(document, steps[0], out button);
     }
     private void CheckDocument(Step step) {
         if (process.HasExited || process.StartTime != startedAt || !Belongs(container, window) || !Belongs(document, container)
@@ -278,8 +312,7 @@ internal sealed class Session {
                             throw new Stop("target_url_changed");
                         if (Matches(DocumentUrl(candidate), step)) {
                             try {
-                                AutomationElement ignored;
-                                Controls(candidate, step, out ignored);
+                                targets = PreparedControls(candidate, step, out button);
                                 next = candidate;
                                 break;
                             } catch (Stop error) { if (error.Reason != "field_not_found") throw; }
@@ -289,7 +322,6 @@ internal sealed class Session {
                 }
                 if (next == null) throw new Stop("timeout");
                 document = next;
-                targets = Controls(document, step, out button);
             }
             CheckDocument(step);
             AutomationElement currentButton;

@@ -39,6 +39,7 @@ struct Step: Decodable {
     let targetOrigin: String
     let targetUrlSha256: String
     let fields: [Field]
+    let activationId: String?
     let submitId: String?
 }
 struct Request: Decodable {
@@ -192,6 +193,41 @@ final class Session {
         let button = try step.submitId.map { try find($0, button: true) }
         return (fields, button)
     }
+    static func preparedControls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
+        let deadline = Date().addingTimeInterval(20)
+        var activated = step.activationId == nil
+        while Date() < deadline {
+            do {
+                if !activated, let activationId = step.activationId {
+                    let nodes = try walk(document, stopAtWebArea: true)
+                    let matches = nodes.filter {
+                        text($0, "AXDOMIdentifier") == activationId && belongs($0, to: document)
+                    }
+                    guard matches.count <= 1 else { throw Stop.failed("field_ambiguous") }
+                    guard let action = matches.first,
+                          (attribute(action, kAXEnabledAttribute) as? Bool) == true,
+                          visible(action, in: document) else {
+                        Thread.sleep(forTimeInterval: 0.1)
+                        continue
+                    }
+                    var actions: CFArray?
+                    guard AXUIElementCopyActionNames(action, &actions) == .success,
+                          (actions as? [String])?.contains(kAXPressAction) == true,
+                          AXUIElementPerformAction(action, kAXPressAction as CFString) == .success else {
+                        throw Stop.failed("field_write_failed")
+                    }
+                    // The activation is exact and value-free. Perform it once,
+                    // then wait for the same document to expose the bound fields.
+                    activated = true
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                return try controls(document, step)
+            } catch Stop.failed("field_not_found") {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+        throw Stop.failed("field_not_found")
+    }
     init(_ request: Request) throws {
         lease = try NativeLease()
         guard AXIsProcessTrusted() else { throw Stop.unavailable("access_required") }
@@ -238,7 +274,7 @@ final class Session {
         guard let container = elementAttribute(document, kAXParentAttribute),
               try Session.documents(container).count == 1 else { throw Stop.unavailable("accessibility_unavailable") }
         self.container = container
-        (targets, button) = try Session.controls(document, steps[0])
+        (targets, button) = try Session.preparedControls(document, steps[0])
     }
     func checkDocument(_ step: Step) throws {
         guard !application.isTerminated, Session.trust(application, requirement),
@@ -263,8 +299,11 @@ final class Session {
                         }
                         if matches(documentURL(next), step) {
                             do {
-                                _ = try Session.controls(next, step)
+                                let prepared = try Session.preparedControls(next, step)
                                 found = next
+                                document = next
+                                targets = prepared.0
+                                button = prepared.1
                                 break
                             } catch Stop.failed("field_not_found") {
                                 // Same-document/SPA transitions can expose the
@@ -276,7 +315,6 @@ final class Session {
                 }
                 guard let next = found else { throw Stop.failed("timeout") }
                 document = next
-                (targets, button) = try Session.controls(document, step)
             }
             try checkDocument(step)
             let (current, currentButton) = try Session.controls(document, step)

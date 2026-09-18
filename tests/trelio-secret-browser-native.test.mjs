@@ -31,14 +31,17 @@ context.browserSteps = [{
 const values = { username: "CANARY-native-user", password: "CANARY-native-password" };
 const fixture = (reply = { status: "ready" }) => {
   const requests = [];
-  let closed = false, chromeCalls = 0, builds = 0;
+  let closed = false, chromeCalls = 0, chromePreflights = 0, builds = 0;
   return {
     requests,
     get closed() { return closed; },
     get chromeCalls() { return chromeCalls; },
+    get chromePreflights() { return chromePreflights; },
     get builds() { return builds; },
     args: {
       context: structuredClone(context), targetUrl, platform: "darwin",
+      profileDirectory: "/synthetic/private/profile",
+      ensurePrivateDirectory: async () => {},
       buildHelper: async () => { builds++; return "/synthetic/private/helper"; },
       openChannel: () => ({
         request: async (request) => {
@@ -47,6 +50,18 @@ const fixture = (reply = { status: "ready" }) => {
         },
         close: () => { closed = true; },
       }),
+      prepareChrome: async (input) => {
+        chromePreflights++;
+        assert.doesNotMatch(JSON.stringify(input), /CANARY/u);
+        return {
+          fill: async ({ secretValues }) => {
+            chromeCalls++;
+            assert.deepEqual(secretValues, values);
+            return { outcome: "succeeded" };
+          },
+          close: () => { closed = true; },
+        };
+      },
       runChrome: async () => { chromeCalls++; return { outcome: "succeeded" }; },
     },
   };
@@ -86,9 +101,10 @@ for (const reasonCode of ["access_required", "application_unavailable", "accessi
     const session = await prepareSecretBrowserSession(f.args);
     assert.equal(session.surface, "chrome");
     assert.equal(session.fallbackReason, reasonCode);
-    assert.equal(f.chromeCalls, 0, "selection never launches Chrome before checkout");
+    assert.equal(f.chromePreflights, 1, "isolated Chrome must be ready before checkout");
+    assert.equal(f.chromeCalls, 0);
     assert.ok(f.closed);
-    await session.fill({});
+    await session.fill({ secretValues: values });
     assert.equal(f.chromeCalls, 1);
     assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/);
   });
@@ -106,7 +122,9 @@ test("embedded-only forbids fallback; explicit Chrome does not inspect other app
   const f = fixture({ status: "unavailable", reasonCode: "access_required" });
   await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), EmbeddedBrowserUnavailable);
   const g = fixture();
-  assert.equal((await prepareSecretBrowserSession({ ...g.args, mode: "chrome" })).surface, "chrome");
+  const chrome = await prepareSecretBrowserSession({ ...g.args, mode: "chrome" });
+  assert.equal(chrome.surface, "chrome");
+  assert.equal(g.chromePreflights, 1);
   assert.equal(g.builds, 0);
 });
 
@@ -177,6 +195,7 @@ test("consume must preserve every binding including application, submit control,
     (c) => { c.clientFamily = "claude-code"; },
     (c) => { c.secretVersion++; },
     (c) => { c.runId = context.grantId; },
+    (c) => { c.browserSteps[0].activationSelector = "#other-mode"; },
     (c) => { c.browserSteps[0].submitSelector = "#other-button"; },
     (c) => { c.browserSteps[0].fields.reverse(); },
   ]) {
@@ -208,6 +227,7 @@ test("multi-step native fill requires explicit advance button; legacy plans rema
   const g = fixture();
   const session = await prepareSecretBrowserSession({ ...g.args, context: c });
   assert.equal(session.fallbackReason, "step_unsupported");
+  assert.equal(g.chromePreflights, 1);
   assert.equal(g.builds, 0);
 });
 test("native helper compiles locally, caches exact bytes and rejects an unprepared value without UI access", {
@@ -279,17 +299,21 @@ test("Windows UIA core fills a real synthetic document without keyboard focus an
 const controllerFixture = (navigateAfterFirst = false) => {
   const location = { origin: context.targetOrigin, href: targetUrl };
   const events = [];
-  class Input {
-    constructor(id) { this.id = id; this.type = "text"; this.isConnected = true; this.disabled = false; this.readOnly = false; }
+  class Element {
+    constructor(id) { this.id = id; this.isConnected = true; this.disabled = false; }
+    getBoundingClientRect() { return { width: 10, height: 10 }; }
+    hasAttribute(name) { return name === "disabled" && this.disabled; }
+  }
+  class Input extends Element {
+    constructor(id) { super(id); this.type = "text"; this.readOnly = false; }
     get value() { return this.stored || ""; }
     set value(value) { this.stored = value; events.push(this.id); }
-    getBoundingClientRect() { return { width: 10, height: 10 }; }
     dispatchEvent() { if (navigateAfterFirst && this.id === "username") location.href += "changed"; }
   }
-  class Button extends Input { click() { events.push("submit"); } }
+  class Button extends Element { click() { events.push("submit"); } }
   const fields = { "#username": new Input("username"), "#password": new Input("password"), "#login": new Button("login") };
   const realm = vm.createContext({
-    location, HTMLInputElement: Input, HTMLTextAreaElement: class {}, HTMLButtonElement: Button,
+    location, HTMLElement: Element, HTMLInputElement: Input, HTMLTextAreaElement: class extends Input {}, HTMLButtonElement: Button,
     InputEvent: class {}, Event: class {},
     getComputedStyle: () => ({ display: "block", visibility: "visible" }),
     document: { querySelectorAll: (selector) => fields[selector] ? [fields[selector]] : [] },
@@ -309,4 +333,57 @@ test("a synchronous page navigation stops the next Chrome setter and submit", ()
   assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "failed");
   assert.deepEqual(f.events, ["username"]);
   assert.equal(f.fields["#password"].value, "");
+});
+
+test("a signed activation action exposes the exact fields before any value is delivered", () => {
+  const f = controllerFixture();
+  const mode = new f.realm.HTMLElement("phone-mode");
+  mode.click = () => {
+    f.events.push("activate");
+    f.fields["#username"] = new f.realm.HTMLInputElement("username");
+  };
+  f.fields["#phone-mode"] = mode;
+  delete f.fields["#username"];
+  vm.runInContext(createSecretBrowserControllerExpression(
+    context.targetOrigin,
+    context.browserSteps[0].fields,
+    "#login",
+    targetUrl,
+    "#phone-mode",
+  ), f.realm);
+  assert.deepEqual(
+    { ...f.realm.__trelioSecretBrowserController() },
+    { status: "waiting", activationPerformed: true },
+  );
+  assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
+  assert.deepEqual(f.events, ["activate"], "preflight remains value-free");
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "succeeded");
+  assert.deepEqual(f.events, ["activate", "username", "password", "submit"]);
+});
+
+test("Chrome accepts exact selector replacements and presentation-only phone masks", () => {
+  const f = controllerFixture();
+  const originalPhone = f.fields["#username"];
+  originalPhone.type = "tel";
+  originalPhone.dispatchEvent = () => {
+    const replacement = new f.realm.HTMLInputElement("username");
+    replacement.type = "tel";
+    replacement.stored = "+7 (999) 111-22-33";
+    f.fields["#username"] = replacement;
+    f.fields["#login"] = new f.realm.HTMLButtonElement("login");
+  };
+  const maskedValues = { username: "79991112233", password: values.password };
+  assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
+  assert.equal(f.realm.__trelioSecretBrowserApply(maskedValues).outcome, "succeeded");
+  assert.deepEqual(f.events, ["username", "password", "submit"]);
+});
+
+test("native preparation carries an exact activation id without credential values", async () => {
+  const f = fixture();
+  f.args.context.browserSteps[0].activationSelector = "#phone-mode";
+  const session = await prepareSecretBrowserSession(f.args);
+  assert.equal(session.surface, "embedded");
+  assert.equal(f.requests[0].steps[0].activationId, "phone-mode");
+  assert.doesNotMatch(JSON.stringify(f.requests[0]), /CANARY/u);
+  await session.close();
 });

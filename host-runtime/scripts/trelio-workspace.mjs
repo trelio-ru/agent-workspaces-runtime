@@ -1309,6 +1309,12 @@ export const formatBridgeCommandError = (error, command = "") => {
     }
     return `${error.code}: ${detail} Повторно откройте этот exact Run через Trelio, чтобы получить новую lease, затем повторите исходное действие один раз.`;
   }
+  if (error instanceof SecretBrowserFillError) {
+    // The reason code is deliberately content-free and already belongs to the
+    // audit allowlist. Returning it here makes a pre-consume failure actionable
+    // without exposing URL, selector, page text or credential values.
+    return `${error.message} [reasonCode=${error.reasonCode}]`;
+  }
   if (
     !(error instanceof TrelioApiError)
     || error.code !== COMPANY_STORAGE_BALANCE_REQUIRED_CODE
@@ -14717,25 +14723,23 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
 
   const browserMode = normalizeSecretBrowserMode(options.browser);
   let browserContext = null;
-  if (browserMode !== "chrome") {
-    // GET не содержит value/ciphertext, не claim-ит grant и безопасен для
-    // bounded transport retry. Старый backend может не иметь этого маршрута;
-    // только его 404 допускает прежний Chrome flow с обычным atomic consume.
-    // 401/403, 5xx и неясный transport не являются разрешением на downgrade.
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        const contextResponse = await request(workspaceOrigin, token,
-          `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?runId=${metadata.runId}`);
-        browserContext = await contextResponse.json();
-        if (browserContext.grantId !== grantId || browserContext.runId !== metadata.runId) {
-          throw new SecretBrowserFillError("Browser context принадлежит другому grant или Run.");
-        }
-        break;
-      } catch (error) {
-        if (browserMode === "auto" && error instanceof TrelioApiError && error.statusCode === 404) break;
-        if (!isRetryableBrowserOutcomeError(error) || attempt === 3) throw error;
-        await wait(250 * attempt);
+  // GET не содержит value/ciphertext, не claim-ит grant и безопасен для
+  // bounded transport retry. Он нужен и forced-Chrome compatibility calls:
+  // current runtime must preflight its own isolated profile before consume.
+  // Только 404 старого backend допускает прежний lazy Chrome flow.
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const contextResponse = await request(workspaceOrigin, token,
+        `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?runId=${metadata.runId}`);
+      browserContext = await contextResponse.json();
+      if (browserContext.grantId !== grantId || browserContext.runId !== metadata.runId) {
+        throw new SecretBrowserFillError("Browser context принадлежит другому grant или Run.");
       }
+      break;
+    } catch (error) {
+      if (browserMode !== "embedded" && error instanceof TrelioApiError && error.statusCode === 404) break;
+      if (!isRetryableBrowserOutcomeError(error) || attempt === 3) throw error;
+      await wait(250 * attempt);
     }
   }
   const browserSession = await prepareSecretBrowserSession({
@@ -14743,6 +14747,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     targetUrl,
     mode: browserMode,
     directory: path.join(SECRET_BROWSER_DIRECTORY, "native"),
+    profileDirectory: SECRET_BROWSER_PROFILE_DIRECTORY,
     ensurePrivateDirectory,
   });
   try {
@@ -14797,9 +14802,10 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
       });
       outcomeReported = true;
       if (result.outcome !== "succeeded") {
+        const reasonCode = result.reasonCode || "adapter_error";
         throw new SecretBrowserFillError(
-          "Trelio Secret Browser не выполнил автоматическую подстановку значения.",
-          result.reasonCode || "adapter_error",
+          `Trelio Secret Browser не выполнил автоматическую подстановку значения (${reasonCode}).`,
+          reasonCode,
         );
       }
       process.stdout.write("Секрет автоматически вставлен в exact поле; plaintext агенту не возвращался.\n");

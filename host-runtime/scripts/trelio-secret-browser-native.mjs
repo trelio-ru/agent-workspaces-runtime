@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   normalizeSecretBrowserTarget,
   normalizeSecretBrowserFieldSelector,
+  prepareSecretBrowserFill,
   runSecretBrowserFill,
   SecretBrowserFillError,
 } from "./trelio-secret-browser.mjs";
@@ -33,7 +34,7 @@ export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
     const hint = reason === "client_unsupported"
       ? " В Agent Run нет поддерживаемого hook-verified клиента Codex/Claude Code; проверьте runtime identity Run."
       : reason === "selector_unsupported"
-        ? " Native поля и submitSelector требуют точный id. Для финальной кнопки без id подготовьте заполнение без submitSelector с browser=embedded, затем нажмите заранее найденную кнопку штатным browser tool без чтения полей."
+        ? " Native activation, поля и submitSelector требуют точный id. Для финальной кнопки без id подготовьте последний step без submitSelector; backend закрепит его за embedded, после чего нажмите заранее найденную кнопку штатным browser tool без чтения полей."
         : "";
     super("Встроенный browser transport недоступен: " + reason + "." + hint, "browser_unavailable");
     this.nativeReason = reason;
@@ -94,6 +95,9 @@ export const browserFillBinding = (context) => {
       targetOrigin: step.targetOrigin,
       targetUrlSha256: step.targetUrlSha256,
       fields,
+      ...(step.activationSelector
+        ? { activationSelector: normalizeSecretBrowserFieldSelector(step.activationSelector) }
+        : {}),
       ...(step.submitSelector ? { submitSelector: normalizeSecretBrowserFieldSelector(step.submitSelector) } : {}),
     };
   });
@@ -282,16 +286,42 @@ export const openNativeSecretBrowserChannel = ({ executable, platform = process.
 
 export const prepareSecretBrowserSession = async ({
   context, targetUrl, mode = "auto", directory, ensurePrivateDirectory,
-  platform = process.platform, buildHelper = buildNativeSecretBrowserHelper,
-  openChannel = openNativeSecretBrowserChannel, runChrome = runSecretBrowserFill,
+  profileDirectory, platform = process.platform, buildHelper = buildNativeSecretBrowserHelper,
+  openChannel = openNativeSecretBrowserChannel,
+  prepareChrome = prepareSecretBrowserFill,
+  runChrome = runSecretBrowserFill,
 }) => {
   mode = normalizeSecretBrowserMode(mode);
   let channel = null;
-  const chrome = (fallbackReason) => ({
-    surface: "chrome", fallbackReason,
-    fill: (args) => runChrome(args),
-    close: () => {},
-  });
+  const chrome = async (fallbackReason) => {
+    // Current servers provide a complete value-free binding. Resolve the
+    // dedicated profile and its exact fields before the one-use grant is
+    // consumed; an ordinary Chrome tab prepared by the agent is unrelated.
+    if (context) {
+      const binding = browserFillBinding(context);
+      normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+      const prepared = await prepareChrome({
+        targetUrl,
+        targetOrigin: binding.targetOrigin,
+        targetUrlSha256: binding.targetUrlSha256,
+        browserSteps: binding.browserSteps,
+        profileDirectory,
+        ensurePrivateDirectory,
+      });
+      return {
+        surface: "chrome", fallbackReason,
+        fill: ({ secretValues }) => prepared.fill({ secretValues }),
+        close: () => prepared.close(),
+      };
+    }
+    // A 404 from a pre-context backend is the only compatibility route where
+    // Chrome can still be opened after consume; new backends never use it.
+    return {
+      surface: "chrome", fallbackReason,
+      fill: (args) => runChrome(args),
+      close: () => {},
+    };
+  };
   if (mode === "chrome") return chrome(null);
   try {
     if (!context) throw new EmbeddedBrowserUnavailable("backend_unavailable");
@@ -308,6 +338,9 @@ export const prepareSecretBrowserSession = async ({
       return {
         targetOrigin: step.targetOrigin, targetUrlSha256: step.targetUrlSha256,
         fields,
+        ...(step.activationSelector
+          ? { activationId: nativeIdFromSecretSelector(step.activationSelector) }
+          : {}),
         ...(step.submitSelector ? { submitId: nativeIdFromSecretSelector(step.submitSelector) } : {}),
       };
     });

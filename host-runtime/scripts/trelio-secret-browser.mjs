@@ -391,7 +391,13 @@ const acquireSecretBrowser = async ({
 // разрешает exact server-bound selector, но не угадывает поле: допустимо ровно
 // одно top-level совпадение. Сайт видит только значение после native setter и
 // не получает handle, callback или loopback endpoint Trelio.
-const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submitSelector, expectedUrl) => {
+const installSecretBrowserController = (
+  expectedOrigin,
+  rawFieldMappings,
+  activationSelector,
+  submitSelector,
+  expectedUrl,
+) => {
   // A later step can reuse the same URL/document/isolated world (SPA login).
   // Replace the completed controller rather than retaining its old targets.
   const fieldMappings = typeof rawFieldMappings === "string"
@@ -401,6 +407,7 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
   const state = {
     status: "waiting",
     reasonCode: null,
+    activationPerformed: false,
     targets: null,
     submitTarget: null,
   };
@@ -421,6 +428,36 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
       && style.visibility !== "hidden";
   };
 
+  const resolveUnique = (selector, invalidReason = "field_selector_invalid") => {
+    let matches;
+    try {
+      matches = document.querySelectorAll(selector);
+    } catch {
+      state.status = "failed";
+      state.reasonCode = invalidReason;
+      return null;
+    }
+    if (matches.length === 0) return undefined;
+    if (matches.length !== 1) {
+      state.status = "failed";
+      state.reasonCode = "field_ambiguous";
+      return null;
+    }
+    return matches[0];
+  };
+
+  const valuesEquivalent = (element, expectedValue) => {
+    if (element.value === expectedValue) return true;
+    // Phone widgets commonly retain the same number while inserting only
+    // presentation punctuation. Accept that exact digit sequence locally;
+    // prefixes, removed digits and arbitrary textual transforms still fail.
+    const presentationOnly = /^[\d\s()+.\-]+$/u;
+    if (!presentationOnly.test(element.value) || !presentationOnly.test(expectedValue)) return false;
+    const actualDigits = element.value.replace(/\D/gu, "");
+    const expectedDigits = expectedValue.replace(/\D/gu, "");
+    return expectedDigits.length >= 6 && actualDigits === expectedDigits;
+  };
+
   const resolveTarget = () => {
     if (state.status !== "waiting") return;
     if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)) {
@@ -428,23 +465,34 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
       state.reasonCode = "target_url_changed";
       return;
     }
-    const targets = [];
-    for (const mapping of fieldMappings) {
-      let matches;
+
+    if (activationSelector && !state.activationPerformed) {
+      const activationTarget = resolveUnique(activationSelector);
+      if (activationTarget === undefined || activationTarget === null) return;
+      const supportedInputAction = activationTarget instanceof HTMLInputElement
+        && ["button", "checkbox", "radio"].includes(activationTarget.type);
+      if (!(activationTarget instanceof HTMLElement)
+        || (activationTarget instanceof HTMLInputElement && !supportedInputAction)
+        || activationTarget instanceof HTMLTextAreaElement
+        || activationTarget.hasAttribute("disabled")
+        || !isVisible(activationTarget)
+        || typeof activationTarget.click !== "function") return;
+      // Mark first so a synchronous SPA render cannot make the controller
+      // toggle the same mode twice on the next bounded readiness poll.
+      state.activationPerformed = true;
       try {
-        matches = document.querySelectorAll(mapping.selector);
+        activationTarget.click();
       } catch {
         state.status = "failed";
-        state.reasonCode = "field_selector_invalid";
-        return;
+        state.reasonCode = "field_write_failed";
       }
-      if (matches.length === 0) return;
-      if (matches.length !== 1) {
-        state.status = "failed";
-        state.reasonCode = "field_ambiguous";
-        return;
-      }
-      const [target] = matches;
+      return;
+    }
+
+    const targets = [];
+    for (const mapping of fieldMappings) {
+      const target = resolveUnique(mapping.selector);
+      if (target === undefined || target === null) return;
       if (!isSupportedField(target) || !isVisible(target)) return;
       if (targets.some((mapping) => mapping.target === target)) {
         state.status = "failed";
@@ -455,12 +503,8 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
     }
     state.targets = targets;
     if (submitSelector) {
-      let buttons;
-      try { buttons = document.querySelectorAll(submitSelector); }
-      catch { state.status = "failed"; state.reasonCode = "field_selector_invalid"; return; }
-      if (buttons.length === 0) return;
-      if (buttons.length !== 1) { state.status = "failed"; state.reasonCode = "field_ambiguous"; return; }
-      const [button] = buttons;
+      const button = resolveUnique(submitSelector);
+      if (button === undefined || button === null) return;
       if (!(button instanceof HTMLButtonElement) || button.disabled || !isVisible(button)) return;
       state.submitTarget = button;
     }
@@ -471,6 +515,7 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
     resolveTarget();
     return {
       status: state.status,
+      ...(state.activationPerformed ? { activationPerformed: true } : {}),
       ...(state.reasonCode ? { reasonCode: state.reasonCode } : {}),
     };
   };
@@ -507,15 +552,18 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
         }
       }
 
-      for (const { fieldKey, selector, target } of state.targets) {
+      for (let index = 0; index < state.targets.length; index += 1) {
+        const { fieldKey, selector } = state.targets[index];
         // A synchronous input/change listener may navigate or replace another
-        // control after the previous setter. Recheck before every write.
+        // control after the previous setter. The grant binds the exact selector,
+        // so a unique replacement on the same exact URL is safe to reacquire.
         const current = document.querySelectorAll(selector);
         if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)
-          || current.length !== 1 || current[0] !== target
-          || !target.isConnected || !isSupportedField(target) || !isVisible(target)) {
+          || current.length !== 1 || !isSupportedField(current[0]) || !isVisible(current[0])) {
           throw new Error("target_changed");
         }
+        const target = current[0];
+        state.targets[index] = { fieldKey, selector, target };
         const prototype = target instanceof HTMLTextAreaElement
           ? HTMLTextAreaElement.prototype
           : HTMLInputElement.prototype;
@@ -530,15 +578,28 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
           data: null,
         }));
         target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        if (target.value !== value) throw new Error("value_not_retained");
+        const retained = document.querySelectorAll(selector);
+        if (retained.length !== 1 || !isSupportedField(retained[0]) || !isVisible(retained[0])
+          || !valuesEquivalent(retained[0], value)) throw new Error("value_not_retained");
+        state.targets[index] = { fieldKey, selector, target: retained[0] };
+      }
+      // A later field listener may re-render an earlier field. Validate the
+      // complete exact mapping once more before the optional submit click.
+      for (const { fieldKey, selector } of state.targets) {
+        const retained = document.querySelectorAll(selector);
+        if (retained.length !== 1 || !isSupportedField(retained[0]) || !isVisible(retained[0])
+          || !valuesEquivalent(retained[0], values[fieldKey])) throw new Error("value_lost");
       }
       if (submitSelector) {
         const buttons = document.querySelectorAll(submitSelector);
         if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)
-          || buttons.length !== 1 || buttons[0] !== state.submitTarget
-          || state.submitTarget.disabled || !isVisible(state.submitTarget)) throw new Error("submit_changed");
+          || buttons.length !== 1 || !(buttons[0] instanceof HTMLButtonElement)
+          || buttons[0].disabled || !isVisible(buttons[0])) throw new Error("submit_changed");
         // Only an explicitly granted button is clicked. No default submit,
         // Enter key or heuristic login action is inferred by the controller.
+        // A framework may have replaced the button together with a field; the
+        // exact selector, URL and uniqueness remain the signed authority.
+        state.submitTarget = buttons[0];
         state.submitTarget.click();
       }
       state.targets = null;
@@ -553,8 +614,14 @@ const installSecretBrowserController = (expectedOrigin, rawFieldMappings, submit
   };
 };
 
-export const createSecretBrowserControllerExpression = (targetOrigin, fieldMappings, submitSelector, targetUrl) => (
-  `(${installSecretBrowserController.toString()})(${JSON.stringify(targetOrigin)},${JSON.stringify(fieldMappings)},${JSON.stringify(submitSelector)},${JSON.stringify(targetUrl)})`
+export const createSecretBrowserControllerExpression = (
+  targetOrigin,
+  fieldMappings,
+  submitSelector,
+  targetUrl,
+  activationSelector,
+) => (
+  `(${installSecretBrowserController.toString()})(${JSON.stringify(targetOrigin)},${JSON.stringify(fieldMappings)},${JSON.stringify(activationSelector)},${JSON.stringify(submitSelector)},${JSON.stringify(targetUrl)})`
 );
 
 const targetOriginFromUrl = (rawUrl) => {
@@ -599,7 +666,15 @@ const readExactTargetInfo = async ({
   return targetInfo;
 };
 
-const createControllerWorld = async ({ client, sessionId, targetOrigin, fieldMappings, submitSelector, targetUrl }) => {
+const createControllerWorld = async ({
+  client,
+  sessionId,
+  targetOrigin,
+  fieldMappings,
+  activationSelector,
+  submitSelector,
+  targetUrl,
+}) => {
   const { frameTree } = await client.request("Page.getFrameTree", {}, sessionId);
   const frameId = frameTree?.frame?.id;
   if (typeof frameId !== "string") {
@@ -615,7 +690,13 @@ const createControllerWorld = async ({ client, sessionId, targetOrigin, fieldMap
   }
   await client.request("Runtime.evaluate", {
     contextId: executionContextId,
-    expression: createSecretBrowserControllerExpression(targetOrigin, fieldMappings, submitSelector, targetUrl),
+    expression: createSecretBrowserControllerExpression(
+      targetOrigin,
+      fieldMappings,
+      submitSelector,
+      targetUrl,
+      activationSelector,
+    ),
     returnByValue: true,
   }, sessionId);
   return executionContextId;
@@ -634,10 +715,8 @@ const evaluateController = async ({ client, sessionId, executionContextId, expre
   return response.result?.value;
 };
 
-export const controlSecretBrowserViaDevTools = async ({
+export const prepareSecretBrowserControllerViaDevTools = async ({
   client,
-  secretValue,
-  secretValues,
   targetUrl,
   targetOrigin,
   targetUrlSha256,
@@ -645,13 +724,12 @@ export const controlSecretBrowserViaDevTools = async ({
   browserSteps,
   fillTimeoutMs = DEFAULT_FILL_TIMEOUT_MS,
 }) => {
-  const values = secretValues ?? { value: secretValue };
   const steps = Array.isArray(browserSteps) && browserSteps.length > 0
     ? browserSteps
     : [{
       targetOrigin,
       targetUrlSha256,
-      fields: [{ fieldKey: Object.keys(values).length === 1 ? Object.keys(values)[0] : "value", selector: fieldSelector }],
+      fields: [{ fieldKey: "value", selector: fieldSelector }],
     }];
   const { targetId } = await client.request("Target.createTarget", {
     url: targetUrl,
@@ -685,11 +763,12 @@ export const controlSecretBrowserViaDevTools = async ({
   await client.request("Page.enable", {}, sessionId);
   await client.request("Runtime.enable", {}, sessionId);
 
-  for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+  const prepareStep = async (stepIndex, deadline) => {
     const step = steps[stepIndex];
     let executionContextId = null;
     let stepReached = false;
     let currentTargetInfo = null;
+    let activationCompleted = false;
 
     while (Date.now() < deadline) {
       try {
@@ -722,6 +801,7 @@ export const controlSecretBrowserViaDevTools = async ({
           sessionId,
           targetOrigin: step.targetOrigin,
           fieldMappings: step.fields,
+          activationSelector: activationCompleted ? undefined : step.activationSelector,
           submitSelector: step.submitSelector,
           targetUrl: currentTargetInfo.url,
         });
@@ -740,27 +820,19 @@ export const controlSecretBrowserViaDevTools = async ({
         continue;
       }
 
+      if (state?.activationPerformed) activationCompleted = true;
+
       if (state?.status === "ready") {
-        const stepValues = Object.fromEntries(step.fields.map(({ fieldKey }) => [fieldKey, values[fieldKey]]));
-        const expression = `globalThis.__trelioSecretBrowserApply(${JSON.stringify(stepValues)})`;
-        const result = await evaluateController({
-          client,
-          sessionId,
-          executionContextId,
-          expression,
-        }).catch(() => null);
-        if (result?.outcome !== "succeeded") {
-          return { outcome: "failed", reasonCode: "field_write_failed" };
-        }
-        break;
+        return { executionContextId, step };
       }
       if (state?.status === "failed") {
-        return {
-          outcome: "failed",
-          reasonCode: SAFE_REASON_CODES.has(state.reasonCode)
-            ? state.reasonCode
-            : "field_write_failed",
-        };
+        const reasonCode = SAFE_REASON_CODES.has(state.reasonCode)
+          ? state.reasonCode
+          : "field_write_failed";
+        throw new SecretBrowserFillError(
+          `Trelio Secret Browser отклонил value-free preflight (${reasonCode}).`,
+          reasonCode,
+        );
       }
       await wait(150);
     }
@@ -770,13 +842,75 @@ export const controlSecretBrowserViaDevTools = async ({
         stepReached ? "field_not_found" : "timeout",
       );
     }
-  }
-  return { outcome: "succeeded" };
+    throw new SecretBrowserFillError("Browser preflight завершился без готового поля.", "adapter_error");
+  };
+
+  // Chrome fallback must resolve its own tab before one-use consume. This is
+  // the critical boundary that prevents an ordinary user Chrome tab prepared
+  // by the agent from being mistaken for the isolated Trelio profile.
+  const firstPrepared = await prepareStep(0, Date.now() + fillTimeoutMs);
+  let used = false;
+  return {
+    fill: async ({ secretValue, secretValues }) => {
+      if (used) throw new SecretBrowserFillError("Повторная передача секрета запрещена.");
+      used = true;
+      const values = secretValues ?? { value: secretValue };
+      const expectedKeys = steps.flatMap((step) => step.fields.map(({ fieldKey }) => fieldKey));
+      if (!values || typeof values !== "object"
+        || expectedKeys.length !== new Set(expectedKeys).size
+        || Object.keys(values).length !== expectedKeys.length
+        || expectedKeys.some((fieldKey) => typeof values[fieldKey] !== "string")) {
+        throw new SecretBrowserFillError("Browser fill получил некорректный набор полей.");
+      }
+
+      const deadline = Date.now() + fillTimeoutMs;
+      for (let stepIndex = 0; stepIndex < steps.length; stepIndex += 1) {
+        const prepared = stepIndex === 0
+          ? firstPrepared
+          : await prepareStep(stepIndex, deadline);
+        const stepValues = Object.fromEntries(
+          prepared.step.fields.map(({ fieldKey }) => [fieldKey, values[fieldKey]]),
+        );
+        const expression = `globalThis.__trelioSecretBrowserApply(${JSON.stringify(stepValues)})`;
+        const result = await evaluateController({
+          client,
+          sessionId,
+          executionContextId: prepared.executionContextId,
+          expression,
+        }).catch(() => null);
+        if (result?.outcome !== "succeeded") {
+          return {
+            outcome: "failed",
+            reasonCode: SAFE_REASON_CODES.has(result?.reasonCode)
+              ? result.reasonCode
+              : "field_write_failed",
+          };
+        }
+      }
+      return { outcome: "succeeded" };
+    },
+  };
 };
 
-export const runSecretBrowserFill = async ({
-  secretValue,
-  secretValues,
+export const controlSecretBrowserViaDevTools = async (options) => {
+  try {
+    const controller = await prepareSecretBrowserControllerViaDevTools(options);
+    return controller.fill({
+      secretValue: options.secretValue,
+      secretValues: options.secretValues,
+    });
+  } catch (error) {
+    // Preserve the legacy one-shot helper result shape for callers that only
+    // need an outcome. The new split prepare/fill path still throws before
+    // consume, which is what the local bridge relies on.
+    if (error instanceof SecretBrowserFillError && SAFE_REASON_CODES.has(error.reasonCode)) {
+      return { outcome: "failed", reasonCode: error.reasonCode };
+    }
+    throw error;
+  }
+};
+
+export const prepareSecretBrowserFill = async ({
   targetUrl,
   targetOrigin,
   targetUrlSha256,
@@ -787,7 +921,7 @@ export const runSecretBrowserFill = async ({
   resolveBrowserExecutable = resolveTrustedSecretBrowserExecutable,
   launchBrowser = launchSecretBrowser,
   acquireBrowser = acquireSecretBrowser,
-  controlBrowser = controlSecretBrowserViaDevTools,
+  prepareController = prepareSecretBrowserControllerViaDevTools,
   browserStartTimeoutMs = DEFAULT_BROWSER_START_TIMEOUT_MS,
   fillTimeoutMs = DEFAULT_FILL_TIMEOUT_MS,
 }) => {
@@ -804,6 +938,9 @@ export const runSecretBrowserFill = async ({
         fieldKey: String(mapping.fieldKey || ""),
         selector: normalizeSecretBrowserFieldSelector(mapping.selector),
       })),
+      ...(step.activationSelector
+        ? { activationSelector: normalizeSecretBrowserFieldSelector(step.activationSelector) }
+        : {}),
       ...(step.submitSelector ? { submitSelector: normalizeSecretBrowserFieldSelector(step.submitSelector) } : {}),
     }))
     : undefined;
@@ -822,10 +959,8 @@ export const runSecretBrowserFill = async ({
       launchBrowser,
       browserStartTimeoutMs,
     });
-    return await controlBrowser({
+    const controller = await prepareController({
       client,
-      secretValue,
-      secretValues,
       targetUrl: normalizedTargetUrl,
       targetOrigin,
       targetUrlSha256,
@@ -833,14 +968,34 @@ export const runSecretBrowserFill = async ({
       browserSteps: normalizedSteps,
       fillTimeoutMs,
     });
+    let closed = false;
+    return {
+      fill: (values) => controller.fill(values),
+      close: () => {
+        if (closed) return;
+        closed = true;
+        client?.close?.();
+      },
+    };
   } catch (error) {
+    client?.close?.();
     if (error instanceof SecretBrowserFillError) throw error;
     throw new SecretBrowserFillError(
       "Trelio Secret Browser завершился локальной ошибкой.",
       "adapter_error",
       { cause: error },
     );
+  }
+};
+
+export const runSecretBrowserFill = async (options) => {
+  const session = await prepareSecretBrowserFill(options);
+  try {
+    return await session.fill({
+      secretValue: options.secretValue,
+      secretValues: options.secretValues,
+    });
   } finally {
-    client?.close?.();
+    session.close();
   }
 };

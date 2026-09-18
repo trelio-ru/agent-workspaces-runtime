@@ -133,6 +133,7 @@ import {
   normalizeSecretBrowserTarget,
   resolveTrustedSecretBrowserExecutable,
   runSecretBrowserFill,
+  SecretBrowserFillError,
 } from "../host-runtime/scripts/trelio-secret-browser.mjs";
 import { pluginDirectory, pluginRepositoryRoot } from "./test-layout.mjs";
 
@@ -726,6 +727,13 @@ test("storage billing blocker preserves the current Run and gives one exact reco
     /^STALE_FENCING_TOKEN:.*не выполняйте автоматический takeover/u,
   );
   assert.equal(formatBridgeCommandError(new Error("обычная ошибка"), "finish"), "обычная ошибка");
+  assert.equal(
+    formatBridgeCommandError(
+      new SecretBrowserFillError("Browser preflight failed.", "field_not_found"),
+      "secret",
+    ),
+    "Browser preflight failed. [reasonCode=field_not_found]",
+  );
 });
 
 test("encrypted draft reuse requires an exact head, scope and writer device", () => {
@@ -6045,6 +6053,13 @@ test("Trelio Secret Browser transports a value once through its isolated control
     assert.equal(secretBearingRequests.length, 1);
     assert.equal(secretBearingRequests[0].method, "Runtime.evaluate");
     assert.match(secretBearingRequests[0].params.expression, /__trelioSecretBrowserApply/u);
+    const readinessIndex = devToolsRequests.findIndex((request) => (
+      request.method === "Runtime.evaluate"
+      && request.params.expression.includes("__trelioSecretBrowserController?.()")
+    ));
+    const deliveryIndex = devToolsRequests.indexOf(secretBearingRequests[0]);
+    assert.ok(readinessIndex >= 0 && readinessIndex < deliveryIndex,
+      "the isolated profile must finish value-free preflight before secret delivery");
 
     const preferences = JSON.parse(await readFile(path.join(profileDirectory, "Default", "Preferences"), "utf8"));
     assert.equal(preferences.credentials_enable_service, false);
@@ -6771,6 +6786,17 @@ const verifyEncryptedSecretApiRouting = async (dedicatedDataPlane) => {
         return fieldSelector === "#missing"
           ? { outcome: "failed", reasonCode: "field_not_found" }
           : { outcome: "succeeded" };
+      }
+      export async function prepareSecretBrowserFill(options) {
+        return {
+          fill: ({ secretValues }) => runSecretBrowserFill({
+            ...options,
+            secretValues,
+            fieldSelector: options.fieldSelector
+              || options.browserSteps?.[0]?.fields?.at(-1)?.selector,
+          }),
+          close: () => {},
+        };
       }
     `;
     await writeFile(preloadPath, `
