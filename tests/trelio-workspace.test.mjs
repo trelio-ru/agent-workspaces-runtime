@@ -2755,6 +2755,196 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
   }
 });
 
+test("legacy layout migration ignores only safe OS metadata and reports exact blockers", {
+  timeout: 20_000,
+}, async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-legacy-layout-"));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const workspaceId = "41414141-4141-4141-8141-414141414141";
+  const legacyRunId = "42424242-4242-4242-8242-424242424242";
+  const targetRunId = "43434343-4343-4343-8343-434343434343";
+  const targetExport = await createExportBundle(path.join(temporaryDirectory, "target"), {
+    "WORKSPACE_CONTEXT.md": "# Migrated persistent workspace\n",
+    "result.md": "new Run content\n",
+  });
+  let startCount = 0;
+  let serverError = null;
+
+  const serializeRun = (id, status) => ({
+    id,
+    status,
+    leaseId: "44444444-4444-4444-8444-444444444444",
+    fencingToken: 1,
+    baseHead: targetExport.head,
+    draftHead: null,
+    contextHeadsJson: {},
+    agentInstructionsSnapshotJson: {
+      schemaVersion: 1,
+      company: null,
+      project: null,
+      compiledMarkdown: "# Рабочие правила агентов Trelio\n",
+    },
+    userProfileSnapshotJson: {
+      schemaVersion: 1,
+      profile: null,
+      compiledMarkdown: "# Как агенту работать со мной\n",
+    },
+  });
+
+  const server = createServer((request, response) => {
+    try {
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers.authorization, "Bearer integration-token");
+      response.setHeader("content-type", "application/json");
+
+      if (request.url === "/api/agent-workspaces/bridge-compatibility") {
+        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        return;
+      }
+      if (request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
+        response.end(JSON.stringify({
+          suite: "trelio-e2ee-v1",
+          state: "plain",
+          company: testCompany,
+        }));
+        return;
+      }
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}`
+      ) {
+        response.end(JSON.stringify({
+          workspace: { id: workspaceId, acceptedHead: targetExport.head },
+          company: testCompany,
+          runs: [serializeRun(legacyRunId, "accepted")],
+          checkpoints: [],
+        }));
+        return;
+      }
+      if (
+        request.method === "POST"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs`
+      ) {
+        startCount += 1;
+        response.end(JSON.stringify({
+          run: serializeRun(targetRunId, "running"),
+          workspace: { id: workspaceId, acceptedHead: targetExport.head },
+          company: testCompany,
+        }));
+        return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${targetRunId}/bundle`) {
+        response.setHeader("content-type", "application/vnd.git.bundle");
+        response.end(targetExport.bundle);
+        return;
+      }
+      response.statusCode = 404;
+      response.end();
+    } catch (error) {
+      serverError = error;
+      response.statusCode = 500;
+      response.end(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  try {
+    await mkdir(homeDirectory, { recursive: true });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const serverAddress = server.address();
+    assert.ok(serverAddress && typeof serverAddress === "object");
+    const origin = `http://127.0.0.1:${serverAddress.port}`;
+    await writeTestCredential(homeDirectory, origin);
+
+    const rootDirectory = path.join(homeDirectory, "Trelio Workspaces", workspaceId);
+    const legacyRoot = path.join(rootDirectory, legacyRunId);
+    const legacyWorkspaceDirectory = path.join(legacyRoot, "workspace");
+    await mkdir(legacyWorkspaceDirectory, { recursive: true });
+    await runGit(legacyWorkspaceDirectory, ["init", "--initial-branch=trelio-candidate"]);
+    await runGit(legacyWorkspaceDirectory, ["config", "user.name", "Trelio Bridge Test"]);
+    await runGit(legacyWorkspaceDirectory, ["config", "user.email", "bridge-test@trelio.local"]);
+    await writeFile(
+      path.join(legacyWorkspaceDirectory, "WORKSPACE_CONTEXT.md"),
+      "# Legacy Run\n",
+      "utf8",
+    );
+    await runGit(legacyWorkspaceDirectory, ["add", "--all"]);
+    await runGit(legacyWorkspaceDirectory, ["commit", "-m", "Legacy Run"]);
+    const legacyHead = (await runGit(
+      legacyWorkspaceDirectory,
+      ["rev-parse", "HEAD"],
+    )).stdout.trim();
+    await writeFile(path.join(legacyRoot, ".trelio-run.json"), JSON.stringify({
+      schemaVersion: 3,
+      origin,
+      workspaceId,
+      runId: legacyRunId,
+      workspaceDirectory: legacyWorkspaceDirectory,
+      materializedHead: legacyHead,
+      objects: [],
+    }));
+
+    const command = [bridgePath, "open", "--origin", origin, "--workspace", workspaceId];
+    const executionOptions = {
+      cwd: temporaryDirectory,
+      encoding: "utf8",
+      timeout: 10_000,
+      env: { ...process.env, HOME: homeDirectory },
+    };
+    const readStructuredBridgeError = async () => {
+      const error = await execFileAsync(process.execPath, command, executionOptions)
+        .then(() => null, (value) => value);
+      assert.ok(error);
+      assert.match(error.stderr, /^Ошибка: \{/u);
+      return JSON.parse(error.stderr.trim().slice("Ошибка: ".length));
+    };
+
+    await mkdir(path.join(rootDirectory, ".DS_Store"));
+    const unsafeMetadataError = await readStructuredBridgeError();
+    assert.equal(unsafeMetadataError.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
+    assert.deepEqual(unsafeMetadataError.details.blockingEntries, [{
+      name: ".DS_Store",
+      entryType: "directory",
+      reasonCode: "SYSTEM_METADATA_NOT_REGULAR_FILE",
+    }]);
+    assert.equal(unsafeMetadataError.details.rootDirectory, rootDirectory);
+    assert.equal(unsafeMetadataError.details.automaticChangesPerformed, false);
+    assert.equal(startCount, 0, "unsafe metadata must fail before server Run creation");
+
+    await rm(path.join(rootDirectory, ".DS_Store"), { recursive: true });
+    await writeFile(path.join(rootDirectory, ".DS_Store"), Buffer.alloc(6 * 1024));
+    await writeFile(path.join(rootDirectory, "keep-me.txt"), "user content\n", "utf8");
+    const unknownEntryError = await readStructuredBridgeError();
+    assert.equal(unknownEntryError.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
+    assert.deepEqual(unknownEntryError.details.blockingEntries, [{
+      name: "keep-me.txt",
+      entryType: "file",
+      reasonCode: "UNRECOGNIZED_ENTRY",
+    }]);
+    assert.equal(startCount, 0, "unknown content must fail before server Run creation");
+
+    await rm(path.join(rootDirectory, "keep-me.txt"));
+    const opened = await execFileAsync(process.execPath, command, executionOptions);
+    assert.equal(opened.stdout.trim(), path.join(rootDirectory, "workspace"));
+    assert.equal(startCount, 1);
+    assert.equal((await stat(path.join(rootDirectory, ".DS_Store"))).size, 6 * 1024);
+    assert.equal(
+      await readFile(path.join(rootDirectory, "workspace", "result.md"), "utf8"),
+      "new Run content\n",
+    );
+    assert.equal(await pathExists(legacyRoot), true, "legacy Run history must remain untouched");
+    assert.ifError(serverError);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    if (process.platform !== "win32") {
+      await execFileAsync("chmod", ["-R", "u+w", temporaryDirectory]).catch(() => undefined);
+    }
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("future Runs reuse one persistent Workspace folder and sync accepted head before start", {
   timeout: 20_000,
 }, async () => {

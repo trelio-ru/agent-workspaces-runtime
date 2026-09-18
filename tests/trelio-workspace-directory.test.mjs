@@ -14,12 +14,15 @@ import {
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
   WorkspaceDirectoryRequiredError,
+  WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
   WORKSPACE_DIRECTORY_REQUIRED,
+  WORKSPACE_LAYOUT_MIGRATION_BLOCKED,
   WORKSPACE_LOCAL_RECOVERY_REQUIRED,
   WORKSPACE_RUN_RECLAIM_REQUIRED,
   parseWorkspaceDirectoryRequiredError,
+  parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
 } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
@@ -219,6 +222,66 @@ test("local change recovery preserves bounded source evidence and an exact safe 
     return true;
   });
   assert.equal(calls, 1, "recovery must not move files or retry open automatically");
+});
+
+test("legacy layout blockers preserve the exact root and bounded entries for the agent", async () => {
+  const rootDirectory = path.resolve(os.tmpdir(), "legacy workspace root");
+  const blockingEntries = Array.from({ length: 25 }, (_, index) => ({
+    name: index === 0 ? ".DS_Store" : `unexpected-${index}.txt`,
+    entryType: index === 0 ? "directory" : "file",
+    reasonCode: index === 0
+      ? "SYSTEM_METADATA_NOT_REGULAR_FILE"
+      : "UNRECOGNIZED_ENTRY",
+  }));
+  const error = new WorkspaceLayoutMigrationBlockedError({
+    workspaceId,
+    rootDirectory,
+    blockingEntries,
+  });
+  assert.equal(error.details.blockingEntries.length, 20);
+  assert.equal(error.details.omittedBlockingEntryCount, 5);
+  assert.equal(error.details.automaticChangesPerformed, false);
+  const stderr = `Ошибка: ${formatBridgeCommandError(error, "open")}\n`;
+  assert.deepEqual(
+    parseWorkspaceLayoutMigrationBlockedError(stderr, workspaceId)?.toJSON(),
+    error.toJSON(),
+  );
+
+  let calls = 0;
+  await assert.rejects(handleTrelioWorkspaceActionOperation(origin, {
+    schemaVersion: 1,
+    operation: "open",
+    parameters: { workspaceId, runId: newRun },
+  }, {
+    runBridge: async () => {
+      calls += 1;
+      throw Object.assign(new Error("child failed"), { stderr });
+    },
+  }), (actual) => {
+    assert.equal(actual.code, WORKSPACE_LAYOUT_MIGRATION_BLOCKED);
+    assert.deepEqual(actual.details, error.details);
+    assert.equal(Object.hasOwn(actual.details, "stderr"), false);
+    return true;
+  });
+  assert.equal(calls, 1, "a blocked migration must not retry or mutate the local root");
+
+  for (const mutate of [
+    (payload) => { payload.details.rootDirectory = "relative"; },
+    (payload) => { payload.details.automaticChangesPerformed = true; },
+    (payload) => { payload.details.blockingEntries[0].name = "nested/file"; },
+    (payload) => { payload.details.blockingEntries[0].reasonCode = "UNKNOWN"; },
+    (payload) => { payload.details.omittedBlockingEntryCount = -1; },
+  ]) {
+    const copy = structuredClone(error.toJSON());
+    mutate(copy);
+    assert.equal(
+      parseWorkspaceLayoutMigrationBlockedError(
+        `Ошибка: ${JSON.stringify(copy)}`,
+        workspaceId,
+      ),
+      null,
+    );
+  }
 });
 
 test("expired local Run recovery preserves the exact existing Run without retrying target open", async () => {

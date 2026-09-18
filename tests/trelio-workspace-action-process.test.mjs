@@ -10,6 +10,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const scriptsDirectory = fileURLToPath(new URL("../host-runtime/scripts/", import.meta.url));
 const origin = "https://example.test";
+const workspaceId = "33333333-3333-4333-8333-333333333333";
+const runId = "44444444-4444-4444-8444-444444444444";
 const skillAction = {
   schemaVersion: 1,
   operation: "skill_run",
@@ -20,6 +22,11 @@ const skillAction = {
     arguments: ["inspect"],
   },
 };
+const openAction = {
+  schemaVersion: 1,
+  operation: "open",
+  parameters: { workspaceId, runId },
+};
 
 // Import the real facade before replacing only this disposable copy's bridge
 // entrypoint. The subprocess then exercises the production execFile path without
@@ -27,7 +34,26 @@ const skillAction = {
 const bridgeProbe = `
 import fs from "node:fs/promises";
 await fs.appendFile(process.env.TRELIO_TEST_EXECUTIONS, "started\\n");
-if (process.env.TRELIO_TEST_CHILD_FAILURE === "1") {
+if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
+  process.stderr.write("Ошибка: " + JSON.stringify({
+    code: "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED",
+    message: "Старая локальная структура содержит блокирующие записи.",
+    details: {
+      workspaceId: process.env.TRELIO_TEST_WORKSPACE_ID,
+      rootDirectory: process.env.TRELIO_TEST_LAYOUT_ROOT,
+      operation: "open",
+      requiredAction: "inspect_workspace_root_entries",
+      automaticChangesPerformed: false,
+      blockingEntries: [{
+        name: "keep-me.txt",
+        entryType: "file",
+        reasonCode: "UNRECOGNIZED_ENTRY",
+      }],
+      omittedBlockingEntryCount: 0,
+    },
+  }) + "\\n");
+  process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_CHILD_FAILURE === "1") {
   process.stderr.write("synthetic bridge failure");
   process.exitCode = 7;
 } else {
@@ -109,7 +135,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -119,6 +145,9 @@ const createFixture = async (t) => {
         ...process.env,
         TRELIO_TEST_EXECUTIONS: executionsPath,
         TRELIO_TEST_CHILD_FAILURE: childFailure ? "1" : "0",
+        TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
+        TRELIO_TEST_LAYOUT_ROOT: workspaceDirectory,
+        TRELIO_TEST_WORKSPACE_ID: workspaceId,
       },
       timeout: 20_000,
       windowsHide: true,
@@ -205,6 +234,27 @@ test("Workspace bridge preserves a child failure without restarting or replaying
   const outcome = await fixture.run({ childFailure: true });
   assert.equal(outcome.error?.code, "TRELIO_WORKSPACE_ACTION_FAILED");
   assert.equal(outcome.error.message, "synthetic bridge failure");
+  assert.equal(outcome.executions, "started\n");
+});
+
+test("Workspace bridge preserves actionable legacy-layout blockers across the process boundary", async (t) => {
+  const fixture = await createFixture(t);
+  const outcome = await fixture.run({ action: openAction, layoutFailure: true });
+  assert.equal(outcome.error?.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
+  assert.equal(outcome.error.message.includes("Старая локальная структура"), true);
+  assert.deepEqual(outcome.error.details, {
+    workspaceId,
+    rootDirectory: fixture.workspaceDirectory,
+    operation: "open",
+    requiredAction: "inspect_workspace_root_entries",
+    automaticChangesPerformed: false,
+    blockingEntries: [{
+      name: "keep-me.txt",
+      entryType: "file",
+      reasonCode: "UNRECOGNIZED_ENTRY",
+    }],
+    omittedBlockingEntryCount: 0,
+  });
   assert.equal(outcome.executions, "started\n");
 });
 

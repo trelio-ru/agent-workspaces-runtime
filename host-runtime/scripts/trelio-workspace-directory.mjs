@@ -2,12 +2,21 @@ import path from "node:path";
 
 export const WORKSPACE_DIRECTORY_REQUIRED = "TRELIO_WORKSPACE_DIRECTORY_REQUIRED";
 export const WORKSPACE_LOCAL_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED";
+export const WORKSPACE_LAYOUT_MIGRATION_BLOCKED = "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED";
 export const WORKSPACE_RUN_RECLAIM_REQUIRED = "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED";
 const MAX_CANDIDATES = 10;
+const MAX_MIGRATION_BLOCKING_ENTRIES = 20;
 const MAX_RECOVERY_CHANGES = 200;
 const MAX_DIRECTORY_LENGTH = 4096;
 const MAX_CHANGE_LENGTH = 4096;
+const MAX_ENTRY_NAME_LENGTH = 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const MIGRATION_ENTRY_TYPES = new Set(["file", "directory", "symbolic_link", "special"]);
+const MIGRATION_REASON_CODES = new Set([
+  "UNRECOGNIZED_ENTRY",
+  "SYSTEM_METADATA_NOT_REGULAR_FILE",
+  "SYSTEM_METADATA_TOO_LARGE",
+]);
 const MESSAGE = "Для этого Agent Workspace зарегистрировано несколько локальных папок. "
   + "Повторите тот же open, указав выбранный корень в parameters.directory "
   + "(CLI: --dir). workingDirectory задаёт cwd процесса, а не явный выбор корня. "
@@ -78,6 +87,52 @@ export class WorkspaceLocalRecoveryRequiredError extends Error {
       directoryParameter: "parameters.directory",
       sourceFilesMustRemainUntouched: true,
       nextSaveActions: ["checkpoint", "pause", "finish"],
+    };
+  }
+
+  toJSON() {
+    return { code: this.code, message: this.message, details: this.details };
+  }
+}
+
+const LAYOUT_MIGRATION_MESSAGE = "Старая локальная структура Agent Workspace содержит "
+  + "записи, которые bridge не может безопасно перенести автоматически. Проверьте exact "
+  + "rootDirectory и blockingEntries; bridge ничего не перемещал и не удалял.";
+
+// Legacy-container preflight выполняется до создания нового Run, поэтому
+// model-facing envelope может безопасно назвать exact локальный root и bounded
+// top-level entries. Он не включает содержимое файлов или служебные metadata
+// прежних Run и не даёт агенту права автоматически очищать каталог.
+export class WorkspaceLayoutMigrationBlockedError extends Error {
+  constructor({ workspaceId, rootDirectory, blockingEntries }) {
+    super(LAYOUT_MIGRATION_MESSAGE);
+    this.code = WORKSPACE_LAYOUT_MIGRATION_BLOCKED;
+    const visibleEntries = blockingEntries
+      .filter((entry) => (
+        typeof entry?.name === "string"
+        && entry.name.length > 0
+        && entry.name.length <= MAX_ENTRY_NAME_LENGTH
+        && !entry.name.includes("\0")
+        && MIGRATION_ENTRY_TYPES.has(entry.entryType)
+        && MIGRATION_REASON_CODES.has(entry.reasonCode)
+        && (entry.sizeBytes === undefined
+          || (Number.isSafeInteger(entry.sizeBytes) && entry.sizeBytes >= 0))
+      ))
+      .slice(0, MAX_MIGRATION_BLOCKING_ENTRIES)
+      .map((entry) => ({
+        name: entry.name,
+        entryType: entry.entryType,
+        reasonCode: entry.reasonCode,
+        ...(entry.sizeBytes === undefined ? {} : { sizeBytes: entry.sizeBytes }),
+      }));
+    this.details = {
+      workspaceId,
+      rootDirectory,
+      operation: "open",
+      requiredAction: "inspect_workspace_root_entries",
+      automaticChangesPerformed: false,
+      blockingEntries: visibleEntries,
+      omittedBlockingEntryCount: blockingEntries.length - visibleEntries.length,
     };
   }
 
@@ -209,6 +264,51 @@ export const parseWorkspaceLocalRecoveryRequiredError = (
     changes: details.changes,
   });
   result.details.omittedChangeCount = details.omittedChangeCount;
+  return result;
+};
+
+export const parseWorkspaceLayoutMigrationBlockedError = (stderr, workspaceId) => {
+  if (typeof stderr !== "string" || stderr.length > 64 * 1024) return null;
+  const text = stderr.trim();
+  if (!text.startsWith("Ошибка: {")) return null;
+  let payload;
+  try { payload = JSON.parse(text.slice("Ошибка: ".length)); }
+  catch { return null; }
+  const details = payload?.details;
+  if (
+    payload?.code !== WORKSPACE_LAYOUT_MIGRATION_BLOCKED
+    || details?.workspaceId !== workspaceId
+    || !UUID_PATTERN.test(workspaceId)
+    || typeof details.rootDirectory !== "string"
+    || !path.isAbsolute(details.rootDirectory)
+    || details.rootDirectory.includes("\0")
+    || details.rootDirectory.length > MAX_DIRECTORY_LENGTH
+    || details.operation !== "open"
+    || details.requiredAction !== "inspect_workspace_root_entries"
+    || details.automaticChangesPerformed !== false
+    || !Array.isArray(details.blockingEntries)
+    || details.blockingEntries.length === 0
+    || details.blockingEntries.length > MAX_MIGRATION_BLOCKING_ENTRIES
+    || details.blockingEntries.some((entry) => (
+      typeof entry?.name !== "string"
+      || entry.name.length === 0
+      || entry.name.length > MAX_ENTRY_NAME_LENGTH
+      || entry.name.includes("\0")
+      || path.basename(entry.name) !== entry.name
+      || !MIGRATION_ENTRY_TYPES.has(entry.entryType)
+      || !MIGRATION_REASON_CODES.has(entry.reasonCode)
+      || (entry.sizeBytes !== undefined
+        && (!Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0))
+    ))
+    || !Number.isSafeInteger(details.omittedBlockingEntryCount)
+    || details.omittedBlockingEntryCount < 0
+  ) return null;
+  const result = new WorkspaceLayoutMigrationBlockedError({
+    workspaceId,
+    rootDirectory: details.rootDirectory,
+    blockingEntries: details.blockingEntries,
+  });
+  result.details.omittedBlockingEntryCount = details.omittedBlockingEntryCount;
   return result;
 };
 

@@ -1,6 +1,7 @@
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   parseWorkspaceDirectoryRequiredError,
+  parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
 } from "./trelio-workspace-directory.mjs";
@@ -9573,6 +9574,7 @@ export const handleTrelioWorkspaceActionOperation = async (
     const stdout = truncateWorkspaceActionOutput(error?.stdout).trim();
     const openRecovery = invocation.operation === "open"
       ? parseWorkspaceDirectoryRequiredError(error?.stderr, recoveryWorkspaceId)
+        || parseWorkspaceLayoutMigrationBlockedError(error?.stderr, recoveryWorkspaceId)
         || parseWorkspaceLocalRecoveryRequiredError(
           error?.stderr,
           recoveryWorkspaceId,

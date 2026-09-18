@@ -11,6 +11,7 @@
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import {
   WorkspaceDirectoryRequiredError,
+  WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
 } from "./trelio-workspace-directory.mjs";
@@ -1287,6 +1288,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 export const formatBridgeCommandError = (error, command = "") => {
   if (
     error instanceof WorkspaceDirectoryRequiredError
+    || error instanceof WorkspaceLayoutMigrationBlockedError
     || error instanceof WorkspaceLocalRecoveryRequiredError
     || error instanceof WorkspaceRunReclaimRequiredError
   ) {
@@ -10009,14 +10011,39 @@ const preflightWorkspaceDirectory = async ({
   // persistent root может быть создан рядом с ними, но лишь после проверки
   // каждого legacy Run по серверу и локальному Git.
   const entries = await fs.readdir(rootDirectory, { withFileTypes: true });
+  const legacyRunEntries = [];
+  const blockingEntries = [];
 
   for (const entry of entries) {
-    if (!entry.isDirectory() || !UUID_PATTERN.test(entry.name)) {
-      throw new Error(
-        "Каталог Workspace содержит неизвестные файлы и не может быть автоматически переведён на persistent-layout.",
-      );
+    const metadataInspection = await inspectBenignWorkspaceMetadataFile(rootDirectory, entry.name);
+    if (metadataInspection.isBenign || metadataInspection.missing) {
+      continue;
     }
 
+    if (entry.isDirectory() && UUID_PATTERN.test(entry.name)) {
+      legacyRunEntries.push(entry);
+      continue;
+    }
+
+    blockingEntries.push({
+      name: entry.name,
+      entryType: metadataInspection.entryType || describeDirectoryEntryType(entry),
+      reasonCode: metadataInspection.reasonCode || "UNRECOGNIZED_ENTRY",
+      ...(metadataInspection.sizeBytes === undefined
+        ? {}
+        : { sizeBytes: metadataInspection.sizeBytes }),
+    });
+  }
+
+  if (blockingEntries.length > 0) {
+    throw new WorkspaceLayoutMigrationBlockedError({
+      workspaceId,
+      rootDirectory,
+      blockingEntries,
+    });
+  }
+
+  for (const entry of legacyRunEntries) {
     const legacyRoot = path.join(rootDirectory, entry.name);
     const legacyMetadata = await readOptionalRunMetadata(legacyRoot);
 
@@ -12175,24 +12202,58 @@ const checkpoint = async (options) => withRun(async ({
   process.stdout.write(`Checkpoint сохранён: ${checkpointPayload.id}.\n`);
 });
 
-const isBenignUntrackedWorkspaceFile = async (workspaceDirectory, entry) => {
-  if (entry.status !== "??" || !BENIGN_WORKSPACE_FILE_NAMES.has(path.basename(entry.filePath))) {
-    return false;
+const inspectBenignWorkspaceMetadataFile = async (workspaceDirectory, filePath) => {
+  if (!BENIGN_WORKSPACE_FILE_NAMES.has(path.basename(filePath))) {
+    return { isBenign: false };
   }
-
   try {
-    const fileStat = await fs.lstat(path.join(workspaceDirectory, entry.filePath));
+    const fileStat = await fs.lstat(path.join(workspaceDirectory, filePath));
 
     // Имя Finder/Explorer само по себе не даёт права скрыть локальную дельту.
     // Symlink, каталог, special file и аномально большой объект остаются dirty,
     // поэтому одинаковый preflight безопасен и для plain, и для E2EE transport.
-    return fileStat.isFile()
-      && !fileStat.isSymbolicLink()
-      && fileStat.size <= MAX_BENIGN_WORKSPACE_FILE_BYTES;
+    if (fileStat.isSymbolicLink()) {
+      return {
+        isBenign: false,
+        entryType: "symbolic_link",
+        reasonCode: "SYSTEM_METADATA_NOT_REGULAR_FILE",
+      };
+    }
+    if (!fileStat.isFile()) {
+      return {
+        isBenign: false,
+        entryType: fileStat.isDirectory() ? "directory" : "special",
+        reasonCode: "SYSTEM_METADATA_NOT_REGULAR_FILE",
+      };
+    }
+    if (fileStat.size > MAX_BENIGN_WORKSPACE_FILE_BYTES) {
+      return {
+        isBenign: false,
+        entryType: "file",
+        reasonCode: "SYSTEM_METADATA_TOO_LARGE",
+        sizeBytes: fileStat.size,
+      };
+    }
+    return { isBenign: true, entryType: "file", sizeBytes: fileStat.size };
   } catch (error) {
-    if (error.code === "ENOENT") return false;
+    if (error.code === "ENOENT") return { isBenign: false, missing: true };
     throw error;
   }
+};
+
+const describeDirectoryEntryType = (entry) => {
+  if (entry.isSymbolicLink()) return "symbolic_link";
+  if (entry.isDirectory()) return "directory";
+  if (entry.isFile()) return "file";
+  return "special";
+};
+
+const isBenignUntrackedWorkspaceFile = async (workspaceDirectory, entry) => {
+  if (entry.status !== "??") return false;
+  return (await inspectBenignWorkspaceMetadataFile(
+    workspaceDirectory,
+    entry.filePath,
+  )).isBenign;
 };
 
 const renderGitStatusEntry = ({ status: entryStatus, filePath }) => {
@@ -15326,20 +15387,7 @@ const hasUnmanagedWorkspaceRootEntries = async (rootDirectory) => {
       continue;
     }
 
-    if (!BENIGN_WORKSPACE_FILE_NAMES.has(entry.name)) {
-      return true;
-    }
-
-    const entryStat = await fs.lstat(path.join(rootDirectory, entry.name));
-
-    // Finder/Explorer metadata is not user Workspace content, but имя само по
-    // себе недостаточно: каталог, symlink или аномально большой файл с таким
-    // именем остаётся fail-closed и не делает весь root удаляемым.
-    if (
-      !entryStat.isFile()
-      || entryStat.isSymbolicLink()
-      || entryStat.size > MAX_BENIGN_WORKSPACE_FILE_BYTES
-    ) {
+    if (!(await inspectBenignWorkspaceMetadataFile(rootDirectory, entry.name)).isBenign) {
       return true;
     }
   }
