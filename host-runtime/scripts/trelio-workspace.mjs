@@ -3758,13 +3758,13 @@ const normalizeRuntimeHookSessionPayload = (value) => {
  */
 export const registerAgentRuntimeHookSession = async ({
   origin = DEFAULT_ORIGIN,
+  token,
   clientSessionId,
   observation,
   publicKeySpki,
   signal,
 }) => {
   const normalizedOrigin = normalizeOrigin(origin);
-  const token = await requireToken(normalizedOrigin);
   await ensureBridgeCompatibility(normalizedOrigin, token, { signal });
   const response = await request(
     normalizedOrigin,

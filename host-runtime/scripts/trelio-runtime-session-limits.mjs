@@ -2,9 +2,10 @@
  * Shared timing contract for the approved hook and value-free diagnostics.
  *
  * Registration's abort clock starts after shell/Node startup, initial ACL
- * checks and any lock wait. The host must allow those costs as well: a
- * seven-second Windows cold start plus the eleven-second registration
- * deadline already exceeds the former fifteen-second definition.
+ * checks, any lock wait and local credential load/migration. The host must
+ * allow those costs as well: a seven-second Windows cold start plus the
+ * eleven-second network deadline already exceeds the former fifteen-second
+ * definition.
  */
 export const PRE_TOOL_USE_TIMEOUT_SECONDS = 30;
 export const RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS = 11_000;

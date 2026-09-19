@@ -442,16 +442,22 @@ const createRuntimeState = async ({
   const publicKeySpki = publicKey.export({ type: "spki", format: "der" }).toString("base64url");
   const privateKeyPkcs8 = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url");
   const {
+    requireToken,
     registerAgentRuntimeHookSession,
     writePrivateJsonFile,
   } = await loadWorkspaceBridgeModule();
 
+  // The outer hook timeout still bounds local Keychain/DPAPI work. Start the
+  // narrower shared network deadline only after the reusable device-session is
+  // available so first-run OS migration cannot consume server request time.
+  const token = await requireToken(origin);
   const registrationSignal = AbortSignal.timeout(
     RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
   );
   const registration = await retryIdempotentRequest(() => (
     registerAgentRuntimeHookSession({
       origin,
+      token,
       clientSessionId,
       observation,
       publicKeySpki,
