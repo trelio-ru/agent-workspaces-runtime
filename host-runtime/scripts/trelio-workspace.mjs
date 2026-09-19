@@ -2073,8 +2073,9 @@ export const deleteMacosBridgeSessionToken = (origin) => (
 
 export const WINDOWS_BRIDGE_DPAPI_SCRIPT = String.raw`
 $ErrorActionPreference = "Stop"
-[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+Add-Type -AssemblyName System.Security
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $Mode = [Environment]::GetEnvironmentVariable(
   "TRELIO_WINDOWS_BRIDGE_DPAPI_MODE",
   [EnvironmentVariableTarget]::Process
