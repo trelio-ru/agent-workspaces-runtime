@@ -48,6 +48,7 @@ import {
   rebuildHydratedLocalActionTaskDocuments,
   resolveMirrorPaths,
   searchCompanyContextMirror,
+  searchAgentSecretsFromMirror,
   searchWorkspaceFilesFromMirror,
   selectEncryptedProposalFilesFromManifest,
   signalLocalCompanyMirrorMutation,
@@ -920,6 +921,76 @@ test("backend search projections do not require full task or domain payloads", (
       .results.some((result) => result.type === "registry"),
     true,
   );
+});
+
+test("Agent Secret refinement reuses the canonical local index and returns only safe metadata", () => {
+  const projectedMirror = structuredClone(mirror);
+  projectedMirror.origin = "https://trelio.example";
+  const secretId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  projectedMirror.searchDocuments = [{
+    cacheKey: `agent-secret:${secretId}`,
+    id: ["agent-secret:", secretId],
+    type: "agent-secret",
+    title: "Production deploy token",
+    stableKey: ["acme/", secretId, "/agent-secret"],
+    revisionToken: "9".repeat(64),
+    referenceValues: [secretId, `/acme/agent-secrets/${secretId}/setup/`],
+    fields: [{ source: "agent-secret-name", values: ["Production deploy token"] }, {
+      source: "agent-secret-description",
+      values: ["Доступ для публикации backend"],
+    }],
+    metadata: {
+      agentSecret: {
+        id: secretId,
+        name: "Production deploy token",
+        publicDescription: "Доступ для публикации backend",
+        status: "active",
+        scopeType: "project",
+        scopeId: projectedMirror.projects[0].id,
+        publicPath: `/acme/agent-secrets/${secretId}/setup/`,
+      },
+      project: {
+        id: projectedMirror.projects[0].id,
+        slug: projectedMirror.projects[0].slug,
+        name: projectedMirror.projects[0].name,
+      },
+      task: null,
+    },
+  }];
+
+  const mixed = searchCompanyContextMirror(projectedMirror, ["deploy token"], 5);
+  assert.equal(mixed.results[0]?.type, "agent-secret");
+  assert.equal(mixed.results[0]?.agentSecret?.id, secretId);
+
+  const dedicated = searchAgentSecretsFromMirror(projectedMirror, {
+    companySlug: "acme",
+    queries: ["deploy token", "публикации backend"],
+    limit: 5,
+  });
+  assert.equal(dedicated.results.length, 1);
+  assert.deepEqual(dedicated.results[0], {
+    id: secretId,
+    name: "Production deploy token",
+    publicDescription: "Доступ для публикации backend",
+    status: "active",
+    publicPath: `/acme/agent-secrets/${secretId}/setup/`,
+    publicUrl: `https://trelio.example/acme/agent-secrets/${secretId}/setup/`,
+    scope: {
+      type: "project",
+      id: projectedMirror.projects[0].id,
+      project: projectedMirror.searchDocuments[0].metadata.project,
+      task: null,
+    },
+    matchedQueries: ["deploy token", "публикации backend"],
+    matchCount: 2,
+    preview: "Production deploy token",
+  });
+  assert.equal(handleNativeLocalContextRead(
+    projectedMirror,
+    "search_agent_secrets",
+    { query: "deploy token" },
+  ).results[0]?.id, secretId);
+  assert.doesNotMatch(JSON.stringify(dedicated), /secret-value|currentVersion|fieldSchema/u);
 });
 
 test("local task corpus keeps useful controls but excludes status and people", () => {

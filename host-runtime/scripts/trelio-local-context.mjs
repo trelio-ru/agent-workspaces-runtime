@@ -4561,6 +4561,70 @@ export const searchWorkspaceFilesFromMirror = (mirror, rawQueries, rawLimit) => 
   return { ...search, resultType: "workspace_file" };
 };
 
+/**
+ * Project the Agent Secret subset of the canonical company search index into
+ * the dedicated MCP response. The backend owns searchable fields and ACL; the
+ * host only filters the already hydrated projection before top-N ranking, so
+ * the dedicated and mixed entry points cannot drift or expose value records.
+ */
+export const searchAgentSecretsFromMirror = (mirror, rawInput) => {
+  const queries = Array.isArray(rawInput?.queries)
+    ? rawInput.queries
+    : [rawInput?.query].filter(Boolean);
+  const search = searchCompanyContextMirror(
+    mirror,
+    queries,
+    rawInput?.limit,
+    {
+      documentTypes: ["agent-secret"],
+      includeMatchDetails: true,
+    },
+  );
+  const results = search.results.map((result) => {
+    const secret = result.agentSecret;
+    if (!secret?.id || !secret?.scopeType || !secret?.scopeId) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_MIRROR_INVALID",
+        "Agent Secret search projection has no exact scope locator.",
+      );
+    }
+    return {
+      id: secret.id,
+      name: secret.name,
+      publicDescription: secret.publicDescription ?? "",
+      status: secret.status,
+      publicPath: secret.publicPath,
+      // Match the native payload whenever the hydrated mirror carries its
+      // trusted app origin, while retaining a usable relative locator for
+      // standalone mirror tests and older cached manifests.
+      publicUrl: mirror.origin
+        ? new URL(secret.publicPath, mirror.origin).toString()
+        : secret.publicPath,
+      scope: {
+        type: secret.scopeType,
+        id: secret.scopeId,
+        project: result.project ?? null,
+        task: result.task ?? null,
+      },
+      matchedQueries: result.matchedQueries,
+      matchCount: result.matchCount,
+      preview: result.preview,
+    };
+  });
+
+  return {
+    searchMode: "lexical",
+    provider: search.provider,
+    rankingPolicyVersion: search.rankingPolicyVersion,
+    company: search.company,
+    generation: search.generation,
+    queries: search.queries,
+    results,
+    pagination: search.pagination,
+    freshness: search.freshness,
+  };
+};
+
 const resolveMirrorProjectBySlug = (mirror, projectSlug) => {
   const matches = (mirror.projects ?? []).filter((project) => (
     project?.slug === projectSlug
@@ -6118,6 +6182,7 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
     );
   }
   if (nativeTool === "search_tasks") return searchTasksFromMirror(mirror, input);
+  if (nativeTool === "search_agent_secrets") return searchAgentSecretsFromMirror(mirror, input);
   if (nativeTool === "search_agent_guidance") return searchAgentGuidanceFromMirror(mirror, input);
   if (nativeTool === "get_agent_procedure") return getAgentProcedureFromMirror(mirror, input);
   if (nativeTool === "search_agent_workspace_files") {

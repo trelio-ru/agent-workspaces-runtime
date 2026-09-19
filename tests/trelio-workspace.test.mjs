@@ -5349,7 +5349,11 @@ test("workspace skill recovers stale OAuth grants without discarding existing sc
 test("workspace skill derives Agent Secret protection from company encryption", async () => {
   const workspaceSkill = await readSkillBundle("trelio-workspace-worker");
 
-  assert.match(workspaceSkill, /вызови `list_agent_secrets` точной области/u);
+  assert.match(workspaceSkill, /вызови\s+`list_agent_secrets` точной области/u);
+  assert.match(
+    workspaceSkill,
+    /`search` и `search_agent_secrets` находят только безопасные metadata/u,
+  );
   assert.match(workspaceSkill, /Режим следует точному состоянию шифрования компании, а не выбору пользователя/u);
   assert.match(workspaceSkill, /plain: `storageMode=trelio`/u);
   assert.match(workspaceSkill, /encrypted: `storageMode=company_e2ee`/u);
@@ -5370,7 +5374,7 @@ test("workspace skill derives Agent Secret protection from company encryption", 
   assert.match(workspaceSkill, /локально шифрует E2EE metadata\/values до одной атомарной записи/u);
   assert.match(workspaceSkill, /Не проси новое\s+значение специально ради доступности исключения чата/u);
   assert.match(workspaceSkill, /`nativeTool=generate_agent_secret`/u);
-  assert.match(workspaceSkill, /не зависит от `allowAgentSaveChatSecrets`/u);
+  assert.match(workspaceSkill, /не зависит от\s+`allowAgentSaveChatSecrets`/u);
   assert.match(workspaceSkill, /`userExplicitlyRequestedGeneratedPersistentStorage=true`/u);
   assert.match(workspaceSkill, /Direct\s+remote `generate_agent_secret` всегда отклоняется/u);
   assert.match(workspaceSkill, /не\s+переноси generation через shell, stdin, файл, clipboard или mirror/u);

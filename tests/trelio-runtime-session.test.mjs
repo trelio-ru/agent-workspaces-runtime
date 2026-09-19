@@ -139,6 +139,7 @@ test("hook protects context and mutation but leaves discovery and recovery open"
   assert.equal(isProtectedTrelioToolName("get_tasks"), true);
   assert.equal(isProtectedTrelioToolName("create_task"), true);
   assert.equal(isProtectedTrelioToolName("search_agent_guidance"), false);
+  assert.equal(isProtectedTrelioToolName("search_agent_secrets"), false);
   assert.equal(isProtectedTrelioToolName("get_agent_procedure"), true);
   assert.equal(isProtectedTrelioToolName("list_my_tasks"), false);
   assert.equal(isProtectedTrelioToolName("approve_agent_workspace_bridge_pairing"), false);

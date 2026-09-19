@@ -15,6 +15,7 @@ const PRIMARY_FIELD_SOURCES = new Set([
     "contact-alias",
     "registry-title",
     "regular-work-title",
+    "agent-secret-name",
 ]);
 const STRUCTURED_FIELD_SOURCES = new Set([
     "task-number",
@@ -39,6 +40,7 @@ const PROSE_FIELD_SOURCES = new Set([
     "registry-description",
     "registry-row-note",
     "regular-work-description",
+    "agent-secret-description",
 ]);
 const DERIVED_FIELD_SOURCES = new Set([
     "task-attachment",
