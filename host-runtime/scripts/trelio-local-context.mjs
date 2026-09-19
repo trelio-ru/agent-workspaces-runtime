@@ -4715,7 +4715,9 @@ const buildLocalTaskProposalProvider = (mirror, task) => ({
   automatic: true,
   provider: "local_company_context",
   server: "trelio-remote-skills",
-  contextTool: "get_trelio_local_proposal_context",
+  contextTool: "continue_trelio_local_action",
+  contextSchemaVersion: 1,
+  contextRoute: "proposal_context",
   renderTool: "render_trelio_local_proposal",
   companySlug: mirror.company.slug,
   target: {
@@ -11035,21 +11037,6 @@ export const handleTrelioLocalWorkspaceOperation = async (
   );
 };
 
-export const TRELIO_LOCAL_CONTEXT_TOOL = {
-  name: "continue_trelio_local_context",
-  description: "Compatibility alias for a previously selected local read. New routes use continue_trelio_local_action.",
-  // The trusted runtime still validates the complete legacy input below.  The
-  // alias intentionally stays schema-light during the independent backend /
-  // runtime rollout so old providerSelection payloads remain callable without
-  // charging every plain-company chat for an obsolete operation catalog.
-  inputSchema: { type: "object" },
-  annotations: {
-    readOnlyHint: true,
-    destructiveHint: false,
-    openWorldHint: false,
-  },
-};
-
 const TRELIO_LOCAL_PROPOSAL_KIND_SCHEMA = {
   type: "string",
   enum: ["comment", "status", "control_clear", "checklist"],
@@ -11078,15 +11065,6 @@ const TRELIO_LOCAL_PROPOSAL_RENDER_PAYLOAD_SCHEMA = {
     { required: ["blocks"] },
     { required: ["proposalId", "expectedRevision", "action", "confirmed"] },
   ],
-};
-
-export const TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL = {
-  name: "get_trelio_local_proposal_context",
-  description: "Compatibility alias for local proposal context. New routes use continue_trelio_local_action.",
-  inputSchema: { type: "object" },
-  annotations: {
-    readOnlyHint: true,
-  },
 };
 
 export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
@@ -11120,17 +11098,6 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
   },
 };
 
-export const TRELIO_LOCAL_WORKSPACE_TOOL = {
-  name: "continue_trelio_local_workspace",
-  description: "Compatibility alias for a selected local Workspace route. New routes use continue_trelio_local_action.",
-  inputSchema: { type: "object" },
-  annotations: {
-    readOnlyHint: false,
-    destructiveHint: true,
-    openWorldHint: false,
-  },
-};
-
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
   description: "Run bridge action. Legacy command/argv use operation=legacy_command; no shell/PATH.",
@@ -11157,14 +11124,12 @@ export const TRELIO_WORKSPACE_ACTION_TOOL = {
 export const TRELIO_LOCAL_ACTION_TOOL = {
   name: "continue_trelio_local_action",
   title: "Continue a Trelio local route",
-  description: "Run one exact server-returned local route. Pass schemaVersion, route and parameters unchanged; legacy direct action input remains supported during rollout.",
+  description: "Run one exact server-returned local route. Pass schemaVersion, route and parameters unchanged; a task proposal template adds only its chosen kind.",
   _meta: { "trelio/sensitiveInput": true },
   inputSchema: {
     type: "object",
-    anyOf: [
-      { required: ["schemaVersion", "route", "parameters"] },
-      { required: ["companySlug", "nativeTool", "arguments"] },
-    ],
+    additionalProperties: false,
+    required: ["schemaVersion", "route", "parameters"],
     properties: {
       schemaVersion: { type: "integer", const: 1 },
       route: {
@@ -11172,24 +11137,6 @@ export const TRELIO_LOCAL_ACTION_TOOL = {
         enum: ["context", "action", "proposal_context", "workspace"],
       },
       parameters: { type: "object" },
-      // Compatibility fields are deliberately optional. New provider routes
-      // put them under parameters; old backend versions still call the same
-      // tool directly with this shape until their rollout window closes.
-      companySlug: { type: "string", minLength: 1, maxLength: 120 },
-      nativeTool: {
-        type: "string",
-        minLength: 1,
-        maxLength: 128,
-        pattern: "^[a-z][a-z0-9_]{0,127}$",
-      },
-      arguments: {
-        type: "object",
-      },
-      localFilePath: {
-        type: "string",
-        minLength: 1,
-        maxLength: 8192,
-      },
     },
   },
   annotations: {

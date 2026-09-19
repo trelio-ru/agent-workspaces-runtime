@@ -1774,11 +1774,8 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   });
 
   assert.deepEqual(response.result.tools.map(({ name }) => name), [
-    "continue_trelio_local_context",
     "continue_trelio_local_action",
-    "get_trelio_local_proposal_context",
     "render_trelio_local_proposal",
-    "continue_trelio_local_workspace",
     "continue_trelio_workspace_action",
     "get_task_proposal_app_state",
     "perform_task_proposal_app_action",
@@ -1815,28 +1812,17 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     assert.equal(tool.inputSchema.additionalProperties, false);
     assert.match(tool.description, /exact Trelio settings URL/u);
   }
-  const providerTools = response.result.tools.slice(0, 6);
-  const appOnlyProposalTools = response.result.tools.slice(6, 20);
+  const providerTools = response.result.tools.slice(0, 3);
+  const appOnlyProposalTools = response.result.tools.slice(3, 17);
   const actionTool = providerTools.find(({ name }) => name === "continue_trelio_local_action");
   const workspaceActionTool = providerTools.find(({ name }) => (
     name === "continue_trelio_workspace_action"
   ));
-  const establishedProviderTools = providerTools.filter(({ name }) => (
-    name !== "continue_trelio_local_action"
-    && name !== "render_trelio_local_proposal"
-    && name !== "continue_trelio_workspace_action"
-  ));
-  assert.equal(Buffer.byteLength(JSON.stringify(establishedProviderTools), "utf8") <= 3_000, true);
   assert.equal(Buffer.byteLength(JSON.stringify(actionTool), "utf8") <= 1_000, true);
   assert.equal(Buffer.byteLength(JSON.stringify(workspaceActionTool), "utf8") <= 900, true);
   assert.equal(actionTool._meta?.["trelio/sensitiveInput"], true);
   assert.doesNotMatch(JSON.stringify(providerTools), /encrypt|e2ee|cipher|private key/iu);
-  const contextTool = providerTools.find(({ name }) => (
-    name === "get_trelio_local_proposal_context"
-  ));
   const renderTool = providerTools.find(({ name }) => name === "render_trelio_local_proposal");
-  assert.equal(contextTool.annotations.readOnlyHint, true);
-  assert.equal(contextTool._meta, undefined);
   assert.equal(renderTool.annotations.readOnlyHint, false);
   assert.equal(renderTool._meta.ui.resourceUri, "ui://trelio/task-proposals/v13.html");
   assert.deepEqual(
@@ -2628,11 +2614,15 @@ test("local proposal context returns structured data without App metadata", asyn
   const target = { runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
   const result = await handleToolCall(
     "https://trelio.example",
-    "get_trelio_local_proposal_context",
+    "continue_trelio_local_action",
     {
-      companySlug: "protected-company",
-      kind: "status",
-      payload: { target },
+      schemaVersion: 1,
+      route: "proposal_context",
+      parameters: {
+        companySlug: "protected-company",
+        kind: "status",
+        arguments: target,
+      },
     },
     {
       proposalOperation: async (_origin, input) => {
@@ -2684,12 +2674,16 @@ test("the first bridge-selected local company read records proposal routing", as
   const providerSelections = [];
   const result = await handleToolCall(
     "https://trelio.example",
-    "continue_trelio_local_context",
+    "continue_trelio_local_action",
     {
-      operation: "get_task",
-      companySlug: "protected-company",
-      projectSlug: "energy",
-      taskNumber: 33,
+      schemaVersion: 1,
+      route: "context",
+      parameters: {
+        operation: "get_task",
+        companySlug: "protected-company",
+        nativeTool: "get_task",
+        arguments: { projectSlug: "energy", taskNumber: 33 },
+      },
     },
     {
       localContextOperation: async () => ({
@@ -3737,7 +3731,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.match(frames[0].result.instructions, /Для старых command-ответов – его процедура совместимости/u);
   assert.match(frames[0].result.instructions, /Native Trelio не требует каталога/u);
-  assert.equal(frames[1].result.tools.length, 31);
+  assert.equal(frames[1].result.tools.length, 28);
 });
 
 test("Remote MCP admission expires absolutely and never caches protected wire declarations", { timeout: 15000 }, async () => {

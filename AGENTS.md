@@ -56,8 +56,8 @@ publication tooling также остаются вне этого публичн
   `parameters.arguments`). Новый native MCP-метод добавляется в backend
   capability matrix и runtime dispatcher без изменения plugin shell. Отдельный
   `render_trelio_local_proposal` сохраняется только из-за MCP App metadata, а
-  typed `continue_trelio_workspace_action` – как bridge ABI. Legacy local aliases
-  остаются schema-light только на совместимый rollout window.
+  typed `continue_trelio_workspace_action` – как bridge ABI. Старые отдельные
+  local aliases и прямой pre-envelope ABI не публикуются в MCP catalog.
 - Cross-repository tests используют реальный plugin checkout через
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
   не попадает в package.

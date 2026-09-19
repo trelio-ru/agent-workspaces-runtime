@@ -64,14 +64,11 @@ import {
   signCompanyEncryptionRecord,
 } from "./trelio-company-encryption.mjs";
 import {
-  TRELIO_LOCAL_CONTEXT_TOOL,
   TRELIO_LOCAL_ACTION_TOOL,
-  TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
   TRELIO_LOCAL_PROPOSAL_LEGACY_RESOURCE_URIS,
   TRELIO_LOCAL_PROPOSAL_RESOURCE_MIME_TYPE,
   TRELIO_LOCAL_PROPOSAL_RESOURCE_URI,
-  TRELIO_LOCAL_WORKSPACE_TOOL,
   TRELIO_WORKSPACE_ACTION_TOOL,
   TrelioLocalContextError,
   handleTrelioLocalContextOperation,
@@ -3303,11 +3300,8 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
 ];
 
 const LOCAL_TOOLS = [
-  TRELIO_LOCAL_CONTEXT_TOOL,
   TRELIO_LOCAL_ACTION_TOOL,
-  TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
-  TRELIO_LOCAL_WORKSPACE_TOOL,
   TRELIO_WORKSPACE_ACTION_TOOL,
   ...LOCAL_PROPOSAL_APP_TOOLS,
   {
@@ -5004,16 +4998,7 @@ export const handleToolCall = async (
           continuationTarget: target,
         });
   };
-  if (name === TRELIO_LOCAL_CONTEXT_TOOL.name) {
-    return runLocalContextRoute(rawArguments);
-  }
   if (name === TRELIO_LOCAL_ACTION_TOOL.name) {
-    if (rawArguments?.route === undefined) {
-      // Direct local-action input is the stable compatibility ABI used by
-      // already returned provider selections while backend and runtime release
-      // independently. New routes always enter through the typed envelope.
-      return runLocalNativeActionRoute(rawArguments);
-    }
     if (
       rawArguments?.schemaVersion !== 1
       || !rawArguments.parameters
@@ -5062,11 +5047,16 @@ export const handleToolCall = async (
         ["get_task_control_clear_proposal_context", "control_clear"],
         ["get_task_checklist_proposal_context", "checklist"],
       ]);
-      const kind = proposalKindByNativeTool.get(parameters.nativeTool);
+      // Native providerSelection responses carry the exact native method,
+      // while an exact encrypted task read already fixes the task target and
+      // needs the model to add only the semantic proposal kind it selected.
+      const kind = ["comment", "status", "control_clear", "checklist"].includes(parameters.kind)
+        ? parameters.kind
+        : proposalKindByNativeTool.get(parameters.nativeTool);
       if (!kind) {
         throw new TrelioLocalContextError(
           "LOCAL_CONTEXT_INVALID_INPUT",
-          "The selected native tool is not a local proposal-context read.",
+          "The local proposal route requires a supported kind or native proposal-context tool.",
         );
       }
       const target = typeof nativeArguments.runId === "string"
@@ -5099,9 +5089,6 @@ export const handleToolCall = async (
       "LOCAL_CONTEXT_INVALID_INPUT",
       "The selected local route is not supported by this runtime.",
     );
-  }
-  if (name === TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL.name) {
-    return runLocalProposalContextRoute(rawArguments);
   }
   if (name === TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name) {
     if (!["save", "action"].includes(rawArguments?.operation)) {
@@ -5145,13 +5132,6 @@ export const handleToolCall = async (
         configDirectory: proposalCapabilityConfigDirectory,
       },
     );
-  }
-  if (name === TRELIO_LOCAL_WORKSPACE_TOOL.name) {
-    return buildTextResult(await localWorkspaceOperation(
-      origin,
-      rawArguments,
-      { signal },
-    ));
   }
   if (name === TRELIO_WORKSPACE_ACTION_TOOL.name) {
     return buildTextResult(await workspaceActionOperation(

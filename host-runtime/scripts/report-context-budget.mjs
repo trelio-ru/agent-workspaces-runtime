@@ -10,10 +10,7 @@ import { compactRemoteDoctorPayload } from "./trelio-mcp-results.mjs";
 import { AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN } from "./trelio-workspace.mjs";
 import {
   TRELIO_LOCAL_ACTION_TOOL,
-  TRELIO_LOCAL_CONTEXT_TOOL,
-  TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
-  TRELIO_LOCAL_WORKSPACE_TOOL,
   TRELIO_WORKSPACE_ACTION_TOOL,
   fetchMirrorResult,
 } from "./trelio-local-context.mjs";
@@ -81,7 +78,7 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // from becoming a host-level App surface after local provider selection.
   // One bounded layer-key array costs 46 bytes across the provider subset and
   // removes tens of KiB from each repeated exact read in the measured fixture.
-  localProviderToolSchemasBytes: 4_600,
+  localProviderToolSchemasBytes: 2_500,
   plainCompanyTaskRunPluginLayerBytes: 89_000,
   encryptedCompanyTaskRunPluginLayerBytes: 105_500,
   localMcpInstructionsBytes: 4_200,
@@ -92,10 +89,10 @@ export const PLUGIN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   // in each triggered onboarding or diagnostics skill.
   // The prefixed ceiling counts the client's worst-case repetition of the
   // initialize instructions once per schema, not extra runtime instructions.
-  modelVisibleLocalToolSchemasBytes: 17_700,
+  modelVisibleLocalToolSchemasBytes: 15_500,
   // +schemaToolName lets doctor load one exact schema instead of every schema;
   // skill section routing adds one bounded initialize prefix, not response data.
-  clientPrefixedLocalToolSchemasBytes: 86_000,
+  clientPrefixedLocalToolSchemasBytes: 75_000,
   clientPrefixedTaskRunLocalToolSchemasBytes: 4_700,
   representativeLocalProposalResultBytes: 14_500,
   representativeLocalAttachmentResultBytes: 1_400,
@@ -113,10 +110,10 @@ export const PLUGIN_CONTEXT_TOKEN_LIMITS = Object.freeze({
   taskRunWithProposalBundlePluginLayer: 14_500,
   plainCompanyTaskRunPluginLayer: 14_800,
   encryptedCompanyTaskRunPluginLayer: 17_600,
-  localProviderToolSchemas: 1_100,
+  localProviderToolSchemas: 600,
   localMcpInstructions: 650,
-  modelVisibleLocalToolSchemas: 4_000,
-  clientPrefixedLocalToolSchemas: 15_000,
+  modelVisibleLocalToolSchemas: 3_500,
+  clientPrefixedLocalToolSchemas: 13_000,
   clientPrefixedTaskRunLocalToolSchemas: 750,
   representativeLocalProposalResult: 1_650,
   representativeLocalAttachmentResult: 200,
@@ -191,8 +188,14 @@ const buildLocalResponseMeasurements = async () => {
     contextRequest: { runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
   } };
   const result = { provider: "local_company_context", proposal };
-  const context = await handleToolCall("https://context-budget.invalid", "get_trelio_local_proposal_context", {
-    companySlug: "demo", kind: "comment", payload: { target: { runId: proposal.currentDraft.contextRequest.runId } },
+  const context = await handleToolCall("https://context-budget.invalid", "continue_trelio_local_action", {
+    schemaVersion: 1,
+    route: "proposal_context",
+    parameters: {
+      companySlug: "demo",
+      kind: "comment",
+      arguments: { runId: proposal.currentDraft.contextRequest.runId },
+    },
   }, { proposalOperation: async () => result });
   const render = await buildLocalProposalRenderResult({ result, companySlug: "demo", kind: "comment", operation: "save" });
   const attachmentPayload = {
@@ -305,16 +308,12 @@ export const buildPluginContextBudgetReport = async ({
   const localProviderToolSchemas = {
     id: "local-provider-tool-schemas",
     source: "scripts/trelio-local-context.mjs#local-provider-tools",
-    // Count the dispatcher, App renderer, ordinary Workspace bridge and the
-    // three schema-light rollout aliases exactly as the MCP server advertises
-    // them.  Omitting aliases here would make the plain-company saving look
-    // larger than the model-visible compatibility surface really is.
+    // Count the complete permanent local provider surface exactly as the MCP
+    // server advertises it. Retired rollout aliases must not silently return
+    // to the always-visible model context through this synthetic subset.
     ...measureContextText(JSON.stringify([
       TRELIO_LOCAL_ACTION_TOOL,
-      TRELIO_LOCAL_CONTEXT_TOOL,
-      TRELIO_LOCAL_PROPOSAL_CONTEXT_TOOL,
       TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
-      TRELIO_LOCAL_WORKSPACE_TOOL,
       TRELIO_WORKSPACE_ACTION_TOOL,
     ])),
   };
