@@ -158,6 +158,9 @@ test("plan is value-free and apply requires exact confirmation", async () => {
     assert.match(plan.planHash, /^[0-9a-f]{64}$/u);
     assert.deepEqual(plan.change.add, CODEX_TRELIO_DIRECT_TOOL_NAMESPACES);
     assert.doesNotMatch(JSON.stringify(plan), /must-not-leak|trelio-codex-routing-/u);
+    assert.match(plan.verification, /вернитесь в этот же чат/u);
+    assert.match(plan.verification, /Новый чат того же проекта нужен только если/u);
+    assert.doesNotMatch(plan.verification, /новую задачу/u);
 
     await assert.rejects(
       applyCodexTrelioHookRouting({ configPath, planHash: plan.planHash, confirmed: false }),
@@ -170,12 +173,16 @@ test("plan is value-free and apply requires exact confirmation", async () => {
     });
     assert.equal(applied.status, "applied");
     assert.equal(applied.restartRequired, true);
+    assert.match(applied.verification, /вернитесь в этот же чат/u);
+    assert.match(applied.verification, /Новый чат того же проекта нужен только если/u);
+    assert.doesNotMatch(applied.verification, /новую задачу/u);
     assert.match(await readFile(configPath, "utf8"), /mcp__trelio_remote_skills/u);
 
     const ready = await planCodexTrelioHookRouting({ configPath });
     assert.equal(ready.status, "ready");
     assert.equal(ready.planHash, null);
     assert.match(ready.verification, /Пользовательский config Codex/u);
+    assert.match(ready.verification, /текущем чате/u);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

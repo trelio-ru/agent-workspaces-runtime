@@ -11,6 +11,8 @@ export const CODEX_TRELIO_DIRECT_TOOL_NAMESPACES = Object.freeze([
 
 export const CODEX_ROUTING_PLAN_TOOL_NAME = "plan_codex_trelio_hook_routing";
 export const CODEX_ROUTING_APPLY_TOOL_NAME = "apply_codex_trelio_hook_routing";
+export const CODEX_ROUTING_RESTART_VERIFICATION =
+  "После apply полностью перезапустите Codex/ChatGPT, вернитесь в этот же чат и повторите одно защищённое чтение Trelio. Новый чат того же проекта нужен только если проверка здесь снова не прошла.";
 
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
@@ -657,8 +659,8 @@ const buildPublicPlan = ({ patch, planHash = null }) => ({
   planHash,
   restartRequired: patch.status === "action_required",
   verification: patch.status === "action_required"
-    ? "После apply полностью перезапустите Codex/ChatGPT, начните новую задачу и повторите одно защищённое чтение Trelio."
-    : "Пользовательский config Codex уже закрепляет Trelio MCP за direct routing; итог проверяет защищённое чтение в текущей задаче.",
+    ? CODEX_ROUTING_RESTART_VERIFICATION
+    : "Пользовательский config Codex уже закрепляет Trelio MCP за direct routing; итог проверяет защищённое чтение в текущем чате.",
 });
 
 const prepareCodexRoutingPlan = async ({
@@ -789,6 +791,6 @@ export const applyCodexTrelioHookRouting = async ({
     addedNamespaces: prepared.patch.missingNamespaces,
     requiredNamespaces: [...CODEX_TRELIO_DIRECT_TOOL_NAMESPACES],
     restartRequired: true,
-    verification: "Полностью перезапустите Codex/ChatGPT, начните новую задачу и повторите одно защищённое чтение Trelio.",
+    verification: CODEX_ROUTING_RESTART_VERIFICATION,
   };
 };

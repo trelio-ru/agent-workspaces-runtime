@@ -1865,7 +1865,10 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   assert.equal(routingPlanTool.inputSchema.additionalProperties, false);
   assert.equal(routingApplyTool.annotations.readOnlyHint, false);
   assert.equal(routingApplyTool.inputSchema.properties.confirmed.const, true);
-  assert.match(routingApplyTool.description, /полный перезапуск Codex\/ChatGPT/u);
+  assert.match(routingApplyTool.description, /полностью перезапустите Codex\/ChatGPT/u);
+  assert.match(routingApplyTool.description, /в этом же чате/u);
+  assert.match(routingApplyTool.description, /новый чат проекта нужен лишь при сбое/u);
+  assert.doesNotMatch(routingApplyTool.description, /новой задаче/u);
   const installationDiagnosticTool = response.result.tools.find(
     ({ name }) => name === "diagnose_trelio_installation",
   );
@@ -1948,7 +1951,7 @@ test("installation diagnostic centralizes local and Codex routing decisions with
       migratesLegacyBoolean: false,
     },
     restartRequired: true,
-    verification: "protected_read_in_new_task",
+    verification: "protected_read_after_restart",
   };
   const result = await handleToolCall(
     "https://trelio.ru",
