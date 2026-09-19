@@ -63,6 +63,7 @@ import {
   canOmitAgentWorkspaceHandoffFiles,
   buildRunContextSpecifications,
   buildBridgeRequestHeaders,
+  buildWindowsBridgeDpapiInvocation,
   collectAgentSkillDeviceConsentThroughLoopback,
   collectCompanyEncryptionKeyThroughLoopback,
   hardenWindowsPrivatePath,
@@ -92,6 +93,7 @@ import {
   parseAndValidateAgentSkillPackage,
   parseAgentSecretSetInput,
   parseWorkspaceObjectPointer,
+  protectWindowsBridgeSessionToken,
   recoverBridgePluginUpgrade,
   restoreRetainedCodexPluginInstallations,
   retainLoadedCodexPluginInstallation,
@@ -112,6 +114,7 @@ import {
   resolveWorkspaceBridgeConfigDirectory,
   retainCurrentContextObjects,
   updateCodexPluginMarketplace,
+  unprotectWindowsBridgeSessionToken,
   validateHandoffTaskOutcome,
   validateEncryptedAgentWorkspaceDerivedArtifacts,
   withEncryptedWorkspaceBrowserProjection,
@@ -7105,6 +7108,112 @@ test("Windows private ACL resolves inbox PowerShell without process PATH", () =>
   );
 });
 
+test("Windows DPAPI command keeps bridge tokens out of argv and environment", () => {
+  const origin = "https://dpapi-transport.test";
+  const token = "twb_token-must-stay-on-stdin";
+  const invocation = buildWindowsBridgeDpapiInvocation(origin, "protect", {
+    SystemRoot: "D:\\Windows",
+  });
+  const serializedInvocation = JSON.stringify(invocation);
+
+  assert.equal(
+    invocation.executable,
+    "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  );
+  assert.equal(invocation.args.at(-2), "-EncodedCommand");
+  assert.equal(serializedInvocation.includes(token), false);
+  assert.equal(serializedInvocation.includes(origin), false);
+  assert.equal(invocation.environment.TRELIO_WINDOWS_BRIDGE_DPAPI_MODE, "protect");
+  assert.match(
+    invocation.environment.TRELIO_WINDOWS_BRIDGE_DPAPI_ENTROPY_BASE64,
+    /^[A-Za-z0-9+/]+={0,2}$/u,
+  );
+  assert.throws(
+    () => buildWindowsBridgeDpapiInvocation(origin, "rotate"),
+    /Unsupported Windows bridge DPAPI mode/u,
+  );
+});
+
+test("Windows DPAPI protects and restores a bridge session for the current user", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const origin = "https://dpapi-roundtrip.test";
+  const token = "twb_windows-dpapi-roundtrip";
+  const ciphertext = await protectWindowsBridgeSessionToken(origin, token);
+
+  assert.notEqual(ciphertext, token);
+  assert.doesNotMatch(ciphertext, /windows-dpapi-roundtrip/u);
+  assert.equal(
+    await unprotectWindowsBridgeSessionToken(origin, ciphertext),
+    token,
+  );
+  await assert.rejects(
+    unprotectWindowsBridgeSessionToken("https://another-origin.test", ciphertext),
+    (error) => {
+      assert.match(String(error), /Windows DPAPI не выполнил операцию unprotect/u);
+      assert.doesNotMatch(String(error), new RegExp(token));
+      assert.doesNotMatch(String(error), new RegExp(ciphertext));
+      assert.equal(error.stdout, undefined);
+      assert.equal(error.stderr, undefined);
+      return true;
+    },
+  );
+});
+
+test("Windows DPAPI migrates a legacy plaintext bridge session before reuse", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-dpapi-migration-"));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const localAppDataDirectory = path.join(temporaryDirectory, "local-app-data");
+  const origin = "https://dpapi-migration.test";
+  const legacyToken = "twb_windows-legacy-plaintext";
+  const childEnvironment = {
+    ...process.env,
+    HOME: homeDirectory,
+    USERPROFILE: homeDirectory,
+    LOCALAPPDATA: localAppDataDirectory,
+  };
+  const configDirectory = resolveWorkspaceBridgeConfigDirectory({
+    environment: childEnvironment,
+    homeDirectory,
+  });
+  const credentialFile = path.join(configDirectory, "credentials.json");
+
+  try {
+    await mkdir(configDirectory, { recursive: true });
+    await writeFile(
+      credentialFile,
+      `${JSON.stringify({ [origin]: { bridgeSessionToken: legacyToken } }, null, 2)}\n`,
+      "utf8",
+    );
+
+    const migrated = await execFileAsync(
+      process.execPath,
+      [bridgePath, "login", "--origin", origin],
+      { encoding: "utf8", env: childEnvironment },
+    );
+    assert.match(migrated.stdout, /уже подключён через device-session/u);
+
+    const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    assert.equal(credentials[origin].bridgeSessionToken, undefined);
+    assert.equal(
+      credentials[origin].bridgeSessionTokenProtected?.provider,
+      "windows-dpapi-current-user",
+    );
+    assert.equal(JSON.stringify(credentials).includes(legacyToken), false);
+
+    const reused = await execFileAsync(
+      process.execPath,
+      [bridgePath, "login", "--origin", origin],
+      { encoding: "utf8", env: childEnvironment },
+    );
+    assert.match(reused.stdout, /уже подключён через device-session/u);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("Windows bridge applies and verifies a current-user-only ACL", {
   skip: process.platform !== "win32",
 }, async () => {
@@ -7188,67 +7297,163 @@ test("bridge fails closed before reading credentials from unsafe POSIX paths", {
   }
 });
 
-test("macOS bridge softly migrates an existing device-session out of Keychain", {
+test("macOS bridge migrates a legacy file session into Keychain before deleting plaintext", {
   skip: process.platform !== "darwin",
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-keychain-migration-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
   const credentialDirectory = path.join(homeDirectory, ".config", "trelio", "workspace-bridge");
-  const fakeBinaryDirectory = path.join(temporaryDirectory, "bin");
-  const securityLog = path.join(temporaryDirectory, "security.log");
-  const origin = "https://legacy-device-session.test";
-  const legacyToken = "twb_legacy-keychain-device-session";
+  const credentialFile = path.join(credentialDirectory, "credentials.json");
+  const keychainFile = path.join(temporaryDirectory, "fixture.keychain-db");
+  const keychainPassword = "synthetic-test-keychain-password";
+  const origin = `https://keychain-migration-${path.basename(temporaryDirectory).toLowerCase()}.test`;
+  const legacyToken = "twb_legacy-file-device-session";
+  const childEnvironment = {
+    ...process.env,
+    HOME: homeDirectory,
+    NODE_TEST_CONTEXT: "child-v8",
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "",
+    TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH: keychainFile,
+  };
+  const deleteKeychainFixture = () => execFileAsync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { deleteMacosBridgeSessionToken } from ${JSON.stringify(pathToFileURL(bridgePath).href)}; await deleteMacosBridgeSessionToken(process.argv[1]);`,
+      origin,
+    ],
+    { encoding: "utf8", env: childEnvironment },
+  );
 
   try {
+    await execFileAsync(
+      "/usr/bin/security",
+      ["create-keychain", "-p", keychainPassword, keychainFile],
+      { encoding: "utf8" },
+    );
+    await execFileAsync(
+      "/usr/bin/security",
+      ["unlock-keychain", "-p", keychainPassword, keychainFile],
+      { encoding: "utf8" },
+    );
+    await execFileAsync(
+      "/usr/bin/security",
+      ["set-keychain-settings", "-lut", "21600", keychainFile],
+      { encoding: "utf8" },
+    );
     await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
     await chmod(credentialDirectory, 0o700);
-    await mkdir(fakeBinaryDirectory, { recursive: true });
-    const fakeSecurity = path.join(fakeBinaryDirectory, "security");
     await writeFile(
-      fakeSecurity,
-      "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRELIO_SECURITY_LOG\"\n"
-        + "if [ \"$1\" = \"find-generic-password\" ]; then printf '%s\\n' \"$TRELIO_LEGACY_TOKEN\"; fi\n",
-      "utf8",
+      credentialFile,
+      `${JSON.stringify({ [origin]: { bridgeSessionToken: legacyToken } }, null, 2)}\n`,
+      { mode: 0o600 },
     );
-    await chmod(fakeSecurity, 0o755);
+    await chmod(credentialFile, 0o600);
 
     const result = await execFileAsync(
       process.execPath,
       [bridgePath, "login", "--origin", origin],
       {
         encoding: "utf8",
-        env: {
-          ...process.env,
-          HOME: homeDirectory,
-          PATH: `${fakeBinaryDirectory}${path.delimiter}${process.env.PATH || ""}`,
-          TRELIO_SECURITY_LOG: securityLog,
-          TRELIO_LEGACY_TOKEN: legacyToken,
-        },
+        env: childEnvironment,
       },
     );
 
     assert.match(result.stdout, /уже подключён через device-session/u);
-    const credentials = JSON.parse(await readFile(
-      path.join(credentialDirectory, "credentials.json"),
-      "utf8",
-    ));
-    assert.equal(credentials[origin].bridgeSessionToken, legacyToken);
-    const securityCalls = await readFile(securityLog, "utf8");
-    assert.match(securityCalls, /find-generic-password.*ru\.trelio\.workspace-bridge\.session/u);
-    assert.match(securityCalls, /delete-generic-password.*ru\.trelio\.workspace-bridge\.session/u);
-    assert.doesNotMatch(securityCalls, /add-generic-password/u);
+    const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
+    // Rebuild the unsigned source-reviewed helper at the same OS user. The
+    // stored item must remain reusable without SecurityAgent UI after cache
+    // cleanup or a future helper rebuild.
+    await rm(
+      path.join(credentialDirectory, "native-helpers", "bridge-keychain"),
+      { recursive: true, force: true },
+    );
+    const reused = await execFileAsync(
+      process.execPath,
+      [bridgePath, "login", "--origin", origin],
+      { encoding: "utf8", env: childEnvironment },
+    );
+    assert.match(reused.stdout, /уже подключён через device-session/u);
     assert.equal(
       (await readdir(credentialDirectory)).filter(
         (name) => name.startsWith(".keychain-device-session-migrated-"),
       ).length,
-      1,
+      0,
     );
     assert.equal((await stat(credentialDirectory)).mode & 0o777, 0o700);
     assert.equal(
-      (await stat(path.join(credentialDirectory, "credentials.json"))).mode & 0o777,
+      (await stat(credentialFile)).mode & 0o777,
       0o600,
     );
   } finally {
+    await deleteKeychainFixture().catch(() => undefined);
+    await execFileAsync(
+      "/usr/bin/security",
+      ["delete-keychain", keychainFile],
+      { encoding: "utf8" },
+    ).catch(() => undefined);
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("macOS bridge preserves plaintext without opening UI when Keychain is locked", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-locked-keychain-"));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const credentialDirectory = path.join(homeDirectory, ".config", "trelio", "workspace-bridge");
+  const credentialFile = path.join(credentialDirectory, "credentials.json");
+  const keychainFile = path.join(temporaryDirectory, "locked.keychain-db");
+  const keychainPassword = "synthetic-locked-keychain-password";
+  const origin = `https://locked-keychain-${path.basename(temporaryDirectory).toLowerCase()}.test`;
+  const legacyToken = "twb_plaintext-must-survive-a-locked-keychain";
+  const childEnvironment = {
+    ...process.env,
+    HOME: homeDirectory,
+    NODE_TEST_CONTEXT: "child-v8",
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "",
+    TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH: keychainFile,
+  };
+
+  try {
+    await execFileAsync(
+      "/usr/bin/security",
+      ["create-keychain", "-p", keychainPassword, keychainFile],
+      { encoding: "utf8" },
+    );
+    await execFileAsync(
+      "/usr/bin/security",
+      ["lock-keychain", keychainFile],
+      { encoding: "utf8" },
+    );
+    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+    await chmod(credentialDirectory, 0o700);
+    await writeFile(
+      credentialFile,
+      `${JSON.stringify({ [origin]: { bridgeSessionToken: legacyToken } }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await chmod(credentialFile, 0o600);
+
+    const result = await execFileAsync(
+      process.execPath,
+      [bridgePath, "login", "--origin", origin],
+      { encoding: "utf8", env: childEnvironment, timeout: 5_000 },
+    );
+
+    assert.match(result.stdout, /уже подключён через device-session/u);
+    assert.doesNotMatch(result.stdout, new RegExp(legacyToken));
+    assert.doesNotMatch(result.stderr, new RegExp(legacyToken));
+    const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    assert.equal(credentials[origin].bridgeSessionToken, legacyToken);
+  } finally {
+    await execFileAsync(
+      "/usr/bin/security",
+      ["delete-keychain", keychainFile],
+      { encoding: "utf8" },
+    ).catch(() => undefined);
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
@@ -8335,16 +8540,9 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-pairing-test-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
-  const fakeBinaryDirectory = path.join(temporaryDirectory, "bin");
-  const securityLog = path.join(temporaryDirectory, "security.log");
-  await mkdir(fakeBinaryDirectory, { recursive: true });
-  const fakeSecurity = path.join(fakeBinaryDirectory, "security");
-  await writeFile(
-    fakeSecurity,
-    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$TRELIO_SECURITY_LOG\"\nexit 64\n",
-    "utf8",
-  );
-  await chmod(fakeSecurity, 0o755);
+  const localAppDataDirectory = path.join(temporaryDirectory, "local-app-data");
+  const keychainFile = path.join(temporaryDirectory, "pairing.keychain-db");
+  const keychainPassword = "synthetic-pairing-keychain-password";
   const pairingId = "44444444-4444-4444-8444-444444444444";
   const userCode = "ABCD-2345";
   const deviceName = "Test workstation";
@@ -8416,11 +8614,45 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
   const childEnvironment = {
     ...process.env,
     HOME: homeDirectory,
-    PATH: `${fakeBinaryDirectory}${path.delimiter}${process.env.PATH || ""}`,
-    TRELIO_SECURITY_LOG: securityLog,
+    USERPROFILE: homeDirectory,
+    LOCALAPPDATA: localAppDataDirectory,
+    NODE_TEST_CONTEXT: "child-v8",
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "",
+    TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH: keychainFile,
   };
+  const configDirectory = resolveWorkspaceBridgeConfigDirectory({
+    environment: childEnvironment,
+    homeDirectory,
+  });
+  const deleteKeychainFixture = () => execFileAsync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { deleteMacosBridgeSessionToken } from ${JSON.stringify(pathToFileURL(bridgePath).href)}; await deleteMacosBridgeSessionToken(process.argv[1]);`,
+      origin,
+    ],
+    { encoding: "utf8", env: childEnvironment },
+  );
 
   try {
+    if (process.platform === "darwin") {
+      await execFileAsync(
+        "/usr/bin/security",
+        ["create-keychain", "-p", keychainPassword, keychainFile],
+        { encoding: "utf8" },
+      );
+      await execFileAsync(
+        "/usr/bin/security",
+        ["unlock-keychain", "-p", keychainPassword, keychainFile],
+        { encoding: "utf8" },
+      );
+      await execFileAsync(
+        "/usr/bin/security",
+        ["set-keychain-settings", "-lut", "21600", keychainFile],
+        { encoding: "utf8" },
+      );
+    }
     let firstFailure;
 
     try {
@@ -8446,13 +8678,7 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
     assert.match(firstOutput, /approve_agent_workspace_bridge_pairing/);
     assert.match(firstOutput, /не просите отдельную фразу подтверждения/);
 
-    const pairingFile = path.join(
-      homeDirectory,
-      ".config",
-      "trelio",
-      "workspace-bridge",
-      "pairings.json",
-    );
+    const pairingFile = path.join(configDirectory, "pairings.json");
     const pendingPairings = JSON.parse(await readFile(pairingFile, "utf8"));
     const localVerifier = pendingPairings[origin].codeVerifier;
     assert.equal(typeof localVerifier, "string");
@@ -8471,27 +8697,39 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
     assert.match(completed.stdout, /подключено к Trelio/);
     assert.equal(await pathExists(pairingFile), false);
 
-    const credentialFile = path.join(
-      homeDirectory,
-      ".config",
-      "trelio",
-      "workspace-bridge",
-      "credentials.json",
-    );
-    const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
-    assert.equal(
-      credentials[origin].bridgeSessionToken,
-      "twb_integration-device-session",
-    );
-    assert.equal(credentials[origin].accessToken, undefined);
-    const securityCalls = await pathExists(securityLog)
-      ? await readFile(securityLog, "utf8")
-      : "";
-    assert.doesNotMatch(
-      securityCalls,
-      /add-generic-password|ru\.trelio\.workspace-bridge\.session/u,
-      "new bridge pairing must not call macOS Keychain for device-session storage",
-    );
+    const credentialFile = path.join(configDirectory, "credentials.json");
+    const credentials = await pathExists(credentialFile)
+      ? JSON.parse(await readFile(credentialFile, "utf8"))
+      : {};
+    if (process.platform === "win32") {
+      assert.equal(credentials[origin].bridgeSessionToken, undefined);
+      assert.deepEqual(
+        {
+          schemaVersion: credentials[origin].bridgeSessionTokenProtected?.schemaVersion,
+          provider: credentials[origin].bridgeSessionTokenProtected?.provider,
+        },
+        {
+          schemaVersion: 1,
+          provider: "windows-dpapi-current-user",
+        },
+      );
+      assert.equal(
+        JSON.stringify(credentials).includes("twb_integration-device-session"),
+        false,
+      );
+    } else if (process.platform === "darwin") {
+      assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
+      assert.equal(
+        JSON.stringify(credentials).includes("twb_integration-device-session"),
+        false,
+      );
+    } else {
+      assert.equal(
+        credentials[origin].bridgeSessionToken,
+        "twb_integration-device-session",
+      );
+    }
+    assert.equal(credentials[origin]?.accessToken, undefined);
 
     const reused = await execFileAsync(process.execPath, [
       bridgePath,
@@ -8508,6 +8746,14 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    if (process.platform === "darwin") {
+      await deleteKeychainFixture().catch(() => undefined);
+      await execFileAsync(
+        "/usr/bin/security",
+        ["delete-keychain", keychainFile],
+        { encoding: "utf8" },
+      ).catch(() => undefined);
+    }
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });

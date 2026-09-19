@@ -118,6 +118,12 @@ descriptor/package read-back до activation.
 
 ## Безопасность
 
+Bridge device-session защищена login Keychain на macOS и DPAPI `CurrentUser` на
+Windows; Linux использует owner-only file fallback. Совместимый runtime
+автоматически мигрирует прежнюю файловую запись только после проверенного
+OS-protected read-back, без передачи token через argv, environment или
+диагностический stdout/stderr.
+
 См. [SECURITY.md](SECURITY.md). Не публикуйте credentials, company content,
 runtime sessions, E2EE keys, signing material и production package URLs в issue,
 fixture или log.

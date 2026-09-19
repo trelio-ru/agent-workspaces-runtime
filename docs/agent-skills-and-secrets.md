@@ -294,6 +294,20 @@ release. Старый owner-only runtime считается не приведё�
 нельзя автоматически читать/копировать/удалять, рабочая копия сохраняется до
 проверки новой.
 
+Отдельная narrow bridge device-session следует реализованному platform
+контракту generic host: login Keychain на macOS, DPAPI `CurrentUser` ciphertext
+в owner-only файле на Windows и явно названный owner-only file fallback на
+Linux. macOS/Windows миграция существующего plaintext выполняет OS-protected
+write, read-back и сравнение до atomic удаления старого поля; при любой ошибке
+рабочая копия не удаляется, текущая операция может продолжить использовать её,
+а миграция повторяется при следующем обращении. Для новой device-session такого
+файлового fallback нет: ошибка OS-хранилища завершает pairing fail-closed.
+Keychain value идёт в локально собранный
+source-reviewed Swift helper через stdin и возвращается только по anonymous fd3;
+DPAPI input – в inbox Windows PowerShell через stdin. Token не входит в argv,
+environment, stdout/stderr диагностики или runtime log. Это не Secure Enclave и
+не обещает защиту от кода, уже исполняемого тем же разблокированным OS user.
+
 Ещё не приведённый к этому контракту персональный Remote MCP PAT сохраняется в owner-only JSON, а не в
 автоматически зашифрованном vault. Его namespace использует exact
 skill/company/member и `connection=remote-mcp`; fingerprint внутри записи

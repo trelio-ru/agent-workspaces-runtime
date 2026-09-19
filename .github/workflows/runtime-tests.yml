@@ -122,7 +122,7 @@ jobs:
       - name: Run Windows ACL regressions
         run: >-
           node --test
-          --test-name-pattern="Windows ACL command|Windows bridge applies|Windows Node resolver|Windows Remote MCP launcher"
+          --test-name-pattern="Windows ACL command|Windows bridge applies|Windows DPAPI|Windows Node resolver|Windows Remote MCP launcher|bridge pairs once"
           tests/trelio-workspace.test.mjs
 
       - name: Run Windows Git prerequisite regressions

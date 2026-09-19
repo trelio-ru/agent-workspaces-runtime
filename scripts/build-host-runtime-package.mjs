@@ -60,6 +60,13 @@ const copyRuntimeSource = async (stagingDirectory) => {
     path.join(targetScripts, "native-secret-browser"),
     { recursive: true, errorOnExist: true },
   );
+  // The Keychain helper is compiled locally from reviewed source so the bridge
+  // can pass the device-session over stdin/fd3 without argv, env or log output.
+  await fs.cp(
+    path.join(SCRIPT_SOURCE, "native-bridge-keychain"),
+    path.join(targetScripts, "native-bridge-keychain"),
+    { recursive: true, errorOnExist: true },
+  );
 };
 
 const main = async () => {

@@ -5,8 +5,9 @@
  *
  * Bridge намеренно не является MCP-сервером и не передаёт OAuth token агенту.
  * Он материализует закреплённые Git-ревизии, хранит bridge device-session в
- * приватном локальном файле и отправляет на сервер только candidate bundle
- * текущего Run.
+ * системном хранилище учётных данных на macOS/Windows (с owner-only файловым
+ * fallback на Linux) и отправляет на сервер только candidate bundle текущего
+ * Run.
  */
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import {
@@ -254,9 +255,12 @@ const AGENT_RULES_SHA256_HEADER = "x-trelio-agent-rules-sha256";
 const LEGACY_OAUTH_SCOPES = "mcp:read mcp:workspaces:read mcp:workspaces:write mcp:secrets:write mcp:secrets:checkout";
 const LEGACY_KEYCHAIN_SERVICE = "ru.trelio.workspace-bridge";
 const LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE = "ru.trelio.workspace-bridge.session";
-// Keychain остаётся только для чтения/записи legacy OAuth и однократной
-// миграции старой bridge device-session. Новые device-session туда не пишутся.
-const USE_LEGACY_MACOS_KEYCHAIN = process.platform === "darwin"
+const BRIDGE_SESSION_KEYCHAIN_SERVICE = "ru.trelio.workspace-bridge.session.v2";
+const MACOS_SECURITY_EXECUTABLE = "/usr/bin/security";
+// Флаг оставлен только для изолированных source-tree тестов и локальной
+// разработки с временным HOME. Обычный desktop runtime его не устанавливает,
+// поэтому production device-session на macOS всегда проходит через Keychain.
+const USE_MACOS_KEYCHAIN = process.platform === "darwin"
   && process.env.TRELIO_WORKSPACE_DISABLE_KEYCHAIN !== "1";
 
 export const resolveWorkspaceBridgeConfigDirectory = ({
@@ -292,6 +296,19 @@ const AGENT_RULES_CACHE_FILE = path.join(CONFIG_DIRECTORY, "agent-rules.json");
 const WORKSPACE_OPEN_LOCK_DIRECTORY = path.join(CONFIG_DIRECTORY, "workspace-open-locks");
 const WORKSPACE_OPEN_LOCK_INITIALIZATION_STALE_MS = 5 * 60 * 1000;
 const SECRET_BROWSER_DIRECTORY = path.join(CONFIG_DIRECTORY, "secret-browser");
+const MACOS_BRIDGE_KEYCHAIN_SOURCE = fileURLToPath(
+  new URL("./native-bridge-keychain/BridgeKeychain.swift", import.meta.url),
+);
+const MACOS_BRIDGE_KEYCHAIN_CACHE_DIRECTORY = path.join(
+  CONFIG_DIRECTORY,
+  "native-helpers",
+  "bridge-keychain",
+);
+const MACOS_BRIDGE_KEYCHAIN_TEST_PATH = HOST_RUNTIME_VERSION === "0.0.0"
+  && process.env.NODE_TEST_CONTEXT
+  && process.env.TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH
+  ? path.resolve(process.env.TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH)
+  : null;
 // Company keys are never stored inside a materialized Workspace. Every
 // company gets one owner-only local device record plus a separate remembered
 // wrapping key; neither file contains the user-entered phrase.
@@ -1112,8 +1129,44 @@ export const inspectLocalBridgeConnection = async ({
 
   const credential = credentials?.[normalizedOrigin];
   const pairing = pairings?.[normalizedOrigin];
-  const deviceSessionConfigured = typeof credential?.bridgeSessionToken === "string"
-    && credential.bridgeSessionToken.length > 0;
+  const fileSessionConfigured = (
+    typeof credential?.bridgeSessionToken === "string"
+    && credential.bridgeSessionToken.length > 0
+  ) || (
+    credential?.bridgeSessionTokenProtected?.schemaVersion === 1
+    && credential.bridgeSessionTokenProtected.provider === "windows-dpapi-current-user"
+    && typeof credential.bridgeSessionTokenProtected.ciphertext === "string"
+    && credential.bridgeSessionTokenProtected.ciphertext.length > 0
+  );
+  let keychainSessionConfigured = false;
+  if (USE_MACOS_KEYCHAIN && configDirectory === CONFIG_DIRECTORY) {
+    try {
+      keychainSessionConfigured = Boolean(
+        await getMacosBridgeSessionToken(normalizedOrigin)
+        || await readMacosBridgeSessionToken(
+          LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE,
+          normalizedOrigin,
+        ),
+      );
+    } catch {
+      if (fileSessionConfigured) {
+        // A pre-migration owner-only token remains the working copy until an
+        // OS-protected write can be verified. Diagnosis must not declare an
+        // existing installation disconnected merely because Keychain is
+        // temporarily locked; the next operation retries migration.
+        keychainSessionConfigured = false;
+      } else {
+        return {
+          status: "attention",
+          origin: normalizedOrigin,
+          deviceSessionConfigured: false,
+          pendingPairing: false,
+          issue: "LOCAL_CONNECTION_KEYCHAIN_UNREADABLE",
+        };
+      }
+    }
+  }
+  const deviceSessionConfigured = fileSessionConfigured || keychainSessionConfigured;
   const pendingPairing = typeof pairing?.expiresAt === "string"
     && Date.parse(pairing.expiresAt) > nowMilliseconds;
   return {
@@ -1675,12 +1728,12 @@ const getKeychainValue = async (
   origin,
   { failOnUnexpectedError = false } = {},
 ) => {
-  if (!USE_LEGACY_MACOS_KEYCHAIN) {
+  if (!USE_MACOS_KEYCHAIN) {
     return null;
   }
 
   try {
-    const result = await execFileAsync("security", [
+    const result = await execFileAsync(MACOS_SECURITY_EXECUTABLE, [
       "find-generic-password",
       "-s",
       service,
@@ -1704,19 +1757,462 @@ const getKeychainValue = async (
   }
 };
 
-const deleteKeychainValue = async (service, origin) => {
-  if (!USE_LEGACY_MACOS_KEYCHAIN) {
+const secretsMatch = (left, right) => {
+  const leftBytes = Buffer.from(String(left || ""), "utf8");
+  const rightBytes = Buffer.from(String(right || ""), "utf8");
+  try {
+    return leftBytes.length === rightBytes.length
+      && crypto.timingSafeEqual(leftBytes, rightBytes);
+  } finally {
+    leftBytes.fill(0);
+    rightBytes.fill(0);
+  }
+};
+
+const assertMacosKeychainHelperFile = async (filePath, expectedMode) => {
+  const metadata = await fs.lstat(filePath);
+  const currentUserId = typeof process.getuid === "function" ? process.getuid() : null;
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("Нативный macOS Keychain helper имеет небезопасный тип.");
+  }
+  if (currentUserId !== null && metadata.uid !== currentUserId) {
+    throw new Error("Нативный macOS Keychain helper принадлежит другому пользователю.");
+  }
+  if ((metadata.mode & 0o777) !== expectedMode) {
+    throw new Error("Нативный macOS Keychain helper имеет небезопасные права.");
+  }
+};
+
+const compileMacosBridgeKeychainHelper = async (sourceFile, outputFile, cwd) => {
+  const environment = {
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    LANG: "en_US.UTF-8",
+    HOME: os.homedir(),
+    TMPDIR: os.tmpdir(),
+  };
+  try {
+    await execFileAsync("/usr/bin/swiftc", ["-O", sourceFile, "-o", outputFile], {
+      cwd,
+      env: environment,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    });
     return;
+  } catch {
+    // Full Xcode can temporarily block /usr/bin/swiftc while waiting for a
+    // licence. The separately installed Apple Command Line Tools remain a
+    // valid fixed-path compiler and SDK; never fall back to PATH/Homebrew.
+    const commandLineTools = "/Library/Developer/CommandLineTools";
+    await execFileAsync(
+      path.join(commandLineTools, "usr", "bin", "swiftc"),
+      [
+        "-O",
+        "-sdk",
+        path.join(commandLineTools, "SDKs", "MacOSX.sdk"),
+        sourceFile,
+        "-o",
+        outputFile,
+      ],
+      {
+        cwd,
+        env: environment,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+      },
+    ).catch((error) => {
+      throw new Error(
+        "Не удалось подготовить системный macOS Keychain helper; legacy bridge device-session сохранена без изменений.",
+        { cause: error },
+      );
+    });
+  }
+};
+
+const resolveMacosBridgeKeychainHelper = async () => {
+  if (!USE_MACOS_KEYCHAIN) {
+    throw new Error("macOS Keychain недоступен для текущего bridge process.");
+  }
+  const sourceBytes = await fs.readFile(MACOS_BRIDGE_KEYCHAIN_SOURCE);
+  const sourceDigest = crypto
+    .createHash("sha256")
+    .update(sourceBytes)
+    .update(`\0${process.arch}\0v1`, "utf8")
+    .digest("hex");
+  sourceBytes.fill(0);
+  const buildDirectory = path.join(
+    MACOS_BRIDGE_KEYCHAIN_CACHE_DIRECTORY,
+    sourceDigest,
+  );
+  const executable = path.join(buildDirectory, "TrelioBridgeKeychain");
+  const manifestFile = path.join(buildDirectory, "build.json");
+  const lockDirectory = path.join(buildDirectory, "build.lock");
+
+  const readVerified = async () => {
+    try {
+      await assertMacosKeychainHelperFile(executable, 0o700);
+      await assertMacosKeychainHelperFile(manifestFile, 0o600);
+      const manifest = await readPrivateJsonFile(manifestFile);
+      const binaryDigest = crypto
+        .createHash("sha256")
+        .update(await fs.readFile(executable))
+        .digest("hex");
+      if (
+        manifest.schemaVersion !== 1
+        || manifest.sourceSha256 !== sourceDigest
+        || manifest.binarySha256 !== binaryDigest
+      ) {
+        throw new Error("Нативный macOS Keychain helper не прошёл проверку целостности.");
+      }
+      return executable;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  };
+
+  await ensurePrivateDirectory(MACOS_BRIDGE_KEYCHAIN_CACHE_DIRECTORY);
+  await ensurePrivateDirectory(buildDirectory);
+  const existing = await readVerified();
+  if (existing) return existing;
+
+  let ownsLock = false;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await fs.mkdir(lockDirectory, { mode: 0o700 });
+      ownsLock = true;
+      break;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      const completed = await readVerified();
+      if (completed) return completed;
+      await wait(100);
+    }
+  }
+  if (!ownsLock) {
+    throw new Error("Другой bridge process не завершил подготовку macOS Keychain helper.");
   }
 
-  await execFileAsync("security", [
-    "delete-generic-password",
-    "-s",
-    service,
-    "-a",
-    origin,
-  ], { encoding: "utf8" }).catch(() => undefined);
+  const temporaryDirectory = path.join(
+    buildDirectory,
+    `build-${crypto.randomUUID()}`,
+  );
+  const temporaryExecutable = path.join(temporaryDirectory, "TrelioBridgeKeychain");
+  try {
+    await ensurePrivateDirectory(temporaryDirectory);
+    await compileMacosBridgeKeychainHelper(
+      MACOS_BRIDGE_KEYCHAIN_SOURCE,
+      temporaryExecutable,
+      temporaryDirectory,
+    );
+    await fs.chmod(temporaryExecutable, 0o700);
+    await assertMacosKeychainHelperFile(temporaryExecutable, 0o700);
+    const binaryDigest = crypto
+      .createHash("sha256")
+      .update(await fs.readFile(temporaryExecutable))
+      .digest("hex");
+    await fs.rename(temporaryExecutable, executable);
+    await writePrivateJsonFile(manifestFile, {
+      schemaVersion: 1,
+      sourceSha256: sourceDigest,
+      binarySha256: binaryDigest,
+    });
+    return await readVerified();
+  } finally {
+    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    await fs.rm(lockDirectory, { recursive: true, force: true });
+  }
 };
+
+const executeMacosBridgeKeychainHelper = async (requestPayload) => {
+  const executable = await resolveMacosBridgeKeychainHelper();
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, [], {
+      shell: false,
+      windowsHide: true,
+      env: {
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        LANG: "en_US.UTF-8",
+        HOME: os.homedir(),
+      },
+      // fd 3 is an anonymous result pipe. stdout/stderr stay disconnected so
+      // neither Keychain values nor native diagnostics can reach normal logs.
+      stdio: ["pipe", "ignore", "ignore", "pipe"],
+    });
+    const resultStream = child.stdio[3];
+    const chunks = [];
+    let resultBytes = 0;
+    let settled = false;
+    const wipeChunks = () => {
+      for (const chunk of chunks) chunk.fill(0);
+      chunks.length = 0;
+    };
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(() => {
+        wipeChunks();
+        reject(new Error("macOS Keychain helper превысил допустимое время."));
+      });
+    }, 10_000);
+
+    child.once("error", (error) => finish(() => {
+      wipeChunks();
+      reject(new Error(
+        "Не удалось запустить системный macOS Keychain helper.",
+        { cause: error },
+      ));
+    }));
+    resultStream?.on("data", (chunk) => {
+      resultBytes += chunk.length;
+      if (resultBytes > 128 * 1024) {
+        child.kill();
+        finish(() => {
+          wipeChunks();
+          reject(new Error("macOS Keychain helper вернул слишком большой ответ."));
+        });
+        return;
+      }
+      chunks.push(Buffer.from(chunk));
+    });
+    resultStream?.once("error", (error) => finish(() => {
+      child.kill();
+      wipeChunks();
+      reject(new Error(
+        "Не удалось прочитать ответ macOS Keychain helper.",
+        { cause: error },
+      ));
+    }));
+    child.once("close", (code) => finish(() => {
+      if (code !== 0) {
+        wipeChunks();
+        reject(new Error(
+          `macOS Keychain отклонил локальную операцию bridge device-session (код ${code}).`,
+        ));
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch (error) {
+        reject(new Error("macOS Keychain helper вернул некорректный ответ.", { cause: error }));
+      } finally {
+        wipeChunks();
+      }
+    }));
+    child.stdin.once("error", (error) => finish(() => {
+      wipeChunks();
+      reject(new Error(
+        "Не удалось передать запрос macOS Keychain helper.",
+        { cause: error },
+      ));
+    }));
+    child.stdin.end(JSON.stringify(requestPayload));
+  });
+};
+
+const readMacosBridgeSessionToken = async (service, origin) => {
+  const response = await executeMacosBridgeKeychainHelper({
+    operation: "get",
+    service,
+    account: origin,
+    ...(MACOS_BRIDGE_KEYCHAIN_TEST_PATH
+      ? { keychainPath: MACOS_BRIDGE_KEYCHAIN_TEST_PATH }
+      : {}),
+  });
+  if (response?.status === "not_found") return null;
+  if (response?.status !== "ready" || typeof response.value !== "string") {
+    throw new Error("macOS Keychain helper не подтвердил bridge device-session.");
+  }
+  return response.value;
+};
+
+export const getMacosBridgeSessionToken = (origin) => (
+  readMacosBridgeSessionToken(BRIDGE_SESSION_KEYCHAIN_SERVICE, origin)
+);
+
+const setMacosBridgeSessionToken = async (origin, value) => {
+  const response = await executeMacosBridgeKeychainHelper({
+    operation: "set",
+    service: BRIDGE_SESSION_KEYCHAIN_SERVICE,
+    account: origin,
+    value,
+    ...(MACOS_BRIDGE_KEYCHAIN_TEST_PATH
+      ? { keychainPath: MACOS_BRIDGE_KEYCHAIN_TEST_PATH }
+      : {}),
+  });
+  if (response?.status !== "stored") {
+    throw new Error("macOS Keychain не подтвердил запись bridge device-session.");
+  }
+  const verified = await getMacosBridgeSessionToken(origin);
+  if (!verified || !secretsMatch(value, verified)) {
+    throw new Error("macOS Keychain не подтвердил сохранённую bridge device-session.");
+  }
+};
+
+const deleteMacosBridgeSessionTokenForService = async (service, origin) => {
+  const response = await executeMacosBridgeKeychainHelper({
+    operation: "delete",
+    service,
+    account: origin,
+    ...(MACOS_BRIDGE_KEYCHAIN_TEST_PATH
+      ? { keychainPath: MACOS_BRIDGE_KEYCHAIN_TEST_PATH }
+      : {}),
+  });
+  if (response?.status !== "deleted" && response?.status !== "not_found") {
+    throw new Error("macOS Keychain не подтвердил удаление bridge device-session.");
+  }
+};
+
+export const deleteMacosBridgeSessionToken = (origin) => (
+  deleteMacosBridgeSessionTokenForService(BRIDGE_SESSION_KEYCHAIN_SERVICE, origin)
+);
+
+export const WINDOWS_BRIDGE_DPAPI_SCRIPT = String.raw`
+$ErrorActionPreference = "Stop"
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$Mode = [Environment]::GetEnvironmentVariable(
+  "TRELIO_WINDOWS_BRIDGE_DPAPI_MODE",
+  [EnvironmentVariableTarget]::Process
+)
+$EntropyBase64 = [Environment]::GetEnvironmentVariable(
+  "TRELIO_WINDOWS_BRIDGE_DPAPI_ENTROPY_BASE64",
+  [EnvironmentVariableTarget]::Process
+)
+if ($Mode -ne "protect" -and $Mode -ne "unprotect") {
+  throw "Bridge DPAPI mode is invalid."
+}
+if ([string]::IsNullOrWhiteSpace($EntropyBase64)) {
+  throw "Bridge DPAPI entropy is missing."
+}
+$Entropy = [Convert]::FromBase64String($EntropyBase64)
+$InputValue = [Console]::In.ReadToEnd().TrimEnd([char]13, [char]10)
+if ([string]::IsNullOrWhiteSpace($InputValue)) {
+  throw "Bridge DPAPI input is empty."
+}
+$InputBytes = $null
+$OutputBytes = $null
+try {
+  if ($Mode -eq "protect") {
+    $InputBytes = [Text.Encoding]::UTF8.GetBytes($InputValue)
+    $OutputBytes = [Security.Cryptography.ProtectedData]::Protect(
+      $InputBytes,
+      $Entropy,
+      [Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    [Console]::Out.Write([Convert]::ToBase64String($OutputBytes))
+  } else {
+    $InputBytes = [Convert]::FromBase64String($InputValue)
+    $OutputBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+      $InputBytes,
+      $Entropy,
+      [Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    [Console]::Out.Write([Text.Encoding]::UTF8.GetString($OutputBytes))
+  }
+} finally {
+  if ($InputBytes -ne $null) { [Array]::Clear($InputBytes, 0, $InputBytes.Length) }
+  if ($OutputBytes -ne $null) { [Array]::Clear($OutputBytes, 0, $OutputBytes.Length) }
+  [Array]::Clear($Entropy, 0, $Entropy.Length)
+  $InputValue = $null
+}
+`;
+
+export const buildWindowsBridgeDpapiInvocation = (
+  origin,
+  mode,
+  environment = process.env,
+) => {
+  if (mode !== "protect" && mode !== "unprotect") {
+    throw new Error(`Unsupported Windows bridge DPAPI mode: ${mode}`);
+  }
+  const normalizedOrigin = normalizeOrigin(origin);
+  const entropy = crypto
+    .createHash("sha256")
+    .update(`trelio-workspace-bridge-session-v1\0${normalizedOrigin}`, "utf8")
+    .digest("base64");
+  return {
+    executable: resolveWindowsPowerShellExecutable(environment),
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      Buffer.from(WINDOWS_BRIDGE_DPAPI_SCRIPT, "utf16le").toString("base64"),
+    ],
+    environment: {
+      TRELIO_WINDOWS_BRIDGE_DPAPI_MODE: mode,
+      TRELIO_WINDOWS_BRIDGE_DPAPI_ENTROPY_BASE64: entropy,
+    },
+  };
+};
+
+const runWindowsBridgeDpapi = async (origin, mode, input, {
+  environment = process.env,
+} = {}) => {
+  const invocation = buildWindowsBridgeDpapiInvocation(origin, mode, environment);
+  let result;
+  try {
+    result = await execFileWithInput(
+      invocation.executable,
+      invocation.args,
+      {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        env: {
+          ...environment,
+          ...invocation.environment,
+        },
+        windowsHide: true,
+      },
+      `${input}\n`,
+    );
+  } catch (error) {
+    // execFileWithInput attaches child stdout/stderr to its rejection. A
+    // failed unprotect process must never let a partially emitted plaintext
+    // value travel through a later diagnostic formatter or model-visible
+    // error. Deliberately discard the original error object and expose only a
+    // stable operation-level message.
+    if (error && typeof error === "object") {
+      error.stdout = "";
+      error.stderr = "";
+    }
+    throw new Error(`Windows DPAPI не выполнил операцию ${mode}.`);
+  }
+  const output = result.stdout.trim();
+  if (!output) {
+    throw new Error(`Windows DPAPI ${mode} вернул пустой результат.`);
+  }
+  return output;
+};
+
+export const protectWindowsBridgeSessionToken = async (
+  origin,
+  token,
+  options = {},
+) => {
+  const ciphertext = await runWindowsBridgeDpapi(origin, "protect", token, options);
+  // Не доверяем успешному exit code как доказательству: до записи файла
+  // раскрываем только что созданный ciphertext тем же CurrentUser и сравниваем
+  // исходные bytes. При сбое прежний plaintext ещё не был изменён.
+  const verified = await runWindowsBridgeDpapi(origin, "unprotect", ciphertext, options);
+  if (!secretsMatch(token, verified)) {
+    throw new Error("Windows DPAPI не подтвердил сохранённую bridge device-session.");
+  }
+  return ciphertext;
+};
+
+export const unprotectWindowsBridgeSessionToken = (
+  origin,
+  ciphertext,
+  options = {},
+) => runWindowsBridgeDpapi(origin, "unprotect", ciphertext, options);
 
 export const WINDOWS_PRIVATE_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = "Stop"
@@ -2014,13 +2510,6 @@ const readFallbackCredentials = async () => {
     throw error;
   }
 };
-
-const resolveKeychainMigrationMarkerFile = (origin) => path.join(
-  CONFIG_DIRECTORY,
-  `.keychain-device-session-migrated-${
-    crypto.createHash("sha256").update(origin).digest("hex").slice(0, 32)
-  }`,
-);
 
 export const writePrivateJsonFile = async (filePath, value) => {
   await ensurePrivateDirectory(path.dirname(filePath));
@@ -2934,65 +3423,137 @@ export const updateCodexPluginMarketplace = async ({
   );
 };
 
-const writePrivateMarkerFile = async (filePath) => {
-  await ensurePrivateDirectory(path.dirname(filePath));
-  await fs.writeFile(filePath, `${new Date().toISOString()}\n`, {
-    flag: "wx",
-    encoding: "utf8",
-    mode: 0o600,
-  }).catch((error) => {
-    if (error.code !== "EEXIST") throw error;
-  });
-  if (process.platform !== "win32") {
-    await fs.chmod(filePath, 0o600);
+const removePlaintextBridgeSessionToken = async (
+  filePath,
+  credentials,
+  origin,
+) => {
+  if (typeof credentials?.[origin]?.bridgeSessionToken !== "string") return;
+
+  const nextCredentials = { ...credentials };
+  const nextCredential = { ...nextCredentials[origin] };
+  delete nextCredential.bridgeSessionToken;
+  if (Object.keys(nextCredential).length === 0) {
+    delete nextCredentials[origin];
+  } else {
+    nextCredentials[origin] = nextCredential;
   }
-  await assertPrivatePathKind(filePath, "file");
+  // Atomic replacement happens only after the OS-protected copy was read back
+  // and compared. If this write fails, the previous working plaintext remains
+  // intact and the next invocation can retry the same idempotent migration.
+  await writePrivateJsonFile(filePath, nextCredentials);
+};
+
+const readProtectedWindowsBridgeSession = async (origin, credential) => {
+  const protectedSession = credential?.bridgeSessionTokenProtected;
+  if (protectedSession === undefined) return null;
+  if (
+    protectedSession?.schemaVersion !== 1
+    || protectedSession.provider !== "windows-dpapi-current-user"
+    || typeof protectedSession.ciphertext !== "string"
+    || protectedSession.ciphertext.length === 0
+  ) {
+    throw new Error("Локальная Windows DPAPI запись bridge device-session повреждена.");
+  }
+  return unprotectWindowsBridgeSessionToken(origin, protectedSession.ciphertext);
 };
 
 const loadBridgeSessionToken = async (origin) => {
-  let configDirectoryAlreadyExisted = true;
-  try {
-    await fs.lstat(CONFIG_DIRECTORY);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    configDirectoryAlreadyExisted = false;
-  }
-
   const credentials = await readFallbackCredentials();
-  const fileToken = credentials[origin]?.bridgeSessionToken || null;
-  if (fileToken) return fileToken;
+  const credential = credentials[origin] || {};
+  const fileToken = typeof credential.bridgeSessionToken === "string"
+    && credential.bridgeSessionToken.length > 0
+    ? credential.bridgeSessionToken
+    : null;
 
-  // Старые macOS-установки уже имеют config-каталог, но не credentials.json.
-  // Pending pairing означает новое подключение, для которого Keychain вообще
-  // не трогаем. В остальных случаях один раз читаем legacy item, переносим его
-  // в приватный файл и больше не зависим от `security`.
-  const hasPendingPairing = await assertPrivateFileIfPresent(PAIRING_FILE);
-  const keychainMigrationMarkerFile = resolveKeychainMigrationMarkerFile(origin);
-  const migrationAlreadyChecked = await assertPrivateFileIfPresent(
-    keychainMigrationMarkerFile,
-  );
-  if (
-    USE_LEGACY_MACOS_KEYCHAIN
-    && configDirectoryAlreadyExisted
-    && !hasPendingPairing
-    && !migrationAlreadyChecked
-  ) {
-    const keychainToken = await getKeychainValue(
-      LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE,
-      origin,
-      { failOnUnexpectedError: true },
-    );
+  if (USE_MACOS_KEYCHAIN) {
+    let keychainToken;
+    try {
+      keychainToken = await getMacosBridgeSessionToken(origin);
+    } catch (error) {
+      if (!fileToken) throw error;
+      // An existing installation must keep working while Login Keychain is
+      // temporarily locked or unavailable. The old owner-only file remains
+      // the authoritative copy for this invocation and migration is retried
+      // next time. This fallback is never used for a newly issued session.
+      return fileToken;
+    }
     if (keychainToken) {
-      await saveBridgeSessionToken(origin, keychainToken);
-      await deleteKeychainValue(LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE, origin);
-      await writePrivateMarkerFile(keychainMigrationMarkerFile);
+      if (fileToken && !secretsMatch(fileToken, keychainToken)) {
+        throw new Error(
+          "Bridge device-session различается в macOS Keychain и legacy private file; автоматическая миграция остановлена без удаления обеих копий.",
+        );
+      }
+      if (fileToken) {
+        await removePlaintextBridgeSessionToken(
+          CREDENTIAL_FILE,
+          credentials,
+          origin,
+        ).catch(() => undefined);
+      }
       return keychainToken;
     }
-    await writePrivateMarkerFile(keychainMigrationMarkerFile);
+    if (fileToken) {
+      try {
+        await setMacosBridgeSessionToken(origin, fileToken);
+        await removePlaintextBridgeSessionToken(CREDENTIAL_FILE, credentials, origin);
+      } catch {
+        // Preserve the only verified working copy. A partial Keychain write is
+        // harmless: a later read either matches and removes plaintext, or the
+        // mismatch guard stops migration without deleting either value.
+      }
+      return fileToken;
+    }
+
+    // Very old macOS installations used the `security` CLI service before
+    // v1.4.1 moved sessions into the owner-only file. Keep that source until a
+    // separately named helper-owned item was written and read back, then
+    // delete only the old service. This avoids ACL ambiguity between binaries.
+    const legacyKeychainToken = await readMacosBridgeSessionToken(
+      LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE,
+      origin,
+    );
+    if (legacyKeychainToken) {
+      await setMacosBridgeSessionToken(origin, legacyKeychainToken);
+      await deleteMacosBridgeSessionTokenForService(
+        LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE,
+        origin,
+      );
+      return legacyKeychainToken;
+    }
+    return null;
+  }
+
+  if (process.platform === "win32") {
+    const protectedToken = await readProtectedWindowsBridgeSession(origin, credential);
+    if (protectedToken) {
+      if (fileToken && !secretsMatch(fileToken, protectedToken)) {
+        throw new Error(
+          "Bridge device-session различается в Windows DPAPI и legacy private file; автоматическая миграция остановлена без удаления обеих копий.",
+        );
+      }
+      if (fileToken) {
+        await removePlaintextBridgeSessionToken(
+          CREDENTIAL_FILE,
+          credentials,
+          origin,
+        ).catch(() => undefined);
+      }
+      return protectedToken;
+    }
+    if (fileToken) {
+      await saveBridgeSessionToken(origin, fileToken).catch(() => undefined);
+      return fileToken;
+    }
+  } else if (fileToken) {
+    // Linux не имеет единого desktop vault, доступного одинаково из Codex и
+    // Claude Code. Сохраняем прежний честный owner-only file contract.
+    return fileToken;
   }
 
   // До 1.4.1 Windows использовал home-based `.config`. Переносим только
-  // проверенный обычный файл, затем сохраняем его в LOCALAPPDATA с exact ACL.
+  // проверенный обычный файл, затем сохраняем ciphertext в LOCALAPPDATA и
+  // удаляем старый plaintext лишь после DPAPI read-back.
   if (
     process.platform === "win32"
     && LEGACY_HOME_CREDENTIAL_FILE !== CREDENTIAL_FILE
@@ -3001,7 +3562,17 @@ const loadBridgeSessionToken = async (origin) => {
     const legacyCredentials = await readPrivateJsonFile(LEGACY_HOME_CREDENTIAL_FILE);
     const legacyToken = legacyCredentials[origin]?.bridgeSessionToken || null;
     if (legacyToken) {
-      await saveBridgeSessionToken(origin, legacyToken);
+      try {
+        await saveBridgeSessionToken(origin, legacyToken);
+        await removePlaintextBridgeSessionToken(
+          LEGACY_HOME_CREDENTIAL_FILE,
+          legacyCredentials,
+          origin,
+        );
+      } catch {
+        // Keep the legacy working copy until both DPAPI verification and
+        // atomic cleanup succeed; migration is retried on the next process.
+      }
       return legacyToken;
     }
   }
@@ -3227,8 +3798,11 @@ export const endAgentRuntimeHookSession = async ({
 const saveCredential = async (origin, field, accessToken, keychainService) => {
   await ensurePrivateDirectory(CONFIG_DIRECTORY);
 
-  if (USE_LEGACY_MACOS_KEYCHAIN) {
-    await run("security", [
+  if (USE_MACOS_KEYCHAIN) {
+    // Legacy OAuth is a rollback-only compatibility path and keeps its
+    // existing Keychain CLI representation. Bridge device-session below uses
+    // the dedicated stdin/fd3 native helper and never places its token in argv.
+    await run(MACOS_SECURITY_EXECUTABLE, [
       "add-generic-password",
       "-U",
       "-s",
@@ -3257,21 +3831,45 @@ const saveLegacyOAuthToken = (origin, accessToken) => (
   saveCredential(origin, "accessToken", accessToken, LEGACY_KEYCHAIN_SERVICE)
 );
 
-const saveBridgeSessionToken = (origin, accessToken) => (
-  (async () => {
-    // Device-session всегда хранится в одном кроссплатформенном файловом
-    // контракте. В отличие от legacy OAuth этот путь никогда не вызывает
-    // `security add-generic-password` на macOS.
+const saveBridgeSessionToken = async (origin, accessToken) => {
+  await ensurePrivateDirectory(CONFIG_DIRECTORY);
+
+  if (USE_MACOS_KEYCHAIN) {
+    await setMacosBridgeSessionToken(origin, accessToken);
     const credentials = await readFallbackCredentials();
-    credentials[origin] = {
+    await removePlaintextBridgeSessionToken(CREDENTIAL_FILE, credentials, origin);
+    return "macOS Keychain";
+  }
+
+  const credentials = await readFallbackCredentials();
+  if (process.platform === "win32") {
+    const ciphertext = await protectWindowsBridgeSessionToken(origin, accessToken);
+    const nextCredential = {
       ...credentials[origin],
-      bridgeSessionToken: accessToken,
+      bridgeSessionTokenProtected: {
+        schemaVersion: 1,
+        provider: "windows-dpapi-current-user",
+        ciphertext,
+      },
       savedAt: new Date().toISOString(),
     };
+    delete nextCredential.bridgeSessionToken;
+    credentials[origin] = nextCredential;
     await writePrivateJsonFile(CREDENTIAL_FILE, credentials);
-    return CREDENTIAL_FILE;
-  })()
-);
+    return "Windows DPAPI";
+  }
+
+  // Linux fallback остаётся закрытым owner-only directory/file ACL. Это не
+  // называется encrypted storage: generic runtime не предполагает наличие
+  // одного desktop keyring API во всех поддерживаемых Linux environments.
+  credentials[origin] = {
+    ...credentials[origin],
+    bridgeSessionToken: accessToken,
+    savedAt: new Date().toISOString(),
+  };
+  await writePrivateJsonFile(CREDENTIAL_FILE, credentials);
+  return CREDENTIAL_FILE;
+};
 
 const readPendingPairings = async () => {
   await ensurePrivateDirectory(CONFIG_DIRECTORY);

@@ -33,6 +33,26 @@ runtime-версию, а plugin compatibility, Codex retention и Run `clientVer
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
 `pluginVersion` и `hostRuntimeVersion`.
 
+Bridge device-session хранится вне plugin/package cache и Workspace. На macOS
+runtime использует login Keychain с service
+`ru.trelio.workspace-bridge.session.v2`; подписанный runtime локально собирает
+маленький source-reviewed Swift helper системным compiler-ом, передаёт значение
+через stdin и получает результат через anonymous fd3, а не argv/env/stdout. На
+Windows ciphertext сохраняется в owner-only `credentials.json`, но ключ и
+расшифрование принадлежат DPAPI `CurrentUser`; additional entropy привязывает
+запись к canonical origin. Linux сохраняет честный owner-only файловый fallback,
+поскольку единый обязательный desktop keyring там не является частью runtime
+prerequisites. При первом чтении прежний plaintext переносится автоматически:
+новое OS-хранилище сначала проходит read-back и constant-time comparison, и
+только после этого atomic replacement удаляет старое поле. Очень старая запись
+service `ru.trelio.workspace-bridge.session` проверяется тем же helper с
+запрещённым SecurityAgent UI и переносится в отдельный v2 namespace. Если её
+старый ACL не допускает новый helper без диалога, перенос прекращается без
+показа системного окна. Ошибка оставляет рабочую старую копию и останавливает
+миграцию без создания новой device-session: текущая операция продолжает
+работать с прежним owner-only token, а следующий вызов повторяет перенос. Для новой pairing-сессии
+файлового fallback нет – сбой Keychain/DPAPI завершает сохранение fail-closed.
+
 Перед запуском проверяется наличие той же папки плагина и файла entrypoint.
 Если их больше нет, `trelio_workspace_action` возвращает
 `TRELIO_PLUGIN_RESTART_REQUIRED` с `requiredAction: restart_client` и
