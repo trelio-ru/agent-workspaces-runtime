@@ -70,6 +70,39 @@ test("local chat input requires exact storage intent and a complete bounded targ
   }
 });
 
+test("new-card normalization preserves secret type and reports unknown fields without echoing them", () => {
+  // This matches the shape that originally failed before any token or ACL
+  // lookup: an API template with one token field and an explicit secret type.
+  const apiKeyInput = {
+    ...createInput(),
+    values: { token: "token-" + canary },
+    newSecret: {
+      ...createInput().newSecret,
+      secretType: "api_key",
+      templateType: "api",
+      fields: [{ key: "token", label: "API token", type: "token", required: true }],
+    },
+  };
+  const normalized = normalizeKnownAgentSecretChatInput(apiKeyInput);
+  assert.equal(normalized.newSecret.secretType, "api_key");
+  assert.equal(normalized.newSecret.templateType, "api");
+
+  const unknownField = "unsupported_" + canary;
+  assert.throws(() => normalizeKnownAgentSecretChatInput({
+    ...apiKeyInput,
+    newSecret: { ...apiKeyInput.newSecret, [unknownField]: true },
+  }), (error) => {
+    assert.equal(error.code, "AGENT_SECRET_CHAT_INPUT_INVALID");
+    assert.equal(error.reason, "unsupported_new_secret_field");
+    assert.match(error.message, /сохранив прежние templateType, fields, values и clientRequestId/u);
+    assert.doesNotMatch(error.message, new RegExp(canary, "u"));
+    return true;
+  });
+  assert.throws(() => normalizeKnownAgentSecretChatInput({
+    ...apiKeyInput, newSecret: { ...apiKeyInput.newSecret, secretType: "synthetic-unknown" },
+  }), (error) => error.reason === "invalid_secret_type");
+});
+
 test("both modes use complete replacement; E2EE metadata and values stay opaque", async () => {
   const encryption = await encryptionFixture();
   const input = normalizeKnownAgentSecretChatInput(createInput());
@@ -225,6 +258,16 @@ test("the generic facade intercepts secrets before provider lookup and preserves
   });
   assert.equal(rejected.structuredContent.code, "AGENT_SECRET_CHAT_INPUT_INVALID");
   assert.doesNotMatch(JSON.stringify(rejected), new RegExp(canary, "u"));
+  const unknownField = "unsupported_" + canary;
+  const unsupported = await handleTrelioLocalActionOperation("https://trelio.example", {
+    companySlug, nativeTool: "save_known_agent_secret",
+    arguments: {
+      ...createInput(), newSecret: { ...createInput().newSecret, [unknownField]: true },
+    },
+  });
+  assert.equal(unsupported.structuredContent.reason, "unsupported_new_secret_field");
+  assert.match(unsupported.structuredContent.message, /сохранив прежние templateType, fields, values и clientRequestId/u);
+  assert.doesNotMatch(JSON.stringify(unsupported), new RegExp(canary, "u"));
   for (const error of [
     new BridgePairingRequiredError({ deviceName: "Synthetic device", pairingId: randomUUID(), expiresAt: "2099-01-01" }),
     new BridgePluginUpgradeRequiredError({ minimumVersion: "999.0.0" }),

@@ -29,7 +29,12 @@ import {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const FIELD_KEY = /^[a-z][a-z0-9_]{0,63}$/u;
 const FIELD_TYPES = new Set(["username", "password", "token", "text", "key", "certificate", "totp"]);
+const SECRET_TYPES = new Set(["opaque", "password", "api_key", "oauth", "ssh_key", "certificate"]);
 const TEMPLATES = new Set(["legacy", "login", "api", "certificate", "custom"]);
+const NEW_SECRET_KEYS = new Set([
+  "scopeType", "scopeId", "name", "publicDescription", "secretType", "templateType", "fields",
+]);
+const SAFE_INPUT_REASONS = new Set(["unsupported_new_secret_field", "invalid_secret_type"]);
 const SAFE_NATIVE_FAILURES = new Map([
   ["TRELIO_RUNTIME_HOOK_REQUIRED", "Включите Hooks плагина Trelio Agent Workspaces и повторите запрос."],
   ["AGENT_RUNTIME_POLICY_NOT_SATISFIED", "Выберите разрешённую компанией модель и уровень reasoning, затем начните новую сессию с включёнными Hooks."],
@@ -41,14 +46,15 @@ const INPUT_KEYS = new Set([
 ]);
 
 export class AgentSecretChatSaveError extends Error {
-  constructor(code, message) {
+  constructor(code, message, reason) {
     super(message);
     this.code = code;
+    this.reason = reason;
   }
 }
-const invalid = () => {
+const invalid = (reason, message = "Проверьте цель сохранения, полную схему полей и явную просьбу сохранить доступы.") => {
   // Never include the invalid input or a JSON/parser error in the exception.
-  throw new AgentSecretChatSaveError("AGENT_SECRET_CHAT_INPUT_INVALID", "Проверьте цель сохранения, полную схему полей и явную просьбу сохранить доступы.");
+  throw new AgentSecretChatSaveError("AGENT_SECRET_CHAT_INPUT_INVALID", message, reason);
 };
 const isRecord = (value) => Boolean(value && typeof value === "object" && !Array.isArray(value));
 const boundedString = (value, maximum, allowEmpty = false) => (
@@ -63,10 +69,23 @@ const canonicalJson = (value) => JSON.stringify(
 );
 
 export const normalizeAgentSecretNewCard = (card, expectedCurrentVersion) => {
+  if (!isRecord(card)) invalid();
+  if (Object.keys(card).some((key) => !NEW_SECRET_KEYS.has(key))) {
+    // Property names are untrusted input too, so the result exposes a stable
+    // reason instead of echoing the unknown key or any neighboring metadata.
+    invalid(
+      "unsupported_new_secret_field",
+      "newSecret содержит неподдерживаемое поле. Уберите только это поле и повторите запрос, сохранив прежние templateType, fields, values и clientRequestId.",
+    );
+  }
+  if (card.secretType !== undefined && !SECRET_TYPES.has(card.secretType)) {
+    invalid(
+      "invalid_secret_type",
+      "secretType не поддерживается. Исправьте только secretType и повторите запрос, сохранив прежние templateType, fields, values и clientRequestId.",
+    );
+  }
   if (
-    !isRecord(card)
-    || Object.keys(card).some((key) => !["scopeType", "scopeId", "name", "publicDescription", "templateType", "fields"].includes(key))
-    || !["company", "project", "task"].includes(card.scopeType) || !UUID.test(card.scopeId || "")
+    !["company", "project", "task"].includes(card.scopeType) || !UUID.test(card.scopeId || "")
     || !boundedString(card.name?.trim(), 255)
     || (card.publicDescription !== undefined && !boundedString(card.publicDescription, 5000, true))
     || (card.templateType !== undefined && !TEMPLATES.has(card.templateType))
@@ -87,6 +106,7 @@ export const normalizeAgentSecretNewCard = (card, expectedCurrentVersion) => {
   return {
     scopeType: card.scopeType, scopeId: card.scopeId, name: card.name.trim(),
     publicDescription: card.publicDescription?.trim() ?? "",
+    ...(card.secretType !== undefined ? { secretType: card.secretType } : {}),
     templateType: card.templateType ?? "custom", fields,
   };
 };
@@ -326,7 +346,11 @@ export const handleKnownAgentSecretChatSave = async (
     // Upstream validation/proxy errors may echo request fragments. Never expose
     // their text or body from a secret-bearing call, even on malformed input.
     const safe = error instanceof AgentSecretChatSaveError
-      ? { code: error.code, message: error.message }
+      ? {
+          code: error.code,
+          ...(SAFE_INPUT_REASONS.has(error.reason) ? { reason: error.reason } : {}),
+          message: error.message,
+        }
       : {
           code: "AGENT_SECRET_CHAT_SAVE_UNCONFIRMED",
           message: error?.statusCode === 403
