@@ -2099,18 +2099,18 @@ $OutputBytes = $null
 try {
   if ($Mode -eq "protect") {
     $InputBytes = [Text.Encoding]::UTF8.GetBytes($InputValue)
-    $OutputBytes = [Security.Cryptography.ProtectedData]::Protect(
+    $OutputBytes = [System.Security.Cryptography.ProtectedData]::Protect(
       $InputBytes,
       $Entropy,
-      [Security.Cryptography.DataProtectionScope]::CurrentUser
+      [System.Security.Cryptography.DataProtectionScope]::CurrentUser
     )
     [Console]::Out.Write([Convert]::ToBase64String($OutputBytes))
   } else {
     $InputBytes = [Convert]::FromBase64String($InputValue)
-    $OutputBytes = [Security.Cryptography.ProtectedData]::Unprotect(
+    $OutputBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
       $InputBytes,
       $Entropy,
-      [Security.Cryptography.DataProtectionScope]::CurrentUser
+      [System.Security.Cryptography.DataProtectionScope]::CurrentUser
     )
     [Console]::Out.Write([Text.Encoding]::UTF8.GetString($OutputBytes))
   }
