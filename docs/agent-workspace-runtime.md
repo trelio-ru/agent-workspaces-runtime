@@ -385,9 +385,8 @@ clean Git и принятый head проверяются обычным preflig
    передачи и границы хода. Если она сразу завершается, достаточно `finish`:
    он уже создаёт handoff checkpoint; отдельный draft перед ним не нужен.
    Canonical typed action использует `filePaths`, а `evidence`, `filePaths` и
-   `questions` передаются массивами строк. На rollout runtime совместимо
-   принимает одиночную строку как массив из одного элемента и alias `files` для
-   `filePaths`; одновременные `files` и `filePaths` отклоняются как неоднозначные.
+   `questions` передаются массивами строк. Одиночные строки и alias `files` не
+   входят в ABI и отклоняются до запуска bridge.
    Непосредственно перед финальным ответом агент выполняет returned
    `bridge.actions.turnCheck` (`status`) из opened directory. `dirty=true`
    требует `checkpoint`, `pause` либо `finish`; ошибка сохранения становится
@@ -624,8 +623,8 @@ Workspace нет другого открытого Run, Git чист и root с�
 истёкший sibling Run не блокирует terminal root, но root собственного
 `expired` Run сохраняется для возможного claim. Active, unknown и dirty roots сохраняются;
 backend outage делает auto-prune no-op. Настройка
-`workspaceRetentionDays` меняет срок в пределах 1–365 дней; старый
-`terminalRunRetentionDays` читается как совместимый alias.
+`workspaceRetentionDays` меняет срок в пределах 1–365 дней; удалённый ключ
+`terminalRunRetentionDays` больше не читается.
 
 Обычные ограниченные untracked metadata-файлы `.DS_Store`, `Thumbs.db` и
 `desktop.ini` не считаются пользовательским содержимым ни рядом с `workspace/`,
@@ -688,9 +687,9 @@ backend не строит plaintext index. Проекция входит в revi
 изменение комментария вне 50-entry detail page создаёт новое immutable generation.
 
 Local mirror schema 5 читает accepted browser manifest и bounded safe text;
-имена binary/external файлов индексируются без их скачивания. Только явно
-отсутствующая legacy projection использует прежний encrypted bundle. Ошибка
-ACL, head, crypto или сети не переключает transport.
+имена binary/external файлов индексируются без их скачивания. Отсутствующая
+browser projection блокирует поиск до обновления runtime; прежний encrypted
+bundle не используется ни при какой категории ошибки.
 
 Один file hit разрешается через `get_agent_workspace_file(delivery=local-file)`
 либо server-selected local `get_workspace_file`/`fetch`, затем typed
@@ -716,7 +715,8 @@ reuse; локальная папка не подтверждает текущи�
 Bridge получает protocol 2 capabilities и per-file limit компании до проверки
 candidate. Общего ограничения 96/100 МиБ для этого протокола нет: ciphertext
 передаётся частями по 8 МиБ, manifest ограничен 8 МиБ, число файлов – server
-capability. Только явный `404` включает прежний transport старого backend.
+capability. Отсутствие capability или маршрута завершает операцию fail-closed;
+монолитный transport старого backend не используется.
 
 Каждый файл – отдельный `TRELIOE1` с random UUID. Bridge сверяет exact committed
 path/type/size/plaintext digest с расшифрованным manifest принятой base revision.

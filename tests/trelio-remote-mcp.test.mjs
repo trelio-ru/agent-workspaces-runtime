@@ -482,48 +482,6 @@ const createStdioHarness = (callTool, options = {}) => {
   };
 };
 
-test("stdio initialize is not blocked by Codex plugin retention", async () => {
-  let markRetentionStarted;
-  let releaseRetention;
-  const retentionStarted = new Promise((resolve) => {
-    markRetentionStarted = resolve;
-  });
-  const retentionBlocked = new Promise((resolve) => {
-    releaseRetention = resolve;
-  });
-  const harness = createStdioHarness(
-    async () => {
-      throw new Error("initialize unexpectedly invoked a tool");
-    },
-    {
-      retainInstallation: async () => {
-        markRetentionStarted();
-        await retentionBlocked;
-      },
-    },
-  );
-
-  try {
-    harness.send({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-03-26",
-        capabilities: {},
-        clientInfo: { name: "retention-regression", version: "1.0.0" },
-      },
-    });
-    const response = await harness.waitForFrame(({ id }) => id === 1);
-    assert.equal(response.result.protocolVersion, "2025-03-26");
-    assert.equal(response.result.serverInfo.name, "trelio-remote-skills");
-    await retentionStarted;
-  } finally {
-    releaseRetention();
-    await harness.close();
-  }
-});
-
 test("stdio host routes a server elicitation request back to the waiting tool call", async () => {
   const harness = createStdioHarness(async (
     _origin,
@@ -3732,7 +3690,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
   assert.equal(frames[0].result.serverInfo.version, "2.4.1");
   assert.equal(frames[0].result.instructions, AGENT_SKILL_ROUTING_INSTRUCTIONS);
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
-  assert.match(frames[0].result.instructions, /Для старых command-ответов – его процедура совместимости/u);
+  assert.doesNotMatch(frames[0].result.instructions, /command-ответов|процедура совместимости/u);
   assert.match(frames[0].result.instructions, /Native Trelio не требует каталога/u);
   assert.equal(frames[1].result.tools.length, 28);
 });
@@ -3743,6 +3701,7 @@ test("Remote MCP admission expires absolutely and never caches protected wire de
   const program = `
     import assert from "node:assert/strict";
     import os from "node:os";
+    import { createHash } from "node:crypto";
     import fs from "node:fs/promises";
     import path from "node:path";
     const chunks = [];
@@ -3764,9 +3723,24 @@ test("Remote MCP admission expires absolutely and never caches protected wire de
       let resolutions = 0;
       let denied = false;
       let protectedWire = false;
+      const rulesMarkdown = "# Platform rules\\n\\nUse typed actions.\\n";
+      const rulesSha256 = createHash("sha256").update(rulesMarkdown, "utf8").digest("hex");
       globalThis.fetch = async (url, options) => {
         const endpoint = new URL(String(url)).pathname;
-        if (endpoint.endsWith("bridge-compatibility")) return Response.json({ supported: true, minimumVersion: "2.0.0" });
+        if (endpoint.endsWith("bridge-compatibility")) {
+          const current = new Headers(options?.headers).get("x-trelio-agent-rules-sha256") === rulesSha256;
+          return Response.json({
+            supported: true,
+            minimumVersion: "3.0.0",
+            agentRules: {
+              status: current ? "current" : "update_required",
+              revisionId: "10000000-0000-4000-8000-000000000003",
+              version: 1,
+              sha256: rulesSha256,
+              ...(current ? {} : { rulesMarkdown }),
+            },
+          });
+        }
         assert.equal(endpoint, "/api/agent-skills/remote-mcp/resolve");
         resolutions++;
         if (denied) return Response.json({ message: "Access revoked" }, { status: 403 });

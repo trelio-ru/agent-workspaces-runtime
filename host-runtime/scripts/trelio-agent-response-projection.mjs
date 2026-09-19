@@ -1085,9 +1085,7 @@ const projectAgentSkillDetail = (payload, args) => {
             const trust = record(execution.trust);
             const { command: _legacyCommand, ...modernExecution } = execution;
             runtimeExecution = {
-                // Remove the legacy duplicate only when the typed route is actually
-                // present. Older hydrated server payloads may still be command-only.
-                ...(own(execution, "localAction") ? modernExecution : execution),
+                ...modernExecution,
                 ...(trust ? { trust: {
                         ...Object.fromEntries(Object.entries(trust).filter(([key]) => key !== "publication")),
                         ...(own(trust, "publication") && trust.publication !== null

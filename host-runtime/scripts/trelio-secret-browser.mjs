@@ -900,9 +900,9 @@ export const controlSecretBrowserViaDevTools = async (options) => {
       secretValues: options.secretValues,
     });
   } catch (error) {
-    // Preserve the legacy one-shot helper result shape for callers that only
-    // need an outcome. The new split prepare/fill path still throws before
-    // consume, which is what the local bridge relies on.
+    // This lower-level controller reports safe page failures as data. The
+    // split prepare/fill path still throws before consume, which is what the
+    // local bridge relies on.
     if (error instanceof SecretBrowserFillError && SAFE_REASON_CODES.has(error.reasonCode)) {
       return { outcome: "failed", reasonCode: error.reasonCode };
     }

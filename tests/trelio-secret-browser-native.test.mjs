@@ -62,16 +62,15 @@ const fixture = (reply = { status: "ready" }) => {
           close: () => { closed = true; },
         };
       },
-      runChrome: async () => { chromeCalls++; return { outcome: "succeeded" }; },
     },
   };
 };
 
-test("native selectors preserve CSS id meaning; compound, type and pseudo selectors fall back before delivery", () => {
+test("native selectors preserve CSS id meaning and reject compound, type and pseudo selectors", () => {
   assert.equal(nativeIdFromSecretSelector("#login-password"), "login-password");
   assert.equal(nativeIdFromSecretSelector('[id="login.password"]'), "login.password");
   for (const selector of ["#password.hidden", "#password:focus", "input#password", "[name=password]", "#a #b", "#a\\:b"]) {
-    assert.throws(() => nativeIdFromSecretSelector(selector), EmbeddedBrowserUnavailable);
+    assert.throws(() => nativeIdFromSecretSelector(selector), SecretBrowserFillError);
   }
 });
 
@@ -151,17 +150,18 @@ test("a final button without an id uses one embedded field-only fill and no nati
   assert.equal(unavailable.requests.length, 1, "no value delivery when this same-tab plan cannot be prepared");
 });
 
-test("missing Run client identity and unsupported submit remain distinct pre-delivery failures", async () => {
-  for (const [clientFamily, reason] of [[null, "client_unsupported"], ["codex", "selector_unsupported"]]) {
-    const f = fixture();
-    f.args.context.clientFamily = clientFamily;
-    f.args.context.browserSteps[0].submitSelector = 'button[type="submit"]';
-    await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }),
-      (error) => error instanceof EmbeddedBrowserUnavailable && error.nativeReason === reason);
-    assert.equal(f.builds, 0);
-    assert.equal(f.requests.length, 0);
-    assert.equal(f.chromeCalls, 0);
-  }
+test("missing Run identity and invalid current selectors fail before delivery", async () => {
+  const missingIdentity = fixture();
+  missingIdentity.args.context.clientFamily = null;
+  await assert.rejects(prepareSecretBrowserSession({ ...missingIdentity.args, mode: "embedded" }),
+    (error) => error instanceof EmbeddedBrowserUnavailable && error.nativeReason === "client_unsupported");
+  const invalidSelector = fixture();
+  invalidSelector.args.context.browserSteps[0].submitSelector = 'button[type="submit"]';
+  await assert.rejects(prepareSecretBrowserSession(invalidSelector.args),
+    (error) => error instanceof SecretBrowserFillError && error.reasonCode === "field_selector_invalid");
+  assert.equal(invalidSelector.chromePreflights, 0);
+  assert.equal(invalidSelector.builds, 0);
+  assert.equal(invalidSelector.requests.length, 0);
 });
 
 test("native capability errors expose only allowlisted reason codes", () => {
@@ -215,7 +215,7 @@ test("different URL, duplicate target ids and missing fields fail before any nat
   assert.throws(() => browserFillBinding(missing));
   assert.equal(f.builds, 0);
 });
-test("multi-step native fill requires explicit advance button; legacy plans remain Chrome-compatible", async () => {
+test("multi-step native fill requires an exact advance button", async () => {
   const c = structuredClone(context);
   c.browserSteps = [
     { ...c.browserSteps[0], fields: [c.browserSteps[0].fields[0]] },
@@ -225,9 +225,9 @@ test("multi-step native fill requires explicit advance button; legacy plans rema
   assert.equal((await prepareSecretBrowserSession({ ...f.args, context: c })).surface, "embedded");
   delete c.browserSteps[0].submitSelector;
   const g = fixture();
-  const session = await prepareSecretBrowserSession({ ...g.args, context: c });
-  assert.equal(session.fallbackReason, "step_unsupported");
-  assert.equal(g.chromePreflights, 1);
+  await assert.rejects(prepareSecretBrowserSession({ ...g.args, context: c }),
+    (error) => error instanceof SecretBrowserFillError && error.reasonCode === "field_selector_invalid");
+  assert.equal(g.chromePreflights, 0);
   assert.equal(g.builds, 0);
 });
 test("native helper compiles locally, caches exact bytes and rejects an unprepared value without UI access", {

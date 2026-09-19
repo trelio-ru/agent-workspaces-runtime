@@ -67,7 +67,6 @@ import {
   buildCompanyEncryptedJsonMarker,
   buildCompanyEncryptedTextMarker,
   buildEncryptedAgentWorkspaceBrowserProjectionMigrationRecord,
-  buildEncryptedAgentWorkspaceBrowserProjectionRecord,
   buildEncryptedAgentWorkspaceDerivedArtifactsRecord,
   buildEncryptedAgentWorkspaceRevisionRecord,
   canonicalJson,
@@ -250,10 +249,9 @@ const AGENT_SKILL_DEVICE_CONSENT_HEADER = "x-trelio-agent-skill-device-consent";
 const AGENT_SKILL_COMPANY_E2EE_HEADER = "x-trelio-company-skill-e2ee";
 const AGENT_SECRET_COMPANY_E2EE_HEADER = "x-trelio-agent-secret-company-e2ee";
 const AGENT_RULES_SHA256_HEADER = "x-trelio-agent-rules-sha256";
-// Legacy OAuth остаётся только как явный rollback для старого backend. Даже
-// там bridge не просит права на рабочие правила и чтение metadata секретов:
-// эти операции принадлежат уже авторизованному MCP control plane.
-const LEGACY_OAUTH_SCOPES = "mcp:read mcp:workspaces:read mcp:workspaces:write mcp:secrets:write mcp:secrets:checkout";
+// Старые Keychain service names читаются только для одноразовой миграции уже
+// сохранённых credentials. Создавать новые credentials по старому OAuth flow
+// runtime v3 больше не умеет.
 const LEGACY_KEYCHAIN_SERVICE = "ru.trelio.workspace-bridge";
 const LEGACY_BRIDGE_SESSION_KEYCHAIN_SERVICE = "ru.trelio.workspace-bridge.session";
 const BRIDGE_SESSION_KEYCHAIN_SERVICE = "ru.trelio.workspace-bridge.session.v2";
@@ -672,17 +670,6 @@ const parseArguments = (rawArguments) => {
   return { command, options, positional };
 };
 
-const AGENT_RUNTIME_CLIENT_FAMILIES = new Set(["codex", "claude-code", "other"]);
-const AGENT_RUNTIME_EFFORT_LEVELS = new Set([
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra",
-]);
-const AGENT_RUNTIME_MODEL_ID_PATTERN = /^[a-z0-9._:+/-]+$/iu;
-
 const readSingleRuntimeOption = (options, key) => {
   const value = options[key];
 
@@ -696,63 +683,6 @@ const readSingleRuntimeOption = (options, key) => {
     throw new Error(`Параметр --${key} не может быть пустым.`);
   }
   return normalized;
-};
-
-/**
- * Собирает только явную self-attestation из exact команды, которую вернул MCP.
- * Bridge принципиально не пытается угадывать model/effort из env, transcript
- * или hook: эти источники локальны и не являются доверенной границей Trelio.
- */
-export const parseSelfReportedRuntimeAttestationOptions = (options = {}) => {
-  const clientFamily = readSingleRuntimeOption(options, "runtime-client");
-  const modelId = readSingleRuntimeOption(options, "runtime-model");
-  const effortLevel = readSingleRuntimeOption(options, "runtime-effort");
-  const observedAt = readSingleRuntimeOption(options, "runtime-observed-at");
-
-  if (!clientFamily) {
-    if (modelId || effortLevel || observedAt) {
-      throw new Error("Runtime attestation требует --runtime-client.");
-    }
-    return null;
-  }
-  if (!AGENT_RUNTIME_CLIENT_FAMILIES.has(clientFamily)) {
-    throw new Error("Параметр --runtime-client должен быть codex, claude-code или other.");
-  }
-  if (!observedAt || Number.isNaN(Date.parse(observedAt))) {
-    throw new Error("Параметр --runtime-observed-at должен содержать ISO timestamp.");
-  }
-
-  if (clientFamily === "other") {
-    if (modelId || effortLevel) {
-      throw new Error("Runtime other не должен объявлять model или effort.");
-    }
-    return {
-      schemaVersion: 1,
-      clientFamily,
-      modelId: null,
-      effortLevel: null,
-      evidenceLevel: "unavailable",
-      source: "unknown",
-      observedAt,
-    };
-  }
-
-  if (!modelId || !AGENT_RUNTIME_MODEL_ID_PATTERN.test(modelId)) {
-    throw new Error("Параметр --runtime-model должен содержать безопасный model id.");
-  }
-  if (effortLevel && !AGENT_RUNTIME_EFFORT_LEVELS.has(effortLevel)) {
-    throw new Error("Параметр --runtime-effort содержит неподдерживаемый уровень.");
-  }
-
-  return {
-    schemaVersion: 1,
-    clientFamily,
-    modelId,
-    effortLevel,
-    evidenceLevel: "self_reported",
-    source: "agent_request",
-    observedAt,
-  };
 };
 
 export const parseRuntimeSessionOption = (options = {}) => {
@@ -1524,7 +1454,6 @@ export const resolveBridgeDataPlaneRoutingResponse = ({
     requestOrigin: routing.encryptionState === "encrypted"
       ? resolveEncryptedDataPlaneOrigin(origin, routing.encryptedDataPlaneOrigin)
       : normalizeOrigin(origin),
-    legacyBackend: false,
   };
 };
 
@@ -1541,28 +1470,12 @@ export const resolveBridgeDataPlaneRouting = async ({
   const query = new URLSearchParams(companySlug
     ? { companySlug: String(companySlug) }
     : { workspaceId: requireUuid(workspaceId, "workspace") });
-  let routing;
-
-  try {
-    routing = await readJsonResponse(await request(
-      origin,
-      token,
-      `/api/agent-workspaces/bridge-routing?${query.toString()}`,
-      signal ? { signal } : {},
-    ));
-  } catch (error) {
-    // Plugin-first rollout: the new bridge can run against the previous
-    // backend until the server advertises routing support and raises minimum.
-    if (error instanceof TrelioApiError && error.statusCode === 404) {
-      return {
-        company: null,
-        encryptionState: null,
-        requestOrigin: normalizeOrigin(origin),
-        legacyBackend: true,
-      };
-    }
-    throw error;
-  }
+  const routing = await readJsonResponse(await request(
+    origin,
+    token,
+    `/api/agent-workspaces/bridge-routing?${query.toString()}`,
+    signal ? { signal } : {},
+  ));
 
   return resolveBridgeDataPlaneRoutingResponse({ origin, companySlug, routing });
 };
@@ -2690,9 +2603,7 @@ export const applyAgentRulesHandshake = async (
   { cacheRules = cacheAgentRules } = {},
 ) => {
   if (rawHandshake === undefined || rawHandshake === null) {
-    // Backward-compatible окно: plugin 1.6.0 публикуется раньше backend,
-    // поэтому старый Trelio ещё не знает dynamic rules handshake.
-    return null;
+    throw new Error("Trelio не вернул обязательный handshake платформенных правил.");
   }
 
   if (rawHandshake?.status === "current") {
@@ -3697,7 +3608,6 @@ const fetchRuntimePolicyAdmission = async ({
   token,
   target,
   runtimeSessionId,
-  runtimeAttestation,
   requestCommand = request,
   waitForRetry = wait,
 }) => {
@@ -3718,7 +3628,6 @@ const fetchRuntimePolicyAdmission = async ({
             ...(target.companySlug ? { companySlug: target.companySlug } : {}),
             ...(target.companyId ? { companyId: target.companyId } : {}),
             ...(runtimeSessionId ? { runtimeSessionId } : {}),
-            ...(runtimeAttestation ? { runtimeAttestation } : {}),
           }),
         },
       );
@@ -3797,42 +3706,6 @@ export const endAgentRuntimeHookSession = async ({
     { method: "POST", signal },
   );
 };
-
-const saveCredential = async (origin, field, accessToken, keychainService) => {
-  await ensurePrivateDirectory(CONFIG_DIRECTORY);
-
-  if (USE_MACOS_KEYCHAIN) {
-    // Legacy OAuth is a rollback-only compatibility path and keeps its
-    // existing Keychain CLI representation. Bridge device-session below uses
-    // the dedicated stdin/fd3 native helper and never places its token in argv.
-    await run(MACOS_SECURITY_EXECUTABLE, [
-      "add-generic-password",
-      "-U",
-      "-s",
-      keychainService,
-      "-a",
-      origin,
-      "-w",
-      accessToken,
-    ]);
-    return "macOS Keychain";
-  }
-
-  // Linux/Windows fallback остаётся закрытым правами текущего пользователя.
-  // Token никогда не помещается в workspace, Git config или stdout.
-  const credentials = await readFallbackCredentials();
-  credentials[origin] = {
-    ...credentials[origin],
-    [field]: accessToken,
-    savedAt: new Date().toISOString(),
-  };
-  await writePrivateJsonFile(CREDENTIAL_FILE, credentials);
-  return CREDENTIAL_FILE;
-};
-
-const saveLegacyOAuthToken = (origin, accessToken) => (
-  saveCredential(origin, "accessToken", accessToken, LEGACY_KEYCHAIN_SERVICE)
-);
 
 const saveBridgeSessionToken = async (origin, accessToken) => {
   await ensurePrivateDirectory(CONFIG_DIRECTORY);
@@ -5284,11 +5157,8 @@ const setupCompanyEncryption = async (origin, options) => {
   }
 
   const token = await requireToken(origin);
-  const compatibility = await ensureBridgeCompatibility(origin, token);
-  const routing = compatibility?.encryptedDataPlane?.enabled === true
-    && compatibility.encryptedDataPlane.routingVersion === 1
-    ? await resolveBridgeDataPlaneRouting({ origin, token, companySlug })
-    : { requestOrigin: origin };
+  await ensureBridgeCompatibility(origin, token);
+  const routing = await resolveBridgeDataPlaneRouting({ origin, token, companySlug });
   const companyEncryption = await ensureCompanyEncryptionContext({
     origin,
     requestOrigin: routing.requestOrigin,
@@ -5503,104 +5373,6 @@ const createPkce = () => {
   const verifier = crypto.randomBytes(48).toString("base64url");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
   return { verifier, challenge };
-};
-
-const legacyOAuthLogin = async (origin) => {
-  const state = crypto.randomBytes(24).toString("base64url");
-  const { verifier, challenge } = createPkce();
-  let resolveCallback;
-  let rejectCallback;
-  const callbackPromise = new Promise((resolve, reject) => {
-    resolveCallback = resolve;
-    rejectCallback = reject;
-  });
-  const server = http.createServer((incoming, outgoing) => {
-    const callbackUrl = new URL(incoming.url || "/", "http://127.0.0.1");
-
-    if (callbackUrl.pathname !== "/oauth/callback") {
-      outgoing.writeHead(404).end("Not found");
-      return;
-    }
-
-    const code = callbackUrl.searchParams.get("code");
-    const returnedState = callbackUrl.searchParams.get("state");
-    const oauthError = callbackUrl.searchParams.get("error");
-
-    if (oauthError || !code || returnedState !== state) {
-      outgoing.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
-      outgoing.end("Trelio не удалось подключить. Можно закрыть эту вкладку.");
-      rejectCallback(new Error(oauthError || "OAuth callback не прошёл проверку state."));
-      return;
-    }
-
-    outgoing.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    outgoing.end("<!doctype html><meta charset=utf-8><title>Trelio подключён</title><p>Trelio Agent Workspaces подключён. Эту вкладку можно закрыть.</p>");
-    resolveCallback(code);
-  });
-
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-
-  try {
-    const address = server.address();
-    const redirectUri = `http://127.0.0.1:${address.port}/oauth/callback`;
-    const registrationResponse = await request(origin, null, "/oauth/register", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        client_name: "Trelio Workspace Bridge",
-        redirect_uris: [redirectUri],
-        scope: LEGACY_OAUTH_SCOPES,
-        grant_types: ["authorization_code"],
-        response_types: ["code"],
-        token_endpoint_auth_method: "none",
-      }),
-    });
-    const registration = await registrationResponse.json();
-    const resource = `${origin}/mcp`;
-    const authorizationUrl = new URL("/oauth/authorize", origin);
-    authorizationUrl.search = new URLSearchParams({
-      response_type: "code",
-      client_id: registration.client_id,
-      redirect_uri: redirectUri,
-      scope: LEGACY_OAUTH_SCOPES,
-      state,
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-      resource,
-    }).toString();
-
-    process.stdout.write("Открываю Trelio для подтверждения доступа…\n");
-    await openBrowser(authorizationUrl.toString());
-    let timeoutId;
-    const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(
-        () => reject(new Error("Время ожидания OAuth подтверждения истекло.")),
-        5 * 60 * 1000,
-      );
-    });
-    const code = await Promise.race([callbackPromise, timeout])
-      .finally(() => clearTimeout(timeoutId));
-    const tokenResponse = await request(origin, null, "/oauth/token", {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: redirectUri,
-        client_id: registration.client_id,
-        code_verifier: verifier,
-        resource,
-      }),
-    });
-    const tokenPayload = await tokenResponse.json();
-    const storage = await saveLegacyOAuthToken(origin, tokenPayload.access_token);
-    process.stdout.write(`Legacy OAuth credential сохранён в ${storage}.\n`);
-  } finally {
-    server.close();
-  }
 };
 
 export const requireToken = async (origin, options = {}) => {
@@ -7323,7 +7095,6 @@ const assertOrdinaryRuntimePolicyForCompany = async ({
   token,
   companyId,
   runtimeSessionId,
-  runtimeAttestation,
 }) => {
   const target = normalizeRuntimePolicyTarget({ companyId });
   if (!target) {
@@ -7334,7 +7105,6 @@ const assertOrdinaryRuntimePolicyForCompany = async ({
     token,
     target,
     runtimeSessionId,
-    runtimeAttestation,
   });
   const evaluation = admission.evaluation;
   if (!evaluation) {
@@ -7624,7 +7394,6 @@ const skillCommand = async (
   const releaseId = requireUuid(options.release, "release");
   const skillId = String(options.skill || "");
   const runtimeSessionId = parseRuntimeSessionOption(options);
-  const runtimeAttestation = parseSelfReportedRuntimeAttestationOptions(options);
 
   if (!SKILL_ID_PATTERN.test(skillId)) {
     throw new Error("Параметр --skill должен содержать lowercase kebab-case id.");
@@ -7643,7 +7412,7 @@ const skillCommand = async (
     // A positive admission covers at most twelve hours of this exact session.
     // Expiry never falls back to stale access when Trelio is unavailable.
     await assertOrdinaryRuntimePolicyForCompany({
-      origin, token, companyId, runtimeSessionId, runtimeAttestation,
+      origin, token, companyId, runtimeSessionId,
     });
     const response = await resolveAgentSkillRuntimeWithDeviceConsent({
       origin, token, companyId, projectId, skillId, releaseId,
@@ -8549,10 +8318,8 @@ const stageEncryptedDerivedArtifactInventory = async ({
 
   let result;
   try {
-    // Probe the signed stage before any payload write. The old backend returns
-    // 404 here, so a plugin-first rollout never sends a new entity field to an
-    // adapter that does not know it yet. A replay whose payloads already exist
-    // completes in this first call without redundant upload.
+    // Probe the signed stage before any payload write. A replay whose payloads
+    // already exist completes in this first call without redundant upload.
     result = await submitStage();
   } catch (error) {
     if (!shouldUploadEncryptedDerivedArtifactPayloads(error)) {
@@ -8590,10 +8357,6 @@ const stageEncryptedDerivedArtifactInventory = async ({
   }
   return result;
 };
-
-export const shouldFallbackFromEncryptedDerivedArtifactStaging = (error) => (
-  error instanceof TrelioApiError && error.statusCode === 404
-);
 
 export const shouldUploadEncryptedDerivedArtifactPayloads = (error) => (
   error instanceof TrelioApiError
@@ -9485,20 +9248,10 @@ const readLocalSettings = async () => {
       : fallback;
   };
 
-  // `terminalRunRetentionDays` остаётся только совместимым alias для уже
-  // настроенных клиентов. Новый ключ описывает фактическую единицу хранения:
-  // один переиспользуемый локальный root на Workspace, а не каталог каждого Run.
-  const legacyWorkspaceRetentionDays = readBoundedInteger(
-    rawSettings.terminalRunRetentionDays,
-    DEFAULT_LOCAL_SETTINGS.workspaceRetentionDays,
-    1,
-    365,
-  );
-
   return {
     workspaceRetentionDays: readBoundedInteger(
       rawSettings.workspaceRetentionDays,
-      legacyWorkspaceRetentionDays,
+      DEFAULT_LOCAL_SETTINGS.workspaceRetentionDays,
       1,
       365,
     ),
@@ -9932,65 +9685,48 @@ export const ensureBridgeCompatibility = async (
   token,
   { signal } = {},
 ) => {
-  try {
-    let cachedAgentRules = await readCachedAgentRules(origin);
+  let cachedAgentRules = await readCachedAgentRules(origin);
 
-    // Update считается завершённым только после отдельного ответа `current`.
-    // Поэтому bridge не начинает start/claim сразу после записи новых bytes:
-    // он повторно отправляет их SHA-256 backend-у. Три bounded попытки также
-    // закрывают редкую гонку нескольких последовательных публикаций правил.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const compatibility = await readJsonResponse(await request(
-        origin,
-        token,
-        "/api/agent-workspaces/bridge-compatibility",
-        {
-          signal,
-          headers: cachedAgentRules
-            ? { [AGENT_RULES_SHA256_HEADER]: cachedAgentRules.sha256 }
-            : {},
-        },
-      ));
+  // Update считается завершённым только после отдельного ответа `current`.
+  // Поэтому bridge не начинает start/claim сразу после записи новых bytes:
+  // он повторно отправляет их SHA-256 backend-у. Три bounded попытки также
+  // закрывают редкую гонку нескольких последовательных публикаций правил.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const compatibility = await readJsonResponse(await request(
+      origin,
+      token,
+      "/api/agent-workspaces/bridge-compatibility",
+      {
+        signal,
+        headers: cachedAgentRules
+          ? { [AGENT_RULES_SHA256_HEADER]: cachedAgentRules.sha256 }
+          : {},
+      },
+    ));
 
-      if (compatibility?.supported !== true) {
-        throw new BridgePluginUpgradeRequiredError(compatibility);
-      }
-
-      const activeAgentRules = await applyAgentRulesHandshake(
-        origin,
-        compatibility.agentRules,
-        cachedAgentRules,
-      );
-
-      // Старый backend в коротком release-окне не возвращает agentRules.
-      // Новый backend разрешает работу только после явного подтверждения hash.
-      if (
-        compatibility.agentRules === undefined
-        || compatibility.agentRules === null
-        || compatibility.agentRules.status === "current"
-      ) {
-        return {
-          ...compatibility,
-          agentRules: activeAgentRules,
-        };
-      }
-
-      cachedAgentRules = activeAgentRules;
+    if (compatibility?.supported !== true) {
+      throw new BridgePluginUpgradeRequiredError(compatibility);
     }
 
-    throw new Error(
-      "Платформенные правила Trelio изменились несколько раз подряд и не были подтверждены.",
+    const activeAgentRules = await applyAgentRulesHandshake(
+      origin,
+      compatibility.agentRules,
+      cachedAgentRules,
     );
-  } catch (error) {
-    if (error instanceof TrelioApiError && error.statusCode === 404) {
-      // Плагин публикуется раньше backend hard gate. Короткое окно deploy
-      // остаётся обратно совместимым: старый backend игнорирует version header,
-      // а новый уже вернёт строгий compatibility payload.
-      return null;
+
+    if (compatibility.agentRules.status === "current") {
+      return {
+        ...compatibility,
+        agentRules: activeAgentRules,
+      };
     }
 
-    throw error;
+    cachedAgentRules = activeAgentRules;
   }
+
+  throw new Error(
+    "Платформенные правила Trelio изменились несколько раз подряд и не были подтверждены.",
+  );
 };
 
 const TERMINAL_RUN_STATUSES = new Set(["accepted", "cancelled"]);
@@ -10780,21 +10516,11 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   const token = await requireToken(origin);
   let compatibility = await ensureBridgeCompatibility(origin, token);
   let activeAgentRules = compatibility?.agentRules ?? null;
-  const workspaceRouting = compatibility?.encryptedDataPlane?.enabled === true
-    && compatibility.encryptedDataPlane.routingVersion === 1
-    ? await resolveBridgeDataPlaneRouting({ origin, token, workspaceId })
-    : {
-        company: null,
-        encryptionState: null,
-        requestOrigin: origin,
-        legacyBackend: true,
-      };
+  const workspaceRouting = await resolveBridgeDataPlaneRouting({ origin, token, workspaceId });
   const workspaceOrigin = workspaceRouting.requestOrigin;
-  // Exact open-команду строит уже допущенный MCP-вызов. Новая схема передаёт
-  // только server-side runtime-session id; legacy self-attestation остаётся на
-  // один rolling-upgrade цикл и не используется новым hook.
+  // Exact open-команду строит уже допущенный MCP-вызов. Модельная политика
+  // использует только server-side runtime session, созданную trusted hook.
   const runtimeSessionId = parseRuntimeSessionOption(options);
-  const runtimeAttestation = parseSelfReportedRuntimeAttestationOptions(options);
   const requestedRunId = options.run ? requireUuid(options.run, "run") : null;
   const rootResolution = await resolveWorkspaceRootDirectory({
     workspaceId,
@@ -10926,7 +10652,6 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
           clientKind: "workspace-bridge",
           clientVersion: PLUGIN_VERSION,
           ...(runtimeSessionId ? { runtimeSessionId } : {}),
-          ...(runtimeAttestation ? { runtimeAttestation } : {}),
           ...(activeAgentRules
             ? { platformRulesSha256: activeAgentRules.sha256 }
             : {}),
@@ -10955,7 +10680,6 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
               clientKind: "workspace-bridge",
               clientVersion: PLUGIN_VERSION,
               ...(runtimeSessionId ? { runtimeSessionId } : {}),
-              ...(runtimeAttestation ? { runtimeAttestation } : {}),
               ...(activeAgentRules
                 ? { platformRulesSha256: activeAgentRules.sha256 }
                 : {}),
@@ -11651,14 +11375,7 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSelectedFile, workspaceFileSearchText } =
     await import("./trelio-workspace-files.mjs");
   const requestInput = { ...input, workspaceHead: input.acceptedHead };
-  let files;
-  try { files = await readEncryptedWorkspaceFileManifest(requestInput); }
-  catch (error) {
-    // Only an explicitly missing legacy projection allows the old encrypted
-    // transport. Network/crypto/ACL errors must never trigger a second path.
-    if (error.code !== "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE") throw error;
-    return readLegacyEncryptedWorkspaceSearchDocuments(input);
-  }
+  const files = await readEncryptedWorkspaceFileManifest(requestInput);
   const documents = files.filter((file) => isHumanFacingEncryptedWorkspacePath(file.path))
     .sort((left, right) => left.sizeBytes - right.sizeBytes || (left.path < right.path ? -1 : 1))
     .map((file) => ({ kind: "workspace_file", workspaceId: input.workspaceId, workspaceHead: input.acceptedHead,
@@ -11685,118 +11402,11 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   return documents;
 };
 
-const readLegacyEncryptedWorkspaceSearchDocuments = async ({
-  origin,
-  token,
-  companyEncryption,
-  workspaceId,
-  acceptedHead,
-  signal,
-}) => {
-  const normalizedWorkspaceId = requireUuid(workspaceId, "workspace");
-  if (!GIT_OBJECT_PATTERN.test(String(acceptedHead || ""))) {
-    throw new Error("Accepted Workspace search head is invalid.");
-  }
-  if (!companyEncryption) {
-    throw new Error("Encrypted Workspace search requires a local company key context.");
-  }
-
-  const temporaryDirectory = await fs.mkdtemp(path.join(
-    os.tmpdir(),
-    `trelio-company-context-${normalizedWorkspaceId}-`,
-  ));
-  const bundlePath = path.join(temporaryDirectory, "accepted.bundle");
-  const workspaceDirectory = path.join(temporaryDirectory, "workspace");
-
-  try {
-    const pathname = `/api/agent-workspaces/workspaces/${normalizedWorkspaceId}/encrypted-bundle?${new URLSearchParams({
-        head: acceptedHead,
-      }).toString()}`;
-    await requestAndDecryptCompanyWorkspaceBundle({
-      origin,
-      token,
-      pathname,
-      destination: bundlePath,
-      companyEncryption,
-      expectedWorkspaceId: normalizedWorkspaceId,
-      expectedWorkspaceHead: acceptedHead,
-      signal,
-      inspectResponse: (response) => {
-        if (response.headers.get("x-trelio-accepted-head") !== acceptedHead) {
-          throw new Error("Trelio returned another accepted head during company-context sync.");
-        }
-      },
-    });
-    await materializeBundle({
-      bundlePath,
-      directory: workspaceDirectory,
-      head: acceptedHead,
-      branch: "trelio-context-search",
-    });
-    await assertMaterializedWorkspaceFileTypes(workspaceDirectory);
-
-    const candidates = [];
-    for (const filePath of await listTrackedWorkspacePaths(workspaceDirectory)) {
-      const normalizedPath = filePath.replaceAll("\\", "/");
-      const baseName = normalizedPath.split("/").at(-1) ?? "";
-      const extension = baseName.includes(".")
-        ? baseName.split(".").at(-1)?.toLowerCase() ?? ""
-        : "";
-      if (
-        !normalizedPath
-        || normalizedPath === "AGENTS.md"
-        || normalizedPath === "CLAUDE.md"
-        || normalizedPath.startsWith(".trelio/")
-        || baseName === ".gitkeep"
-      ) {
-        continue;
-      }
-      const absolutePath = path.join(workspaceDirectory, ...normalizedPath.split("/"));
-      const metadata = await fs.lstat(absolutePath);
-      if (
-        !metadata.isFile()
-        || metadata.isSymbolicLink()
-      ) {
-        continue;
-      }
-      candidates.push({ path: normalizedPath, absolutePath, sizeBytes: metadata.size, searchable: COMPANY_CONTEXT_SEARCHABLE_EXTENSIONS.has(extension) });
-    }
-
-    candidates.sort((left, right) => (
-      left.sizeBytes - right.sizeBytes || left.path.localeCompare(right.path)
-    ));
-    const documents = [];
-    let indexedBytes = 0;
-    for (const candidate of candidates) {
-      let text = "";
-      let sizeBytes = candidate.sizeBytes;
-      if (candidate.sizeBytes <= COMPANY_CONTEXT_SEARCHABLE_FILE_BYTES) {
-        const bytes = await fs.readFile(candidate.absolutePath);
-        try {
-          const pointer = parseWorkspaceObjectPointer(bytes);
-          if (pointer) sizeBytes = pointer.sizeBytes;
-          else if (candidate.searchable && indexedBytes + bytes.length <= COMPANY_CONTEXT_SEARCHABLE_WORKSPACE_BYTES
-            && !bytes.includes(0) && isUtf8(bytes)) { indexedBytes += bytes.length; text = bytes.toString("utf8"); }
-        } finally { bytes.fill(0); }
-      }
-      documents.push({ kind: "workspace_file", workspaceId: normalizedWorkspaceId, workspaceHead: acceptedHead,
-        path: candidate.path, name: candidate.path.split("/").at(-1), sizeBytes, text });
-    }
-
-    return documents;
-  } finally {
-    await fs.rm(temporaryDirectory, { recursive: true, force: true });
-  }
-};
-
 const inspectWorkspace = async (origin, options) => {
   const workspaceId = requireUuid(options.workspace, "workspace");
   const token = await requireToken(origin);
-  const compatibility = await ensureBridgeCompatibility(origin, token);
-  const routing = compatibility?.encryptedDataPlane?.enabled === true
-    && compatibility.encryptedDataPlane.routingVersion === 1
-    ? await resolveBridgeDataPlaneRouting({ origin, token, workspaceId })
-    : { requestOrigin: origin };
+  await ensureBridgeCompatibility(origin, token);
+  const routing = await resolveBridgeDataPlaneRouting({ origin, token, workspaceId });
   const workspaceOrigin = routing.requestOrigin;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -11840,11 +11450,8 @@ const inspectWorkspace = async (origin, options) => {
 const migrateEncryptedWorkspaceBrowserFiles = async (origin, options) => {
   const workspaceId = requireUuid(options.workspace, "workspace");
   const token = await requireToken(origin);
-  const compatibility = await ensureBridgeCompatibility(origin, token);
-  const routing = compatibility?.encryptedDataPlane?.enabled === true
-    && compatibility.encryptedDataPlane.routingVersion === 1
-    ? await resolveBridgeDataPlaneRouting({ origin, token, workspaceId })
-    : { requestOrigin: origin };
+  await ensureBridgeCompatibility(origin, token);
+  const routing = await resolveBridgeDataPlaneRouting({ origin, token, workspaceId });
   const workspaceOrigin = routing.requestOrigin;
   const rawSnapshot = await readJsonResponse(await request(
     workspaceOrigin,
@@ -12002,29 +11609,24 @@ const withRun = async (handler) => {
   );
 
   if (metadata.encryption?.enabled && !metadata.encryption.dataPlaneOrigin) {
-    const compatibility = await ensureBridgeCompatibility(origin, token);
+    await ensureBridgeCompatibility(origin, token);
+    const routing = await resolveBridgeDataPlaneRouting({
+      origin,
+      token,
+      workspaceId: metadata.workspaceId,
+    });
     if (
-      compatibility?.encryptedDataPlane?.enabled === true
-      && compatibility.encryptedDataPlane.routingVersion === 1
+      routing.company
+      && company?.id
+      && (
+        routing.company.id !== company.id
+        || routing.company.slug !== company.slug
+        || routing.encryptionState !== "encrypted"
+      )
     ) {
-      const routing = await resolveBridgeDataPlaneRouting({
-        origin,
-        token,
-        workspaceId: metadata.workspaceId,
-      });
-      if (
-        routing.company
-        && company?.id
-        && (
-          routing.company.id !== company.id
-          || routing.company.slug !== company.slug
-          || routing.encryptionState !== "encrypted"
-        )
-      ) {
-        throw new Error("Trelio вернул другой company route для текущего Agent Run.");
-      }
-      workspaceOrigin = routing.requestOrigin;
+      throw new Error("Trelio вернул другой company route для текущего Agent Run.");
     }
+    workspaceOrigin = routing.requestOrigin;
   }
   const companyEncryption = company?.slug
     ? await ensureCompanyEncryptionContext({
@@ -13671,7 +13273,7 @@ const withLocalCandidateBundle = async (
   try {
     // The encrypted server stores an opaque dependency chain. Trusted devices
     // import its full base and deltas locally; periodic full checkpoints bound
-    // recovery cost. Legacy servers still require a self-contained snapshot.
+    // recovery cost.
     await runGit(
       fullSnapshot
         ? ["bundle", "create", bundlePath, "refs/heads/trelio-candidate"]
@@ -13693,24 +13295,16 @@ const withLocalCandidateBundle = async (
 const resolveEncryptedWorkspaceStorage = async ({ metadata, origin, token, companyEncryption }) => {
   const cacheKey = `${metadata.runId}:${metadata.baseHead}`;
   if (companyEncryption.storageCapabilitiesKey === cacheKey) return companyEncryption.storageCapabilities;
-  let capabilities;
-  try {
-    capabilities = await withEncryptedWorkspaceRequestRetry(async () => validateEncryptedWorkspaceCapabilities(
-      await (await request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token,
-        `/api/agent-workspaces/runs/${metadata.runId}/encrypted-storage`)).json(), metadata));
-  } catch (error) {
-    // The bridge ships before the backend. Only an explicit absent endpoint
-    // selects the legacy protocol; failed transport/ACL never downgrades it.
-    if (!(error instanceof TrelioApiError) || error.statusCode !== 404) throw error;
-    capabilities = null;
-  }
+  const capabilities = await withEncryptedWorkspaceRequestRetry(async () => validateEncryptedWorkspaceCapabilities(
+    await (await request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token,
+      `/api/agent-workspaces/runs/${metadata.runId}/encrypted-storage`)).json(), metadata));
   companyEncryption.storageCapabilitiesKey = cacheKey;
   companyEncryption.storageCapabilities = capabilities;
   return capabilities;
 };
 
 const encryptedWorkspaceBundlePlan = (storage, companyEncryption) => {
-  const canUseDelta = storage && storage.baseRevision.chainLength < ENCRYPTED_WORKSPACE_MAX_CHAIN_LENGTH
+  const canUseDelta = storage.baseRevision.chainLength < ENCRYPTED_WORKSPACE_MAX_CHAIN_LENGTH
     && storage.baseRevision.scopeId === companyEncryption.runtime.scope.id
     && storage.baseRevision.scopeEpoch === companyEncryption.runtime.scope.epoch;
   return { bundleFormat: canUseDelta ? "delta" : "full", parentRevisionId: canUseDelta ? storage.baseRevision.id : null };
@@ -13831,90 +13425,8 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
 
 const uploadEncryptedAgentWorkspaceBrowserProjection = async (input) => {
   const storage = await resolveEncryptedWorkspaceStorage(input);
-  return storage ? uploadIncrementalEncryptedWorkspaceProjection({ ...input, storage })
-    : uploadLegacyEncryptedAgentWorkspaceBrowserProjection(input);
+  return uploadIncrementalEncryptedWorkspaceProjection({ ...input, storage });
 };
-
-const uploadLegacyEncryptedAgentWorkspaceBrowserProjection = async ({
-  metadata,
-  origin,
-  token,
-  companyEncryption,
-  workspaceHead,
-}) => withEncryptedWorkspaceBrowserProjection({
-  metadata,
-  workspaceHead,
-  companyEncryption,
-  temporaryPrefix: "trelio-browser-projection",
-}, async (projection) => {
-  const record = buildEncryptedAgentWorkspaceBrowserProjectionRecord({
-    companyId: companyEncryption.runtime.company.id,
-    workspaceId: requireUuid(metadata.workspaceId, "workspace"),
-    runId: requireUuid(metadata.runId, "run"),
-    baseHead: metadata.baseHead,
-    workspaceHead,
-    projectionId: projection.projectionId,
-    scopeId: companyEncryption.runtime.scope.id,
-    scopeEpoch: companyEncryption.runtime.scope.epoch,
-    writerDeviceId: companyEncryption.runtime.device.id,
-    ciphertextSha256: projection.ciphertextSha256,
-    ciphertextSizeBytes: projection.ciphertextSizeBytes,
-    indexSha256: projection.indexSha256,
-    fileCount: projection.fileCount,
-    fencingToken: Number(metadata.fencingToken),
-  });
-  const signature = await signCompanyEncryptionRecord(
-    companyEncryption.device.privateKeys.signingPrivateKey,
-    record,
-  );
-  const result = await withEncryptedWorkspaceTransportCooldownRetry(async () => {
-    const response = await request(
-      resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
-      token,
-      `/api/agent-workspaces/runs/${metadata.runId}/encrypted-browser-projection`,
-      {
-        method: "POST",
-        duplex: "half",
-        headers: {
-          "content-type": ENCRYPTED_WORKSPACE_BROWSER_PROJECTION_CONTENT_TYPE,
-          "content-length": String(projection.ciphertextSizeBytes),
-          "x-trelio-lease-id": metadata.leaseId,
-          "x-trelio-fencing-token": String(metadata.fencingToken),
-          "x-trelio-base-head": metadata.baseHead,
-          "x-trelio-workspace-head": workspaceHead,
-          "x-trelio-browser-projection-id": projection.projectionId,
-          "x-trelio-scope-id": companyEncryption.runtime.scope.id,
-          "x-trelio-scope-epoch": String(companyEncryption.runtime.scope.epoch),
-          "x-trelio-writer-device-id": companyEncryption.runtime.device.id,
-          "x-trelio-ciphertext-sha256": projection.ciphertextSha256,
-          "x-trelio-index-sha256": projection.indexSha256,
-          "x-trelio-file-count": String(projection.fileCount),
-          "x-trelio-signature": signature,
-        },
-        // A retry must construct a fresh stream over the same immutable file;
-        // a fetch failure can leave the previous stream partially consumed.
-        body: createReadStream(projection.projectionPath),
-      },
-    );
-    return response.json();
-  });
-
-  const returnedProjectionId = requireUuid(result?.projectionId, "browser projection");
-
-  if (
-    result.workspaceHead !== workspaceHead
-    || Number(result.fileCount) !== projection.fileCount
-    || result.state !== "staging"
-  ) {
-    throw new Error("Trelio вернул другую encrypted browser projection.");
-  }
-
-  // A lost response can leave an already committed pack on the server while
-  // no local checkpoint exists. The backend reuses that exact Run/head/device
-  // projection and returns its opaque UUID; the candidate must bind the UUID
-  // the server actually owns, not the freshly generated retry UUID.
-  return { ...result, projectionId: returnedProjectionId };
-});
 
 const uploadEncryptedAgentWorkspaceRevision = async ({
   metadata,
@@ -13932,118 +13444,42 @@ const uploadEncryptedAgentWorkspaceRevision = async ({
     throw new Error("Encrypted Workspace upload requires an unlocked company context.");
   }
   const storage = await resolveEncryptedWorkspaceStorage({ metadata, origin, token, companyEncryption });
-  if (storage) {
-    const binding = encryptedWorkspaceLocalBinding(metadata, companyEncryption);
-    const bundlePlan = encryptedWorkspaceBundlePlan(storage, companyEncryption);
-    const cacheDirectory = encryptedWorkspaceCacheDirectory(metadataPath, metadata);
-    const file = await prepareCachedEncryptedWorkspaceFile({ cacheDirectory,
-      // Git pack ordering/compression may change between invocations. The
-      // immutable head and exact base define the content; preserve the first
-      // verified ciphertext even if Git serializes that same graph differently.
-      cacheKey: encryptedWorkspaceCacheKey({ ...binding, ...bundlePlan, kind: "revision", workspaceHead }),
-      sourcePath: bundlePath, kind: "revision", metadata, companyEncryption,
-      originalName: "workspace.bundle", mimeType: "application/vnd.git.bundle", ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile });
-    const api = (pathname, options) => request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token, pathname, options);
-    await uploadEncryptedWorkspaceFile({ file, metadata, api, retry: withEncryptedWorkspaceRequestRetry,
-      onProgress: createEncryptedUploadHeartbeat(metadata, api) });
-    const body = await cacheEncryptedWorkspaceRecord({ cacheDirectory,
-      key: { ...binding, ...bundlePlan, workspaceHead, revisionKind, uploadId: file.uploadId,
-        browserProjectionId, derivedArtifactsSha256 }, readPrivateJsonFile, writePrivateJsonFile,
-      create: async () => {
-        const record = { baseHead: metadata.baseHead, workspaceHead,
-          scopeId: binding.scopeId, scopeEpoch: binding.scopeEpoch, writerDeviceId: binding.writerDeviceId,
-          ciphertextSha256: file.ciphertextSha256, ciphertextSizeBytes: file.ciphertextSizeBytes,
-          fencingToken: binding.fencingToken, ...bundlePlan,
-          ...(browserProjectionId ? { browserProjectionId } : {}),
-          ...(derivedArtifactsSha256 ? { derivedArtifactsSha256 } : {}) };
-        return { ...record, leaseId: metadata.leaseId, uploadId: file.uploadId,
-          signature: await signCompanyEncryptionRecord(companyEncryption.device.privateKeys.signingPrivateKey,
-            buildEncryptedAgentWorkspaceRevisionRecord({ ...record, companyId: binding.companyId,
-              workspaceId: binding.workspaceId, runId: binding.runId, revisionKind })) };
-      },
-    });
-    return publishEncryptedWorkspaceRecord({ metadata, kind: revisionKind, api,
-      retry: withEncryptedWorkspaceRequestRetry,
-      record: buildEncryptedAgentWorkspaceRevisionRecord({ ...body, ...binding, revisionKind }), signature: body.signature,
-      publish: async () => (await api(
-      `/api/agent-workspaces/runs/${metadata.runId}/encrypted-storage/${revisionKind === "draft" ? "draft" : "candidate"}`,
-      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
-    )).json() });
-  }
-  const encryptedPath = `${bundlePath}.trelioe1`;
-  try {
-    const encrypted = await encryptFileToCompanyContainer({
-      sourcePath: bundlePath,
-      destinationPath: encryptedPath,
-      scopePublicEncryptionJwk: companyEncryption.runtime.scope.publicEncryptionJwk,
-      aad: {
-        companyId: companyEncryption.runtime.company.id,
-        scopeId: companyEncryption.runtime.scope.id,
-        scopeEpoch: companyEncryption.runtime.scope.epoch,
-        entityType: "agent_workspace_revision",
-        entityId: requireUuid(metadata.runId, "run"),
-        entityRevision: Number(metadata.fencingToken),
-      },
-      originalName: "workspace.bundle",
-      mimeType: "application/vnd.git.bundle",
-      writerDeviceId: companyEncryption.runtime.device.id,
-      signingPrivateKey: companyEncryption.device.privateKeys.signingPrivateKey,
-    });
-    const manifest = buildEncryptedAgentWorkspaceRevisionRecord({
-      companyId: companyEncryption.runtime.company.id,
-      workspaceId: requireUuid(metadata.workspaceId, "workspace"),
-      runId: requireUuid(metadata.runId, "run"),
-      revisionKind,
-      baseHead: metadata.baseHead,
-      workspaceHead,
-      scopeId: companyEncryption.runtime.scope.id,
-      scopeEpoch: companyEncryption.runtime.scope.epoch,
-      writerDeviceId: companyEncryption.runtime.device.id,
-      ciphertextSha256: encrypted.ciphertextSha256,
-      ciphertextSizeBytes: encrypted.ciphertextSizeBytes,
-      fencingToken: Number(metadata.fencingToken),
-      ...(browserProjectionId ? { browserProjectionId } : {}),
-      ...(derivedArtifactsSha256 ? { derivedArtifactsSha256 } : {}),
-    });
-    const signature = await signCompanyEncryptionRecord(
-      companyEncryption.device.privateKeys.signingPrivateKey,
-      manifest,
-    );
-    return withEncryptedWorkspaceTransportCooldownRetry(async () => {
-      const response = await request(
-        resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
-        token,
-        `/api/agent-workspaces/runs/${metadata.runId}/encrypted-${revisionKind === "draft" ? "draft" : "candidate"}`,
-        {
-          method: "POST",
-          duplex: "half",
-          headers: {
-            "content-type": "application/vnd.trelio.encrypted-workspace",
-            "content-length": String(encrypted.ciphertextSizeBytes),
-            "x-trelio-lease-id": metadata.leaseId,
-            "x-trelio-fencing-token": String(metadata.fencingToken),
-            "x-trelio-base-head": metadata.baseHead,
-            "x-trelio-workspace-head": workspaceHead,
-            "x-trelio-scope-id": companyEncryption.runtime.scope.id,
-            "x-trelio-scope-epoch": String(companyEncryption.runtime.scope.epoch),
-            "x-trelio-writer-device-id": companyEncryption.runtime.device.id,
-            "x-trelio-ciphertext-sha256": encrypted.ciphertextSha256,
-            "x-trelio-signature": signature,
-            ...(browserProjectionId
-              ? { "x-trelio-browser-projection-id": browserProjectionId }
-              : {}),
-            ...(derivedArtifactsSha256
-              ? { "x-trelio-derived-artifacts-sha256": derivedArtifactsSha256 }
-              : {}),
-          },
-          body: createReadStream(encryptedPath),
-        },
-      );
-      return response.json();
-    });
-  } finally {
-    await fs.rm(encryptedPath, { force: true }).catch(() => undefined);
-  }
+  const binding = encryptedWorkspaceLocalBinding(metadata, companyEncryption);
+  const bundlePlan = encryptedWorkspaceBundlePlan(storage, companyEncryption);
+  const cacheDirectory = encryptedWorkspaceCacheDirectory(metadataPath, metadata);
+  const file = await prepareCachedEncryptedWorkspaceFile({ cacheDirectory,
+    // Git pack ordering/compression may change between invocations. The
+    // immutable head and exact base define the content; preserve the first
+    // verified ciphertext even if Git serializes that same graph differently.
+    cacheKey: encryptedWorkspaceCacheKey({ ...binding, ...bundlePlan, kind: "revision", workspaceHead }),
+    sourcePath: bundlePath, kind: "revision", metadata, companyEncryption,
+    originalName: "workspace.bundle", mimeType: "application/vnd.git.bundle", ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile });
+  const api = (pathname, options) => request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token, pathname, options);
+  await uploadEncryptedWorkspaceFile({ file, metadata, api, retry: withEncryptedWorkspaceRequestRetry,
+    onProgress: createEncryptedUploadHeartbeat(metadata, api) });
+  const body = await cacheEncryptedWorkspaceRecord({ cacheDirectory,
+    key: { ...binding, ...bundlePlan, workspaceHead, revisionKind, uploadId: file.uploadId,
+      browserProjectionId, derivedArtifactsSha256 }, readPrivateJsonFile, writePrivateJsonFile,
+    create: async () => {
+      const record = { baseHead: metadata.baseHead, workspaceHead,
+        scopeId: binding.scopeId, scopeEpoch: binding.scopeEpoch, writerDeviceId: binding.writerDeviceId,
+        ciphertextSha256: file.ciphertextSha256, ciphertextSizeBytes: file.ciphertextSizeBytes,
+        fencingToken: binding.fencingToken, ...bundlePlan,
+        ...(browserProjectionId ? { browserProjectionId } : {}),
+        ...(derivedArtifactsSha256 ? { derivedArtifactsSha256 } : {}) };
+      return { ...record, leaseId: metadata.leaseId, uploadId: file.uploadId,
+        signature: await signCompanyEncryptionRecord(companyEncryption.device.privateKeys.signingPrivateKey,
+          buildEncryptedAgentWorkspaceRevisionRecord({ ...record, companyId: binding.companyId,
+            workspaceId: binding.workspaceId, runId: binding.runId, revisionKind })) };
+    },
+  });
+  return publishEncryptedWorkspaceRecord({ metadata, kind: revisionKind, api,
+    retry: withEncryptedWorkspaceRequestRetry,
+    record: buildEncryptedAgentWorkspaceRevisionRecord({ ...body, ...binding, revisionKind }), signature: body.signature,
+    publish: async () => (await api(
+    `/api/agent-workspaces/runs/${metadata.runId}/encrypted-storage/${revisionKind === "draft" ? "draft" : "candidate"}`,
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+  )).json() });
 };
 
 const parseEncryptedDraftRevisionDescriptor = (draft, expected) => {
@@ -14131,14 +13567,7 @@ export const resolveReusableEncryptedDraftRevision = ({
 
 export const shouldFallbackFromEncryptedDraftPromotion = (error) => (
   error instanceof TrelioApiError
-  && (
-    error.code === "ENCRYPTED_DRAFT_CHANGED"
-    // During the required plugin-first rollout the previous backend does not
-    // know the body-free promotion route yet. Falling back here is safe: that
-    // endpoint accepted no bundle bytes, and the ordinary candidate upload
-    // remains the backwards-compatible data plane until backend deployment.
-    || error.statusCode === 404
-  )
+  && error.code === "ENCRYPTED_DRAFT_CHANGED"
 );
 
 const promoteEncryptedAgentWorkspaceDraft = async ({
@@ -14204,11 +13633,11 @@ const promoteEncryptedAgentWorkspaceDraft = async ({
     );
     return response.json();
   };
-  const storage = await resolveEncryptedWorkspaceStorage({ metadata, origin, token, companyEncryption });
-  return storage ? publishEncryptedWorkspaceRecord({ metadata, kind: "accepted", record: manifest, signature,
+  await resolveEncryptedWorkspaceStorage({ metadata, origin, token, companyEncryption });
+  return publishEncryptedWorkspaceRecord({ metadata, kind: "accepted", record: manifest, signature,
     api: (pathname, options) => request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token, pathname, options),
     retry: withEncryptedWorkspaceTransportCooldownRetry, publish,
-  }) : withEncryptedWorkspaceTransportCooldownRetry(publish);
+  });
 };
 
 const saveRunDraftSnapshot = async ({
@@ -14352,7 +13781,6 @@ const submit = async (options) => withRun(async ({
   let browserProjectionId = null;
   let encryptedDerivedArtifactInventory = null;
   let encryptedDerivedArtifactManifests = [];
-  let encryptedDerivedArtifactsServerSupported = false;
 
   if (companyEncryption) {
     const preparedDerivedArtifacts = await prepareEncryptedDerivedArtifactInventory({
@@ -14371,23 +13799,13 @@ const submit = async (options) => withRun(async ({
     // instead of colliding with an already stored entity revision.
     await writeRunMetadata(metadataPath, submissionMetadata);
     await heartbeat();
-    try {
-      await stageEncryptedDerivedArtifactInventory({
-        metadata: submissionMetadata,
-        origin,
-        token,
-        companyEncryption,
-        inventory: encryptedDerivedArtifactInventory,
-      });
-      encryptedDerivedArtifactsServerSupported = true;
-    } catch (error) {
-      if (!shouldFallbackFromEncryptedDerivedArtifactStaging(error)) throw error;
-      // Plugin releases precede their compatible backend patch. During that
-      // bounded rollout window the old backend has no staging endpoint and
-      // verifies the legacy revision signature without the new digest. Once
-      // the endpoint exists, every accepted candidate is bound fail-closed.
-      encryptedDerivedArtifactsServerSupported = false;
-    }
+    await stageEncryptedDerivedArtifactInventory({
+      metadata: submissionMetadata,
+      origin,
+      token,
+      companyEncryption,
+      inventory: encryptedDerivedArtifactInventory,
+    });
 
     const reusableProjection = submissionMetadata.browserProjection?.workspaceHead === head
       && UUID_PATTERN.test(String(submissionMetadata.browserProjection?.projectionId || ""))
@@ -14443,9 +13861,7 @@ const submit = async (options) => withRun(async ({
         workspaceHead: head,
         revisionKind: "accepted",
         browserProjectionId,
-        derivedArtifactsSha256: encryptedDerivedArtifactsServerSupported
-          ? encryptedDerivedArtifactInventory.derivedArtifactsSha256
-          : null,
+        derivedArtifactsSha256: encryptedDerivedArtifactInventory.derivedArtifactsSha256,
       }),
     );
     let result;
@@ -14465,9 +13881,7 @@ const submit = async (options) => withRun(async ({
             companyEncryption,
             draft: reusableDraft,
             browserProjectionId,
-            derivedArtifactsSha256: encryptedDerivedArtifactsServerSupported
-              ? encryptedDerivedArtifactInventory.derivedArtifactsSha256
-              : null,
+            derivedArtifactsSha256: encryptedDerivedArtifactInventory.derivedArtifactsSha256,
           });
           promotedDraft = true;
         } catch (error) {
@@ -14514,7 +13928,7 @@ const submit = async (options) => withRun(async ({
         ? "Зашифрованный draft принят без повторной отправки полного snapshot.\n"
         : "Зашифрованный результат записан в рабочее пространство Trelio.\n",
     );
-    if (encryptedDerivedArtifactsServerSupported && encryptedDerivedArtifactManifests.length > 0) {
+    if (encryptedDerivedArtifactManifests.length > 0) {
       process.stdout.write("Производные артефакты для проверки человеком:\n");
       for (const [index, manifest] of encryptedDerivedArtifactManifests.entries()) {
         const artifact = encryptedDerivedArtifactInventory.artifacts[index];
@@ -15428,11 +14842,10 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
   }
 
   const browserMode = normalizeSecretBrowserMode(options.browser);
-  let browserContext = null;
+  let browserContext;
   // GET не содержит value/ciphertext, не claim-ит grant и безопасен для
-  // bounded transport retry. Он нужен и forced-Chrome compatibility calls:
-  // current runtime must preflight its own isolated profile before consume.
-  // Только 404 старого backend допускает прежний lazy Chrome flow.
+  // bounded transport retry. Runtime обязан проверить собственную изолированную
+  // browser-сессию до необратимого consume одноразового grant.
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const contextResponse = await request(workspaceOrigin, token,
@@ -15443,7 +14856,6 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
       }
       break;
     } catch (error) {
-      if (browserMode !== "embedded" && error instanceof TrelioApiError && error.statusCode === 404) break;
       if (!isRetryableBrowserOutcomeError(error) || attempt === 3) throw error;
       await wait(250 * attempt);
     }
@@ -15471,10 +14883,8 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
       || payload.executable !== "trelio-workspace"
       || typeof payload.targetOrigin !== "string"
       || !/^[0-9a-f]{64}$/u.test(payload.targetUrlSha256 || "")
-      || (
-        (!Array.isArray(payload.browserSteps) || payload.browserSteps.length === 0)
-        && (typeof payload.browserFieldSelector !== "string" || !payload.browserFieldSelector)
-      )
+      || !Array.isArray(payload.browserSteps)
+      || payload.browserSteps.length === 0
     ) {
       throw new Error("Trelio вернул некорректный browser-fill grant.");
     }
@@ -15484,14 +14894,13 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     let localResult = null;
     let outcomeReported = false;
     try {
-      if (browserContext) assertBrowserFillBindingUnchanged(browserContext, payload);
+      assertBrowserFillBindingUnchanged(browserContext, payload);
       const secretValues = await resolveCheckoutSecretValues(payload, companyEncryption);
       const result = await browserSession.fill({
         secretValues,
         targetUrl,
         targetOrigin: payload.targetOrigin,
         targetUrlSha256: payload.targetUrlSha256,
-        fieldSelector: payload.browserFieldSelector,
         browserSteps: payload.browserSteps,
         profileDirectory: SECRET_BROWSER_PROFILE_DIRECTORY,
         ensurePrivateDirectory,
@@ -16364,7 +15773,6 @@ const printHelp = () => {
   process.stdout.write("Команды:\n");
   process.stdout.write("  trelio-workspace doctor [--json] [--origin URL]\n");
   process.stdout.write("  trelio-workspace login [--origin https://trelio.ru]\n");
-  process.stdout.write("  trelio-workspace login --legacy-oauth [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace encryption setup --company SLUG [--json] [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace inspect --workspace UUID [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace open --workspace UUID [--run UUID] [--dir PATH]\n");
@@ -16710,11 +16118,7 @@ const main = async () => {
   if (command === "doctor") {
     await doctor(options);
   } else if (command === "login") {
-    if (options["legacy-oauth"] === true) {
-      await legacyOAuthLogin(origin);
-    } else {
-      await pairBridge(origin);
-    }
+    await pairBridge(origin);
   } else if (command === "encryption") {
     if (positional[0] === "setup" && positional.length === 1) {
       await setupCompanyEncryption(origin, options);

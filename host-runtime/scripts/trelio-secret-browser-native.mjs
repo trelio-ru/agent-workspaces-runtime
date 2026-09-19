@@ -13,7 +13,6 @@ import {
   normalizeSecretBrowserTarget,
   normalizeSecretBrowserFieldSelector,
   prepareSecretBrowserFill,
-  runSecretBrowserFill,
   SecretBrowserFillError,
 } from "./trelio-secret-browser.mjs";
 
@@ -23,7 +22,7 @@ const MACOS_COMMAND_LINE_TOOLS_DIRECTORY = "/Library/Developer/CommandLineTools"
 const NATIVE_UNAVAILABLE = new Set([
   "platform_unsupported", "client_unsupported", "helper_unavailable",
   "access_required", "application_unavailable", "accessibility_unavailable",
-  "selector_unsupported", "step_unsupported", "backend_unavailable",
+  "backend_unavailable",
 ]);
 
 export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
@@ -33,9 +32,7 @@ export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
     // an unsupported browser. Never copy native diagnostics, URLs or DOM data.
     const hint = reason === "client_unsupported"
       ? " В Agent Run нет поддерживаемого hook-verified клиента Codex/Claude Code; проверьте runtime identity Run."
-      : reason === "selector_unsupported"
-        ? " Native activation, поля и submitSelector требуют точный id. Для финальной кнопки без id подготовьте последний step без submitSelector; backend закрепит его за embedded, после чего нажмите заранее найденную кнопку штатным browser tool без чтения полей."
-        : "";
+      : "";
     super("Встроенный browser transport недоступен: " + reason + "." + hint, "browser_unavailable");
     this.nativeReason = reason;
   }
@@ -55,7 +52,12 @@ export const nativeIdFromSecretSelector = (selector) => {
   const value = normalizeSecretBrowserFieldSelector(selector);
   const hash = /^#([A-Za-z_][A-Za-z0-9_-]*)$/u.exec(value);
   const attribute = /^\[id=(["'])([A-Za-z_][A-Za-z0-9_.:-]*)\1\]$/u.exec(value);
-  if (!hash && !attribute) throw new EmbeddedBrowserUnavailable("selector_unsupported");
+  if (!hash && !attribute) {
+    throw new SecretBrowserFillError(
+      'Native activation, fields and submit require exact #id or [id="..."] selectors.',
+      "field_selector_invalid",
+    );
+  }
   return hash?.[1] ?? attribute[2];
 };
 
@@ -67,13 +69,11 @@ export const browserFillBinding = (context) => {
     || !/^[0-9a-f]{64}$/u.test(context.targetUrlSha256 || "")) {
     throw new SecretBrowserFillError("Некорректный browser-fill context.");
   }
-  const steps = context.browserSteps?.length ? context.browserSteps : [{
-    targetOrigin: context.targetOrigin,
-    targetUrlSha256: context.targetUrlSha256,
-    fields: [{ fieldKey: context.fieldKeys[0], selector: context.browserFieldSelector }],
-  }];
+  const steps = context.browserSteps;
   const seen = new Set();
-  if (steps.length > 10) throw new SecretBrowserFillError("Некорректный browser-fill context.");
+  if (!Array.isArray(steps) || steps.length < 1 || steps.length > 10) {
+    throw new SecretBrowserFillError("Некорректный browser-fill context.");
+  }
   const normalized = steps.map((step) => {
     const url = new URL(step.targetOrigin);
     if (url.protocol !== "https:" || url.origin !== step.targetOrigin
@@ -289,7 +289,6 @@ export const prepareSecretBrowserSession = async ({
   profileDirectory, platform = process.platform, buildHelper = buildNativeSecretBrowserHelper,
   openChannel = openNativeSecretBrowserChannel,
   prepareChrome = prepareSecretBrowserFill,
-  runChrome = runSecretBrowserFill,
 }) => {
   mode = normalizeSecretBrowserMode(mode);
   let channel = null;
@@ -297,29 +296,21 @@ export const prepareSecretBrowserSession = async ({
     // Current servers provide a complete value-free binding. Resolve the
     // dedicated profile and its exact fields before the one-use grant is
     // consumed; an ordinary Chrome tab prepared by the agent is unrelated.
-    if (context) {
-      const binding = browserFillBinding(context);
-      normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
-      const prepared = await prepareChrome({
-        targetUrl,
-        targetOrigin: binding.targetOrigin,
-        targetUrlSha256: binding.targetUrlSha256,
-        browserSteps: binding.browserSteps,
-        profileDirectory,
-        ensurePrivateDirectory,
-      });
-      return {
-        surface: "chrome", fallbackReason,
-        fill: ({ secretValues }) => prepared.fill({ secretValues }),
-        close: () => prepared.close(),
-      };
-    }
-    // A 404 from a pre-context backend is the only compatibility route where
-    // Chrome can still be opened after consume; new backends never use it.
+    if (!context) throw new EmbeddedBrowserUnavailable("backend_unavailable");
+    const binding = browserFillBinding(context);
+    normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+    const prepared = await prepareChrome({
+      targetUrl,
+      targetOrigin: binding.targetOrigin,
+      targetUrlSha256: binding.targetUrlSha256,
+      browserSteps: binding.browserSteps,
+      profileDirectory,
+      ensurePrivateDirectory,
+    });
     return {
       surface: "chrome", fallbackReason,
-      fill: (args) => runChrome(args),
-      close: () => {},
+      fill: ({ secretValues }) => prepared.fill({ secretValues }),
+      close: () => prepared.close(),
     };
   };
   if (mode === "chrome") return chrome(null);
@@ -330,7 +321,12 @@ export const prepareSecretBrowserSession = async ({
     if (!["darwin", "win32"].includes(platform)) throw new EmbeddedBrowserUnavailable("platform_unsupported");
     if (!["codex", "claude-code"].includes(binding.clientFamily)) throw new EmbeddedBrowserUnavailable("client_unsupported");
     const steps = binding.browserSteps.map((step, index) => {
-      if (index < binding.browserSteps.length - 1 && !step.submitSelector) throw new EmbeddedBrowserUnavailable("step_unsupported");
+      if (index < binding.browserSteps.length - 1 && !step.submitSelector) {
+        throw new SecretBrowserFillError(
+          "Every non-final browser fill step requires an exact submitSelector.",
+          "field_selector_invalid",
+        );
+      }
       const fields = step.fields.map(({ fieldKey, selector }) => ({ fieldKey, id: nativeIdFromSecretSelector(selector) }));
       if (new Set(fields.map((field) => field.id)).size !== fields.length) {
         throw new SecretBrowserFillError("Browser selectors разрешаются в одно поле.", "field_ambiguous");

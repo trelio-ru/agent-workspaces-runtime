@@ -21,6 +21,53 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+const TEST_AGENT_RULES_MARKDOWN = "# Platform rules\n\nUse exact typed actions.\n";
+const TEST_AGENT_RULES_SHA256 = createHash("sha256")
+  .update(TEST_AGENT_RULES_MARKDOWN, "utf8")
+  .digest("hex");
+const TEST_AGENT_RULES_REVISION_ID = "10000000-0000-4000-8000-000000000001";
+
+// Every current bridge handshake carries the immutable platform rules snapshot.
+// Tests use one shared fixture so a missing handshake cannot accidentally model
+// a backend generation that the v3 runtime no longer supports.
+const buildTestBridgeCompatibility = (request) => {
+  const rulesAreCurrent = (
+    request.headers["x-trelio-agent-rules-sha256"] === TEST_AGENT_RULES_SHA256
+  );
+  return {
+    supported: true,
+    minimumVersion: PLUGIN_VERSION,
+    agentRules: {
+      status: rulesAreCurrent ? "current" : "update_required",
+      revisionId: TEST_AGENT_RULES_REVISION_ID,
+      version: 1,
+      sha256: TEST_AGENT_RULES_SHA256,
+      ...(rulesAreCurrent ? {} : { rulesMarkdown: TEST_AGENT_RULES_MARKDOWN }),
+    },
+  };
+};
+
+const respondToPlainTestBridgeRouting = (request, response) => {
+  if (
+    request.method !== "GET"
+    || !request.url?.startsWith("/api/agent-workspaces/bridge-routing?")
+  ) {
+    return false;
+  }
+
+  const requestUrl = new URL(request.url, "http://loopback");
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify({
+    schemaVersion: 1,
+    company: {
+      id: testCompany.id,
+      slug: requestUrl.searchParams.get("companySlug") || testCompany.slug,
+    },
+    encryptionState: "plain",
+  }));
+  return true;
+};
+
 import {
   AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION,
   AGENT_SKILL_BROWSER_SESSION_DEFAULT_LEASE_MS,
@@ -109,7 +156,6 @@ import {
   resolveEncryptedDataPlaneOrigin,
   resolveReusableEncryptedDraftRevision,
   shouldFallbackFromEncryptedDraftPromotion,
-  shouldFallbackFromEncryptedDerivedArtifactStaging,
   shouldUploadEncryptedDerivedArtifactPayloads,
   resolveWorkspaceBridgeConfigDirectory,
   retainCurrentContextObjects,
@@ -832,7 +878,7 @@ test("encrypted draft reuse requires an exact head, scope and writer device", ()
   }), null);
 });
 
-test("encrypted draft promotion falls back only for stale draft or an older backend", () => {
+test("encrypted draft promotion falls back only for a stale draft", () => {
   assert.equal(
     shouldFallbackFromEncryptedDraftPromotion(
       new TrelioApiError(409, "draft changed", null, "ENCRYPTED_DRAFT_CHANGED"),
@@ -841,7 +887,7 @@ test("encrypted draft promotion falls back only for stale draft or an older back
   );
   assert.equal(
     shouldFallbackFromEncryptedDraftPromotion(new TrelioApiError(404, "route not found")),
-    true,
+    false,
   );
   assert.equal(
     shouldFallbackFromEncryptedDraftPromotion(
@@ -855,23 +901,7 @@ test("encrypted draft promotion falls back only for stale draft or an older back
   );
 });
 
-test("encrypted derived-artifact staging falls back only during an older-backend rollout", () => {
-  assert.equal(
-    shouldFallbackFromEncryptedDerivedArtifactStaging(
-      new TrelioApiError(404, "route not found"),
-    ),
-    true,
-  );
-  assert.equal(
-    shouldFallbackFromEncryptedDerivedArtifactStaging(
-      new TrelioApiError(409, "inventory changed", null, "ENCRYPTED_DERIVED_ARTIFACTS_CHANGED"),
-    ),
-    false,
-  );
-  assert.equal(
-    shouldFallbackFromEncryptedDerivedArtifactStaging(new TypeError("fetch failed")),
-    false,
-  );
+test("encrypted derived-artifact payload upload is retried only when the server requests it", () => {
   assert.equal(
     shouldUploadEncryptedDerivedArtifactPayloads(
       new TrelioApiError(
@@ -1787,13 +1817,10 @@ test("encryption setup reports plain companies without creating a Run", async ()
       assert.equal(request.headers.authorization, "Bearer integration-token");
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       response.setHeader("content-type", "application/json");
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-        response.end(JSON.stringify({
-          supported: true,
-          minimumVersion: PLUGIN_VERSION,
-          agentRules: null,
-        }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
       if (request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
@@ -2497,6 +2524,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         compatibilityRequests += 1;
         response.setHeader("content-type", "application/json");
@@ -2850,8 +2878,9 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
       assert.equal(request.headers.authorization, "Bearer integration-token");
       response.setHeader("content-type", "application/json");
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
       if (request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
@@ -3060,9 +3089,10 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
 
@@ -3374,9 +3404,10 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
 
@@ -4209,9 +4240,10 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
 
@@ -4248,7 +4280,7 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
         if (currentRunId === expiredSiblingTerminalRunId) {
           currentRuns.push({ id: expiredSiblingRunId, status: "expired", updatedAt: oldTimestamp });
         }
-        response.end(JSON.stringify({ runs: currentRuns }));
+        response.end(JSON.stringify({ company: testCompany, runs: currentRuns }));
         concurrentOverviewRequests -= 1;
         return;
       }
@@ -4570,13 +4602,11 @@ test("encrypted derived artifacts validate exact committed source and canonical 
   }
 });
 
-test("encrypted projection upload uses the backend's canonical id header", async () => {
+test("encrypted projection migration uses the backend's canonical id header", async () => {
   const bridgeSource = await readFile(bridgePath, "utf8");
 
-  assert.match(
-    bridgeSource,
-    /\/encrypted-browser-projection`[\s\S]{0,1800}"x-trelio-browser-projection-id": projection\.projectionId/u,
-  );
+  assert.match(bridgeSource, /\/encrypted-browser-projection-migration`/u);
+  assert.match(bridgeSource, /"x-trelio-browser-projection-id": projection\.projectionId/u);
   assert.doesNotMatch(bridgeSource, /"x-trelio-projection-id"/u);
 });
 
@@ -5880,7 +5910,7 @@ test("workspace skill defaults task-level controls to shared without widening ex
   );
 });
 
-test("hot-path skills use typed bridge actions and keep launcher compatibility lazy", async () => {
+test("hot-path skills use typed bridge actions exclusively", async () => {
   const catalogSkill = await readFile(
     path.join(pluginDirectory, "skills", "trelio-skill-catalog", "SKILL.md"),
     "utf8",
@@ -5901,10 +5931,7 @@ test("hot-path skills use typed bridge actions and keep launcher compatibility l
   assert.doesNotMatch(catalogSkill, /If it is available in `PATH`/u);
   assert.doesNotMatch(workspaceSkill, /logical launcher/u);
   assert.doesNotMatch(AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN, /логический launcher/u);
-  assert.match(recoveryReference, /id="legacy-command-only-responses"/u);
-  assert.match(recoveryReference, /`operation=legacy_command`/u);
-  assert.match(recoveryReference, /Runtime без shell проверит executable, quoting/u);
-  assert.match(recoveryReference, /legacy `secret set` завершаются точным/u);
+  assert.doesNotMatch(recoveryReference, /legacy-command-only-responses|operation=legacy_command/u);
   assert.doesNotMatch(recoveryReference, /первый токен серверной команды/u);
   assert.doesNotMatch(recoveryReference, /передай им проверенные\s+оставшиеся argv/u);
 });
@@ -6281,13 +6308,14 @@ test("secret set sends one atomic named-field bundle from protected stdin", {
       assert.equal(request.headers.authorization, "Bearer integration-token");
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (
         request.method === "GET"
         && request.url === "/api/agent-workspaces/bridge-compatibility"
       ) {
         compatibilityCount += 1;
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
 
@@ -6374,7 +6402,7 @@ test("secret set sends one atomic named-field bundle from protected stdin", {
     assert.equal(result.stdout.includes(values.username), false);
     assert.equal(result.stdout.includes(values.password), false);
     assert.equal(result.stderr, "");
-    assert.equal(compatibilityCount, 1);
+    assert.equal(compatibilityCount, 2);
     assert.deepEqual(writes, [{ runId, values }]);
     assert.ifError(serverError);
   } finally {
@@ -6593,7 +6621,6 @@ const verifyEncryptedSecretApiRouting = async (dedicatedDataPlane) => {
     executable: "trelio-workspace", deliveryMode: "browser",
     targetOrigin: new URL(targetUrl).origin,
     targetUrlSha256: createHash("sha256").update(targetUrl).digest("hex"),
-    browserFieldSelector: grant.selector,
     browserSteps: [{
       targetOrigin: new URL(targetUrl).origin,
       targetUrlSha256: createHash("sha256").update(targetUrl).digest("hex"),
@@ -6621,9 +6648,19 @@ const verifyEncryptedSecretApiRouting = async (dedicatedDataPlane) => {
       assert.equal(request.headers["x-trelio-agent-secret-company-e2ee"], "v1");
       response.setHeader("content-type", "application/json");
 
+      if (request.method === "GET" && request.url?.startsWith("/api/agent-workspaces/bridge-routing?")) {
+        assert.equal(plane, "canonical");
+        response.end(JSON.stringify({
+          schemaVersion: 1,
+          company,
+          encryptionState: "encrypted",
+          encryptedDataPlaneOrigin: dedicatedDataPlane ? "https://e2ee.trelio.ru" : "https://trelio.ru",
+        }));
+        return;
+      }
       if (request.method === "GET" && request.url === "/api/agent-workspaces/bridge-compatibility") {
         assert.equal(plane, "canonical");
-        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
       if (request.method === "GET" && request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
@@ -6687,12 +6724,7 @@ const verifyEncryptedSecretApiRouting = async (dedicatedDataPlane) => {
       if (request.method === "GET" && contextGrant) {
         assert.equal(consumedGrantIds.has(contextGrant.id), false, "native selection precedes consume");
         contextGrantIds.add(contextGrant.id);
-        // One grant models an older server without the value-free endpoint.
-        // Its normal consume still authorizes Chrome; there is no host retry.
-        if (contextGrant.selector === "#throws") {
-          response.statusCode = 404;
-          response.end(JSON.stringify({ error: "Not found" }));
-        } else response.end(JSON.stringify(browserBinding(contextGrant)));
+        response.end(JSON.stringify(browserBinding(contextGrant)));
         return;
       }
       const browserGrant = browserGrants.find((grant) => (
@@ -6877,9 +6909,13 @@ const verifyEncryptedSecretApiRouting = async (dedicatedDataPlane) => {
       JSON.stringify({
         schemaVersion: 3,
         origin,
+        workspaceId: "23232323-2323-4232-8232-232323232323",
         runId,
         company,
-        ...(dedicatedDataPlane ? { encryption: { enabled: true, dataPlaneOrigin } } : {}),
+        encryption: {
+          enabled: true,
+          dataPlaneOrigin: dedicatedDataPlane ? dataPlaneOrigin : origin,
+        },
       }, null, 2) + "\n",
       "utf8",
     );
@@ -8180,8 +8216,7 @@ test("skill host ignores a PATH python hijack and runs Python entrypoints in iso
   }
 });
 
-for (const boundSession of [false, true]) {
-test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves legacy calls"}, verifies packages and repairs tampering`, {
+test("skill host reuses twelve-hour admission, verifies packages and repairs tampering", {
   timeout: 25_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-skill-runtime-test-"));
@@ -8193,16 +8228,7 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
   const companyId = "99999999-9999-4999-8999-999999999999";
   const memberId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const connectionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-  const runtimeArgv = boundSession ? ["--runtime-session", "dddddddd-dddd-4ddd-8ddd-dddddddddddd"] : [
-    "--runtime-client",
-    "codex",
-    "--runtime-model",
-    "gpt-5.6-sol",
-    "--runtime-effort",
-    "high",
-    "--runtime-observed-at",
-    "2026-08-19T12:34:56.000Z",
-  ];
+  const runtimeArgv = ["--runtime-session", "dddddddd-dddd-4ddd-8ddd-dddddddddddd"];
   const deliveredFilePathLog = path.join(temporaryDirectory, "delivered-file-path.txt");
   const runId = "66666666-6666-4666-8666-666666666666";
   const grantIds = {
@@ -8265,12 +8291,10 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({
-          supported: true,
-          minimumVersion: PLUGIN_VERSION,
-        }));
+        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
         return;
       }
 
@@ -8280,16 +8304,8 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
       ) {
         const body = JSON.parse((await readRequestBody(request)).toString("utf8"));
         assert.equal(body.companyId, companyId);
-        if (boundSession) assert.equal(body.runtimeSessionId, runtimeArgv[1]);
-        else assert.deepEqual(body.runtimeAttestation, {
-          schemaVersion: 1,
-          clientFamily: "codex",
-          modelId: "gpt-5.6-sol",
-          effortLevel: "high",
-          evidenceLevel: "self_reported",
-          source: "agent_request",
-          observedAt: "2026-08-19T12:34:56.000Z",
-        });
+        assert.equal(body.runtimeSessionId, runtimeArgv[1]);
+        assert.equal(body.runtimeAttestation, undefined);
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({
           schemaVersion: 1,
@@ -8530,7 +8546,7 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
     const expectedRuntimeOutput = `runtime:--message,hello:${releaseId}:${memberId}:${connectionId}:{"schemaVersion":1,"baseUrl":"https://example.test/"}:project=none:grants=false,false,false`;
     assert.match(firstRun.stdout, new RegExp(expectedRuntimeOutput.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
     assert.match(secondRun.stdout, new RegExp(expectedRuntimeOutput.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
-    assert.equal(resolveCount, boundSession ? 1 : 2, "only exact bound sessions may reuse admission");
+    assert.equal(resolveCount, 1, "an exact bound session may reuse admission");
     assert.equal(packageDownloadCount, 1, "second invocation must use verified cache");
 
     for (const deliveryMode of ["env", "file", "stdin"]) {
@@ -8571,7 +8587,7 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
 
     const repairedRun = await runSkill();
     assert.match(repairedRun.stdout, new RegExp(expectedRuntimeOutput.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
-    assert.equal(resolveCount, boundSession ? 2 : 7, "damaged package bytes require live reauthorization");
+    assert.equal(resolveCount, 2, "damaged package bytes require live reauthorization");
     assert.equal(packageDownloadCount, 2, "tampered cache must be downloaded again");
     const resolvesBeforeSetup = resolveCount;
     for (let invocation = 0; invocation < 2; invocation += 1) {
@@ -8595,7 +8611,6 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
-}
 
 test("bridge pairs once through MCP approval and reuses the narrow local device session", {
   timeout: 15_000,
@@ -9604,6 +9619,7 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
       assert.equal(request.headers.authorization, "Bearer integration-token");
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
 
+      if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
         const rulesAreCurrent = (

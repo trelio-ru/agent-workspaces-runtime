@@ -191,14 +191,15 @@ test("local skill detail loads authority sections lazily and reuses only an exac
     knownInstructionKey: summary.skill.instructionKey,
   });
   assert.equal(otherProject.skill.instructionsMarkdown, payload.skill.instructionsMarkdown);
-  const legacyEnvelope = { content: [{ type: "text", text: JSON.stringify({
+  const commandOnlyEnvelope = { content: [{ type: "text", text: JSON.stringify({
     ...payload,
     runtimeExecution: { releaseId: "release-3", trust: { level: "platform_verified" }, command: ["legacy", "only"] },
   }) }] };
-  const legacyOnly = JSON.parse(compactLocalNativeMcpResult(
-    "get_agent_skill", legacyEnvelope, { ...baseArgs, sections: ["execution"] },
+  const commandOnly = JSON.parse(compactLocalNativeMcpResult(
+    "get_agent_skill", commandOnlyEnvelope, { ...baseArgs, sections: ["execution"] },
   ).content[0].text);
-  assert.deepEqual(legacyOnly.runtimeExecution.command, ["legacy", "only"]);
+  assert.equal(commandOnly.runtimeExecution.command, undefined);
+  assert.equal(commandOnly.runtimeExecution.releaseId, "release-3");
 });
 
 test("local task mutation returns a compact receipt with an exact section continuation", () => {

@@ -38,6 +38,25 @@ const definition = JSON.parse(await readFile(
 const outerTimeoutMilliseconds = definition.hooks.PreToolUse[0].hooks[0].timeout * 1_000;
 const compatibilityPath = "/api/agent-workspaces/bridge-compatibility";
 const registrationPath = "/api/agent-workspaces/runtime-policy/sessions";
+const agentRulesMarkdown = "# Platform rules\n\nUse exact runtime proofs.\n";
+const agentRulesSha256 = crypto.createHash("sha256")
+  .update(agentRulesMarkdown, "utf8")
+  .digest("hex");
+
+const buildCompatibility = (request) => {
+  const current = request.headers["x-trelio-agent-rules-sha256"] === agentRulesSha256;
+  return {
+    supported: true,
+    minimumVersion: "3.0.0",
+    agentRules: {
+      status: current ? "current" : "update_required",
+      revisionId: "10000000-0000-4000-8000-000000000004",
+      version: 1,
+      sha256: agentRulesSha256,
+      ...(current ? {} : { rulesMarkdown: agentRulesMarkdown }),
+    },
+  };
+};
 
 // All credentials, observations, session IDs and HTTP responses below belong
 // to a disposable loopback fixture. Run the real hook, including native Windows
@@ -52,7 +71,7 @@ const createFixture = async (t, { registrationDelayMilliseconds = 0, stallPath =
     response.setHeader("content-type", "application/json");
     if (request.url === compatibilityPath) {
       if (state.stallPath === compatibilityPath) return;
-      response.end(JSON.stringify({ supported: true, minimumVersion: "1.13.3" }));
+      response.end(JSON.stringify(buildCompatibility(request)));
       return;
     }
     if (request.url === registrationPath) {

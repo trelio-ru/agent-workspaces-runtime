@@ -57,6 +57,28 @@ const expectedRuntimeHookCommandWindows = [
 ].join(" ");
 const TEST_PLUGIN_VERSION = "2.4.0";
 const TEST_HOST_RUNTIME_VERSION = "2.4.1";
+const TEST_AGENT_RULES_MARKDOWN = "# Platform rules\n\nUse exact runtime proofs.\n";
+const TEST_AGENT_RULES_SHA256 = crypto
+  .createHash("sha256")
+  .update(TEST_AGENT_RULES_MARKDOWN, "utf8")
+  .digest("hex");
+
+const buildTestBridgeCompatibility = (request, minimumVersion) => {
+  const current = (
+    request.headers["x-trelio-agent-rules-sha256"] === TEST_AGENT_RULES_SHA256
+  );
+  return {
+    supported: true,
+    minimumVersion,
+    agentRules: {
+      status: current ? "current" : "update_required",
+      revisionId: "10000000-0000-4000-8000-000000000004",
+      version: 1,
+      sha256: TEST_AGENT_RULES_SHA256,
+      ...(current ? {} : { rulesMarkdown: TEST_AGENT_RULES_MARKDOWN }),
+    },
+  };
+};
 
 const runHook = (hookInput, environment) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [hookScriptPath], {
@@ -237,7 +259,6 @@ test("route guard covers every native proposal renderer and both target forms", 
     }), companyMarkerPaths, toolName);
   }
   for (const [toolName, type] of [
-    ["render_task_comment_proposals", "commentProposal"],
     ["render_task_proposals", "controlClearProposal"],
   ]) {
     assert.deepEqual(resolveNativeProposalRouteMarkerPaths({
@@ -780,7 +801,7 @@ test("SessionStart pins the initial model and supported host names inject verifi
     assert.equal(request.headers["x-trelio-host-runtime-version"], TEST_HOST_RUNTIME_VERSION);
     response.setHeader("content-type", "application/json");
     if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-      response.end(JSON.stringify({ supported: true, minimumVersion: "1.11.0" }));
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request, "3.0.0")));
       return;
     }
     if (request.url === "/api/agent-workspaces/runtime-policy/sessions") {
@@ -1142,7 +1163,7 @@ test("concurrent first protected calls register one shared runtime session", asy
     assert.equal(request.headers["x-trelio-host-runtime-version"], TEST_HOST_RUNTIME_VERSION);
     response.setHeader("content-type", "application/json");
     if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-      response.end(JSON.stringify({ supported: true, minimumVersion: "1.13.3" }));
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request, "3.0.0")));
       return;
     }
     if (request.url === "/api/agent-workspaces/runtime-policy/sessions") {
@@ -1252,7 +1273,7 @@ test("SessionEnd removes the local key before a bounded remote cleanup", async (
     assert.equal(request.headers["x-trelio-host-runtime-version"], TEST_HOST_RUNTIME_VERSION);
     response.setHeader("content-type", "application/json");
     if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-      response.end(JSON.stringify({ supported: true, minimumVersion: "1.13.3" }));
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request, "3.0.0")));
       return;
     }
     if (request.url?.endsWith(`/sessions/${runtimeSessionId}/end`)) {

@@ -92,7 +92,7 @@ test("browser choice stays an enum in the typed Workspace action", () => {
 test("typed Workspace dispatcher covers every public bridge operation without shell input", () => {
   const actions = [
     ["doctor", { json: true }],
-    ["login", { legacyOauth: false }],
+    ["login", {}],
     ["encryption_setup", { companySlug: "acme", json: true }],
     ["inspect", { workspaceId: actionWorkspaceId }],
     ["open", { workspaceId: actionWorkspaceId, runId: actionRunId }],
@@ -161,16 +161,16 @@ test("typed Workspace dispatcher covers every public bridge operation without sh
   }
 });
 
-test("typed checkpoint actions normalize scalar lists and the legacy files alias", () => {
+test("typed checkpoint actions require canonical array fields", () => {
   const invocation = buildTrelioWorkspaceActionInvocation({
     schemaVersion: 1,
     operation: "finish",
     workingDirectory: actionWorkingDirectory,
     parameters: {
       summary: "Подготовлен итог",
-      evidence: "Проверка прошла",
-      files: ["WORKSPACE_CONTEXT.md", "artifacts/result.md"],
-      questions: "Нужна ли дополнительная проверка?",
+      evidence: ["Проверка прошла"],
+      filePaths: ["WORKSPACE_CONTEXT.md", "artifacts/result.md"],
+      questions: ["Нужна ли дополнительная проверка?"],
       nextAction: "Передать результат",
       taskOutcome: "no_status_change",
     },
@@ -192,12 +192,23 @@ test("typed checkpoint actions normalize scalar lists and the legacy files alias
     workingDirectory: actionWorkingDirectory,
     parameters: {
       summary: "Подготовлен итог",
-      filePaths: ["canonical.md"],
       files: ["alias.md"],
     },
   }), (error) => (
     error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"
-    && /cannot be combined/u.test(error.message)
+    && /parameters\.files is not supported/u.test(error.message)
+  ));
+  assert.throws(() => buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "finish",
+    workingDirectory: actionWorkingDirectory,
+    parameters: {
+      summary: "Подготовлен итог",
+      evidence: "Проверка прошла",
+    },
+  }), (error) => (
+    error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"
+    && /parameters\.evidence must contain/u.test(error.message)
   ));
 });
 
@@ -245,86 +256,16 @@ test("folder onboarding apply stays inside the host and never reaches bridge arg
   }), (error) => error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
 });
 
-test("legacy command-only responses are parsed and allowlisted inside the runtime", async () => {
-  const summary = "Готово; $(touch never-runs)";
-  const invocation = buildTrelioWorkspaceActionInvocation({
+test("command-only Workspace actions are outside the current ABI", () => {
+  assert.throws(() => buildTrelioWorkspaceActionInvocation({
     schemaVersion: 1,
     operation: "legacy_command",
-    parameters: {
-      command: `trelio-workspace checkpoint --type draft --summary "${summary}" --evidence 'one two'`,
-    },
+    parameters: { command: "trelio-workspace status" },
     workingDirectory: actionWorkingDirectory,
-  });
-  assert.equal(invocation.operation, "checkpoint");
-  assert.deepEqual(invocation.argumentsList, [
-    "checkpoint",
-    "--type",
-    "draft",
-    "--summary",
-    summary,
-    "--evidence",
-    "one two",
-  ]);
-  assert.deepEqual(invocation.actionParameters, { type: "draft" });
-
-  let captured = null;
-  const result = await handleTrelioWorkspaceActionOperation(
-    "https://trelio.example",
-    {
-      schemaVersion: 1,
-      operation: "legacy_command",
-      parameters: {
-        argv: [
-          "trelio-workspace",
-          "open",
-          "--workspace",
-          actionWorkspaceId,
-          "--run",
-          actionRunId,
-        ],
-      },
-    },
-    {
-      runBridge: async (origin, argumentsList, options) => {
-        captured = { origin, argumentsList, options };
-        return { stdout: "Workspace открыт\n", stderr: "" };
-      },
-    },
-  );
-  assert.deepEqual(captured, {
-    origin: "https://trelio.example",
-    argumentsList: [
-      "open",
-      "--workspace",
-      actionWorkspaceId,
-      "--run",
-      actionRunId,
-    ],
-    options: { signal: undefined },
-  });
-  assert.equal(result.operation, "open");
-});
-
-test("legacy command compatibility rejects shell lookup, unknown flags and secret input", () => {
-  for (const command of [
-    "./trelio-workspace status",
-    "trelio-workspace inspect --workspace 11111111-1111-4111-8111-111111111111 --shell sh",
-    "trelio-workspace secret set --secret 55555555-5555-4555-8555-555555555555",
-    "trelio-workspace clean",
-    "trelio-workspace status ; touch never-runs",
-    "trelio-workspace checkpoint --summary 'unfinished",
-  ]) {
-    assert.throws(
-      () => buildTrelioWorkspaceActionInvocation({
-        schemaVersion: 1,
-        operation: "legacy_command",
-        parameters: { command },
-        workingDirectory: actionWorkingDirectory,
-      }),
-      (error) => error?.code?.startsWith("TRELIO_WORKSPACE_LEGACY_COMMAND_"),
-      command,
-    );
-  }
+  }), (error) => (
+    error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"
+    && /operation is not supported/u.test(error.message)
+  ));
 });
 
 test("typed Workspace dispatcher rejects undeclared flags and implicit destructive cleanup", () => {

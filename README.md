@@ -62,11 +62,8 @@ trusted host. Модель не анализирует refs/objects и не пи
 plan возвращает отдельное manual-only действие и по-прежнему не раскрывает путь
 либо содержимое config.
 
-Command-only ответы старого backend проходят через
-`continue_trelio_workspace_action(operation=legacy_command)`: runtime без shell
-разбирает exact command/argv и проверяет executable, public operation и флаги.
-Модель не ищет launcher и не интерпретирует quoting; legacy secret input этим
-маршрутом запрещён.
+Backend и runtime обмениваются только typed actions. Command-only ответы и
+модельная интерпретация launcher/argv не входят в публичный ABI.
 
 Local company search и Workspace-file search возвращают один компактный
 `nextCall`: exact continuation tool/operation плюс mapping полей выбранного

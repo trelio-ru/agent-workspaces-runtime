@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -39,6 +40,30 @@ const firstRun = "22222222-2222-4222-8222-222222222222";
 const secondRun = "33333333-3333-4333-8333-333333333333";
 const newRun = "44444444-4444-4444-8444-444444444444";
 const origin = "https://example.test";
+const testAgentRulesMarkdown = "# Platform rules\n\nUse exact typed actions.\n";
+const testAgentRulesSha256 = createHash("sha256")
+  .update(testAgentRulesMarkdown, "utf8")
+  .digest("hex");
+
+// The v3 bridge refuses to start without a verified platform-rules snapshot.
+// Keep this fixture faithful to the current handshake so directory-recovery
+// tests cannot accidentally exercise a removed pre-rules client contract.
+const buildTestBridgeCompatibility = (request) => {
+  const rulesAreCurrent = (
+    request.headers["x-trelio-agent-rules-sha256"] === testAgentRulesSha256
+  );
+  return {
+    supported: true,
+    minimumVersion: "3.0.0",
+    agentRules: {
+      status: rulesAreCurrent ? "current" : "update_required",
+      revisionId: "10000000-0000-4000-8000-000000000001",
+      version: 1,
+      sha256: testAgentRulesSha256,
+      ...(rulesAreCurrent ? {} : { rulesMarkdown: testAgentRulesMarkdown }),
+    },
+  };
+};
 
 const fixture = async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-directory-"));
@@ -392,7 +417,13 @@ test("real bridge reports ambiguity before claim and cwd selection still rejects
     requests.push({ method: request.method, url: request.url });
     response.setHeader("content-type", "application/json");
     if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-      response.end(JSON.stringify({ supported: true }));
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+    } else if (request.url.startsWith("/api/agent-workspaces/bridge-routing?")) {
+      response.end(JSON.stringify({
+        schemaVersion: 1,
+        company,
+        encryptionState: "plain",
+      }));
     } else if (request.url === `/api/agent-workspaces/workspaces/${workspaceId}`) {
       response.end(JSON.stringify({
         company, workspace: { id: workspaceId, acceptedHead: "a".repeat(40) },
@@ -440,7 +471,11 @@ test("real bridge reports ambiguity before claim and cwd selection still rejects
       }),
   });
   await assert.rejects(run(f.root), { code: WORKSPACE_DIRECTORY_REQUIRED });
-  assert.deepEqual(requests.map(({ url }) => url), ["/api/agent-workspaces/bridge-compatibility"]);
+  assert.deepEqual(requests.map(({ url }) => url), [
+    "/api/agent-workspaces/bridge-compatibility",
+    "/api/agent-workspaces/bridge-compatibility",
+    `/api/agent-workspaces/bridge-routing?workspaceId=${workspaceId}`,
+  ]);
   for (const invoke of [() => run(path.join(f.second, "workspace")), () => run(f.root, f.second)]) {
     await assert.rejects(invoke(), (error) => error.code === "TRELIO_WORKSPACE_ACTION_FAILED"
       && /незавершённый Agent Run/u.test(error.message));

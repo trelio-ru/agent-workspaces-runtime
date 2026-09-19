@@ -14,7 +14,6 @@ const LOCAL_PROPOSAL_PROVIDER = "local_company_context";
 const NATIVE_TASK_PROPOSAL_RENDER_TOOLS = new Set([
   "propose_task_comment",
   "render_task_comment_proposal",
-  "render_task_comment_proposals",
   "render_task_status_proposal",
   "render_task_control_clear_proposal",
   "render_task_checklist_proposal",

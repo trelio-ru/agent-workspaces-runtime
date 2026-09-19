@@ -563,45 +563,21 @@ const runPreToolUse = async (hookInput) => {
   const filePath = await statePathFor(clientSessionId, origin);
   let state = await readRuntimeState(filePath);
   if (!state) {
-    try {
-      state = await withRuntimeStateLock(filePath, async () => {
-        // The winner may have completed while this process waited. Always
-        // re-read after acquiring the lock before creating a second session.
-        const registeredState = await readRuntimeState(filePath);
-        if (registeredState) return registeredState;
-        const initialObservation = await readPendingObservation(filePath);
-        await fs.rm(filePath, { force: true }).catch(() => undefined);
-        return createRuntimeState({
-          hookInput,
-          clientSessionId,
-          origin,
-          filePath,
-          initialObservation,
-        });
+    state = await withRuntimeStateLock(filePath, async () => {
+      // The winner may have completed while this process waited. Always
+      // re-read after acquiring the lock before creating a second session.
+      const registeredState = await readRuntimeState(filePath);
+      if (registeredState) return registeredState;
+      const initialObservation = await readPendingObservation(filePath);
+      await fs.rm(filePath, { force: true }).catch(() => undefined);
+      return createRuntimeState({
+        hookInput,
+        clientSessionId,
+        origin,
+        filePath,
+        initialObservation,
       });
-    } catch (error) {
-      // The plugin is released before the backend in the production sequence.
-      // During that bounded window only, inject the hook-observed value into
-      // the old server contract. A non-404 failure must remain fail-closed.
-      if (Number(error?.statusCode) !== 404) throw error;
-      const observation = await detectAgentRuntimeAttestation({ hookInput });
-      const output = {
-        ...resolveToolInput(hookInput),
-        runtimeAttestation: {
-          ...observation,
-          evidenceLevel: observation.clientFamily === "other" ? "unavailable" : "self_reported",
-          source: observation.clientFamily === "other" ? "unknown" : "agent_request",
-        },
-      };
-      process.stdout.write(`${JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "allow",
-          updatedInput: output,
-        },
-      })}\n`);
-      return;
-    }
+    });
   }
   writeUpdatedInput(toolInput, buildRuntimeSessionProof({ state, toolName }));
 };

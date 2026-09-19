@@ -124,7 +124,7 @@ const buildBridgeConnectionAction = (connection) => ({
     arguments: {
       schemaVersion: 1,
       operation: "login",
-      parameters: { legacyOauth: false },
+      parameters: {},
     },
   },
   followPairingRequest: {
