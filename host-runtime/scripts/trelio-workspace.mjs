@@ -11,6 +11,7 @@
  */
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import {
+  WorkspaceActiveRunRequiredError,
   WorkspaceDirectoryRequiredError,
   WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
@@ -1359,7 +1360,8 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 
 export const formatBridgeCommandError = (error, command = "") => {
   if (
-    error instanceof WorkspaceDirectoryRequiredError
+    error instanceof WorkspaceActiveRunRequiredError
+    || error instanceof WorkspaceDirectoryRequiredError
     || error instanceof WorkspaceLayoutMigrationBlockedError
     || error instanceof WorkspaceLocalRecoveryRequiredError
     || error instanceof WorkspaceRunReclaimRequiredError
@@ -11942,8 +11944,23 @@ const migrateEncryptedWorkspaceBrowserFiles = async (origin, options) => {
 
 const findRunMetadata = async (startDirectory = process.cwd()) => {
   let current = path.resolve(startDirectory);
+  let readOnlyInspectionObserved = false;
 
   while (true) {
+    // Accepted Workspace inspection is intentionally read-only and has no Run
+    // metadata. Remember that exact state so a later run-bound command reports
+    // the correct recovery instead of misdiagnosing a legacy layout.
+    for (const inspectionPath of [
+      path.join(current, ".trelio-inspection.json"),
+      path.join(current, "..", ".trelio-inspection.json"),
+    ]) {
+      try {
+        const inspection = await fs.stat(inspectionPath);
+        if (inspection.isFile()) readOnlyInspectionObserved = true;
+      } catch (error) {
+        if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+      }
+    }
     for (const candidate of [
       path.join(current, ".trelio-run.json"),
       path.join(current, "..", ".trelio-run.json"),
@@ -11952,16 +11969,20 @@ const findRunMetadata = async (startDirectory = process.cwd()) => {
         const metadata = JSON.parse(await fs.readFile(candidate, "utf8"));
         return { metadata, metadataPath: path.resolve(candidate) };
       } catch (error) {
-        if (error.code !== "ENOENT") {
-          throw error;
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+        if (error instanceof SyntaxError) {
+          throw new WorkspaceActiveRunRequiredError("RUN_METADATA_INVALID");
         }
+        throw error;
       }
     }
 
     const parent = path.dirname(current);
 
     if (parent === current) {
-      throw new Error("Текущий каталог не находится внутри материализованного Trelio Run.");
+      throw new WorkspaceActiveRunRequiredError(
+        readOnlyInspectionObserved ? "READ_ONLY_INSPECTION" : "RUN_METADATA_NOT_FOUND",
+      );
     }
     current = parent;
   }
@@ -11969,6 +11990,9 @@ const findRunMetadata = async (startDirectory = process.cwd()) => {
 
 const withRun = async (handler) => {
   const { metadata, metadataPath } = await findRunMetadata();
+  if (!UUID_PATTERN.test(String(metadata?.runId || ""))) {
+    throw new WorkspaceActiveRunRequiredError("RUN_ID_MISSING");
+  }
   const origin = normalizeOrigin(metadata.origin);
   const token = await requireToken(origin);
   const company = metadata.company;

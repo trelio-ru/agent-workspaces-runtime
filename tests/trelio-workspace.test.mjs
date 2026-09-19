@@ -315,6 +315,55 @@ const execBridgeWithInput = (argumentsList, input, options, nodeArguments = []) 
   child.stdin.end(input);
 });
 
+test("run-bound bridge command identifies a read-only inspection without calling Trelio", async () => {
+  const inspectionRoot = await mkdtemp(path.join(os.tmpdir(), "trelio-read-only-run-required-"));
+  const workspaceDirectory = path.join(inspectionRoot, "workspace");
+
+  try {
+    await mkdir(workspaceDirectory);
+    await writeFile(
+      path.join(inspectionRoot, ".trelio-inspection.json"),
+      JSON.stringify({ mode: "read_only_accepted_workspace" }),
+      "utf8",
+    );
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        bridgePath,
+        "secret",
+        "exec",
+        "--grant",
+        "44444444-4444-4444-8444-444444444444",
+        "--",
+        process.execPath,
+      ], {
+        cwd: workspaceDirectory,
+        encoding: "utf8",
+        timeout: 8_000,
+        env: {
+          ...process.env,
+          TRELIO_WORKSPACE_DISABLE_AUTO_UPDATE: "1",
+          TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
+        },
+      }),
+      (error) => {
+        const prefix = "Ошибка: ";
+        assert.equal(error.stderr.startsWith(prefix), true);
+        const payload = JSON.parse(error.stderr.trim().slice(prefix.length));
+        assert.equal(payload.code, "TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED");
+        assert.deepEqual(payload.details, {
+          requiredAction: "prepare_and_open_workspace_run",
+          reasonCode: "READ_ONLY_INSPECTION",
+          automaticChangesPerformed: false,
+        });
+        assert.equal(Object.hasOwn(payload.details, "rootDirectory"), false);
+        return true;
+      },
+    );
+  } finally {
+    await rm(inspectionRoot, { recursive: true, force: true });
+  }
+});
+
 /**
  * Read a skill together with its one-level Markdown references.
  *

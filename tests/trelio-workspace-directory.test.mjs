@@ -13,14 +13,17 @@ import {
   resolveWorkspaceBridgeConfigDirectory,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
+  WorkspaceActiveRunRequiredError,
   WorkspaceDirectoryRequiredError,
   WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
+  WORKSPACE_ACTIVE_RUN_REQUIRED,
   WORKSPACE_DIRECTORY_REQUIRED,
   WORKSPACE_LAYOUT_MIGRATION_BLOCKED,
   WORKSPACE_LOCAL_RECOVERY_REQUIRED,
   WORKSPACE_RUN_RECLAIM_REQUIRED,
+  parseWorkspaceActiveRunRequiredError,
   parseWorkspaceDirectoryRequiredError,
   parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
@@ -319,6 +322,34 @@ test("expired local Run recovery preserves the exact existing Run without retryi
     return true;
   });
   assert.equal(calls, 1, "target open must stop until the exact expired Run is prepared");
+});
+
+test("active Run recovery is semantic, bounded and distinct from layout migration", () => {
+  const error = new WorkspaceActiveRunRequiredError("READ_ONLY_INSPECTION");
+  const stderr = `Ошибка: ${formatBridgeCommandError(error, "secret")}\n`;
+  const parsed = parseWorkspaceActiveRunRequiredError(stderr, "secret_exec");
+  assert.equal(parsed?.code, WORKSPACE_ACTIVE_RUN_REQUIRED);
+  assert.deepEqual(parsed?.details, {
+    requiredAction: "prepare_and_open_workspace_run",
+    reasonCode: "READ_ONLY_INSPECTION",
+    automaticChangesPerformed: false,
+    operation: "secret_exec",
+  });
+  assert.equal(Object.hasOwn(parsed.details, "rootDirectory"), false);
+  assert.equal(parseWorkspaceActiveRunRequiredError(stderr, ""), null);
+
+  for (const mutate of [
+    (payload) => { payload.code = WORKSPACE_LAYOUT_MIGRATION_BLOCKED; },
+    (payload) => { payload.details.reasonCode = "UNRECOGNIZED_ENTRY"; },
+    (payload) => { payload.details.automaticChangesPerformed = true; },
+  ]) {
+    const copy = error.toJSON();
+    mutate(copy);
+    assert.equal(
+      parseWorkspaceActiveRunRequiredError(`Ошибка: ${JSON.stringify(copy)}`, "secret_exec"),
+      null,
+    );
+  }
 });
 
 test("MCP preserves directory recovery once and accepts its exact directory field", async (t) => {

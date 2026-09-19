@@ -4,6 +4,7 @@ export const WORKSPACE_DIRECTORY_REQUIRED = "TRELIO_WORKSPACE_DIRECTORY_REQUIRED
 export const WORKSPACE_LOCAL_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED";
 export const WORKSPACE_LAYOUT_MIGRATION_BLOCKED = "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED";
 export const WORKSPACE_RUN_RECLAIM_REQUIRED = "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED";
+export const WORKSPACE_ACTIVE_RUN_REQUIRED = "TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED";
 const MAX_CANDIDATES = 10;
 const MAX_MIGRATION_BLOCKING_ENTRIES = 20;
 const MAX_RECOVERY_CHANGES = 200;
@@ -16,6 +17,12 @@ const MIGRATION_REASON_CODES = new Set([
   "UNRECOGNIZED_ENTRY",
   "SYSTEM_METADATA_NOT_REGULAR_FILE",
   "SYSTEM_METADATA_TOO_LARGE",
+]);
+const ACTIVE_RUN_REASON_CODES = new Set([
+  "READ_ONLY_INSPECTION",
+  "RUN_METADATA_NOT_FOUND",
+  "RUN_METADATA_INVALID",
+  "RUN_ID_MISSING",
 ]);
 const MESSAGE = "Для этого Agent Workspace зарегистрировано несколько локальных папок. "
   + "Повторите тот же open, указав выбранный корень в parameters.directory "
@@ -160,6 +167,31 @@ export class WorkspaceRunReclaimRequiredError extends Error {
       targetRunId: targetRunId || null,
       operation: "open",
       reasonCode: "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW",
+    };
+  }
+
+  toJSON() {
+    return { code: this.code, message: this.message, details: this.details };
+  }
+}
+
+const ACTIVE_RUN_MESSAGE = "Для этого действия нужен открытый активный Trelio Agent Run. "
+  + "Подготовьте нужный Workspace через prepare_agent_workspace_run, выполните возвращённый "
+  + "open и повторите исходное действие один раз. Отсутствие .trelio-run.json в read-only "
+  + "inspection является штатным и само по себе не означает старую локальную структуру.";
+
+// Run-bound actions must fail with a semantic recovery route before they touch
+// OAuth, secrets or provider data. The envelope intentionally contains no local
+// path or metadata bytes: the caller already owns the target selection and only
+// needs to know that a writable Run must be prepared and opened first.
+export class WorkspaceActiveRunRequiredError extends Error {
+  constructor(reasonCode) {
+    super(ACTIVE_RUN_MESSAGE);
+    this.code = WORKSPACE_ACTIVE_RUN_REQUIRED;
+    this.details = {
+      requiredAction: "prepare_and_open_workspace_run",
+      reasonCode,
+      automaticChangesPerformed: false,
     };
   }
 
@@ -341,4 +373,26 @@ export const parseWorkspaceRunReclaimRequiredError = (
     sourceRunId: details.runId,
     targetRunId: details.targetRunId,
   });
+};
+
+export const parseWorkspaceActiveRunRequiredError = (stderr, operation) => {
+  if (typeof stderr !== "string" || stderr.length > 64 * 1024) return null;
+  const text = stderr.trim();
+  if (!text.startsWith("Ошибка: {")) return null;
+  let payload;
+  try { payload = JSON.parse(text.slice("Ошибка: ".length)); }
+  catch { return null; }
+  const details = payload?.details;
+  if (
+    payload?.code !== WORKSPACE_ACTIVE_RUN_REQUIRED
+    || details?.requiredAction !== "prepare_and_open_workspace_run"
+    || !ACTIVE_RUN_REASON_CODES.has(details.reasonCode)
+    || details.automaticChangesPerformed !== false
+    || typeof operation !== "string"
+    || operation.length === 0
+    || operation.length > 128
+  ) return null;
+  const result = new WorkspaceActiveRunRequiredError(details.reasonCode);
+  result.details.operation = operation;
+  return result;
 };
