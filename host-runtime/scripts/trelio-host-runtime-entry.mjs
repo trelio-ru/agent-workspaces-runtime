@@ -11,6 +11,7 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { requireTrelioComponentVersions } from "./trelio-component-versions.mjs";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const MODE_ENTRYPOINTS = Object.freeze({
@@ -37,8 +38,13 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
 export const runHostRuntime = async ({
   rawArguments = process.argv.slice(2),
   spawnProcess = spawn,
+  environment = process.env,
 } = {}) => {
   const invocation = resolveHostRuntimeInvocation(rawArguments);
+  // A downloaded runtime is meaningful only together with the exact shell and
+  // runtime releases selected by the signed loader. Rejecting an incomplete
+  // launch here keeps every child mode from inventing a stale fallback version.
+  requireTrelioComponentVersions(environment);
 
   return await new Promise((resolve, reject) => {
     // Запускаем exact Node, которым stable shell уже был запущен. Это не
@@ -48,7 +54,7 @@ export const runHostRuntime = async ({
       [invocation.entrypointPath, ...invocation.arguments],
       {
         cwd: path.resolve(SCRIPT_DIRECTORY, ".."),
-        env: process.env,
+        env: environment,
         shell: false,
         stdio: "inherit",
         windowsHide: true,

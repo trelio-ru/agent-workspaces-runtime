@@ -23,7 +23,15 @@ host-процесса не наследуется; `cwd` самого host не 
 Loader передаёт shell-версию отдельно в `TRELIO_PLUGIN_VERSION`, а версию
 подписанного runtime – в `TRELIO_HOST_RUNTIME_VERSION`. Doctor сравнивает Codex
 и Claude manifests именно с shell-версией; внутренний fallback bridge ABI не
-может создать ложное требование переустановить уже согласованный plugin shell.
+используется. Production entrypoint до запуска `bridge`, `hook` или `mcp`
+требует обе точные стабильные версии; отсутствие identity не превращается в
+ложный manifest mismatch. Прямой source-tree запуск имеет явную development
+identity `0.0.0`, которая не выдаётся за опубликованный plugin или runtime.
+
+HTTP transport, Agent Skill admission и MCP server metadata используют
+runtime-версию, а plugin compatibility, Codex retention и Run `clientVersion` –
+shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
+`pluginVersion` и `hostRuntimeVersion`.
 
 Перед запуском проверяется наличие той же папки плагина и файла entrypoint.
 Если их больше нет, `trelio_workspace_action` возвращает

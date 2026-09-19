@@ -35,6 +35,13 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
+  HOST_RUNTIME_VERSION,
+  PLUGIN_VERSION,
+  getHostRuntimeVersion,
+  getPluginVersion,
+} from "./trelio-component-versions.mjs";
+export { HOST_RUNTIME_VERSION, PLUGIN_VERSION };
+import {
   PRE_TOOL_USE_TIMEOUT_SECONDS,
   RUNTIME_STATE_LOCK_STALE_MILLISECONDS,
 } from "./trelio-runtime-session-limits.mjs";
@@ -85,7 +92,6 @@ import {
 } from "./trelio-skill-admission.mjs";
 
 const execFileAsync = promisify(execFile);
-export const BRIDGE_VERSION = "2.3.1";
 const BRIDGE_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
 const BROWSER_SESSION_MODULE_URL = pathToFileURL(
   path.join(path.dirname(BRIDGE_ENTRYPOINT_PATH), "trelio-browser-session.mjs"),
@@ -236,7 +242,7 @@ const BENIGN_WORKSPACE_FILE_NAMES = new Set([
 const MAX_BENIGN_WORKSPACE_FILE_BYTES = 1024 * 1024;
 const DEFAULT_ORIGIN = "https://trelio.ru";
 const PRODUCTION_ENCRYPTED_DATA_PLANE_ORIGIN = "https://e2ee.trelio.ru";
-const BRIDGE_VERSION_HEADER = "x-trelio-agent-workspaces-version";
+const PLUGIN_VERSION_HEADER = "x-trelio-agent-workspaces-version";
 const HOST_RUNTIME_VERSION_HEADER = "x-trelio-host-runtime-version";
 const AGENT_SKILL_DEVICE_CONSENT_HEADER = "x-trelio-agent-skill-device-consent";
 const AGENT_SKILL_COMPANY_E2EE_HEADER = "x-trelio-company-skill-e2ee";
@@ -895,7 +901,7 @@ const readObservedRuntimeHookContract = (hooksManifest, eventName) => {
  */
 export const inspectBundledPlugin = async ({
   pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-  loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION || BRIDGE_VERSION,
+  loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION,
 } = {}) => {
   const [codexManifest, claudeManifest, hooksManifest] = await Promise.all([
     readDiagnosticJsonFile(path.join(pluginDirectory, ".codex-plugin", "plugin.json")),
@@ -916,12 +922,16 @@ export const inspectBundledPlugin = async ({
 
   if (!normalizedLoadedPluginVersion) {
     issues.push("LOADED_PLUGIN_VERSION_INVALID");
-  }
-  if (codexVersion !== normalizedLoadedPluginVersion) {
-    issues.push("CODEX_MANIFEST_VERSION_MISMATCH");
-  }
-  if (claudeVersion !== normalizedLoadedPluginVersion) {
-    issues.push("CLAUDE_MANIFEST_VERSION_MISMATCH");
+  } else {
+    // A missing loader identity is its own startup/configuration failure. Do
+    // not reinterpret it as two stale manifests and tell the user to reinstall
+    // an otherwise coherent plugin shell.
+    if (codexVersion !== normalizedLoadedPluginVersion) {
+      issues.push("CODEX_MANIFEST_VERSION_MISMATCH");
+    }
+    if (claudeVersion !== normalizedLoadedPluginVersion) {
+      issues.push("CLAUDE_MANIFEST_VERSION_MISMATCH");
+    }
   }
 
   const observedEvents = Object.fromEntries(
@@ -1122,7 +1132,7 @@ export const inspectLocalBridgeConnection = async ({
 export const diagnoseLocalPrerequisites = async (options = {}) => {
   const {
     pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-    loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION || BRIDGE_VERSION,
+    loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION,
     configDirectory = CONFIG_DIRECTORY,
     origin = DEFAULT_ORIGIN,
     nodePath = process.execPath,
@@ -1210,15 +1220,15 @@ export const buildBridgeRequestHeaders = (token, initialHeaders = {}) => {
   // transfer и Agent Secrets. Backend поэтому проверяет фактически
   // исполняемый bridge каждого запроса, а не только provenance старого Run.
   headers.set(
-    BRIDGE_VERSION_HEADER,
-    process.env.TRELIO_PLUGIN_VERSION || BRIDGE_VERSION,
+    PLUGIN_VERSION_HEADER,
+    getPluginVersion(),
   );
   // Runtime changes independently from the stable plugin shell. Sending both
   // versions lets backend compatibility policy require a runtime refresh
   // without forcing Codex to replace a plugin directory used by open tasks.
   headers.set(
     HOST_RUNTIME_VERSION_HEADER,
-    process.env.TRELIO_HOST_RUNTIME_VERSION || BRIDGE_VERSION,
+    getHostRuntimeVersion(),
   );
   // Storage capability is independent of the marketplace version during the
   // plugin-first rollout. Old executables must fail before receiving deltas.
@@ -2568,7 +2578,7 @@ export const restoreRetainedCodexPluginInstallations = async ({
 
 export const retainLoadedCodexPluginInstallation = async ({
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-  loadedPluginVersion = BRIDGE_VERSION,
+  loadedPluginVersion = PLUGIN_VERSION,
   retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
 } = {}) => {
   const source = await inspectImmutableCodexPluginTree(
@@ -2666,7 +2676,7 @@ const runCodexPluginMutationWithRetention = async (
   {
     preserveLoadedPlugin = true,
     loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-    loadedPluginVersion = BRIDGE_VERSION,
+    loadedPluginVersion = PLUGIN_VERSION,
     retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
   } = {},
 ) => {
@@ -2772,7 +2782,7 @@ export const resolveInstalledCodexPluginBridge = async ({
   verifyMarketplace = true,
   preserveLoadedPlugin = true,
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-  loadedPluginVersion = BRIDGE_VERSION,
+  loadedPluginVersion = PLUGIN_VERSION,
   retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
 } = {}) => {
   if (verifyMarketplace) {
@@ -2849,7 +2859,7 @@ export const updateCodexPluginMarketplace = async ({
   waitForRetry = wait,
   preserveLoadedPlugin = true,
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-  loadedPluginVersion = BRIDGE_VERSION,
+  loadedPluginVersion = PLUGIN_VERSION,
   retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
 } = {}) => {
   let lastError = null;
@@ -7023,7 +7033,7 @@ const skillCommand = async (
   await ensureBridgeCompatibility(origin, token);
   const admissionKey = skillAdmissionKey({ origin, token,
     sessionId: runtimeSessionId, kind: "runtime", companyId, projectId,
-    skillId, releaseId, hostVersion: BRIDGE_VERSION });
+    skillId, releaseId, hostVersion: HOST_RUNTIME_VERSION });
   const cachedAdmission = refreshAdmission ? null
     : await readRuntimeSkillAdmission(admissionKey, token);
   const admissionCheckedAt = Date.now();
@@ -9308,7 +9318,7 @@ export class BridgePluginUpgradeRequiredError extends Error {
       : "актуальная";
 
     super(
-      `Версия Trelio Agent Workspaces v${BRIDGE_VERSION} больше не поддерживается; `
+      `Версия Trelio Agent Workspaces v${PLUGIN_VERSION} больше не поддерживается; `
       + `требуется ${minimumVersion === "актуальная" ? minimumVersion : `v${minimumVersion}`}.`,
     );
     this.code = "AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED";
@@ -10313,7 +10323,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
         body: JSON.stringify({
           expectedFencingToken: existingRun.fencingToken,
           clientKind: "workspace-bridge",
-          clientVersion: BRIDGE_VERSION,
+          clientVersion: PLUGIN_VERSION,
           ...(runtimeSessionId ? { runtimeSessionId } : {}),
           ...(runtimeAttestation ? { runtimeAttestation } : {}),
           ...(activeAgentRules
@@ -10342,7 +10352,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               clientKind: "workspace-bridge",
-              clientVersion: BRIDGE_VERSION,
+              clientVersion: PLUGIN_VERSION,
               ...(runtimeSessionId ? { runtimeSessionId } : {}),
               ...(runtimeAttestation ? { runtimeAttestation } : {}),
               ...(activeAgentRules
@@ -10493,7 +10503,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       ...existingMetadata,
       schemaVersion: 3,
       origin,
-      pluginVersion: BRIDGE_VERSION,
+      pluginVersion: PLUGIN_VERSION,
+      hostRuntimeVersion: HOST_RUNTIME_VERSION,
       scopeType: runPayload.workspace?.scopeType || existingMetadata.scopeType || null,
       company: runPayload.company,
       encryption: companyEncryption?.metadata ?? { enabled: false },
@@ -10658,7 +10669,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     const metadata = {
       schemaVersion: 3,
       origin,
-      pluginVersion: BRIDGE_VERSION,
+      pluginVersion: PLUGIN_VERSION,
+      hostRuntimeVersion: HOST_RUNTIME_VERSION,
       scopeType: runPayload.workspace?.scopeType || null,
       company: runPayload.company,
       encryption: companyEncryption?.metadata ?? { enabled: false },
@@ -10993,7 +11005,8 @@ const materializeWorkspaceInspection = async ({
       schemaVersion: 1,
       mode: "read_only_accepted_workspace",
       origin,
-      pluginVersion: BRIDGE_VERSION,
+      pluginVersion: PLUGIN_VERSION,
+      hostRuntimeVersion: HOST_RUNTIME_VERSION,
       workspaceId,
       acceptedHead,
       company: snapshot.company,
@@ -15722,7 +15735,9 @@ const runAutomaticLocalCleanupForCurrentRun = async () => {
 };
 
 const printHelp = () => {
-  process.stdout.write(`Trelio Agent Workspace Bridge ${BRIDGE_VERSION}\n\n`);
+  process.stdout.write(
+    `Trelio Agent Workspace Runtime ${HOST_RUNTIME_VERSION} (plugin ${PLUGIN_VERSION})\n\n`,
+  );
   process.stdout.write("Команды:\n");
   process.stdout.write("  trelio-workspace doctor [--json] [--origin URL]\n");
   process.stdout.write("  trelio-workspace login [--origin https://trelio.ru]\n");
@@ -15949,7 +15964,7 @@ export const recoverBridgePluginUpgrade = async (
     waitForRetry = wait,
     preserveLoadedPlugin = true,
     loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
-    loadedPluginVersion = BRIDGE_VERSION,
+    loadedPluginVersion = PLUGIN_VERSION,
     retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
   } = {},
 ) => {

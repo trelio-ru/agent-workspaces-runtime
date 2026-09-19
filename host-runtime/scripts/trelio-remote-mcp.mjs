@@ -27,13 +27,13 @@ import {
   applyCodexTrelioHookRouting,
   planCodexTrelioHookRouting,
 } from "./trelio-codex-routing.mjs";
+import { HOST_RUNTIME_VERSION } from "./trelio-component-versions.mjs";
 
 import {
   AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION,
   AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES,
   AGENT_SKILL_MAX_PACKAGE_BYTES,
   AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
-  BRIDGE_VERSION,
   diagnoseLocalPrerequisites,
   ensureBridgeCompatibility,
   ensureCompanyEncryptionContext,
@@ -683,7 +683,7 @@ export const resolveRemoteMcpDeclaration = async (
       admissionToken = token;
       admissionKey = skillAdmissionKey({ origin, token,
         sessionId: remoteAdmissionSessionId, kind: "remote_mcp",
-        ...input, hostVersion: BRIDGE_VERSION });
+        ...input, hostVersion: HOST_RUNTIME_VERSION });
       const cached = openSkillAdmission({ key: admissionKey, token,
         entry: remoteAdmissions.get(admissionKey) });
       if (cached) {
@@ -1316,7 +1316,7 @@ const createRemoteSession = async (
         capabilities: {},
         clientInfo: {
           name: "Trelio trusted Remote MCP host",
-          version: BRIDGE_VERSION,
+          version: HOST_RUNTIME_VERSION,
         },
       },
     },
@@ -2134,6 +2134,7 @@ export const resolveAgentSkillPackageMinimumHostVersion = ({
   packageSizeBytes,
   requestedMinimum,
   encrypted = false,
+  hostRuntimeVersion = HOST_RUNTIME_VERSION,
 }) => {
   const packageContractMinimum = packageSizeBytes > AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES
     ? AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION
@@ -2143,7 +2144,7 @@ export const resolveAgentSkillPackageMinimumHostVersion = ({
     packageContractMinimum,
   );
   return encrypted
-    ? maximumStableVersion(effectiveMinimum, BRIDGE_VERSION)
+    ? maximumStableVersion(effectiveMinimum, hostRuntimeVersion)
     : effectiveMinimum;
 };
 
@@ -2306,7 +2307,7 @@ const normalizePublicationExecution = async ({
       kind: "remote_mcp",
       remoteMcpConfig: config,
       remoteMcpMinimumHostVersion: encrypted
-        ? maximumStableVersion(schemaMinimum, BRIDGE_VERSION)
+        ? maximumStableVersion(schemaMinimum, HOST_RUNTIME_VERSION)
         : schemaMinimum,
     };
   }
@@ -5277,7 +5278,7 @@ export const handleLocalMcpMessage = async (
         },
         serverInfo: {
           name: "trelio-remote-skills",
-          version: BRIDGE_VERSION,
+          version: HOST_RUNTIME_VERSION,
         },
         // Server-wide instructions are intentionally returned by the static
         // local host: this makes skill-first routing visible before Codex

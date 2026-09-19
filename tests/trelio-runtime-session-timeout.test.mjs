@@ -196,6 +196,17 @@ test("plugin doctor compares manifests with the loaded shell version", async () 
   assert.deepEqual(report.issues, []);
 });
 
+test("plugin doctor does not turn a missing loader version into stale manifests", async () => {
+  const report = await inspectBundledPlugin({
+    pluginDirectory,
+    loadedPluginVersion: null,
+  });
+
+  assert.equal(report.status, "action_required");
+  assert.equal(report.loadedVersion, null);
+  assert.deepEqual(report.issues, ["LOADED_PLUGIN_VERSION_INVALID"]);
+});
+
 test("cold startup and slow registration produce a proof after the former 15-second cutoff", async (t) => {
   const fixture = await createFixture(t, { registrationDelayMilliseconds: 7_500 });
   const result = await fixture.run(8_500);

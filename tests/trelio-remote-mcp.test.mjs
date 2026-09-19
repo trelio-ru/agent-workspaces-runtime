@@ -54,7 +54,8 @@ test("large private packages raise their exact runtime host floor", () => {
     packageSizeBytes: 1,
     requestedMinimum: "1.4.0",
     encrypted: true,
-  }), "2.3.1");
+    hostRuntimeVersion: "2.4.1",
+  }), "2.4.1");
 });
 
 const companyId = "11111111-1111-4111-8111-111111111111";
@@ -3645,6 +3646,8 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
     env: {
       ...process.env,
       CODEX_MCP_NODE_PATH: process.execPath,
+      TRELIO_PLUGIN_VERSION: "2.4.0",
+      TRELIO_HOST_RUNTIME_VERSION: "2.4.1",
     },
   });
   let stdout = "";
@@ -3681,7 +3684,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
   assert.equal(exitCode, 0, stderr);
   const frames = stdout.trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(frames.map(({ id }) => id), [1, 2]);
-  assert.equal(frames[0].result.serverInfo.version, "2.3.1");
+  assert.equal(frames[0].result.serverInfo.version, "2.4.1");
   assert.equal(frames[0].result.instructions, AGENT_SKILL_ROUTING_INSTRUCTIONS);
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.match(frames[0].result.instructions, /Для старых command-ответов – его процедура совместимости/u);

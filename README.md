@@ -41,6 +41,12 @@ Stable shell передаёт runtime:
 Runtime не сканирует plugin cache и не предполагает, что оба source tree лежат в
 одном репозитории.
 
+Runtime не хранит общий `BRIDGE_VERSION`: shell и host имеют две независимые
+identity. Production entrypoint принимает их только через loader и прекращает
+запуск при отсутствующем либо некорректном `TRELIO_PLUGIN_VERSION` или
+`TRELIO_HOST_RUNTIME_VERSION`; source-tree execution использует отдельный
+непубликуемый marker `0.0.0`.
+
 Local MCP предоставляет read-only `diagnose_trelio_installation`: он объединяет
 host-owned doctor Node/Git/plugin/session/pairing с Codex direct-routing plan и
 возвращает ordered typed actions. Tool не устанавливает компоненты, не применяет

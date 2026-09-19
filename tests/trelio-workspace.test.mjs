@@ -35,7 +35,8 @@ import {
   AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN,
   AGENT_WORKSPACE_RUNTIME_CLAUDE_MARKDOWN,
   AGENT_WORKSPACE_WORKLOG_FORMAT_MARKDOWN,
-  BRIDGE_VERSION,
+  HOST_RUNTIME_VERSION,
+  PLUGIN_VERSION,
   COMPANY_STORAGE_BALANCE_REQUIRED_CODE,
   LEGACY_WORKSPACE_CONTEXT_FILE_NAME,
   WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME,
@@ -947,7 +948,7 @@ test("Codex plugin updater retries transient network failures and validates exac
       ),
       writeFile(
         path.join(installedPath, "scripts", "trelio-workspace.mjs"),
-        "export const BRIDGE_VERSION = '1.5.12';\n",
+        "export const PLUGIN_VERSION = '1.5.12';\n",
       ),
     ]);
 
@@ -1081,7 +1082,7 @@ test("Codex plugin updater retains exact versioned skill paths across repeated c
       ),
       writeFile(
         path.join(installedPath, "scripts", "trelio-workspace.mjs"),
-        `export const BRIDGE_VERSION = ${JSON.stringify(version)};\n`,
+        `export const PLUGIN_VERSION = ${JSON.stringify(version)};\n`,
       ),
       writeFile(
         path.join(
@@ -1366,7 +1367,7 @@ test("upgrade-required re-dispatches the exact installed bridge in the same Code
         path.join(installedPath, ".codex-plugin", "plugin.json"),
         JSON.stringify({ name: "trelio-agent-workspaces", version: "1.5.12" }),
       ),
-      writeFile(bridgePath, "export const BRIDGE_VERSION = '1.5.12';\n"),
+      writeFile(bridgePath, "export const PLUGIN_VERSION = '1.5.12';\n"),
     ]);
 
     const environment = {
@@ -1732,13 +1733,13 @@ test("encryption setup reports plain companies without creating a Run", async ()
     try {
       requests.push({ method: request.method, url: request.url });
       assert.equal(request.headers.authorization, "Bearer integration-token");
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
 
       response.setHeader("content-type", "application/json");
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.end(JSON.stringify({
           supported: true,
-          minimumVersion: BRIDGE_VERSION,
+          minimumVersion: PLUGIN_VERSION,
           agentRules: null,
         }));
         return;
@@ -2441,7 +2442,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
   const server = createServer(async (request, response) => {
     try {
       seenUrls.push(request.url || "");
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
@@ -2453,7 +2454,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
         );
         response.end(JSON.stringify({
           supported: true,
-          minimumVersion: BRIDGE_VERSION,
+          minimumVersion: PLUGIN_VERSION,
           agentRules: {
             status: hasCurrentRules ? "current" : "update_required",
             revisionId: platformRulesRevisionId,
@@ -2793,12 +2794,12 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
 
   const server = createServer((request, response) => {
     try {
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
       response.setHeader("content-type", "application/json");
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
-        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
         return;
       }
       if (request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
@@ -3004,12 +3005,12 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
 
   const server = createServer(async (request, response) => {
     try {
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
         return;
       }
 
@@ -3318,12 +3319,12 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
   const server = createServer(async (request, response) => {
     try {
       const body = request.method === "POST" ? await readRequestBody(request) : Buffer.alloc(0);
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
         return;
       }
 
@@ -3697,7 +3698,7 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
   const server = createServer(async (request, response) => {
     try {
       const body = await readRequestBody(request);
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url?.endsWith("/heartbeat")) {
@@ -3765,7 +3766,8 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
     const baseMetadata = {
       schemaVersion: 3,
       origin,
-      pluginVersion: BRIDGE_VERSION,
+      pluginVersion: PLUGIN_VERSION,
+      hostRuntimeVersion: HOST_RUNTIME_VERSION,
       scopeType: "project",
       workspaceId: "44444444-4444-4444-8444-444444444444",
       runId,
@@ -3945,7 +3947,8 @@ test("context fetch downloads one exact path, reuses verified cache and rejects 
       `${JSON.stringify({
         schemaVersion: 3,
         origin,
-        pluginVersion: BRIDGE_VERSION,
+        pluginVersion: PLUGIN_VERSION,
+        hostRuntimeVersion: HOST_RUNTIME_VERSION,
         workspaceId: "44444444-4444-4444-8444-444444444444",
         runId: currentRunId,
         workspaceDirectory,
@@ -4132,7 +4135,8 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       `${JSON.stringify({
         schemaVersion: 3,
         origin,
-        pluginVersion: BRIDGE_VERSION,
+        pluginVersion: PLUGIN_VERSION,
+        hostRuntimeVersion: HOST_RUNTIME_VERSION,
         workspaceId: workspaceIdByRunId.get(currentRunId),
         runId: currentRunId,
         workspaceDirectory,
@@ -4150,12 +4154,12 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
 
   const server = createServer(async (request, response) => {
     try {
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
         return;
       }
 
@@ -4545,7 +4549,8 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
     (plugin) => plugin.name === "trelio-agent-workspaces",
   );
 
-  assert.match(BRIDGE_VERSION, /^\d+\.\d+\.\d+$/u);
+  assert.match(PLUGIN_VERSION, /^\d+\.\d+\.\d+$/u);
+  assert.match(HOST_RUNTIME_VERSION, /^\d+\.\d+\.\d+$/u);
   assert.equal(codexManifest.version, claudeManifest.version);
   assert.equal(claudeMarketplaceEntry?.version, codexManifest.version);
   // Marketplace copy must describe only the stable host contract. Provider
@@ -6209,7 +6214,7 @@ test("secret set sends one atomic named-field bundle from protected stdin", {
   const server = createServer(async (request, response) => {
     try {
       assert.equal(request.headers.authorization, "Bearer integration-token");
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
 
       if (
         request.method === "GET"
@@ -6217,7 +6222,7 @@ test("secret set sends one atomic named-field bundle from protected stdin", {
       ) {
         compatibilityCount += 1;
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
         return;
       }
 
@@ -6547,13 +6552,13 @@ const verifyEncryptedSecretApiRouting = async (dedicatedDataPlane) => {
         assert.equal(plane, dedicatedDataPlane ? "encrypted" : "canonical");
       }
       assert.equal(request.headers.authorization, "Bearer integration-token");
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers["x-trelio-agent-secret-company-e2ee"], "v1");
       response.setHeader("content-type", "application/json");
 
       if (request.method === "GET" && request.url === "/api/agent-workspaces/bridge-compatibility") {
         assert.equal(plane, "canonical");
-        response.end(JSON.stringify({ supported: true, minimumVersion: BRIDGE_VERSION }));
+        response.end(JSON.stringify({ supported: true, minimumVersion: PLUGIN_VERSION }));
         return;
       }
       if (request.method === "GET" && request.url?.startsWith("/api/agent-workspaces/encryption/runtime?")) {
@@ -6935,7 +6940,7 @@ test("secret checkout self-dispatches trelio-workspace without resolving PATH", 
       assert.equal(request.headers.authorization, "Bearer integration-token");
       assert.equal(
         request.headers["x-trelio-agent-workspaces-version"],
-        BRIDGE_VERSION,
+        PLUGIN_VERSION,
       );
       assert.deepEqual(
         JSON.parse((await readRequestBody(request)).toString("utf8")),
@@ -7002,7 +7007,7 @@ test("secret checkout self-dispatches trelio-workspace without resolving PATH", 
       },
     );
 
-    assert.match(result.stdout, /Trelio Agent Workspace Bridge/u);
+    assert.match(result.stdout, /Trelio Agent Workspace Runtime/u);
     assert.equal(result.stdout.includes(secretValue), false);
     assert.equal(result.stderr, "");
     assert.equal(consumeCount, 1);
@@ -7338,8 +7343,8 @@ test("workspace worker gates external services but not native Trelio work", asyn
 
 test("bridge adds its release version and bearer credential to every API request", () => {
   const headers = buildBridgeRequestHeaders("oauth-token", { accept: "application/json" });
-  assert.equal(headers.get("x-trelio-agent-workspaces-version"), BRIDGE_VERSION);
-  assert.equal(headers.get("x-trelio-host-runtime-version"), BRIDGE_VERSION);
+  assert.equal(headers.get("x-trelio-agent-workspaces-version"), PLUGIN_VERSION);
+  assert.equal(headers.get("x-trelio-host-runtime-version"), HOST_RUNTIME_VERSION);
   assert.equal(headers.get("x-trelio-agent-skill-device-consent"), "v1");
   assert.equal(headers.get("x-trelio-company-skill-e2ee"), "v1");
   assert.equal(headers.get("x-trelio-agent-secret-company-e2ee"), "v1");
@@ -7502,7 +7507,7 @@ const buildConnectionFreeRuntimeResolutionPayload = () => {
       packageSignature: "signed-package",
       signingKeyId: "test",
       signingPublicKeySpki: "public-key",
-      minimumHostVersion: BRIDGE_VERSION,
+      minimumHostVersion: HOST_RUNTIME_VERSION,
       manifest: {},
     },
     trust: {
@@ -7990,14 +7995,14 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
 
   const server = createServer(async (request, response) => {
     try {
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({
           supported: true,
-          minimumVersion: BRIDGE_VERSION,
+          minimumVersion: PLUGIN_VERSION,
         }));
         return;
       }
@@ -8124,7 +8129,7 @@ test(`skill host ${boundSession ? "reuses twelve-hour admission" : "resolves leg
             packageSignature,
             signingKeyId: "test",
             signingPublicKeySpki,
-            minimumHostVersion: BRIDGE_VERSION,
+            minimumHostVersion: HOST_RUNTIME_VERSION,
             manifest: {},
           },
           trust: {
@@ -8350,7 +8355,7 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
 
   const server = createServer(async (request, response) => {
     try {
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       const body = JSON.parse((await readRequestBody(request)).toString("utf8") || "{}");
 
       if (
@@ -8659,7 +8664,7 @@ test("bridge finish checkpoints and submits an external object without hanging",
     try {
       const body = await readRequestBody(request);
       seenRequests.push({ method: request.method, url: request.url, body });
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url?.endsWith("/heartbeat")) {
@@ -8782,7 +8787,8 @@ test("bridge finish checkpoints and submits an external object without hanging",
       `${JSON.stringify({
         schemaVersion: 3,
         origin,
-        pluginVersion: BRIDGE_VERSION,
+        pluginVersion: PLUGIN_VERSION,
+        hostRuntimeVersion: HOST_RUNTIME_VERSION,
         scopeType: "project",
         workspaceId: "44444444-4444-4444-8444-444444444444",
         runId,
@@ -8886,7 +8892,7 @@ test("bridge registers inherited objects for a clean precommitted candidate", {
   const server = createServer(async (request, response) => {
     try {
       const body = await readRequestBody(request);
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url?.endsWith("/heartbeat")) {
@@ -8993,7 +8999,8 @@ test("bridge registers inherited objects for a clean precommitted candidate", {
       `${JSON.stringify({
         schemaVersion: 3,
         origin,
-        pluginVersion: BRIDGE_VERSION,
+        pluginVersion: PLUGIN_VERSION,
+        hostRuntimeVersion: HOST_RUNTIME_VERSION,
         workspaceId: "44444444-4444-4444-8444-444444444444",
         runId,
         leaseId: "55555555-5555-4555-8555-555555555555",
@@ -9076,7 +9083,7 @@ test("bridge resumes external object registration from durable per-file progress
   const server = createServer(async (request, response) => {
     try {
       const body = await readRequestBody(request);
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
       if (request.url?.endsWith("/heartbeat")) {
@@ -9177,7 +9184,8 @@ test("bridge resumes external object registration from durable per-file progress
       `${JSON.stringify({
         schemaVersion: 3,
         origin,
-        pluginVersion: BRIDGE_VERSION,
+        pluginVersion: PLUGIN_VERSION,
+        hostRuntimeVersion: HOST_RUNTIME_VERSION,
         workspaceId: "44444444-4444-4444-8444-444444444444",
         runId,
         leaseId: "55555555-5555-4555-8555-555555555555",
@@ -9286,7 +9294,7 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
         return;
       }
       assert.equal(request.headers.authorization, "Bearer integration-token");
-      assert.equal(request.headers["x-trelio-agent-workspaces-version"], BRIDGE_VERSION);
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
 
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
@@ -9295,7 +9303,7 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
         );
         response.end(JSON.stringify({
           supported: true,
-          minimumVersion: BRIDGE_VERSION,
+          minimumVersion: PLUGIN_VERSION,
           agentRules: {
             status: rulesAreCurrent ? "current" : "update_required",
             revisionId: rulesRevisionId,
@@ -9493,7 +9501,8 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
 
 test("bridge help advertises encryption setup, read-only inspection and context sync", async () => {
   const result = await execFileAsync(process.execPath, [bridgePath, "help"], { encoding: "utf8" });
-  assert.match(result.stdout, new RegExp(`Bridge ${BRIDGE_VERSION.replaceAll(".", "\\.")}`));
+  assert.match(result.stdout, new RegExp(`Runtime ${HOST_RUNTIME_VERSION.replaceAll(".", "\\.")}`));
+  assert.match(result.stdout, new RegExp(`plugin ${PLUGIN_VERSION.replaceAll(".", "\\.")}`));
   assert.match(result.stdout, /trelio-workspace doctor \[--json\] \[--origin URL\]/);
   assert.match(result.stdout, /trelio-workspace encryption setup --company SLUG \[--json\]/);
   assert.match(result.stdout, /trelio-workspace inspect --workspace UUID/);
