@@ -517,7 +517,8 @@ write не выполняется, ручной ввод сохраняется,
 совместимостью уже сохранённых карточек.
 
 MCP App даёт редактируемый текст и кнопку «Опубликовать». Если current host не
-заявил `io.modelcontextprotocol/ui`, но заявил `elicitation.form`, local MCP
+заявил `io.modelcontextprotocol/ui`, но заявил form elicitation как
+`elicitation.form` либо совместимым пустым `elicitation: {}`, local MCP
 отправляет ему flat native form с independent decision каждой карточки,
 редактируемым comment body и выбором файлов/контролей/пунктов. Двунаправленный
 stdio dispatcher связывает server request с исходным tool call и отменяет его
@@ -528,6 +529,11 @@ stdio dispatcher связывает server request с исходным tool call
 использует прежний text-only flow с явной командой. В proposal включаются только
 важные итоговые и действительно полезные промежуточные файлы. Пользователь может
 убрать любой; attachments создаются при публикации, а не при подготовке.
+Model-visible receipt всегда содержит отдельный `interactivePresentation`:
+App payload имеет `delegated_unconfirmed`, ответ native form –
+`client_responded`, неответивший form – `not_confirmed`, а unsupported host –
+`text_only`. Runtime поэтому не утверждает, что карточка или форма показана,
+если получил только сохранённый draft либо вернул payload клиенту.
 
 Если вся задача готова, агент независимо читает
 `get_task_status_proposal_context` и вызывает `render_task_status_proposal` с

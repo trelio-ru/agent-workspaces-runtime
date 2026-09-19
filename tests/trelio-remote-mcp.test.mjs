@@ -2470,7 +2470,7 @@ test("local proposal render returns a real MCP App result instead of JSON text o
 
 });
 
-test("local proposal render uses form elicitation when the host cannot render MCP Apps", async (t) => {
+test("local proposal render treats an empty elicitation capability as form support", async (t) => {
   const configDirectory = await createProposalCapabilityConfigDirectory(t);
   const proposalId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const itemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -2481,7 +2481,9 @@ test("local proposal render uses form elicitation when the host cannot render MC
     kind: "checklist",
     operation: "save",
     configDirectory,
-    clientCapabilities: { elicitation: { form: {} } },
+    // MCP 2025-11-25 defines the empty object as form-mode support. Claude Code
+    // currently advertises this compact shape instead of an explicit `form` key.
+    clientCapabilities: { elicitation: {} },
     requestClient: async (method, params) => {
       requests.push({ method, params });
       return {
@@ -2535,6 +2537,12 @@ test("local proposal render uses form elicitation when the host cannot render MC
       },
     },
   }]);
+  assert.deepEqual(result.structuredContent.interactivePresentation, {
+    schemaVersion: 1,
+    provider: "mcp_elicitation",
+    status: "client_responded",
+    instruction: "The client returned an exact elicitation response. Use interactiveReview as the only authoritative interactive decision; decline or cancel records no proposal decision.",
+  });
   assert.match(result.content[0].text, /structuredContent/u);
 });
 
@@ -2572,6 +2580,46 @@ test("local proposal render keeps MCP Apps primary over elicitation", async (t) 
 
   assert.equal(requested, false);
   assert.equal(result.structuredContent.interactiveReview, undefined);
+  assert.equal(result.structuredContent.interactivePresentation.provider, "mcp_app");
+  assert.equal(result.structuredContent.interactivePresentation.status, "delegated_unconfirmed");
+  assert.match(
+    result.structuredContent.interactivePresentation.instruction,
+    /cannot confirm that the client rendered/iu,
+  );
+});
+
+test("local proposal render identifies text-only fallback without claiming a card was shown", async (t) => {
+  const configDirectory = await createProposalCapabilityConfigDirectory(t);
+  const result = await buildLocalProposalRenderResult({
+    origin: "https://trelio.example",
+    companySlug: "acme",
+    kind: "comment",
+    operation: "save",
+    configDirectory,
+    clientCapabilities: {},
+    result: {
+      proposal: {
+        project: { name: "Проект" },
+        task: { number: 5, title: "Проверить текстовый fallback" },
+        currentDraft: {
+          proposalId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          revision: 1,
+          bodyText: "Готово",
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(result.structuredContent.interactivePresentation, {
+    schemaVersion: 1,
+    provider: "text",
+    status: "text_only",
+    instruction: "The proposal draft was saved, but this client did not advertise a supported interactive proposal UI. No card was created. Present the text receipt and wait for an explicit user decision.",
+  });
+  assert.match(
+    result.structuredContent.interactivePresentation.instruction,
+    /No card was created/iu,
+  );
 });
 
 test("local proposal context returns structured data without App metadata", async () => {

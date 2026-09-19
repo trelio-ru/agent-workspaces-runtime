@@ -4194,6 +4194,26 @@ const buildLocalProposalFormNextAction = (card, content) => {
   };
 };
 
+/**
+ * MCP 2025-11-25 keeps backwards compatibility with clients that advertise
+ * `elicitation: {}`: the empty object means form mode, while newer clients may
+ * spell the same support as `elicitation: { form: {} }`.  Keep the distinction
+ * from URL-only elicitation explicit so a future URL capability cannot
+ * accidentally enable a form that the host cannot render.
+ */
+const supportsFormElicitation = (clientCapabilities) => {
+  const elicitation = clientCapabilities?.elicitation;
+  if (!elicitation || typeof elicitation !== "object" || Array.isArray(elicitation)) {
+    return false;
+  }
+  return Object.keys(elicitation).length === 0
+    || Boolean(
+      elicitation.form
+      && typeof elicitation.form === "object"
+      && !Array.isArray(elicitation.form),
+    );
+};
+
 const maybeElicitLocalProposalReview = async ({
   structuredContent,
   clientCapabilities,
@@ -4202,7 +4222,7 @@ const maybeElicitLocalProposalReview = async ({
 }) => {
   if (
     clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]
-    || !clientCapabilities?.elicitation?.form
+    || !supportsFormElicitation(clientCapabilities)
     || typeof requestClient !== "function"
   ) return null;
 
@@ -4312,6 +4332,50 @@ const buildLocalProposalModelReceipt = (structuredContent) => ({
   appPayload: "Full proposal context is available only to the MCP App in hidden _meta.",
 });
 
+/**
+ * Saving a proposal draft and displaying an interactive control are separate
+ * facts.  The bridge can prove that it returned an App payload, or that a host
+ * answered an elicitation request, but it cannot observe whether a client
+ * actually painted an MCP App.  Make that boundary explicit in model-visible
+ * output so an agent never upgrades a successful save into the false claim
+ * that a card was shown.
+ */
+const buildLocalProposalInteractivePresentation = ({
+  clientCapabilities,
+  interactiveReview,
+}) => {
+  if (clientCapabilities?.extensions?.[MCP_APP_CLIENT_EXTENSION]) {
+    return {
+      schemaVersion: 1,
+      provider: "mcp_app",
+      status: "delegated_unconfirmed",
+      instruction: "The proposal draft was saved and an MCP App payload was returned, but the runtime cannot confirm that the client rendered it. Do not claim that a card was shown unless it is actually visible in the host UI.",
+    };
+  }
+  if (interactiveReview) {
+    return {
+      schemaVersion: 1,
+      provider: "mcp_elicitation",
+      status: "client_responded",
+      instruction: "The client returned an exact elicitation response. Use interactiveReview as the only authoritative interactive decision; decline or cancel records no proposal decision.",
+    };
+  }
+  if (supportsFormElicitation(clientCapabilities)) {
+    return {
+      schemaVersion: 1,
+      provider: "mcp_elicitation",
+      status: "not_confirmed",
+      instruction: "The proposal draft was saved, but no interactive form response was received. Do not claim that a form or card was shown; present the text receipt and wait for an explicit user decision.",
+    };
+  }
+  return {
+    schemaVersion: 1,
+    provider: "text",
+    status: "text_only",
+    instruction: "The proposal draft was saved, but this client did not advertise a supported interactive proposal UI. No card was created. Present the text receipt and wait for an explicit user decision.",
+  };
+};
+
 export const buildLocalProposalRenderResult = async ({
   result,
   companySlug,
@@ -4347,6 +4411,10 @@ export const buildLocalProposalRenderResult = async ({
   // return a useful text-client receipt with draft text and exact decisions.
   const modelReceipt = {
     ...buildLocalProposalModelReceipt(structuredContent),
+    interactivePresentation: buildLocalProposalInteractivePresentation({
+      clientCapabilities,
+      interactiveReview,
+    }),
     ...(interactiveReview ? { interactiveReview } : {}),
   };
   return compactLocalMcpResult({
