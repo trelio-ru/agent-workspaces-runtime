@@ -5578,7 +5578,7 @@ test("project access skill preserves owner-only plan/apply and moderator confirm
   assert.doesNotMatch(projectAccessSkill, /\[TODO:/u);
 });
 
-test("private skill management keeps owner-only confirmation, E2EE and assignment boundaries", async () => {
+test("private skill management plugin remains a stable plan/apply bootstrap router", async () => {
   const managementSkill = await readFile(
     path.join(
       pluginDirectory,
@@ -5589,21 +5589,18 @@ test("private skill management keeps owner-only confirmation, E2EE and assignmen
     "utf8",
   );
 
-  assert.match(managementSkill, /владельцем или администратором\s+компании/u);
-  assert.match(managementSkill, /`agent-skill:manage`/u);
-  assert.match(managementSkill, /executionKind=markdown/u);
-  assert.match(managementSkill, /executionKind=remote_mcp/u);
-  assert.match(managementSkill, /executionKind=skillpkg/u);
-  assert.match(managementSkill, /plan_company_private_agent_skill_create/u);
-  assert.match(managementSkill, /create_company_private_agent_skill/u);
-  assert.match(managementSkill, /plan_company_private_agent_skill_release/u);
-  assert.match(managementSkill, /publish_company_private_agent_skill_release/u);
-  assert.match(managementSkill, /Не вызывай apply в том же ходе ассистента, в котором подготовлен план/u);
-  assert.match(managementSkill, /точный\s+`planHash`/u);
-  assert.match(managementSkill, /точный `settingsUrl` из apply/u);
-  assert.match(managementSkill, /не назначает и не включает его/u);
-  assert.match(managementSkill, /bridge шифрует тексты,\s+поисковые слова, Remote MCP config/u);
-  assert.match(managementSkill, /company_unverified/u);
+  assert.match(managementSkill, /короткий bootstrap-маршрутизатор/u);
+  assert.match(managementSkill, /management tools `trelio-remote-skills`/u);
+  assert.match(managementSkill, /отдельного явного подтверждения/u);
+  assert.match(managementSkill, /`planId`, `planHash` и `confirmed=true`/u);
+  assert.match(managementSkill, /Не обходи этот контур браузером, прямым HTTP, записью в БД или другим MCP/u);
+  assert.match(managementSkill, /точный\s+`settingsUrl`/u);
+  assert.doesNotMatch(managementSkill, /executionKind=/u);
+  assert.doesNotMatch(managementSkill, /plan_company_private_agent_skill_create/u);
+  assert.doesNotMatch(managementSkill, /create_company_private_agent_skill/u);
+  assert.doesNotMatch(managementSkill, /MiB/u);
+  assert.doesNotMatch(managementSkill, /agent-skill:manage/u);
+  assert.doesNotMatch(managementSkill, /TRELIOE1|company_unverified|bridge шифрует/u);
   assert.doesNotMatch(managementSkill, /\[TODO:/u);
 });
 

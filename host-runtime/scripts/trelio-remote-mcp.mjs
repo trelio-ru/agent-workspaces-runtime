@@ -175,6 +175,7 @@ const COMPANY_SKILL_PLAN_DIRECTORY = path.join(
   "agent-skill-publication-plans",
 );
 const COMPANY_SKILL_MANAGEMENT_TOOL_NAMES = new Set([
+  "get_company_private_agent_skill_authoring_contract",
   "plan_company_private_agent_skill_create",
   "create_company_private_agent_skill",
   "plan_company_private_agent_skill_release",
@@ -2483,6 +2484,93 @@ const readCompanyPrivateSkillManagementContext = async ({
   return { ...rawContext, skill, companyEncryption };
 };
 
+/**
+ * Validate only the stable authoring-contract envelope owned by the runtime.
+ * Additive policy fields deliberately pass through unchanged: the backend may
+ * evolve authoring guidance and limits without forcing another plugin/runtime
+ * release, while an ABI or isolation regression still fails closed locally.
+ */
+export const normalizeCompanyPrivateSkillAuthoringContract = (
+  rawContract,
+  expectedCompanySlug,
+) => {
+  const instructionsMarkdown = String(rawContract?.instructionsMarkdown || "").trim();
+  const executionKinds = Array.isArray(rawContract?.executionKinds)
+    ? rawContract.executionKinds : [];
+  const knownExecutionKinds = new Set(executionKinds.map(({ kind }) => kind));
+  const browserCapabilities = Array.isArray(rawContract?.browserRuntime?.requiredCapabilities)
+    ? rawContract.browserRuntime.requiredCapabilities : [];
+  if (
+    !rawContract
+    || typeof rawContract !== "object"
+    || Array.isArray(rawContract)
+    || rawContract.schemaVersion !== 1
+    || !STABLE_VERSION_PATTERN.test(String(rawContract.contractVersion || ""))
+    || instructionsMarkdown.length < 1
+    || instructionsMarkdown.length > 200_000
+    || !UUID_PATTERN.test(String(rawContract.company?.id || ""))
+    || rawContract.company.slug !== expectedCompanySlug
+    || !["plain", "encrypted"].includes(rawContract.company.encryptionState)
+    || rawContract.permissions?.canManage !== true
+    || rawContract.discovery?.searchTool !== "search_agent_guidance"
+    || !["markdown", "remote_mcp", "skillpkg"].every((kind) => knownExecutionKinds.has(kind))
+    || rawContract.browserRuntime?.abi !== "browser-session-v1"
+    || rawContract.browserRuntime?.executionKind !== "skillpkg"
+    || !["browser", "local-session"].every((capability) => (
+      browserCapabilities.includes(capability)
+    ))
+    || rawContract.browserRuntime?.profileReuseAcrossSkills !== false
+    || rawContract.browserRuntime?.isolation !== "skill/company/member/connection"
+    || rawContract.publication?.separatePlanHashConfirmationRequired !== true
+    || rawContract.publication?.applyInPlanTurnAllowed !== false
+  ) {
+    throw new RemoteMcpHostError(
+      "AGENT_SKILL_AUTHORING_INVALID_CONTRACT",
+      "Trelio вернул несовместимый authoring contract приватного навыка.",
+    );
+  }
+
+  return {
+    ...rawContract,
+    instructionsMarkdown,
+    nextTools: {
+      createPlan: "plan_company_private_agent_skill_create",
+      createApply: "create_company_private_agent_skill",
+      releasePlan: "plan_company_private_agent_skill_release",
+      releaseApply: "publish_company_private_agent_skill_release",
+    },
+  };
+};
+
+const readCompanyPrivateSkillAuthoringContract = async (
+  origin,
+  rawInput,
+  { signal } = {},
+) => {
+  if (
+    !rawInput
+    || typeof rawInput !== "object"
+    || Array.isArray(rawInput)
+    || Object.keys(rawInput).some((key) => key !== "companySlug")
+  ) {
+    throw new RemoteMcpHostError(
+      "AGENT_SKILL_MANAGEMENT_INVALID_INPUT",
+      "Authoring contract принимает только companySlug.",
+    );
+  }
+  const companySlug = requireBoundedText(rawInput.companySlug, "companySlug", 120);
+  const token = await requireToken(origin, { onStatus: () => undefined, signal });
+  await ensureBridgeCompatibility(origin, token, { signal });
+  const query = new URLSearchParams({ companySlug });
+  const response = await request(
+    origin,
+    token,
+    `/api/agent-skills/private-management/authoring-contract?${query.toString()}`,
+    { signal },
+  );
+  return normalizeCompanyPrivateSkillAuthoringContract(await response.json(), companySlug);
+};
+
 const normalizeCommonPublicationInput = (rawInput) => ({
   companySlug: requireBoundedText(rawInput?.companySlug, "companySlug", 120),
   skillSlug: requireSkillSlug(rawInput?.skillSlug),
@@ -2954,6 +3042,13 @@ const handleCompanySkillManagementTool = async (
   rawArguments,
   { signal } = {},
 ) => {
+  if (name === "get_company_private_agent_skill_authoring_contract") {
+    return buildTextResult(await readCompanyPrivateSkillAuthoringContract(
+      origin,
+      rawArguments,
+      { signal },
+    ));
+  }
   if (name === "plan_company_private_agent_skill_create") {
     return buildTextResult(await planCompanyPrivateSkillCreate(
       origin,
@@ -3375,9 +3470,27 @@ const LOCAL_TOOLS = [
     },
   },
   {
+    name: "get_company_private_agent_skill_authoring_contract",
+    title: "Read the private Agent Skill authoring contract",
+    description: "Owner/admin only. Before authoring or materially revising a private skill, load the current backend-versioned contract for the exact company. It defines overlap discovery, execution kinds, package limits, generic browser/session isolation and publication decisions; this read creates no plan and publishes nothing.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["companySlug"],
+      properties: {
+        companySlug: { type: "string", minLength: 1, maxLength: 120 },
+      },
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "plan_company_private_agent_skill_create",
     title: "Plan a company-private Agent Skill",
-    description: "Owner/admin only. Validate one Markdown, Remote MCP, or local .skillpkg skill, prepare a no-assignment initial release, encrypt protected content locally when company E2EE is enabled, and return an exact expiring planHash. This does not publish; ask for separate explicit confirmation before apply.",
+    description: "Owner/admin only. After loading the current authoring contract, validate one Markdown, Remote MCP, or local .skillpkg skill, prepare a no-assignment initial release, encrypt protected content locally when company E2EE is enabled, and return an exact expiring planHash. This does not publish; ask for separate explicit confirmation before apply.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -3423,7 +3536,7 @@ const LOCAL_TOOLS = [
   {
     name: "plan_company_private_agent_skill_release",
     title: "Plan a company-private Agent Skill release",
-    description: "Owner/admin only. Read the live current release, validate Markdown, Remote MCP, a new local .skillpkg, or reuse of the current package, encrypt locally for company E2EE, and return an exact CAS-bound planHash. This does not publish; ask for separate explicit confirmation before apply.",
+    description: "Owner/admin only. After loading the current authoring contract, read the live current release, validate Markdown, Remote MCP, a new local .skillpkg, or reuse of the current package, encrypt locally for company E2EE, and return an exact CAS-bound planHash. This does not publish; ask for separate explicit confirmation before apply.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

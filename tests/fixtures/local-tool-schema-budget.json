@@ -141,6 +141,13 @@
       "baselineTokens": 192,
       "maxTokens": 224
     },
+    "get_company_private_agent_skill_authoring_contract": {
+      "modelVisible": true,
+      "baselineBytes": 697,
+      "maxBytes": 768,
+      "baselineTokens": 138,
+      "maxTokens": 192
+    },
     "plan_company_private_agent_skill_create": {
       "modelVisible": true,
       "baselineBytes": 2171,

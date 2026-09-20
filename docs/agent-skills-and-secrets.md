@@ -80,8 +80,12 @@ control-plane outage, timeout, transient/unknown failure и запрещённы
 ## Управление приватными навыками
 
 Владелец или администратор компании может управлять private Agent Skills через
-четыре локальных инструмента `trelio-remote-skills`: отдельные plan/apply для
-создания и для новой версии. Bridge-session должна иметь capability
+read-only authoring contract и четыре локальных plan/apply инструмента
+`trelio-remote-skills` для создания и новой версии. Authoring contract каждый
+раз загружается из backend для exact компании, поэтому текущие правила, лимиты и
+ABI можно менять без нового plugin release. Он требует сначала проверить overlap
+через catalog guidance и только затем выбрать минимальный execution kind.
+Bridge-session должна иметь capability
 `agent-skill:manage`; обычный участник, устаревший OAuth grant и прямой HTTP
 этот контур не заменяют.
 
@@ -99,6 +103,14 @@ provider-neutral HTTPS/auth/header/tool-policy validator, который при�
 digest, interpreter и capabilities. Такой runtime остаётся
 `company_unverified` и перед первым запуском требует отдельного защищённого
 device consent.
+
+Browser automation допускается только в `.skillpkg` с capabilities `browser` и
+`local-session` и top-level `browserSession`. Package подключается к общему
+host-owned `browser-session-v1`: host отвечает за discovery, Playwright,
+lifecycle, profile lock, absolute lease и cleanup, а package – за URL,
+navigation, selectors, read guards и mutation authority. Profile/session имеет
+namespace `skill/company/member/connection` и не переиспользуется между навыками;
+общий runtime не означает общий аккаунт, cookies или external authority.
 
 При company E2EE bridge до apply локально шифрует title, description, search
 terms, instructions, summary/reason, Remote MCP config, runtime manifest и

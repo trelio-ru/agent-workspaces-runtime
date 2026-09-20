@@ -23,6 +23,7 @@ import {
   fingerprintRemoteMcpConfig,
   handleLocalMcpMessage,
   handleToolCall,
+  normalizeCompanyPrivateSkillAuthoringContract,
   openCredentialFormInBrowser,
   persistLocalProposalProviderSelection,
   readLocalProposalAppResource,
@@ -56,6 +57,79 @@ test("large private packages raise their exact runtime host floor", () => {
     encrypted: true,
     hostRuntimeVersion: "2.4.1",
   }), "2.4.1");
+});
+
+test("private skill authoring contract preserves additive backend policy", () => {
+  const contract = normalizeCompanyPrivateSkillAuthoringContract({
+    schemaVersion: 1,
+    contractVersion: "1.0.0",
+    instructionsMarkdown: "  Current authoring policy.  ",
+    company: {
+      id: companyId,
+      slug: "example-company",
+      encryptionState: "encrypted",
+    },
+    permissions: { canManage: true, role: "admin" },
+    discovery: { searchTool: "search_agent_guidance" },
+    executionKinds: [
+      { kind: "markdown" },
+      { kind: "remote_mcp" },
+      { kind: "skillpkg" },
+    ],
+    browserRuntime: {
+      abi: "browser-session-v1",
+      executionKind: "skillpkg",
+      requiredCapabilities: ["browser", "local-session"],
+      isolation: "skill/company/member/connection",
+      profileReuseAcrossSkills: false,
+    },
+    publication: {
+      separatePlanHashConfirmationRequired: true,
+      applyInPlanTurnAllowed: false,
+    },
+    futurePolicyField: { enabled: true },
+  }, "example-company");
+
+  assert.equal(contract.instructionsMarkdown, "Current authoring policy.");
+  assert.deepEqual(contract.futurePolicyField, { enabled: true });
+  assert.equal(
+    contract.nextTools.createPlan,
+    "plan_company_private_agent_skill_create",
+  );
+});
+
+test("private skill authoring contract fails closed on browser isolation drift", () => {
+  assert.throws(() => normalizeCompanyPrivateSkillAuthoringContract({
+    schemaVersion: 1,
+    contractVersion: "1.0.0",
+    instructionsMarkdown: "Current authoring policy.",
+    company: {
+      id: companyId,
+      slug: "example-company",
+      encryptionState: "plain",
+    },
+    permissions: { canManage: true },
+    discovery: { searchTool: "search_agent_guidance" },
+    executionKinds: [
+      { kind: "markdown" },
+      { kind: "remote_mcp" },
+      { kind: "skillpkg" },
+    ],
+    browserRuntime: {
+      abi: "browser-session-v1",
+      executionKind: "skillpkg",
+      requiredCapabilities: ["browser", "local-session"],
+      isolation: "skill/company/member/connection",
+      profileReuseAcrossSkills: true,
+    },
+    publication: {
+      separatePlanHashConfirmationRequired: true,
+      applyInPlanTurnAllowed: false,
+    },
+  }, "example-company"), (error) => {
+    assert.equal(error.code, "AGENT_SKILL_AUTHORING_INVALID_CONTRACT");
+    return true;
+  });
 });
 
 const companyId = "11111111-1111-4111-8111-111111111111";
@@ -1752,6 +1826,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     "diagnose_trelio_installation",
     "plan_codex_trelio_hook_routing",
     "apply_codex_trelio_hook_routing",
+    "get_company_private_agent_skill_authoring_contract",
     "plan_company_private_agent_skill_create",
     "create_company_private_agent_skill",
     "plan_company_private_agent_skill_release",
@@ -1761,6 +1836,13 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     "call_remote_agent_skill_tool",
     "forget_remote_agent_skill_credential",
   ]);
+  const authoringTool = response.result.tools.find(({ name }) => (
+    name === "get_company_private_agent_skill_authoring_contract"
+  ));
+  assert.equal(authoringTool.annotations.readOnlyHint, true);
+  assert.equal(authoringTool.inputSchema.additionalProperties, false);
+  assert.deepEqual(authoringTool.inputSchema.required, ["companySlug"]);
+  assert.match(authoringTool.description, /generic browser\/session isolation/u);
   for (const toolName of [
     "create_company_private_agent_skill",
     "publish_company_private_agent_skill_release",
@@ -3692,7 +3774,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.doesNotMatch(frames[0].result.instructions, /command-ответов|процедура совместимости/u);
   assert.match(frames[0].result.instructions, /Native Trelio не требует каталога/u);
-  assert.equal(frames[1].result.tools.length, 28);
+  assert.equal(frames[1].result.tools.length, 29);
 });
 
 test("Remote MCP admission expires absolutely and never caches protected wire declarations", { timeout: 15000 }, async () => {
