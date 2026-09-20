@@ -963,6 +963,7 @@ test("local task corpus keeps useful controls but excludes status and people", (
 test("local regular-work search groups manual discussion evidence by set and keeps exact anchors", () => {
   const regularWorkMirror = structuredClone(mirror);
   const setId = "88888888-8888-4888-8888-888888888888";
+  const occurrenceId = "99999999-9999-4999-8999-999999999997";
   const commentId = "99999999-9999-4999-8999-999999999998";
   const setPath = `/acme/mobile/routines/${setId}/`;
   regularWorkMirror.contextDocuments.push({
@@ -995,10 +996,11 @@ test("local regular-work search groups manual discussion evidence by set and kee
         publicPath: setPath,
       },
       items: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", title: "Снять позиции в поисковиках" }],
-      comments: [{ id: commentId, bodyPlainText: "Проверить просадку по брендовым запросам" }],
+      comments: [{ id: commentId, occurrenceId, bodyPlainText: "Проверить просадку по брендовым запросам" }],
       attachments: [{
         id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         commentId,
+        occurrenceId,
         originalName: "позиции-сентябрь.xlsx",
       }],
     },
@@ -1012,7 +1014,10 @@ test("local regular-work search groups manual discussion evidence by set and kee
   assert.equal(discussion.length, 1);
   assert.equal(discussion[0].id, `context:regular_work:${setId}`);
   assert.deepEqual(discussion[0].matchedQueries, ["брендовым запросам", "позиции-сентябрь.xlsx"]);
-  assert.equal(discussion[0].url, `${setPath}#regular-work-comment-${commentId}`);
+  assert.equal(
+    discussion[0].url,
+    `${setPath}checks/${occurrenceId}/#regular-work-comment-${commentId}`,
+  );
   assert.equal(
     searchCompanyContextMirror(regularWorkMirror, ["снять позиции"], 10)
       .results.some((result) => result.type === "regular-work" && result.url === setPath),
@@ -1385,6 +1390,27 @@ test("native regular-work reads preserve catalog and exact-detail shapes from th
   assert.equal(exact.set.revision, 4);
   assert.equal(exact.items[0].title, "Проверить отчёт");
   assert.equal(exact.current[0].isDone, true);
+
+  const occurrenceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const occurrenceMirror = structuredClone(regularMirror);
+  occurrenceMirror.contextDocuments[occurrenceMirror.contextDocuments.length - 1].payload = {
+    company: regularMirror.company,
+    project: regularMirror.projects[0],
+    set: exact.set,
+    item: exact.items[0],
+    occurrence: { id: occurrenceId, dateKey: "2026-09-18", isDone: true },
+    comments: [{ id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", type: "system" }],
+    commentsPagination: { total: 1, hasMore: false },
+    viewer: { memberId: regularMirror.viewer.memberId, canEdit: true },
+  };
+  const occurrence = handleNativeLocalContextRead(occurrenceMirror, "get_regular_work", {
+    companySlug: "acme",
+    projectSlug: "mobile",
+    setId,
+    occurrenceId,
+  });
+  assert.equal(occurrence.occurrence.id, occurrenceId);
+  assert.equal(occurrence.comments[0].type, "system");
 
   const inventory = listCompanyContextMirror(regularMirror, "regular_work", 0, 50, "mobile");
   assert.equal(inventory.total, 1);
@@ -2004,6 +2030,28 @@ test("encrypted regular-work actions protect new content but preserve structural
   assert.equal(update.value.setId, existingSetId);
   assert.match(update.value.title, /^~e1:/u);
 
+  const check = await protectLocalActionArguments({
+    nativeTool: "create_or_update_regular_work",
+    arguments: {
+      operation: "create_item",
+      companySlug: "acme",
+      projectSlug: "mobile",
+      setId: existingSetId,
+      item: {
+        mode: "check",
+        title: "Проверить остатки",
+        descriptionMarkdown: "Сверить **фактический** остаток",
+      },
+      clientRequestId: "regular-work-create-check",
+    },
+    companyEncryption,
+    mirror,
+  });
+  assert.equal(check.value.item.mode, "check");
+  assert.equal(Object.hasOwn(check.value.item, "descriptionMarkdown"), false);
+  assert.equal(check.value.item.descriptionJson.$trelioE2ee.v, 1);
+  assert.doesNotMatch(JSON.stringify(check.value), /Сверить|фактический/u);
+
   const item = await protectLocalActionArguments({
     nativeTool: "create_or_update_regular_work",
     arguments: {
@@ -2032,6 +2080,28 @@ test("encrypted regular-work actions protect new content but preserve structural
   assert.match(item.value.item.task.checklists[0].title, /^~e1:/u);
   assert.match(item.value.item.task.checklists[0].items[0].content, /^~e1:/u);
   assert.doesNotMatch(JSON.stringify(item.value), /закрытый отчёт|Проверить суммы|Сверить остатки/u);
+
+  const occurrenceId = "88888888-8888-4888-8888-888888888888";
+  const comment = await protectLocalActionArguments({
+    nativeTool: "create_regular_check_comment",
+    arguments: {
+      companySlug: "acme",
+      projectSlug: "mobile",
+      setId: existingSetId,
+      occurrenceId,
+      bodyMarkdown: "Проверил отклонение по **закрытому** отчёту",
+      clientRequestId: "regular-work-comment",
+      userExplicitlyRequestedImmediatePublication: true,
+    },
+    companyEncryption,
+    mirror,
+  });
+  assert.equal(comment.value.setId, existingSetId);
+  assert.equal(comment.value.occurrenceId, occurrenceId);
+  assert.equal(comment.value.userExplicitlyRequestedImmediatePublication, true);
+  assert.equal(Object.hasOwn(comment.value, "bodyMarkdown"), false);
+  assert.equal(comment.value.bodyJson.$trelioE2ee.v, 1);
+  assert.doesNotMatch(JSON.stringify(comment.value), /Проверил отклонение|закрытому/u);
 });
 
 test("encrypted registry actions preserve row identity and typed structure across chats", async () => {

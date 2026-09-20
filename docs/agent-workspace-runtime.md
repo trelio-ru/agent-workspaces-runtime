@@ -685,6 +685,14 @@ Encrypted regular-work mirror получает отдельную bounded search
 именами вложений. Значения остаются protected markers до trusted local hydration;
 backend не строит plaintext index. Проекция входит в revision token, поэтому
 изменение комментария вне 50-entry detail page создаёт новое immutable generation.
+Комментарий exact check occurrence сохраняет открытый structural `occurrenceId`:
+локальный search ведёт на `/checks/:occurrenceId/#regular-work-comment-...`, а
+`get_regular_work` с этим ID точечно гидратирует только один dated thread и не
+кэширует его под общим set ID. `create_regular_check_comment` проходит через
+generic local action: body преобразуется в canonical rich text и шифруется,
+тогда как set/occurrence IDs и явное разрешение публикации остаются structural.
+Top-level description лёгкого check-пункта проходит через тот же generic
+rich-text protection, а task-пункт сохраняет описание внутри `item.task`.
 
 Local mirror schema 5 читает accepted browser manifest и bounded safe text;
 имена binary/external файлов индексируются без их скачивания. Отсутствующая

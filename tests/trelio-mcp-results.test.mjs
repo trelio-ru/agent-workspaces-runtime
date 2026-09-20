@@ -359,6 +359,31 @@ test("local regular-work detail uses the generated native response projection", 
     { companySlug: "demo", projectSlug: "mobile", setId: payload.set.id, responseDetail: "full" },
   ).content[0].text);
   assert.deepEqual(full, payload, "Compatibility full read still exposes the original hydrated DTO");
+
+  const occurrencePayload = {
+    company: payload.company,
+    project: payload.project,
+    set: payload.set,
+    item: payload.items[0],
+    occurrence: { id: "occurrence-1", dateKey: "2026-09-18", isDone: false },
+    comments: [{ id: "comment-1", type: "manual", bodyPlainText: "Проверить причину" }],
+    commentsPagination: { total: 1, hasMore: false },
+  };
+  const occurrenceEnvelope = { content: [{ type: "text", text: JSON.stringify(occurrencePayload) }] };
+  const exactOccurrence = JSON.parse(compactLocalNativeMcpResult(
+    "get_regular_work",
+    occurrenceEnvelope,
+    { companySlug: "demo", projectSlug: "mobile", setId: payload.set.id, occurrenceId: "occurrence-1" },
+  ).content[0].text);
+  assert.deepEqual(exactOccurrence, occurrencePayload);
+  assert.equal(exactOccurrence.deferredData, undefined);
+
+  const commentResult = JSON.parse(compactLocalNativeMcpResult(
+    "create_regular_check_comment",
+    occurrenceEnvelope,
+    { companySlug: "demo", projectSlug: "mobile", setId: payload.set.id, occurrenceId: "occurrence-1" },
+  ).content[0].text);
+  assert.deepEqual(commentResult, occurrencePayload);
 });
 
 test("local file read carries exactly one full copy with revision and coverage", () => {

@@ -3335,15 +3335,20 @@ const fetchContextDocumentProjection = async ({
   token,
   companySlug,
   document,
+  occurrenceId = null,
   signal,
-}) => readJson(await request(
-  origin,
-  token,
-  `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}`
-    + `/documents/${encodeURIComponent(document.type)}/${encodeURIComponent(document.id)}`
-    + `?${new URLSearchParams({ expectedRevision: document.revisionToken }).toString()}`,
-  { signal },
-));
+}) => {
+  const query = new URLSearchParams({ expectedRevision: document.revisionToken });
+  if (occurrenceId) query.set("occurrenceId", occurrenceId);
+  return readJson(await request(
+    origin,
+    token,
+    `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}`
+      + `/documents/${encodeURIComponent(document.type)}/${encodeURIComponent(document.id)}`
+      + `?${query.toString()}`,
+    { signal },
+  ));
+};
 
 const getMirrorDetailCache = (mirror) => {
   const cached = mirrorDetailCache.get(mirror);
@@ -4023,9 +4028,18 @@ const buildRegularWorkSearchFields = (contextDocument) => {
   const attachments = Array.isArray(projection.attachments)
     ? projection.attachments
     : comments.flatMap((comment) => comment?.attachments ?? []);
-  const commentPath = (commentId) => commentId && setPath
-    ? `${setPath}#regular-work-comment-${encodeURIComponent(commentId)}`
-    : setPath;
+  const commentPath = (commentId, occurrenceId) => {
+    if (!setPath) return setPath;
+    // An occurrence discussion is a first-class dated thread. Preserve the
+    // structural UUID in the local index so a search hit opens that exact
+    // check instead of collapsing back to the parent set discussion.
+    const discussionPath = occurrenceId
+      ? `${setPath}checks/${encodeURIComponent(occurrenceId)}/`
+      : setPath;
+    return commentId
+      ? `${discussionPath}#regular-work-comment-${encodeURIComponent(commentId)}`
+      : discussionPath;
+  };
 
   // A search result represents the set, never an individual discussion row.
   // The winning field still carries the exact comment anchor so an agent can
@@ -4042,12 +4056,12 @@ const buildRegularWorkSearchFields = (contextDocument) => {
     ...comments.map((comment) => buildSearchField(
       "regular-work-comment",
       comment?.bodyPlainText,
-      { publicPath: commentPath(comment?.id) },
+      { publicPath: commentPath(comment?.id, comment?.occurrenceId) },
     )),
     ...attachments.map((attachment) => buildSearchField(
       "regular-work-attachment",
       attachment?.originalName,
-      { publicPath: commentPath(attachment?.commentId) },
+      { publicPath: commentPath(attachment?.commentId, attachment?.occurrenceId) },
     )),
   ]);
 };
@@ -5822,6 +5836,12 @@ const getRegularWorkFromMirror = (mirror, rawInput) => {
       "The regular-work set is absent from the current ACL-filtered local company generation.",
     );
   }
+  if (rawInput?.occurrenceId && document.payload?.occurrence?.id !== rawInput.occurrenceId) {
+    throw new TrelioLocalContextError(
+      "LOCAL_CONTEXT_RESULT_NOT_FOUND",
+      "The regular-work occurrence is absent from the current exact local projection.",
+    );
+  }
   // Unlike generic fetch, the native exact tool returns the domain payload
   // itself. The shared response projector can then defer history/options in
   // precisely the same shape as the plain-company MCP response.
@@ -6075,6 +6095,46 @@ const selectNativeReadDetails = (mirror, nativeTool, input) => {
 };
 
 const hydrateMirrorForNativeRead = async ({ ready, nativeTool, input, signal }) => {
+  if (nativeTool === "get_regular_work" && input?.occurrenceId) {
+    const matchesProject = buildMirrorProjectScopeMatcher(ready.mirror, input.projectSlug || null);
+    const document = (ready.mirror.contextDocuments ?? []).find((candidate) => (
+      candidate.type === "regular_work"
+      && candidate.id === input.setId
+      && matchesProject(candidate)
+    ));
+    if (!document) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_RESULT_NOT_FOUND",
+        "The regular-work set is absent from the current ACL-filtered local company generation.",
+      );
+    }
+    // Occurrence details are intentionally not cached under the parent set ID:
+    // two dated checks of one set must never overwrite or reuse each other's
+    // discussion. Fetch and hydrate this one bounded projection for this read.
+    const rawValue = await fetchContextDocumentProjection({
+      origin: ready.requestOrigin,
+      token: ready.token,
+      companySlug: ready.mirror.company.slug,
+      document,
+      occurrenceId: input.occurrenceId,
+      signal,
+    });
+    const hydrated = await hydrateAgentCompanyEncryptedJson({
+      value: rawValue,
+      origin: ready.requestOrigin,
+      token: ready.token,
+      companyEncryption: ready.companyEncryption,
+      signal,
+    });
+    return {
+      ...ready.mirror,
+      contextDocuments: (ready.mirror.contextDocuments ?? []).map((candidate) => (
+        candidate.id === document.id && candidate.type === document.type
+          ? hydrated.document
+          : candidate
+      )),
+    };
+  }
   const selection = selectNativeReadDetails(ready.mirror, nativeTool, input);
   let taskOverlay = ready.mirror;
   let contextOverlay = ready.mirror;

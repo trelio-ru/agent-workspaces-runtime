@@ -311,7 +311,7 @@ const meetingTools = new Set([
     "plan_meeting_context_updates", "confirm_meeting_context_updates", "record_meeting_context_update_outcome",
 ]);
 const regularWorkTools = new Set([
-    "get_regular_work", "create_or_update_regular_work", "complete_regular_check",
+    "get_regular_work", "create_or_update_regular_work", "create_regular_check_comment", "complete_regular_check",
 ]);
 const peopleTools = new Set([
     "get_project_meta", "get_task_create_meta", "resolve_user", "resolve_company_member", "resolve_status",
@@ -785,6 +785,10 @@ const deferRegularWorkDetail = (value, args) => {
     const payload = record(projectRegularWorkDetail(value));
     if (!payload)
         return value;
+    // Exact check reads are already bounded to one occurrence and its own
+    // discussion; set-only heavy sections do not exist on this projection.
+    if (record(payload.occurrence))
+        return payload;
     const company = record(payload.company);
     const project = record(payload.project);
     const set = record(payload.set);
@@ -1253,8 +1257,9 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
             additionalAccess: list(memberLink),
         });
     if (regularWorkTools.has(toolName)) {
-        if (toolName === "get_regular_work")
+        if (toolName === "get_regular_work" || toolName === "create_regular_check_comment") {
             return deferRegularWorkDetail(payload, args);
+        }
         const detail = record(payload.regularWork);
         return detail ? { ...payload, regularWork: deferRegularWorkDetail(detail, args) } : payload;
     }
