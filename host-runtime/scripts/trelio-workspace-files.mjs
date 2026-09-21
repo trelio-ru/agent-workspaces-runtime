@@ -75,7 +75,16 @@ export const readEncryptedWorkspaceFileManifest = async (input) => {
   const projection = overview?.encryption?.browserProjection;
   if (overview?.company?.id !== input.companyEncryption.runtime.company.id) fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
   if (overview?.workspace?.acceptedHead && overview.workspace.acceptedHead !== input.workspaceHead) fail("WORKSPACE_OUTDATED");
-  if (!projection) fail("WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE");
+  if (!projection) {
+    // A server-created encrypted initial revision deliberately has no browser
+    // projection because it contains only the scaffold and exposes no
+    // human-facing files.  The backend distinguishes that legitimate empty
+    // state from a damaged/legacy accepted revision.  Trust only the explicit
+    // false value: missing or true must remain fail-closed so a protocol drift
+    // cannot silently hide accepted Workspace content from local search.
+    if (overview?.encryption?.browserProjectionRequired === false) return [];
+    fail("WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE");
+  }
   if (projection.workspaceHead !== input.workspaceHead) fail("WORKSPACE_OUTDATED");
   if (!UUID.test(String(projection.id)) || !UUID.test(String(projection.manifestFileId))) fail("WORKSPACE_FILE_MANIFEST_INVALID");
   const bytes = await openEncryptedFile({ ...input, fileId: projection.manifestFileId, kind: "manifest", maximum: 16 * 1024 * 1024 });

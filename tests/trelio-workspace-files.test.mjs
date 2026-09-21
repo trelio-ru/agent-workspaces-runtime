@@ -89,6 +89,61 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
   }
 });
 
+test("encrypted discovery treats only a server-confirmed initial revision as an empty projection", async () => {
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const companyId = "22222222-2222-4222-8222-222222222222";
+  const head = "a".repeat(40);
+  let browserProjectionRequired = false;
+  const server = createServer((request, response) => {
+    if (request.url !== `/api/agent-workspaces/workspaces/${workspaceId}`) {
+      response.statusCode = 404;
+      response.end();
+      return;
+    }
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({
+      company: { id: companyId },
+      workspace: { acceptedHead: head },
+      encryption: browserProjectionRequired === undefined
+        ? {}
+        : { browserProjectionRequired },
+    }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const input = {
+    origin: `http://127.0.0.1:${server.address().port}`,
+    token: "synthetic-test-token",
+    companyEncryption: { runtime: { company: { id: companyId } } },
+    workspaceId,
+    workspaceHead: head,
+  };
+
+  try {
+    assert.deepEqual(await readEncryptedWorkspaceFileManifest(input), []);
+    assert.deepEqual(await readEncryptedWorkspaceSearchDocuments({
+      ...input,
+      acceptedHead: head,
+    }), []);
+
+    browserProjectionRequired = true;
+    await assert.rejects(
+      readEncryptedWorkspaceFileManifest(input),
+      { code: "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" },
+    );
+
+    // An older or malformed server response must not be mistaken for the
+    // explicitly authenticated initial-empty state.
+    browserProjectionRequired = undefined;
+    await assert.rejects(
+      readEncryptedWorkspaceFileManifest(input),
+      { code: "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" },
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("file locators reject traversal and foreign path syntax before transport", () => {
   for (const filePath of ["../secret", "/etc/passwd", "x/../secret", "x\\secret", "x//secret", "x\0secret"]) {
     assert.throws(() => validateWorkspaceFileLocator({ workspaceId: "11111111-1111-4111-8111-111111111111", workspaceHead: "a".repeat(40), filePath }), { code: "WORKSPACE_FILE_INVALID_LOCATOR" });
