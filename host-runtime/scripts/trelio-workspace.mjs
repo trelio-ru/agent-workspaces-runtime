@@ -3372,7 +3372,151 @@ const readProtectedWindowsBridgeSession = async (origin, credential) => {
   return unprotectWindowsBridgeSessionToken(origin, protectedSession.ciphertext);
 };
 
-const loadBridgeSessionToken = async (origin) => {
+const probeBridgeSessionToken = async (origin, token, { signal } = {}) => {
+  try {
+    // Compatibility is the smallest authenticated read shared by every bridge
+    // session. It checks the live bearer without opening a Workspace, rotating
+    // a lease or exposing company content.
+    await request(origin, token, "/api/agent-workspaces/bridge-compatibility", {
+      method: "GET",
+      signal,
+    });
+    return { status: "ready" };
+  } catch (error) {
+    if (
+      error instanceof TrelioApiError
+      && error.statusCode === 401
+      && ["BRIDGE_SESSION_INVALID", "BRIDGE_SESSION_REQUIRED"].includes(error.code)
+    ) {
+      return { status: "invalid" };
+    }
+    // A transport failure, hard version gate or server error says nothing
+    // about the credential. Keep both local copies and let the original
+    // operation surface its real failure instead of guessing that one expired.
+    return { status: "unknown", error };
+  }
+};
+
+const selfRevokeBridgeSessionToken = async (origin, token, { signal } = {}) => {
+  try {
+    await request(origin, token, "/api/agent-workspaces/bridge-session/self-revoke", {
+      method: "POST",
+      signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reasonCode: "duplicate_legacy_session" }),
+    });
+    return true;
+  } catch (error) {
+    if (
+      error instanceof TrelioApiError
+      && error.statusCode === 401
+      && ["BRIDGE_SESSION_INVALID", "BRIDGE_SESSION_REQUIRED"].includes(error.code)
+    ) {
+      // A session that disappeared between the read-only probe and revoke is
+      // already safe to forget locally.
+      return true;
+    }
+    return false;
+  }
+};
+
+const withoutBridgeSessionFields = (credentials, origin) => {
+  const nextCredentials = { ...credentials };
+  const nextCredential = { ...nextCredentials[origin] };
+  delete nextCredential.bridgeSessionToken;
+  delete nextCredential.bridgeSessionTokenProtected;
+  if (Object.keys(nextCredential).length === 0) {
+    delete nextCredentials[origin];
+  } else {
+    nextCredentials[origin] = nextCredential;
+  }
+  return nextCredentials;
+};
+
+const clearInvalidMacosBridgeSessions = async (
+  origin,
+  keychainToken,
+  credentials,
+) => {
+  await deleteMacosBridgeSessionToken(origin);
+  try {
+    await writePrivateJsonFile(
+      CREDENTIAL_FILE,
+      withoutBridgeSessionFields(credentials, origin),
+    );
+  } catch (error) {
+    // Keep the operation fail-closed if the file changed concurrently or
+    // became unwritable. Restoring the already-proven-invalid Keychain value
+    // preserves the original conflict for a later deterministic retry instead
+    // of leaving an invalid lone plaintext credential that would be migrated.
+    await setMacosBridgeSessionToken(origin, keychainToken).catch(() => undefined);
+    throw error;
+  }
+};
+
+const reconcileBridgeSessionConflict = async ({
+  origin,
+  protectedToken,
+  legacyToken,
+  signal,
+  promoteLegacyToken,
+  removeLegacyToken,
+  clearInvalidTokens,
+}) => {
+  const [protectedProbe, legacyProbe] = await Promise.all([
+    probeBridgeSessionToken(origin, protectedToken, { signal }),
+    probeBridgeSessionToken(origin, legacyToken, { signal }),
+  ]);
+
+  if (protectedProbe.status === "invalid" && legacyProbe.status === "invalid") {
+    // Two independent 401 responses prove that a new pairing is required.
+    // The platform callback owns atomic/rollback-safe local cleanup.
+    await clearInvalidTokens();
+    return null;
+  }
+
+  if (legacyProbe.status === "ready" && protectedProbe.status === "invalid") {
+    try {
+      // Promotion includes the protected write/read-back and legacy cleanup.
+      // A failed migration keeps the verified file value usable for this call.
+      await promoteLegacyToken();
+    } catch {
+      // The original operation can still authenticate with the live legacy
+      // token. A later invocation repeats the read-only probes before retrying
+      // any local mutation.
+    }
+    return legacyToken;
+  }
+
+  if (protectedProbe.status === "ready") {
+    if (
+      legacyProbe.status === "invalid"
+      || (
+        legacyProbe.status === "ready"
+        && await selfRevokeBridgeSessionToken(origin, legacyToken, { signal })
+      )
+    ) {
+      // The OS-protected credential is canonical. A second still-live legacy
+      // session is revoked before its only local copy is removed. Ambiguous
+      // revoke results retain the file for a later read-back.
+      await removeLegacyToken().catch(() => undefined);
+    }
+    return protectedToken;
+  }
+
+  if (legacyProbe.status === "ready") {
+    // The protected probe failed for a non-auth reason. Keep both copies, use
+    // the one whose live read succeeded and retry cleanup later.
+    return legacyToken;
+  }
+
+  // Neither probe established live state. Prefer the canonical OS-protected
+  // value but preserve both copies so the original operation reports the real
+  // transport/version failure instead of a fabricated credential conflict.
+  return protectedToken;
+};
+
+const loadBridgeSessionToken = async (origin, { signal } = {}) => {
   const credentials = await readFallbackCredentials();
   const credential = credentials[origin] || {};
   const fileToken = typeof credential.bridgeSessionToken === "string"
@@ -3394,9 +3538,30 @@ const loadBridgeSessionToken = async (origin) => {
     }
     if (keychainToken) {
       if (fileToken && !secretsMatch(fileToken, keychainToken)) {
-        throw new Error(
-          "Bridge device-session различается в macOS Keychain и legacy private file; автоматическая миграция остановлена без удаления обеих копий.",
-        );
+        return reconcileBridgeSessionConflict({
+          origin,
+          protectedToken: keychainToken,
+          legacyToken: fileToken,
+          signal,
+          promoteLegacyToken: async () => {
+            await setMacosBridgeSessionToken(origin, fileToken);
+            await removePlaintextBridgeSessionToken(
+              CREDENTIAL_FILE,
+              credentials,
+              origin,
+            );
+          },
+          removeLegacyToken: () => removePlaintextBridgeSessionToken(
+            CREDENTIAL_FILE,
+            credentials,
+            origin,
+          ),
+          clearInvalidTokens: () => clearInvalidMacosBridgeSessions(
+            origin,
+            keychainToken,
+            credentials,
+          ),
+        });
       }
       if (fileToken) {
         await removePlaintextBridgeSessionToken(
@@ -3442,9 +3607,22 @@ const loadBridgeSessionToken = async (origin) => {
     const protectedToken = await readProtectedWindowsBridgeSession(origin, credential);
     if (protectedToken) {
       if (fileToken && !secretsMatch(fileToken, protectedToken)) {
-        throw new Error(
-          "Bridge device-session различается в Windows DPAPI и legacy private file; автоматическая миграция остановлена без удаления обеих копий.",
-        );
+        return reconcileBridgeSessionConflict({
+          origin,
+          protectedToken,
+          legacyToken: fileToken,
+          signal,
+          promoteLegacyToken: () => saveBridgeSessionToken(origin, fileToken),
+          removeLegacyToken: () => removePlaintextBridgeSessionToken(
+            CREDENTIAL_FILE,
+            credentials,
+            origin,
+          ),
+          clearInvalidTokens: () => writePrivateJsonFile(
+            CREDENTIAL_FILE,
+            withoutBridgeSessionFields(credentials, origin),
+          ),
+        });
       }
       if (fileToken) {
         await removePlaintextBridgeSessionToken(
@@ -3500,8 +3678,8 @@ const loadLegacyOAuthToken = async (origin) => {
   return keychainToken || credentials[origin]?.accessToken || null;
 };
 
-export const loadToken = async (origin) => (
-  await loadBridgeSessionToken(origin)
+export const loadToken = async (origin, options = {}) => (
+  await loadBridgeSessionToken(origin, options)
   || await loadLegacyOAuthToken(origin)
 );
 
@@ -5376,7 +5554,7 @@ const createPkce = () => {
 };
 
 export const requireToken = async (origin, options = {}) => {
-  const token = await loadToken(origin);
+  const token = await loadToken(origin, options);
 
   if (token) {
     return token;

@@ -448,13 +448,14 @@ const createRuntimeState = async ({
     writePrivateJsonFile,
   } = await loadWorkspaceBridgeModule();
 
-  // The outer hook timeout still bounds local Keychain/DPAPI work. Start the
-  // narrower shared network deadline only after the reusable device-session is
-  // available so first-run OS migration cannot consume server request time.
-  const token = await requireToken(origin);
+  // One shared deadline covers conflict probes and registration. Ordinary
+  // Keychain/DPAPI reads are local, but a divergent legacy copy now requires
+  // live authenticated probes; leaving those requests outside the internal
+  // budget would make the host kill the hook before it can release its lock.
   const registrationSignal = AbortSignal.timeout(
     RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
   );
+  const token = await requireToken(origin, { signal: registrationSignal });
   const registration = await retryIdempotentRequest(() => (
     registerAgentRuntimeHookSession({
       origin,

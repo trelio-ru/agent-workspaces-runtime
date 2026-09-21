@@ -7309,6 +7309,179 @@ test("Windows DPAPI migrates a legacy plaintext bridge session before reuse", {
   }
 });
 
+test("Windows bridge resolves differing DPAPI and legacy file sessions from live state", {
+  skip: process.platform !== "win32",
+  timeout: 30_000,
+}, async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-dpapi-conflict-"));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const localAppDataDirectory = path.join(temporaryDirectory, "local-app-data");
+  const validTokens = new Set();
+  const revokedTokens = [];
+  let serverError = null;
+
+  const server = createServer(async (request, response) => {
+    try {
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
+      const authorization = String(request.headers.authorization || "");
+      const token = authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "";
+
+      if (
+        request.method === "GET"
+        && request.url === "/api/agent-workspaces/bridge-compatibility"
+      ) {
+        response.setHeader("content-type", "application/json");
+        if (validTokens.has(token)) {
+          response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+        } else {
+          response.statusCode = 401;
+          response.end(JSON.stringify({
+            code: "BRIDGE_SESSION_INVALID",
+            message: "Bridge session is invalid.",
+          }));
+        }
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && request.url === "/api/agent-workspaces/bridge-session/self-revoke"
+      ) {
+        let requestBody = "";
+        for await (const chunk of request) requestBody += chunk;
+        assert.equal(request.headers["content-type"], "application/json");
+        assert.deepEqual(
+          JSON.parse(requestBody),
+          { reasonCode: "duplicate_legacy_session" },
+        );
+        response.setHeader("content-type", "application/json");
+        if (!validTokens.has(token)) {
+          response.statusCode = 401;
+          response.end(JSON.stringify({
+            code: "BRIDGE_SESSION_INVALID",
+            message: "Bridge session is invalid.",
+          }));
+          return;
+        }
+        validTokens.delete(token);
+        revokedTokens.push(token);
+        response.end(JSON.stringify({ revoked: true }));
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("Not found");
+    } catch (error) {
+      serverError = error;
+      response.statusCode = 500;
+      response.end(String(error));
+    }
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const childEnvironment = {
+    ...process.env,
+    HOME: homeDirectory,
+    USERPROFILE: homeDirectory,
+    LOCALAPPDATA: localAppDataDirectory,
+  };
+  const configDirectory = resolveWorkspaceBridgeConfigDirectory({
+    environment: childEnvironment,
+    homeDirectory,
+  });
+  const credentialFile = path.join(configDirectory, "credentials.json");
+  const runLogin = () => execFileAsync(
+    process.execPath,
+    [bridgePath, "login", "--origin", origin],
+    { encoding: "utf8", env: childEnvironment },
+  );
+  const writeLegacyToken = async (token) => {
+    await mkdir(configDirectory, { recursive: true });
+    let credentials = {};
+    try {
+      credentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    credentials[origin] = {
+      ...credentials[origin],
+      bridgeSessionToken: token,
+    };
+    await writeFile(
+      credentialFile,
+      `${JSON.stringify(credentials, null, 2)}\n`,
+      "utf8",
+    );
+  };
+  const seedProtectedToken = async (token) => {
+    await rm(credentialFile, { force: true });
+    await writeLegacyToken(token);
+    const migrated = await runLogin();
+    assert.match(migrated.stdout, /уже подключён через device-session/u);
+  };
+  const readCredentials = async () => JSON.parse(await readFile(credentialFile, "utf8"));
+
+  try {
+    const protectedReady = "twb_windows-conflict-dpapi-ready";
+    await seedProtectedToken(protectedReady);
+    await writeLegacyToken("twb_windows-conflict-file-stale");
+    validTokens.clear();
+    validTokens.add(protectedReady);
+    const preferredResult = await runLogin();
+    assert.match(preferredResult.stdout, /уже подключён через device-session/u);
+    assert.equal((await readCredentials())[origin]?.bridgeSessionToken, undefined);
+
+    const protectedAlsoReady = "twb_windows-conflict-dpapi-second-ready";
+    const legacyAlsoReady = "twb_windows-conflict-file-second-ready";
+    await seedProtectedToken(protectedAlsoReady);
+    await writeLegacyToken(legacyAlsoReady);
+    validTokens.clear();
+    validTokens.add(protectedAlsoReady);
+    validTokens.add(legacyAlsoReady);
+    const duplicateResult = await runLogin();
+    assert.match(duplicateResult.stdout, /уже подключён через device-session/u);
+    assert.equal((await readCredentials())[origin]?.bridgeSessionToken, undefined);
+    assert.deepEqual(revokedTokens, [legacyAlsoReady]);
+
+    const staleProtected = "twb_windows-conflict-dpapi-stale";
+    const legacyReady = "twb_windows-conflict-file-ready";
+    await seedProtectedToken(staleProtected);
+    await writeLegacyToken(legacyReady);
+    validTokens.clear();
+    validTokens.add(legacyReady);
+    const promotedResult = await runLogin();
+    assert.match(promotedResult.stdout, /уже подключён через device-session/u);
+    const promotedCredentials = await readCredentials();
+    assert.equal(promotedCredentials[origin]?.bridgeSessionToken, undefined);
+    assert.equal(
+      await unprotectWindowsBridgeSessionToken(
+        origin,
+        promotedCredentials[origin].bridgeSessionTokenProtected.ciphertext,
+      ),
+      legacyReady,
+    );
+
+    const invalidProtected = "twb_windows-conflict-dpapi-invalid";
+    const invalidLegacy = "twb_windows-conflict-file-invalid";
+    await seedProtectedToken(invalidProtected);
+    await writeLegacyToken(invalidLegacy);
+    validTokens.clear();
+    await assert.rejects(runLogin(), /Not found/u);
+    const clearedCredentials = await readCredentials();
+    assert.equal(clearedCredentials[origin]?.bridgeSessionToken, undefined);
+    assert.equal(clearedCredentials[origin]?.bridgeSessionTokenProtected, undefined);
+    assert.ifError(serverError);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
 test("Windows bridge applies and verifies a current-user-only ACL", {
   skip: process.platform !== "win32",
 }, async () => {
@@ -7544,6 +7717,259 @@ test("macOS bridge preserves plaintext without opening UI when Keychain is locke
     const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
     assert.equal(credentials[origin].bridgeSessionToken, legacyToken);
   } finally {
+    await execFileAsync(
+      "/usr/bin/security",
+      ["delete-keychain", keychainFile],
+      { encoding: "utf8" },
+    ).catch(() => undefined);
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("macOS bridge resolves differing Keychain and legacy file sessions from live state", {
+  skip: process.platform !== "darwin",
+  timeout: 30_000,
+}, async () => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-keychain-conflict-"));
+  const homeDirectory = path.join(temporaryDirectory, "home");
+  const credentialDirectory = path.join(homeDirectory, ".config", "trelio", "workspace-bridge");
+  const credentialFile = path.join(credentialDirectory, "credentials.json");
+  const keychainFile = path.join(temporaryDirectory, "fixture.keychain-db");
+  const keychainPassword = "synthetic-conflict-keychain-password";
+  const validTokens = new Set();
+  const revokedTokens = [];
+  let revokeFailuresRemaining = 0;
+  let revokeRequests = 0;
+  let serverError = null;
+
+  const server = createServer(async (request, response) => {
+    try {
+      assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
+      const authorization = String(request.headers.authorization || "");
+      const token = authorization.startsWith("Bearer ")
+        ? authorization.slice("Bearer ".length)
+        : "";
+
+      if (
+        request.method === "GET"
+        && request.url === "/api/agent-workspaces/bridge-compatibility"
+      ) {
+        response.setHeader("content-type", "application/json");
+        if (validTokens.has(token)) {
+          response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+        } else {
+          response.statusCode = 401;
+          response.end(JSON.stringify({
+            code: "BRIDGE_SESSION_INVALID",
+            message: "Bridge session is invalid.",
+          }));
+        }
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && request.url === "/api/agent-workspaces/bridge-session/self-revoke"
+      ) {
+        let requestBody = "";
+        for await (const chunk of request) requestBody += chunk;
+        assert.equal(request.headers["content-type"], "application/json");
+        assert.deepEqual(
+          JSON.parse(requestBody),
+          { reasonCode: "duplicate_legacy_session" },
+        );
+        revokeRequests += 1;
+        response.setHeader("content-type", "application/json");
+        if (revokeFailuresRemaining > 0) {
+          revokeFailuresRemaining -= 1;
+          response.statusCode = 500;
+          response.end(JSON.stringify({
+            code: "TEMPORARY_FAILURE",
+            message: "Temporary failure.",
+          }));
+          return;
+        }
+        if (!validTokens.has(token)) {
+          response.statusCode = 401;
+          response.end(JSON.stringify({
+            code: "BRIDGE_SESSION_INVALID",
+            message: "Bridge session is invalid.",
+          }));
+          return;
+        }
+        validTokens.delete(token);
+        revokedTokens.push(token);
+        response.end(JSON.stringify({ revoked: true }));
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end("Not found");
+    } catch (error) {
+      serverError = error;
+      response.statusCode = 500;
+      response.end(String(error));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const childEnvironment = {
+    ...process.env,
+    HOME: homeDirectory,
+    NODE_TEST_CONTEXT: "child-v8",
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "",
+    TRELIO_WORKSPACE_TEST_KEYCHAIN_PATH: keychainFile,
+  };
+  const deleteKeychainFixture = () => execFileAsync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { deleteMacosBridgeSessionToken } from ${JSON.stringify(pathToFileURL(bridgePath).href)}; await deleteMacosBridgeSessionToken(process.argv[1]);`,
+      origin,
+    ],
+    { encoding: "utf8", env: childEnvironment },
+  );
+  const hasKeychainToken = async () => {
+    const result = await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { getMacosBridgeSessionToken } from ${JSON.stringify(pathToFileURL(bridgePath).href)}; process.stdout.write(String(Boolean(await getMacosBridgeSessionToken(process.argv[1]))));`,
+        origin,
+      ],
+      { encoding: "utf8", env: childEnvironment },
+    );
+    return result.stdout === "true";
+  };
+  const writeLegacyToken = async (token) => {
+    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
+    await chmod(credentialDirectory, 0o700);
+    await writeFile(
+      credentialFile,
+      `${JSON.stringify({ [origin]: { bridgeSessionToken: token } }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await chmod(credentialFile, 0o600);
+  };
+  const seedKeychainToken = async (token) => {
+    await deleteKeychainFixture().catch(() => undefined);
+    await writeLegacyToken(token);
+    const migrated = await execFileAsync(
+      process.execPath,
+      [bridgePath, "login", "--origin", origin],
+      { encoding: "utf8", env: childEnvironment },
+    );
+    assert.match(migrated.stdout, /уже подключён через device-session/u);
+    const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
+  };
+  const runLogin = () => execFileAsync(
+    process.execPath,
+    [bridgePath, "login", "--origin", origin],
+    { encoding: "utf8", env: childEnvironment },
+  );
+  const assertLegacyRemoved = async () => {
+    const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
+  };
+
+  try {
+    await execFileAsync(
+      "/usr/bin/security",
+      ["create-keychain", "-p", keychainPassword, keychainFile],
+      { encoding: "utf8" },
+    );
+    await execFileAsync(
+      "/usr/bin/security",
+      ["unlock-keychain", "-p", keychainPassword, keychainFile],
+      { encoding: "utf8" },
+    );
+    await execFileAsync(
+      "/usr/bin/security",
+      ["set-keychain-settings", "-lut", "21600", keychainFile],
+      { encoding: "utf8" },
+    );
+
+    const protectedReady = "twb_conflict-keychain-ready";
+    const staleLegacy = "twb_conflict-file-stale";
+    await seedKeychainToken(protectedReady);
+    await writeLegacyToken(staleLegacy);
+    validTokens.clear();
+    validTokens.add(protectedReady);
+    const preferredResult = await runLogin();
+    assert.match(preferredResult.stdout, /уже подключён через device-session/u);
+    await assertLegacyRemoved();
+    assert.deepEqual(revokedTokens, []);
+
+    const protectedAlsoReady = "twb_conflict-keychain-second-ready";
+    const legacyAlsoReady = "twb_conflict-file-second-ready";
+    await seedKeychainToken(protectedAlsoReady);
+    await writeLegacyToken(legacyAlsoReady);
+    validTokens.clear();
+    validTokens.add(protectedAlsoReady);
+    validTokens.add(legacyAlsoReady);
+    const duplicateResult = await runLogin();
+    assert.match(duplicateResult.stdout, /уже подключён через device-session/u);
+    await assertLegacyRemoved();
+    assert.deepEqual(revokedTokens, [legacyAlsoReady]);
+    assert.equal(validTokens.has(legacyAlsoReady), false);
+
+    const protectedDuringAmbiguousRevoke = "twb_conflict-keychain-ambiguous";
+    const retainedLegacy = "twb_conflict-file-retained";
+    await seedKeychainToken(protectedDuringAmbiguousRevoke);
+    await writeLegacyToken(retainedLegacy);
+    validTokens.clear();
+    validTokens.add(protectedDuringAmbiguousRevoke);
+    validTokens.add(retainedLegacy);
+    revokeFailuresRemaining = 1;
+    const ambiguousResult = await runLogin();
+    assert.match(ambiguousResult.stdout, /уже подключён через device-session/u);
+    const retainedCredentials = JSON.parse(await readFile(credentialFile, "utf8"));
+    assert.equal(retainedCredentials[origin]?.bridgeSessionToken, retainedLegacy);
+
+    // A new invocation first performs both read-only probes again. Only that
+    // live read-back authorizes a second revoke attempt after the ambiguous
+    // mutation result.
+    const recoveredRevokeResult = await runLogin();
+    assert.match(recoveredRevokeResult.stdout, /уже подключён через device-session/u);
+    await assertLegacyRemoved();
+    assert.equal(revokeRequests, 3);
+    assert.deepEqual(revokedTokens, [legacyAlsoReady, retainedLegacy]);
+
+    const staleProtected = "twb_conflict-keychain-stale";
+    const legacyReady = "twb_conflict-file-ready";
+    await seedKeychainToken(staleProtected);
+    await writeLegacyToken(legacyReady);
+    validTokens.clear();
+    validTokens.add(legacyReady);
+    const fallbackResult = await runLogin();
+    assert.match(fallbackResult.stdout, /уже подключён через device-session/u);
+    await assertLegacyRemoved();
+
+    // A second mismatch proves that the verified file token replaced the
+    // stale Keychain item: the runtime now keeps it as the protected winner
+    // and removes only this newly introduced invalid legacy value.
+    await writeLegacyToken("twb_conflict-file-third-stale");
+    const replacedResult = await runLogin();
+    assert.match(replacedResult.stdout, /уже подключён через device-session/u);
+    await assertLegacyRemoved();
+
+    const invalidProtected = "twb_conflict-keychain-invalid";
+    const invalidLegacy = "twb_conflict-file-invalid";
+    await seedKeychainToken(invalidProtected);
+    await writeLegacyToken(invalidLegacy);
+    validTokens.clear();
+    await assert.rejects(runLogin(), /Not found/u);
+    await assertLegacyRemoved();
+    assert.equal(await hasKeychainToken(), false);
+    assert.ifError(serverError);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await deleteKeychainFixture().catch(() => undefined);
     await execFileAsync(
       "/usr/bin/security",
       ["delete-keychain", keychainFile],

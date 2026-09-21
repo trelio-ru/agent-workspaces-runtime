@@ -120,6 +120,9 @@ Windows; Linux использует owner-only file fallback. Совместим
 автоматически мигрирует прежнюю файловую запись только после проверенного
 OS-protected read-back, без передачи token через argv, environment или
 диагностический stdout/stderr.
+Разошедшиеся protected и legacy-копии сверяются отдельными live read-only
+проверками: подтверждённая сессия сохраняется, а вторую runtime удаляет только
+после доказанного 401 либо успешного self-revoke.
 
 См. [SECURITY.md](SECURITY.md). Не публикуйте credentials, company content,
 runtime sessions, E2EE keys, signing material и production package URLs в issue,

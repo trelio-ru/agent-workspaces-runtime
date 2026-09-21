@@ -53,6 +53,24 @@ service `ru.trelio.workspace-bridge.session` проверяется тем же 
 работать с прежним owner-only token, а следующий вызов повторяет перенос. Для новой pairing-сессии
 файлового fallback нет – сбой Keychain/DPAPI завершает сохранение fail-closed.
 
+Если после прерванной миграции OS-protected запись и legacy plaintext содержат
+разные device-session, runtime не останавливается на локальном сравнении. Он
+проверяет каждую копию отдельным authenticated read-only
+`bridge-compatibility` запросом без открытия Workspace и ротации lease. Одна
+подтверждённая рабочая сессия становится текущей; рабочий legacy token сначала
+перезаписывается в Keychain/DPAPI с read-back, а рабочая защищённая запись имеет
+приоритет над legacy. Если обе сессии ещё действуют, legacy session сначала
+self-revoke-ится и только затем удаляется из файла. Потерянный ответ revoke или
+иная неоднозначная ошибка сохраняет plaintext для следующего read-back, но не
+блокирует работу через подтверждённую Keychain/DPAPI сессию. Два точных HTTP 401
+удаляют обе недействительные локальные копии и переводят штатный flow к новому
+pairing. Транспортный сбой, 5xx или version gate не считается доказательством
+невалидной сессии и не разрешает удаление.
+Reconciliation self-revoke передаёт только фиксированный
+`reasonCode=duplicate_legacy_session`; произвольный audit-текст runtime не
+задаёт. Отсутствующий body сохраняет прежний pairing-persistence reason для
+старых клиентов.
+
 Перед запуском проверяется наличие той же папки плагина и файла entrypoint.
 Если их больше нет, `trelio_workspace_action` возвращает
 `TRELIO_PLUGIN_RESTART_REQUIRED` с `requiredAction: restart_client` и
