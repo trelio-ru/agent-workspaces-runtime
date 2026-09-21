@@ -448,14 +448,25 @@ const createRuntimeState = async ({
     writePrivateJsonFile,
   } = await loadWorkspaceBridgeModule();
 
-  // One shared deadline covers conflict probes and registration. Ordinary
-  // Keychain/DPAPI reads are local, but a divergent legacy copy now requires
-  // live authenticated probes; leaving those requests outside the internal
-  // budget would make the host kill the hook before it can release its lock.
-  const registrationSignal = AbortSignal.timeout(
-    RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
-  );
-  const token = await requireToken(origin, { signal: registrationSignal });
+  // Start the shared network deadline lazily. Windows DPAPI and macOS Keychain
+  // work is local but can be slow on a cold user profile; charging that time to
+  // the HTTP budget caused a valid first registration to abort before the
+  // server replied. The signal getter is first read only by a real conflict
+  // probe, pairing request or registration, so divergent credentials still
+  // share one bounded deadline with the subsequent session registration.
+  let registrationSignal = null;
+  const networkOptions = {};
+  Object.defineProperty(networkOptions, "signal", {
+    enumerable: true,
+    get: () => {
+      registrationSignal ??= AbortSignal.timeout(
+        RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
+      );
+      return registrationSignal;
+    },
+  });
+  const token = await requireToken(origin, networkOptions);
+  registrationSignal ??= networkOptions.signal;
   const registration = await retryIdempotentRequest(() => (
     registerAgentRuntimeHookSession({
       origin,

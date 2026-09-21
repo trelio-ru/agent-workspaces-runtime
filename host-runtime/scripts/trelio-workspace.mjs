@@ -3516,7 +3516,7 @@ const reconcileBridgeSessionConflict = async ({
   return protectedToken;
 };
 
-const loadBridgeSessionToken = async (origin, { signal } = {}) => {
+const loadBridgeSessionToken = async (origin, options = {}) => {
   const credentials = await readFallbackCredentials();
   const credential = credentials[origin] || {};
   const fileToken = typeof credential.bridgeSessionToken === "string"
@@ -3542,7 +3542,10 @@ const loadBridgeSessionToken = async (origin, { signal } = {}) => {
           origin,
           protectedToken: keychainToken,
           legacyToken: fileToken,
-          signal,
+          // Read the lazy deadline only when reconciliation actually needs a
+          // network probe. Ordinary Keychain/file migration must not consume
+          // the later runtime-registration request budget.
+          signal: options.signal,
           promoteLegacyToken: async () => {
             await setMacosBridgeSessionToken(origin, fileToken);
             await removePlaintextBridgeSessionToken(
@@ -3611,7 +3614,9 @@ const loadBridgeSessionToken = async (origin, { signal } = {}) => {
           origin,
           protectedToken,
           legacyToken: fileToken,
-          signal,
+          // See the macOS branch above: DPAPI decrypt/migration remains local,
+          // while a true conflict shares the bounded network deadline.
+          signal: options.signal,
           promoteLegacyToken: () => saveBridgeSessionToken(origin, fileToken),
           removeLegacyToken: () => removePlaintextBridgeSessionToken(
             CREDENTIAL_FILE,
