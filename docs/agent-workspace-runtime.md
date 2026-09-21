@@ -573,6 +573,19 @@ blocker с exact summary/question/next action и `draftHead`. Только по�
 `context/run-checkpoint.json`. Полная переписка не переносится. Dirty или
 diverged локальное дерево никогда не перезаписывается автоматически.
 
+Если это exact активный Run и его local root отстал от server draft, bridge
+возвращает `TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED`, а не свободный текст.
+Envelope различает `DIRTY_WORKTREE` и `DIVERGED_HISTORY`, содержит base/local/
+server heads, bounded changed paths и exact `suggestedDirectory`. Агент в том
+же ходе повторяет exact `open` в этой папке, оставляя source root нетронутым,
+сопоставляет дельту и сохраняет объединённый результат. Вопрос человеку нужен
+только при смысловом конфликте; технический recovery не завершает ход сам по
+себе и не создаёт новый Run.
+
+Этот recovery code, его model-facing action contract и local MCP description
+принадлежат independently signed runtime/server contour. Ради их изменения
+public stable plugin и его bundled references не меняются.
+
 Если новый exact Run открывается поверх root завершённого Run с локальной
 дельтой, bridge возвращает structured
 `TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED`: source/target Run, bounded Git

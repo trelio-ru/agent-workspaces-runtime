@@ -12,6 +12,7 @@
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import {
   WorkspaceActiveRunRequiredError,
+  WorkspaceDraftRecoveryRequiredError,
   WorkspaceDirectoryRequiredError,
   WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
@@ -1291,6 +1292,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 export const formatBridgeCommandError = (error, command = "") => {
   if (
     error instanceof WorkspaceActiveRunRequiredError
+    || error instanceof WorkspaceDraftRecoveryRequiredError
     || error instanceof WorkspaceDirectoryRequiredError
     || error instanceof WorkspaceLayoutMigrationBlockedError
     || error instanceof WorkspaceLocalRecoveryRequiredError
@@ -8669,6 +8671,7 @@ const fastForwardMaterializedBundle = async ({
   knownObjects,
   allowHistoryReplacement = false,
   expectedLocalHead = null,
+  draftRecovery = null,
 }) => {
   const localHead = (await runGit(["rev-parse", "HEAD"], {
     cwd: workspaceDirectory,
@@ -8687,6 +8690,15 @@ const fastForwardMaterializedBundle = async ({
   const localStatus = await getGitStatus(workspaceDirectory, knownObjects);
 
   if (localStatus) {
+    if (draftRecovery) {
+      throw new WorkspaceDraftRecoveryRequiredError({
+        ...draftRecovery,
+        reasonCode: "DIRTY_WORKTREE",
+        localHead,
+        serverDraftHead: head,
+        changes: localStatus.split("\n").filter(Boolean),
+      });
+    }
     throw new Error(
       "Локальный Run содержит несохранённые изменения и отстаёт от server draft. "
       + "Откройте актуальный Run в новом каталоге или перенесите изменения осознанно.",
@@ -8709,6 +8721,21 @@ const fastForwardMaterializedBundle = async ({
     })).stdout.trim();
 
     if (mergeBase !== localHead) {
+      if (draftRecovery) {
+        const committedChanges = (await runGit([
+          "diff",
+          "--name-status",
+          "--no-renames",
+          `${mergeBase}..${localHead}`,
+        ], { cwd: workspaceDirectory })).stdout.split("\n").filter(Boolean);
+        throw new WorkspaceDraftRecoveryRequiredError({
+          ...draftRecovery,
+          reasonCode: "DIVERGED_HISTORY",
+          localHead,
+          serverDraftHead: head,
+          changes: committedChanges,
+        });
+      }
       throw new Error(
         "Локальная история Run расходится с server draft. Автоматическая перезапись запрещена.",
       );
@@ -10997,6 +11024,17 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
           // продолжение того же Run по-прежнему допускает лишь fast-forward.
           allowHistoryReplacement: !continuingSameRun,
           expectedLocalHead: localHead,
+          // Продолжение exact Run может безопасно открыть server draft в
+          // отдельном root и сопоставить его с локальной дельтой. Для другого
+          // Run действует отдельный terminal-root recovery contract.
+          draftRecovery: continuingSameRun ? {
+            workspaceId,
+            runId,
+            sourceDirectory: rootDirectory,
+            sourceWorkspaceDirectory: workspaceDirectory,
+            suggestedDirectory: `${rootDirectory}-recovery-${runId.slice(0, 8)}`,
+            baseHead: String(agentRun.baseHead),
+          } : null,
         });
       } finally {
         await fs.rm(syncDirectory, { recursive: true, force: true });

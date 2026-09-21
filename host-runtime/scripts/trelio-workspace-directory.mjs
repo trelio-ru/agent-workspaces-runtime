@@ -2,6 +2,7 @@ import path from "node:path";
 
 export const WORKSPACE_DIRECTORY_REQUIRED = "TRELIO_WORKSPACE_DIRECTORY_REQUIRED";
 export const WORKSPACE_LOCAL_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED";
+export const WORKSPACE_DRAFT_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED";
 export const WORKSPACE_LAYOUT_MIGRATION_BLOCKED = "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED";
 export const WORKSPACE_RUN_RECLAIM_REQUIRED = "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED";
 export const WORKSPACE_ACTIVE_RUN_REQUIRED = "TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED";
@@ -24,6 +25,11 @@ const ACTIVE_RUN_REASON_CODES = new Set([
   "RUN_METADATA_INVALID",
   "RUN_ID_MISSING",
 ]);
+const DRAFT_RECOVERY_REASON_CODES = new Set([
+  "DIRTY_WORKTREE",
+  "DIVERGED_HISTORY",
+]);
+const GIT_HEAD_PATTERN = /^[0-9a-f]{40,64}$/u;
 const MESSAGE = "Для этого Agent Workspace зарегистрировано несколько локальных папок. "
   + "Повторите тот же open, указав выбранный корень в parameters.directory "
   + "(CLI: --dir). workingDirectory задаёт cwd процесса, а не явный выбор корня. "
@@ -93,6 +99,64 @@ export class WorkspaceLocalRecoveryRequiredError extends Error {
       requiredAction: "open_recovery_directory_and_transfer_selected_changes",
       directoryParameter: "parameters.directory",
       sourceFilesMustRemainUntouched: true,
+      nextSaveActions: ["checkpoint", "pause", "finish"],
+    };
+  }
+
+  toJSON() {
+    return { code: this.code, message: this.message, details: this.details };
+  }
+}
+
+const DRAFT_RECOVERY_MESSAGE = "Локальное состояние активного Agent Run расходится с server draft. "
+  + "Bridge не перезапишет её автоматически. Повторите тот же open для exact Run в "
+  + "suggestedDirectory, сопоставьте перечисленную локальную дельту с server draft, "
+  + "перенесите совместимые изменения и сохраните результат через checkpoint, pause или finish. "
+  + "Уточнение у пользователя нужно только при смысловом конфликте.";
+
+// Same-Run divergence is recoverable without mutating the source checkout: a
+// second exact open materializes the authoritative server draft in a fresh
+// root, while bounded path-level evidence tells the agent what still needs to
+// be reconciled. File contents and private Run metadata never cross the bridge
+// process boundary in this envelope.
+export class WorkspaceDraftRecoveryRequiredError extends Error {
+  constructor({
+    workspaceId,
+    runId,
+    reasonCode,
+    sourceDirectory,
+    sourceWorkspaceDirectory,
+    suggestedDirectory,
+    baseHead,
+    localHead,
+    serverDraftHead,
+    changes,
+  }) {
+    super(DRAFT_RECOVERY_MESSAGE);
+    this.code = WORKSPACE_DRAFT_RECOVERY_REQUIRED;
+    const visibleChanges = changes
+      .filter((change) => (
+        typeof change === "string"
+        && change.length > 0
+        && change.length <= MAX_CHANGE_LENGTH
+      ))
+      .slice(0, MAX_RECOVERY_CHANGES);
+    this.details = {
+      workspaceId,
+      runId,
+      reasonCode,
+      sourceDirectory,
+      sourceWorkspaceDirectory,
+      suggestedDirectory,
+      baseHead,
+      localHead,
+      serverDraftHead,
+      changes: visibleChanges,
+      omittedChangeCount: changes.length - visibleChanges.length,
+      requiredAction: "open_server_draft_in_recovery_directory_and_reconcile_local_changes",
+      directoryParameter: "parameters.directory",
+      sourceFilesMustRemainUntouched: true,
+      automaticChangesPerformed: false,
       nextSaveActions: ["checkpoint", "pause", "finish"],
     };
   }
@@ -293,6 +357,70 @@ export const parseWorkspaceLocalRecoveryRequiredError = (
     sourceWorkspaceDirectory: details.sourceWorkspaceDirectory,
     suggestedDirectory: details.suggestedDirectory,
     lastSavedDraftHead: details.lastSavedDraftHead,
+    changes: details.changes,
+  });
+  result.details.omittedChangeCount = details.omittedChangeCount;
+  return result;
+};
+
+export const parseWorkspaceDraftRecoveryRequiredError = (
+  stderr,
+  workspaceId,
+  runId,
+) => {
+  if (typeof stderr !== "string" || stderr.length > 256 * 1024) return null;
+  const text = stderr.trim();
+  if (!text.startsWith("Ошибка: {")) return null;
+  let payload;
+  try { payload = JSON.parse(text.slice("Ошибка: ".length)); }
+  catch { return null; }
+  const details = payload?.details;
+  if (
+    payload?.code !== WORKSPACE_DRAFT_RECOVERY_REQUIRED
+    || details?.workspaceId !== workspaceId
+    || details?.runId !== runId
+    || !UUID_PATTERN.test(String(workspaceId || ""))
+    || !UUID_PATTERN.test(String(runId || ""))
+    || !DRAFT_RECOVERY_REASON_CODES.has(details.reasonCode)
+    || details.requiredAction
+      !== "open_server_draft_in_recovery_directory_and_reconcile_local_changes"
+    || details.directoryParameter !== "parameters.directory"
+    || details.sourceFilesMustRemainUntouched !== true
+    || details.automaticChangesPerformed !== false
+    || !Array.isArray(details.nextSaveActions)
+    || details.nextSaveActions.join("\0") !== "checkpoint\0pause\0finish"
+    || ![details.sourceDirectory, details.sourceWorkspaceDirectory, details.suggestedDirectory]
+      .every((directory) => (
+        typeof directory === "string"
+        && path.isAbsolute(directory)
+        && !directory.includes("\0")
+        && directory.length <= MAX_DIRECTORY_LENGTH
+      ))
+    || path.resolve(details.sourceWorkspaceDirectory)
+      !== path.join(path.resolve(details.sourceDirectory), "workspace")
+    || path.resolve(details.suggestedDirectory) === path.resolve(details.sourceDirectory)
+    || ![details.baseHead, details.localHead, details.serverDraftHead]
+      .every((head) => typeof head === "string" && GIT_HEAD_PATTERN.test(head))
+    || !Array.isArray(details.changes)
+    || details.changes.length > MAX_RECOVERY_CHANGES
+    || details.changes.some((change) => (
+      typeof change !== "string"
+      || change.length === 0
+      || change.length > MAX_CHANGE_LENGTH
+    ))
+    || !Number.isSafeInteger(details.omittedChangeCount)
+    || details.omittedChangeCount < 0
+  ) return null;
+  const result = new WorkspaceDraftRecoveryRequiredError({
+    workspaceId,
+    runId,
+    reasonCode: details.reasonCode,
+    sourceDirectory: details.sourceDirectory,
+    sourceWorkspaceDirectory: details.sourceWorkspaceDirectory,
+    suggestedDirectory: details.suggestedDirectory,
+    baseHead: details.baseHead,
+    localHead: details.localHead,
+    serverDraftHead: details.serverDraftHead,
     changes: details.changes,
   });
   result.details.omittedChangeCount = details.omittedChangeCount;

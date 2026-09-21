@@ -166,6 +166,7 @@ import {
   withEncryptedWorkspaceBrowserProjection,
   withEncryptedWorkspaceTransportCooldownRetry,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { parseWorkspaceDraftRecoveryRequiredError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   createAgentEncryptionDevice,
@@ -3565,7 +3566,10 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         && request.url === `/api/agent-workspaces/runs/${runId}/claim`
       ) {
         const claim = JSON.parse(body.toString("utf8"));
-        assert.equal(currentStatus, "waiting_for_human");
+        assert.ok(
+          ["waiting_for_human", "running"].includes(currentStatus),
+          "an exact open may intentionally reclaim a waiting or active portable Run",
+        );
         assert.equal(claim.expectedFencingToken, fencingToken);
         fencingToken += 1;
         currentStatus = "running";
@@ -3755,6 +3759,116 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         await readFile(path.join(secondRootDirectory, ".trelio-run.json"), "utf8"),
       ).baseHead,
       "server draft must not replace the accepted base head",
+    );
+
+    // The first checkout now receives a clean local commit while the second
+    // checkout advances the server draft. Reopening the first checkout must
+    // return an exact recovery route instead of flattening either history or
+    // collapsing the failure into a generic child-process error.
+    await writeFile(
+      path.join(firstWorkspaceDirectory, "artifacts", "local-only.md"),
+      "Локальный материал, который ещё не попал в server draft.\n",
+      "utf8",
+    );
+    await runGit(firstWorkspaceDirectory, ["add", "artifacts/local-only.md"]);
+    await runGit(firstWorkspaceDirectory, ["commit", "-m", "Local divergent work"]);
+    const localDivergedHead = (await runGit(
+      firstWorkspaceDirectory,
+      ["rev-parse", "HEAD"],
+    )).stdout.trim();
+
+    const secondWorkspaceDirectory = path.join(secondRootDirectory, "workspace");
+    await writeFile(
+      path.join(secondWorkspaceDirectory, "artifacts", "decision.md"),
+      "# Варианты решения\n\nServer draft продолжен со второго компьютера.\n",
+      "utf8",
+    );
+    await execFileAsync(
+      process.execPath,
+      [
+        bridgePath,
+        "checkpoint",
+        "--type",
+        "draft",
+        "--summary",
+        "Server draft продолжен на втором компьютере.",
+      ],
+      {
+        cwd: secondWorkspaceDirectory,
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { ...process.env, HOME: secondHomeDirectory },
+      },
+    );
+    const latestServerDraftHead = draftHead;
+
+    const divergence = await execFileAsync(
+      process.execPath,
+      [
+        bridgePath,
+        "open",
+        "--origin",
+        origin,
+        "--workspace",
+        writableWorkspaceId,
+        "--run",
+        runId,
+        "--dir",
+        firstRootDirectory,
+      ],
+      {
+        cwd: temporaryDirectory,
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { ...process.env, HOME: firstHomeDirectory },
+      },
+    ).then(() => null, (error) => error);
+    assert.ok(divergence, "diverged same-Run history must stop the original open");
+    const recovery = parseWorkspaceDraftRecoveryRequiredError(
+      divergence.stderr,
+      writableWorkspaceId,
+      runId,
+    );
+    assert.equal(recovery?.code, "TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED");
+    assert.equal(recovery?.details.reasonCode, "DIVERGED_HISTORY");
+    assert.equal(recovery?.details.localHead, localDivergedHead);
+    assert.equal(recovery?.details.serverDraftHead, latestServerDraftHead);
+    assert.deepEqual(recovery?.details.changes, ["A\tartifacts/local-only.md"]);
+    assert.equal(
+      await readFile(path.join(firstWorkspaceDirectory, "artifacts", "local-only.md"), "utf8"),
+      "Локальный материал, который ещё не попал в server draft.\n",
+      "the source history must remain untouched",
+    );
+
+    const recoveryDirectory = recovery.details.suggestedDirectory;
+    await execFileAsync(
+      process.execPath,
+      [
+        bridgePath,
+        "open",
+        "--origin",
+        origin,
+        "--workspace",
+        writableWorkspaceId,
+        "--run",
+        runId,
+        "--dir",
+        recoveryDirectory,
+      ],
+      {
+        cwd: temporaryDirectory,
+        encoding: "utf8",
+        timeout: 10_000,
+        env: { ...process.env, HOME: firstHomeDirectory },
+      },
+    );
+    assert.equal(
+      await readFile(path.join(recoveryDirectory, "workspace", "artifacts", "decision.md"), "utf8"),
+      "# Варианты решения\n\nServer draft продолжен со второго компьютера.\n",
+    );
+    await assert.rejects(
+      readFile(path.join(recoveryDirectory, "workspace", "artifacts", "local-only.md"), "utf8"),
+      { code: "ENOENT" },
     );
     assert.ifError(serverError);
   } finally {

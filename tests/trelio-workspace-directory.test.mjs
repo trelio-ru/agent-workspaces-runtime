@@ -15,22 +15,26 @@ import {
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
   WorkspaceActiveRunRequiredError,
+  WorkspaceDraftRecoveryRequiredError,
   WorkspaceDirectoryRequiredError,
   WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
   WORKSPACE_ACTIVE_RUN_REQUIRED,
+  WORKSPACE_DRAFT_RECOVERY_REQUIRED,
   WORKSPACE_DIRECTORY_REQUIRED,
   WORKSPACE_LAYOUT_MIGRATION_BLOCKED,
   WORKSPACE_LOCAL_RECOVERY_REQUIRED,
   WORKSPACE_RUN_RECLAIM_REQUIRED,
   parseWorkspaceActiveRunRequiredError,
+  parseWorkspaceDraftRecoveryRequiredError,
   parseWorkspaceDirectoryRequiredError,
   parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
 } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
+  TRELIO_WORKSPACE_ACTION_TOOL,
   buildTrelioWorkspaceActionInvocation,
   handleTrelioWorkspaceActionOperation,
 } from "../host-runtime/scripts/trelio-local-context.mjs";
@@ -250,6 +254,76 @@ test("local change recovery preserves bounded source evidence and an exact safe 
     return true;
   });
   assert.equal(calls, 1, "recovery must not move files or retry open automatically");
+});
+
+test("same-Run draft recovery preserves both histories and exposes one exact reconciliation route", async () => {
+  const sourceDirectory = path.resolve(os.tmpdir(), "source active run");
+  const suggestedDirectory = path.resolve(os.tmpdir(), "server draft recovery");
+  const changes = Array.from({ length: 250 }, (_, index) => `M\tartifacts/file-${index}.md`);
+  const error = new WorkspaceDraftRecoveryRequiredError({
+    workspaceId,
+    runId: newRun,
+    reasonCode: "DIVERGED_HISTORY",
+    sourceDirectory,
+    sourceWorkspaceDirectory: path.join(sourceDirectory, "workspace"),
+    suggestedDirectory,
+    baseHead: "a".repeat(40),
+    localHead: "b".repeat(40),
+    serverDraftHead: "c".repeat(40),
+    changes,
+  });
+  assert.equal(error.details.changes.length, 200);
+  assert.equal(error.details.omittedChangeCount, 50);
+  assert.equal(error.details.automaticChangesPerformed, false);
+  assert.equal(error.details.sourceFilesMustRemainUntouched, true);
+
+  const stderr = `Ошибка: ${formatBridgeCommandError(error, "open")}\n`;
+  assert.deepEqual(
+    parseWorkspaceDraftRecoveryRequiredError(stderr, workspaceId, newRun)?.toJSON(),
+    error.toJSON(),
+  );
+  assert.equal(parseWorkspaceDraftRecoveryRequiredError(stderr, workspaceId, secondRun), null);
+
+  let calls = 0;
+  await assert.rejects(handleTrelioWorkspaceActionOperation(origin, {
+    schemaVersion: 1,
+    operation: "open",
+    parameters: { workspaceId, runId: newRun },
+  }, {
+    runBridge: async () => {
+      calls += 1;
+      throw Object.assign(new Error("child failed"), { stderr });
+    },
+  }), (actual) => {
+    assert.equal(actual.code, WORKSPACE_DRAFT_RECOVERY_REQUIRED);
+    assert.deepEqual(actual.details, error.details);
+    assert.equal(Object.hasOwn(actual.details, "stderr"), false);
+    return true;
+  });
+  assert.equal(calls, 1, "the host must leave exact recovery execution to the agent");
+  assert.match(
+    TRELIO_WORKSPACE_ACTION_TOOL.description,
+    /TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED.*repeat open in details\.suggestedDirectory immediately and continue/u,
+  );
+
+  for (const mutate of [
+    (payload) => { payload.details.reasonCode = "UNKNOWN"; },
+    (payload) => { payload.details.localHead = "not-a-head"; },
+    (payload) => { payload.details.suggestedDirectory = payload.details.sourceDirectory; },
+    (payload) => { payload.details.automaticChangesPerformed = true; },
+    (payload) => { payload.details.omittedChangeCount = -1; },
+  ]) {
+    const copy = structuredClone(error.toJSON());
+    mutate(copy);
+    assert.equal(
+      parseWorkspaceDraftRecoveryRequiredError(
+        `Ошибка: ${JSON.stringify(copy)}`,
+        workspaceId,
+        newRun,
+      ),
+      null,
+    );
+  }
 });
 
 test("legacy layout blockers preserve the exact root and bounded entries for the agent", async () => {

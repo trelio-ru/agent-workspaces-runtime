@@ -1,6 +1,7 @@
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   parseWorkspaceActiveRunRequiredError,
+  parseWorkspaceDraftRecoveryRequiredError,
   parseWorkspaceDirectoryRequiredError,
   parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
@@ -9503,6 +9504,11 @@ export const handleTrelioWorkspaceActionOperation = async (
     const openRecovery = invocation.operation === "open"
       ? parseWorkspaceDirectoryRequiredError(error?.stderr, recoveryWorkspaceId)
         || parseWorkspaceLayoutMigrationBlockedError(error?.stderr, recoveryWorkspaceId)
+        || parseWorkspaceDraftRecoveryRequiredError(
+          error?.stderr,
+          recoveryWorkspaceId,
+          recoveryRunId,
+        )
         || parseWorkspaceLocalRecoveryRequiredError(
           error?.stderr,
           recoveryWorkspaceId,
@@ -9517,8 +9523,9 @@ export const handleTrelioWorkspaceActionOperation = async (
     if (openRecovery) {
       // Не повторяем open и не выбираем первый root за вызывающего агента.
       // Structured recovery сохраняет exact пути без второй копии stderr. Для
-      // dirty terminal Run suggestedDirectory открывается отдельным повторным
-      // action; source root остаётся нетронутым до осознанного переноса файлов.
+      // dirty terminal Run или same-Run draft divergence открываются отдельным
+      // повторным action; source root остаётся нетронутым до осознанного
+      // переноса файлов.
       throw new TrelioLocalContextError(
         openRecovery.code,
         openRecovery.message,
@@ -10912,7 +10919,7 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
 
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
-  description: "Run one exact typed bridge action returned by Trelio.",
+  description: "Run an exact Trelio bridge action. On TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED, repeat open in details.suggestedDirectory immediately and continue.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
