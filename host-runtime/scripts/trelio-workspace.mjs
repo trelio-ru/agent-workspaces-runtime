@@ -225,7 +225,7 @@ export const AGENT_WORKSPACE_WORKLOG_FORMAT_MARKDOWN = [
   "",
   "## Состав записи",
   "",
-  "- краткий итог Run;",
+  "- автор и краткий итог Run;",
   "- подтверждения и проверки;",
   "- изменённые долговечные материалы;",
   "- открытые вопросы;",
@@ -10966,6 +10966,43 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     activeAgentRules = await cacheAgentRules(origin, pinnedRunAgentRules);
   }
   const runId = requireUuid(agentRun.id, "run");
+  const overviewRun = Array.isArray(runOverview?.runs)
+    ? runOverview.runs.find((item) => item?.id === runId)
+    : null;
+  let openedRunAuthor = selectAgentWorkspaceRunAuthor(overviewRun, agentRun);
+
+  if (!openedRunAuthor?.displayName && !openedRunAuthor?.username) {
+    let authorOverview = null;
+
+    try {
+      // Compact MCP open already has a pre-claim overview. The direct bridge
+      // start compatibility path does not, so enrich only that path with one
+      // token-free metadata read instead of adding author bytes to the
+      // model-visible prepare response.
+      authorOverview = await readJsonResponse(await request(
+        workspaceOrigin,
+        token,
+        `/api/agent-workspaces/workspaces/${workspaceId}`,
+      ));
+    } catch {
+      // Friendly identity is not mutation authority. Preserve the stable
+      // initiating member id already returned with the Run and let the final
+      // checkpoint retry enrichment before rendering the durable worklog.
+    }
+
+    if (authorOverview) {
+      if (
+        authorOverview?.company?.id !== runPayload.company.id
+        || authorOverview?.workspace?.id !== workspaceId
+      ) {
+        throw new Error("Trelio вернул другую область при чтении автора Agent Run.");
+      }
+      openedRunAuthor = selectAgentWorkspaceRunAuthor(
+        authorOverview.runs?.find((item) => item?.id === runId),
+        openedRunAuthor,
+      );
+    }
+  }
   const materializedHead = GIT_OBJECT_PATTERN.test(String(agentRun.draftHead || ""))
     ? String(agentRun.draftHead)
     : String(agentRun.baseHead);
@@ -11080,6 +11117,10 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       userProfileSnapshot: agentRun.userProfileSnapshotJson,
       runtimePolicySnapshot: agentRun.runtimePolicySnapshotJson,
       runtimeAttestation: agentRun.runtimeAttestationJson,
+      runAuthor: selectAgentWorkspaceRunAuthor(
+        openedRunAuthor,
+        continuingSameRun ? existingMetadata.runAuthor : null,
+      ),
       contexts: [],
       contextObjects: [],
       terminalStatus: undefined,
@@ -11238,6 +11279,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       userProfileSnapshot: agentRun.userProfileSnapshotJson,
       runtimePolicySnapshot: agentRun.runtimePolicySnapshotJson,
       runtimeAttestation: agentRun.runtimeAttestationJson,
+      runAuthor: openedRunAuthor,
       contexts: serializeMaterializedContexts(contexts),
       objects,
       createdAt: now,
@@ -12169,6 +12211,105 @@ const renderWorklogList = (items) => (
     : "Нет"
 );
 
+const normalizeAgentWorkspaceRunAuthor = (value) => {
+  const memberId = String(value?.memberId || value?.initiatedByMemberId || "").trim();
+
+  if (!UUID_PATTERN.test(memberId)) {
+    return null;
+  }
+
+  const normalizeIdentityText = (candidate, maxLength) => {
+    if (typeof candidate !== "string") return null;
+    const normalized = candidate.replace(/[\r\n]+/gu, " ").trim();
+    return normalized && normalized.length <= maxLength ? normalized : null;
+  };
+  const displayName = normalizeIdentityText(
+    value?.displayName ?? value?.initiatedByDisplayName,
+    255,
+  );
+  const username = normalizeIdentityText(
+    value?.username ?? value?.initiatedByUsername,
+    64,
+  );
+
+  return {
+    memberId,
+    ...(displayName ? { displayName } : {}),
+    ...(username && !/[\s@]/u.test(username) ? { username } : {}),
+  };
+};
+
+const selectAgentWorkspaceRunAuthor = (...candidates) => {
+  const authors = candidates
+    .map(normalizeAgentWorkspaceRunAuthor)
+    .filter(Boolean);
+
+  if (authors.length === 0) return null;
+
+  const memberId = authors[0].memberId;
+
+  // Metadata is presentation-only, but a mismatched member would attribute an
+  // accepted durable record to the wrong person. Stop instead of merging two
+  // independently returned identities under one friendly label.
+  if (authors.some((author) => author.memberId !== memberId)) {
+    throw new Error("Trelio вернул несовпадающее авторство текущего Agent Run.");
+  }
+
+  const displayName = authors.find((author) => author.displayName)?.displayName;
+  const username = authors.find((author) => author.username)?.username;
+
+  return {
+    memberId,
+    ...(displayName ? { displayName } : {}),
+    ...(username ? { username } : {}),
+  };
+};
+
+const renderAgentWorkspaceRunAuthor = (value) => {
+  const author = normalizeAgentWorkspaceRunAuthor(value);
+
+  if (!author) return "Неизвестен";
+  if (author.displayName && author.username) {
+    return `${author.displayName} (@${author.username})`;
+  }
+  if (author.displayName) return author.displayName;
+  if (author.username) return `@${author.username}`;
+  return "Неизвестен";
+};
+
+const resolveAgentWorkspaceRunAuthor = async ({
+  metadata,
+  workspaceOrigin,
+  token,
+}) => {
+  const storedAuthor = normalizeAgentWorkspaceRunAuthor(metadata.runAuthor);
+
+  if (storedAuthor?.displayName || storedAuthor?.username) {
+    return storedAuthor;
+  }
+
+  let overview;
+
+  try {
+    overview = await readJsonResponse(await request(
+      workspaceOrigin,
+      token,
+      `/api/agent-workspaces/workspaces/${metadata.workspaceId}`,
+    ));
+  } catch {
+    // Author enrichment must not make an otherwise valid handoff unavailable
+    // during a transient overview failure. The stable member id stored at open
+    // still distinguishes people; an old metadata file falls back to the
+    // explicit "Неизвестен" label while the server audit remains canonical.
+    return storedAuthor;
+  }
+
+  const currentRun = Array.isArray(overview?.runs)
+    ? overview.runs.find((run) => run?.id === metadata.runId)
+    : null;
+  return selectAgentWorkspaceRunAuthor(currentRun, storedAuthor);
+};
+
 export const ensureAutomaticRunWorklog = async ({
   metadata,
   metadataPath,
@@ -12290,6 +12431,8 @@ export const ensureAutomaticRunWorklog = async ({
   );
   const content = [
     "# Результат Run",
+    "",
+    `Автор: ${renderAgentWorkspaceRunAuthor(metadata.runAuthor)}`,
     "",
     "## Итог",
     "",
@@ -12578,8 +12721,17 @@ const checkpoint = async (options) => withRun(async ({
   });
 
   if (checkpointType === "handoff") {
-    await ensureAutomaticRunWorklog({
+    const runAuthor = await resolveAgentWorkspaceRunAuthor({
       metadata,
+      workspaceOrigin,
+      token,
+    });
+    const worklogMetadata = runAuthor
+      ? { ...metadata, runAuthor }
+      : metadata;
+
+    await ensureAutomaticRunWorklog({
+      metadata: worklogMetadata,
       metadataPath,
       summary,
       evidence,

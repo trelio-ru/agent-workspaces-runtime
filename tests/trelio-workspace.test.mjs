@@ -199,6 +199,11 @@ const testCompany = {
   slug: "bridge-test-company",
   name: "Bridge test company",
 };
+const testRunAuthor = {
+  memberId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  displayName: "Владислав Тестов",
+  username: "vladislav-test",
+};
 const companyHead = "a".repeat(40);
 const relatedHead = "b".repeat(40);
 
@@ -2565,7 +2570,13 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
         response.end(JSON.stringify({
           workspace: { id: writableWorkspaceId, acceptedHead: baseExport.head },
           company: testCompany,
-          runs: [{ id: runId, status: "running" }],
+          runs: [{
+            id: runId,
+            status: "running",
+            initiatedByMemberId: testRunAuthor.memberId,
+            initiatedByDisplayName: testRunAuthor.displayName,
+            initiatedByUsername: testRunAuthor.username,
+          }],
         }));
         return;
       }
@@ -2582,6 +2593,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
         response.end(JSON.stringify({
           run: {
             id: runId,
+            initiatedByMemberId: testRunAuthor.memberId,
             leaseId: "55555555-5555-4555-8555-555555555555",
             fencingToken: 1,
             baseHead: baseExport.head,
@@ -2755,6 +2767,10 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
     const contextIndex = JSON.parse(
       await readFile(path.join(rootDirectory, "context", "index.json"), "utf8"),
     );
+    const runMetadata = JSON.parse(
+      await readFile(path.join(rootDirectory, ".trelio-run.json"), "utf8"),
+    );
+    assert.deepEqual(runMetadata.runAuthor, testRunAuthor);
     assert.equal(contextIndex.userProfile.profile.revisionId, "77777777-7777-4777-8777-777777777777");
     assert.equal(
       await readFile(path.join(rootDirectory, "context", "worklog-format.md"), "utf8"),
@@ -10671,7 +10687,13 @@ test("bridge creates one deterministic worklog entry from handoff", async () => 
     const baseHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
     await mkdir(path.join(workspaceDirectory, "artifacts"));
     await writeFile(path.join(workspaceDirectory, "artifacts", "result.md"), "# Готово\n", "utf8");
-    const metadata = { workspaceDirectory, baseHead, runId, clientKind: "workspace-bridge" };
+    const metadata = {
+      workspaceDirectory,
+      baseHead,
+      runId,
+      clientKind: "workspace-bridge",
+      runAuthor: testRunAuthor,
+    };
     await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, "utf8");
 
     const firstPath = await ensureAutomaticRunWorklog({
@@ -10688,8 +10710,10 @@ test("bridge creates one deterministic worklog entry from handoff", async () => 
     const expectedPath = `worklog/2026-09-13-run-${runId}.md`;
     assert.equal(firstPath, expectedPath);
     assert.equal(persistedMetadata.automaticWorklogPath, expectedPath);
+    const worklog = await readFile(path.join(workspaceDirectory, expectedPath), "utf8");
+    assert.match(worklog, /Автор: Владислав Тестов \(@vladislav-test\)/u);
     assert.match(
-      await readFile(path.join(workspaceDirectory, expectedPath), "utf8"),
+      worklog,
       /## Подтверждения\n\n- Тесты прошли[\s\S]*## Материалы\n\n- artifacts\/result\.md/u,
     );
 
