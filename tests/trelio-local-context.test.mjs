@@ -2765,7 +2765,14 @@ test("historical project slugs resolve to canonical mirror records", () => {
 });
 
 test("native workspace reads preserve project links and unambiguous result ids", () => {
-  const listed = handleNativeLocalContextRead(mirror, "list_workspaces", {
+  const workspaceMirror = {
+    ...mirror,
+    workspaces: [...mirror.workspaces, {
+      id: "44444444-4444-4444-8444-444444444444",
+      acceptedHead: "a".repeat(40),
+    }],
+  };
+  const listed = handleNativeLocalContextRead(workspaceMirror, "list_workspaces", {
     companySlug: "acme",
     projectSlug: "mobile-legacy",
   });
@@ -2775,6 +2782,7 @@ test("native workspace reads preserve project links and unambiguous result ids",
   const fileSearch = searchWorkspaceFilesFromMirror(mirror, ["fencing token"], 10);
 
   assert.equal(listed.workspaces.length, 1);
+  assert.equal(listed.workspaces[0].acceptedHead, "a".repeat(40));
   assert.equal(fetched.workspace.title, "Архитектура локального индекса");
   assert.equal(fetched.effectiveInstructions.status, "loaded");
   assert.deepEqual(fetched.effectiveInstructions.layers, []);

@@ -1,6 +1,6 @@
 // Generated portable Trelio response contract. Do not edit by hand.
 import { createHash } from "node:crypto";
-export const MCP_RESPONSE_PROJECTION_VERSION = 2;
+export const MCP_RESPONSE_PROJECTION_VERSION = 3;
 export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
     "get_contact", "get_registry", "get_knowledge_base_page", "get_project_meta",
     "get_task_create_meta", "get_regular_work", "list_recent_activity", "list_agent_skills",
@@ -910,6 +910,74 @@ const RUN_SNAPSHOT_FIELDS = [
 const ACTIVE_RUN_STATUSES = new Set(["running", "waiting_for_human", "review"]);
 const WORKSPACE_RECENT_TERMINAL_RUN_LIMIT = 5;
 const WORKSPACE_RECENT_CHECKPOINT_LIMIT = 10;
+const WORKSPACE_INVENTORY_SOURCE_FIELDS = new Set([
+    "id", "title", "description", "state", "ownerScope", "companyScopeReason",
+    "company", "project", "accessSource", "updatedAt", "createdAt", "createdByMemberId",
+    "deletedAt", "deletedByMemberId", "deletionReason", "deletionSource", "task",
+    "repository", "acceptedFileCount", "linkedTaskCount", "permissions", "acceptedHead",
+    "accessibleThroughProjectIds",
+]);
+const WORKSPACE_INVENTORY_REPOSITORY_FIELDS = new Set([
+    "id", "scopeType", "scopeKey", "companyId", "projectId", "taskId", "title",
+    "description", "parentWorkspaceId", "acceptedHead", "formatVersion", "state",
+    "createdAt", "updatedAt", "createdByMemberId", "deletedAt", "deletedByMemberId",
+    "deletionReason", "deletionSource",
+]);
+const WORKSPACE_INVENTORY_COMPACT_FIELDS = [
+    "id", "title", "description", "state", "ownerScope", "accessSource", "updatedAt",
+    "acceptedFileCount", "linkedTaskCount", "permissions",
+];
+/**
+ * Inventory needs enough data to choose one Workspace, not the complete
+ * repository DTO repeated for every row. The owner envelope already carries
+ * company/project identity, while an exact get_workspace read remains the
+ * authoritative continuation after selection.
+ */
+const projectWorkspaceInventoryItem = (value, listedOwner) => {
+    const source = record(value);
+    if (!source || Object.keys(source).some((key) => !WORKSPACE_INVENTORY_SOURCE_FIELDS.has(key))) {
+        return value;
+    }
+    const repository = own(source, "repository") && source.repository !== null
+        ? record(source.repository) : null;
+    if (own(source, "repository") && source.repository !== null && !repository)
+        return value;
+    if (repository && Object.keys(repository).some((key) => !WORKSPACE_INVENTORY_REPOSITORY_FIELDS.has(key))) {
+        return value;
+    }
+    if (!own(source, "acceptedHead") && !own(repository ?? {}, "acceptedHead"))
+        return value;
+    const compact = Object.fromEntries(WORKSPACE_INVENTORY_COMPACT_FIELDS
+        .filter((field) => own(source, field))
+        .map((field) => [field, source[field]]));
+    const owner = record(listedOwner);
+    const project = record(source.project);
+    const ownerProject = record(owner?.project);
+    return {
+        ...compact,
+        // The listing project may only be a secondary link. Keep a different
+        // primary owner here so the agent does not mistake it for the owner scope.
+        ...(project && (typeof project.id !== "string" || project.id !== ownerProject?.id) ? { project } : {}),
+        ...(source.companyScopeReason !== null && source.companyScopeReason !== undefined
+            && source.companyScopeReason !== "" ? { companyScopeReason: source.companyScopeReason } : {}),
+        ...(source.task ? { task: source.task } : {}),
+        // Null is meaningful for a not-yet-initialized repository and must not be
+        // confused with a missing field or an inaccessible Workspace.
+        acceptedHead: own(source, "acceptedHead") ? source.acceptedHead : repository?.acceptedHead ?? null,
+    };
+};
+const projectWorkspaceInventory = (payload) => {
+    if (!Array.isArray(payload.workspaces))
+        return payload;
+    const result = {
+        ...payload,
+        workspaces: payload.workspaces.map((workspace) => projectWorkspaceInventoryItem(workspace, payload.owner)),
+    };
+    // These are browser creation defaults, not facts needed to select or read a
+    // Workspace. The create_workspace schema and exact tool contract own them.
+    delete result.defaults;
+    return result;
+};
 const projectWorkspaceOverview = (payload) => {
     if (!Array.isArray(payload.runs) || own(payload, "overviewSummary"))
         return payload;
@@ -1152,6 +1220,8 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
     }
     if (toolName === "get_agent_workspace" || toolName === "get_agent_workspace_by_scope")
         return projectWorkspaceOverview(payload);
+    if (toolName === "list_workspaces")
+        return projectWorkspaceInventory(payload);
     if (toolName === "list_agent_secrets")
         return projectAgentSecretInventory(payload, args);
     if (toolName === "cancel_agent_workspace_run")

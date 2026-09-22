@@ -58,6 +58,35 @@ test("local projection preserves hydrated notes, explicit states and arbitrary d
   }
 });
 
+test("local workspace inventory keeps accepted head and removes mirror routing metadata", () => {
+  const company = { id: "company", slug: "demo", name: "Demo" };
+  const project = { id: "project", slug: "mobile", name: "Mobile" };
+  const payload = {
+    schemaVersion: 1,
+    provider: "local_company_context",
+    owner: { scope: "project", company, project },
+    generation: "accepted-generation",
+    workspaces: [{
+      id: "workspace-1", title: "Архитектура", description: "Решение команды",
+      state: "active", ownerScope: "project", company, project,
+      accessibleThroughProjectIds: ["project"], acceptedHead: "a".repeat(40),
+      permissions: { canRead: true, canWrite: false },
+    }],
+  };
+  const compact = compactLocalNativeMcpResult("list_workspaces", {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+  });
+  const result = JSON.parse(compact.content[0].text);
+  assert.equal(result.provider, "local_company_context");
+  assert.equal(result.generation, "accepted-generation");
+  assert.deepEqual(result.owner, payload.owner);
+  assert.deepEqual(result.workspaces[0], {
+    id: "workspace-1", title: "Архитектура", description: "Решение команды",
+    state: "active", ownerScope: "project", permissions: { canRead: true, canWrite: false },
+    acceptedHead: "a".repeat(40),
+  });
+});
+
 test("local task lists and proposal reviews use the generated shared-entity contracts", () => {
   const company = { id: "company", slug: "demo", name: "Demo" };
   const project = { id: "project", slug: "mobile", name: "Mobile" };

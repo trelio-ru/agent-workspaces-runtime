@@ -5988,6 +5988,7 @@ const listWorkspacesFromMirror = (mirror, rawInput) => {
       "Project is absent from the current local company generation.",
     );
   }
+  const workspacesById = new Map((mirror.workspaces ?? []).map((workspace) => [workspace.id, workspace]));
   const workspaces = (mirror.workspaceEntries ?? []).filter((workspace) => {
     if (workspace.state === "deleted") return false;
     if (rawInput?.includeArchived !== true && workspace.state !== "active") return false;
@@ -5999,7 +6000,17 @@ const listWorkspacesFromMirror = (mirror, rawInput) => {
     // secondary many-to-many relation.
     return workspace.accessibleThroughProjectIds?.includes(project.id)
       || workspace.project?.id === project.id;
-  });
+  }).map((workspace) => ({
+    ...workspace,
+    // The encrypted manifest keeps catalog cards and accepted repositories in
+    // separate arrays. Join by exact Workspace UUID before model projection so
+    // the compact inventory can retain the accepted revision without a nested
+    // repository DTO or a plaintext server read.
+    acceptedHead: workspace.acceptedHead
+      ?? workspace.repository?.acceptedHead
+      ?? workspacesById.get(workspace.id)?.acceptedHead
+      ?? null,
+  }));
   return {
     schemaVersion: 1,
     provider: "local_company_context",
