@@ -15,10 +15,14 @@
 ## Запуск локального bridge
 
 Local MCP facade запускает bundled bridge через текущий `process.execPath` и
-точный entrypoint загруженного плагина. Каждому дочернему процессу передаётся
-явный `cwd`: проверенный `workingDirectory` операции, если он задан, иначе
-корень загруженного плагина. Удалённый после обновления `cwd` долгоживущего
-host-процесса не наследуется; `cwd` самого host не меняется.
+точный entrypoint загруженного плагина. Для Run-bound action с exact
+`runIdentity={workspaceId,runId}` runtime находит root в owner-private registry,
+повторно сверяет origin и запускает дочерний процесс из его `workspace/`;
+переданный `workingDirectory` остаётся только подсказкой при нескольких копиях
+того же exact Run. Старые action без identity по-прежнему требуют явный
+проверенный `workingDirectory`, а остальные операции используют корень
+загруженного плагина. Удалённый после обновления `cwd` долгоживущего host-процесса
+не наследуется; `cwd` самого host не меняется.
 
 Перед Codex MCP initialize runtime выполняет узкую миграцию пользовательского
 `config.toml`: exact legacy server `trelio-mcp`, созданный прежним setup-flow,
@@ -420,7 +424,9 @@ clean Git и принятый head проверяются обычным preflig
    `questions` передаются массивами строк. Одиночные строки и alias `files` не
    входят в ABI и отклоняются до запуска bridge.
    Непосредственно перед финальным ответом агент выполняет returned
-   `bridge.actions.turnCheck` (`status`) из opened directory. `dirty=true`
+   `bridge.actions.turnCheck` (`status`). Server-issued `runIdentity` связывает
+   checkpoint, pause, status и finish с exact зарегистрированной папкой, поэтому
+   модель не переносит `cwd` между вызовами. `dirty=true`
    требует `checkpoint`, `pause` либо `finish`; ошибка сохранения становится
    явным blocker и не разрешает очистить локальные файлы. Это проверяемая
    model-facing граница, а не фоновый filesystem autosave хоста.
@@ -625,6 +631,11 @@ reason codes; `automaticChangesPerformed=false` подтверждает отс�
 
 Run-bound действие, запущенное вне открытого writable Run, возвращает
 `TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED`, а не общий filesystem-текст.
+Identity-bound action сначала ищет exact `workspaceId/runId` в owner-private
+registry; cwd другого проекта или Workspace не может вызвать ложный поиск
+`.trelio-run.json` в этом каталоге. `workingDirectory` старого клиента остаётся
+совместимым и при exact identity используется только для разрешения нескольких
+зарегистрированных копий того же Run.
 `details.reasonCode=READ_ONLY_INSPECTION` отдельно обозначает штатный каталог
 `prepare_agent_workspace_read`, где `.trelio-run.json` намеренно отсутствует;
 `RUN_METADATA_NOT_FOUND`, `RUN_METADATA_INVALID` и `RUN_ID_MISSING` описывают

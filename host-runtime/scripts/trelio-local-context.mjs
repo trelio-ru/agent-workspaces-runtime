@@ -1,5 +1,7 @@
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
+  WorkspaceActiveRunRequiredError,
+  WorkspaceDirectoryRequiredError,
   parseWorkspaceActiveRunRequiredError,
   parseWorkspaceDraftRecoveryRequiredError,
   parseWorkspaceDirectoryRequiredError,
@@ -41,6 +43,7 @@ import {
   ensurePrivateDirectory,
   hydrateAgentCompanyEncryptedJson,
   materializeRuntimeControlFiles,
+  normalizeOrigin,
   parseWorkspaceObjectPointer,
   readEncryptedWorkspaceSearchDocuments,
   readPrivateJsonFile,
@@ -49,6 +52,7 @@ import {
   resolveBridgeDataPlaneRouting,
   resolveCompanyEncryptionRequestOrigin,
   resolveCompanyContextMirrorDirectory,
+  resolveRegisteredWorkspaceRootDirectory,
   runAutomaticLocalCleanup,
   runGit,
   writeAndDecryptCompanyWorkspaceBundle,
@@ -8585,6 +8589,27 @@ const appendWorkspaceActionValues = (argumentsList, name, values) => {
 
 const normalizeWorkspaceActionUuid = (value, fieldName) => normalizeUuid(value, fieldName);
 
+const normalizeWorkspaceActionRunIdentity = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      "runIdentity must contain the exact Workspace and Run identifiers returned by Trelio.",
+    );
+  }
+  const allowedKeys = new Set(["workspaceId", "runId"]);
+  const unknownKey = Object.keys(value).find((key) => !allowedKeys.has(key));
+  if (unknownKey) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      `runIdentity.${unknownKey} is not supported.`,
+    );
+  }
+  return {
+    workspaceId: normalizeWorkspaceActionUuid(value.workspaceId, "runIdentity.workspaceId"),
+    runId: normalizeWorkspaceActionUuid(value.runId, "runIdentity.runId"),
+  };
+};
+
 const normalizeWorkspaceActionSkillId = (value, fieldName = "parameters.skillId") => {
   const skillId = normalizeWorkspaceActionString(value, fieldName, { maximumLength: 128 });
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skillId)) {
@@ -8738,6 +8763,7 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
     "schemaVersion",
     "operation",
     "parameters",
+    "runIdentity",
     "workingDirectory",
   ]);
   const unknownEnvelopeKey = Object.keys(rawInput).find((key) => !allowedEnvelopeKeys.has(key));
@@ -8758,7 +8784,24 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
     );
   }
 
-  const requiredWorkingDirectory = TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS.has(operation);
+  if (
+    rawInput.runIdentity !== undefined
+    && !TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS.has(operation)
+  ) {
+    throw new TrelioLocalContextError(
+      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
+      `runIdentity is not supported for operation ${operation}.`,
+    );
+  }
+  const runIdentity = rawInput.runIdentity === undefined
+    ? null
+    : normalizeWorkspaceActionRunIdentity(rawInput.runIdentity);
+
+  // New server actions bind their cwd to a verified Run identity. Keeping the
+  // explicit absolute cwd as an optional hint preserves old clients and lets a
+  // duplicate exact Run root be selected without trusting that path as identity.
+  const requiredWorkingDirectory = TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS.has(operation)
+    && runIdentity === null;
   const workingDirectory = normalizeWorkspaceActionAbsolutePath(
     rawInput.workingDirectory,
     "workingDirectory",
@@ -9036,8 +9079,46 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
     parameters,
     actionParameters: parameters,
     argumentsList,
+    runIdentity,
     workingDirectory,
   };
+};
+
+const resolveWorkspaceActionWorkingDirectory = async (
+  origin,
+  invocation,
+  resolveRunRootDirectory,
+) => {
+  if (!invocation.runIdentity) return invocation.workingDirectory;
+
+  let rootDirectory;
+  try {
+    rootDirectory = await resolveRunRootDirectory({
+      workspaceId: invocation.runIdentity.workspaceId,
+      runId: invocation.runIdentity.runId,
+      origin: normalizeOrigin(origin),
+      startDirectory: invocation.workingDirectory ?? process.cwd(),
+    });
+  } catch (error) {
+    if (error instanceof WorkspaceDirectoryRequiredError) {
+      throw new TrelioLocalContextError(error.code, error.message, {
+        ...error.details,
+        operation: invocation.operation,
+      });
+    }
+    throw error;
+  }
+
+  if (!rootDirectory) {
+    const error = new WorkspaceActiveRunRequiredError("RUN_METADATA_NOT_FOUND");
+    throw new TrelioLocalContextError(error.code, error.message, {
+      ...error.details,
+      workspaceId: invocation.runIdentity.workspaceId,
+      runId: invocation.runIdentity.runId,
+      operation: invocation.operation,
+    });
+  }
+  return path.join(rootDirectory, "workspace");
 };
 
 const truncateWorkspaceActionOutput = (value) => {
@@ -9343,6 +9424,7 @@ export const handleTrelioWorkspaceActionOperation = async (
     runBridge = runWorkspaceBridge,
     runHeartbeatManager,
     folderOnboardingApply = applyTrelioFolderOnboarding,
+    resolveRunRootDirectory = resolveRegisteredWorkspaceRootDirectory,
   } = {},
 ) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
@@ -9361,15 +9443,21 @@ export const handleTrelioWorkspaceActionOperation = async (
   const heartbeatManager = runHeartbeatManager
     ?? (runBridge === runWorkspaceBridge ? workspaceRunHeartbeatManager : null);
   let activeHeartbeatEntry = null;
+  let workingDirectory = invocation.workingDirectory;
   try {
-    if (heartbeatManager && invocation.workingDirectory) {
+    workingDirectory = await resolveWorkspaceActionWorkingDirectory(
+      origin,
+      invocation,
+      resolveRunRootDirectory,
+    );
+    if (heartbeatManager && workingDirectory) {
       activeHeartbeatEntry = await heartbeatManager.beginAction(
-        invocation.workingDirectory,
+        workingDirectory,
         invocation.operation,
       );
     }
     const result = await runBridge(origin, invocation.argumentsList, {
-      ...(invocation.workingDirectory ? { cwd: invocation.workingDirectory } : {}),
+      ...(workingDirectory ? { cwd: workingDirectory } : {}),
       signal,
     });
     if (heartbeatManager && invocation.operation === "open") {
@@ -9384,7 +9472,7 @@ export const handleTrelioWorkspaceActionOperation = async (
         openWorkingDirectory: invocation.workingDirectory,
       });
     } else if (heartbeatManager) {
-      if (!activeHeartbeatEntry && invocation.workingDirectory) {
+      if (!activeHeartbeatEntry && workingDirectory) {
         // A host may restart while the local Run and lease remain valid. The
         // first successful foreground action proves that metadata is usable;
         // adopt it for future heartbeat even though the old proof-bearing open
@@ -9393,14 +9481,14 @@ export const handleTrelioWorkspaceActionOperation = async (
         // caller-owned directory without persistent Run metadata.
         try {
           const identity = await readOpenedWorkspaceRunIdentity(
-            path.resolve(invocation.workingDirectory),
+            path.resolve(workingDirectory),
             origin,
           );
           activeHeartbeatEntry = heartbeatManager.start({
             origin,
             workspaceId: identity.workspaceId,
             runId: identity.runId,
-            workspaceDirectory: path.resolve(invocation.workingDirectory),
+            workspaceDirectory: path.resolve(workingDirectory),
           });
         } catch {
           // The completed foreground action remains authoritative; absence of
@@ -9442,7 +9530,7 @@ export const handleTrelioWorkspaceActionOperation = async (
     const leaseFailure = classifyWorkspaceRunLeaseFailure(error);
     if (
       !activeHeartbeatEntry
-      && invocation.workingDirectory
+      && workingDirectory
       && (leaseFailure === "LEASE_EXPIRED" || leaseFailure === "RUN_NOT_ACTIVE")
     ) {
       // A restarted MCP host has no in-memory timer or original proof-bearing
@@ -9451,7 +9539,7 @@ export const handleTrelioWorkspaceActionOperation = async (
       // return a claim action. The failed mutation itself is never replayed.
       try {
         const identity = await readOpenedWorkspaceRunIdentity(
-          path.resolve(invocation.workingDirectory),
+          path.resolve(workingDirectory),
           origin,
         );
         throw new TrelioLocalContextError(
@@ -9483,6 +9571,8 @@ export const handleTrelioWorkspaceActionOperation = async (
       error instanceof TrelioLocalContextError
       && (
         error.code === "TRELIO_PLUGIN_RESTART_REQUIRED"
+        || error.code === "TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED"
+        || error.code === "TRELIO_WORKSPACE_DIRECTORY_REQUIRED"
         || error.code.startsWith("TRELIO_WORKSPACE_RUN_")
       )
     ) {
@@ -10919,7 +11009,7 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
 
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
-  description: "Run an exact Trelio bridge action. On TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED, repeat open in details.suggestedDirectory immediately and continue.",
+  description: "On TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED, repeat open in details.suggestedDirectory immediately and continue.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -10928,6 +11018,9 @@ export const TRELIO_WORKSPACE_ACTION_TOOL = {
       schemaVersion: { type: "integer", const: TRELIO_WORKSPACE_ACTION_SCHEMA_VERSION },
       operation: { type: "string" },
       parameters: { type: "object" },
+      // Keep tools/list compact; the dispatcher performs the closed-key and
+      // exact UUID validation before any registry or child-process access.
+      runIdentity: { type: "object" },
       workingDirectory: {
         type: "string",
       },

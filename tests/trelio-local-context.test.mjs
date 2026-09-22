@@ -212,6 +212,82 @@ test("typed checkpoint actions require canonical array fields", () => {
   ));
 });
 
+test("run-bound actions accept an exact identity without a model-carried cwd", async () => {
+  const rootDirectory = path.resolve(os.tmpdir(), "trelio-registered-run-root");
+  const workspaceDirectory = path.join(rootDirectory, "workspace");
+  const runIdentity = {
+    workspaceId: actionWorkspaceId,
+    runId: actionRunId,
+  };
+  const invocation = buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: "finish",
+    parameters: { summary: "Готово" },
+    runIdentity,
+  });
+  assert.deepEqual(invocation.runIdentity, runIdentity);
+  assert.equal(invocation.workingDirectory, null);
+  assert.deepEqual(invocation.argumentsList, ["finish", "--summary", "Готово"]);
+
+  let resolvedInput = null;
+  let captured = null;
+  const result = await handleTrelioWorkspaceActionOperation(
+    "https://trelio.example/path",
+    {
+      schemaVersion: 1,
+      operation: "finish",
+      parameters: { summary: "Готово" },
+      runIdentity,
+      // A stale project cwd is only a disambiguation hint. It must never be
+      // used as the child cwd after exact Run resolution succeeds.
+      workingDirectory: actionWorkingDirectory,
+    },
+    {
+      resolveRunRootDirectory: async (input) => {
+        resolvedInput = input;
+        return rootDirectory;
+      },
+      runBridge: async (origin, argumentsList, options) => {
+        captured = { origin, argumentsList, options };
+        return { stdout: "Run завершён\n", stderr: "" };
+      },
+    },
+  );
+  assert.deepEqual(resolvedInput, {
+    workspaceId: actionWorkspaceId,
+    runId: actionRunId,
+    origin: "https://trelio.example",
+    startDirectory: actionWorkingDirectory,
+  });
+  assert.deepEqual(captured, {
+    origin: "https://trelio.example/path",
+    argumentsList: ["finish", "--summary", "Готово"],
+    options: { cwd: workspaceDirectory, signal: undefined },
+  });
+  assert.equal(result.operation, "finish");
+});
+
+test("identity-bound actions fail before launch when the registered Run is absent", async () => {
+  await assert.rejects(handleTrelioWorkspaceActionOperation(
+    "https://trelio.example",
+    {
+      schemaVersion: 1,
+      operation: "status",
+      parameters: {},
+      runIdentity: { workspaceId: actionWorkspaceId, runId: actionRunId },
+    },
+    {
+      resolveRunRootDirectory: async () => null,
+      runBridge: async () => assert.fail("missing Run must fail before child launch"),
+    },
+  ), (error) => (
+    error?.code === "TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED"
+    && error.details?.workspaceId === actionWorkspaceId
+    && error.details?.runId === actionRunId
+    && error.details?.requiredAction === "prepare_and_open_workspace_run"
+  ));
+});
+
 test("folder onboarding apply stays inside the host and never reaches bridge argv", async () => {
   const parameters = {
     folderPath: actionWorkingDirectory,
