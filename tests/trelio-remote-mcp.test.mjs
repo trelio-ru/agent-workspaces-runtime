@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -24,6 +25,7 @@ import {
   fingerprintRemoteMcpConfig,
   handleLocalMcpMessage,
   handleToolCall,
+  isHostRuntimeUpgradeRequiredError,
   normalizeCompanyPrivateSkillAuthoringContract,
   openCredentialFormInBrowser,
   persistLocalProposalProviderSelection,
@@ -34,9 +36,11 @@ import {
   resolveSafeRemoteMcpEndpoint,
   runStdioHost,
   selectRemoteToolsForPolicy,
+  startHostRuntimeMcpDelegate,
   validateResolvedRemoteMcp,
   validateRemoteMcpPublicationConfig,
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { CodexRoutingConfigError } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
@@ -564,6 +568,428 @@ const createStdioHarness = (callTool, options = {}) => {
     },
   };
 };
+
+test("runtime handoff is limited to the two pre-operation compatibility gates", () => {
+  for (const code of [
+    "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+    "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
+  ]) {
+    assert.equal(isHostRuntimeUpgradeRequiredError(
+      new TrelioApiError(409, "Upgrade required.", null, code),
+    ), true);
+  }
+  assert.equal(isHostRuntimeUpgradeRequiredError(
+    new TrelioApiError(409, "Another conflict.", null, "WORKSPACE_OUTDATED"),
+  ), false);
+  assert.equal(isHostRuntimeUpgradeRequiredError(
+    new RemoteMcpHostError(
+      "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+      "Forged local error.",
+    ),
+  ), false);
+});
+
+test("runtime gate delegates the rejected call and the rest of the MCP session", async () => {
+  const forwarded = [];
+  let delegateClosed = false;
+  const harness = createStdioHarness(async () => {
+    throw new TrelioApiError(
+      409,
+      "Runtime v3.0.4 is required.",
+      null,
+      "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+    );
+  }, {
+    environment: {
+      TRELIO_HOST_RUNTIME_VERSION: "3.0.3",
+      TRELIO_PLUGIN_VERSION: "3.0.2",
+    },
+    startRuntimeDelegate: async ({ initializeParams, enqueueResponse }) => {
+      assert.deepEqual(initializeParams, {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: { form: {} } },
+        clientInfo: { name: "runtime-handoff-regression", version: "1.0.0" },
+      });
+      return {
+        runtimeVersion: "3.0.4",
+        forward: async (message) => {
+          forwarded.push(message);
+          if (message.id !== undefined && message.id !== null) {
+            await enqueueResponse({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: message.method === "tools/call"
+                ? { content: [{ type: "text", text: "updated runtime" }] }
+                : {},
+            });
+          }
+        },
+        close: async () => {
+          delegateClosed = true;
+        },
+      };
+    },
+  });
+
+  try {
+    harness.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: { elicitation: { form: {} } },
+        clientInfo: { name: "runtime-handoff-regression", version: "1.0.0" },
+      },
+    });
+    await harness.waitForFrame(({ id }) => id === 1);
+    const rejectedCall = {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "continue_trelio_local_action",
+        arguments: { schemaVersion: 1, route: "action", parameters: { opaque: true } },
+      },
+    };
+    harness.send(rejectedCall);
+    const replayedResponse = await harness.waitForFrame(({ id }) => id === 2);
+    assert.equal(replayedResponse.result.content[0].text, "updated runtime");
+    assert.deepEqual(forwarded, [rejectedCall]);
+
+    const ping = { jsonrpc: "2.0", id: 3, method: "ping" };
+    harness.send(ping);
+    await harness.waitForFrame(({ id }) => id === 3);
+    assert.deepEqual(forwarded, [rejectedCall, ping]);
+  } finally {
+    await harness.close();
+  }
+  assert.equal(delegateClosed, true);
+});
+
+test("cancellation during a runtime update follows the replay to the delegate", async () => {
+  const forwarded = [];
+  let resolveDelegateStart;
+  let reportDelegateStart;
+  const delegateStartRequested = new Promise((resolve) => {
+    reportDelegateStart = resolve;
+  });
+  const delegateReady = new Promise((resolve) => {
+    resolveDelegateStart = resolve;
+  });
+  const harness = createStdioHarness(async () => {
+    throw new TrelioApiError(
+      409,
+      "Runtime v3.0.4 is required.",
+      null,
+      "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+    );
+  }, {
+    environment: {
+      TRELIO_HOST_RUNTIME_VERSION: "3.0.3",
+      TRELIO_PLUGIN_VERSION: "3.0.2",
+    },
+    startRuntimeDelegate: async ({ enqueueResponse }) => {
+      reportDelegateStart();
+      await delegateReady;
+      return {
+        runtimeVersion: "3.0.4",
+        forward: async (message) => {
+          forwarded.push(message);
+          if (message.method === "notifications/cancelled") {
+            await enqueueResponse({
+              jsonrpc: "2.0",
+              id: message.params.requestId,
+              result: {
+                content: [{ type: "text", text: "cancelled by delegate" }],
+                isError: true,
+              },
+            });
+          }
+        },
+        close: async () => {},
+      };
+    },
+  });
+
+  try {
+    harness.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {} },
+    });
+    await harness.waitForFrame(({ id }) => id === 1);
+    harness.send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "continue_trelio_local_action", arguments: {} },
+    });
+    await delegateStartRequested;
+    harness.send({
+      jsonrpc: "2.0",
+      method: "notifications/cancelled",
+      params: { requestId: 2, reason: "User cancelled." },
+    });
+    resolveDelegateStart();
+    const response = await harness.waitForFrame(({ id }) => id === 2);
+    assert.equal(response.result.content[0].text, "cancelled by delegate");
+    assert.deepEqual(forwarded.map(({ method }) => method), [
+      "tools/call",
+      "notifications/cancelled",
+    ]);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("runtime delegate updates through the stable loader and keeps payloads on stdio", async () => {
+  const invocations = [];
+  const forwardedFrames = [];
+  let delegateProcess;
+  let inputBuffer = "";
+  let resolveForwarded;
+  const forwarded = new Promise((resolve) => {
+    resolveForwarded = resolve;
+  });
+
+  const spawnProcess = (_executable, argumentsList, options) => {
+    invocations.push({ argumentsList, options });
+    const child = new EventEmitter();
+    child.kill = () => {
+      queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
+    };
+    if (argumentsList.at(-1) === "__update") {
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    }
+
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stdin.setEncoding("utf8");
+    child.stdin.on("data", (chunk) => {
+      inputBuffer += chunk;
+      while (inputBuffer.includes("\n")) {
+        const boundary = inputBuffer.indexOf("\n");
+        const line = inputBuffer.slice(0, boundary);
+        inputBuffer = inputBuffer.slice(boundary + 1);
+        if (!line) continue;
+        const frame = JSON.parse(line);
+        forwardedFrames.push(frame);
+        if (frame.method === "initialize") {
+          child.stdout.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: frame.id,
+            result: {
+              protocolVersion: frame.params.protocolVersion,
+              serverInfo: { name: "trelio-remote-skills", version: "3.0.4" },
+            },
+          })}\n`);
+        }
+        if (frame.method === "tools/call") {
+          child.stdout.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: frame.id,
+            result: { content: [{ type: "text", text: "done" }] },
+          })}\n`);
+        }
+      }
+    });
+    child.stdin.once("finish", () => {
+      queueMicrotask(() => child.emit("exit", 0, null));
+    });
+    delegateProcess = child;
+    return child;
+  };
+
+  const delegate = await startHostRuntimeMcpDelegate({
+    environment: {
+      TRELIO_PLUGIN_ROOT: "/trusted/plugin",
+      TRELIO_PLUGIN_VERSION: "3.0.2",
+      TRELIO_HOST_RUNTIME_VERSION: "3.0.3",
+    },
+    initializeParams: {
+      protocolVersion: "2025-06-18",
+      capabilities: { resources: {} },
+      clientInfo: { name: "delegate-test", version: "1.0.0" },
+    },
+    enqueueResponse: async (frame) => {
+      if (frame.id === 7) resolveForwarded(frame);
+    },
+    spawnProcess,
+    statFile: async () => ({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+    }),
+  });
+  assert.equal(delegate.runtimeVersion, "3.0.4");
+
+  const protectedCall = {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "continue_trelio_local_action",
+      arguments: { route: "action", parameters: { runtimeSessionProof: "opaque" } },
+    },
+  };
+  await delegate.forward(protectedCall);
+  assert.equal((await forwarded).result.content[0].text, "done");
+  await delegate.close();
+
+  assert.deepEqual(invocations.map(({ argumentsList }) => argumentsList), [
+    ["/trusted/plugin/scripts/trelio-host-runtime-loader.mjs", "__update"],
+    ["/trusted/plugin/scripts/trelio-host-runtime-loader.mjs", "mcp"],
+  ]);
+  assert.equal(invocations[0].options.env.TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK, "1");
+  assert.equal(invocations[1].options.env.TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE, "1");
+  assert.doesNotMatch(JSON.stringify(invocations), /runtimeSessionProof|opaque/u);
+  assert.equal(forwardedFrames[0].method, "initialize");
+  assert.equal(forwardedFrames[1].method, "notifications/initialized");
+  assert.deepEqual(forwardedFrames[2], protectedCall);
+  assert.ok(delegateProcess);
+});
+
+test("runtime delegate rejects a loader that keeps the same immutable version", async () => {
+  let inputBuffer = "";
+  const spawnProcess = (_executable, argumentsList) => {
+    const child = new EventEmitter();
+    child.kill = () => queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
+    if (argumentsList.at(-1) === "__update") {
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    }
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stdin.setEncoding("utf8");
+    child.stdin.on("data", (chunk) => {
+      inputBuffer += chunk;
+      if (!inputBuffer.includes("\n")) return;
+      const frame = JSON.parse(inputBuffer.slice(0, inputBuffer.indexOf("\n")));
+      child.stdout.write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        id: frame.id,
+        result: {
+          protocolVersion: frame.params.protocolVersion,
+          serverInfo: { name: "trelio-remote-skills", version: "3.0.3" },
+        },
+      })}\n`);
+    });
+    return child;
+  };
+
+  await assert.rejects(startHostRuntimeMcpDelegate({
+    environment: {
+      TRELIO_PLUGIN_ROOT: "/trusted/plugin",
+      TRELIO_PLUGIN_VERSION: "3.0.2",
+      TRELIO_HOST_RUNTIME_VERSION: "3.0.3",
+    },
+    initializeParams: { protocolVersion: "2025-06-18", capabilities: {} },
+    enqueueResponse: async () => {},
+    spawnProcess,
+    statFile: async () => ({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+    }),
+  }), /3\.0\.3 -> 3\.0\.3/u);
+});
+
+test("runtime delegate isolates nested server request ids from stale in-flight calls", async () => {
+  let inputBuffer = "";
+  let resolveServerRequest;
+  let resolveToolResult;
+  const serverRequest = new Promise((resolve) => {
+    resolveServerRequest = resolve;
+  });
+  const toolResult = new Promise((resolve) => {
+    resolveToolResult = resolve;
+  });
+  const spawnProcess = (_executable, argumentsList) => {
+    const child = new EventEmitter();
+    child.kill = () => queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
+    if (argumentsList.at(-1) === "__update") {
+      queueMicrotask(() => child.emit("exit", 0, null));
+      return child;
+    }
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stdin.setEncoding("utf8");
+    child.stdin.on("data", (chunk) => {
+      inputBuffer += chunk;
+      while (inputBuffer.includes("\n")) {
+        const boundary = inputBuffer.indexOf("\n");
+        const line = inputBuffer.slice(0, boundary);
+        inputBuffer = inputBuffer.slice(boundary + 1);
+        if (!line) continue;
+        const frame = JSON.parse(line);
+        if (frame.method === "initialize") {
+          child.stdout.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: frame.id,
+            result: {
+              protocolVersion: frame.params.protocolVersion,
+              serverInfo: { name: "trelio-remote-skills", version: "3.0.4" },
+            },
+          })}\n`);
+        } else if (frame.method === "tools/call") {
+          child.stdout.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: "trelio-client-request-1",
+            method: "elicitation/create",
+            params: { message: "Confirm" },
+          })}\n`);
+        } else if (
+          frame.method === undefined
+          && frame.id === "trelio-client-request-1"
+        ) {
+          child.stdout.write(`${JSON.stringify({
+            jsonrpc: "2.0",
+            id: 9,
+            result: { content: [{ type: "text", text: "confirmed" }] },
+          })}\n`);
+        }
+      }
+    });
+    child.stdin.once("finish", () => queueMicrotask(() => child.emit("exit", 0, null)));
+    return child;
+  };
+
+  const delegate = await startHostRuntimeMcpDelegate({
+    environment: {
+      TRELIO_PLUGIN_ROOT: "/trusted/plugin",
+      TRELIO_PLUGIN_VERSION: "3.0.2",
+      TRELIO_HOST_RUNTIME_VERSION: "3.0.3",
+    },
+    initializeParams: { protocolVersion: "2025-06-18", capabilities: {} },
+    enqueueResponse: async (frame) => {
+      if (frame.method === "elicitation/create") resolveServerRequest(frame);
+      if (frame.id === 9) resolveToolResult(frame);
+    },
+    spawnProcess,
+    statFile: async () => ({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+    }),
+  });
+  await delegate.forward({
+    jsonrpc: "2.0",
+    id: 9,
+    method: "tools/call",
+    params: { name: "connect_remote_agent_skill", arguments: {} },
+  });
+  const nestedRequest = await serverRequest;
+  assert.match(nestedRequest.id, /^trelio-runtime-delegate-/u);
+  assert.notEqual(nestedRequest.id, "trelio-client-request-1");
+
+  await delegate.forward({
+    jsonrpc: "2.0",
+    id: nestedRequest.id,
+    result: { action: "accept" },
+  });
+  assert.equal((await toolResult).result.content[0].text, "confirmed");
+  await delegate.close();
+});
 
 test("stdio host routes a server elicitation request back to the waiting tool call", async () => {
   const harness = createStdioHarness(async (

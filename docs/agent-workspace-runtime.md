@@ -51,6 +51,20 @@ runtime-версию, а plugin compatibility, Codex retention и Run `clientVer
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
 `pluginVersion` и `hostRuntimeVersion`.
 
+Долгоживущий local MCP не требует restart задачи после публикации нового
+подписанного runtime. Если backend вернул точный
+`AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED` либо
+`AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED`, прежний MCP через immutable stable
+loader дожидается signed update, запускает новый MCP на анонимных stdio pipe и
+проверяет, что его `initialize.serverInfo.version` строго новее текущей. Только
+после этого он повторяет exact отклонённый `tools/call` и передаёт новому
+процессу все последующие JSON-RPC frames той же клиентской сессии. Аргументы,
+runtime proof и результаты не попадают в argv, env, файл или лог. Такой replay
+безопасен только для этих двух hard gate: backend возвращает их до проверки и
+поглощения proof и до вызова операции. Любая другая ошибка, та же либо более
+старая runtime-версия и повреждённый nested transport завершаются fail-closed;
+неоднозначная mutation автоматически не повторяется.
+
 Bridge device-session хранится вне plugin/package cache и Workspace. На macOS
 runtime использует login Keychain с service
 `ru.trelio.workspace-bridge.session.v2`; подписанный runtime локально собирает

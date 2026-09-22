@@ -9,6 +9,7 @@
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -29,13 +30,17 @@ import {
   planCodexTrelioHookRouting,
   removeCodexLegacyTrelioMcpRegistration,
 } from "./trelio-codex-routing.mjs";
-import { HOST_RUNTIME_VERSION } from "./trelio-component-versions.mjs";
+import {
+  HOST_RUNTIME_VERSION,
+  getHostRuntimeVersion,
+} from "./trelio-component-versions.mjs";
 
 import {
   AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION,
   AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES,
   AGENT_SKILL_MAX_PACKAGE_BYTES,
   AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
+  TrelioApiError,
   diagnoseLocalPrerequisites,
   ensureBridgeCompatibility,
   ensureCompanyEncryptionContext,
@@ -106,6 +111,17 @@ const MAX_REMOTE_TOOL_COUNT = 64;
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
 const REMOTE_REQUEST_TIMEOUT_MS = 20_000;
 const TRELIO_RESOLVE_TIMEOUT_MS = 20_000;
+// The stable loader may wait up to ninety seconds for a racing updater and
+// then perform four bounded fifteen-second network attempts. Keep the outer
+// handoff deadline above that complete verified path instead of killing a
+// healthy convergence halfway through its required retries.
+const HOST_RUNTIME_UPDATE_TIMEOUT_MS = 180_000;
+const HOST_RUNTIME_MCP_INITIALIZE_TIMEOUT_MS = 10_000;
+const HOST_RUNTIME_MCP_CLOSE_TIMEOUT_MS = 5_000;
+const HOST_RUNTIME_UPGRADE_REQUIRED_CODES = new Set([
+  "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+  "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
+]);
 const CREDENTIAL_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_BROWSER_HANDOFF_TIMEOUT_MS = 7_500;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -5413,6 +5429,366 @@ export const handleToolCall = async (
   throw new RemoteMcpHostError("REMOTE_MCP_UNKNOWN_LOCAL_TOOL", "Неизвестный local Remote MCP tool.");
 };
 
+const waitWithTimeout = async (promise, timeoutMs, timeoutMessage, onTimeout) => {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          onTimeout?.();
+          reject(new Error(timeoutMessage));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const waitForRuntimeLoaderExit = (
+  child,
+  {
+    timeoutMs = HOST_RUNTIME_UPDATE_TIMEOUT_MS,
+    operation,
+  },
+) => waitWithTimeout(
+  new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (exitCode, signal) => {
+      if (signal) {
+        reject(new Error(`${operation} завершён сигналом ${signal}.`));
+        return;
+      }
+      if ((exitCode ?? 1) !== 0) {
+        reject(new Error(`${operation} завершён с кодом ${exitCode ?? 1}.`));
+        return;
+      }
+      resolve(exitCode ?? 0);
+    });
+  }),
+  timeoutMs,
+  `${operation} не завершён за ${timeoutMs} мс.`,
+  () => child.kill?.(),
+);
+
+export const isHostRuntimeUpgradeRequiredError = (error) => (
+  error instanceof TrelioApiError
+  && HOST_RUNTIME_UPGRADE_REQUIRED_CODES.has(error.code)
+);
+
+/**
+ * Replace a stale long-lived MCP implementation without replacing its outer
+ * stdio transport.
+ *
+ * The stable plugin loader is the only component allowed to select and verify
+ * a downloaded runtime. The old runtime therefore starts that loader twice:
+ * once for an exact signed update and once for a fresh MCP process. Tool
+ * arguments, runtime proofs and protected results travel only through anonymous
+ * stdio pipes; none of them enter argv, environment, temporary files or logs.
+ */
+export const startHostRuntimeMcpDelegate = async ({
+  environment = process.env,
+  initializeParams,
+  enqueueResponse,
+  spawnProcess = spawn,
+  statFile = fs.lstat,
+  currentRuntimeVersion = getHostRuntimeVersion(environment),
+  updateTimeoutMs = HOST_RUNTIME_UPDATE_TIMEOUT_MS,
+  initializeTimeoutMs = HOST_RUNTIME_MCP_INITIALIZE_TIMEOUT_MS,
+  closeTimeoutMs = HOST_RUNTIME_MCP_CLOSE_TIMEOUT_MS,
+} = {}) => {
+  if (!initializeParams || typeof initializeParams !== "object") {
+    throw new Error(
+      "Trelio host runtime не может обновить MCP до завершённого initialize.",
+    );
+  }
+  if (typeof enqueueResponse !== "function") {
+    throw new Error("Trelio host runtime handoff требует внешний MCP transport.");
+  }
+  const pluginRoot = String(environment.TRELIO_PLUGIN_ROOT || "").trim();
+  if (!path.isAbsolute(pluginRoot)) {
+    throw new Error(
+      "Stable Trelio plugin loader недоступен; требуется обновить plugin shell.",
+    );
+  }
+  const loaderPath = path.join(
+    pluginRoot,
+    "scripts",
+    "trelio-host-runtime-loader.mjs",
+  );
+  const loaderMetadata = await statFile(loaderPath).catch(() => null);
+  if (!loaderMetadata?.isFile() || loaderMetadata.isSymbolicLink()) {
+    throw new Error(
+      "Stable Trelio plugin loader отсутствует либо не является обычным файлом.",
+    );
+  }
+
+  const updateChild = spawnProcess(process.execPath, [loaderPath, "__update"], {
+    env: {
+      ...environment,
+      TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK: "1",
+    },
+    shell: false,
+    stdio: ["ignore", "ignore", "inherit"],
+    windowsHide: true,
+  });
+  await waitForRuntimeLoaderExit(updateChild, {
+    timeoutMs: updateTimeoutMs,
+    operation: "Обновление Trelio host runtime",
+  });
+
+  const child = spawnProcess(process.execPath, [loaderPath, "mcp"], {
+    env: {
+      ...environment,
+      // The explicit __update immediately above already performed the bounded
+      // network convergence. Avoid a second startup fetch while retaining the
+      // delegate's own ability to perform a later exact hard-gate handoff.
+      TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
+    },
+    shell: false,
+    stdio: ["pipe", "pipe", "inherit"],
+    windowsHide: true,
+  });
+  if (!child.stdin || !child.stdout) {
+    child.kill?.();
+    throw new Error("Обновлённый Trelio MCP не открыл stdio transport.");
+  }
+
+  const initializeId = `trelio-runtime-handoff-${crypto.randomUUID()}`;
+  const clientRequestIdPrefix = `trelio-runtime-delegate-${crypto.randomUUID()}`;
+  const pendingRequestIds = new Map();
+  const delegatedClientRequestIds = new Map();
+  let delegatedClientRequestSequence = 0;
+  let ready = false;
+  let closing = false;
+  let terminalError = null;
+  let resolveInitialize;
+  let rejectInitialize;
+  let outputQueue = Promise.resolve();
+  const initializeResult = new Promise((resolve, reject) => {
+    resolveInitialize = resolve;
+    rejectInitialize = reject;
+  });
+
+  const failPendingRequests = (error) => {
+    if (closing) {
+      pendingRequestIds.clear();
+      delegatedClientRequestIds.clear();
+      return;
+    }
+    for (const [id] of pendingRequestIds) {
+      pendingRequestIds.delete(id);
+      void enqueueResponse({
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32000,
+          message: error.message,
+          data: { code: "TRELIO_HOST_RUNTIME_DELEGATE_CLOSED" },
+        },
+      });
+    }
+    delegatedClientRequestIds.clear();
+  };
+
+  const childExit = new Promise((resolve, reject) => {
+    child.once("error", (error) => {
+      terminalError = error;
+      rejectInitialize(error);
+      failPendingRequests(error);
+      reject(error);
+    });
+    child.once("exit", (exitCode, signal) => {
+      const error = signal
+        ? new Error(`Обновлённый Trelio MCP завершён сигналом ${signal}.`)
+        : (exitCode ?? 1) === 0
+          ? null
+          : new Error(`Обновлённый Trelio MCP завершён с кодом ${exitCode ?? 1}.`);
+      terminalError = error || new Error("Обновлённый Trelio MCP transport закрыт.");
+      if (!ready) rejectInitialize(terminalError);
+      failPendingRequests(terminalError);
+      if (error) reject(error);
+      else resolve(exitCode ?? 0);
+    });
+  });
+  // A later await observes the child result. This early handler prevents an
+  // unexpected delegate exit from becoming an unhandled rejection meanwhile.
+  childExit.catch(() => undefined);
+
+  const childOutput = readline.createInterface({
+    input: child.stdout,
+    crlfDelay: Infinity,
+    terminal: false,
+  });
+  childOutput.on("line", (line) => {
+    if (!line.trim()) return;
+    let frame;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      terminalError = new Error("Обновлённый Trelio MCP вернул повреждённый JSON-RPC frame.");
+      rejectInitialize(terminalError);
+      failPendingRequests(terminalError);
+      child.kill?.();
+      return;
+    }
+    if (!ready && frame?.id === initializeId) {
+      if (frame.error) {
+        terminalError = new Error(
+          String(frame.error.message || "Обновлённый Trelio MCP отклонил initialize."),
+        );
+        rejectInitialize(terminalError);
+        child.kill?.();
+      } else {
+        resolveInitialize(frame.result);
+      }
+      return;
+    }
+    if (!ready) {
+      // No application request is sent before initialize completes, so any
+      // other frame would be impossible to correlate safely with the client.
+      terminalError = new Error("Обновлённый Trelio MCP нарушил initialize sequence.");
+      rejectInitialize(terminalError);
+      child.kill?.();
+      return;
+    }
+    if (
+      frame?.method === undefined
+      && frame?.id !== undefined
+      && frame?.id !== null
+    ) {
+      pendingRequestIds.delete(frame.id);
+    }
+    if (
+      frame?.method !== undefined
+      && frame?.id !== undefined
+      && frame?.id !== null
+    ) {
+      // Both the old and delegated MCP may have started their server-request
+      // counters at the same value. Rewrite delegated request ids at this
+      // transport boundary so an elicitation response cannot accidentally
+      // resolve an older in-flight request owned by the stale runtime.
+      delegatedClientRequestSequence += 1;
+      const outerRequestId = `${clientRequestIdPrefix}-${delegatedClientRequestSequence}`;
+      delegatedClientRequestIds.set(outerRequestId, frame.id);
+      void enqueueResponse({ ...frame, id: outerRequestId });
+      return;
+    }
+    void enqueueResponse(frame);
+  });
+
+  const writeFrame = async (frame) => {
+    if (terminalError) throw terminalError;
+    outputQueue = outputQueue.then(() => new Promise((resolve, reject) => {
+      child.stdin.write(`${JSON.stringify(frame)}\n`, (error) => {
+        if (error) {
+          terminalError = error;
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    }));
+    return await outputQueue;
+  };
+
+  await writeFrame({
+    jsonrpc: "2.0",
+    id: initializeId,
+    method: "initialize",
+    params: initializeParams,
+  });
+  const nestedInitialize = await waitWithTimeout(
+    initializeResult,
+    initializeTimeoutMs,
+    `Обновлённый Trelio MCP не ответил на initialize за ${initializeTimeoutMs} мс.`,
+    () => child.kill?.(),
+  );
+  const nextRuntimeVersion = String(nestedInitialize?.serverInfo?.version || "");
+  if (
+    !STABLE_VERSION_PATTERN.test(nextRuntimeVersion)
+    || !STABLE_VERSION_PATTERN.test(currentRuntimeVersion)
+    || compareStableVersions(nextRuntimeVersion, currentRuntimeVersion) <= 0
+  ) {
+    closing = true;
+    child.kill?.();
+    throw new Error(
+      `Signed runtime update не активировал более новую версию: `
+      + `${currentRuntimeVersion} -> ${nextRuntimeVersion || "unknown"}.`,
+    );
+  }
+  ready = true;
+  await writeFrame({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+  return {
+    runtimeVersion: nextRuntimeVersion,
+    forward: async (message) => {
+      let forwardedMessage = message;
+      if (
+        message?.method === undefined
+        && message?.id !== undefined
+        && message?.id !== null
+        && delegatedClientRequestIds.has(message.id)
+      ) {
+        const childRequestId = delegatedClientRequestIds.get(message.id);
+        delegatedClientRequestIds.delete(message.id);
+        forwardedMessage = { ...message, id: childRequestId };
+      } else if (
+        message?.method === "notifications/cancelled"
+        && delegatedClientRequestIds.has(message.params?.requestId)
+      ) {
+        forwardedMessage = {
+          ...message,
+          params: {
+            ...message.params,
+            requestId: delegatedClientRequestIds.get(message.params.requestId),
+          },
+        };
+      } else if (
+        message?.method === "$/cancelRequest"
+        && delegatedClientRequestIds.has(message.params?.id)
+      ) {
+        forwardedMessage = {
+          ...message,
+          params: {
+            ...message.params,
+            id: delegatedClientRequestIds.get(message.params.id),
+          },
+        };
+      }
+      if (
+        forwardedMessage?.method !== undefined
+        && forwardedMessage?.id !== undefined
+        && forwardedMessage?.id !== null
+      ) {
+        pendingRequestIds.set(forwardedMessage.id, true);
+      }
+      try {
+        await writeFrame(forwardedMessage);
+      } catch (error) {
+        pendingRequestIds.delete(forwardedMessage?.id);
+        throw error;
+      }
+    },
+    close: async () => {
+      if (closing) return;
+      closing = true;
+      pendingRequestIds.clear();
+      delegatedClientRequestIds.clear();
+      await outputQueue.catch(() => undefined);
+      child.stdin.end();
+      await waitWithTimeout(
+        childExit,
+        closeTimeoutMs,
+        `Обновлённый Trelio MCP не завершён за ${closeTimeoutMs} мс.`,
+        () => child.kill?.(),
+      ).catch(() => undefined);
+      childOutput.close();
+    },
+  };
+};
+
 const safeErrorPayload = (error) => ({
   code: error instanceof RemoteMcpHostError
     || error instanceof TrelioLocalContextError
@@ -5438,6 +5814,7 @@ export const handleLocalMcpMessage = async (
     clientCapabilities = null,
     requestClient = null,
     codexLegacyMcpMigration = null,
+    runtimeUpgradeRecovery = null,
     signal,
   } = {},
 ) => {
@@ -5536,7 +5913,22 @@ export const handleLocalMcpMessage = async (
         )),
       };
     } catch (error) {
-      const errorPayload = safeErrorPayload(error);
+      let effectiveError = error;
+      if (
+        runtimeUpgradeRecovery
+        && isHostRuntimeUpgradeRequiredError(error)
+      ) {
+        try {
+          // The backend raises these gates before consuming the runtime proof
+          // or invoking the selected operation. The delegate may therefore
+          // replay this exact rejected JSON-RPC request once without guessing
+          // whether a side effect already happened.
+          if (await runtimeUpgradeRecovery(error, message)) return null;
+        } catch (recoveryError) {
+          effectiveError = recoveryError;
+        }
+      }
+      const errorPayload = safeErrorPayload(effectiveError);
       const isProposalCardError = errorPayload.code.startsWith("LOCAL_CONTEXT_PROPOSAL_");
       return {
         jsonrpc: "2.0",
@@ -5574,6 +5966,9 @@ export const runStdioHost = async ({
   handleMessage = handleLocalMcpMessage,
   environment = process.env,
   legacyMcpMigration = removeCodexLegacyTrelioMcpRegistration,
+  startRuntimeDelegate = startHostRuntimeMcpDelegate,
+  spawnProcess = spawn,
+  statFile = fs.lstat,
 } = {}) => {
   const codexLegacyMcpMigration = await migrateCodexLegacyTrelioMcpForRuntime({
     environment,
@@ -5588,8 +5983,11 @@ export const runStdioHost = async ({
   const pendingClientRequests = new Map();
   const inFlightDispatches = new Set();
   let clientCapabilities = null;
+  let clientInitializeParams = null;
   let clientRequestSequence = 0;
   let outputQueue = Promise.resolve();
+  let runtimeDelegate = null;
+  let runtimeDelegatePromise = null;
 
   const enqueueResponse = (response) => {
     if (!response) {
@@ -5602,6 +6000,61 @@ export const runStdioHost = async ({
       outputStream.write(`${JSON.stringify(response)}\n`);
     });
     return outputQueue;
+  };
+
+  const activateRuntimeDelegate = async () => {
+    if (!runtimeDelegatePromise) {
+      runtimeDelegatePromise = startRuntimeDelegate({
+        environment,
+        initializeParams: clientInitializeParams,
+        enqueueResponse,
+        spawnProcess,
+        statFile,
+        currentRuntimeVersion: getHostRuntimeVersion(environment),
+      }).then((delegate) => {
+        runtimeDelegate = delegate;
+        return delegate;
+      }).catch((error) => {
+        // A transport or update failure does not prove that the signed rollout
+        // is unusable. Keep the immutable current host alive and let a later
+        // exact hard gate perform a fresh bounded recovery attempt.
+        runtimeDelegatePromise = null;
+        throw error;
+      });
+    }
+    return await runtimeDelegatePromise;
+  };
+
+  const forwardToRuntimeDelegate = async (
+    message,
+    { respondOnFailure = true, signal } = {},
+  ) => {
+    try {
+      if (signal?.aborted) throw createCancellationError();
+      const delegate = await activateRuntimeDelegate();
+      if (signal?.aborted) throw createCancellationError();
+      await delegate.forward(message);
+      return true;
+    } catch (error) {
+      if (
+        respondOnFailure
+        && message?.id !== undefined
+        && message?.id !== null
+        && message?.method !== undefined
+      ) {
+        await enqueueResponse({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: -32000,
+            message: error instanceof Error ? error.message : String(error),
+            data: { code: "TRELIO_HOST_RUNTIME_HANDOFF_FAILED" },
+          },
+        });
+        return false;
+      }
+      throw error;
+    }
   };
 
   const requestClient = (method, params, { signal } = {}) => {
@@ -5647,13 +6100,16 @@ export const runStdioHost = async ({
       && (Object.hasOwn(message, "result") || Object.hasOwn(message, "error"))
     ) {
       const pending = pendingClientRequests.get(message.id);
-      if (!pending) return;
-      pendingClientRequests.delete(message.id);
-      if (message.error) {
-        pending.reject(new Error(String(message.error.message || "Client request failed.")));
-      } else {
-        pending.resolve(message.result);
+      if (pending) {
+        pendingClientRequests.delete(message.id);
+        if (message.error) {
+          pending.reject(new Error(String(message.error.message || "Client request failed.")));
+        } else {
+          pending.resolve(message.result);
+        }
+        return;
       }
+      if (runtimeDelegatePromise) await forwardToRuntimeDelegate(message);
       return;
     }
     if (
@@ -5666,7 +6122,17 @@ export const runStdioHost = async ({
       const requestId = message.method === "notifications/cancelled"
         ? message.params?.requestId
         : message.params?.id;
-      activeToolCalls.get(requestId)?.abort(createCancellationError());
+      const activeController = activeToolCalls.get(requestId);
+      if (activeController) {
+        activeController.abort(createCancellationError());
+        return;
+      }
+      if (runtimeDelegatePromise) await forwardToRuntimeDelegate(message);
+      return;
+    }
+
+    if (runtimeDelegatePromise) {
+      await forwardToRuntimeDelegate(message);
       return;
     }
 
@@ -5685,6 +6151,7 @@ export const runStdioHost = async ({
     }
     if (message?.jsonrpc === "2.0" && message.method === "initialize") {
       clientCapabilities = message.params?.capabilities || {};
+      clientInitializeParams = message.params || {};
     }
 
     try {
@@ -5695,6 +6162,22 @@ export const runStdioHost = async ({
         clientCapabilities,
         requestClient,
         codexLegacyMcpMigration,
+        runtimeUpgradeRecovery: async (_error, rejectedMessage) => {
+          if (
+            controller
+            && activeToolCalls.get(rejectedMessage.id) === controller
+          ) {
+            // Ownership moves to the delegate before it starts. A cancellation
+            // arriving during the signed update must therefore wait for and
+            // reach the new MCP instead of aborting only the already-rejected
+            // stale call while the replay continues unnoticed.
+            activeToolCalls.delete(rejectedMessage.id);
+          }
+          return await forwardToRuntimeDelegate(
+            rejectedMessage,
+            { respondOnFailure: false, signal: controller?.signal },
+          );
+        },
       }));
     } finally {
       if (controller && activeToolCalls.get(message.id) === controller) {
@@ -5738,6 +6221,10 @@ export const runStdioHost = async ({
     pending.reject(new Error("MCP transport closed before the client answered."));
   }
   await Promise.allSettled([...inFlightDispatches]);
+  if (runtimeDelegatePromise) {
+    await runtimeDelegatePromise.catch(() => null);
+  }
+  await runtimeDelegate?.close();
   await outputQueue;
 };
 
