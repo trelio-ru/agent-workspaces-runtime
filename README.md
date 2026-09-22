@@ -81,12 +81,17 @@ Local company search и Workspace-file search возвращают один ко
 Требуются Node.js 22+ и standalone Git 2.28+.
 
 ```bash
-npm ci
+npm run worktree:bootstrap
 export TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT=/absolute/path/to/agent-workspaces/plugins/trelio-agent-workspaces
 node tests/trelio-host-runtime-entry.test.mjs
 node tests/trelio-workspace.test.mjs
 npm run test:context-budget
 ```
+
+`npm run git:new-worktree -- codex/<task-slug>` по умолчанию выполняет этот
+bootstrap автоматически и возвращает готовую к тестам папку. Если registry
+временно недоступен, созданные branch/worktree сохраняются, а команда печатает
+точный безопасный способ продолжить установку без создания новой ветки.
 
 Полный список direct test invocations закреплён в
 [runtime-tests.yml](.github/workflows/runtime-tests.yml). Tests запускаются

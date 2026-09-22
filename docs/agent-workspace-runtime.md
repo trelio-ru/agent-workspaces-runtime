@@ -693,8 +693,10 @@ accepted revision и история Run остаются на сервере Tre
 
 ## Учёт контекста агента
 
-`npm ci --ignore-scripts` устанавливает закреплённый `tiktoken@1.0.22` только
-для отчётов/тестов; bridge и MCP runtime его не импортируют.
+`worktree:bootstrap` выполняет проверяемый `npm ci --include=dev --ignore-scripts`
+и устанавливает закреплённый `tiktoken@1.0.22` только для отчётов/тестов; новый
+task worktree запускает bootstrap автоматически. Bridge и MCP runtime этот пакет
+не импортируют.
 `npm run report:context-budget` измеряет UTF-8 bytes и `tokensO200kBase`
 офлайн-кодировкой `o200k_base`. Русский и английский текст проходят один
 tokenizer; служебные маркеры в документах считаются обычным текстом.

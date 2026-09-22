@@ -71,7 +71,11 @@ publication tooling также остаются вне этого публичн
 - Перед правкой выполни `git fetch --prune origin`, `git status -sb` и
   `git rev-list --left-right --count HEAD...@{upstream}`.
 - Работай в отдельном worktree/ветке `codex/*`, созданном через
-  `npm run git:new-worktree -- codex/<task-slug>`.
+  `npm run git:new-worktree -- codex/<task-slug>`. Успешная команда также
+  устанавливает и проверяет exact devDependencies; после bootstrap-ошибки
+  продолжай в сохранённом worktree через напечатанный `worktree:bootstrap`, не
+  создавая вторую ветку. `--skip-bootstrap` допустим только без локальных
+  отчётов, сборок и тестов.
 - Завершённая правка получает commit на русском и интегрируется только через
   `npm run git:push-main`; raw push в `main` запрещён.
 - После интеграции выполни из canonical checkout
@@ -83,6 +87,8 @@ publication tooling также остаются вне этого публичн
 
 - Сначала запускай узкие изменённые tests, затем весь список direct Node tests из
   `.github/workflows/runtime-tests.yml`.
+- Перед локальным gate `npm run check:dependencies` должен подтвердить exact
+  dependency tree; `node_modules` разных worktree не объединяются.
 - Package builder проверяй двумя сборками одной версии и byte comparison.
 - Cross-repository tests запускай с exact plugin root. Ошибка отсутствующего
   plugin checkout – setup failure, а не повод копировать plugin source.

@@ -7,19 +7,53 @@ source "${SCRIPT_DIR}/git-main-guard.sh"
 REPOSITORY_ROOT="${AGENT_WORKSPACES_REPOSITORY_ROOT:-$(
   git -C "${SCRIPT_DIR}/.." rev-parse --show-toplevel 2>/dev/null || true
 )}"
-TASK_BRANCH="${1:-}"
-REQUESTED_PATH="${2:-}"
+TASK_BRANCH=""
+REQUESTED_PATH=""
+SKIP_BOOTSTRAP=0
 MAIN_LOCK=""
 CREATED_TEMP_PATH=0
 
 usage() {
   cat >&2 <<'EOF'
-Usage: bash scripts/create-task-worktree.sh codex/<slug> [path]
+Usage: bash scripts/create-task-worktree.sh [--skip-bootstrap] codex/<slug> [path]
 
-Creates a separate task worktree from fresh origin/main. When path is omitted,
-the worktree is created in a unique temporary directory and printed on stdout.
+Creates a separate task worktree from fresh origin/main and installs its exact
+development dependencies. --skip-bootstrap is only for work that will not run
+local builds, reports or tests.
 EOF
 }
+
+POSITIONAL_ARGUMENTS=()
+while (( $# > 0 )); do
+  case "$1" in
+    --skip-bootstrap)
+      SKIP_BOOTSTRAP=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --*)
+      agent_workspaces_git_guard_log "ERROR: unknown argument: $1"
+      usage
+      exit 2
+      ;;
+    *)
+      POSITIONAL_ARGUMENTS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if (( ${#POSITIONAL_ARGUMENTS[@]} < 1 )) \
+  || (( ${#POSITIONAL_ARGUMENTS[@]} > 2 )); then
+  usage
+  exit 2
+fi
+
+TASK_BRANCH="${POSITIONAL_ARGUMENTS[0]}"
+REQUESTED_PATH="${POSITIONAL_ARGUMENTS[1]:-}"
 
 cleanup() {
   agent_workspaces_release_main_lock "${MAIN_LOCK}"
@@ -34,11 +68,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-
-if [[ "$#" -lt 1 ]] || [[ "$#" -gt 2 ]]; then
-  usage
-  exit 2
-fi
 
 if [[ -z "${REPOSITORY_ROOT}" ]]; then
   agent_workspaces_git_guard_log \
@@ -130,4 +159,33 @@ RESOLVED_TASK_ROOT="$(agent_workspaces_resolve_directory "${REQUESTED_PATH}")"
 
 agent_workspaces_git_guard_log \
   "Task worktree ${TASK_BRANCH} created from fresh origin/main."
+
+# Git-lock защищает только общие refs и само worktree add. Установка npm может
+# ждать registry и не должна на это время блокировать другие task worktree или
+# guarded push в том же clone.
+agent_workspaces_release_main_lock "${MAIN_LOCK}"
+MAIN_LOCK=""
+
+if [[ "${SKIP_BOOTSTRAP}" -eq 1 ]]; then
+  agent_workspaces_git_guard_log \
+    "Dependency bootstrap was explicitly skipped; this worktree is not ready for local reports or tests."
+  printf '%s\n' "${RESOLVED_TASK_ROOT}"
+  exit 0
+fi
+
+if ! bash "${RESOLVED_TASK_ROOT}/scripts/bootstrap-worktree-dependencies.sh" \
+  "${RESOLVED_TASK_ROOT}"; then
+  # Git-операция уже завершилась. Сохраняем branch/worktree после сетевой или
+  # локальной npm-ошибки: bootstrap идемпотентен и безопасно продолжается там же.
+  agent_workspaces_git_guard_log \
+    "ERROR: task worktree was created, but dependency bootstrap failed: ${RESOLVED_TASK_ROOT}"
+  agent_workspaces_git_guard_log "Resume with:"
+  printf '[agent-workspaces-git-guard]   npm --prefix %q run worktree:bootstrap\n' \
+    "${RESOLVED_TASK_ROOT}" >&2
+  printf '%s\n' "${RESOLVED_TASK_ROOT}"
+  exit 3
+fi
+
+agent_workspaces_git_guard_log \
+  "Task worktree ${TASK_BRANCH} is ready for local reports and tests."
 printf '%s\n' "${RESOLVED_TASK_ROOT}"

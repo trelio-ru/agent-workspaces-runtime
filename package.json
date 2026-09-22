@@ -2,6 +2,8 @@
   "name": "agent-workspaces-runtime",
   "private": true,
   "scripts": {
+    "worktree:bootstrap": "bash scripts/bootstrap-worktree-dependencies.sh",
+    "check:dependencies": "bash scripts/bootstrap-worktree-dependencies.sh --check",
     "check:worktree": "bash scripts/assert-clean-worktree.sh",
     "git:configure-main": "bash scripts/configure-canonical-main.sh",
     "git:new-worktree": "bash scripts/create-task-worktree.sh",
@@ -12,6 +14,7 @@
     "report:context-budget": "node host-runtime/scripts/report-context-budget.mjs",
     "test:context-budget": "node tests/context-budget.test.mjs",
     "test:runtime-entry": "node tests/trelio-host-runtime-entry.test.mjs",
+    "test:worktree-bootstrap": "bash scripts/bootstrap-worktree-dependencies.test.sh",
     "test:git-guard": "node --test scripts/git-finish-worktree.test.mjs && bash scripts/git-main-guard.test.sh"
   },
   "devDependencies": {

@@ -25,7 +25,11 @@ CANONICAL_REPOSITORY="${TEST_ROOT}/canonical"
 TASK_ONE_WORKTREE="${TEST_ROOT}/task-one"
 TASK_TWO_WORKTREE="${TEST_ROOT}/task-two"
 TASK_THREE_WORKTREE="${TEST_ROOT}/task-three"
+FAILED_BOOTSTRAP_WORKTREE="${TEST_ROOT}/failed-bootstrap"
 EXTERNAL_CLONE="${TEST_ROOT}/external-clone"
+MOCK_BIN="${TEST_ROOT}/mock-bin"
+NPM_CALLS_FILE="${TEST_ROOT}/npm-calls"
+FAILED_BOOTSTRAP_OUTPUT="${TEST_ROOT}/failed-bootstrap-output"
 
 git init --bare --initial-branch=main "${REMOTE_REPOSITORY}" >/dev/null
 git init --initial-branch=main "${CANONICAL_REPOSITORY}" >/dev/null
@@ -35,9 +39,11 @@ git -C "${CANONICAL_REPOSITORY}" config user.email \
 
 mkdir -p \
   "${CANONICAL_REPOSITORY}/.githooks" \
-  "${CANONICAL_REPOSITORY}/scripts"
+  "${CANONICAL_REPOSITORY}/scripts" \
+  "${MOCK_BIN}"
 cp "${PROJECT_ROOT}/.gitignore" "${CANONICAL_REPOSITORY}/.gitignore"
 cp "${PROJECT_ROOT}/package.json" "${CANONICAL_REPOSITORY}/package.json"
+cp "${PROJECT_ROOT}/package-lock.json" "${CANONICAL_REPOSITORY}/package-lock.json"
 cp "${PROJECT_ROOT}/.githooks/pre-commit" \
   "${CANONICAL_REPOSITORY}/.githooks/pre-commit"
 cp "${PROJECT_ROOT}/.githooks/pre-push" \
@@ -48,6 +54,8 @@ cp "${PROJECT_ROOT}/scripts/configure-canonical-main.sh" \
   "${CANONICAL_REPOSITORY}/scripts/configure-canonical-main.sh"
 cp "${PROJECT_ROOT}/scripts/create-task-worktree.sh" \
   "${CANONICAL_REPOSITORY}/scripts/create-task-worktree.sh"
+cp "${PROJECT_ROOT}/scripts/bootstrap-worktree-dependencies.sh" \
+  "${CANONICAL_REPOSITORY}/scripts/bootstrap-worktree-dependencies.sh"
 cp "${PROJECT_ROOT}/scripts/git-main-guard.sh" \
   "${CANONICAL_REPOSITORY}/scripts/git-main-guard.sh"
 cp "${PROJECT_ROOT}/scripts/git-finish-worktree.mjs" \
@@ -57,6 +65,36 @@ cp "${PROJECT_ROOT}/scripts/push-main.sh" \
 chmod +x \
   "${CANONICAL_REPOSITORY}/.githooks/pre-commit" \
   "${CANONICAL_REPOSITORY}/.githooks/pre-push"
+
+# Git-guard regression проверяет один настоящий default bootstrap без сети.
+# Остальные task worktree ниже используют explicit --skip-bootstrap, потому что
+# их предмет – refs/push/cleanup, а не повторная проверка dependency installer.
+cat > "${MOCK_BIN}/node" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '22\n'
+EOF
+cat > "${MOCK_BIN}/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\t%s\n' "${PWD}" "$*" >> "${MOCK_NPM_CALLS_FILE}"
+case "${1:-}" in
+  ci)
+    if [[ "${MOCK_NPM_ALWAYS_FAIL:-0}" -eq 1 ]]; then
+      exit 75
+    fi
+    mkdir -p node_modules/tiktoken
+    ;;
+  ls)
+    [[ -d node_modules/tiktoken ]]
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+EOF
+chmod +x "${MOCK_BIN}/node" "${MOCK_BIN}/npm"
+: > "${NPM_CALLS_FILE}"
 
 printf 'initial\n' > "${CANONICAL_REPOSITORY}/README.md"
 git -C "${CANONICAL_REPOSITORY}" add .
@@ -111,9 +149,18 @@ if (
 fi
 
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
+AGENT_WORKSPACES_NODE_BIN="${MOCK_BIN}/node" \
+AGENT_WORKSPACES_NPM_BIN="${MOCK_BIN}/npm" \
+MOCK_NPM_CALLS_FILE="${NPM_CALLS_FILE}" \
   bash "${CANONICAL_REPOSITORY}/scripts/create-task-worktree.sh" \
     codex/guard-test-one \
     "${TASK_ONE_WORKTREE}" >/dev/null
+
+if [[ ! -d "${TASK_ONE_WORKTREE}/node_modules/tiktoken" ]] \
+  || ! grep -Fq $'ci --include=dev --ignore-scripts' "${NPM_CALLS_FILE}"; then
+  printf 'Task worktree creation did not bootstrap exact devDependencies.\n' >&2
+  exit 1
+fi
 
 printf 'task one\n' >> "${TASK_ONE_WORKTREE}/README.md"
 git -C "${TASK_ONE_WORKTREE}" add README.md
@@ -152,8 +199,44 @@ if [[ -d "${TASK_ONE_WORKTREE}" ]] \
   exit 1
 fi
 
+# После исчерпания npm retry Git-операция уже завершена: helper должен вернуть
+# отдельный exit 3, сохранить exact worktree/branch и напечатать идемпотентное
+# продолжение. Общий main-lock при этом уже обязан быть свободен.
+set +e
+AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
+AGENT_WORKSPACES_NODE_BIN="${MOCK_BIN}/node" \
+AGENT_WORKSPACES_NPM_BIN="${MOCK_BIN}/npm" \
+AGENT_WORKSPACES_NPM_RETRY_ATTEMPTS=1 \
+AGENT_WORKSPACES_NPM_RETRY_DELAY_SECONDS=0 \
+MOCK_NPM_ALWAYS_FAIL=1 \
+MOCK_NPM_CALLS_FILE="${NPM_CALLS_FILE}" \
+  bash "${CANONICAL_REPOSITORY}/scripts/create-task-worktree.sh" \
+    codex/guard-bootstrap-failure \
+    "${FAILED_BOOTSTRAP_WORKTREE}" \
+    > "${FAILED_BOOTSTRAP_OUTPUT}" 2>&1
+failed_bootstrap_status=$?
+set -e
+
+if [[ "${failed_bootstrap_status}" -ne 3 ]] \
+  || [[ ! -d "${FAILED_BOOTSTRAP_WORKTREE}" ]] \
+  || ! git -C "${CANONICAL_REPOSITORY}" show-ref --verify --quiet \
+    refs/heads/codex/guard-bootstrap-failure \
+  || ! grep -Fq 'worktree:bootstrap' "${FAILED_BOOTSTRAP_OUTPUT}"; then
+  printf 'Failed bootstrap did not preserve a resumable task worktree.\n' >&2
+  exit 1
+fi
+
+if [[ -d "${CANONICAL_REPOSITORY}/.git/trelio-agent-workspaces-runtime-main-update.lock" ]]; then
+  printf 'Failed dependency bootstrap kept the shared main lock active.\n' >&2
+  exit 1
+fi
+
+git -C "${CANONICAL_REPOSITORY}" worktree remove "${FAILED_BOOTSTRAP_WORKTREE}"
+git -C "${CANONICAL_REPOSITORY}" branch -D codex/guard-bootstrap-failure >/dev/null
+
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
   bash "${CANONICAL_REPOSITORY}/scripts/create-task-worktree.sh" \
+    --skip-bootstrap \
     codex/guard-test-two \
     "${TASK_TWO_WORKTREE}" >/dev/null
 
@@ -206,6 +289,7 @@ external_sha="$(git -C "${EXTERNAL_CLONE}" rev-parse HEAD)"
 
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
   bash "${CANONICAL_REPOSITORY}/scripts/create-task-worktree.sh" \
+    --skip-bootstrap \
     codex/guard-test-three \
     "${TASK_THREE_WORKTREE}" >/dev/null
 
