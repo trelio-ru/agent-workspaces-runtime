@@ -280,6 +280,15 @@ process по deadline. Общие browser discovery, Playwright runtime, lifecyc
 profile lock и cleanup не содержат provider URL, selectors или mutation
 semantics.
 
+Playwright bootstrap не предполагает, что npm установлен рядом с host-owned
+Node. Он разрешает настоящий `npm-cli.js` в стандартном layout самого runtime
+либо отдельной абсолютной PATH-установки Node/npm, включая Unix
+`bin/../lib/node_modules/npm`. Узкая фиксированная ссылка `~/.local/bin/npm`
+проверяется даже когда произвольный пользовательский каталог намеренно не вошёл
+в очищенный runtime PATH. Найденный entrypoint запускается текущим Node с
+`shell:false`; shell-wrapper `npm`/`npm.cmd` исполнять нельзя, а ссылка допустима
+только когда её realpath оканчивается точным `npm-cli.js`.
+
 Lease по умолчанию равна 30 минутам; signed skill может выбрать от минуты до
 6 часов. Команды, reconnect, новый Run, worker или CLI не продлевают исходный
 deadline. `manualAssist=true` разрешает provider-у открыть ручной fallback

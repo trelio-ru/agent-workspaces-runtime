@@ -163,6 +163,83 @@ test("shared browser runtime resolves npm-cli.js without a command shell", () =>
   }
 });
 
+test("shared browser runtime finds standalone npm from an absolute PATH layout", () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-path-npm-layout-"));
+  const hostNode = path.join(temporary, "host-runtime", "bin", "node");
+  const systemBin = path.join(temporary, "system-node", "bin");
+  const systemNpmCli = path.join(
+    temporary,
+    "system-node",
+    "lib",
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  try {
+    fs.mkdirSync(path.dirname(hostNode), { recursive: true });
+    fs.mkdirSync(path.dirname(systemNpmCli), { recursive: true });
+    fs.mkdirSync(systemBin, { recursive: true });
+    fs.writeFileSync(hostNode, "test host node placeholder\n");
+    fs.writeFileSync(systemNpmCli, "// standalone npm entrypoint\n");
+
+    // The desktop runtime Node intentionally has no bundled npm. Discovery
+    // must still use the separate absolute PATH installation without invoking
+    // its platform shell wrapper.
+    assert.deepEqual(resolveNpmInvocation({
+      nodeExecutable: hostNode,
+      environment: { PATH: systemBin },
+    }), {
+      executable: hostNode,
+      npmCliPath: fs.realpathSync(systemNpmCli),
+    });
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("shared browser runtime finds a user-local npm outside the skill PATH", {
+  skip: process.platform === "win32",
+}, () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-user-npm-layout-"));
+  const homeDirectory = path.join(temporary, "owner");
+  const hostNode = path.join(temporary, "desktop-host", "bin", "node");
+  const userNpmLink = path.join(homeDirectory, ".local", "bin", "npm");
+  const userNpmCli = path.join(
+    homeDirectory,
+    ".standalone-node",
+    "lib",
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
+  try {
+    fs.mkdirSync(path.dirname(hostNode), { recursive: true });
+    fs.mkdirSync(path.dirname(userNpmLink), { recursive: true });
+    fs.mkdirSync(path.dirname(userNpmCli), { recursive: true });
+    fs.writeFileSync(hostNode, "test desktop host node placeholder\n");
+    fs.writeFileSync(userNpmCli, "// user-local standalone npm entrypoint\n");
+    fs.symlinkSync(userNpmCli, userNpmLink);
+
+    // The host deliberately removes arbitrary user directories from the skill
+    // PATH. Browser bootstrap may inspect only the fixed ~/.local/bin/npm link
+    // and accepts it only after realpath proves the target is npm-cli.js.
+    assert.deepEqual(resolveNpmInvocation({
+      nodeExecutable: hostNode,
+      environment: {
+        HOME: homeDirectory,
+        PATH: path.dirname(hostNode),
+      },
+    }), {
+      executable: hostNode,
+      npmCliPath: fs.realpathSync(userNpmCli),
+    });
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("shared browser runtime discovers Microsoft Edge when Chrome is absent", () => {
   const environment = {
     PROGRAMFILES: "C:\\Program Files",

@@ -36,6 +36,11 @@ publication tooling также остаются вне этого публичн
   lifecycle и profile lock. Provider-specific navigation, selectors, read
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
+- Playwright bootstrap допускает отдельную системную Node/npm-установку, даже
+  когда host работает своим Node и очищает runtime PATH. Запускать можно только
+  exact `npm-cli.js`, найденный в стандартном absolute layout либо через
+  проверенную realpath-ссылку `~/.local/bin/npm`, текущим Node и с `shell:false`;
+  `npm`, `npm.cmd` и другой shell-wrapper не исполняются.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 
 ## Граница plugin/runtime

@@ -207,16 +207,30 @@ export const npmCliCandidates = ({
     .split(path.delimiter)
     .map((entry) => entry.trim())
     .filter((entry) => entry && path.isAbsolute(entry));
+  const homeDirectory = String(environmentValue(environment, "HOME") || os.homedir());
+  const npmDirectories = [...new Set([
+    ...pathDirectories,
+    process.platform !== "win32" && path.isAbsolute(homeDirectory)
+      ? path.join(homeDirectory, ".local", "bin")
+      : null,
+  ].filter(Boolean))];
   const ambient = environmentValue(environment, "npm_execpath");
-  return [
+  return [...new Set([
     ambient && path.isAbsolute(ambient) ? ambient : null,
     path.join(executableDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
     path.resolve(executableDirectory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-    ...pathDirectories.flatMap((directory) => [
+    ...npmDirectories.flatMap((directory) => [
       path.join(directory, "node_modules", "npm", "bin", "npm-cli.js"),
+      // Desktop hosts may run skills with their own Node executable while the
+      // user's standalone Node/npm bin is omitted from the sanitized PATH.
+      // Official Unix installers place npm under ../lib and expose an `npm`
+      // symlink from bin; resolve both forms to the JavaScript entrypoint so we
+      // keep shell:false and never execute npm, npm.cmd or another wrapper.
+      path.resolve(directory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+      path.join(directory, "npm"),
       path.join(directory, "npm-cli.js"),
     ]),
-  ].filter(Boolean);
+  ].filter(Boolean))];
 };
 
 export const resolveNpmInvocation = ({
