@@ -81,9 +81,14 @@ const buildTestBridgeCompatibility = (request, minimumVersion) => {
 };
 
 const runHook = (hookInput, environment) => new Promise((resolve, reject) => {
+  const isolatedCodexHome = environment?.CODEX_HOME
+    || path.join(environment?.HOME || os.tmpdir(), ".codex-test");
   const child = spawn(process.execPath, [hookScriptPath], {
     env: {
       ...process.env,
+      // Hook tests must never inspect or migrate the developer's real Codex
+      // config inherited from the desktop application.
+      CODEX_HOME: isolatedCodexHome,
       TRELIO_PLUGIN_VERSION: TEST_PLUGIN_VERSION,
       TRELIO_HOST_RUNTIME_VERSION: TEST_HOST_RUNTIME_VERSION,
       ...environment,
@@ -193,6 +198,58 @@ test("active hook distinguishes automatic host runtime recovery from plugin upgr
 
   assert.match(pluginFormatted, /обновите плагин/u);
   assert.match(pluginFormatted, /новой задаче/u);
+});
+
+test("active hook removes the exact legacy Codex MCP registration and requires restart", async () => {
+  const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-legacy-mcp-"));
+  const codexHome = path.join(temporaryHome, ".codex");
+  const configPath = path.join(codexHome, "config.toml");
+  try {
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(configPath, [
+      "model = \"gpt-test\"",
+      "",
+      "[mcp_servers.trelio-mcp]",
+      "command = \"legacy\"",
+      "",
+      "[mcp_servers.trelio]",
+      "url = \"https://trelio.example/mcp\"",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    const removed = await runHook({
+      hook_event_name: "SessionStart",
+      source: "startup",
+      session_id: "legacy-mcp-session",
+      model: "gpt-5.6-sol",
+    }, {
+      HOME: temporaryHome,
+      USERPROFILE: temporaryHome,
+      CODEX_HOME: codexHome,
+    });
+
+    assert.equal(removed.exitCode, 2);
+    assert.match(removed.stderr, /^TRELIO_CODEX_LEGACY_MCP_RESTART_REQUIRED:/u);
+    assert.match(removed.stderr, /Полностью перезапустите Codex\/ChatGPT/u);
+    assert.match(removed.stderr, /mcp__trelio_mcp__\*/u);
+    const migratedSource = await readFile(configPath, "utf8");
+    assert.doesNotMatch(migratedSource, /mcp_servers\.trelio-mcp/u);
+    assert.match(migratedSource, /\[mcp_servers\.trelio\]/u);
+
+    const restarted = await runHook({
+      hook_event_name: "SessionStart",
+      source: "startup",
+      session_id: "legacy-mcp-session",
+      model: "gpt-5.6-sol",
+    }, {
+      HOME: temporaryHome,
+      USERPROFILE: temporaryHome,
+      CODEX_HOME: codexHome,
+    });
+    assert.deepEqual(restarted, { exitCode: 0, stdout: "", stderr: "" });
+  } finally {
+    await rm(temporaryHome, { recursive: true, force: true });
+  }
 });
 
 test("active hook applies the stable runtime update and replays the exact payload once", async () => {

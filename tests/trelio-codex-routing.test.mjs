@@ -8,8 +8,11 @@ import {
   CODEX_TRELIO_DIRECT_TOOL_NAMESPACES,
   CodexRoutingConfigError,
   applyCodexTrelioHookRouting,
+  buildCodexLegacyMcpRemovalPatch,
   buildCodexRoutingConfigPatch,
+  migrateCodexLegacyTrelioMcpForRuntime,
   planCodexTrelioHookRouting,
+  removeCodexLegacyTrelioMcpRegistration,
   resolveCodexConfigPath,
 } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 
@@ -24,6 +27,125 @@ test("Codex config path follows CODEX_HOME and the Windows user profile", () => 
     environment: { CODEX_HOME: "D:\\CodexData", USERPROFILE: "C:\\Users\\Ada" },
     homeDirectory: "C:\\Fallback",
   }), "D:\\CodexData\\config.toml");
+});
+
+test("legacy Trelio MCP patch removes the exact server and all descendant tables", () => {
+  const source = [
+    "model = \"gpt-test\"",
+    "",
+    "[mcp_servers.\"trelio-mcp\"]",
+    "command = \"node\"",
+    "args = [\"legacy-server.mjs\"]",
+    "",
+    "[mcp_servers.\"trelio-mcp\".env]",
+    "LEGACY_ONLY = \"1\"",
+    "",
+    "[mcp_servers.trelio-mcp.tools.get_task]",
+    "enabled = false",
+    "",
+    "[mcp_servers.\"trelio-mcp-dev\"]",
+    "command = \"keep-me\"",
+    "",
+    "[mcp_servers.trelio]",
+    "url = \"https://trelio.example/mcp\"",
+    "",
+  ].join("\n");
+
+  const patch = buildCodexLegacyMcpRemovalPatch(source);
+
+  assert.equal(patch.status, "action_required");
+  assert.doesNotMatch(patch.nextSource, /legacy-server|LEGACY_ONLY|tools\.get_task/u);
+  assert.match(patch.nextSource, /\[mcp_servers\."trelio-mcp-dev"\]/u);
+  assert.match(patch.nextSource, /command = "keep-me"/u);
+  assert.match(patch.nextSource, /\[mcp_servers\.trelio\]/u);
+  assert.match(patch.nextSource, /https:\/\/trelio\.example\/mcp/u);
+  assert.equal(buildCodexLegacyMcpRemovalPatch(patch.nextSource).status, "ready");
+});
+
+test("legacy Trelio MCP patch removes exact dotted assignments only", () => {
+  const source = [
+    "mcp_servers.trelio-mcp.command = \"remove-me\"",
+    "mcp_servers.\"trelio-mcp\".args = [\"remove-me-too\"]",
+    "mcp_servers.trelio-mcp-dev.command = \"keep-me\"",
+    "",
+  ].join("\r\n");
+
+  const patch = buildCodexLegacyMcpRemovalPatch(source);
+
+  assert.equal(patch.status, "action_required");
+  assert.doesNotMatch(patch.nextSource, /remove-me/u);
+  assert.match(patch.nextSource, /trelio-mcp-dev\.command = "keep-me"\r\n/u);
+  assert.equal(patch.nextSource.replaceAll("\r\n", "").includes("\n"), false);
+});
+
+test("legacy Trelio MCP migration is automatic, value-free and idempotent", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-codex-legacy-mcp-"));
+  const configPath = path.join(directory, "config.toml");
+  try {
+    await writeFile(configPath, [
+      "secret_setting = \"must-stay-private\"",
+      "",
+      "[mcp_servers.trelio-mcp]",
+      "command = \"legacy\"",
+      "",
+      "[mcp_servers.trelio]",
+      "url = \"https://trelio.example/mcp\"",
+      "",
+    ].join("\n"), { mode: 0o600 });
+
+    const removed = await removeCodexLegacyTrelioMcpRegistration({ configPath });
+    assert.deepEqual(removed, {
+      schemaVersion: 1,
+      status: "removed",
+      serverName: "trelio-mcp",
+      restartRequired: true,
+    });
+    assert.doesNotMatch(JSON.stringify(removed), /must-stay-private|trelio-codex-legacy/u);
+    const nextSource = await readFile(configPath, "utf8");
+    assert.match(nextSource, /secret_setting = "must-stay-private"/u);
+    assert.doesNotMatch(nextSource, /\[mcp_servers\.trelio-mcp\]/u);
+    assert.match(nextSource, /\[mcp_servers\.trelio\]/u);
+
+    assert.deepEqual(await removeCodexLegacyTrelioMcpRegistration({ configPath }), {
+      schemaVersion: 1,
+      status: "not_found",
+      serverName: "trelio-mcp",
+      restartRequired: false,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime migration skips Claude and converts Codex write failures to a typed blocker", async () => {
+  let migrationCalls = 0;
+  const skipped = await migrateCodexLegacyTrelioMcpForRuntime({
+    environment: {
+      CLAUDE_PLUGIN_ROOT: "/plugin",
+      // A shell may carry this unrelated variable into Claude Code; it must
+      // not turn a Claude plugin process into a Codex migration owner.
+      CODEX_HOME: "/inherited/codex",
+    },
+    migrate: async () => {
+      migrationCalls += 1;
+      return { status: "removed" };
+    },
+  });
+  assert.equal(skipped.status, "not_applicable");
+  assert.equal(migrationCalls, 0);
+
+  const blocked = await migrateCodexLegacyTrelioMcpForRuntime({
+    environment: { CODEX_HOME: "/codex" },
+    migrate: async () => {
+      throw new CodexRoutingConfigError(
+        "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE",
+        "config is a symlink",
+      );
+    },
+  });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.error.code, "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE");
+  assert.match(blocked.error.message, /config is a symlink/u);
 });
 
 test("routing patch creates one focused Code Mode table", () => {

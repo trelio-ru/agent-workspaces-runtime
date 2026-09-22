@@ -27,6 +27,7 @@ import {
   isActiveLocalProposalRouteMarker,
   resolveNativeProposalRouteMarkerPaths,
 } from "./trelio-proposal-route-guard.mjs";
+import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mjs";
 
 const DISCOVERY_TOOLS = new Set([
   "list_knowledge_base_pages", "list_contacts", "list_registries",
@@ -52,6 +53,8 @@ const HOST_RUNTIME_RECOVERY_CODES = new Set([
   "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
 ]);
 const PLUGIN_UPGRADE_REQUIRED_CODE = "AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED";
+const LEGACY_MCP_RESTART_REQUIRED_CODE = "TRELIO_CODEX_LEGACY_MCP_RESTART_REQUIRED";
+const LEGACY_MCP_REMOVAL_FAILED_CODE = "TRELIO_CODEX_LEGACY_MCP_REMOVAL_FAILED";
 const SAFE_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,127}$/u;
 const TRELIO_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,127}$/u;
 // Claude Code qualifies MCP servers contributed by a plugin inside hook
@@ -743,6 +746,26 @@ export const recoverHookHostRuntimeUpgrade = async (
 const runHook = async () => {
   const hookInput = await readStdinJson();
   try {
+    if (
+      hookInput.hook_event_name === "SessionStart"
+      || hookInput.hook_event_name === "PreToolUse"
+    ) {
+      const migration = await migrateCodexLegacyTrelioMcpForRuntime();
+      if (migration.status === "removed") {
+        const error = new Error(
+          "Runtime удалил legacy MCP server trelio-mcp из пользовательского config.toml Codex",
+        );
+        error.code = LEGACY_MCP_RESTART_REQUIRED_CODE;
+        throw error;
+      }
+      if (migration.status === "blocked") {
+        const error = new Error(
+          `${migration.error?.message || "Runtime не смог удалить legacy MCP server trelio-mcp"} Выполните codex mcp remove trelio-mcp и затем полностью перезапустите Codex/ChatGPT`,
+        );
+        error.code = LEGACY_MCP_REMOVAL_FAILED_CODE;
+        throw error;
+      }
+    }
     await executeHookInput(hookInput);
     return 0;
   } catch (error) {
@@ -786,7 +809,19 @@ export const formatRuntimeHookFailure = (error) => {
         + "повторите запрос в новой задаче; иначе сначала обновите плагин. Полный "
         + "перезапуск нужен только если новая задача всё ещё видит старую версию."
       )
-      : "Устраните указанную причину и повторите запрос в текущей задаче.";
+      : code === LEGACY_MCP_RESTART_REQUIRED_CODE
+        ? (
+            "Полностью перезапустите Codex/ChatGPT: текущий процесс мог уже загрузить "
+            + "mcp__trelio_mcp__* в tool catalog. После restart повторите защищённое "
+            + "чтение через штатный mcp__trelio__* в этом же чате."
+          )
+        : code === LEGACY_MCP_REMOVAL_FAILED_CODE
+          ? (
+              "Автоматическая миграция не завершилась. Выполните codex mcp remove "
+              + "trelio-mcp, полностью перезапустите Codex/ChatGPT и повторите "
+              + "защищённое чтение через штатный mcp__trelio__*."
+            )
+          : "Устраните указанную причину и повторите запрос в текущей задаче.";
 
   return `${code}: активный hook остановил защищённую работу Trelio. ${message} ${recovery}\n`;
 };

@@ -8,6 +8,7 @@ export const CODEX_TRELIO_DIRECT_TOOL_NAMESPACES = Object.freeze([
   "mcp__trelio",
   "mcp__trelio_remote_skills",
 ]);
+export const CODEX_LEGACY_TRELIO_MCP_SERVER_NAME = "trelio-mcp";
 
 export const CODEX_ROUTING_PLAN_TOOL_NAME = "plan_codex_trelio_hook_routing";
 export const CODEX_ROUTING_APPLY_TOOL_NAME = "apply_codex_trelio_hook_routing";
@@ -281,6 +282,72 @@ const keyPathEquals = (actual, expected) => (
   actual.length === expected.length
   && actual.every((segment, index) => segment === expected[index])
 );
+
+const keyPathStartsWith = (actual, expected) => (
+  Array.isArray(actual)
+  && actual.length >= expected.length
+  && expected.every((segment, index) => actual[index] === segment)
+);
+
+/**
+ * Removes the exact obsolete server registration which older Trelio setup
+ * commands wrote as `[mcp_servers.trelio-mcp]`. The name is a product-owned
+ * migration key, so it does not need command/path fingerprinting or another
+ * confirmation. Similar user servers such as `trelio-mcp-dev` stay untouched.
+ *
+ * A table owns every following statement until the next table. Removing that
+ * complete range is essential: leaving `command`, `args`, `env` or nested
+ * `.tools` tables behind could either make TOML invalid or resurrect a partial
+ * legacy server after a later edit.
+ */
+export const buildCodexLegacyMcpRemovalPatch = (source) => {
+  const statements = scanTomlStatements(source);
+  const legacyPrefix = ["mcp_servers", CODEX_LEGACY_TRELIO_MCP_SERVER_NAME];
+  let currentTablePath = [];
+  let insideLegacyTable = false;
+  let removedStatements = 0;
+  const retained = [];
+
+  for (const statement of statements) {
+    const code = stripTrailingTomlComment(statement.text).trim();
+    let tablePath = parseTablePath(statement.text);
+    if (!tablePath && code.startsWith("[[") && code.endsWith("]]")) {
+      tablePath = parseTomlKeyPath(code.slice(2, -2));
+    }
+    const isTableBoundary = code.startsWith("[") && code.endsWith("]");
+    if (isTableBoundary) {
+      currentTablePath = tablePath;
+      insideLegacyTable = keyPathStartsWith(tablePath, legacyPrefix);
+      if (insideLegacyTable) {
+        removedStatements += 1;
+        continue;
+      }
+      retained.push(statement.text);
+      continue;
+    }
+
+    if (insideLegacyTable) {
+      removedStatements += 1;
+      continue;
+    }
+
+    const assignment = readAssignment(statement.text);
+    const effectiveKeyPath = assignment && currentTablePath
+      ? [...currentTablePath, ...assignment.keyPath]
+      : null;
+    if (keyPathStartsWith(effectiveKeyPath, legacyPrefix)) {
+      removedStatements += 1;
+      continue;
+    }
+    retained.push(statement.text);
+  }
+
+  return {
+    status: removedStatements > 0 ? "action_required" : "ready",
+    removedStatements,
+    nextSource: retained.join(""),
+  };
+};
 
 /**
  * Reads only a plain array of strings. Comments inside the value are rejected
@@ -738,6 +805,120 @@ const writeCodexConfigAtomically = async ({
   } finally {
     if (handle) await handle.close().catch(() => undefined);
     await filesystem.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+};
+
+const prepareCodexLegacyMcpRemoval = async ({
+  configPath,
+  filesystem,
+}) => {
+  const state = await readCodexConfig(configPath, filesystem);
+  const patch = buildCodexLegacyMcpRemovalPatch(state.source);
+  const nextBytes = Buffer.concat([
+    ...(state.bom ? [Buffer.from([0xef, 0xbb, 0xbf])] : []),
+    Buffer.from(patch.nextSource, "utf8"),
+  ]);
+  return {
+    configPath,
+    state,
+    patch,
+    nextBytes,
+    currentSha256: sha256(state.bytes),
+  };
+};
+
+/**
+ * Applies the product-owned legacy server migration without model or user
+ * confirmation. The operation is exact-name, idempotent and CAS-protected.
+ * A concurrent Codex/config writer gets one clean re-read; we never overwrite
+ * its newer bytes with a stale prepared file.
+ */
+export const removeCodexLegacyTrelioMcpRegistration = async ({
+  configPath = resolveCodexConfigPath(),
+  filesystem = fs,
+  maximumAttempts = 2,
+} = {}) => {
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    const prepared = await prepareCodexLegacyMcpRemoval({ configPath, filesystem });
+    if (prepared.patch.status === "ready") {
+      return {
+        schemaVersion: 1,
+        status: "not_found",
+        serverName: CODEX_LEGACY_TRELIO_MCP_SERVER_NAME,
+        restartRequired: false,
+      };
+    }
+    try {
+      await writeCodexConfigAtomically({ prepared, filesystem });
+    } catch (error) {
+      if (
+        error?.code === "TRELIO_CODEX_ROUTING_PLAN_STALE"
+        && attempt < maximumAttempts
+      ) continue;
+      throw error;
+    }
+
+    const verified = await prepareCodexLegacyMcpRemoval({ configPath, filesystem });
+    if (verified.patch.status !== "ready") {
+      throw new CodexRoutingConfigError(
+        "TRELIO_CODEX_LEGACY_MCP_REMOVAL_FAILED",
+        "Legacy MCP server trelio-mcp остался в пользовательском config.toml после atomic read-back.",
+      );
+    }
+    return {
+      schemaVersion: 1,
+      status: "removed",
+      serverName: CODEX_LEGACY_TRELIO_MCP_SERVER_NAME,
+      restartRequired: true,
+    };
+  }
+
+  throw new CodexRoutingConfigError(
+    "TRELIO_CODEX_LEGACY_MCP_REMOVAL_RACE",
+    "Пользовательский config.toml Codex повторно изменился во время удаления legacy MCP server trelio-mcp.",
+  );
+};
+
+/**
+ * Shared startup wrapper for the Codex local MCP and lifecycle hook. Claude
+ * loads the same signed runtime, so the client guard must live beside the
+ * migration instead of being reimplemented by each entrypoint.
+ */
+export const migrateCodexLegacyTrelioMcpForRuntime = async ({
+  environment = process.env,
+  migrate = removeCodexLegacyTrelioMcpRegistration,
+} = {}) => {
+  if (
+    environment.CLAUDE_CODE_ENTRYPOINT
+    || (
+      environment.CLAUDE_PLUGIN_ROOT
+      && !environment.CODEX_CLI_PATH
+      && !environment.CODEX_THREAD_ID
+    )
+  ) {
+    return {
+      schemaVersion: 1,
+      status: "not_applicable",
+      restartRequired: false,
+    };
+  }
+  try {
+    return await migrate();
+  } catch (error) {
+    return {
+      schemaVersion: 1,
+      status: "blocked",
+      serverName: CODEX_LEGACY_TRELIO_MCP_SERVER_NAME,
+      restartRequired: false,
+      error: {
+        code: error instanceof CodexRoutingConfigError
+          ? error.code
+          : "TRELIO_CODEX_LEGACY_MCP_REMOVAL_FAILED",
+        message: error instanceof Error
+          ? error.message
+          : "Не удалось удалить legacy MCP server trelio-mcp.",
+      },
+    };
   }
 };
 

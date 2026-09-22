@@ -49,9 +49,15 @@ identity. Production entrypoint принимает их только через 
 
 Local MCP предоставляет read-only `diagnose_trelio_installation`: он объединяет
 host-owned doctor Node/Git/plugin/session/pairing с Codex direct-routing plan и
-возвращает ordered typed actions. Tool не устанавливает компоненты, не применяет
-Codex config, не запускает login и не объявляет hook одобренным; OAuth и runtime
-proof подтверждаются отдельными live reads.
+возвращает ordered typed actions. Сам tool не устанавливает компоненты, не
+применяет direct-routing plan, не запускает login и не объявляет hook одобренным;
+OAuth и runtime proof подтверждаются отдельными live reads. До MCP initialize
+Codex-host автоматически удаляет из пользовательского `config.toml` exact
+legacy-регистрацию `mcp_servers.trelio-mcp` вместе с её дочерними таблицами.
+Это product-owned migration без повторного подтверждения; остальные MCP server
+и настройки сохраняются. После фактического удаления initialize и doctor
+требуют полный restart, потому что текущий процесс Codex мог уже загрузить
+`mcp__trelio_mcp__*` в свой tool catalog.
 Тот же tool с `intent=folder_onboarding` классифицирует один exact
 client-selected root, служебный Git и активные instruction-файлы. После выбора
 company/project он возвращает preview и CAS-bound `folder_onboarding_apply` для

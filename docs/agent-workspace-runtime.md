@@ -20,6 +20,20 @@ Local MCP facade запускает bundled bridge через текущий `pr
 корень загруженного плагина. Удалённый после обновления `cwd` долгоживущего
 host-процесса не наследуется; `cwd` самого host не меняется.
 
+Перед Codex MCP initialize runtime выполняет узкую миграцию пользовательского
+`config.toml`: exact legacy server `trelio-mcp`, созданный прежним setup-flow,
+удаляется вместе со всеми дочерними таблицами. Имя принадлежит Trelio, поэтому
+миграция не сверяет старую command/path fingerprint и не требует отдельного
+подтверждения. Похожие имена и все остальные настройки остаются byte-for-byte;
+запись проходит через bounded UTF-8 parser, optimistic read-back и atomic
+replacement. После реального удаления текущий local MCP process сохраняет
+`restartRequired` в initialize/doctor: уже построенный клиентом tool catalog
+может всё ещё содержать `mcp__trelio_mcp__*`, и только полный restart исключает
+этот namespace. Ошибка безопасной записи не скрывается статусом ready, а
+возвращает exact manual fallback `codex mcp remove trelio-mcp`. Claude-host эту
+Codex-миграцию не выполняет. Штатные `trelio` и `trelio-remote-skills`, hook
+matcher и direct-routing confirmation flow не меняются.
+
 Loader передаёт shell-версию отдельно в `TRELIO_PLUGIN_VERSION`, а версию
 подписанного runtime – в `TRELIO_HOST_RUNTIME_VERSION`. Doctor сравнивает Codex
 и Claude manifests именно с shell-версией; внутренний fallback bridge ABI не

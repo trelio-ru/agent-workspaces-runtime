@@ -14,6 +14,7 @@ import {
   RemoteMcpHostError,
   attachLocalContextNextCall,
   assertExactReadOnlyToolList,
+  buildAgentSkillRoutingInstructions,
   buildLocalProposalAppResourceMeta,
   buildLocalProposalRenderResult,
   buildRemoteMcpRequestHeaders,
@@ -522,6 +523,14 @@ const createStdioHarness = (callTool, options = {}) => {
     outputStream,
     origin: "https://trelio.test",
     callTool,
+    // Unit harnesses must never inspect or rewrite the developer's real Codex
+    // config. Dedicated startup-migration tests override this exact stub.
+    legacyMcpMigration: async () => ({
+      schemaVersion: 1,
+      status: "not_found",
+      serverName: "trelio-mcp",
+      restartRequired: false,
+    }),
     ...options,
   });
 
@@ -2033,6 +2042,76 @@ test("installation diagnostic centralizes local and Codex routing decisions with
   assert.equal(applyCalls, 0);
 });
 
+test("installation diagnostic cannot report ready after automatic legacy MCP removal", async () => {
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    { clientKind: "codex", intent: "diagnostics" },
+    {
+      localPrerequisiteDiagnosis: async () => ({
+        ...readyLocalInstallationDiagnosis,
+        connection: { status: "ready", deviceSessionConfigured: true },
+      }),
+      codexRoutingPlan: async () => ({
+        schemaVersion: 1,
+        status: "ready",
+        planHash: null,
+        missingNamespaces: [],
+        restartRequired: false,
+      }),
+      codexLegacyMcpMigration: {
+        schemaVersion: 1,
+        status: "removed",
+        serverName: "trelio-mcp",
+        restartRequired: true,
+      },
+    },
+  );
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.equal(payload.status, "action_required");
+  assert.equal(payload.codexLegacyMcpMigration.status, "removed");
+  assert.deepEqual(payload.requiredActions.map(({ code }) => code), [
+    "RESTART_CODEX_AFTER_LEGACY_TRELIO_MCP_REMOVAL",
+  ]);
+  assert.equal(payload.requiredActions[0].removedServerName, "trelio-mcp");
+  assert.equal(payload.requiredActions[0].restartRequired, true);
+});
+
+test("installation diagnostic exposes the exact manual fallback only after automatic removal failed", async () => {
+  const result = await handleToolCall(
+    "https://trelio.ru",
+    "diagnose_trelio_installation",
+    { clientKind: "codex", intent: "diagnostics" },
+    {
+      localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexRoutingPlan: async () => ({
+        schemaVersion: 1,
+        status: "ready",
+        planHash: null,
+        missingNamespaces: [],
+        restartRequired: false,
+      }),
+      codexLegacyMcpMigration: {
+        schemaVersion: 1,
+        status: "blocked",
+        serverName: "trelio-mcp",
+        restartRequired: false,
+        error: {
+          code: "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE",
+          message: "Пользовательский config.toml Codex должен быть обычным файлом, не ссылкой.",
+        },
+      },
+    },
+  );
+  const payload = JSON.parse(result.content[0].text);
+
+  assert.equal(payload.status, "action_required");
+  assert.equal(payload.requiredActions[0].code, "REMOVE_LEGACY_TRELIO_MCP_REGISTRATION");
+  assert.equal(payload.requiredActions[0].fallbackCommand, "codex mcp remove trelio-mcp");
+  assert.equal(payload.requiredActions[0].authority, "automatic_repair_failed");
+});
+
 test("folder onboarding intent delegates only to the host-side read-only planner", async () => {
   let plannerInput = null;
   const result = await handleToolCall(
@@ -3434,6 +3513,51 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
   ]) assert.match(instructions, invariant);
 });
 
+test("stdio startup removes legacy Codex MCP before initialize and requires restart", async () => {
+  let migrationCalls = 0;
+  const harness = createStdioHarness(async () => {
+    throw new Error("tool call is not expected");
+  }, {
+    legacyMcpMigration: async () => {
+      migrationCalls += 1;
+      return {
+        schemaVersion: 1,
+        status: "removed",
+        serverName: "trelio-mcp",
+        restartRequired: true,
+      };
+    },
+  });
+
+  try {
+    harness.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-03-26" },
+    });
+    const initialized = await harness.waitForFrame(({ id }) => id === 1);
+    assert.equal(migrationCalls, 1);
+    assert.match(initialized.result.instructions, /автоматически удалил legacy MCP server trelio-mcp/u);
+    assert.match(initialized.result.instructions, /Полностью перезапусти Codex\/ChatGPT/u);
+    assert.match(initialized.result.instructions, /не вызывай уже загруженные mcp__trelio_mcp__\*/u);
+    assert.match(initialized.result.instructions, /Native Trelio не требует каталога/u);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("legacy Codex MCP migration failure stays visible in initialize instructions", () => {
+  const instructions = buildAgentSkillRoutingInstructions({
+    status: "blocked",
+    error: { code: "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE" },
+  });
+
+  assert.match(instructions, /проблему автоматического удаления legacy MCP server trelio-mcp/u);
+  assert.match(instructions, /Запусти diagnose_trelio_installation/u);
+  assert.match(instructions, /не объявляй установку готовой/u);
+});
+
 test("integration-only completion can reach the full context review without a task or Run", async () => {
   const instructions = await readRoutingInstructionsFromInitialize();
   const reference = "trelio-workspace-worker/references/workspace-context-review.md";
@@ -3731,6 +3855,9 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
     env: {
       ...process.env,
       CODEX_MCP_NODE_PATH: process.execPath,
+      CODEX_HOME: "",
+      CODEX_CLI_PATH: "",
+      CLAUDE_PLUGIN_ROOT: pluginDirectory,
       TRELIO_PLUGIN_VERSION: "2.4.0",
       TRELIO_HOST_RUNTIME_VERSION: "2.4.1",
     },

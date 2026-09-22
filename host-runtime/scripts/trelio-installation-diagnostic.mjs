@@ -109,6 +109,25 @@ const buildBlockedCodexRoutingAction = (routing) => ({
   preserves: ["hook_trust", "oauth", "plugin_enabled_state"],
 });
 
+const buildRemovedLegacyMcpRestartAction = () => ({
+  code: "RESTART_CODEX_AFTER_LEGACY_TRELIO_MCP_REMOVAL",
+  reasonCode: "TRELIO_CODEX_LEGACY_MCP_REMOVED",
+  authority: "client_restart_required",
+  removedServerName: "trelio-mcp",
+  restartRequired: true,
+  nextStep: "Полностью перезапустите Codex/ChatGPT и повторите защищённое чтение Trelio в этом же чате.",
+});
+
+const buildBlockedLegacyMcpRemovalAction = (migration) => ({
+  code: "REMOVE_LEGACY_TRELIO_MCP_REGISTRATION",
+  reasonCode: migration.error?.code || "TRELIO_CODEX_LEGACY_MCP_REMOVAL_FAILED",
+  authority: "automatic_repair_failed",
+  serverName: "trelio-mcp",
+  fallbackCommand: "codex mcp remove trelio-mcp",
+  restartRequired: true,
+  message: migration.error?.message || "Runtime не смог автоматически удалить legacy MCP server trelio-mcp.",
+});
+
 const buildBridgeConnectionAction = (connection) => ({
   code: connection?.status === "pairing_pending"
     ? "CONTINUE_BRIDGE_PAIRING"
@@ -197,6 +216,7 @@ export const buildTrelioInstallationDiagnostic = ({
   intent: rawIntent,
   local,
   codexRouting = null,
+  codexLegacyMcpMigration = null,
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
@@ -217,6 +237,11 @@ export const buildTrelioInstallationDiagnostic = ({
   if (local.node?.status !== "ready") requiredActions.push(buildNodeAction(local));
   if (local.git?.status !== "ready") requiredActions.push(buildGitAction(local));
   if (local.plugin?.status !== "ready") requiredActions.push(buildPluginAction(local));
+  if (clientKind === "codex" && codexLegacyMcpMigration?.status === "removed") {
+    requiredActions.push(buildRemovedLegacyMcpRestartAction());
+  } else if (clientKind === "codex" && codexLegacyMcpMigration?.status === "blocked") {
+    requiredActions.push(buildBlockedLegacyMcpRemovalAction(codexLegacyMcpMigration));
+  }
   if (clientKind === "codex" && codexRouting.status === "action_required") {
     requiredActions.push(buildCodexRoutingAction(codexRouting));
   } else if (clientKind === "codex" && codexRouting.status !== "ready") {
@@ -259,6 +284,16 @@ export const buildTrelioInstallationDiagnostic = ({
       : "ready_for_live_verification",
     local: buildLocalSummary(local),
     codexRouting: clientKind === "codex" ? codexRouting : null,
+    codexLegacyMcpMigration: clientKind === "codex" && codexLegacyMcpMigration
+      ? {
+          status: codexLegacyMcpMigration.status,
+          serverName: codexLegacyMcpMigration.serverName ?? "trelio-mcp",
+          restartRequired: codexLegacyMcpMigration.restartRequired === true,
+          ...(codexLegacyMcpMigration.error
+            ? { error: codexLegacyMcpMigration.error }
+            : {}),
+        }
+      : null,
     clientInspection: buildClientInspection(clientKind),
     requiredActions,
     warnings,

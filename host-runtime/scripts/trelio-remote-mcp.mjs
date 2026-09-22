@@ -25,7 +25,9 @@ import {
   CODEX_ROUTING_PLAN_TOOL_NAME,
   CodexRoutingConfigError,
   applyCodexTrelioHookRouting,
+  migrateCodexLegacyTrelioMcpForRuntime,
   planCodexTrelioHookRouting,
+  removeCodexLegacyTrelioMcpRegistration,
 } from "./trelio-codex-routing.mjs";
 import { HOST_RUNTIME_VERSION } from "./trelio-component-versions.mjs";
 
@@ -208,6 +210,19 @@ export const AGENT_SKILL_ROUTING_INSTRUCTIONS = [
   "Явная development/debug/audit/release задача в названном каноническом репозитории разрешает maintainer tools и bounded read-only probes; одного checkout мало. Сохраняй scope/ACL, secret delivery, no-logging, output bounds и authority внешних mutations; обычная работа компании возвращается к каталогу. Подробнее – выбранный skill и external-services.md.",
   "Отвечай по-русски, если пользователь не выбрал другой язык. Ограничение: причина и следующий шаг. Сохраняй точные цитаты/ссылки, помечай перевод; не переводи команды, поля, tool names и error codes.",
 ].join("\n\n");
+
+const CODEX_LEGACY_MCP_RESTART_INSTRUCTION = "Runtime автоматически удалил legacy MCP server trelio-mcp из пользовательского config.toml Codex. Полностью перезапусти Codex/ChatGPT до следующего защищённого чтения. До перезапуска не вызывай уже загруженные mcp__trelio_mcp__*; используй только штатные mcp__trelio__* и mcp__trelio_remote_skills__* после restart.";
+const CODEX_LEGACY_MCP_BLOCKED_INSTRUCTION = "Runtime обнаружил проблему автоматического удаления legacy MCP server trelio-mcp. Не используй mcp__trelio_mcp__*. Запусти diagnose_trelio_installation и выполни возвращённое exact recovery; не объявляй установку готовой до устранения этого действия.";
+
+export const buildAgentSkillRoutingInstructions = (legacyMcpMigration = null) => {
+  if (legacyMcpMigration?.status === "removed") {
+    return `${CODEX_LEGACY_MCP_RESTART_INSTRUCTION}\n\n${AGENT_SKILL_ROUTING_INSTRUCTIONS}`;
+  }
+  if (legacyMcpMigration?.status === "blocked") {
+    return `${CODEX_LEGACY_MCP_BLOCKED_INSTRUCTION}\n\n${AGENT_SKILL_ROUTING_INSTRUCTIONS}`;
+  }
+  return AGENT_SKILL_ROUTING_INSTRUCTIONS;
+};
 
 const FORBIDDEN_HEADERS = new Set([
   "accept",
@@ -5045,6 +5060,7 @@ export const handleToolCall = async (
     folderOnboardingPrepare = prepareTrelioFolderOnboarding,
     codexRoutingPlan = planCodexTrelioHookRouting,
     codexRoutingApply = applyCodexTrelioHookRouting,
+    codexLegacyMcpMigration = null,
   } = {},
 ) => {
   throwIfAborted(signal);
@@ -5300,6 +5316,7 @@ export const handleToolCall = async (
       intent: rawArguments.intent,
       local,
       codexRouting,
+      codexLegacyMcpMigration,
     }));
   }
   if (COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(name)) {
@@ -5420,6 +5437,7 @@ export const handleLocalMcpMessage = async (
     proposalCapabilityConfigDirectory,
     clientCapabilities = null,
     requestClient = null,
+    codexLegacyMcpMigration = null,
     signal,
   } = {},
 ) => {
@@ -5443,7 +5461,7 @@ export const handleLocalMcpMessage = async (
         // Server-wide instructions are intentionally returned by the static
         // local host: this makes skill-first routing visible before Codex
         // decides that a browser or another currently exposed tool is easier.
-        instructions: AGENT_SKILL_ROUTING_INSTRUCTIONS,
+        instructions: buildAgentSkillRoutingInstructions(codexLegacyMcpMigration),
       },
     };
   }
@@ -5513,6 +5531,7 @@ export const handleLocalMcpMessage = async (
             proposalCapabilityConfigDirectory,
             clientCapabilities,
             requestClient,
+            codexLegacyMcpMigration,
           },
         )),
       };
@@ -5553,7 +5572,13 @@ export const runStdioHost = async ({
   origin = normalizeOrigin(process.env.TRELIO_ORIGIN || DEFAULT_ORIGIN),
   callTool = handleToolCall,
   handleMessage = handleLocalMcpMessage,
+  environment = process.env,
+  legacyMcpMigration = removeCodexLegacyTrelioMcpRegistration,
 } = {}) => {
+  const codexLegacyMcpMigration = await migrateCodexLegacyTrelioMcpForRuntime({
+    environment,
+    migrate: legacyMcpMigration,
+  });
   const input = readline.createInterface({
     input: inputStream,
     crlfDelay: Infinity,
@@ -5669,6 +5694,7 @@ export const runStdioHost = async ({
         signal: controller?.signal,
         clientCapabilities,
         requestClient,
+        codexLegacyMcpMigration,
       }));
     } finally {
       if (controller && activeToolCalls.get(message.id) === controller) {
