@@ -5108,9 +5108,21 @@ export const handleToolCall = async (
     // Unlike the read/search helpers this continuation must preserve the
     // native CallToolResult envelope, including isError, structuredContent
     // and MCP App metadata. The local handler hydrates only protected values.
+    // The legacy action route also carries proposal-context reads; their
+    // provider must reach the hook even though the native envelope omits it.
     return compactLocalNativeMcpResult(
       routeArguments?.nativeTool,
-      await localActionOperation(origin, routeArguments, { signal }),
+      await localActionOperation(origin, routeArguments, {
+        signal,
+        onProviderSelected: async (provider) => proposalProviderSelectionRecorder?.({
+          origin,
+          companySlug: routeArguments?.companySlug,
+          target: routeArguments?.arguments?.runId
+            ? { runId: routeArguments.arguments.runId }
+            : null,
+          provider,
+        }),
+      }),
       routeArguments?.arguments,
     );
   };

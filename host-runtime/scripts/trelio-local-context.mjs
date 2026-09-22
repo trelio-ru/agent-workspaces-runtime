@@ -8125,7 +8125,7 @@ const handleLocalTaskAttachmentStreamOperation = async ({
 export const handleTrelioLocalActionOperation = async (
   origin,
   rawInput,
-  { signal } = {},
+  { signal, onProviderSelected } = {},
 ) => {
   const companySlug = normalizeCompanySlug(rawInput?.companySlug);
   const nativeTool = String(rawInput?.nativeTool || "").trim();
@@ -8160,6 +8160,13 @@ export const handleTrelioLocalActionOperation = async (
     return handleGeneratedAgentSecretSave(origin, rawInput, { signal });
   }
   const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal });
+  // Legacy native reads can arrive through route=action. Record the bridge's
+  // authoritative provider choice before returning their native-shaped result:
+  // that result has no provider field, but the next proposal render must be
+  // stopped by the hook before Codex mounts the wrong MCP App.
+  await onProviderSelected?.(provider.nativeProvider
+    ? "native_trelio"
+    : "local_company_context");
   const hasLocalFilePath = rawInput.localFilePath !== undefined;
   if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment"].includes(nativeTool)) {
     throw new TrelioLocalContextError(

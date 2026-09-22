@@ -76,6 +76,11 @@ Local company search и Workspace-file search возвращают один ко
 результата. Plugin reference хранит только authority/fail-closed правила, а не
 дублирует устройство mirror, ranking и fetch routing.
 
+При server-selected локальном `route=action` runtime сохраняет короткоживущий
+непрозрачный provider marker, включая legacy reads proposal context. Hook
+останавливает неподходящий native proposal renderer до монтирования MCP App;
+для plain company marker снимается при подтверждённом native provider.
+
 ## Локальная разработка
 
 Требуются Node.js 22+ и standalone Git 2.28+.

@@ -3254,6 +3254,60 @@ test("the first bridge-selected local company read records proposal routing", as
   }]);
 });
 
+test("legacy action proposal context records and clears the provider before native App render", async () => {
+  const configDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-legacy-action-provider-"));
+  const runId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const selection = {
+    origin: "https://trelio.example",
+    companySlug: "protected-company",
+    target: { runId },
+    configDirectory,
+  };
+  let provider = "local_company_context";
+  const call = () => handleToolCall(
+    selection.origin,
+    "continue_trelio_local_action",
+    {
+      schemaVersion: 1,
+      route: "action",
+      parameters: {
+        companySlug: selection.companySlug,
+        nativeTool: "get_task_review_context",
+        arguments: { runId, proposalKinds: ["comment", "status"] },
+      },
+    },
+    {
+      localActionOperation: async (_origin, _input, { onProviderSelected }) => {
+        await onProviderSelected(provider);
+        return { structuredContent: { schemaVersion: 1, task: { title: "Result" } } };
+      },
+      proposalProviderSelectionRecorder: (record) => persistLocalProposalProviderSelection({
+        ...record,
+        configDirectory,
+      }),
+    },
+  );
+
+  try {
+    const result = await call();
+    assert.equal(result.structuredContent.task.title, "Result");
+    const markerPaths = resolveSelectedLocalProposalRouteMarkerPaths(selection);
+    assert.equal(markerPaths.length, 2);
+    for (const markerPath of markerPaths) {
+      assert.match(await readFile(markerPath, "utf8"), /"provider": "local_company_context"/u);
+    }
+
+    // A later confirmed plain-company selection must not leave a stale guard.
+    provider = "native_trelio";
+    await call();
+    for (const markerPath of markerPaths) {
+      await assert.rejects(readFile(markerPath, "utf8"), { code: "ENOENT" });
+    }
+  } finally {
+    await rm(configDirectory, { recursive: true, force: true });
+  }
+});
+
 test("local proposal provider persistence contains only opaque short-lived routing state", async () => {
   const configDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-proposal-provider-"));
   const selection = {
