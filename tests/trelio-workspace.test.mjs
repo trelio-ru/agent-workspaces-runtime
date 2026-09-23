@@ -7397,7 +7397,7 @@ test("Windows DPAPI protects and restores a bridge session for the current user"
   const ciphertext = await protectWindowsBridgeSessionToken(origin, token);
 
   assert.notEqual(ciphertext, token);
-  assert.doesNotMatch(ciphertext, /windows-dpapi-roundtrip/u);
+  assert.equal(ciphertext.includes("windows-dpapi-roundtrip"), false);
   assert.equal(
     await unprotectWindowsBridgeSessionToken(origin, ciphertext),
     token,
@@ -7405,9 +7405,12 @@ test("Windows DPAPI protects and restores a bridge session for the current user"
   await assert.rejects(
     unprotectWindowsBridgeSessionToken("https://another-origin.test", ciphertext),
     (error) => {
-      assert.match(String(error), /Windows DPAPI не выполнил операцию unprotect/u);
-      assert.doesNotMatch(String(error), new RegExp(token));
-      assert.doesNotMatch(String(error), new RegExp(ciphertext));
+      const message = String(error);
+      // A failed secrecy assertion must not print the token or ciphertext into
+      // public CI logs while checking the Windows DPAPI error boundary.
+      assert.equal(message.includes("Windows DPAPI не выполнил операцию unprotect"), true);
+      assert.equal(message.includes(token), false);
+      assert.equal(message.includes(ciphertext), false);
       assert.equal(error.stdout, undefined);
       assert.equal(error.stderr, undefined);
       return true;
