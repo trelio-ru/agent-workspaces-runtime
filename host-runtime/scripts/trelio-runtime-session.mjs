@@ -108,7 +108,14 @@ const resolveClientSessionId = (hookInput, environment = process.env) => {
 export const resolveTrelioMcpToolName = (hookInput) => {
   const rawName = String(hookInput?.tool_name || hookInput?.toolName || "");
   if (LOCAL_ACTION_HOST_TOOL_PATTERNS.some((pattern) => pattern.test(rawName))) {
-    const nativeTool = String(resolveToolInput(hookInput)?.nativeTool || "").trim().toLowerCase();
+    // The single public local tool wraps the native call in parameters. Read
+    // the method from that envelope so its proof is signed for the native
+    // method that the dispatcher will execute, never for a stale top-level
+    // alias or an untrusted argument inside parameters.arguments.
+    const input = resolveToolInput(hookInput);
+    const nativeTool = input?.schemaVersion === 1
+      ? String(input?.parameters?.nativeTool || "").trim().toLowerCase()
+      : "";
     return TRELIO_TOOL_NAME_PATTERN.test(nativeTool) ? nativeTool : null;
   }
   const doubleUnderscore = rawName.match(/^(?:mcp__)?trelio__([a-z0-9_]+)$/iu);

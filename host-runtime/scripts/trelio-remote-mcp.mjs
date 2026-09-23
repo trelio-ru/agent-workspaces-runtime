@@ -5191,6 +5191,11 @@ export const handleToolCall = async (
         companySlug: parameters.companySlug,
         nativeTool: parameters.nativeTool,
         arguments: nativeArguments,
+        // Only the top-level field injected by PreToolUse may cross into the
+        // bridge. A model-supplied value inside parameters has no authority.
+        ...(rawArguments.runtimeSessionProof
+          ? { runtimeSessionProof: rawArguments.runtimeSessionProof }
+          : {}),
         ...(parameters.localFilePath !== undefined
           ? { localFilePath: parameters.localFilePath }
           : {}),

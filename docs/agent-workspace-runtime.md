@@ -244,6 +244,13 @@ owner-private snapshot, вычисляет размер/SHA-256, получае�
 reserved attachment ID, поэтому не создаёт дубликат. Inline-image transport
 остаётся отдельным bounded compatibility flow.
 
+В общем local-action envelope метод находится в `parameters.nativeTool`.
+`PreToolUse` подписывает proof для этого метода и добавляет его только в
+top-level `runtimeSessionProof`; local MCP передаёт этот proof bridge отдельно
+от `parameters.arguments`. Поля с таким именем внутри `parameters` не являются
+допуском. Plain attachment reservation и encrypted action используют один
+проверяемый server admission без повторной подписи модели.
+
 Encrypted `download_attachment` по server-selected local route расшифровывает
 проверенный `TRELIOE1` в отдельный owner-private файл до 24 MiB и возвращает
 `delivery=local-file`, `localFilePath`, исходное имя/MIME, размер, SHA-256 и

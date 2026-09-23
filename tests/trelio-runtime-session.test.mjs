@@ -152,12 +152,45 @@ test("hook protects context and mutation but leaves discovery and recovery open"
   assert.equal(resolveTrelioMcpToolName({ tool_name: "exec_command" }), null);
   assert.equal(resolveTrelioMcpToolName({
     tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
-    tool_input: { nativeTool: "create_task", arguments: {} },
+    tool_input: {
+      schemaVersion: 1,
+      route: "action",
+      parameters: { nativeTool: "create_task", arguments: {} },
+    },
   }), "create_task");
   assert.equal(resolveTrelioMcpToolName({
     tool_name: "mcp__plugin_trelio-agent-workspaces_trelio-remote-skills__continue_trelio_local_action",
+    tool_input: {
+      schemaVersion: 1,
+      route: "action",
+      parameters: { nativeTool: "upload_attachment", arguments: {} },
+    },
+  }), "upload_attachment");
+  assert.equal(resolveTrelioMcpToolName({
+    tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
     tool_input: { nativeTool: "create_task", arguments: {} },
-  }), "create_task");
+  }), null);
+  assert.equal(resolveTrelioMcpToolName({
+    tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
+    tool_input: {
+      schemaVersion: 1,
+      route: "action",
+      nativeTool: "create_task",
+      parameters: { nativeTool: "invalid/tool", arguments: {} },
+    },
+  }), null);
+  assert.equal(resolveTrelioMcpToolName({
+    tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
+    tool_input: {
+      schemaVersion: 1,
+      route: "action",
+      parameters: { nativeTool: "upload_attachment", arguments: { nativeTool: "create_task" } },
+    },
+  }), "upload_attachment");
+  assert.equal(resolveTrelioMcpToolName({
+    tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
+    tool_input: { schemaVersion: 1, route: "action", parameters: { nativeTool: "invalid/tool", arguments: {} } },
+  }), null);
   assert.equal(resolveTrelioMcpToolName({
     tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
     tool_input: { nativeTool: "invalid/tool", arguments: {} },
@@ -989,9 +1022,14 @@ test("SessionStart pins the initial model and supported host names inject verifi
       transcript_path: transcriptPath,
       tool_name: "mcp__plugin_trelio-agent-workspaces_trelio-remote-skills__continue_trelio_local_action",
       tool_input: {
-        companySlug: "vkus",
-        nativeTool: "create_task",
-        arguments: { projectSlug: "first", title: "Test" },
+        schemaVersion: 1,
+        route: "action",
+        parameters: {
+          companySlug: "vkus",
+          nativeTool: "upload_attachment",
+          localFilePath: "/tmp/demo.png",
+          arguments: { projectSlug: "first", taskNumber: 2 },
+        },
       },
     }, environment);
     assert.equal(localActionGuarded.exitCode, 0);
@@ -999,13 +1037,14 @@ test("SessionStart pins the initial model and supported host names inject verifi
     const localActionInput = JSON.parse(
       localActionGuarded.stdout,
     ).hookSpecificOutput.updatedInput;
-    assert.equal(localActionInput.nativeTool, "create_task");
+    assert.equal(localActionInput.parameters.nativeTool, "upload_attachment");
+    assert.equal(localActionInput.parameters.runtimeSessionProof, undefined);
     assert.equal(crypto.verify(
       null,
       Buffer.from([
         "trelio-runtime-proof-v1",
         runtimeSessionId,
-        "create_task",
+        "upload_attachment",
         localActionInput.runtimeSessionProof.issuedAt,
         localActionInput.runtimeSessionProof.nonce,
       ].join("\n")),

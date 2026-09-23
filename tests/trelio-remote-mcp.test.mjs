@@ -2296,6 +2296,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   assert.equal(Buffer.byteLength(JSON.stringify(actionTool), "utf8") <= 1_000, true);
   assert.equal(Buffer.byteLength(JSON.stringify(workspaceActionTool), "utf8") <= 900, true);
   assert.equal(actionTool._meta?.["trelio/sensitiveInput"], true);
+  assert.deepEqual(actionTool.inputSchema.properties.runtimeSessionProof, { type: "object" });
   assert.doesNotMatch(JSON.stringify(providerTools), /encrypt|e2ee|cipher|private key/iu);
   const renderTool = providerTools.find(({ name }) => name === "render_trelio_local_proposal");
   assert.equal(renderTool.annotations.readOnlyHint, false);
@@ -2700,6 +2701,40 @@ test("one local dispatcher preserves exact native inputs across route families",
     operation: "get_revision_diff",
     runtimeSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   }]);
+});
+
+test("local action forwards only the top-level hook proof to the native bridge", async () => {
+  const hookProof = { schemaVersion: 1, nonce: "hook-issued" };
+  let forwarded;
+  await handleToolCall(
+    "https://trelio.example",
+    "continue_trelio_local_action",
+    {
+      schemaVersion: 1,
+      route: "action",
+      runtimeSessionProof: hookProof,
+      parameters: {
+        companySlug: "plain-company",
+        nativeTool: "upload_attachment",
+        localFilePath: "/tmp/demo.png",
+        runtimeSessionProof: { nonce: "untrusted-nested" },
+        arguments: { companySlug: "plain-company", projectSlug: "general", taskNumber: 14 },
+      },
+    },
+    {
+      localActionOperation: async (_origin, input) => {
+        forwarded = input;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    },
+  );
+  assert.deepEqual(forwarded, {
+    companySlug: "plain-company",
+    nativeTool: "upload_attachment",
+    arguments: { companySlug: "plain-company", projectSlug: "general", taskNumber: 14 },
+    runtimeSessionProof: hookProof,
+    localFilePath: "/tmp/demo.png",
+  });
 });
 
 test("diagnostic intent reports bridge state without turning pairing into a required repair", async () => {

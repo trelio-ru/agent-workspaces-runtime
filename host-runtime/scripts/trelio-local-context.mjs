@@ -11067,6 +11067,7 @@ export const TRELIO_LOCAL_ACTION_TOOL = {
         enum: ["context", "action", "proposal_context", "workspace"],
       },
       parameters: { type: "object" },
+      runtimeSessionProof: { type: "object" },
     },
   },
   annotations: {
