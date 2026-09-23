@@ -176,6 +176,50 @@ test("directory recovery ignores missing, corrupt, wrong-scope and invalid-Run r
   assert.equal(await f.resolve(), f.first);
 });
 
+test("Windows resolves a registered Run when metadata spells its directory with different casing", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const f = await fixture(t);
+  f.roots.splice(1);
+  const metadataPath = path.join(f.first, ".trelio-run.json");
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  metadata.workspaceDirectory = metadata.workspaceDirectory.toUpperCase();
+  await fs.writeFile(metadataPath, JSON.stringify(metadata));
+
+  assert.equal(await f.resolve({ runId: firstRun }), f.first);
+  const operations = [
+    { operation: "status", parameters: {} },
+    { operation: "checkpoint", parameters: { type: "draft", summary: "Сохранить изменения" } },
+    {
+      operation: "finish",
+      parameters: {
+        summary: "Передать подготовленный результат",
+        evidence: ["Проверено"],
+        nextAction: "Принять результат",
+      },
+    },
+  ];
+  for (const { operation, parameters } of operations) {
+    let bridgeCwd = null;
+    await handleTrelioWorkspaceActionOperation(origin, {
+      schemaVersion: 1,
+      operation,
+      parameters,
+      runIdentity: { workspaceId, runId: firstRun },
+      workingDirectory: path.join(f.first, "workspace"),
+    }, {
+      resolveRunRootDirectory: (input) => resolveRegisteredWorkspaceRootDirectory(input, {
+        readRegistry: async () => f.roots,
+      }),
+      runBridge: async (_origin, _arguments, options) => {
+        bridgeCwd = options.cwd;
+        return { stdout: "ok", stderr: "" };
+      },
+    });
+    assert.equal(bridgeCwd, path.join(f.first, "workspace"));
+  }
+});
+
 test("directory recovery resolves filesystem aliases without following a symlink registry root", {
   skip: process.platform === "win32" ? "Creating symlinks requires separate Windows privileges" : false,
 }, async (t) => {

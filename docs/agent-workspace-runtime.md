@@ -663,6 +663,10 @@ registry; cwd другого проекта или Workspace не может в�
 `.trelio-run.json` в этом каталоге. `workingDirectory` старого клиента остаётся
 совместимым и при exact identity используется только для разрешения нескольких
 зарегистрированных копий того же Run.
+На Windows проверка сохранённого `workspaceDirectory` учитывает регистр пути по
+правилам самой платформы: различие регистра букв не делает действительный Run
+отсутствующим в registry.
+
 `details.reasonCode=READ_ONLY_INSPECTION` отдельно обозначает штатный каталог
 `prepare_agent_workspace_read`, где `.trelio-run.json` намеренно отсутствует;
 `RUN_METADATA_NOT_FOUND`, `RUN_METADATA_INVALID` и `RUN_ID_MISSING` описывают

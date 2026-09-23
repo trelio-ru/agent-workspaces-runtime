@@ -10246,12 +10246,21 @@ export const resolveRegisteredWorkspaceRootDirectory = async (
       continue;
     }
 
+    // Windows preserves the spelling supplied by each process even when two
+    // paths name the same directory with different letter case. `relative`
+    // uses the platform's comparison without broadening the registry search.
+    const metadataWorkspaceDirectory = path.resolve(String(metadata?.workspaceDirectory || ""));
+    const expectedWorkspaceDirectory = path.join(rootDirectory, "workspace");
+    const sameWorkspaceDirectory = path.relative(
+      expectedWorkspaceDirectory,
+      metadataWorkspaceDirectory,
+    ) === "";
+
     if (
       metadata?.workspaceId === workspaceId
       && UUID_PATTERN.test(String(metadata.runId || ""))
       && metadataOrigin === origin
-      && path.resolve(String(metadata.workspaceDirectory || ""))
-        === path.join(rootDirectory, "workspace")
+      && sameWorkspaceDirectory
     ) {
       candidates.push({ rootDirectory, runId: String(metadata.runId || "") });
     }
