@@ -33,6 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
+import { isLocalPathInside, sameLocalPath } from "./trelio-local-path.mjs";
 
 import {
   LEGACY_WORKSPACE_CONTEXT_FILE_NAME,
@@ -9918,7 +9919,7 @@ export const readLocalWorkspaceRevisionFile = async ({
   });
   const repositoryRoot = path.resolve(repositoryDirectory);
   const absolutePath = path.resolve(repositoryRoot, normalizedFilePath);
-  if (!absolutePath.startsWith(`${repositoryRoot}${path.sep}`)) {
+  if (!isLocalPathInside(repositoryRoot, absolutePath)) {
     throw new TrelioLocalContextError(
       "LOCAL_CONTEXT_INVALID_INPUT",
       "filePath escaped the temporary Workspace repository.",
@@ -10313,7 +10314,7 @@ const readOpenedWorkspaceRunIdentity = async (workspaceDirectory, expectedOrigin
     metadata.schemaVersion !== 3
     || !UUID_PATTERN.test(String(metadata.workspaceId || ""))
     || !UUID_PATTERN.test(String(metadata.runId || ""))
-    || path.resolve(String(metadata.workspaceDirectory || "")) !== workspaceDirectory
+    || !sameLocalPath(String(metadata.workspaceDirectory || ""), workspaceDirectory)
     || recordedOrigin !== requestedOrigin
   ) {
     throw new TrelioLocalContextError(
@@ -10335,7 +10336,7 @@ const readRestoreRunMetadata = async (workspaceDirectory, input) => {
     metadata.schemaVersion !== 3
     || metadata.workspaceId !== input.workspaceId
     || metadata.runId !== input.runId
-    || path.resolve(String(metadata.workspaceDirectory || "")) !== workspaceDirectory
+    || !sameLocalPath(String(metadata.workspaceDirectory || ""), workspaceDirectory)
     || metadata.baseHead !== input.expectedHead
   ) {
     throw new TrelioLocalContextError(

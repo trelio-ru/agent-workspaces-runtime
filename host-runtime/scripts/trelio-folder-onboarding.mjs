@@ -4,6 +4,7 @@ import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { sameLocalPath } from "./trelio-local-path.mjs";
 
 import {
   GIT_DISABLED_GLOBAL_CONFIG_PATH,
@@ -391,9 +392,13 @@ const inspectServiceGit = async ({
     );
   }
   const worktreePaths = parseWorktreePaths(worktrees.stdout);
+  const worktreeRealPath = worktreePaths.length === 1
+    ? await filesystem.realpath(worktreePaths[0]).catch(() => null)
+    : null;
   if (
     worktreePaths.length !== 1
-    || await filesystem.realpath(worktreePaths[0]).catch(() => null) !== rootPath
+    || !worktreeRealPath
+    || !sameLocalPath(worktreeRealPath, rootPath)
   ) {
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED",
@@ -609,7 +614,7 @@ const inspectFolder = async ({
   let serviceGit = false;
   if (topLevel.ok) {
     const topLevelPath = await filesystem.realpath(topLevel.stdout.trim()).catch(() => null);
-    if (topLevelPath !== rootPath) {
+    if (!topLevelPath || !sameLocalPath(topLevelPath, rootPath)) {
       throw new TrelioFolderOnboardingError(
         "TRELIO_FOLDER_ONBOARDING_PARENT_GIT",
         "The selected folder is inside another Git worktree.",

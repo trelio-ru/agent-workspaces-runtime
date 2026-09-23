@@ -28,6 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { isLocalPathInside, sameLocalPath } from "./trelio-local-path.mjs";
 import {
   buildEncryptedWorkspaceProjectionRecord, materializeEncryptedWorkspaceChain,
   prepareCachedEncryptedWorkspaceFile, uploadEncryptedWorkspaceFile,
@@ -6909,12 +6910,9 @@ const pythonInvocationCandidates = (environment = process.env) => {
 };
 
 const pathOverlaps = (leftPath, rightPath) => {
-  const left = path.resolve(leftPath);
-  const right = path.resolve(rightPath);
-  const leftToRight = path.relative(left, right);
-  const rightToLeft = path.relative(right, left);
-  return (!leftToRight.startsWith("..") && !path.isAbsolute(leftToRight))
-    || (!rightToLeft.startsWith("..") && !path.isAbsolute(rightToLeft));
+  return sameLocalPath(leftPath, rightPath)
+    || isLocalPathInside(leftPath, rightPath)
+    || isLocalPathInside(rightPath, leftPath);
 };
 
 /**
@@ -10251,10 +10249,10 @@ export const resolveRegisteredWorkspaceRootDirectory = async (
     // uses the platform's comparison without broadening the registry search.
     const metadataWorkspaceDirectory = path.resolve(String(metadata?.workspaceDirectory || ""));
     const expectedWorkspaceDirectory = path.join(rootDirectory, "workspace");
-    const sameWorkspaceDirectory = path.relative(
+    const sameWorkspaceDirectory = sameLocalPath(
       expectedWorkspaceDirectory,
       metadataWorkspaceDirectory,
-    ) === "";
+    );
 
     if (
       metadata?.workspaceId === workspaceId
@@ -10316,7 +10314,7 @@ export const resolveRegisteredWorkspaceRootDirectory = async (
         const canonicalCandidates = [];
         for (const candidate of selectedCandidates) {
           const realRoot = await fs.realpath(candidate.rootDirectory).catch(() => null);
-          if (realRoot === realCanonicalRoot) canonicalCandidates.push(candidate);
+          if (realRoot && sameLocalPath(realRoot, realCanonicalRoot)) canonicalCandidates.push(candidate);
         }
         if (canonicalCandidates.length === 1) return canonicalCandidates[0].rootDirectory;
       }
@@ -10455,8 +10453,7 @@ const assertValidMaterializedRoot = async (
     metadata.workspaceId !== workspaceId
     || !UUID_PATTERN.test(String(metadata.runId || ""))
     || normalizeOrigin(metadata.origin || DEFAULT_ORIGIN) !== origin
-    || path.resolve(String(metadata.workspaceDirectory || ""))
-      !== path.join(rootDirectory, "workspace")
+    || !sameLocalPath(String(metadata.workspaceDirectory || ""), path.join(rootDirectory, "workspace"))
   ) {
     throw new Error("Локальный каталог принадлежит другому или повреждённому Trelio Workspace.");
   }
@@ -10591,7 +10588,7 @@ const preflightWorkspaceDirectory = async ({
 
   const defaultPersistentRoot = path.join(LEGACY_DEFAULT_WORKSPACES_DIRECTORY, workspaceId);
 
-  if (directoryOption || path.resolve(rootDirectory) !== path.resolve(defaultPersistentRoot)) {
+  if (directoryOption || !sameLocalPath(rootDirectory, defaultPersistentRoot)) {
     throw new Error(
       directoryOption
         ? "Выбранный --dir уже существует, но не принадлежит Trelio Workspace."
@@ -11453,8 +11450,7 @@ const removePreviousWorkspaceInspection = async (rootDirectory, workspaceId) => 
       metadata.schemaVersion !== 1
       || metadata.mode !== "read_only_accepted_workspace"
       || metadata.workspaceId !== workspaceId
-      || path.resolve(String(metadata.workspaceDirectory || ""))
-        !== path.join(path.resolve(rootDirectory), "workspace")
+      || !sameLocalPath(String(metadata.workspaceDirectory || ""), path.join(rootDirectory, "workspace"))
     ) {
       throw new Error(
         `Существующий каталог не принадлежит read-only Workspace ${workspaceId}: ${rootDirectory}`,
@@ -11530,7 +11526,7 @@ const materializeWorkspaceInspection = async ({
     if (cached.schemaVersion !== 1 || cached.mode !== "read_only_accepted_workspace"
       || cached.origin !== origin || cached.workspaceId !== workspaceId
       || cached.company?.id !== snapshot.company.id || cached.acceptedHead !== acceptedHead
-      || cached.workspaceDirectory !== workspaceDirectory
+      || !sameLocalPath(cached.workspaceDirectory, workspaceDirectory)
       || JSON.stringify(cached.encryption) !== JSON.stringify(companyEncryption?.metadata ?? { enabled: false })
       || !cached.contentFingerprint
       || cached.contentFingerprint !== await fingerprintWorkspaceInspection(workspaceDirectory)) cached = null;
@@ -12045,7 +12041,7 @@ const fetchRunContextObject = async (
   const contexts = Array.isArray(metadata.contexts) ? metadata.contexts : [];
   const context = contexts.find((candidate) => {
     const directory = path.resolve(String(candidate?.directory || ""));
-    return absolutePath.startsWith(`${directory}${path.sep}`);
+    return isLocalPathInside(directory, absolutePath);
   });
 
   if (!context) {
@@ -15454,7 +15450,7 @@ const discoverRegisteredRunRoots = async () => {
         && !rootStat.isSymbolicLink()
         && UUID_PATTERN.test(String(metadata.workspaceId || ""))
         && UUID_PATTERN.test(String(metadata.runId || ""))
-        && path.resolve(metadata.workspaceDirectory || "") === path.join(rootDirectory, "workspace")
+        && sameLocalPath(metadata.workspaceDirectory || "", path.join(rootDirectory, "workspace"))
       ) {
         discovered.push({ rootDirectory, metadata });
       }
@@ -15830,18 +15826,17 @@ const planSkillRuntimeCachePrune = async ({ settings }) => {
 
 const assertSafeRegisteredRunRoot = (root, registeredRoots) => {
   const resolvedRoot = path.resolve(root.rootDirectory);
-  const defaultPrefix = `${path.resolve(LEGACY_DEFAULT_WORKSPACES_DIRECTORY)}${path.sep}`;
 
   if (
-    !resolvedRoot.startsWith(defaultPrefix)
+    !isLocalPathInside(path.resolve(LEGACY_DEFAULT_WORKSPACES_DIRECTORY), resolvedRoot)
     && !registeredRoots.has(resolvedRoot)
   ) {
     throw new Error(`Run root не зарегистрирован для безопасного удаления: ${resolvedRoot}`);
   }
 
   if (
-    path.resolve(root.metadata.workspaceDirectory || "") !== path.join(resolvedRoot, "workspace")
-    || path.dirname(path.resolve(path.join(resolvedRoot, ".trelio-run.json"))) !== resolvedRoot
+    !sameLocalPath(root.metadata.workspaceDirectory || "", path.join(resolvedRoot, "workspace"))
+    || !sameLocalPath(path.dirname(path.resolve(path.join(resolvedRoot, ".trelio-run.json"))), resolvedRoot)
   ) {
     throw new Error(`Run root не прошёл проверку структуры: ${resolvedRoot}`);
   }
@@ -16090,12 +16085,10 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
     await fs.rm(candidate.filePath, { force: true });
   }
 
-  const skillRuntimeCachePrefix =
-    `${path.resolve(SKILL_RUNTIME_CACHE_DIRECTORY)}${path.sep}`;
   for (const candidate of skillRuntimeCacheCandidates) {
     const resolvedDirectory = path.resolve(candidate.directoryPath);
 
-    if (!resolvedDirectory.startsWith(skillRuntimeCachePrefix)) {
+    if (!isLocalPathInside(SKILL_RUNTIME_CACHE_DIRECTORY, resolvedDirectory)) {
       throw new Error(
         `Skill runtime cache path не прошёл проверку: ${resolvedDirectory}`,
       );

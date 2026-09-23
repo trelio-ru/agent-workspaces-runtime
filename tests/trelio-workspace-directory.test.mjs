@@ -300,6 +300,25 @@ test("local change recovery preserves bounded source evidence and an exact safe 
   assert.equal(calls, 1, "recovery must not move files or retry open automatically");
 });
 
+test("Windows recovery accepts a source Workspace path with different letter case", {
+  skip: process.platform !== "win32",
+}, () => {
+  const sourceDirectory = path.resolve(os.tmpdir(), "Case Sensitive Run");
+  const error = new WorkspaceLocalRecoveryRequiredError({
+    workspaceId,
+    sourceRunId: firstRun,
+    targetRunId: newRun,
+    sourceRunStatus: "accepted",
+    sourceDirectory,
+    sourceWorkspaceDirectory: path.join(sourceDirectory, "workspace").toUpperCase(),
+    suggestedDirectory: `${sourceDirectory}-recovery`,
+    lastSavedDraftHead: null,
+    changes: ["M artifacts/notes.md"],
+  });
+  const stderr = `Ошибка: ${formatBridgeCommandError(error, "open")}\n`;
+  assert.ok(parseWorkspaceLocalRecoveryRequiredError(stderr, workspaceId, newRun));
+});
+
 test("same-Run draft recovery preserves both histories and exposes one exact reconciliation route", async () => {
   const sourceDirectory = path.resolve(os.tmpdir(), "source active run");
   const suggestedDirectory = path.resolve(os.tmpdir(), "server draft recovery");

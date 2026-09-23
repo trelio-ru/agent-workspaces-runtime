@@ -1,4 +1,5 @@
 import path from "node:path";
+import { sameLocalPath } from "./trelio-local-path.mjs";
 
 export const WORKSPACE_DIRECTORY_REQUIRED = "TRELIO_WORKSPACE_DIRECTORY_REQUIRED";
 export const WORKSPACE_LOCAL_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED";
@@ -334,9 +335,8 @@ export const parseWorkspaceLocalRecoveryRequiredError = (
         && !directory.includes("\0")
         && directory.length <= MAX_DIRECTORY_LENGTH
       ))
-    || path.resolve(details.sourceWorkspaceDirectory)
-      !== path.join(path.resolve(details.sourceDirectory), "workspace")
-    || path.resolve(details.suggestedDirectory) === path.resolve(details.sourceDirectory)
+    || !sameLocalPath(details.sourceWorkspaceDirectory, path.join(details.sourceDirectory, "workspace"))
+    || sameLocalPath(details.suggestedDirectory, details.sourceDirectory)
     || !Array.isArray(details.changes)
     || details.changes.length > MAX_RECOVERY_CHANGES
     || details.changes.some((change) => (
@@ -397,9 +397,8 @@ export const parseWorkspaceDraftRecoveryRequiredError = (
         && !directory.includes("\0")
         && directory.length <= MAX_DIRECTORY_LENGTH
       ))
-    || path.resolve(details.sourceWorkspaceDirectory)
-      !== path.join(path.resolve(details.sourceDirectory), "workspace")
-    || path.resolve(details.suggestedDirectory) === path.resolve(details.sourceDirectory)
+    || !sameLocalPath(details.sourceWorkspaceDirectory, path.join(details.sourceDirectory, "workspace"))
+    || sameLocalPath(details.suggestedDirectory, details.sourceDirectory)
     || ![details.baseHead, details.localHead, details.serverDraftHead]
       .every((head) => typeof head === "string" && GIT_HEAD_PATTERN.test(head))
     || !Array.isArray(details.changes)

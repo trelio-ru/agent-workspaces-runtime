@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireTrelioComponentVersions } from "./trelio-component-versions.mjs";
+import { sameLocalPath } from "./trelio-local-path.mjs";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const MODE_ENTRYPOINTS = Object.freeze({
@@ -72,7 +73,7 @@ export const runHostRuntime = async ({
   });
 };
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+if (process.argv[1] && sameLocalPath(fileURLToPath(import.meta.url), process.argv[1])) {
   runHostRuntime()
     .then((exitCode) => {
       process.exitCode = exitCode;

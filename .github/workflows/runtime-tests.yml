@@ -74,6 +74,7 @@ jobs:
           node tests/trelio-git.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
           node tests/trelio-local-attachments.test.mjs
+          node tests/trelio-local-path.test.mjs
           node tests/trelio-local-context.test.mjs
           node tests/trelio-mcp-results.test.mjs
           node tests/trelio-remote-mcp.test.mjs
@@ -142,6 +143,9 @@ jobs:
 
       - name: Run Windows Workspace directory selection regressions
         run: node tests/trelio-workspace-directory.test.mjs
+
+      - name: Run Windows path comparison regressions
+        run: node tests/trelio-local-path.test.mjs
 
       - name: Run Windows embedded browser transport regressions
         run: node tests/trelio-secret-browser-native.test.mjs
