@@ -48,6 +48,7 @@ const RECOVERY_TOOLS = new Set([
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HOOK_REQUIRED_CODE = "TRELIO_RUNTIME_HOOK_REQUIRED";
 const HOOK_FAILED_CODE = "TRELIO_RUNTIME_HOOK_FAILED";
+const SUPPORTED_HOOK_EVENTS = new Set(["SessionStart", "PreToolUse", "SessionEnd"]);
 const HOST_RUNTIME_RECOVERY_CODES = new Set([
   "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
   "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
@@ -92,7 +93,11 @@ const readStdinJson = async () => {
     if (size > 512 * 1024) throw new Error("Hook input is too large.");
     chunks.push(Buffer.from(chunk));
   }
-  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+  // A launched hook with no payload cannot distinguish a protected PreToolUse
+  // from an advisory lifecycle event. Returning success here would let Codex
+  // call Trelio without updatedInput and obscure the local transport failure.
+  if (chunks.length === 0) throw new Error("Hook input is empty.");
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 };
 
 const resolveClientSessionId = (hookInput, environment = process.env) => {
@@ -752,6 +757,13 @@ export const recoverHookHostRuntimeUpgrade = async (
 
 const runHook = async () => {
   const hookInput = await readStdinJson();
+  if (
+    !hookInput
+    || typeof hookInput !== "object"
+    || !SUPPORTED_HOOK_EVENTS.has(hookInput.hook_event_name)
+  ) {
+    throw new Error("Hook event is missing or unsupported.");
+  }
   try {
     if (
       hookInput.hook_event_name === "SessionStart"

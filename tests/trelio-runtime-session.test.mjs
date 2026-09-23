@@ -112,6 +112,18 @@ const readRequestBody = async (request) => {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 };
 
+test("empty or unsupported hook payload fails closed before any protected call", async () => {
+  const empty = await runHook(undefined);
+  assert.equal(empty.exitCode, 2);
+  assert.equal(empty.stdout, "");
+  assert.match(empty.stderr, /^TRELIO_RUNTIME_HOOK_FAILED:.*Hook input is empty/u);
+
+  const unsupported = await runHook({ hook_event_name: "UnexpectedEvent" });
+  assert.equal(unsupported.exitCode, 2);
+  assert.equal(unsupported.stdout, "");
+  assert.match(unsupported.stderr, /^TRELIO_RUNTIME_HOOK_FAILED:.*Hook event is missing or unsupported/u);
+});
+
 test("Codex hook observes model and current turn effort", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-hook-"));
   const transcriptPath = path.join(temporaryDirectory, "rollout.jsonl");

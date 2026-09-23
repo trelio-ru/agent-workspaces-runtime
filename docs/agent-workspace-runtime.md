@@ -46,6 +46,11 @@ Loader передаёт shell-версию отдельно в `TRELIO_PLUGIN_VE
 ложный manifest mismatch. Прямой source-tree запуск имеет явную development
 identity `0.0.0`, которая не выдаётся за опубликованный plugin или runtime.
 
+Hook принимает только непустой JSON с поддерживаемым `hook_event_name`.
+Пустой stdin или неизвестное событие завершаются блокирующим кодом `2` и
+`TRELIO_RUNTIME_HOOK_FAILED`: успешный выход без `updatedInput` для защищённого
+`PreToolUse` оставил бы MCP-вызов без proof и скрыл бы локальную причину.
+
 HTTP transport, Agent Skill admission и MCP server metadata используют
 runtime-версию, а plugin compatibility, Codex retention и Run `clientVersion` –
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
