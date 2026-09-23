@@ -16,6 +16,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const MIGRATION_ENTRY_TYPES = new Set(["file", "directory", "symbolic_link", "special"]);
 const MIGRATION_REASON_CODES = new Set([
   "UNRECOGNIZED_ENTRY",
+  "LEGACY_RUN_METADATA_NOT_FOUND",
   "SYSTEM_METADATA_NOT_REGULAR_FILE",
   "SYSTEM_METADATA_TOO_LARGE",
 ]);

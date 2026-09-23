@@ -2861,6 +2861,8 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
   const workspaceId = "41414141-4141-4141-8141-414141414141";
   const legacyRunId = "42424242-4242-4242-8242-424242424242";
   const targetRunId = "43434343-4343-4343-8343-434343434343";
+  const contextOnlyRunId = "45454545-4545-4545-8545-454545454545";
+  const unknownRunId = "46464646-4646-4646-8646-464646464646";
   const targetExport = await createExportBundle(path.join(temporaryDirectory, "target"), {
     "WORKSPACE_CONTEXT.md": "# Migrated persistent workspace\n",
     "result.md": "new Run content\n",
@@ -2915,7 +2917,10 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
         response.end(JSON.stringify({
           workspace: { id: workspaceId, acceptedHead: targetExport.head },
           company: testCompany,
-          runs: [serializeRun(legacyRunId, "accepted")],
+          runs: [
+            serializeRun(legacyRunId, "accepted"),
+            serializeRun(contextOnlyRunId, "accepted"),
+          ],
           checkpoints: [],
         }));
         return;
@@ -2984,6 +2989,10 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
       materializedHead: legacyHead,
       objects: [],
     }));
+    const contextOnlyRoot = path.join(rootDirectory, contextOnlyRunId);
+    const contextOnlyFile = path.join(contextOnlyRoot, "context", "project", "pinned.txt");
+    await mkdir(path.dirname(contextOnlyFile), { recursive: true });
+    await writeFile(contextOnlyFile, "old read-only context\n", "utf8");
 
     const command = [bridgePath, "open", "--origin", origin, "--workspace", workspaceId];
     const executionOptions = {
@@ -3025,6 +3034,26 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     assert.equal(startCount, 0, "unknown content must fail before server Run creation");
 
     await rm(path.join(rootDirectory, "keep-me.txt"));
+    await mkdir(path.join(contextOnlyRoot, "workspace"));
+    const missingMetadataError = await readStructuredBridgeError();
+    assert.equal(missingMetadataError.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
+    assert.deepEqual(missingMetadataError.details.blockingEntries, [{
+      name: contextOnlyRunId,
+      entryType: "directory",
+      reasonCode: "LEGACY_RUN_METADATA_NOT_FOUND",
+    }]);
+    assert.equal(missingMetadataError.details.automaticChangesPerformed, false);
+    assert.equal(startCount, 0, "a writable legacy tree without metadata must remain blocked");
+    await rm(path.join(contextOnlyRoot, "workspace"), { recursive: true });
+
+    const unknownRoot = path.join(rootDirectory, unknownRunId);
+    await mkdir(path.join(unknownRoot, "context"), { recursive: true });
+    const unknownRunError = await readStructuredBridgeError();
+    assert.equal(unknownRunError.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
+    assert.equal(unknownRunError.details.blockingEntries[0].name, unknownRunId);
+    assert.equal(startCount, 0, "unknown Run identity must not be treated as terminal");
+    await rm(unknownRoot, { recursive: true });
+
     const opened = await execFileAsync(process.execPath, command, executionOptions);
     assert.equal(opened.stdout.trim(), path.join(rootDirectory, "workspace"));
     assert.equal(startCount, 1);
@@ -3034,6 +3063,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
       "new Run content\n",
     );
     assert.equal(await pathExists(legacyRoot), true, "legacy Run history must remain untouched");
+    assert.equal(await readFile(contextOnlyFile, "utf8"), "old read-only context\n");
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));

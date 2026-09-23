@@ -10466,6 +10466,23 @@ const resolveRecordedMaterializedHead = (metadata) => [
   metadata.baseHead,
 ].map((value) => String(value || "")).find((value) => GIT_OBJECT_PATTERN.test(value)) || null;
 
+const isNonWritableLegacyRunResidue = async (legacyRoot) => {
+  const entries = await fs.readdir(legacyRoot, { withFileTypes: true });
+
+  for (const entry of entries) {
+    // Старый Run мог оставить только закреплённый read-only context. Не трогаем
+    // его байты, но и не блокируем новый persistent root, если здесь нет
+    // writable workspace, из которого нужно восстанавливать пользовательскую дельту.
+    if (entry.name === "context" && entry.isDirectory() && !entry.isSymbolicLink()) {
+      continue;
+    }
+    const inspection = await inspectBenignWorkspaceMetadataFile(legacyRoot, entry.name);
+    if (!inspection.isBenign && !inspection.missing) return false;
+  }
+
+  return true;
+};
+
 const preflightWorkspaceDirectory = async ({
   workspaceId,
   origin,
@@ -10612,9 +10629,24 @@ const preflightWorkspaceDirectory = async ({
   for (const entry of legacyRunEntries) {
     const legacyRoot = path.join(rootDirectory, entry.name);
     const legacyMetadata = await readOptionalRunMetadata(legacyRoot);
+    const legacyRunState = overview?.runs?.find((run) => run.id === entry.name);
 
     if (!legacyMetadata) {
-      throw new Error("Legacy Run не содержит служебный metadata-файл; автоматическая миграция остановлена.");
+      if (
+        TERMINAL_RUN_STATUSES.has(legacyRunState?.status)
+        && await isNonWritableLegacyRunResidue(legacyRoot)
+      ) {
+        continue;
+      }
+      throw new WorkspaceLayoutMigrationBlockedError({
+        workspaceId,
+        rootDirectory,
+        blockingEntries: [{
+          name: entry.name,
+          entryType: "directory",
+          reasonCode: "LEGACY_RUN_METADATA_NOT_FOUND",
+        }],
+      });
     }
     await assertValidMaterializedRoot(legacyRoot, legacyMetadata, workspaceId, origin);
     if (
@@ -10624,9 +10656,9 @@ const preflightWorkspaceDirectory = async ({
     ) {
       throw new Error("Legacy Run принадлежит другой компании Trelio.");
     }
-    const legacyRunState = overview?.runs?.find((run) => run.id === legacyMetadata.runId);
+    const materializedRunState = overview?.runs?.find((run) => run.id === legacyMetadata.runId);
 
-    if (!legacyRunState || !TERMINAL_RUN_STATUSES.has(legacyRunState.status)) {
+    if (!materializedRunState || !TERMINAL_RUN_STATUSES.has(materializedRunState.status)) {
       throw new Error(
         "В старой локальной структуре найден незавершённый Agent Run. Сначала продолжите или отмените его.",
       );

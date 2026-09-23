@@ -649,6 +649,12 @@ reason codes; `automaticChangesPerformed=false` подтверждает отс�
 переноса и удаления. Local MCP сохраняет этот envelope вместо общего
 `TRELIO_WORKSPACE_ACTION_FAILED`, поэтому агент сообщает конкретную запись и не
 угадывает root по `workingDirectory` либо общей фразе о старой структуре.
+Старый terminal Run без `.trelio-run.json`, чей каталог пуст либо содержит только `context/`
+и безопасные системные metadata-файлы, bridge оставляет нетронутым и открывает
+новый persistent root: в таком каталоге нет writable Workspace для переноса.
+Run без подтверждённого terminal state или с любым другим содержимым без metadata
+по-прежнему блокирует миграцию, теперь с точным
+`blockingEntries[].reasonCode=LEGACY_RUN_METADATA_NOT_FOUND` вместо generic ошибки.
 
 Run-bound действие, запущенное вне открытого writable Run, возвращает
 `TRELIO_WORKSPACE_ACTIVE_RUN_REQUIRED`, а не общий filesystem-текст.
