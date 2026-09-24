@@ -64,6 +64,17 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     },
   }) + "\\n");
   process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_TRANSPORT_FAILURE === "1") {
+  process.stderr.write("Ошибка: " + JSON.stringify({
+    code: "TRELIO_BRIDGE_TRANSPORT_FAILED",
+    message: "Trelio bridge transport failed before an HTTP response.",
+    details: {
+      phase: "bridge_compatibility",
+      causeCode: "UND_ERR_CONNECT_TIMEOUT",
+      privateExtra: "private-proxy.example/secret-token",
+    },
+  }) + "\\n");
+  process.exitCode = 7;
 } else if (process.env.TRELIO_TEST_CHILD_FAILURE === "1") {
   process.stderr.write("synthetic bridge failure");
   process.exitCode = 7;
@@ -146,7 +157,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -158,6 +169,7 @@ const createFixture = async (t) => {
         TRELIO_TEST_CHILD_FAILURE: childFailure ? "1" : "0",
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
+        TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
         TRELIO_TEST_LAYOUT_ROOT: workspaceDirectory,
         TRELIO_TEST_WORKSPACE_ID: workspaceId,
       },
@@ -246,6 +258,20 @@ test("Workspace bridge preserves a child failure without restarting or replaying
   const outcome = await fixture.run({ childFailure: true });
   assert.equal(outcome.error?.code, "TRELIO_WORKSPACE_ACTION_FAILED");
   assert.equal(outcome.error.message, "synthetic bridge failure");
+  assert.equal(outcome.executions, "started\n");
+});
+
+test("Workspace bridge forwards only sanitized transport diagnostics without replaying the action", async (t) => {
+  const fixture = await createFixture(t);
+  const outcome = await fixture.run({ transportFailure: true });
+  assert.equal(outcome.error?.code, "TRELIO_BRIDGE_TRANSPORT_FAILED");
+  assert.equal(outcome.error.message, "Trelio bridge transport failed before an HTTP response.");
+  assert.deepEqual(outcome.error.details, {
+    operation: "skill_run",
+    phase: "bridge_compatibility",
+    causeCode: "UND_ERR_CONNECT_TIMEOUT",
+  });
+  assert.doesNotMatch(JSON.stringify(outcome.error), /private-proxy|secret-token/u);
   assert.equal(outcome.executions, "started\n");
 });
 

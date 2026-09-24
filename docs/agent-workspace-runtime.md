@@ -61,6 +61,16 @@ runtime-версию, а plugin compatibility, Codex retention и Run `clientVer
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
 `pluginVersion` и `hostRuntimeVersion`.
 
+Если `fetch` завершается до HTTP-ответа, bridge передаёт в CLI и local MCP
+типизированный `TRELIO_BRIDGE_TRANSPORT_FAILED` с фазой
+`bridge_compatibility` либо `api_request` и allowlisted низкоуровневым
+`causeCode` (`UNKNOWN`, когда кода нет). Сырой `cause`, URL, токен и proxy-текст
+в diagnostic payload не попадают. HTTP 401/403/5xx остаются отдельными
+`TrelioApiError`, отмена запроса сохраняет свой исходный сигнал. Local MCP
+сохраняет фазу и код без автоматического повтора неоднозначной Agent Skill
+или Workspace mutation; видимое `fetch failed` само по себе не доказывает
+10-секундный timeout или потерянный process descriptor.
+
 Долгоживущий local MCP не требует restart задачи после публикации нового
 подписанного runtime. Если backend вернул точный
 `AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED` либо

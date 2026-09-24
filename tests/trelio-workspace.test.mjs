@@ -89,6 +89,7 @@ import {
   WORKING_FOLDER_WORKSPACES_DIRECTORY_NAME,
   WORKSPACE_CONTEXT_FILE_NAME,
   BridgePluginUpgradeRequiredError,
+  BridgeTransportError,
   BrowserOpenError,
   AgentSkillDeviceConsentDeclinedError,
   TrelioApiError,
@@ -131,6 +132,7 @@ import {
   ensureAutomaticRunWorklog,
   findTrelioWorkingFolderRoot,
   formatBridgeCommandError,
+  ensureBridgeCompatibility,
   normalizeAgentSkillPackagePath,
   normalizeAgentSkillBrowserSession,
   normalizeAgentSkillDeviceConsentChallenge,
@@ -838,6 +840,35 @@ test("storage billing blocker preserves the current Run and gives one exact reco
       "secret",
     ),
     "Browser preflight failed. [reasonCode=field_not_found]",
+  );
+});
+
+test("bridge transport diagnostics preserve phase and safe cause code without leaking fetch details", async (t) => {
+  const privateText = "private-proxy.example/secret-token";
+  const cause = Object.assign(new TypeError(`fetch failed: ${privateText}`), {
+    cause: Object.assign(new Error(privateText), { code: "ECONNRESET" }),
+  });
+  const diagnostic = new BridgeTransportError("bridge_compatibility", cause);
+  assert.deepEqual(JSON.parse(formatBridgeCommandError(diagnostic)), {
+    code: "TRELIO_BRIDGE_TRANSPORT_FAILED",
+    message: "Trelio bridge transport failed before an HTTP response.",
+    details: { phase: "bridge_compatibility", causeCode: "ECONNRESET" },
+  });
+  assert.doesNotMatch(formatBridgeCommandError(diagnostic), /private-proxy|secret-token/u);
+  assert.equal(isEncryptedWorkspaceRetryableTransportError(diagnostic), true);
+
+  const server = createServer((incoming) => incoming.socket.destroy());
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  await assert.rejects(
+    ensureBridgeCompatibility(origin, "private-test-token"),
+    (error) => {
+      assert.equal(error?.code, "TRELIO_BRIDGE_TRANSPORT_FAILED");
+      assert.equal(error?.phase, "bridge_compatibility");
+      assert.doesNotMatch(formatBridgeCommandError(error), /private-test-token|127\.0\.0\.1/u);
+      return true;
+    },
   );
 });
 

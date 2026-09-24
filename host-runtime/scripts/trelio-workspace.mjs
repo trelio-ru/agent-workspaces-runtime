@@ -1276,6 +1276,43 @@ export class TrelioApiError extends Error {
   }
 }
 
+const BRIDGE_TRANSPORT_CAUSE_CODES = new Set([
+  "EAI_AGAIN", "ECONNABORTED", "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH",
+  "ENETUNREACH", "ENOTFOUND", "EPIPE", "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+const bridgeTransportCauseCode = (error) => {
+  const seen = new Set();
+  for (let current = error, depth = 0; current && depth < 6 && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (BRIDGE_TRANSPORT_CAUSE_CODES.has(current.code)) return current.code;
+    current = current.cause;
+  }
+  return "UNKNOWN";
+};
+
+export class BridgeTransportError extends Error {
+  constructor(phase, cause) {
+    // The native fetch cause may contain an address, URL or proxy diagnostic.
+    // Preserve only fixed protocol fields across CLI stderr and MCP; the
+    // original cause stays local for transport classification/cooldown.
+    super("Trelio bridge transport failed before an HTTP response.", { cause });
+    this.code = "TRELIO_BRIDGE_TRANSPORT_FAILED";
+    this.phase = phase;
+    this.causeCode = bridgeTransportCauseCode(cause);
+  }
+
+  toJSON() {
+    return {
+      code: this.code,
+      message: this.message,
+      details: { phase: this.phase, causeCode: this.causeCode },
+    };
+  }
+}
+
 export const COMPANY_STORAGE_BALANCE_REQUIRED_CODE = "COMPANY_STORAGE_BALANCE_REQUIRED";
 const RUN_LEASE_RECOVERY_CODES = new Set([
   "LEASE_EXPIRED",
@@ -1291,6 +1328,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
+  if (error instanceof BridgeTransportError) return JSON.stringify(error);
   if (
     error instanceof WorkspaceActiveRunRequiredError
     || error instanceof WorkspaceDraftRecoveryRequiredError
@@ -1344,9 +1382,18 @@ export const formatBridgeCommandError = (error, command = "") => {
 };
 
 export const request = async (origin, token, pathname, options = {}) => {
-  const headers = buildBridgeRequestHeaders(token, options.headers || {});
+  const { diagnosticPhase = "api_request", ...fetchOptions } = options;
+  const headers = buildBridgeRequestHeaders(token, fetchOptions.headers || {});
 
-  const response = await fetch(new URL(pathname, `${origin}/`), { ...options, headers });
+  let response;
+  try {
+    response = await fetch(new URL(pathname, `${origin}/`), { ...fetchOptions, headers });
+  } catch (error) {
+    // Cancellation belongs to the caller and must not be misreported as a
+    // network failure or put an encrypted Workspace into transport cooldown.
+    if (fetchOptions.signal?.aborted || error?.name === "AbortError") throw error;
+    throw new BridgeTransportError(diagnosticPhase, error);
+  }
 
   if (!response.ok) {
     const responseText = await response.text();
@@ -9906,6 +9953,7 @@ export const ensureBridgeCompatibility = async (
       "/api/agent-workspaces/bridge-compatibility",
       {
         signal,
+        diagnosticPhase: "bridge_compatibility",
         headers: cachedAgentRules
           ? { [AGENT_RULES_SHA256_HEADER]: cachedAgentRules.sha256 }
           : {},

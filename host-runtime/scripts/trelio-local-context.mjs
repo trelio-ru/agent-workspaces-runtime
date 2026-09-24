@@ -9147,6 +9147,31 @@ const truncateWorkspaceActionOutput = (value) => {
     : `${output.slice(0, 64 * 1024)}\n[output truncated]`;
 };
 
+const parseBridgeTransportError = (stderr, operation) => {
+  if (typeof stderr !== "string" || stderr.length > 64 * 1024) return null;
+  const text = stderr.trim();
+  if (!text.startsWith("Ошибка: {")) return null;
+  let payload;
+  try { payload = JSON.parse(text.slice("Ошибка: ".length)); }
+  catch { return null; }
+  const phase = payload?.details?.phase;
+  const causeCode = payload?.details?.causeCode;
+  if (
+    payload?.code !== "TRELIO_BRIDGE_TRANSPORT_FAILED"
+    || !["api_request", "bridge_compatibility"].includes(phase)
+    || !/^(?:UNKNOWN|[A-Z][A-Z0-9_]{1,63})$/u.test(causeCode)
+  ) return null;
+
+  // The child exports only fixed diagnostic fields. In particular, do not
+  // forward raw fetch cause/stderr: they may contain a private endpoint or
+  // proxy details, and an ambiguous action must never be replayed here.
+  return new TrelioLocalContextError(
+    payload.code,
+    "Trelio bridge transport failed before an HTTP response.",
+    { operation, phase, causeCode },
+  );
+};
+
 export const classifyWorkspaceRunLeaseFailure = (error) => {
   const errorText = [
     error?.code,
@@ -9599,6 +9624,8 @@ export const handleTrelioWorkspaceActionOperation = async (
     }
     const stderr = truncateWorkspaceActionOutput(error?.stderr).trim();
     const stdout = truncateWorkspaceActionOutput(error?.stdout).trim();
+    const transportError = parseBridgeTransportError(error?.stderr, invocation.operation);
+    if (transportError) throw transportError;
     const activeRunRecovery = parseWorkspaceActiveRunRequiredError(
       error?.stderr,
       invocation.operation,
