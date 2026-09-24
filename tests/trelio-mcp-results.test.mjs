@@ -133,10 +133,12 @@ test("local task lists and proposal reviews use the generated shared-entity cont
 
   const run = { id: "run", status: "accepted" };
   const contextRequest = { runId: "run" };
-  const task = { id: "task-1", number: 1, currentStatus: status };
+  const proposalProject = { ...project, publicPath: "/demo/mobile/", url: "https://example.invalid/demo/mobile/" };
+  const task = { id: "task-1", number: 1, currentStatus: status,
+    publicPath: "/demo/mobile/tasks/1/", url: "https://example.invalid/demo/mobile/tasks/1/" };
   const instruction = "Static proposal instruction ".repeat(40);
   const comment = {
-    schemaVersion: 4, run, contextRequest, company, project, task,
+    schemaVersion: 4, run, contextRequest, company, project: proposalProject, task,
     stateRevision: 7, currentDraft: null,
     proposalAuthoring: { voice: "first_person", instruction },
     authoringBasis: { snapshotSha256: "a".repeat(64), instruction },
@@ -146,7 +148,7 @@ test("local task lists and proposal reviews use the generated shared-entity cont
     task: { id: "task-1", status }, controls: [], checklists: [],
     proposalContexts: {
       comment,
-      checklist: { schemaVersion: 1, run, contextRequest, company, project, task,
+      checklist: { schemaVersion: 1, run, contextRequest, company, project: proposalProject, task,
         stateRevision: 8, currentDraft: null },
     },
     instruction,
@@ -159,6 +161,10 @@ test("local task lists and proposal reviews use the generated shared-entity cont
   assert.equal(compactReview.proposalContexts.comment.authoringBasis.snapshotSha256, "a".repeat(64));
   assert.equal(compactReview.proposalContexts.comment.task, undefined);
   assert.equal(compactReview.proposalEntities.tasks[compactReview.proposalContexts.comment.taskRef].id, "task-1");
+  assert.equal("publicPath" in compactReview.proposalEntities.projects[0], false);
+  assert.equal("publicPath" in compactReview.proposalEntities.tasks[0], false);
+  assert.equal(compactReview.proposalEntities.projects[0].url, proposalProject.url);
+  assert.equal(compactReview.proposalEntities.tasks[0].url, task.url);
   assert.match(compactReview.proposalContexts.comment.proposalAuthoring.instructionKey,
     /^task-proposal-instruction-sha256:[0-9a-f]{64}$/u);
   assert.equal(compactReview.proposalInstructionSource, "tool_description");

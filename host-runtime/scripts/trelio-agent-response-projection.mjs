@@ -232,7 +232,15 @@ const projectTaskReviewContext = (value) => {
         return value;
     const projectedContexts = Object.fromEntries(Object.entries(rawContexts).map(([kind, contextValue]) => {
         const context = record(contextValue);
-        return [kind, context ? projectProposalInstructions(context) : contextValue];
+        if (!context)
+            return [kind, contextValue];
+        // Bundled cards must expose the same target coordinates as the singular
+        // proposal readers. The shared dictionary is built after this projection,
+        // so restoring a card cannot reintroduce duplicate browser routes.
+        return [kind, mapFields(projectProposalInstructions(context), {
+                project: withoutDuplicatePublicPath,
+                task: withoutDuplicatePublicPath,
+            })];
     }));
     const counts = new Map();
     for (const contextValue of Object.values(projectedContexts)) {
@@ -1575,6 +1583,8 @@ const projectBatch01Read = (toolName, payload, args) => {
             return mapFields(payload, { task: withoutTaskTone });
         case "get_task_status_proposal_context":
         case "get_task_comment_proposal_context":
+        case "get_task_control_clear_proposal_context":
+        case "get_task_checklist_proposal_context":
             return mapFields(payload, {
                 project: withoutDuplicatePublicPath,
                 task: withoutDuplicatePublicPath,
