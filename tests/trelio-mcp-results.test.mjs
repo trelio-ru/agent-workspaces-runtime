@@ -58,6 +58,29 @@ test("local projection preserves hydrated notes, explicit states and arbitrary d
   }
 });
 
+test("local hydration applies the conservative notification and page receipt projection", () => {
+  const notifications = { notifications: [{ id: "notice-1", taskTargetPath: "/demo/tasks/1/",
+    targetUrl: "https://example.invalid/demo/tasks/1/", readAt: null }],
+  pagination: { hasMore: false } };
+  const localNotices = compactLocalNativeMcpResult("list_notifications", {
+    structuredContent: notifications,
+    content: [{ type: "text", text: JSON.stringify(notifications) }],
+  }).structuredContent;
+  assert.equal("taskTargetPath" in localNotices.notifications[0], false);
+  assert.equal(localNotices.notifications[0].targetUrl, notifications.notifications[0].targetUrl);
+  assert.equal(localNotices.notifications[0].readAt, null);
+
+  const page = { ok: true, action: "update_knowledge_base_page", company: { slug: "demo" },
+    page: { id: "page-1", slug: "article", updatedAt: "2026-09-24T00:00:00.000Z",
+      bodyPlainText: "Содержимое ".repeat(100) } };
+  const localPage = compactLocalNativeMcpResult("update_knowledge_base_page", {
+    structuredContent: page, content: [{ type: "text", text: JSON.stringify(page) }],
+  }).structuredContent;
+  assert.equal("bodyPlainText" in localPage.page, false);
+  assert.equal(localPage.page.updatedAt, page.page.updatedAt);
+  assert.equal(localPage.deferredData.arguments.responseDetail, "full");
+});
+
 test("local workspace inventory keeps accepted head and removes mirror routing metadata", () => {
   const company = { id: "company", slug: "demo", name: "Demo" };
   const project = { id: "project", slug: "mobile", name: "Mobile" };

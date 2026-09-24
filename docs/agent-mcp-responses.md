@@ -15,7 +15,10 @@ MCP App не изменяются. Поля пользовательских д�
   при полном task/document locator; canonical rich text остаётся доступен через
   `rich_description`. После переноса continuation указывает новый проект/номер;
   повторная mutation ради подробностей запрещена.
-- `get_contact`, `get_registry`, `get_knowledge_base_page`,
+- `get_project_meta` откладывает workflow options вместе с template/custom-field/
+  membership справочниками; выбранные данные возвращаются через
+  `responseFields`, а полный exact read – через `responseDetail=full`.
+  `get_contact`, `get_registry`, `get_knowledge_base_page`,
   `get_regular_work` и `list_recent_activity` принимают `responseFields` и
   возвращают только выбранные тяжёлые поля вместе с compact core.
   `responseDetail=full` остаётся совместимым явным чтением. Эти arguments
@@ -48,6 +51,12 @@ MCP App не изменяются. Поля пользовательских д�
   удаляется только из доказанной второй копии; revision, coverage, диапазоны,
   hash и media остаются. Errors, самостоятельный текст и hidden `_meta`
   сохраняются. Проекция не запускается над arbitrary provider JSON.
+- В известных task/project/workspace DTO сокращаются только повторные
+  browser routes, UI tone и доказанные дубли; исторические snapshots
+  исключаются лишь при точном `null`. Календарный `dueDate`, непустая история,
+  поисковые совпадения и ACL сохраняются. Notification path опускается только
+  при абсолютном `targetUrl`; успешный update knowledge-base page может
+  заменить длинный повтор body на exact full-read continuation с revision.
 - Unified `search` по умолчанию возвращает пять кандидатов и сохраняет
   `hasMore`/coverage для осознанного расширения. Каждый результат оставляет
   stable ID, compact exact locator, archive/state, matched formulations и

@@ -1,6 +1,6 @@
 // Generated portable Trelio response contract. Do not edit by hand.
 import { createHash } from "node:crypto";
-export const MCP_RESPONSE_PROJECTION_VERSION = 3;
+export const MCP_RESPONSE_PROJECTION_VERSION = 4;
 export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
     "get_contact", "get_registry", "get_knowledge_base_page", "get_project_meta",
     "get_task_create_meta", "get_regular_work", "list_recent_activity", "list_agent_skills",
@@ -10,7 +10,7 @@ export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
 ]);
 export const MCP_RESPONSE_FIELD_TOOLS = {
     get_contact: ["richText", "options"],
-    get_project_meta: ["taskCustomFields", "taskTemplates", "members", "memberGroups"],
+    get_project_meta: ["workflowOptions", "taskCustomFields", "taskTemplates", "members", "memberGroups"],
     get_registry: ["richText", "history", "comments", "commentsPagination", "mentionableMembers"],
     get_knowledge_base_page: ["richText", "pages"],
     get_regular_work: ["richText", "history", "preparation", "options", "mentionableMembers"],
@@ -767,7 +767,7 @@ const projectProjectMeta = (payload, args) => {
     const projectSlug = project?.slug ?? args.projectSlug;
     if (typeof companySlug !== "string" || typeof projectSlug !== "string")
         return result;
-    return addDeferred(result, ["taskCustomFields", "taskTemplates", "members", "memberGroups"], {
+    return addDeferred(result, ["workflowOptions", "taskCustomFields", "taskTemplates", "members", "memberGroups"], {
         tool: "get_project_meta",
         arguments: { companySlug, projectSlug },
     }, args);
@@ -1206,7 +1206,7 @@ const projectAgentSkillDetail = (payload, args) => {
     };
 };
 /** Полный обход только известных domain positions; errors/Apps обрабатывает caller. */
-export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
+const projectMcpAgentPayloadBase = (toolName, value, rawArguments = {}) => {
     const payload = record(value);
     const args = record(rawArguments) ?? {};
     if (!payload || (MCP_RESPONSE_DETAIL_TOOLS.has(toolName) && args.responseDetail === "full"))
@@ -1363,4 +1363,241 @@ export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
     // Неизвестный tool/shape сохраняется целиком. Generic provider responses,
     // instructions, snapshots, approval boundaries и arbitrary JSON не обрезаются.
     return value;
+};
+/**
+ * The next batch is intentionally narrower than a path-based JSON cleaner. A
+ * crossed-out field in one real response can be the only audit or navigation
+ * evidence in another response. Only known DTO positions are visited, and
+ * nullable historical fields disappear only while they are actually null.
+ */
+const withoutFields = (value, fields) => {
+    const source = record(value);
+    if (!source)
+        return value;
+    const result = { ...source };
+    for (const field of fields)
+        delete result[field];
+    return result;
+};
+const withoutNullFields = (value, fields) => {
+    const source = record(value);
+    if (!source)
+        return value;
+    const result = { ...source };
+    for (const field of fields) {
+        if (result[field] === null)
+            delete result[field];
+    }
+    return result;
+};
+const withoutBrowserPaths = (value) => withoutFields(value, [
+    "settingsPath", "archivePath", "notificationsPath",
+]);
+const withoutDuplicatePublicPath = (value) => {
+    const source = record(value);
+    return source && typeof source.url === "string"
+        ? withoutFields(source, ["publicPath"]) : value;
+};
+const withoutTaskTone = (value) => withoutFields(value, ["deadlineTone"]);
+const WORKSPACE_AUDIT_FIELDS = [
+    "parentWorkspaceId", "createdAt", "createdByMemberId",
+    "deletedAt", "deletedByMemberId", "deletionReason", "deletionSource",
+];
+const withoutWorkspaceAudit = (value) => withoutNullFields(withoutFields(value, ["createdAt", "createdByMemberId"]), ["parentWorkspaceId", "deletedAt", "deletedByMemberId", "deletionReason", "deletionSource"]);
+const projectWorkspaceReadDuplicate = (payload) => {
+    const workspace = record(payload.workspace);
+    const overview = record(payload.overview);
+    const overviewWorkspace = record(overview?.workspace);
+    if (!workspace || !overview || !overviewWorkspace || workspace.id !== overviewWorkspace.id) {
+        return payload;
+    }
+    // The overview repeats the same workspace's descriptive facts. Compare each
+    // value before removing it; a future independent overview value must survive.
+    const duplicateFields = ["title", "description", "state", "updatedAt", "createdAt", "createdByMemberId"];
+    const projectedOverview = { ...overviewWorkspace };
+    for (const field of duplicateFields) {
+        if (own(workspace, field) && equal(workspace[field], overviewWorkspace[field])) {
+            delete projectedOverview[field];
+        }
+    }
+    return { ...payload, overview: { ...overview, workspace: projectedOverview } };
+};
+const projectKnowledgeBaseUpdateReceipt = (payload) => {
+    const page = record(payload.page);
+    const company = record(payload.company);
+    if (payload.ok !== true || payload.action !== "update_knowledge_base_page"
+        || !page || typeof page.slug !== "string" || typeof page.updatedAt !== "string"
+        || typeof company?.slug !== "string" || own(payload, "deferredData"))
+        return payload;
+    const repeatedFields = ["bodyJson", "bodyPlainText"].filter((field) => own(page, field));
+    if (!repeatedFields.length)
+        return payload;
+    // The write already supplied the complete replacement body. Keep the new
+    // page revision and all effects, and expose an exact ACL-checked full read
+    // when the caller needs to inspect the stored representation again.
+    const candidate = {
+        ...payload,
+        page: withoutFields(page, repeatedFields),
+        deferredData: {
+            fields: repeatedFields.map((field) => `page.${field}`),
+            tool: "get_knowledge_base_page",
+            arguments: { companySlug: company.slug, pageSlug: page.slug, responseDetail: "full" },
+            instruction: "Use the exact page read only if the stored body must be inspected; do not replay the mutation.",
+        },
+    };
+    return JSON.stringify(candidate).length < JSON.stringify(payload).length ? candidate : payload;
+};
+const projectBatch01Read = (toolName, payload, args) => {
+    switch (toolName) {
+        case "get_project_meta": {
+            let result = payload;
+            const deferred = record(payload.deferredData);
+            const deferredArguments = record(deferred?.arguments);
+            const requested = stringArray(args.responseFields);
+            // A caller may feed an older already-projected result back through the
+            // portable projector. Upgrade its continuation only when workflow
+            // options were not expressly requested and the net payload is smaller.
+            if (own(payload, "workflowOptions") && deferred && deferredArguments
+                && Array.isArray(deferred.fields) && !requested.includes("workflowOptions")) {
+                const { workflowOptions: _workflowOptions, ...withoutWorkflowOptions } = payload;
+                const candidate = {
+                    ...withoutWorkflowOptions,
+                    deferredData: {
+                        ...deferred,
+                        fields: ["workflowOptions", ...stringArray(deferred.fields).filter((field) => field !== "workflowOptions")],
+                        arguments: {
+                            ...deferredArguments,
+                            responseFields: ["workflowOptions", ...stringArray(deferredArguments.responseFields)
+                                    .filter((field) => field !== "workflowOptions")],
+                        },
+                    },
+                };
+                if (JSON.stringify(candidate).length < JSON.stringify(payload).length)
+                    result = candidate;
+            }
+            return mapFields(result, {
+                company: (value) => withoutFields(withoutBrowserPaths(value), ["publicPath"]),
+                project: withoutBrowserPaths,
+            });
+        }
+        case "resolve_status":
+            return mapFields(payload, {
+                company: (value) => withoutFields(withoutBrowserPaths(value), ["publicPath"]),
+                project: withoutBrowserPaths,
+            });
+        case "list_project_tasks":
+            return mapFields(payload, {
+                company: (value) => withoutFields(value, ["publicPath"]),
+                project: withoutBrowserPaths,
+                tasks: list(withoutTaskTone),
+            });
+        case "list_my_tasks":
+            return mapFields(payload, { tasks: list(withoutTaskTone) });
+        case "get_task":
+        case "get_tasks":
+            return mapFields(payload, { tasks: list((value) => mapFields(value, {
+                    task: withoutTaskTone,
+                    connections: (connections) => mapFields(connections, { task: withoutTaskTone }),
+                })) });
+        case "get_task_create_meta":
+            return mapFields(payload, {
+                project: (value) => withoutFields(value, ["publicPath"]),
+                viewer: (value) => {
+                    const source = record(value);
+                    if (!source)
+                        return value;
+                    const projected = withoutFields(source, ["avatarUrl", "initials", "color"]);
+                    const result = record(projected);
+                    if (result.userDisplayName === result.displayName)
+                        delete result.userDisplayName;
+                    return result;
+                },
+            });
+        case "get_task_sections":
+            return mapFields(payload, {
+                sections: (sections) => mapFields(sections, {
+                    relationships: (value) => mapFields(value, { subtasks: list(withoutTaskTone) }),
+                }),
+            });
+        case "get_task_activity":
+            return mapFields(payload, {
+                company: withoutBrowserPaths,
+                project: withoutBrowserPaths,
+                comments: list((value) => mapFields(withoutFields(value, ["sourceLabel"]), {
+                    entries: list((entry) => withoutNullFields(withoutFields(entry, ["sourceLabel", "detailsToggleLabel"]), [
+                        "previousDescription", "previousChecklist", "agentWorkspaceHandoff",
+                    ])),
+                })),
+            });
+        case "list_task_connections":
+            return mapFields(payload, {
+                task: withoutTaskTone,
+                relations: list((value) => mapFields(value, { task: withoutTaskTone })),
+            });
+        case "get_workspace":
+            return mapFields(projectWorkspaceReadDuplicate(payload), {
+                workspace: (value) => withoutFields(value, ["createdAt", "createdByMemberId"]),
+            });
+        case "get_agent_workspace":
+        case "list_agent_workspace_revisions":
+        case "get_agent_workspace_file":
+        case "get_workspace_revision_diff": {
+            const workspace = record(payload.workspace);
+            const diff = record(payload.diff);
+            const hasWorkspaceAudit = workspace && WORKSPACE_AUDIT_FIELDS.some((field) => own(workspace, field));
+            const hasEmptyPatch = toolName === "get_workspace_revision_diff" && diff
+                && diff.patchTotalChars === 0 && diff.patchTruncated === false
+                && (diff.patch === null || diff.nextPatchOffset === null);
+            if (!hasWorkspaceAudit && !hasEmptyPatch)
+                return payload;
+            return mapFields(payload, { workspace: withoutWorkspaceAudit,
+                ...(toolName === "get_workspace_revision_diff" ? {
+                    diff: (value) => {
+                        const source = record(value);
+                        if (!source || source.patchTotalChars !== 0 || source.patchTruncated !== false)
+                            return value;
+                        return withoutNullFields(source, ["patch", "nextPatchOffset"]);
+                    },
+                } : {}),
+            });
+        }
+        case "list_recent_activity":
+            return mapFields(payload, { events: (value) => mapFields(value, {
+                    items: list((item) => withoutFields(item, ["sourceLabel"])),
+                }) });
+        case "list_company_activity":
+            return mapFields(payload, { items: list((item) => mapFields(item, {
+                    details: (details) => mapFields(details, {
+                        acceptedBy: (actor) => withoutFields(actor, ["avatarUrl"]),
+                    }),
+                })) });
+        case "get_task_review_context":
+            return mapFields(payload, { task: withoutTaskTone });
+        case "get_task_status_proposal_context":
+        case "get_task_comment_proposal_context":
+            return mapFields(payload, {
+                project: withoutDuplicatePublicPath,
+                task: withoutDuplicatePublicPath,
+            });
+        case "list_notifications":
+            return mapFields(payload, { notifications: list((value) => {
+                    const notification = record(value);
+                    return notification && typeof notification.targetUrl === "string"
+                        ? withoutFields(notification, ["taskTargetPath"]) : value;
+                }) });
+        case "update_knowledge_base_page":
+            return projectKnowledgeBaseUpdateReceipt(payload);
+        default:
+            return payload;
+    }
+};
+/** Preserve the existing explicit full mode and every unclassified response. */
+export const projectMcpAgentPayload = (toolName, value, rawArguments = {}) => {
+    const projected = projectMcpAgentPayloadBase(toolName, value, rawArguments);
+    const payload = record(projected);
+    const args = record(rawArguments);
+    if (!payload || (MCP_RESPONSE_DETAIL_TOOLS.has(toolName) && args?.responseDetail === "full")) {
+        return projected;
+    }
+    return projectBatch01Read(toolName, payload, args ?? {});
 };
