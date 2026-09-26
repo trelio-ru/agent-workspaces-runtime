@@ -24,6 +24,7 @@ const NATIVE_UNAVAILABLE = new Set([
   "access_required", "application_unavailable", "accessibility_unavailable",
   "backend_unavailable",
 ]);
+const NATIVE_PREFLIGHT_CHROME_RETRY = new Set(["target_url_changed", "field_not_found"]);
 
 export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
   constructor(nativeReason) {
@@ -346,7 +347,19 @@ export const prepareSecretBrowserSession = async ({
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {
       throw new EmbeddedBrowserUnavailable(ready.reasonCode);
     }
-    if (ready.status !== "ready") throw new SecretBrowserFillError("Проверка встроенной вкладки отклонена.", ready.reasonCode);
+    if (ready.status !== "ready") {
+      // AX/UIA can omit an existing web document or a hidden mode control.
+      // These two value-free misses may select a new isolated Chrome surface:
+      // Chrome still has to verify its own exact URL and all fields before
+      // the one-use grant is consumed. Ambiguity/write errors stay terminal.
+      if (mode === "auto" && ready.status === "failed"
+        && NATIVE_PREFLIGHT_CHROME_RETRY.has(ready.reasonCode)) {
+        await channel.close();
+        channel = null;
+        return chrome(ready.reasonCode);
+      }
+      throw new SecretBrowserFillError("Проверка встроенной вкладки отклонена.", ready.reasonCode);
+    }
     let used = false;
     return {
       surface: "embedded", fallbackReason: null,

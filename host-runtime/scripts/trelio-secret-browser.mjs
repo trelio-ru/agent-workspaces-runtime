@@ -475,13 +475,35 @@ const installSecretBrowserController = (
         || (activationTarget instanceof HTMLInputElement && !supportedInputAction)
         || activationTarget instanceof HTMLTextAreaElement
         || activationTarget.hasAttribute("disabled")
-        || !isVisible(activationTarget)
-        || typeof activationTarget.click !== "function") return;
+        || activationTarget.disabled === true) return;
+      let clickTarget = activationTarget;
+      if (!isVisible(activationTarget)) {
+        // A hidden radio/checkbox can be switched by its visible HTML label.
+        // Keep the grant bound to the input's exact selector and permit only
+        // one explicit `for=id` association in this same top-level document.
+        // Never search by label text or click an unrelated visible element.
+        if (!(activationTarget instanceof HTMLInputElement)
+          || !["checkbox", "radio"].includes(activationTarget.type)
+          || !activationTarget.id) return;
+        const labels = [...(activationTarget.labels ?? [])].filter((label) => (
+          label instanceof HTMLLabelElement
+          && label.htmlFor === activationTarget.id
+          && label.control === activationTarget
+        ));
+        if (labels.length > 1) {
+          state.status = "failed";
+          state.reasonCode = "field_ambiguous";
+          return;
+        }
+        if (labels.length !== 1 || !isVisible(labels[0])) return;
+        clickTarget = labels[0];
+      }
+      if (typeof clickTarget.click !== "function") return;
       // Mark first so a synchronous SPA render cannot make the controller
       // toggle the same mode twice on the next bounded readiness poll.
       state.activationPerformed = true;
       try {
-        activationTarget.click();
+        clickTarget.click();
       } catch {
         state.status = "failed";
         state.reasonCode = "field_write_failed";
@@ -803,7 +825,10 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
           fieldMappings: step.fields,
           activationSelector: activationCompleted ? undefined : step.activationSelector,
           submitSelector: step.submitSelector,
-          targetUrl: currentTargetInfo.url,
+          // TargetInfo may preserve a different textual URL spelling than
+          // location.href. Its normalized form was already checked against
+          // the grant hash above, so compare the controller to that form.
+          targetUrl: new URL(currentTargetInfo.url).toString(),
         });
       }
       let state;

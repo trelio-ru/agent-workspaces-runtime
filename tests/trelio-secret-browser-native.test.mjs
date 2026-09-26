@@ -13,7 +13,10 @@ import {
   EmbeddedBrowserUnavailable, nativeIdFromSecretSelector, openNativeSecretBrowserChannel,
   prepareSecretBrowserSession,
 } from "../host-runtime/scripts/trelio-secret-browser-native.mjs";
-import { createSecretBrowserControllerExpression, SecretBrowserFillError } from "../host-runtime/scripts/trelio-secret-browser.mjs";
+import {
+  createSecretBrowserControllerExpression, prepareSecretBrowserControllerViaDevTools,
+  SecretBrowserFillError,
+} from "../host-runtime/scripts/trelio-secret-browser.mjs";
 
 const targetUrl = "https://login.example.test/account?flow=1";
 const context = {
@@ -108,7 +111,31 @@ for (const reasonCode of ["access_required", "application_unavailable", "accessi
     assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/);
   });
 }
-for (const reasonCode of ["target_url_changed", "field_ambiguous", "field_not_found", "adapter_error", "timeout"]) {
+for (const reasonCode of ["target_url_changed", "field_not_found"]) {
+  test("value-free native document/field miss may use a separately verified Chrome tab: " + reasonCode, async () => {
+    const f = fixture({ status: "failed", reasonCode });
+    const session = await prepareSecretBrowserSession(f.args);
+    assert.equal(session.surface, "chrome");
+    assert.equal(session.fallbackReason, reasonCode);
+    assert.equal(f.chromePreflights, 1);
+    assert.equal(f.chromeCalls, 0);
+    assert.ok(f.closed);
+    await session.fill({ secretValues: values });
+    assert.equal(f.chromeCalls, 1);
+  });
+}
+test("Chrome preflight failure after a native miss never receives a secret", async () => {
+  const f = fixture({ status: "failed", reasonCode: "target_url_changed" });
+  f.args.prepareChrome = async () => {
+    throw new SecretBrowserFillError("Synthetic exact URL mismatch.", "target_url_changed");
+  };
+  await assert.rejects(prepareSecretBrowserSession(f.args), (error) => (
+    error instanceof SecretBrowserFillError && error.reasonCode === "target_url_changed"
+  ));
+  assert.ok(f.closed);
+  assert.equal(f.chromeCalls, 0);
+});
+for (const reasonCode of ["field_ambiguous", "adapter_error", "timeout"]) {
   test("preflight failure cannot downgrade: " + reasonCode, async () => {
     const f = fixture({ status: "failed", reasonCode });
     await assert.rejects(prepareSecretBrowserSession(f.args), SecretBrowserFillError);
@@ -310,10 +337,15 @@ const controllerFixture = (navigateAfterFirst = false) => {
     set value(value) { this.stored = value; events.push(this.id); }
     dispatchEvent() { if (navigateAfterFirst && this.id === "username") location.href += "changed"; }
   }
+  class Label extends Element {
+    constructor(id, control) { super(id); this.control = control; this.htmlFor = control.id; }
+    click() { events.push(this.id); this.control.checked = true; }
+  }
   class Button extends Element { click() { events.push("submit"); } }
   const fields = { "#username": new Input("username"), "#password": new Input("password"), "#login": new Button("login") };
   const realm = vm.createContext({
-    location, HTMLElement: Element, HTMLInputElement: Input, HTMLTextAreaElement: class extends Input {}, HTMLButtonElement: Button,
+    location, HTMLElement: Element, HTMLInputElement: Input, HTMLLabelElement: Label,
+    HTMLTextAreaElement: class extends Input {}, HTMLButtonElement: Button,
     InputEvent: class {}, Event: class {},
     getComputedStyle: () => ({ display: "block", visibility: "visible" }),
     document: { querySelectorAll: (selector) => fields[selector] ? [fields[selector]] : [] },
@@ -359,6 +391,76 @@ test("a signed activation action exposes the exact fields before any value is de
   assert.deepEqual(f.events, ["activate"], "preflight remains value-free");
   assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "succeeded");
   assert.deepEqual(f.events, ["activate", "username", "password", "submit"]);
+});
+
+test("a hidden exact radio activates through its sole visible for=id label", () => {
+  const f = controllerFixture();
+  const radio = new f.realm.HTMLInputElement("phone-mode");
+  radio.type = "radio";
+  radio.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  const label = new f.realm.HTMLLabelElement("phone-label", radio);
+  radio.labels = [label];
+  label.click = () => {
+    f.events.push("activate-label");
+    radio.checked = true;
+    f.fields["#username"] = new f.realm.HTMLInputElement("username");
+  };
+  f.fields["#phone-mode"] = radio;
+  delete f.fields["#username"];
+  vm.runInContext(createSecretBrowserControllerExpression(
+    context.targetOrigin, context.browserSteps[0].fields, "#login", targetUrl, "#phone-mode",
+  ), f.realm);
+  assert.deepEqual({ ...f.realm.__trelioSecretBrowserController() }, {
+    status: "waiting", activationPerformed: true,
+  });
+  assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
+  assert.deepEqual(f.events, ["activate-label"], "switching remains value-free");
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "succeeded");
+  assert.deepEqual(f.events, ["activate-label", "username", "password", "submit"]);
+});
+
+test("hidden input with multiple exact labels fails closed before a click", () => {
+  const f = controllerFixture();
+  const radio = new f.realm.HTMLInputElement("phone-mode");
+  radio.type = "radio";
+  radio.getBoundingClientRect = () => ({ width: 0, height: 0 });
+  radio.labels = [new f.realm.HTMLLabelElement("one", radio), new f.realm.HTMLLabelElement("two", radio)];
+  f.fields["#phone-mode"] = radio;
+  vm.runInContext(createSecretBrowserControllerExpression(
+    context.targetOrigin, context.browserSteps[0].fields, "#login", targetUrl, "#phone-mode",
+  ), f.realm);
+  assert.deepEqual({ ...f.realm.__trelioSecretBrowserController() }, {
+    status: "failed", reasonCode: "field_ambiguous",
+  });
+  assert.deepEqual(f.events, []);
+});
+
+test("controller compares the normalized verified URL, not TargetInfo spelling", async () => {
+  const rawTargetUrl = "HTTPS://LOGIN.EXAMPLE.TEST/account?flow=1";
+  let controllerExpression = null;
+  const client = {
+    request: async (method, parameters) => {
+      if (method === "Target.createTarget") return { targetId: "synthetic-tab" };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: rawTargetUrl } };
+      if (method === "Target.attachToTarget") return { sessionId: "synthetic-session" };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "synthetic-frame" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") {
+        if (!parameters.expression.startsWith("globalThis.")) {
+          controllerExpression = parameters.expression;
+          return { result: { value: undefined } };
+        }
+        return { result: { value: { status: "ready" } } };
+      }
+      return {};
+    },
+  };
+  await prepareSecretBrowserControllerViaDevTools({
+    client, targetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: context.targetUrlSha256, browserSteps: context.browserSteps,
+  });
+  assert.ok(controllerExpression?.includes(JSON.stringify(targetUrl)));
+  assert.ok(!controllerExpression.includes(JSON.stringify(rawTargetUrl)));
 });
 
 test("Chrome accepts exact selector replacements and presentation-only phone masks", () => {
