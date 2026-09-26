@@ -27,7 +27,7 @@ import {
 import crypto from "node:crypto";
 import { Buffer, isUtf8 } from "node:buffer";
 import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8017,6 +8017,173 @@ const canonicalizeLocalActionProjectSlugs = (value, mirror) => {
   }));
 };
 
+/**
+ * Read exactly one user-selected transcript on the trusted device. The bridge
+ * sends text through the ordinary meeting ACL and proof path. The absolute
+ * path stays in the local invocation and source bytes never enter model-visible
+ * tool arguments or results.
+ */
+export const readLocalMeetingTranscriptFile = async (localFilePath) => {
+  if (typeof localFilePath !== "string" || !path.isAbsolute(localFilePath)
+    || localFilePath.length > 8_192) {
+    throw new TrelioLocalContextError("LOCAL_ACTION_INVALID_UPLOAD_PATH", "The transcript requires one absolute local file path.");
+  }
+  const metadata = await fs.lstat(localFilePath).catch((error) => {
+    throw new TrelioLocalContextError(
+      "LOCAL_ACTION_TRANSCRIPT_FILE_UNAVAILABLE",
+      "The local transcript file is unavailable on this device.",
+      { causeCode: error?.code ?? null },
+    );
+  });
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size < 1
+    || metadata.size > 2_000_000) {
+    throw new TrelioLocalContextError("LOCAL_ACTION_TRANSCRIPT_FILE_INVALID", "The transcript must be one regular UTF-8 file of at most 2 MB.");
+  }
+  const handle = await fs.open(localFilePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch((error) => {
+    throw new TrelioLocalContextError(
+      "LOCAL_ACTION_TRANSCRIPT_FILE_UNAVAILABLE",
+      "The local transcript file could not be opened on this device.",
+      { causeCode: error?.code ?? null },
+    );
+  });
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || (process.platform !== "win32"
+      && (opened.dev !== metadata.dev || opened.ino !== metadata.ino))
+      || opened.size !== metadata.size) {
+      throw new TrelioLocalContextError("LOCAL_ACTION_TRANSCRIPT_FILE_CHANGED", "The transcript file changed before it could be read.");
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
+      || after.ctimeMs !== opened.ctimeMs || bytes.length !== opened.size) {
+      throw new TrelioLocalContextError("LOCAL_ACTION_TRANSCRIPT_FILE_CHANGED", "The transcript file changed while it was being read.");
+    }
+    if (!isUtf8(bytes) || bytes.includes(0)) {
+      throw new TrelioLocalContextError("LOCAL_ACTION_TRANSCRIPT_FILE_INVALID", "The transcript must contain UTF-8 text.");
+    }
+    const contentText = bytes.toString("utf8");
+    if (!contentText.trim()) {
+      throw new TrelioLocalContextError("LOCAL_ACTION_TRANSCRIPT_FILE_INVALID", "The transcript file is empty.");
+    }
+    return { contentText, originalName: path.basename(localFilePath) };
+  } finally {
+    await handle.close();
+  }
+};
+
+export const buildLocalMeetingTranscriptArguments = async ({
+  companySlug, nativeTool, rawArguments, localFilePath,
+}) => {
+  const isSourceAddition = nativeTool === "add_meeting_source";
+  const allowedFields = new Set(isSourceAddition
+    ? ["meetingId", "kind", "origin", "fullTranscriptConfirmed"]
+    : ["companySlug", "title", "occurredAt", "transcriptOrigin", "participantMemberIds",
+      "memberGrants", "groupGrants", "companyAccess", "confirmedAllCompanyMembersAccess",
+      "clientRequestId", "fullTranscriptConfirmed"]);
+  const validTarget = isSourceAddition
+    ? rawArguments.kind === "transcript" && typeof rawArguments.meetingId === "string"
+      && rawArguments.contentText === undefined && rawArguments.originalName === undefined
+    : nativeTool === "create_meeting" && rawArguments.companySlug === companySlug
+      && rawArguments.transcriptText === undefined && typeof rawArguments.clientRequestId === "string";
+  if (!validTarget || rawArguments.fullTranscriptConfirmed !== true
+    || Object.keys(rawArguments).some((field) => !allowedFields.has(field))) {
+    throw new TrelioLocalContextError("LOCAL_ACTION_TRANSCRIPT_INPUT_INVALID", "Select one meeting transcript file and confirm it is the complete original source.");
+  }
+  const file = await readLocalMeetingTranscriptFile(localFilePath);
+  return {
+    ...rawArguments,
+    ...(isSourceAddition
+      ? {
+          contentText: file.contentText,
+          originalName: file.originalName,
+          contentType: "text/plain; charset=utf-8",
+        }
+      : { transcriptText: file.contentText }),
+  };
+};
+
+const handleLocalMeetingTranscriptOperation = async ({
+  origin, companySlug, nativeTool, rawInput, provider, mirror = null, signal,
+}) => {
+  const argumentsWithText = await buildLocalMeetingTranscriptArguments({
+    companySlug,
+    nativeTool,
+    rawArguments: rawInput.arguments,
+    localFilePath: rawInput.localFilePath,
+  });
+  const protectedInput = provider.companyEncryption && nativeTool === "add_meeting_source"
+    ? {
+        ...argumentsWithText,
+        // Meeting source additions lack a public idempotency key. Derive an
+        // opaque, company-keyed locator from the exact target and file bytes
+        // so an interrupted encrypted upload reuses its marker and the native
+        // source SHA deduplicates it. The plaintext digest never leaves here.
+        clientRequestId: deriveLocalActionEntityId(
+          provider.companyEncryption,
+          `meeting_transcript\0${argumentsWithText.meetingId}\0${crypto.createHash("sha256").update(argumentsWithText.contentText).digest("hex")}`,
+        ),
+      }
+    : argumentsWithText;
+  const protectedRequest = provider.companyEncryption
+    ? await protectLocalActionArguments({
+        nativeTool,
+        arguments: protectedInput,
+        companyEncryption: provider.companyEncryption,
+        mirror,
+      })
+    : { value: protectedInput, payloads: [], expectedPayloadValues: {} };
+  if (provider.companyEncryption) {
+    await uploadLocalActionPayloads({
+      origin: provider.requestOrigin,
+      token: provider.token,
+      companyEncryption: provider.companyEncryption,
+      payloads: protectedRequest.payloads,
+      expectedPayloadValues: protectedRequest.expectedPayloadValues,
+      signal,
+    });
+  }
+  try {
+    const response = await request(
+      provider.requestOrigin,
+      provider.token,
+      `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          nativeTool,
+          arguments: { ...protectedRequest.value, localFileDelivery: true },
+          ...(rawInput.runtimeSessionProof
+            ? { runtimeSessionProof: rawInput.runtimeSessionProof }
+            : {}),
+        }),
+        signal,
+      },
+    );
+    const result = await readJson(response);
+    return provider.companyEncryption
+      ? await hydrateLocalActionResult({
+          rawResult: result,
+          origin: provider.requestOrigin,
+          token: provider.token,
+          companyEncryption: provider.companyEncryption,
+          mirror,
+          documentOrigin: origin,
+          signal,
+        })
+      : result;
+  } finally {
+    if (provider.companyEncryption) {
+      await invalidateLocalCompanyMirrorSession({
+        origin,
+        companySlug,
+        companyEncryption: provider.companyEncryption,
+      });
+    }
+  }
+};
+
 const handleLocalTaskAttachmentStreamOperation = async ({
   origin,
   companySlug,
@@ -8180,10 +8347,10 @@ export const handleTrelioLocalActionOperation = async (
     ? "native_trelio"
     : "local_company_context");
   const hasLocalFilePath = rawInput.localFilePath !== undefined;
-  if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment"].includes(nativeTool)) {
+  if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment", "add_meeting_source", "create_meeting"].includes(nativeTool)) {
     throw new TrelioLocalContextError(
       "LOCAL_ACTION_INVALID_UPLOAD_PATH",
-      "localFilePath supports task and knowledge-base attachment uploads only.",
+      "localFilePath supports task attachments, knowledge-base attachments and meeting transcripts only.",
     );
   }
   if (nativeTool === "upload_attachment" && !hasLocalFilePath) {
@@ -8195,6 +8362,12 @@ export const handleTrelioLocalActionOperation = async (
   if (provider.nativeProvider && !hasLocalFilePath) return {
     content: [{ type: "text", text: JSON.stringify(provider.result) }],
   };
+
+  if (hasLocalFilePath && ["add_meeting_source", "create_meeting"].includes(nativeTool) && provider.nativeProvider) {
+    return handleLocalMeetingTranscriptOperation({
+      origin, companySlug, nativeTool, rawInput, provider, signal,
+    });
+  }
 
   if (hasLocalFilePath && provider.nativeProvider) {
     return handleLocalTaskAttachmentStreamOperation({
@@ -8256,6 +8429,11 @@ export const handleTrelioLocalActionOperation = async (
     actionMirror,
   );
   if (hasLocalFilePath) {
+    if (["add_meeting_source", "create_meeting"].includes(nativeTool)) {
+      return handleLocalMeetingTranscriptOperation({
+        origin, companySlug, nativeTool, rawInput, provider, mirror: actionMirror, signal,
+      });
+    }
     return handleLocalTaskAttachmentStreamOperation({
       origin,
       companySlug,

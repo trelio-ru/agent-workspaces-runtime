@@ -21,6 +21,7 @@ import {
   buildEncryptedRestoreHandoffArguments,
   buildLocalCancelledRunReceipt,
   buildLocalTaskAttachmentStreamRequest,
+  buildLocalMeetingTranscriptArguments,
   buildLocalMarkdownDocument,
   buildLocalProposalPublicationDocument,
   buildProposalValueMarkers,
@@ -42,6 +43,7 @@ import {
   prepareLocalTaskAttachmentUploadSession,
   prepareLocalProposalBundle,
   readLocalWorkspaceRevisionFile,
+  readLocalMeetingTranscriptFile,
   protectLocalActionArguments,
   readLocalCompanyMirrorMutationToken,
   readTaskSectionsWithRevisionRefresh,
@@ -1510,6 +1512,72 @@ test("local action schema stays provider-neutral and does not advertise crypto m
   );
 });
 
+test("local meeting transcript reads complete UTF-8 bytes without following a symlink", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-meeting-transcript-"));
+  const original = path.join(directory, "Полная расшифровка.txt");
+  const linked = path.join(directory, "shortcut.txt");
+  const contentText = "Первый участник: начало\nВторой участник: ответ\n";
+  try {
+    await fs.writeFile(original, contentText, { mode: 0o600 });
+    assert.deepEqual(await readLocalMeetingTranscriptFile(original), {
+      contentText,
+      originalName: "Полная расшифровка.txt",
+    });
+    await fs.symlink(original, linked);
+    await assert.rejects(readLocalMeetingTranscriptFile(linked), /regular UTF-8 file/u);
+    await fs.writeFile(original, Buffer.from([0xff, 0xfe, 0x00]));
+    await assert.rejects(readLocalMeetingTranscriptFile(original), /UTF-8 text/u);
+    await fs.writeFile(original, Buffer.alloc(2_000_001));
+    await assert.rejects(readLocalMeetingTranscriptFile(original), /at most 2 MB/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("local meeting create and source addition inject the whole selected file", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-meeting-input-"));
+  const localFilePath = path.join(directory, "Встреча.txt");
+  const text = "Участник 1: начало\nУчастник 2: конец\n";
+  try {
+    await fs.writeFile(localFilePath, text, { mode: 0o600 });
+    const create = await buildLocalMeetingTranscriptArguments({
+      companySlug: "acme",
+      nativeTool: "create_meeting",
+      localFilePath,
+      rawArguments: {
+        companySlug: "acme",
+        title: "Совещание",
+        clientRequestId: "create-meeting-once",
+        fullTranscriptConfirmed: true,
+      },
+    });
+    assert.equal(create.transcriptText, text);
+    assert.equal(JSON.stringify(create).includes(localFilePath), false);
+    const addition = await buildLocalMeetingTranscriptArguments({
+      companySlug: "acme",
+      nativeTool: "add_meeting_source",
+      localFilePath,
+      rawArguments: {
+        meetingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        kind: "transcript",
+        origin: "user_supplied",
+        fullTranscriptConfirmed: true,
+      },
+    });
+    assert.equal(addition.contentText, text);
+    assert.equal(addition.originalName, "Встреча.txt");
+    assert.equal(JSON.stringify(addition).includes(localFilePath), false);
+    await assert.rejects(buildLocalMeetingTranscriptArguments({
+      companySlug: "acme",
+      nativeTool: "add_meeting_source",
+      localFilePath,
+      rawArguments: { meetingId: addition.meetingId, kind: "transcript", contentText: "excerpt", fullTranscriptConfirmed: true },
+    }), /complete original source/u);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 for (const nativeTool of ["upload_attachment", "upload_knowledge_base_attachment"]) {
   test(`${nativeTool} staging keeps the path local and builds plain stream metadata`, async () => {
     const sourceDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-local-upload-test-"));
@@ -1881,6 +1949,37 @@ test("local action protects nested task content and converts Markdown before upl
   assert.match(JSON.stringify(decryptedValues), /Секретная задача/u);
   assert.match(JSON.stringify(decryptedValues), /bulletList/u);
   assert.match(JSON.stringify(decryptedValues), /Не утечь/u);
+
+  const meetingSource = await protectLocalActionArguments({
+    nativeTool: "add_meeting_source",
+    arguments: {
+      meetingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      kind: "transcript",
+      origin: "user_supplied",
+      contentText: "Полная расшифровка встречи",
+      originalName: "Встреча.txt",
+      fullTranscriptConfirmed: true,
+    },
+    companyEncryption,
+  });
+  assert.equal(meetingSource.value.fullTranscriptConfirmed, true);
+  assert.match(meetingSource.value.contentText, /^~e1:/u);
+  assert.match(meetingSource.value.originalName, /^~e1:/u);
+  assert.doesNotMatch(JSON.stringify(meetingSource.value), /Полная расшифровка|Встреча\.txt/u);
+  const meetingCreate = await protectLocalActionArguments({
+    nativeTool: "create_meeting",
+    arguments: {
+      companySlug: "acme",
+      title: "Закрытая встреча",
+      transcriptText: "Полная исходная расшифровка",
+      clientRequestId: "meeting-create-from-file",
+      fullTranscriptConfirmed: true,
+    },
+    companyEncryption,
+  });
+  assert.match(meetingCreate.value.transcriptText, /^~e1:/u);
+  assert.match(meetingCreate.value.title, /^~e1:/u);
+  assert.doesNotMatch(JSON.stringify(meetingCreate.value), /Полная исходная|Закрытая встреча/u);
 
   const deletedWorkspaceId = "11111111-1111-4111-8111-111111111111";
   const deletionMirror = { workspaceEntries: [{ id: deletedWorkspaceId, title: "Лишний воркспейс", description: "Не удерживать это описание", updatedAt: "2026-09-10T12:00:00.000Z" }] };

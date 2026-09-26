@@ -252,6 +252,19 @@ primary project. Registry/contact/meeting связи semantic и сами дос
 
 ## Локальные вложения
 
+Локальная полная UTF-8 расшифровка встречи использует тот же bundled local
+action envelope с `nativeTool=create_meeting` либо `add_meeting_source`,
+`localFilePath` и точными
+meeting arguments. Bridge читает один обычный файл до 2 MB с проверкой
+неизменности, запрещает symlink и добавляет весь текст только в защищённый
+запрос native meeting source. Plain company допускает этот узкий маршрут через
+bridge; encrypted company шифрует `contentText` и `originalName` до передачи.
+Путь не уходит на сервер, а ответ содержит только metadata сохранённого source.
+После неоднозначного ответа требуется exact read источников до повтора.
+Для encrypted `add_meeting_source` bridge выводит стабильный opaque payload ID
+из company key, meeting ID и digest исходного текста; повтор того же файла
+получает тот же marker и не создаёт второй immutable source.
+
 Task attachment с доступным локальным файлом не кодируется в base64 для MCP.
 Только для exact выбранного пользователем или созданного агентом файла агент
 передаёт bundled local action абсолютный `localFilePath`, bridge создаёт
