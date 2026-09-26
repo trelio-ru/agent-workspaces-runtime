@@ -198,6 +198,16 @@ test("native capability errors expose only allowlisted reason codes", () => {
   assert.doesNotMatch(error.message, /CANARY/u);
 });
 
+test("macOS background window discovery never activates or raises the client", async () => {
+  // Electron can omit AXChildren and AXWindows after losing foreground status.
+  // Keep the alternate window handles in the signed native adapter while
+  // guarding against a future 'fix' that steals the user's application focus.
+  const source = await fs.readFile(new URL("../host-runtime/scripts/native-secret-browser/SecretBrowser.swift", import.meta.url), "utf8");
+  assert.match(source, /kAXMainWindowAttribute/u);
+  assert.match(source, /kAXFocusedWindowAttribute/u);
+  assert.match(source, /Session\.applicationDocuments\(ax\)/u);
+  assert.doesNotMatch(source, /\.(?:activate|unhide|hide)\s*\(|kAXRaiseAction/u);
+});
 
 test("lost native reply after a setter never calls Chrome or repeats the write", async () => {
   const f = fixture();

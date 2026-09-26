@@ -164,6 +164,28 @@ final class Session {
             return false
         }
     }
+    static func applicationDocuments(_ application: AXUIElement) throws -> [AXUIElement] {
+        // An inactive Electron client may leave its application-level
+        // AXChildren/AXWindows empty even while its last main window remains
+        // addressable through AXMainWindow or AXFocusedWindow. Read those
+        // documented window attributes without activating, raising or focusing
+        // the client. Exact URL, top-level document and control checks below
+        // still gate every candidate before any secret is consumed.
+        var roots = [application]
+        for key in [kAXMainWindowAttribute, kAXFocusedWindowAttribute] {
+            if let window = elementAttribute(application, key as String),
+               !roots.contains(where: { CFEqual($0, window) }) {
+                roots.append(window)
+            }
+        }
+        var found: [AXUIElement] = []
+        for root in roots {
+            for document in try documents(root) where !found.contains(where: { CFEqual($0, document) }) {
+                found.append(document)
+            }
+        }
+        return found
+    }
     static func controls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
         let nodes = try walk(document, stopAtWebArea: true)
         func find(_ id: String, button: Bool) throws -> AXUIElement {
@@ -257,7 +279,7 @@ final class Session {
             // Documented Electron switch; it exposes the accessibility tree but
             // does not grant TCC permission or change any browser/site policy.
             AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-            let docs = try Session.documents(ax)
+            let docs = try Session.applicationDocuments(ax)
             exposedDocuments += docs.count
             for doc in docs where matches(documentURL(doc), steps[0]) { candidates.append((app, ax, doc)) }
         }
