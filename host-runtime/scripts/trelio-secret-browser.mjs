@@ -688,6 +688,34 @@ const readExactTargetInfo = async ({
   return targetInfo;
 };
 
+const readBoundDocumentState = async ({ client, sessionId, step, previousStep }) => {
+  const { frameTree } = await client.request("Page.getFrameTree", {}, sessionId);
+  const frameUrl = frameTree?.frame?.url;
+  if (typeof frameUrl !== "string") {
+    throw new SecretBrowserFillError("Не удалось определить URL browser document.");
+  }
+  // Chrome publishes the requested TargetInfo.url before the navigation commits:
+  // the top-level frame can still be about:blank. Wait for that exact document
+  // instead of installing the controller in the old frame and reporting a
+  // misleading target_url_changed. No secret is available at this boundary.
+  if (!frameUrl || frameUrl === "about:blank") return "pending";
+  const frameOrigin = targetOriginFromUrl(frameUrl);
+  if (!frameOrigin) {
+    throw new SecretBrowserFillError("Browser document открыл некорректный URL.", "target_url_changed");
+  }
+  const frameUrlSha256 = hashSecretBrowserTargetUrl(new URL(frameUrl).toString());
+  if (frameOrigin === step.targetOrigin && frameUrlSha256 === step.targetUrlSha256) return "ready";
+  // During a multi-step navigation the previous bound document may outlive
+  // TargetInfo's switch to the next URL. Keep waiting in the same tab only for
+  // that exact previous page; an unrelated page remains a terminal mismatch.
+  if (previousStep && frameOrigin === previousStep.targetOrigin
+    && frameUrlSha256 === previousStep.targetUrlSha256) return "pending";
+  if (frameOrigin !== step.targetOrigin && frameOrigin !== previousStep?.targetOrigin) {
+    throw new SecretBrowserFillError("Browser document ушёл с закреплённого HTTPS origin.", "target_origin_changed");
+  }
+  throw new SecretBrowserFillError("Browser document ушёл с exact URL одноразового grant.", "target_url_changed");
+};
+
 const createControllerWorld = async ({
   client,
   sessionId,
@@ -800,7 +828,6 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
           targetOrigin: step.targetOrigin,
           targetUrlSha256: step.targetUrlSha256,
         });
-        stepReached = true;
       } catch (error) {
         // Между шагами вкладка может ещё оставаться на успешно заполненном
         // предыдущем exact URL. Ждём штатную навигацию в той же вкладке, но
@@ -816,6 +843,18 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
         await wait(150);
         continue;
       }
+
+      const documentState = await readBoundDocumentState({
+        client,
+        sessionId,
+        step,
+        previousStep: stepIndex > 0 ? steps[stepIndex - 1] : null,
+      });
+      if (documentState === "pending") {
+        await wait(150);
+        continue;
+      }
+      stepReached = true;
 
       if (!executionContextId) {
         executionContextId = await createControllerWorld({

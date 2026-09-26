@@ -471,7 +471,9 @@ Accessibility permission нет. Правила browser tool, site approvals и 
 
 Chrome fallback выбирается runtime только до consume, если нет native platform/client,
 компилятора, разрешения Accessibility, доступного приложения/accessibility tree
-либо поддержки selector/перехода между steps. Старый backend с 404 на новом GET
+либо native preflight не нашёл exact document/field. Chrome отдельно проверяет
+закреплённый URL и все поля до consume; неоднозначный target и ошибка записи
+остаются окончательным отказом. Старый backend с 404 на новом GET
 использует прежний Chrome flow на том же host; обычный consume всё равно
 проверяет grant. Современный backend передаёт internal `browser=embedded` только
 для финального field-only step, где нужен последующий клик в той же вкладке;
@@ -490,7 +492,9 @@ bindings. Он безопасно переопределяет единстве�
 exact selector после динамического rerender и допускает только
 presentation-only форматирование телефонного номера с неизменной
 последовательностью цифр. Профиль хранит cookies/session; подготовка не очищает
-их.
+их. Вкладка может заранее показать запрошенный `TargetInfo.url`, пока её
+top-level document ещё `about:blank`; Chrome ждёт подтверждения exact URL
+самого документа перед установкой controller и передачей секрета.
 
 Успех означает заполнение/запрошенное нажатие, а не доказанный вход. До checkout
 используется content-free auth probe, если он есть. После заполнения агент не

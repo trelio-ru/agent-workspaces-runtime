@@ -6238,7 +6238,7 @@ test("Trelio Secret Browser transports a value once through its isolated control
       if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
       if (method === "Target.attachToTarget") return { sessionId: "session-1" };
       if (method === "Page.enable" || method === "Runtime.enable") return {};
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1" } } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1", url: targetUrl } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 41 };
       if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserController?.()")) {
         return { result: { value: { status: "ready" } } };
@@ -6336,7 +6336,7 @@ test("Trelio Secret Browser fails closed before sending a value for an ambiguous
       if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
       if (method === "Target.attachToTarget") return { sessionId: "session-1" };
       if (method === "Page.enable" || method === "Runtime.enable") return {};
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1" } } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame-1", url: targetUrl } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 42 };
       if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserController?.()")) {
         return { result: { value: { status: "failed", reasonCode: "field_ambiguous" } } };
@@ -6391,7 +6391,9 @@ test("Trelio Secret Browser fills login and password in one browser window and k
       }
       if (method === "Target.attachToTarget") return { sessionId: "one-window-session" };
       if (method === "Page.enable" || method === "Runtime.enable") return {};
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "one-window-frame" } } };
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "one-window-frame", url: appliedSteps === 0 ? firstUrl : secondUrl } } };
+      }
       if (method === "Page.createIsolatedWorld") return { executionContextId: 50 + appliedSteps };
       if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserController?.()")) {
         return { result: { value: { status: "ready" } } };

@@ -443,7 +443,7 @@ test("controller compares the normalized verified URL, not TargetInfo spelling",
       if (method === "Target.createTarget") return { targetId: "synthetic-tab" };
       if (method === "Target.getTargetInfo") return { targetInfo: { url: rawTargetUrl } };
       if (method === "Target.attachToTarget") return { sessionId: "synthetic-session" };
-      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "synthetic-frame" } } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "synthetic-frame", url: targetUrl } } };
       if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       if (method === "Runtime.evaluate") {
         if (!parameters.expression.startsWith("globalThis.")) {
@@ -461,6 +461,66 @@ test("controller compares the normalized verified URL, not TargetInfo spelling",
   });
   assert.ok(controllerExpression?.includes(JSON.stringify(targetUrl)));
   assert.ok(!controllerExpression.includes(JSON.stringify(rawTargetUrl)));
+});
+
+test("Chrome waits for the committed document after TargetInfo reaches the requested URL", async () => {
+  let frameReads = 0;
+  let controllerCreatedAfterFrame = false;
+  const client = {
+    request: async (method, parameters) => {
+      if (method === "Target.createTarget") return { targetId: "synthetic-tab" };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Target.attachToTarget") return { sessionId: "synthetic-session" };
+      if (method === "Page.getFrameTree") {
+        frameReads += 1;
+        return { frameTree: { frame: {
+          id: "synthetic-frame",
+          // Chrome can report the requested TargetInfo URL while the main
+          // frame is still about:blank and has no committed URL at all.
+          url: frameReads < 3 ? "" : targetUrl,
+        } } };
+      }
+      if (method === "Page.createIsolatedWorld") {
+        controllerCreatedAfterFrame = frameReads >= 3;
+        return { executionContextId: 1 };
+      }
+      if (method === "Runtime.evaluate") {
+        return parameters.expression.startsWith("globalThis.")
+          ? { result: { value: { status: "ready" } } }
+          : { result: { value: undefined } };
+      }
+      return {};
+    },
+  };
+  await prepareSecretBrowserControllerViaDevTools({
+    client, targetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: context.targetUrlSha256, browserSteps: context.browserSteps,
+    fillTimeoutMs: 2_000,
+  });
+  assert.ok(frameReads >= 3);
+  assert.equal(controllerCreatedAfterFrame, true);
+});
+
+test("Chrome rejects an unrelated committed document before installing its controller", async () => {
+  let controllerCreated = false;
+  const client = {
+    request: async (method) => {
+      if (method === "Target.createTarget") return { targetId: "synthetic-tab" };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Target.attachToTarget") return { sessionId: "synthetic-session" };
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "synthetic-frame", url: `${targetUrl}?changed=1` } } };
+      }
+      if (method === "Page.createIsolatedWorld") controllerCreated = true;
+      return {};
+    },
+  };
+  await assert.rejects(prepareSecretBrowserControllerViaDevTools({
+    client, targetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: context.targetUrlSha256, browserSteps: context.browserSteps,
+    fillTimeoutMs: 1_000,
+  }), (error) => error?.reasonCode === "target_url_changed");
+  assert.equal(controllerCreated, false);
 });
 
 test("Chrome accepts exact selector replacements and presentation-only phone masks", () => {
