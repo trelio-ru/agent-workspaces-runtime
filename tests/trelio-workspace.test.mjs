@@ -3127,6 +3127,7 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
   let firstRunStatus = "running";
   let firstRunActivityAt = new Date().toISOString();
   let secondRunStatus = null;
+  let omitSecondRunFromOverview = false;
   let startCount = 0;
   let serverError = null;
   let markFirstStartSeen;
@@ -3200,12 +3201,55 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
               lastHeartbeatAt: firstRunActivityAt,
               leaseExpiresAt: firstRunActivityAt,
             }),
-            ...(secondRunStatus
+            ...(secondRunStatus && !omitSecondRunFromOverview
               ? [serializeRun(secondRunId, secondExport.head, secondRunStatus)]
               : []),
           ],
           checkpoints: [],
         }));
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${secondRunId}`
+      ) {
+        events.push("exact-second-run");
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({
+          run: {
+            ...serializeRun(secondRunId, secondExport.head, secondRunStatus),
+            workspaceId,
+          },
+          latestCheckpoint: null,
+        }));
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${thirdRunId}`
+      ) {
+        events.push("exact-third-run");
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({
+          run: { ...serializeRun(thirdRunId, secondExport.head, "running"), workspaceId },
+          latestCheckpoint: {
+            id: "99999999-9999-4999-8999-999999999999",
+            runId: thirdRunId,
+            checkpointType: "draft",
+            summary: "Resume this exact Run",
+          },
+        }));
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && request.url === `/api/agent-workspaces/runs/${thirdRunId}/claim`
+      ) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(serializeRun(thirdRunId, secondExport.head, "running")));
         return;
       }
 
@@ -3240,6 +3284,12 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       }
 
       if (request.url === `/api/agent-workspaces/runs/${secondRunId}/bundle`) {
+        response.setHeader("content-type", "application/vnd.git.bundle");
+        response.end(secondExport.bundle);
+        return;
+      }
+
+      if (request.url === `/api/agent-workspaces/runs/${thirdRunId}/bundle`) {
         response.setHeader("content-type", "application/vnd.git.bundle");
         response.end(secondExport.bundle);
         return;
@@ -3407,6 +3457,25 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       await readFile(path.join(expectedWorkspaceDirectory, "committed-only.md"), "utf8"),
       "clean working tree but unpublished commit\n",
     );
+    await runGit(expectedWorkspaceDirectory, ["reset", "--hard", secondExport.head]);
+    omitSecondRunFromOverview = true;
+    const thirdOpen = await execFileAsync(process.execPath, command, executionOptions);
+    assert.equal(thirdOpen.stdout.trim(), expectedWorkspaceDirectory);
+    assert.equal(startCount, 3, "an older accepted Run must not block the next open");
+    assert.ok(events.includes("exact-second-run"), "the bridge must verify the old Run by exact ID");
+    const thirdMetadata = JSON.parse(await readFile(firstMetadataPath, "utf8"));
+    assert.equal(thirdMetadata.runId, thirdRunId);
+    const continued = await execFileAsync(process.execPath, [
+      ...command,
+      "--run",
+      thirdRunId,
+    ], executionOptions);
+    assert.equal(continued.stdout.trim(), expectedWorkspaceDirectory);
+    assert.ok(events.includes("exact-third-run"));
+    const checkpoint = JSON.parse(await readFile(path.join(
+      path.dirname(expectedWorkspaceDirectory), "context", "run-checkpoint.json",
+    ), "utf8"));
+    assert.equal(checkpoint.summary, "Resume this exact Run");
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));

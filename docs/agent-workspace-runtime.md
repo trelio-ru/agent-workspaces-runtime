@@ -383,8 +383,12 @@ delta. Apply принимает только текущий plan hash и explici
 правку он не перезаписывает. Plugin/model не повторяют этот алгоритм shell-кодом.
 
 Следующие Run переиспользуют тот же `workspace/`, а не создают копию по
-`run-id`. Перед `start` или `claim` bridge получает live server overview,
-проверяет terminal status предыдущего локального Run и чистоту Git, сравнивает
+`run-id`. Перед `start` или `claim` bridge получает live server overview; если
+прежний локальный или продолжаемый Run вышел из списка последних 50, bridge
+читает его и последний checkpoint по exact ID через ACL-checked API. Отсутствие
+в overview не является
+доказательством активного или завершённого состояния. Затем bridge проверяет
+terminal status предыдущего локального Run и чистоту Git, сравнивает
 локальный head с current `acceptedHead` и при необходимости синхронизирует
 tracked tree. Dirty/diverged данные не перезаписываются; неизвестный server
 status или недоступный backend не допускает новый writable Run. В одном

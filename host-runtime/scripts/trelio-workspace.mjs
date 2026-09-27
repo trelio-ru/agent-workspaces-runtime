@@ -10543,6 +10543,37 @@ const isNonWritableLegacyRunResidue = async (legacyRoot) => {
   return true;
 };
 
+const loadExactWorkspaceRun = async ({
+  origin,
+  token,
+  workspaceId,
+  runId,
+  companyEncryption,
+}) => {
+  // The overview is a 50-Run UI window, not an authoritative membership or
+  // lifecycle check. An older local root must be resolved by exact server ID
+  // before bridge may reuse its Git checkout or claim that Run again.
+  const rawSnapshot = await readJsonResponse(await request(
+    origin,
+    token,
+    `/api/agent-workspaces/workspaces/${workspaceId}/runs/${runId}`,
+  ));
+  if (
+    rawSnapshot?.run?.id !== runId
+    || rawSnapshot?.run?.workspaceId !== workspaceId
+    || (rawSnapshot.latestCheckpoint !== null
+      && rawSnapshot.latestCheckpoint?.runId !== runId)
+  ) {
+    throw new Error("Trelio вернул Agent Run другого Workspace.");
+  }
+  return hydrateAgentCompanyEncryptedJson({
+    value: rawSnapshot,
+    origin,
+    token,
+    companyEncryption,
+  });
+};
+
 const preflightWorkspaceDirectory = async ({
   workspaceId,
   origin,
@@ -10550,6 +10581,7 @@ const preflightWorkspaceDirectory = async ({
   rootDirectory,
   directoryOption,
   overview,
+  loadRunState,
 }) => {
   let rootStat;
 
@@ -10577,7 +10609,7 @@ const preflightWorkspaceDirectory = async ({
     ) {
       throw new Error("Локальный Workspace принадлежит другой компании Trelio.");
     }
-    const localRunState = overview?.runs?.find((run) => run.id === existingMetadata.runId);
+    const localRunState = await loadRunState(existingMetadata.runId);
     const continuingSameRun = requestedRunId === existingMetadata.runId;
 
     if (!continuingSameRun) {
@@ -10689,7 +10721,7 @@ const preflightWorkspaceDirectory = async ({
   for (const entry of legacyRunEntries) {
     const legacyRoot = path.join(rootDirectory, entry.name);
     const legacyMetadata = await readOptionalRunMetadata(legacyRoot);
-    const legacyRunState = overview?.runs?.find((run) => run.id === entry.name);
+    const legacyRunState = await loadRunState(entry.name);
 
     if (!legacyMetadata) {
       if (
@@ -10716,7 +10748,7 @@ const preflightWorkspaceDirectory = async ({
     ) {
       throw new Error("Legacy Run принадлежит другой компании Trelio.");
     }
-    const materializedRunState = overview?.runs?.find((run) => run.id === legacyMetadata.runId);
+    const materializedRunState = await loadRunState(legacyMetadata.runId);
 
     if (!materializedRunState || !TERMINAL_RUN_STATUSES.has(materializedRunState.status)) {
       throw new Error(
@@ -10898,6 +10930,31 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     runOverview = overview;
   }
 
+  const exactRuns = new Map();
+  const loadRunState = async (runId) => {
+    const recentRun = runOverview?.runs?.find((run) => run.id === runId);
+    if (recentRun) return recentRun;
+    if (exactRuns.has(runId)) return exactRuns.get(runId)?.run ?? null;
+    let exactRun;
+    try {
+      exactRun = await loadExactWorkspaceRun({
+        origin: workspaceOrigin,
+        token,
+        workspaceId,
+        runId,
+        companyEncryption,
+      });
+    } catch (error) {
+      // A scoped 404 is a verified missing Run, not proof of terminal state.
+      // Legacy migration uses null to report the precise unsafe directory;
+      // access and transport errors still fail without touching local data.
+      if (!(error instanceof TrelioApiError) || error.statusCode !== 404) throw error;
+      exactRun = null;
+    }
+    exactRuns.set(runId, exactRun);
+    return exactRun?.run ?? null;
+  };
+
   const directoryPreflight = await preflightWorkspaceDirectory({
     workspaceId,
     origin,
@@ -10905,6 +10962,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     rootDirectory,
     directoryOption: options.dir,
     overview: runOverview,
+    loadRunState,
   });
 
   if (!requestedRunId && directoryPreflight.existingMetadata) {
@@ -10928,8 +10986,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   }
 
   if (requestedRunId) {
-    const existingRun = runOverview.runs.find((item) => item.id === requestedRunId);
-
+    const existingRun = await loadRunState(requestedRunId);
     if (!existingRun) {
       throw new Error("Run не найден в указанном workspace или недоступен пользователю.");
     }
@@ -11098,7 +11155,9 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   const materializedHead = GIT_OBJECT_PATTERN.test(String(agentRun.draftHead || ""))
     ? String(agentRun.draftHead)
     : String(agentRun.baseHead);
-  const latestRunCheckpoint = findLatestRunCheckpoint(runOverview, runId);
+  const latestRunCheckpoint = findLatestRunCheckpoint(runOverview, runId)
+    || exactRuns.get(runId)?.latestCheckpoint
+    || null;
   const workspaceDirectory = path.join(rootDirectory, "workspace");
   const metadataPath = path.join(rootDirectory, ".trelio-run.json");
 
@@ -12025,22 +12084,16 @@ const synchronizeRunContext = async ({
   token,
   companyEncryption,
 }) => {
-  const rawOverview = await readJsonResponse(await request(
-    workspaceOrigin,
-    token,
-    `/api/agent-workspaces/workspaces/${requireUuid(metadata.workspaceId, "workspace")}`,
-  ));
-  const overview = await hydrateAgentCompanyEncryptedJson({
-    value: rawOverview,
+  // Context refresh needs the exact pinned Run and its latest checkpoint.
+  // Neither is guaranteed to remain in the bounded Workspace overview.
+  const snapshot = await loadExactWorkspaceRun({
     origin: workspaceOrigin,
     token,
+    workspaceId: requireUuid(metadata.workspaceId, "workspace"),
+    runId: requireUuid(metadata.runId, "run"),
     companyEncryption,
   });
-  const agentRun = overview.runs.find((item) => item.id === metadata.runId);
-
-  if (!agentRun) {
-    throw new Error("Agent Run не найден или больше недоступен пользователю.");
-  }
+  const agentRun = snapshot.run;
 
   const rootDirectory = path.dirname(metadataPath);
   const contextHeads = agentRun.contextHeadsJson || {};
@@ -12057,7 +12110,7 @@ const synchronizeRunContext = async ({
     contexts,
     agentRun.agentInstructionsSnapshotJson,
     agentRun.userProfileSnapshotJson,
-    findLatestRunCheckpoint(overview, metadata.runId),
+    snapshot.latestCheckpoint,
     metadata.runId,
   );
   await writeRunMetadata(metadataPath, {
