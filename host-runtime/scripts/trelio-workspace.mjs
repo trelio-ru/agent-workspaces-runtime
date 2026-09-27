@@ -15385,6 +15385,16 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
         );
       }
       process.stdout.write("Секрет автоматически вставлен в exact поле; plaintext агенту не возвращался.\n");
+      if (browserSession.surface === "chrome" && result.postSubmit) {
+        const state = result.postSubmit.state;
+        if (state === "bound_controls_visible") {
+          process.stdout.write("После submit все закреплённые поля и кнопка входа по-прежнему видимы в Chrome. Вход не подтверждён; перед новой попыткой проверьте ответ портала.\n");
+        } else if (state === "bound_controls_missing" || state === "navigation_observed" || state === "other_origin") {
+          process.stdout.write(`После submit состояние страницы изменилось (${state}). Это не доказывает успешный вход; проверьте авторизацию в том же Chrome-профиле.\n`);
+        } else if (state === "unknown") {
+          process.stdout.write("Состояние страницы после submit определить не удалось; результат входа остаётся неизвестным.\n");
+        }
+      }
       if (browserSession.background) {
         process.stdout.write("Подстановка выполнена в отдельном фоновом Chrome-профиле; результат входа следует проверить там. Исходная embedded-вкладка Codex остаётся в своём прежнем состоянии.\n");
       }

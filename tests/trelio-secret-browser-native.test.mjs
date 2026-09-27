@@ -14,7 +14,8 @@ import {
   prepareSecretBrowserSession,
 } from "../host-runtime/scripts/trelio-secret-browser-native.mjs";
 import {
-  createSecretBrowserControllerExpression, prepareSecretBrowserControllerViaDevTools,
+  createSecretBrowserControllerExpression, observeSecretBrowserPostSubmit,
+  prepareSecretBrowserControllerViaDevTools,
   SecretBrowserFillError,
 } from "../host-runtime/scripts/trelio-secret-browser.mjs";
 
@@ -166,6 +167,87 @@ test("background Chrome preflight never activates a window or sends a secret", a
     { url: targetUrl, newWindow: false });
   assert.equal(requests.some(({ method }) => method === "Target.activateTarget"), false);
   assert.doesNotMatch(JSON.stringify(requests), /CANARY/u);
+});
+
+test("post-submit observation reports only bound form state, never credential values", async () => {
+  const requests = [];
+  const client = {
+    request: async (method, params) => {
+      requests.push({ method, params });
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame", url: targetUrl } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 17 };
+      if (method === "Runtime.evaluate") return { result: { value: true } };
+      throw new Error("unexpected request");
+    },
+  };
+  const result = await observeSecretBrowserPostSubmit({
+    client, sessionId: "session", targetId: "target", targetUrl,
+    targetOrigin: context.targetOrigin, step: context.browserSteps[0],
+    waitAfterSubmit: async () => {},
+  });
+  assert.deepEqual(result, { state: "bound_controls_visible" });
+  assert.equal(requests.some((item) => JSON.stringify(item).includes("CANARY-native")), false);
+  assert.ok(requests.at(-1).params.expression.includes(JSON.stringify("#password")));
+  assert.ok(!requests.at(-1).params.expression.includes(".value"));
+  assert.equal(requests.at(-1).params.contextId, 17);
+});
+
+test("post-submit observation treats navigation and missing controls as evidence, not login success", async () => {
+  const step = context.browserSteps[0];
+  const waitAfterSubmit = async () => {};
+  const navigated = await observeSecretBrowserPostSubmit({
+    client: { request: async () => ({ targetInfo: { url: "https://login.example.test/home" } }) },
+    sessionId: "session", targetId: "target", targetUrl,
+    targetOrigin: context.targetOrigin, step, waitAfterSubmit,
+  });
+  assert.deepEqual(navigated, { state: "navigation_observed" });
+  const missing = await observeSecretBrowserPostSubmit({
+    client: { request: async (method) => {
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame", url: targetUrl } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 17 };
+      return { result: { value: false } };
+    } },
+    sessionId: "session", targetId: "target", targetUrl,
+    targetOrigin: context.targetOrigin, step, waitAfterSubmit,
+  });
+  assert.deepEqual(missing, { state: "bound_controls_missing" });
+  const unreadable = await observeSecretBrowserPostSubmit({
+    client: { request: async () => { throw new Error("closed"); } },
+    sessionId: "session", targetId: "target", targetUrl,
+    targetOrigin: context.targetOrigin, step, waitAfterSubmit,
+  });
+  assert.deepEqual(unreadable, { state: "unknown" });
+});
+
+test("Chrome fill returns the post-submit observation without promoting it to auth success", async () => {
+  const client = {
+    request: async (method, params) => {
+      if (method === "Target.createTarget") return { targetId: "target" };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Target.attachToTarget") return { sessionId: "session" };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame", url: targetUrl } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserController?.()")) {
+        return { result: { value: { status: "ready" } } };
+      }
+      if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserApply")) {
+        return { result: { value: { outcome: "succeeded" } } };
+      }
+      if (method === "Runtime.evaluate" || method === "Page.enable" || method === "Runtime.enable") return { result: {} };
+      throw new Error(`unexpected request: ${method}`);
+    },
+  };
+  const controller = await prepareSecretBrowserControllerViaDevTools({
+    client, targetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: context.targetUrlSha256, browserSteps: context.browserSteps,
+    headless: true,
+    observePostSubmit: async () => ({ state: "bound_controls_visible" }),
+  });
+  assert.deepEqual(await controller.fill({ secretValues: values }), {
+    outcome: "succeeded", postSubmit: { state: "bound_controls_visible" },
+  });
 });
 for (const reasonCode of ["target_url_changed", "field_not_found"]) {
   test("value-free native document/field miss may use a separately verified Chrome tab: " + reasonCode, async () => {

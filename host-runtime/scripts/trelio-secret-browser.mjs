@@ -770,6 +770,71 @@ const evaluateController = async ({ client, sessionId, executionContextId, expre
   return response.result?.value;
 };
 
+// A successful DOM setter and button click do not prove that a remote login
+// succeeded. Observe only whether the exact granted controls are still visible
+// after the page has had time to process the submit. This deliberately returns
+// no field value, cookie, response body or unrestricted page text.
+export const observeSecretBrowserPostSubmit = async ({
+  client, sessionId, targetId, targetUrl, targetOrigin, step,
+  waitAfterSubmit = wait, waitAfterSubmitMs = 2_000,
+}) => {
+  if (!step.submitSelector) return { state: "not_submitted" };
+  await waitAfterSubmit(waitAfterSubmitMs);
+  try {
+    const { targetInfo } = await client.request("Target.getTargetInfo", { targetId });
+    const currentUrl = new URL(String(targetInfo?.url || ""));
+    if (currentUrl.origin !== targetOrigin) return { state: "other_origin" };
+    if (currentUrl.toString() !== targetUrl) return { state: "navigation_observed" };
+    const { frameTree } = await client.request("Page.getFrameTree", {}, sessionId);
+    const frame = frameTree?.frame;
+    if (typeof frame?.url !== "string" || typeof frame?.id !== "string") {
+      return { state: "unknown" };
+    }
+    const frameUrl = new URL(frame.url);
+    if (frameUrl.origin !== targetOrigin) return { state: "other_origin" };
+    if (frameUrl.toString() !== targetUrl) return { state: "navigation_observed" };
+    // The site can change main-world JavaScript. Inspect only DOM presence in
+    // a fresh isolated world, without trusting page-defined wrappers or ever
+    // reading the values that the one-use grant delivered.
+    const { executionContextId } = await client.request("Page.createIsolatedWorld", {
+      frameId: frame.id,
+      worldName: CONTROLLER_WORLD_NAME,
+      grantUniveralAccess: false,
+    }, sessionId);
+    if (!Number.isInteger(executionContextId)) return { state: "unknown" };
+
+    const selectors = [...step.fields.map(({ selector }) => selector), step.submitSelector];
+    const expression = `(() => {
+      if (location.href !== ${JSON.stringify(targetUrl)}) return null;
+      const selectors = ${JSON.stringify(selectors)};
+      const visible = (element) => element instanceof HTMLElement
+        && element.isConnected
+        && element.getClientRects().length > 0
+        && getComputedStyle(element).visibility !== "hidden"
+        && getComputedStyle(element).display !== "none";
+      return selectors.every((selector) => {
+        const matches = document.querySelectorAll(selector);
+        return matches.length === 1 && visible(matches[0]);
+      });
+    })()`;
+    const response = await client.request("Runtime.evaluate", {
+      contextId: executionContextId,
+      expression,
+      returnByValue: true,
+      awaitPromise: false,
+    }, sessionId);
+    if (response.exceptionDetails || typeof response.result?.value !== "boolean") {
+      return { state: "unknown" };
+    }
+    return { state: response.result.value ? "bound_controls_visible" : "bound_controls_missing" };
+  } catch {
+    // The submit may navigate or close the target while this read-only probe
+    // runs. Do not turn that ambiguous post-submit observation into another
+    // credential delivery or a false claim of successful authorization.
+    return { state: "unknown" };
+  }
+};
+
 export const prepareSecretBrowserControllerViaDevTools = async ({
   client,
   targetUrl,
@@ -779,6 +844,7 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
   browserSteps,
   headless = false,
   fillTimeoutMs = DEFAULT_FILL_TIMEOUT_MS,
+  observePostSubmit = observeSecretBrowserPostSubmit,
 }) => {
   const steps = Array.isArray(browserSteps) && browserSteps.length > 0
     ? browserSteps
@@ -959,7 +1025,15 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
           };
         }
       }
-      return { outcome: "succeeded" };
+      if (!steps.at(-1).submitSelector) return { outcome: "succeeded" };
+      return {
+        outcome: "succeeded",
+        postSubmit: await observePostSubmit({
+          client, sessionId, targetId, targetUrl,
+          targetOrigin: steps.at(-1).targetOrigin,
+          step: steps.at(-1),
+        }),
+      };
     },
   };
 };
