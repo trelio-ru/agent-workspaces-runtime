@@ -508,7 +508,9 @@ presentation-only форматирование телефонного номер
 top-level document ещё `about:blank`; Chrome ждёт подтверждения exact URL
 самого документа перед установкой controller и передачей секрета.
 Для `submitSelector` controller после записи полей повторно проверяет URL,
-selector, кнопку и hit test её центра внутри скрытой вкладки, затем посылает
+selector, кнопку и hit test видимой части внутри скрытой вкладки. Если кнопка
+полностью вне viewport, controller прокручивает страницу до неё и повторяет
+проверку exact URL, selector и identity кнопки. Затем он посылает
 один browser mouse click через DevTools Input. Это создаёт trusted click без
 активации окна и системного указателя. JavaScript `element.click()` и keyboard
 Enter для submit не используются; после неоднозначного mouse event grant не

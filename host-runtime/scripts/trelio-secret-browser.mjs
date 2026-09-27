@@ -652,13 +652,35 @@ const installSecretBrowserController = (
     const button = matches.length === 1 ? matches[0] : null;
     if (button !== state.submitTarget || !(button instanceof HTMLButtonElement)
       || button.disabled || !isVisible(button)) return null;
-    const box = button.getBoundingClientRect();
-    const x = box.left + box.width / 2;
-    const y = box.top + box.height / 2;
-    // Fail closed if the button is off-screen or covered. Sending a pointer
-    // event to stale coordinates could otherwise click a different control.
-    if (!Number.isFinite(x) || !Number.isFinite(y)
-      || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+    const visiblePoint = () => {
+      const box = button.getBoundingClientRect();
+      // A hidden Chrome viewport may clip only the button's centre while a
+      // substantial part remains clickable. Use the centre of the intersection
+      // with the viewport, never coordinates outside that intersection.
+      const left = Math.max(0, box.left);
+      const top = Math.max(0, box.top);
+      const right = Math.min(innerWidth, box.right ?? box.left + box.width);
+      const bottom = Math.min(innerHeight, box.bottom ?? box.top + box.height);
+      if (![left, top, right, bottom].every(Number.isFinite)
+        || right - left < 2 || bottom - top < 2) return null;
+      return { x: (left + right) / 2, y: (top + bottom) / 2 };
+    };
+    let point = visiblePoint();
+    if (!point) {
+      // A fully clipped button needs a page-local scroll. It does not move the
+      // OS pointer or focus; recheck all signed bindings because scroll handlers
+      // can rerender the form before the browser receives its mouse event.
+      button.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      const afterScroll = document.querySelectorAll(submitSelector);
+      if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)
+        || afterScroll.length !== 1 || afterScroll[0] !== button
+        || button.disabled || !isVisible(button)) return null;
+      point = visiblePoint();
+    }
+    // Fail closed if an overlay covers the visible point. Dispatching at stale
+    // coordinates could otherwise click a different control.
+    if (!point) return null;
+    const { x, y } = point;
     const hit = document.elementFromPoint(x, y);
     return hit && button.contains(hit) ? { x, y } : null;
   };

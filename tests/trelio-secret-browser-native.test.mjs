@@ -523,7 +523,8 @@ const controllerFixture = (navigateAfterFirst = false) => {
   const events = [];
   class Element {
     constructor(id) { this.id = id; this.isConnected = true; this.disabled = false; }
-    getBoundingClientRect() { return { left: 10, top: 20, width: 10, height: 10 }; }
+    getBoundingClientRect() { return this.rect ?? { left: 10, top: 20, width: 10, height: 10 }; }
+    scrollIntoView() { this.onScroll?.(); }
     hasAttribute(name) { return name === "disabled" && this.disabled; }
     contains(other) { return other === this; }
   }
@@ -561,6 +562,28 @@ test("Chrome fallback fills both fields and binds the exact visible submit point
   assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
   assert.deepEqual({ ...f.realm.__trelioSecretBrowserSubmitPoint() }, { x: 15, y: 25 });
   assert.deepEqual(f.events, ["username", "password"]);
+});
+test("Chrome clicks the visible part when the button centre falls below the hidden viewport", () => {
+  const f = controllerFixture();
+  f.fields["#login"].rect = { left: 10, top: 84, width: 40, height: 40 };
+  f.fields["#login"].onScroll = () => { throw new Error("partly visible button must not scroll"); };
+  f.realm.__trelioSecretBrowserController();
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
+  const point = f.realm.__trelioSecretBrowserSubmitPoint();
+  assert.deepEqual({ ...point }, { x: 30, y: 92 });
+  assert.deepEqual(f.events, ["username", "password"]);
+});
+test("Chrome scrolls a fully clipped button and rechecks its exact identity", () => {
+  const f = controllerFixture();
+  const button = f.fields["#login"];
+  button.rect = { left: 10, top: 150, width: 40, height: 40 };
+  button.onScroll = () => { button.rect = { left: 10, top: 40, width: 40, height: 40 }; };
+  f.realm.__trelioSecretBrowserController();
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
+  assert.deepEqual({ ...f.realm.__trelioSecretBrowserSubmitPoint() }, { x: 30, y: 60 });
+  button.rect = { left: 10, top: 150, width: 40, height: 40 };
+  button.onScroll = () => { f.fields["#login"] = new f.realm.HTMLButtonElement("replacement"); };
+  assert.equal(f.realm.__trelioSecretBrowserSubmitPoint(), null);
 });
 test("Chrome blocks mouse input if the granted button is covered or replaced", () => {
   const f = controllerFixture();
