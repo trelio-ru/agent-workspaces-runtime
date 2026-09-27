@@ -111,6 +111,61 @@ for (const reasonCode of ["access_required", "application_unavailable", "accessi
     assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/);
   });
 }
+test("a hidden embedded tab selects an isolated background profile before checkout", async () => {
+  const f = fixture({ status: "unavailable", reasonCode: "accessibility_unavailable" });
+  let preparedInput;
+  f.args.prepareChrome = async (input) => {
+    preparedInput = input;
+    return { fill: async () => ({ outcome: "succeeded" }), close: () => {} };
+  };
+  const session = await prepareSecretBrowserSession(f.args);
+  assert.equal(session.surface, "chrome");
+  assert.equal(session.background, true);
+  assert.equal(preparedInput.headless, true);
+  assert.equal(preparedInput.profileDirectory, "/synthetic/private/profile-background");
+  assert.doesNotMatch(JSON.stringify(preparedInput), /CANARY/u);
+  await session.close();
+
+  const explicit = fixture();
+  let explicitInput;
+  explicit.args.prepareChrome = async (input) => {
+    explicitInput = input;
+    return { fill: async () => ({ outcome: "succeeded" }), close: () => {} };
+  };
+  const explicitSession = await prepareSecretBrowserSession({ ...explicit.args, mode: "chrome" });
+  assert.equal(explicitSession.background, false);
+  assert.equal(explicitInput.headless, false);
+  assert.equal(explicitInput.profileDirectory, "/synthetic/private/profile");
+});
+test("background Chrome preflight never activates a window or sends a secret", async () => {
+  const requests = [];
+  const client = {
+    request: async (method, params = {}) => {
+      requests.push({ method, params });
+      if (method === "Target.createTarget") return { targetId: "background-target" };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Target.attachToTarget") return { sessionId: "background-session" };
+      if (method === "Page.enable" || method === "Runtime.enable") return {};
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "background-frame", url: targetUrl } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 7 };
+      if (method === "Runtime.evaluate") {
+        return params.expression.includes("__trelioSecretBrowserController?.()")
+          ? { result: { value: { status: "ready" } } }
+          : { result: {} };
+      }
+      throw new Error("unexpected CDP command");
+    },
+  };
+  await prepareSecretBrowserControllerViaDevTools({
+    client, targetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: context.targetUrlSha256,
+    fieldSelector: "#username", headless: true, fillTimeoutMs: 1_000,
+  });
+  assert.deepEqual(requests.find(({ method }) => method === "Target.createTarget")?.params,
+    { url: targetUrl, newWindow: false });
+  assert.equal(requests.some(({ method }) => method === "Target.activateTarget"), false);
+  assert.doesNotMatch(JSON.stringify(requests), /CANARY/u);
+});
 for (const reasonCode of ["target_url_changed", "field_not_found"]) {
   test("value-free native document/field miss may use a separately verified Chrome tab: " + reasonCode, async () => {
     const f = fixture({ status: "failed", reasonCode });

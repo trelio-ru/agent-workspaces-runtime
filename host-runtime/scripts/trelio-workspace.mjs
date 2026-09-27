@@ -15347,7 +15347,10 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
       throw new Error("Trelio вернул некорректный browser-fill grant.");
     }
 
-    process.stdout.write(`Автоматически подставляю Agent Secret на ${payload.targetOrigin}; browser=${browserSession.surface}${browserSession.fallbackReason ? ", fallback=" + browserSession.fallbackReason : ""}.\n`);
+    // The automatic fallback is a separate browser profile. Surface metadata
+    // must be visible to the agent so a successful fill is never mistaken for
+    // authorization of the original hidden Codex tab.
+    process.stdout.write(`Автоматически подставляю Agent Secret на ${payload.targetOrigin}; browser=${browserSession.surface}${browserSession.background ? ", profile=background" : ""}${browserSession.fallbackReason ? ", fallback=" + browserSession.fallbackReason : ""}.\n`);
 
     let localResult = null;
     let outcomeReported = false;
@@ -15382,6 +15385,9 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
         );
       }
       process.stdout.write("Секрет автоматически вставлен в exact поле; plaintext агенту не возвращался.\n");
+      if (browserSession.background) {
+        process.stdout.write("Подстановка выполнена в отдельном фоновом Chrome-профиле; результат входа следует проверить там. Исходная embedded-вкладка Codex остаётся в своём прежнем состоянии.\n");
+      }
     } catch (error) {
       // Локальный результат уже мог наступить, а потерялся только ответ audit
       // endpoint. В таком случае нельзя записывать противоречивый outcome.

@@ -486,6 +486,14 @@ hidden/read-only field, 401/403 или исчерпанные transport retries 
 операцию. Никакого fallback после выдачи значения, partial fill или потерянного
 ответа consume нет.
 
+Если automatic native preflight недоступен до consume, Chrome fallback запускается
+без окна в отдельном owner-only постоянном профиле `profile-background`. Он не активирует
+CDP target и не переводит другое приложение на передний план; exact URL,
+проверка полей и одноразовый grant остаются прежними. Явно выбранный Chrome
+transport сохраняет свой отдельный обычный профиль и видимое окно. Background
+fallback не авторизует уже открытую embedded-вкладку и не даёт агенту доступ к
+её cookies: результат относится только к проверенному fallback-профилю.
+
 После native preflight consume заново проверяет живые права и атомарно расходует
 grant. Bridge сравнивает весь полученный binding с preflight, локально открывает
 E2EE payload при необходимости и один раз передаёт values по anonymous stdin

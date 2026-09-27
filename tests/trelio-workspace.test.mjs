@@ -6317,6 +6317,13 @@ test("Trelio Secret Browser transports a value once through its isolated control
       }).slice(-2),
       ["--new-window", "about:blank"],
     );
+    const backgroundArguments = buildSecretBrowserArguments({
+      profileDirectory: "/private/profile-background",
+      headless: true,
+    });
+    assert.ok(backgroundArguments.includes("--headless=new"));
+    assert.ok(backgroundArguments.includes("--user-data-dir=/private/profile-background"));
+    assert.equal(buildSecretBrowserArguments({ profileDirectory: "/private/profile" }).includes("--headless=new"), false);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }

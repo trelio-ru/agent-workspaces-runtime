@@ -136,7 +136,7 @@ export const resolveTrustedSecretBrowserExecutable = async ({
 // Chrome 137+ больше не принимает --load-extension в branded builds. Поэтому
 // browser-fill использует одноразовый loopback DevTools transport выделенного
 // профиля, а не расширение и не постоянное разрешение на все HTTPS-сайты.
-export const buildSecretBrowserArguments = ({ profileDirectory }) => [
+export const buildSecretBrowserArguments = ({ profileDirectory, headless = false }) => [
   `--user-data-dir=${profileDirectory}`,
   "--profile-directory=Default",
   "--remote-debugging-address=127.0.0.1",
@@ -146,6 +146,10 @@ export const buildSecretBrowserArguments = ({ profileDirectory }) => [
   "--disable-features=PasswordManagerOnboarding",
   "--no-default-browser-check",
   "--no-first-run",
+  // A value-free embedded preflight may find that the original chat's tab is
+  // unmounted from the OS accessibility tree. The separately verified fallback
+  // must not summon a Chrome window or take focus from another user workflow.
+  ...(headless ? ["--headless=new"] : []),
   "--new-window",
   "about:blank",
 ];
@@ -221,13 +225,13 @@ const prepareSecretBrowserProfile = async ({ profileDirectory, ensurePrivateDire
   }
 };
 
-const launchSecretBrowser = async ({ executable, args, spawnProcess = spawn }) => {
+const launchSecretBrowser = async ({ executable, args, headless = false, spawnProcess = spawn }) => {
   await new Promise((resolve, reject) => {
     const child = spawnProcess(executable, args, {
       detached: true,
       shell: false,
       stdio: "ignore",
-      windowsHide: false,
+      windowsHide: headless,
     });
     child.once("error", reject);
     child.once("spawn", () => {
@@ -353,6 +357,7 @@ const tryConnectProfileDevTools = async (profileDirectory) => {
 const acquireSecretBrowser = async ({
   profileDirectory,
   args,
+  headless = false,
   resolveBrowserExecutable,
   launchBrowser,
   browserStartTimeoutMs,
@@ -373,7 +378,7 @@ const acquireSecretBrowser = async ({
   }
 
   const executable = await resolveBrowserExecutable();
-  await launchBrowser({ executable, args });
+  await launchBrowser({ executable, args, headless });
 
   const deadline = Date.now() + browserStartTimeoutMs;
   while (Date.now() < deadline) {
@@ -772,6 +777,7 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
   targetUrlSha256,
   fieldSelector,
   browserSteps,
+  headless = false,
   fillTimeoutMs = DEFAULT_FILL_TIMEOUT_MS,
 }) => {
   const steps = Array.isArray(browserSteps) && browserSteps.length > 0
@@ -783,12 +789,14 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
     }];
   const { targetId } = await client.request("Target.createTarget", {
     url: targetUrl,
-    newWindow: true,
+    newWindow: !headless,
   });
   if (typeof targetId !== "string") {
     throw new SecretBrowserFillError("Не удалось открыть вкладку Trelio Secret Browser.", "browser_unavailable");
   }
-  await client.request("Target.activateTarget", { targetId });
+  // A headless target navigates without activation. Keep the attended Chrome
+  // behavior for explicit sessions, but never ask the OS to raise a fallback.
+  if (!headless) await client.request("Target.activateTarget", { targetId });
 
   const deadline = Date.now() + fillTimeoutMs;
   while (Date.now() < deadline) {
@@ -981,6 +989,7 @@ export const prepareSecretBrowserFill = async ({
   fieldSelector,
   browserSteps,
   profileDirectory,
+  headless = false,
   ensurePrivateDirectory,
   resolveBrowserExecutable = resolveTrustedSecretBrowserExecutable,
   launchBrowser = launchSecretBrowser,
@@ -1012,13 +1021,14 @@ export const prepareSecretBrowserFill = async ({
     ? undefined
     : normalizeSecretBrowserFieldSelector(fieldSelector);
   await prepareSecretBrowserProfile({ profileDirectory, ensurePrivateDirectory });
-  const args = buildSecretBrowserArguments({ profileDirectory });
+  const args = buildSecretBrowserArguments({ profileDirectory, headless });
 
   let client;
   try {
     client = await acquireBrowser({
       profileDirectory,
       args,
+      headless,
       resolveBrowserExecutable,
       launchBrowser,
       browserStartTimeoutMs,
@@ -1030,6 +1040,7 @@ export const prepareSecretBrowserFill = async ({
       targetUrlSha256,
       fieldSelector: normalizedFieldSelector,
       browserSteps: normalizedSteps,
+      headless,
       fillTimeoutMs,
     });
     let closed = false;

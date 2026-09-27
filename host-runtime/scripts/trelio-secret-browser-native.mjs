@@ -300,16 +300,24 @@ export const prepareSecretBrowserSession = async ({
     if (!context) throw new EmbeddedBrowserUnavailable("backend_unavailable");
     const binding = browserFillBinding(context);
     normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+    // Never reuse a possibly headed profile for the fallback selected after
+    // an invisible embedded tab. Its own persistent profile retains cookies
+    // across grants, while a new headless process cannot raise another app.
+    const headless = fallbackReason !== null;
+    const selectedProfileDirectory = headless
+      ? path.join(path.dirname(profileDirectory), `${path.basename(profileDirectory)}-background`)
+      : profileDirectory;
     const prepared = await prepareChrome({
       targetUrl,
       targetOrigin: binding.targetOrigin,
       targetUrlSha256: binding.targetUrlSha256,
       browserSteps: binding.browserSteps,
-      profileDirectory,
+      profileDirectory: selectedProfileDirectory,
+      headless,
       ensurePrivateDirectory,
     });
     return {
-      surface: "chrome", fallbackReason,
+      surface: "chrome", fallbackReason, background: headless,
       fill: ({ secretValues }) => prepared.fill({ secretValues }),
       close: () => prepared.close(),
     };
