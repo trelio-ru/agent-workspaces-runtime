@@ -8468,6 +8468,8 @@ test("connection-free skill runtime receives member identity without synthetic c
     },
     inheritedEnvironment: {
       SAFE_PARENT_VALUE: "kept",
+      CODEX_THREAD_ID: "11111111-1111-4111-8111-111111111111",
+      CODEX_HOME: "/trusted/codex-home",
       HOME: "/trusted/home",
       HTTPS_PROXY: "http://127.0.0.1:3128",
       LC_CTYPE: "en_US.UTF-8",
@@ -8485,6 +8487,8 @@ test("connection-free skill runtime receives member identity without synthetic c
   });
 
   assert.equal(environment.SAFE_PARENT_VALUE, undefined);
+  assert.equal(environment.CODEX_THREAD_ID, "11111111-1111-4111-8111-111111111111");
+  assert.equal(environment.CODEX_HOME, "/trusted/codex-home");
   assert.equal(environment.HOME, "/trusted/home");
   assert.equal(environment.HTTPS_PROXY, "http://127.0.0.1:3128");
   assert.equal(environment.LC_CTYPE, "en_US.UTF-8");
@@ -8507,6 +8511,8 @@ test("connection-free skill runtime receives member identity without synthetic c
 
   for (const forbiddenGrantName of [
     "TRELIO_SKILL_COMPANY_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_HOME",
     "NODE_OPTIONS",
     "HOME",
     "BASH_ENV",

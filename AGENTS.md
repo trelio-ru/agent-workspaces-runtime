@@ -30,6 +30,9 @@ publication tooling также остаются вне этого публичн
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.
+- Подписанный Agent Skill может получить `CODEX_THREAD_ID` из ограниченного
+  окружения для точного локального чтения названия чата. Этот ID не даёт прав
+  Trelio или внешнего сервиса; название проверяется по exact ID ответа.
 - Browser-навыки используют общий host-owned `browser-session-v1`: signed
   descriptor выбирает класс хранения, absolute lease и opt-in manual assist;
   host один раз реализует browser discovery, Playwright bootstrap, process

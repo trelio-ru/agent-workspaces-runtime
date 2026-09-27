@@ -6764,6 +6764,11 @@ const AGENT_SKILL_INHERITED_ENVIRONMENT_KEYS = new Set([
   "APPDATA",
   "COLORTERM",
   "COMSPEC",
+  "CODEX_HOME",
+  // Signed provider runtimes may resolve explanatory OS-prompt text from the
+  // current Codex thread. The UUID grants no Trelio or provider authority;
+  // consumers must still verify the exact ID returned by Codex metadata.
+  "CODEX_THREAD_ID",
   // Linux headed login needs the existing desktop-session endpoints. They do
   // not alter the Node/Python loader before runtime start, unlike the omitted
   // LD_*/DYLD_*/interpreter-hook variables.
