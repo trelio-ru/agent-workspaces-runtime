@@ -2897,13 +2897,15 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
   const expiredRunId = "47474747-4747-4747-8747-474747474747";
   const expiredResidueRunId = "48484848-4848-4848-8848-484848484848";
   const oldActivityAt = new Date(Date.now() - 72 * 60 * 60 * 1_000).toISOString();
-  let expiredActivityAt = new Date().toISOString();
-  let expiredCheckpoint = null;
+  const expiredActivityAt = new Date().toISOString();
+  const expiredCheckpoint = { id: "49494949-4949-4949-8949-494949494949", runId: expiredRunId };
+  let expiredRunKnown = true;
   const targetExport = await createExportBundle(path.join(temporaryDirectory, "target"), {
     "WORKSPACE_CONTEXT.md": "# Migrated persistent workspace\n",
     "result.md": "new Run content\n",
   });
   let startCount = 0;
+  let claimCount = 0;
   let serverError = null;
 
   const serializeRun = (id, status) => ({
@@ -2955,7 +2957,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
           company: testCompany,
           runs: [
             serializeRun(legacyRunId, "accepted"),
-            serializeRun(contextOnlyRunId, "accepted"),
+            serializeRun(contextOnlyRunId, "running"),
             { ...serializeRun(expiredRunId, "expired"), updatedAt: expiredActivityAt },
             { ...serializeRun(expiredResidueRunId, "expired"), updatedAt: oldActivityAt },
           ],
@@ -2967,6 +2969,11 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
         request.method === "GET"
         && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${expiredRunId}`
       ) {
+        if (!expiredRunKnown) {
+          response.statusCode = 404;
+          response.end();
+          return;
+        }
         response.end(JSON.stringify({
           run: {
             ...serializeRun(expiredRunId, "expired"),
@@ -2989,6 +2996,24 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
           },
           latestCheckpoint: null,
         }));
+        return;
+      }
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${targetRunId}`
+      ) {
+        response.end(JSON.stringify({
+          run: { ...serializeRun(targetRunId, "running"), workspaceId },
+          latestCheckpoint: null,
+        }));
+        return;
+      }
+      if (
+        request.method === "POST"
+        && request.url === `/api/agent-workspaces/runs/${targetRunId}/claim`
+      ) {
+        claimCount += 1;
+        response.end(JSON.stringify(serializeRun(targetRunId, "running")));
         return;
       }
       if (
@@ -3060,7 +3085,9 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     await mkdir(path.dirname(contextOnlyFile), { recursive: true });
     await writeFile(contextOnlyFile, "old read-only context\n", "utf8");
 
-    const command = [bridgePath, "open", "--origin", origin, "--workspace", workspaceId];
+    const command = [
+      bridgePath, "open", "--origin", origin, "--workspace", workspaceId, "--run", targetRunId,
+    ];
     const executionOptions = {
       cwd: temporaryDirectory,
       encoding: "utf8",
@@ -3120,6 +3147,16 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     assert.equal(startCount, 0, "unknown Run identity must not be treated as terminal");
     await rm(unknownRoot, { recursive: true });
 
+    const legacyMetadataPath = path.join(legacyRoot, ".trelio-run.json");
+    const originalLegacyMetadata = await readFile(legacyMetadataPath, "utf8");
+    await writeFile(legacyMetadataPath, JSON.stringify({
+      ...JSON.parse(originalLegacyMetadata),
+      runId: targetRunId,
+    }));
+    const mismatchedRun = await readStructuredBridgeError();
+    assert.equal(mismatchedRun.details.blockingEntries[0].reasonCode, "LEGACY_RUN_ID_MISMATCH");
+    await writeFile(legacyMetadataPath, originalLegacyMetadata);
+
     const expiredRoot = path.join(rootDirectory, expiredRunId);
     const expiredWorkspaceDirectory = path.join(expiredRoot, "workspace");
     await mkdir(expiredWorkspaceDirectory, { recursive: true });
@@ -3150,31 +3187,34 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     await mkdir(path.dirname(expiredResidueFile), { recursive: true });
     await writeFile(expiredResidueFile, "retained read-only context\n");
 
-    await assert.rejects(
-      execFileAsync(process.execPath, command, executionOptions),
-      /незавершённый Agent Run/u,
-      "a recent expired legacy Run stays recoverable",
-    );
-    expiredActivityAt = oldActivityAt;
-    expiredCheckpoint = { id: "49494949-4949-4949-8949-494949494949", runId: expiredRunId };
-    await assert.rejects(
-      execFileAsync(process.execPath, command, executionOptions),
-      /незавершённый Agent Run/u,
-      "a checkpoint is server work even when the bounded overview omits it",
-    );
-    expiredCheckpoint = null;
+    expiredRunKnown = false;
+    const unknownMaterializedRun = await readStructuredBridgeError();
+    assert.equal(unknownMaterializedRun.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED", JSON.stringify(unknownMaterializedRun));
+    assert.deepEqual(unknownMaterializedRun.details.blockingEntries, [{
+      name: expiredRunId,
+      entryType: "directory",
+      reasonCode: "LEGACY_RUN_STATUS_UNKNOWN",
+    }], JSON.stringify(unknownMaterializedRun));
+    assert.equal(startCount, 0, "an unknown server Run cannot authorize migration");
+    expiredRunKnown = true;
     await writeFile(path.join(expiredWorkspaceDirectory, "unsaved.txt"), "local draft\n");
-    await assert.rejects(
-      execFileAsync(process.execPath, command, executionOptions),
-      /незавершённый Agent Run/u,
-      "untracked local work cannot be skipped during migration",
-    );
+    const dirtyLegacyRun = await readStructuredBridgeError();
+    assert.equal(dirtyLegacyRun.code, "TRELIO_WORKSPACE_LAYOUT_MIGRATION_BLOCKED");
+    assert.deepEqual(dirtyLegacyRun.details.blockingEntries, [{
+      name: expiredRunId,
+      entryType: "directory",
+      reasonCode: "LEGACY_RUN_LOCAL_CHANGES",
+    }]);
     await rm(path.join(expiredWorkspaceDirectory, "unsaved.txt"));
     assert.equal(startCount, 0, "unsafe legacy state must fail before server start");
 
+    // This legacy checkout is still a recent expired Run with a durable server
+    // checkpoint. It must remain intact while a distinct persistent checkout
+    // is created for the newly selected Run.
     const opened = await execFileAsync(process.execPath, command, executionOptions);
     assert.equal(opened.stdout.trim(), path.join(rootDirectory, "workspace"));
-    assert.equal(startCount, 1);
+    assert.equal(startCount, 0, "an exact prepared Run must be claimed, not recreated");
+    assert.equal(claimCount, 1);
     assert.equal((await stat(path.join(rootDirectory, ".DS_Store"))).size, 6 * 1024);
     assert.equal(
       await readFile(path.join(rootDirectory, "workspace", "result.md"), "utf8"),
@@ -3182,6 +3222,7 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     );
     assert.equal(await pathExists(legacyRoot), true, "legacy Run history must remain untouched");
     assert.equal(await pathExists(expiredRoot), true, "expired Run history must remain untouched");
+    assert.equal(await readFile(path.join(expiredWorkspaceDirectory, "old.md"), "utf8"), "old clean result\n");
     assert.equal(await readFile(contextOnlyFile, "utf8"), "old read-only context\n");
     assert.equal(await readFile(expiredResidueFile, "utf8"), "retained read-only context\n");
     assert.ifError(serverError);

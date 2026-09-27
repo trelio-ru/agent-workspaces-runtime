@@ -397,16 +397,22 @@ terminal status предыдущего локального Run и чистот�
 без draft, candidate, blocker, handoff и checkpoint bridge повторно получает
 точный серверный снимок и только после 48 часов без активности допускает новый
 Run при чистой локальной истории, рабочем дереве и служебном root. Эта проверка
-действует и для прежнего `<workspace-id>/<run-id>/workspace`, а остаток только
-с read-only `context/` остаётся на месте. Недавний либо содержащий работу
-`expired` Run требует восстановления и не пропускается. Bridge сравнивает
+относится к общему persistent root: недавний либо содержащий работу `expired`
+Run в нём требует восстановления и не пропускается. Bridge сравнивает
 локальный head с current `acceptedHead` и при необходимости синхронизирует
 tracked tree. Dirty/diverged данные не перезаписываются; неизвестный server
 status или недоступный backend не допускает новый writable Run. В одном
 persistent root одновременно открывается только один локальный Run. Уже
-начатый legacy Run из `<workspace-id>/<run-id>/workspace` продолжается на месте;
-после его безопасного завершения либо доказанной пустой просрочки новые Run
-переходят на общий root без удаления старого каталога.
+начатый legacy Run из `<workspace-id>/<run-id>/workspace` продолжается на месте.
+При выборе другого Run каждый старый UUID-каталог сверяется с точным серверным
+Run. Если старый checkout и его служебный root чисты, новый persistent root
+открывается отдельно даже при свежем `expired`, checkpoint или действующей
+сессии старого Run: старые файлы и серверная работа остаются доступны для
+продолжения. Неизвестное серверное состояние либо локальная дельта блокируют
+миграцию; последняя получает exact
+`blockingEntries[].reasonCode=LEGACY_RUN_LOCAL_CHANGES`. Остаток только с
+read-only `context/` и подтверждённым Run также остаётся на месте и не
+блокирует другой Run независимо от его статуса.
 
 `context/company`, `context/project` и UUID-каталоги `context/related/`
 являются exact snapshot `contextHeadsJson` текущего Run. После успешной
@@ -708,10 +714,10 @@ reason codes; `automaticChangesPerformed=false` подтверждает отс�
 переноса и удаления. Local MCP сохраняет этот envelope вместо общего
 `TRELIO_WORKSPACE_ACTION_FAILED`, поэтому агент сообщает конкретную запись и не
 угадывает root по `workingDirectory` либо общей фразе о старой структуре.
-Старый terminal Run без `.trelio-run.json`, чей каталог пуст либо содержит только `context/`
+Старый подтверждённый Run без `.trelio-run.json`, чей каталог пуст либо содержит только `context/`
 и безопасные системные metadata-файлы, bridge оставляет нетронутым и открывает
 новый persistent root: в таком каталоге нет writable Workspace для переноса.
-Run без подтверждённого terminal state или с любым другим содержимым без metadata
+Run без подтверждённой identity на сервере или с любым другим содержимым без metadata
 по-прежнему блокирует миграцию, теперь с точным
 `blockingEntries[].reasonCode=LEGACY_RUN_METADATA_NOT_FOUND` вместо generic ошибки.
 

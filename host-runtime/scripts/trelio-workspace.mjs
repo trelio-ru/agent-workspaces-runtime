@@ -10551,11 +10551,6 @@ const isNonWritableLegacyRunResidue = async (legacyRoot) => {
   return true;
 };
 
-const canIgnoreStaleEmptyExpiredLegacyResidue = async ({ legacyRoot, snapshot }) => (
-  isStaleEmptyExpiredRun({ snapshot })
-  && await isNonWritableLegacyRunResidue(legacyRoot)
-);
-
 const loadExactWorkspaceRun = async ({
   origin,
   token,
@@ -10737,17 +10732,12 @@ const preflightWorkspaceDirectory = async ({
     const legacyRunState = await loadRunState(entry.name);
 
     if (!legacyMetadata) {
-      const reusableExpiredResidue = legacyRunState?.status === "expired"
-        ? await canIgnoreStaleEmptyExpiredLegacyResidue({
-            legacyRoot,
-            snapshot: await loadRunSnapshot(entry.name),
-          })
-        : false;
-      if (
-        reusableExpiredResidue
-        || (TERMINAL_RUN_STATUSES.has(legacyRunState?.status)
-          && await isNonWritableLegacyRunResidue(legacyRoot))
-      ) {
+      // A UUID child containing only pinned context has no writable checkout.
+      // Its server Run may still have a draft or checkpoint, but opening a
+      // different Run in the parent neither overwrites that server work nor
+      // removes the old context. Resolve the exact identity before ignoring it;
+      // an unknown child remains a layout blocker.
+      if (legacyRunState && await isNonWritableLegacyRunResidue(legacyRoot)) {
         continue;
       }
       throw new WorkspaceLayoutMigrationBlockedError({
@@ -10760,6 +10750,17 @@ const preflightWorkspaceDirectory = async ({
         }],
       });
     }
+    if (legacyMetadata.runId !== entry.name) {
+      throw new WorkspaceLayoutMigrationBlockedError({
+        workspaceId,
+        rootDirectory,
+        blockingEntries: [{
+          name: entry.name,
+          entryType: "directory",
+          reasonCode: "LEGACY_RUN_ID_MISMATCH",
+        }],
+      });
+    }
     await assertValidMaterializedRoot(legacyRoot, legacyMetadata, workspaceId, origin);
     if (
       legacyMetadata.company?.id
@@ -10769,28 +10770,33 @@ const preflightWorkspaceDirectory = async ({
       throw new Error("Legacy Run принадлежит другой компании Trelio.");
     }
     const materializedRunState = await loadRunState(legacyMetadata.runId);
-    // Old UUID roots are retained after migration. An expired Run without
-    // server work may stop blocking a new root only after the same age and
-    // complete local Git checks used for a persistent root. The exact read
-    // includes its checkpoint even when the overview history is bounded.
-    const reusableExpiredRun = materializedRunState?.status === "expired"
-      ? await canReplaceStaleEmptyExpiredRun({
-          rootDirectory: legacyRoot,
-          metadata: legacyMetadata,
-          snapshot: await loadRunSnapshot(legacyMetadata.runId),
-        })
-      : false;
-
-    if (!materializedRunState || (!TERMINAL_RUN_STATUSES.has(materializedRunState.status)
-      && !reusableExpiredRun)) {
-      throw new Error(
-        "В старой локальной структуре найден незавершённый Agent Run. Сначала продолжите или отмените его.",
-      );
+    if (!materializedRunState) {
+      throw new WorkspaceLayoutMigrationBlockedError({
+        workspaceId,
+        rootDirectory,
+        blockingEntries: [{
+          name: entry.name,
+          entryType: "directory",
+          reasonCode: "LEGACY_RUN_STATUS_UNKNOWN",
+        }],
+      });
     }
-    if (await getGitStatus(legacyMetadata.workspaceDirectory, legacyMetadata.objects || [])) {
-      throw new Error(
-        "В старой локальной структуре найден Run с несохранёнными изменениями. Автоматическая миграция запрещена.",
-      );
+    // The old UUID checkout and the new persistent checkout are distinct
+    // directories. Server checkpoints and even an active lease belong to the
+    // old Run and remain recoverable there; they must not veto an independently
+    // selected Run. Only local data that the bridge cannot safely reconcile
+    // requires recovery before creating the parent checkout.
+    if (await hasUnmanagedWorkspaceRootEntries(legacyRoot)
+      || await isWritableWorkspaceDirty({ rootDirectory: legacyRoot, metadata: legacyMetadata })) {
+      throw new WorkspaceLayoutMigrationBlockedError({
+        workspaceId,
+        rootDirectory,
+        blockingEntries: [{
+          name: entry.name,
+          entryType: "directory",
+          reasonCode: "LEGACY_RUN_LOCAL_CHANGES",
+        }],
+      });
     }
   }
 
