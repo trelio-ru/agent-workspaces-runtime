@@ -46,6 +46,16 @@ export const normalizeSecretBrowserMode = (value = "auto") => {
   return value;
 };
 
+// The background profile is intentionally separate from every ordinary CUA
+// browser. Return only a validated target identity and the fixed local profile
+// path after a successful fill: neither contains a credential or CDP endpoint.
+// A missing/invalid identity must never suggest attaching to a guessed tab.
+export const describeBackgroundSecretBrowserContinuation = (session) => {
+  if (!session?.background || !path.isAbsolute(session.profileDirectory || "")
+    || !/^[0-9a-f]{32}$/iu.test(session.targetId || "")) return null;
+  return `Для продолжения в той же фоновой сессии: profileDirectory=${JSON.stringify(session.profileDirectory)}, targetId=${session.targetId}. Если нет выбранного Agent Skill для сайта и локальный browser route разрешён, подключитесь к DevToolsActivePort только этого профиля и этому exact targetId; проверьте состояние входа там. Обычная вкладка Codex/Chrome использует другой профиль. Не считывайте значения полей входа, cookies или storage и не повторяйте grant по виду другой вкладки.`;
+};
+
 // AXDOMIdentifier / UIA AutomationId are DOM ids. Do not approximate CSS via
 // labels, focus or keystrokes: a broad selector could silently select another
 // field. Unsupported syntax is a capability miss before any checkout.
@@ -318,6 +328,8 @@ export const prepareSecretBrowserSession = async ({
     });
     return {
       surface: "chrome", fallbackReason, background: headless,
+      profileDirectory: selectedProfileDirectory,
+      targetId: prepared.targetId,
       fill: ({ secretValues }) => prepared.fill({ secretValues }),
       close: () => prepared.close(),
     };

@@ -10,7 +10,8 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   assertBrowserFillBindingUnchanged, browserFillBinding, buildNativeSecretBrowserHelper,
-  EmbeddedBrowserUnavailable, nativeIdFromSecretSelector, openNativeSecretBrowserChannel,
+  describeBackgroundSecretBrowserContinuation, EmbeddedBrowserUnavailable,
+  nativeIdFromSecretSelector, openNativeSecretBrowserChannel,
   prepareSecretBrowserSession,
 } from "../host-runtime/scripts/trelio-secret-browser-native.mjs";
 import {
@@ -139,6 +140,25 @@ test("a hidden embedded tab selects an isolated background profile before checko
   assert.equal(explicitInput.headless, false);
   assert.equal(explicitInput.profileDirectory, "/synthetic/private/profile");
 });
+test("background continuation points only to the exact validated target", async () => {
+  const f = fixture({ status: "failed", reasonCode: "field_not_found" });
+  const targetId = "B27FAC46EA5ECDCA14C660B2F008425A";
+  f.args.prepareChrome = async () => ({
+    targetId,
+    fill: async () => ({ outcome: "succeeded" }),
+    close: () => {},
+  });
+  const session = await prepareSecretBrowserSession(f.args);
+  assert.equal(session.targetId, targetId);
+  assert.equal(session.profileDirectory, "/synthetic/private/profile-background");
+  const hint = describeBackgroundSecretBrowserContinuation(session);
+  assert.match(hint, /profile-background/u);
+  assert.match(hint, new RegExp(targetId, "u"));
+  assert.doesNotMatch(hint, /CANARY|password/u);
+  assert.equal(describeBackgroundSecretBrowserContinuation({ ...session, targetId: "bad\nsecret" }), null);
+  assert.equal(describeBackgroundSecretBrowserContinuation({ ...session, background: false }), null);
+  await session.close();
+});
 test("background Chrome preflight never activates a window or sends a secret", async () => {
   const requests = [];
   const client = {
@@ -158,11 +178,12 @@ test("background Chrome preflight never activates a window or sends a secret", a
       throw new Error("unexpected CDP command");
     },
   };
-  await prepareSecretBrowserControllerViaDevTools({
+  const controller = await prepareSecretBrowserControllerViaDevTools({
     client, targetUrl, targetOrigin: context.targetOrigin,
     targetUrlSha256: context.targetUrlSha256,
     fieldSelector: "#username", headless: true, fillTimeoutMs: 1_000,
   });
+  assert.equal(controller.targetId, "background-target");
   assert.deepEqual(requests.find(({ method }) => method === "Target.createTarget")?.params,
     { url: targetUrl, newWindow: false });
   assert.equal(requests.some(({ method }) => method === "Target.activateTarget"), false);

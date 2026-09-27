@@ -62,6 +62,7 @@ import {
   assertBrowserFillBindingUnchanged,
   normalizeSecretBrowserMode,
   prepareSecretBrowserSession,
+  describeBackgroundSecretBrowserContinuation,
 } from "./trelio-secret-browser-native.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
@@ -15396,7 +15397,9 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
         }
       }
       if (browserSession.background) {
+        const continuation = describeBackgroundSecretBrowserContinuation(browserSession);
         process.stdout.write("Подстановка выполнена в отдельном фоновом Chrome-профиле; результат входа следует проверить там. Исходная embedded-вкладка Codex остаётся в своём прежнем состоянии.\n");
+        if (continuation) process.stdout.write(`${continuation}\n`);
       }
     } catch (error) {
       // Локальный результат уже мог наступить, а потерялся только ответ audit

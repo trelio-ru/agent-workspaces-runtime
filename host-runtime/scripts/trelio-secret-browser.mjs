@@ -1034,6 +1034,10 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
   const firstPrepared = await prepareStep(0, Date.now() + fillTimeoutMs);
   let used = false;
   return {
+    // The target identity is routing metadata, never a DevTools credential.
+    // Expose it to the bridge so a post-login agent can keep working in this
+    // exact isolated profile instead of opening an unrelated CUA/Chrome tab.
+    targetId,
     fill: async ({ secretValue, secretValues }) => {
       if (used) throw new SecretBrowserFillError("Повторная передача секрета запрещена.");
       used = true;
@@ -1192,6 +1196,7 @@ export const prepareSecretBrowserFill = async ({
     });
     let closed = false;
     return {
+      targetId: controller.targetId,
       fill: (values) => controller.fill(values),
       close: () => {
         if (closed) return;
