@@ -214,6 +214,16 @@ Run. Schema v1/v2 не поддерживаются: совместимая па
 использовать schema v3 и `get_task_sections`, а version
 mismatch завершается обновлением вместо fallback к монолитному payload.
 
+Если task core и полный каталог инструкций вместе превышают 24 КиБ, exact read
+возвращает `effectiveInstructions.status=incomplete` с manifest. Агент получает
+части по 4 КиБ через `get_task_instruction_page` с теми же task locators и
+cache keys, сверяет `catalogRevisionKey` и SHA-256 каждого восстановленного
+слоя, затем применяет правила. Страницы не повторяют task core. При смене
+revision чтение начинается заново; отсутствие части запрещает работу по задаче.
+Encrypted local route соблюдает тот же контракт. Новые личные правила
+ограничены 16 КиБ UTF-8 после нормализации, в том числе до локального
+шифрования; старые более крупные редакции остаются читаемыми.
+
 На повторном exact read агент передаёт `nextReadArguments.knownInstructionLayerKeys`
 только пока полные неизменные layers ещё в model context. `reusedLayerKeys`
 разрешаются через эти bytes вместе с новыми layers ответа; изменённые правила

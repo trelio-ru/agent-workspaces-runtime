@@ -712,6 +712,20 @@ test("encrypted local rule publications enforce company/project UTF-8 limits bef
       && /Лимит – 8 КиБ/u.test(error.message)
     ),
   );
+  assert.deepEqual(
+    assertLocalAgentInstructionPublicationWithinLimit({
+      nativeTool: "plan_my_agent_profile_update",
+      arguments: { companySlug: "acme", instructionsMarkdown: "a".repeat((16 * 1024) - 1) },
+    }),
+    { sizeBytes: 16 * 1024, maxBytes: 16 * 1024 },
+  );
+  assert.throws(
+    () => assertLocalAgentInstructionPublicationWithinLimit({
+      nativeTool: "publish_my_agent_profile",
+      arguments: { companySlug: "acme", instructionsMarkdown: "a".repeat(16 * 1024) },
+    }),
+    (error) => error?.code === "LOCAL_ACTION_AGENT_INSTRUCTIONS_TOO_LARGE",
+  );
   assert.equal(
     assertLocalAgentInstructionPublicationWithinLimit({
       nativeTool: "create_task",
@@ -3703,9 +3717,52 @@ test("changed mirror records are hydrated in bounded mirror-wide batches", async
 });
 
 
+test("encrypted exact task reads page large authority and reject stale continuations", () => {
+  const fixture = structuredClone(mirror);
+  fixture.instructions.company = {
+    compiledMarkdown: "Большое правило компании. ".repeat(1_000),
+    company: { revisionId: "company-r1", version: 1 },
+  };
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  const cold = handleNativeLocalContextRead(fixture, "get_task", target);
+  assert.equal(cold.effectiveInstructions.status, "incomplete");
+  assert.ok(Buffer.byteLength(JSON.stringify(cold), "utf8") <= 24 * 1024);
+  const { catalogRevisionKey, pageCount, layerManifest } = cold.effectiveInstructions.delivery;
+  const partsByKey = new Map();
+  for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
+    const page = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex,
+    });
+    assert.equal(page.responseKind, "instruction_page");
+    assert.equal(page.pageIndex, pageIndex);
+    assert.ok(Buffer.byteLength(page.part.markdown, "utf8") <= 4 * 1024);
+    assert.equal(page.tasks, undefined);
+    const parts = partsByKey.get(page.part.key) ?? [];
+    parts[page.part.partIndex] = page.part.markdown;
+    partsByKey.set(page.part.key, parts);
+    if (pageIndex === pageCount - 1) {
+      assert.deepEqual(page.nextExactReadArguments.knownInstructionLayerKeys,
+        cold.tasks[0].instructionScope.orderedLayerKeys);
+    }
+  }
+  for (const layer of layerManifest) {
+    const parts = partsByKey.get(layer.key);
+    assert.equal(parts.length, layer.partCount);
+    assert.equal(crypto.createHash("sha256").update(parts.join(""), "utf8").digest("hex"),
+      layer.sha256);
+  }
+  fixture.instructions.company.company = { revisionId: "company-r2", version: 2 };
+  assert.throws(
+    () => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: 0,
+    }),
+    (error) => error?.code === "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE",
+  );
+});
+
 test("encrypted same-context task reads reuse complete authority and reload changed/lost layers", () => {
   const fixture = structuredClone(mirror);
-  fixture.instructions.company = { compiledMarkdown: "Полное проверенное правило. ".repeat(1_000),
+  fixture.instructions.company = { compiledMarkdown: "Полное проверенное правило. ".repeat(200),
     company: { revisionId: "company-r1", version: 1 } };
   const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
   const cold = handleNativeLocalContextRead(fixture, "get_task", target);

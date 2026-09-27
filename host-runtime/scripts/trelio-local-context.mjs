@@ -824,9 +824,12 @@ const LOCAL_ACTION_STRING_ARRAY_FIELDS = new Set(["aliases", "tags", "searchTerm
 const LOCAL_AGENT_INSTRUCTION_PUBLICATION_TOOLS = new Set([
   "plan_agent_instructions_update",
   "publish_agent_instructions",
+  "plan_my_agent_profile_update",
+  "publish_my_agent_profile",
 ]);
 const LOCAL_COMPANY_AGENT_INSTRUCTIONS_MAX_BYTES = 16 * 1024;
 const LOCAL_PROJECT_AGENT_INSTRUCTIONS_MAX_BYTES = 8 * 1024;
+const LOCAL_PERSONAL_AGENT_PROFILE_MAX_BYTES = 16 * 1024;
 const LOCAL_ACTION_CONTENT_SLUG_TOOLS = new Set([
   "create_knowledge_base_page",
   "update_knowledge_base_page",
@@ -878,9 +881,13 @@ export const assertLocalAgentInstructionPublicationWithinLimit = ({
   const instructionsMarkdown = rawArguments?.instructionsMarkdown;
   if (typeof instructionsMarkdown !== "string") return null;
 
-  const isProjectScope = typeof rawArguments?.projectSlug === "string"
+  const isPersonalProfile = nativeTool === "plan_my_agent_profile_update"
+    || nativeTool === "publish_my_agent_profile";
+  const isProjectScope = !isPersonalProfile && typeof rawArguments?.projectSlug === "string"
     && rawArguments.projectSlug.trim().length > 0;
-  const maxBytes = isProjectScope
+  const maxBytes = isPersonalProfile
+    ? LOCAL_PERSONAL_AGENT_PROFILE_MAX_BYTES
+    : isProjectScope
     ? LOCAL_PROJECT_AGENT_INSTRUCTIONS_MAX_BYTES
     : LOCAL_COMPANY_AGENT_INSTRUCTIONS_MAX_BYTES;
   const normalizedBody = instructionsMarkdown.replace(/\r\n?/gu, "\n").trim();
@@ -888,7 +895,7 @@ export const assertLocalAgentInstructionPublicationWithinLimit = ({
   const sizeBytes = Buffer.byteLength(normalizedMarkdown, "utf8");
 
   if (sizeBytes > maxBytes) {
-    const scopeLabel = isProjectScope ? "проекта" : "компании";
+    const scopeLabel = isPersonalProfile ? "личного профиля" : isProjectScope ? "проекта" : "компании";
     throw new TrelioLocalContextError(
       "LOCAL_ACTION_AGENT_INSTRUCTIONS_TOO_LARGE",
       `Рабочие правила ${scopeLabel} занимают ${sizeBytes} байт в UTF-8. `
@@ -5013,7 +5020,85 @@ const buildLocalScopedEffectiveInstructions = (
   };
 };
 
-const buildLocalExactTaskRead = (mirror, rawLocators, knownInstructionLayerKeys = []) => {
+const LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES = 24 * 1024;
+const LOCAL_TASK_INSTRUCTION_PART_MAX_BYTES = 4 * 1024;
+
+const splitLocalInstructionMarkdown = (markdown) => {
+  if (!markdown) return [""];
+  const parts = [];
+  let part = "";
+  let partBytes = 0;
+  for (const character of markdown) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (part && partBytes + characterBytes > LOCAL_TASK_INSTRUCTION_PART_MAX_BYTES) {
+      parts.push(part);
+      part = "";
+      partBytes = 0;
+    }
+    part += character;
+    partBytes += characterBytes;
+  }
+  if (part) parts.push(part);
+  return parts;
+};
+
+const buildLocalTaskInstructionDelivery = (catalog, inlineMaxBytes) => {
+  if (Buffer.byteLength(JSON.stringify(catalog), "utf8") <= inlineMaxBytes) {
+    return { catalog, pages: [] };
+  }
+  const allLayerKeys = catalog.nextReadArguments.knownInstructionLayerKeys;
+  // Bind every page to the freshly rebuilt catalog and the caller's exact
+  // cache hints. A changed rule invalidates the continuation instead of
+  // mixing authority bytes from two revisions.
+  const catalogRevisionKey = sha256LocalInstruction(JSON.stringify({
+    allLayerKeys,
+    reusedLayerKeys: catalog.reusedLayerKeys,
+  }));
+  const layerManifest = [];
+  const parts = [];
+  for (const layer of catalog.layers) {
+    const markdownParts = splitLocalInstructionMarkdown(layer.markdown);
+    const { markdown: _markdown, ...metadata } = layer;
+    layerManifest.push({ ...metadata, partCount: markdownParts.length });
+    markdownParts.forEach((markdown, partIndex) => parts.push({
+      key: layer.key,
+      sha256: layer.sha256,
+      partIndex,
+      partCount: markdownParts.length,
+      markdown,
+    }));
+  }
+  const pages = parts.map((part, pageIndex) => ({
+    schemaVersion: 3,
+    responseKind: "instruction_page",
+    catalogRevisionKey,
+    pageIndex,
+    pageCount: parts.length,
+    part,
+    nextPageIndex: pageIndex + 1 < parts.length ? pageIndex + 1 : null,
+    ...(pageIndex + 1 === parts.length
+      ? { nextExactReadArguments: { knownInstructionLayerKeys: allLayerKeys } }
+      : {}),
+  }));
+  return {
+    catalog: {
+      schemaVersion: 3,
+      status: "incomplete",
+      authority: "Instruction delivery is incomplete. Read every get_task_instruction_page with the same task locator(s), knownInstructionLayerKeys and expectedCatalogRevisionKey. Concatenate each layer's parts in partIndex order and verify its SHA-256 before interpreting task content. Restart the exact read if the revision changes.",
+      layers: [],
+      reusedLayerKeys: catalog.reusedLayerKeys,
+      delivery: { catalogRevisionKey, pageCount: pages.length, layerManifest },
+    },
+    pages,
+  };
+};
+
+const buildLocalExactTaskRead = (
+  mirror,
+  rawLocators,
+  knownInstructionLayerKeys = [],
+  pageRequest = null,
+) => {
   const records = rawLocators.map((locator) => {
     if (String(locator?.companySlug || "").toLowerCase() !== mirror.company.slug.toLowerCase()) {
       throw new TrelioLocalContextError(
@@ -5062,23 +5147,64 @@ const buildLocalExactTaskRead = (mirror, rawLocators, knownInstructionLayerKeys 
         reusedLayerKeys: [],
       };
 
-  return {
-    effectiveInstructions,
-    tasks: records.map((record, index) => ({
-      locator: {
-        companySlug: mirror.company.slug,
-        projectSlug: record.projectSlug,
-        taskNumber: record.number,
-      },
-      // Provider selection rides the already required exact encrypted task
-      // read; there is no model-visible preflight and no field on plain tasks.
-      proposalProvider: buildLocalTaskProposalProvider(mirror, record),
-      instructionScope: instructionSnapshots[index].reference,
-      task: buildLocalTaskCore(record),
-      connections: record.payload?.connections ?? {},
-      relatedWorkspaces: record.payload?.relatedWorkspaces ?? [],
-    })),
+  const taskReads = records.map((record, index) => ({
+    locator: {
+      companySlug: mirror.company.slug,
+      projectSlug: record.projectSlug,
+      taskNumber: record.number,
+    },
+    // Provider selection rides the already required exact encrypted task
+    // read; there is no model-visible preflight and no field on plain tasks.
+    proposalProvider: buildLocalTaskProposalProvider(mirror, record),
+    instructionScope: instructionSnapshots[index].reference,
+    task: buildLocalTaskCore(record),
+    connections: record.payload?.connections ?? {},
+    relatedWorkspaces: record.payload?.relatedWorkspaces ?? [],
+  }));
+  const taskBytes = Buffer.byteLength(JSON.stringify({ tasks: taskReads }), "utf8");
+  if (taskBytes > LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES) {
+    throw new TrelioLocalContextError(
+      "LOCAL_CONTEXT_RESULT_TOO_LARGE",
+      "Exact task cores exceed the bounded result. Narrow the task batch or load one task at a time.",
+    );
+  }
+  const delivery = instructionsLoaded
+    ? buildLocalTaskInstructionDelivery(
+        effectiveInstructions,
+        Math.max(0, LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES - taskBytes),
+      )
+    : { catalog: effectiveInstructions, pages: [] };
+  if (pageRequest) {
+    if (!instructionsLoaded || delivery.pages.length === 0) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE",
+        "The instruction catalog is no longer paged. Restart the exact task read.",
+      );
+    }
+    const page = delivery.pages[pageRequest.pageIndex];
+    if (
+      !Number.isInteger(pageRequest.pageIndex)
+      || pageRequest.expectedCatalogRevisionKey !== delivery.catalog.delivery.catalogRevisionKey
+      || !page
+    ) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE",
+        "The instruction catalog or page index changed. Restart the exact task read.",
+      );
+    }
+    return page;
+  }
+  const result = {
+    effectiveInstructions: delivery.catalog,
+    tasks: taskReads,
   };
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES) {
+    throw new TrelioLocalContextError(
+      "LOCAL_CONTEXT_RESULT_TOO_LARGE",
+      "Exact task response exceeds the bounded result. Narrow the task batch.",
+    );
+  }
+  return result;
 };
 
 const getTaskSectionsFromMirror = (mirror, rawInput) => {
@@ -6067,7 +6193,7 @@ const selectNativeReadDetails = (mirror, nativeTool, input) => {
   if (nativeTool === "get_task") {
     return { taskIds: taskIdsForLocators(mirror, [input]), documentIds: [] };
   }
-  if (nativeTool === "get_tasks") {
+  if (nativeTool === "get_tasks" || nativeTool === "get_task_instruction_page") {
     return { taskIds: taskIdsForLocators(mirror, input.tasks ?? []), documentIds: [] };
   }
 
@@ -6225,6 +6351,18 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
       );
     }
     return buildLocalExactTaskRead(mirror, input.tasks, input.knownInstructionLayerKeys);
+  }
+  if (nativeTool === "get_task_instruction_page") {
+    if (!Array.isArray(input.tasks) || input.tasks.length < 1 || input.tasks.length > 20) {
+      throw new TrelioLocalContextError(
+        "LOCAL_CONTEXT_INVALID_INPUT",
+        "get_task_instruction_page requires from 1 to 20 exact task locators.",
+      );
+    }
+    return buildLocalExactTaskRead(mirror, input.tasks, input.knownInstructionLayerKeys, {
+      expectedCatalogRevisionKey: input.expectedCatalogRevisionKey,
+      pageIndex: input.pageIndex,
+    });
   }
   if (nativeTool === "list_workspaces") return listWorkspacesFromMirror(mirror, input);
   if (nativeTool === "get_workspace") {
