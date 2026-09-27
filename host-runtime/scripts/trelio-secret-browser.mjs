@@ -622,22 +622,41 @@ const installSecretBrowserController = (
         if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)
           || buttons.length !== 1 || !(buttons[0] instanceof HTMLButtonElement)
           || buttons[0].disabled || !isVisible(buttons[0])) throw new Error("submit_changed");
-        // Only an explicitly granted button is clicked. No default submit,
-        // Enter key or heuristic login action is inferred by the controller.
         // A framework may have replaced the button together with a field; the
         // exact selector, URL and uniqueness remain the signed authority.
+        // Focus only this granted button. The host sends a browser input event
+        // after a second value-free check; HTMLElement.click() is synthetic and
+        // some login handlers reject it even though their AJAX request runs.
         state.submitTarget = buttons[0];
-        state.submitTarget.click();
+        state.submitTarget.focus();
+        if (document.activeElement !== state.submitTarget) throw new Error("submit_focus_failed");
       }
       state.targets = null;
-      state.status = "succeeded";
-      return { outcome: "succeeded" };
+      state.status = submitSelector ? "submit_ready" : "succeeded";
+      return { outcome: submitSelector ? "submit_ready" : "succeeded" };
     } catch {
       state.targets = null;
       state.status = "failed";
       state.reasonCode = "field_write_failed";
       return { outcome: "failed", reasonCode: state.reasonCode };
     }
+  };
+
+  globalThis.__trelioSecretBrowserSubmitReady = () => {
+    if (!submitSelector || state.status !== "submit_ready"
+      || location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)) return false;
+    let matches;
+    try {
+      matches = document.querySelectorAll(submitSelector);
+    } catch {
+      return false;
+    }
+    // Key dispatch is allowed only while the same unique, visible, enabled
+    // button still owns keyboard focus. A changed page cannot redirect Enter
+    // to a different control after the credential handoff.
+    return matches.length === 1 && matches[0] === state.submitTarget
+      && matches[0] instanceof HTMLButtonElement && !matches[0].disabled
+      && isVisible(matches[0]) && document.activeElement === matches[0];
   };
 };
 
@@ -1016,13 +1035,38 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
           executionContextId: prepared.executionContextId,
           expression,
         }).catch(() => null);
-        if (result?.outcome !== "succeeded") {
+        const submitSelector = prepared.step.submitSelector;
+        if (result?.outcome !== (submitSelector ? "submit_ready" : "succeeded")) {
           return {
             outcome: "failed",
             reasonCode: SAFE_REASON_CODES.has(result?.reasonCode)
               ? result.reasonCode
               : "field_write_failed",
           };
+        }
+        if (submitSelector) {
+          // The isolated world retains only the exact button identity, not a
+          // copy of either secret. A final read-only focus check precedes one
+          // browser-generated Enter sequence, which produces a trusted click
+          // without activating the hidden Chrome window or pressing OS keys.
+          const ready = await evaluateController({
+            client,
+            sessionId,
+            executionContextId: prepared.executionContextId,
+            expression: "globalThis.__trelioSecretBrowserSubmitReady?.()",
+          }).catch(() => false);
+          if (ready !== true) return { outcome: "failed", reasonCode: "field_write_failed" };
+          const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+          try {
+            await client.request("Input.dispatchKeyEvent", {
+              type: "keyDown", ...key, text: "\r", unmodifiedText: "\r",
+            }, sessionId);
+            await client.request("Input.dispatchKeyEvent", { type: "keyUp", ...key }, sessionId);
+          } catch {
+            // The first event may already have submitted the form. The grant
+            // is consumed, so never retry or dispatch a second Enter.
+            return { outcome: "failed", reasonCode: "adapter_error" };
+          }
         }
       }
       if (!steps.at(-1).submitSelector) return { outcome: "succeeded" };

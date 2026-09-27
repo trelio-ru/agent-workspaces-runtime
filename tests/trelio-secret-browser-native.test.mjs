@@ -222,8 +222,10 @@ test("post-submit observation treats navigation and missing controls as evidence
 });
 
 test("Chrome fill returns the post-submit observation without promoting it to auth success", async () => {
+  const requests = [];
   const client = {
     request: async (method, params) => {
+      requests.push({ method, params });
       if (method === "Target.createTarget") return { targetId: "target" };
       if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
       if (method === "Target.attachToTarget") return { sessionId: "session" };
@@ -233,8 +235,12 @@ test("Chrome fill returns the post-submit observation without promoting it to au
         return { result: { value: { status: "ready" } } };
       }
       if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserApply")) {
-        return { result: { value: { outcome: "succeeded" } } };
+        return { result: { value: { outcome: "submit_ready" } } };
       }
+      if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserSubmitReady")) {
+        return { result: { value: true } };
+      }
+      if (method === "Input.dispatchKeyEvent") return {};
       if (method === "Runtime.evaluate" || method === "Page.enable" || method === "Runtime.enable") return { result: {} };
       throw new Error(`unexpected request: ${method}`);
     },
@@ -248,6 +254,43 @@ test("Chrome fill returns the post-submit observation without promoting it to au
   assert.deepEqual(await controller.fill({ secretValues: values }), {
     outcome: "succeeded", postSubmit: { state: "bound_controls_visible" },
   });
+  assert.deepEqual(requests.filter(({ method }) => method === "Input.dispatchKeyEvent").map(({ params }) => params.type),
+    ["keyDown", "keyUp"]);
+  assert.doesNotMatch(JSON.stringify(requests.filter(({ method }) => method === "Input.dispatchKeyEvent")), /CANARY/u);
+});
+test("Chrome refuses to dispatch Enter when the bound button lost focus", async () => {
+  const requests = [];
+  const client = {
+    request: async (method, params) => {
+      requests.push({ method, params });
+      if (method === "Target.createTarget") return { targetId: "target" };
+      if (method === "Target.getTargetInfo") return { targetInfo: { url: targetUrl } };
+      if (method === "Target.attachToTarget") return { sessionId: "session" };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame", url: targetUrl } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserController?.()")) {
+        return { result: { value: { status: "ready" } } };
+      }
+      if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserApply")) {
+        return { result: { value: { outcome: "submit_ready" } } };
+      }
+      if (method === "Runtime.evaluate" && params.expression.includes("__trelioSecretBrowserSubmitReady")) {
+        return { result: { value: false } };
+      }
+      if (method === "Runtime.evaluate" || method === "Page.enable" || method === "Runtime.enable") return { result: {} };
+      throw new Error(`unexpected request: ${method}`);
+    },
+  };
+  const controller = await prepareSecretBrowserControllerViaDevTools({
+    client, targetUrl, targetOrigin: context.targetOrigin,
+    targetUrlSha256: context.targetUrlSha256, browserSteps: context.browserSteps,
+    headless: true,
+  });
+  assert.deepEqual(await controller.fill({ secretValues: values }), {
+    outcome: "failed", reasonCode: "field_write_failed",
+  });
+  assert.equal(requests.some(({ method }) => method === "Input.dispatchKeyEvent"), false);
+  await assert.rejects(controller.fill({ secretValues: values }), /Повторная передача/u);
 });
 for (const reasonCode of ["target_url_changed", "field_not_found"]) {
   test("value-free native document/field miss may use a separately verified Chrome tab: " + reasonCode, async () => {
@@ -489,23 +532,39 @@ const controllerFixture = (navigateAfterFirst = false) => {
     constructor(id, control) { super(id); this.control = control; this.htmlFor = control.id; }
     click() { events.push(this.id); this.control.checked = true; }
   }
-  class Button extends Element { click() { events.push("submit"); } }
+  const document = { activeElement: null, querySelectorAll: (selector) => fields[selector] ? [fields[selector]] : [] };
+  class Button extends Element {
+    focus() { document.activeElement = this; events.push("focus-login"); }
+    click() { events.push("synthetic-submit"); }
+  }
   const fields = { "#username": new Input("username"), "#password": new Input("password"), "#login": new Button("login") };
   const realm = vm.createContext({
     location, HTMLElement: Element, HTMLInputElement: Input, HTMLLabelElement: Label,
     HTMLTextAreaElement: class extends Input {}, HTMLButtonElement: Button,
     InputEvent: class {}, Event: class {},
     getComputedStyle: () => ({ display: "block", visibility: "visible" }),
-    document: { querySelectorAll: (selector) => fields[selector] ? [fields[selector]] : [] },
+    document,
   });
   vm.runInContext(createSecretBrowserControllerExpression(context.targetOrigin, context.browserSteps[0].fields, "#login", targetUrl), realm);
   return { realm, events, fields };
 };
-test("Chrome fallback fills both fields then invokes only the explicitly granted button", () => {
+test("Chrome fallback fills both fields then focuses only the explicitly granted button", () => {
   const f = controllerFixture();
   assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
-  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "succeeded");
-  assert.deepEqual(f.events, ["username", "password", "submit"]);
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
+  assert.equal(f.realm.__trelioSecretBrowserSubmitReady(), true);
+  assert.deepEqual(f.events, ["username", "password", "focus-login"]);
+});
+test("Chrome blocks Enter if focus moves away from the granted button", () => {
+  const f = controllerFixture();
+  assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
+  f.realm.document.activeElement = f.fields["#password"];
+  assert.equal(f.realm.__trelioSecretBrowserSubmitReady(), false);
+  f.realm.document.activeElement = f.fields["#login"];
+  f.fields["#login"] = new f.realm.HTMLButtonElement("different-login");
+  assert.equal(f.realm.__trelioSecretBrowserSubmitReady(), false);
+  assert.deepEqual(f.events, ["username", "password", "focus-login"]);
 });
 test("a synchronous page navigation stops the next Chrome setter and submit", () => {
   const f = controllerFixture(true);
@@ -537,8 +596,8 @@ test("a signed activation action exposes the exact fields before any value is de
   );
   assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
   assert.deepEqual(f.events, ["activate"], "preflight remains value-free");
-  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "succeeded");
-  assert.deepEqual(f.events, ["activate", "username", "password", "submit"]);
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
+  assert.deepEqual(f.events, ["activate", "username", "password", "focus-login"]);
 });
 
 test("a hidden exact radio activates through its sole visible for=id label", () => {
@@ -563,8 +622,8 @@ test("a hidden exact radio activates through its sole visible for=id label", () 
   });
   assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
   assert.deepEqual(f.events, ["activate-label"], "switching remains value-free");
-  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "succeeded");
-  assert.deepEqual(f.events, ["activate-label", "username", "password", "submit"]);
+  assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
+  assert.deepEqual(f.events, ["activate-label", "username", "password", "focus-login"]);
 });
 
 test("hidden input with multiple exact labels fails closed before a click", () => {
@@ -684,8 +743,8 @@ test("Chrome accepts exact selector replacements and presentation-only phone mas
   };
   const maskedValues = { username: "79991112233", password: values.password };
   assert.equal(f.realm.__trelioSecretBrowserController().status, "ready");
-  assert.equal(f.realm.__trelioSecretBrowserApply(maskedValues).outcome, "succeeded");
-  assert.deepEqual(f.events, ["username", "password", "submit"]);
+  assert.equal(f.realm.__trelioSecretBrowserApply(maskedValues).outcome, "submit_ready");
+  assert.deepEqual(f.events, ["username", "password", "focus-login"]);
 });
 
 test("native preparation carries an exact activation id without credential values", async () => {

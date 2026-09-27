@@ -507,6 +507,11 @@ presentation-only форматирование телефонного номер
 их. Вкладка может заранее показать запрошенный `TargetInfo.url`, пока её
 top-level document ещё `about:blank`; Chrome ждёт подтверждения exact URL
 самого документа перед установкой controller и передачей секрета.
+Для `submitSelector` controller после записи полей фокусирует только exact
+кнопку внутри своей скрытой вкладки, повторно проверяет URL, selector и фокус,
+затем посылает один browser `Enter` через DevTools Input. Это создаёт trusted
+click без активации окна и системного ввода. JavaScript `element.click()` для
+submit не используется; после неоднозначного события Enter grant не повторяется.
 
 Успех означает заполнение/запрошенное нажатие, а не доказанный вход. До checkout
 используется content-free auth probe, если он есть. После заполнения агент не
