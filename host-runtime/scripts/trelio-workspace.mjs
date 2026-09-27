@@ -10005,45 +10005,48 @@ const latestFiniteTimestamp = (values) => {
   return timestamps.length > 0 ? Math.max(...timestamps) : null;
 };
 
-const expiredRunHasServerWork = (overview, run) => (
+const expiredRunHasServerWork = (snapshot) => (
   Boolean(
-    run.draftHead
-    || run.candidateHead
-    || run.blockerJson
-    || run.billingBlockerJson
-    || run.handoffJson
+    snapshot?.run?.draftHead
+    || snapshot?.run?.candidateHead
+    || snapshot?.run?.blockerJson
+    || snapshot?.run?.billingBlockerJson
+    || snapshot?.run?.handoffJson
+    || snapshot?.latestCheckpoint
   )
-  || (Array.isArray(overview?.checkpoints)
-    && overview.checkpoints.some((checkpoint) => checkpoint?.runId === run.id))
 );
 
-const canReplaceStaleEmptyExpiredRun = async ({
-  rootDirectory,
-  metadata,
-  overview,
-  run,
+const isStaleEmptyExpiredRun = ({
+  snapshot,
+  localActivityTimes = [],
   nowMs = Date.now(),
 }) => {
-  if (run?.status !== "expired" || expiredRunHasServerWork(overview, run)) {
+  const run = snapshot?.run;
+  if (run?.status !== "expired" || expiredRunHasServerWork(snapshot)) {
     return false;
   }
 
   const latestActivityAt = latestFiniteTimestamp([
-    metadata.lastUsedAt,
-    metadata.claimedAt,
-    metadata.createdAt,
+    ...localActivityTimes,
     run.lastHeartbeatAt,
     run.leaseExpiresAt,
     run.draftUpdatedAt,
     run.updatedAt,
     run.createdAt,
   ]);
-  if (
-    latestActivityAt === null
-    || nowMs - latestActivityAt < STALE_EMPTY_EXPIRED_RUN_REUSE_MS
-  ) {
-    return false;
-  }
+  return latestActivityAt !== null
+    && nowMs - latestActivityAt >= STALE_EMPTY_EXPIRED_RUN_REUSE_MS;
+};
+
+const canReplaceStaleEmptyExpiredRun = async ({
+  rootDirectory,
+  metadata,
+  snapshot,
+}) => {
+  if (!isStaleEmptyExpiredRun({
+    snapshot,
+    localActivityTimes: [metadata.lastUsedAt, metadata.claimedAt, metadata.createdAt],
+  })) return false;
 
   const root = { rootDirectory, metadata };
   // Возраст – только фильтр кандидата. Право переиспользовать root появляется
@@ -10543,6 +10546,11 @@ const isNonWritableLegacyRunResidue = async (legacyRoot) => {
   return true;
 };
 
+const canIgnoreStaleEmptyExpiredLegacyResidue = async ({ legacyRoot, snapshot }) => (
+  isStaleEmptyExpiredRun({ snapshot })
+  && await isNonWritableLegacyRunResidue(legacyRoot)
+);
+
 const loadExactWorkspaceRun = async ({
   origin,
   token,
@@ -10582,6 +10590,7 @@ const preflightWorkspaceDirectory = async ({
   directoryOption,
   overview,
   loadRunState,
+  loadRunSnapshot,
 }) => {
   let rootStat;
 
@@ -10617,8 +10626,7 @@ const preflightWorkspaceDirectory = async ({
         ? await canReplaceStaleEmptyExpiredRun({
             rootDirectory,
             metadata: existingMetadata,
-            overview,
-            run: localRunState,
+            snapshot: await loadRunSnapshot(existingMetadata.runId),
           })
         : false;
       if (!localRunState || (!TERMINAL_RUN_STATUSES.has(localRunState.status) && !reusableExpiredRun)) {
@@ -10724,9 +10732,16 @@ const preflightWorkspaceDirectory = async ({
     const legacyRunState = await loadRunState(entry.name);
 
     if (!legacyMetadata) {
+      const reusableExpiredResidue = legacyRunState?.status === "expired"
+        ? await canIgnoreStaleEmptyExpiredLegacyResidue({
+            legacyRoot,
+            snapshot: await loadRunSnapshot(entry.name),
+          })
+        : false;
       if (
-        TERMINAL_RUN_STATUSES.has(legacyRunState?.status)
-        && await isNonWritableLegacyRunResidue(legacyRoot)
+        reusableExpiredResidue
+        || (TERMINAL_RUN_STATUSES.has(legacyRunState?.status)
+          && await isNonWritableLegacyRunResidue(legacyRoot))
       ) {
         continue;
       }
@@ -10749,8 +10764,20 @@ const preflightWorkspaceDirectory = async ({
       throw new Error("Legacy Run принадлежит другой компании Trelio.");
     }
     const materializedRunState = await loadRunState(legacyMetadata.runId);
+    // Old UUID roots are retained after migration. An expired Run without
+    // server work may stop blocking a new root only after the same age and
+    // complete local Git checks used for a persistent root. The exact read
+    // includes its checkpoint even when the overview history is bounded.
+    const reusableExpiredRun = materializedRunState?.status === "expired"
+      ? await canReplaceStaleEmptyExpiredRun({
+          rootDirectory: legacyRoot,
+          metadata: legacyMetadata,
+          snapshot: await loadRunSnapshot(legacyMetadata.runId),
+        })
+      : false;
 
-    if (!materializedRunState || !TERMINAL_RUN_STATUSES.has(materializedRunState.status)) {
+    if (!materializedRunState || (!TERMINAL_RUN_STATUSES.has(materializedRunState.status)
+      && !reusableExpiredRun)) {
       throw new Error(
         "В старой локальной структуре найден незавершённый Agent Run. Сначала продолжите или отмените его.",
       );
@@ -10931,10 +10958,8 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
   }
 
   const exactRuns = new Map();
-  const loadRunState = async (runId) => {
-    const recentRun = runOverview?.runs?.find((run) => run.id === runId);
-    if (recentRun) return recentRun;
-    if (exactRuns.has(runId)) return exactRuns.get(runId)?.run ?? null;
+  const loadRunSnapshot = async (runId) => {
+    if (exactRuns.has(runId)) return exactRuns.get(runId);
     let exactRun;
     try {
       exactRun = await loadExactWorkspaceRun({
@@ -10952,7 +10977,18 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       exactRun = null;
     }
     exactRuns.set(runId, exactRun);
-    return exactRun?.run ?? null;
+    return exactRun;
+  };
+  const loadRunState = async (runId) => {
+    const recentRun = runOverview?.runs?.find((run) => run.id === runId);
+    // An expired overview row may have been reclaimed after that bounded
+    // response. Use the same exact snapshot needed for checkpoint proof as
+    // the current status, rather than authorizing reuse from stale metadata.
+    if (recentRun?.status === "expired") {
+      return (await loadRunSnapshot(runId))?.run ?? null;
+    }
+    if (recentRun) return recentRun;
+    return (await loadRunSnapshot(runId))?.run ?? null;
   };
 
   const directoryPreflight = await preflightWorkspaceDirectory({
@@ -10963,6 +10999,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     directoryOption: options.dir,
     overview: runOverview,
     loadRunState,
+    loadRunSnapshot,
   });
 
   if (!requestedRunId && directoryPreflight.existingMetadata) {
@@ -15620,6 +15657,7 @@ const RUN_STATUS_READ_CONCURRENCY = 4;
 
 const readRunStatusMap = async ({ origin, token, roots }) => {
   const statusByRunId = new Map();
+  const exactSnapshotByRunId = new Map();
   const latestRunActivityByWorkspaceId = new Map();
   const workspacesWithOpenRuns = new Set();
   const workspaceIds = [...new Set(
@@ -15677,6 +15715,38 @@ const readRunStatusMap = async ({ origin, token, roots }) => {
         workspacesWithOpenRuns.add(workspaceId);
       }
     }
+    // Overview is bounded for UI. Old local roots can outlive that window, and
+    // an expired Run needs its exact checkpoint state before any deletion.
+    for (const root of roots.filter((item) => (
+      item.metadata.workspaceId === workspaceId
+      && normalizeOrigin(item.metadata.origin || DEFAULT_ORIGIN) === origin
+    ))) {
+      const runId = root.metadata.runId;
+      if (statusByRunId.has(runId) && statusByRunId.get(runId).status !== "expired") continue;
+      let snapshot;
+      try {
+        snapshot = await readJsonResponse(await request(
+          routing.requestOrigin,
+          token,
+          `/api/agent-workspaces/workspaces/${requireUuid(workspaceId, "workspace")}`
+            + `/runs/${requireUuid(runId, "run")}`,
+        ));
+      } catch (error) {
+        // A genuine 404 cannot authorize deletion, but it must not block
+        // retention of every other independently verified local root.
+        if (error instanceof TrelioApiError && error.statusCode === 404) continue;
+        throw error;
+      }
+      if (
+        snapshot?.run?.id !== runId
+        || snapshot?.run?.workspaceId !== workspaceId
+        || (snapshot.latestCheckpoint !== null && snapshot.latestCheckpoint?.runId !== runId)
+      ) {
+        throw new Error("Trelio вернул другой Agent Run при проверке локального retention.");
+      }
+      statusByRunId.set(runId, snapshot.run);
+      exactSnapshotByRunId.set(runId, snapshot);
+    }
     }
   };
 
@@ -15687,6 +15757,7 @@ const readRunStatusMap = async ({ origin, token, roots }) => {
 
   return {
     statusByRunId,
+    exactSnapshotByRunId,
     latestRunActivityByWorkspaceId,
     workspacesWithOpenRuns,
   };
@@ -15967,6 +16038,19 @@ const assertSafeRegisteredRunRoot = (root, registeredRoots) => {
   }
 };
 
+const isLegacyRunSubdirectory = (root) => (
+  UUID_PATTERN.test(String(root.metadata.workspaceId || ""))
+  && UUID_PATTERN.test(String(root.metadata.runId || ""))
+  && sameLocalPath(
+    root.rootDirectory,
+    path.join(
+      LEGACY_DEFAULT_WORKSPACES_DIRECTORY,
+      root.metadata.workspaceId,
+      root.metadata.runId,
+    ),
+  )
+);
+
 const hasUnmanagedWorkspaceRootEntries = async (rootDirectory) => {
   const rootEntries = await fs.readdir(rootDirectory, { withFileTypes: true });
 
@@ -15992,6 +16076,7 @@ const planWorkspaceCleanup = async ({
   const roots = await discoverRegisteredRunRoots();
   const {
     statusByRunId,
+    exactSnapshotByRunId,
     latestRunActivityByWorkspaceId,
     workspacesWithOpenRuns,
   } = await readRunStatusMap({ origin, token, roots });
@@ -16015,18 +16100,29 @@ const planWorkspaceCleanup = async ({
     }
 
     const runState = statusByRunId.get(root.metadata.runId);
+    const legacyRunSubdirectory = isLegacyRunSubdirectory(root);
 
     if (!runState) {
       skipRoot(root, "run_status_unknown");
       continue;
     }
 
-    if (!TERMINAL_RUN_STATUSES.has(runState.status)) {
+    const staleEmptyExpiredRun = runState.status === "expired"
+      && exactSnapshotByRunId.has(root.metadata.runId)
+      && isStaleEmptyExpiredRun({
+        snapshot: exactSnapshotByRunId.get(root.metadata.runId),
+        localActivityTimes: [
+          root.metadata.lastUsedAt,
+          root.metadata.claimedAt,
+          root.metadata.createdAt,
+        ],
+      });
+    if (!TERMINAL_RUN_STATUSES.has(runState.status) && !staleEmptyExpiredRun) {
       skipRoot(root, "run_not_terminal", runState);
       continue;
     }
 
-    if (workspacesWithOpenRuns.has(root.metadata.workspaceId)) {
+    if (!legacyRunSubdirectory && workspacesWithOpenRuns.has(root.metadata.workspaceId)) {
       skipRoot(root, "workspace_has_open_run", runState);
       continue;
     }
@@ -16045,8 +16141,13 @@ const planWorkspaceCleanup = async ({
     const inactiveSince = Math.max(
       Number.isFinite(terminalAt) ? terminalAt : Number.NEGATIVE_INFINITY,
       Number.isFinite(localActivityAt) ? localActivityAt : Number.NEGATIVE_INFINITY,
-      latestRunActivityByWorkspaceId.get(root.metadata.workspaceId)
-        || Number.NEGATIVE_INFINITY,
+      // The persistent root is shared by successive Runs; old UUID child
+      // roots are not. A new Run must not reset retention for an unrelated,
+      // verified old child that still has its own exact Git and server proof.
+      legacyRunSubdirectory
+        ? Number.NEGATIVE_INFINITY
+        : (latestRunActivityByWorkspaceId.get(root.metadata.workspaceId)
+          || Number.NEGATIVE_INFINITY),
     );
 
     if (!Number.isFinite(inactiveSince) || Date.now() - inactiveSince < retentionMs) {

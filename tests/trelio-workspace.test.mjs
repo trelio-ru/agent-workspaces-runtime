@@ -2885,7 +2885,7 @@ test("bridge open keeps a large parent context pointer-first and downloads zero 
 });
 
 test("legacy layout migration ignores only safe OS metadata and reports exact blockers", {
-  timeout: 20_000,
+  timeout: 35_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-legacy-layout-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
@@ -2894,6 +2894,11 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
   const targetRunId = "43434343-4343-4343-8343-434343434343";
   const contextOnlyRunId = "45454545-4545-4545-8545-454545454545";
   const unknownRunId = "46464646-4646-4646-8646-464646464646";
+  const expiredRunId = "47474747-4747-4747-8747-474747474747";
+  const expiredResidueRunId = "48484848-4848-4848-8848-484848484848";
+  const oldActivityAt = new Date(Date.now() - 72 * 60 * 60 * 1_000).toISOString();
+  let expiredActivityAt = new Date().toISOString();
+  let expiredCheckpoint = null;
   const targetExport = await createExportBundle(path.join(temporaryDirectory, "target"), {
     "WORKSPACE_CONTEXT.md": "# Migrated persistent workspace\n",
     "result.md": "new Run content\n",
@@ -2951,8 +2956,38 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
           runs: [
             serializeRun(legacyRunId, "accepted"),
             serializeRun(contextOnlyRunId, "accepted"),
+            { ...serializeRun(expiredRunId, "expired"), updatedAt: expiredActivityAt },
+            { ...serializeRun(expiredResidueRunId, "expired"), updatedAt: oldActivityAt },
           ],
           checkpoints: [],
+        }));
+        return;
+      }
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${expiredRunId}`
+      ) {
+        response.end(JSON.stringify({
+          run: {
+            ...serializeRun(expiredRunId, "expired"),
+            workspaceId,
+            updatedAt: expiredActivityAt,
+          },
+          latestCheckpoint: expiredCheckpoint,
+        }));
+        return;
+      }
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${expiredResidueRunId}`
+      ) {
+        response.end(JSON.stringify({
+          run: {
+            ...serializeRun(expiredResidueRunId, "expired"),
+            workspaceId,
+            updatedAt: oldActivityAt,
+          },
+          latestCheckpoint: null,
         }));
         return;
       }
@@ -3085,6 +3120,58 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     assert.equal(startCount, 0, "unknown Run identity must not be treated as terminal");
     await rm(unknownRoot, { recursive: true });
 
+    const expiredRoot = path.join(rootDirectory, expiredRunId);
+    const expiredWorkspaceDirectory = path.join(expiredRoot, "workspace");
+    await mkdir(expiredWorkspaceDirectory, { recursive: true });
+    await runGit(expiredWorkspaceDirectory, ["init", "--initial-branch=trelio-candidate"]);
+    await runGit(expiredWorkspaceDirectory, ["config", "user.name", "Trelio Bridge Test"]);
+    await runGit(expiredWorkspaceDirectory, ["config", "user.email", "bridge-test@trelio.local"]);
+    await writeFile(path.join(expiredWorkspaceDirectory, "old.md"), "old clean result\n");
+    await runGit(expiredWorkspaceDirectory, ["add", "--all"]);
+    await runGit(expiredWorkspaceDirectory, ["commit", "-m", "Old clean Run"]);
+    const expiredHead = (await runGit(expiredWorkspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+    await writeFile(path.join(expiredRoot, ".trelio-run.json"), JSON.stringify({
+      schemaVersion: 3,
+      origin,
+      workspaceId,
+      runId: expiredRunId,
+      workspaceDirectory: expiredWorkspaceDirectory,
+      baseHead: expiredHead,
+      materializedHead: expiredHead,
+      createdAt: oldActivityAt,
+      objects: [],
+    }));
+    const expiredResidueFile = path.join(
+      rootDirectory,
+      expiredResidueRunId,
+      "context",
+      "pinned.txt",
+    );
+    await mkdir(path.dirname(expiredResidueFile), { recursive: true });
+    await writeFile(expiredResidueFile, "retained read-only context\n");
+
+    await assert.rejects(
+      execFileAsync(process.execPath, command, executionOptions),
+      /незавершённый Agent Run/u,
+      "a recent expired legacy Run stays recoverable",
+    );
+    expiredActivityAt = oldActivityAt;
+    expiredCheckpoint = { id: "49494949-4949-4949-8949-494949494949", runId: expiredRunId };
+    await assert.rejects(
+      execFileAsync(process.execPath, command, executionOptions),
+      /незавершённый Agent Run/u,
+      "a checkpoint is server work even when the bounded overview omits it",
+    );
+    expiredCheckpoint = null;
+    await writeFile(path.join(expiredWorkspaceDirectory, "unsaved.txt"), "local draft\n");
+    await assert.rejects(
+      execFileAsync(process.execPath, command, executionOptions),
+      /незавершённый Agent Run/u,
+      "untracked local work cannot be skipped during migration",
+    );
+    await rm(path.join(expiredWorkspaceDirectory, "unsaved.txt"));
+    assert.equal(startCount, 0, "unsafe legacy state must fail before server start");
+
     const opened = await execFileAsync(process.execPath, command, executionOptions);
     assert.equal(opened.stdout.trim(), path.join(rootDirectory, "workspace"));
     assert.equal(startCount, 1);
@@ -3094,7 +3181,9 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
       "new Run content\n",
     );
     assert.equal(await pathExists(legacyRoot), true, "legacy Run history must remain untouched");
+    assert.equal(await pathExists(expiredRoot), true, "expired Run history must remain untouched");
     assert.equal(await readFile(contextOnlyFile, "utf8"), "old read-only context\n");
+    assert.equal(await readFile(expiredResidueFile, "utf8"), "retained read-only context\n");
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -3206,6 +3295,25 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
               : []),
           ],
           checkpoints: [],
+        }));
+        return;
+      }
+
+      if (
+        request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${runId}`
+      ) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({
+          run: {
+            ...serializeRun(runId, firstExport.head, firstRunStatus, {
+              lastHeartbeatAt: firstRunActivityAt,
+              leaseExpiresAt: firstRunActivityAt,
+              updatedAt: firstRunActivityAt,
+            }),
+            workspaceId,
+          },
+          latestCheckpoint: null,
         }));
         return;
       }
@@ -4402,6 +4510,9 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
   const expiredSiblingTerminalRunId = "12121212-1212-4212-8212-121212121212";
   const expiredSiblingRunId = "13131313-1313-4313-8313-131313131313";
   const expiredLocalRunId = "14141414-1414-4414-8414-141414141414";
+  const expiredCheckpointRunId = "16161616-1616-4616-8616-161616161616";
+  const legacyOldRunId = "17171717-1717-4717-8717-171717171717";
+  const legacyActiveSiblingRunId = "18181818-1818-4818-8818-181818181818";
   const unsafeSystemMetadataRunId = "15151515-1515-4515-8515-151515151515";
   const runStates = new Map([
     [acceptedRunId, "accepted"],
@@ -4414,6 +4525,9 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     [busyTerminalRunId, "accepted"],
     [expiredSiblingTerminalRunId, "accepted"],
     [expiredLocalRunId, "expired"],
+    [expiredCheckpointRunId, "expired"],
+    [legacyOldRunId, "accepted"],
+    [legacyActiveSiblingRunId, "running"],
     [unsafeSystemMetadataRunId, "accepted"],
   ]);
   const workspaceIdByRunId = new Map(
@@ -4422,6 +4536,7 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`,
     ]),
   );
+  workspaceIdByRunId.set(legacyActiveSiblingRunId, workspaceIdByRunId.get(legacyOldRunId));
   const roots = new Map();
   let serverError = null;
   let concurrentOverviewRequests = 0;
@@ -4438,9 +4553,12 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       lastUsedAt = null,
       unmanaged = false,
       unsafeSystemMetadata = false,
+      legacy = false,
     } = {},
   ) => {
-    const rootDirectory = path.join(temporaryDirectory, name);
+    const rootDirectory = legacy
+      ? path.join(homeDirectory, "Trelio Workspaces", workspaceIdByRunId.get(currentRunId), currentRunId)
+      : path.join(temporaryDirectory, name);
     const workspaceDirectory = path.join(rootDirectory, "workspace");
     await mkdir(workspaceDirectory, { recursive: true });
     await runGit(workspaceDirectory, ["init", "--initial-branch=trelio-candidate"]);
@@ -4507,6 +4625,32 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
         return;
       }
 
+      const exactRunMatch = request.url?.match(
+        /^\/api\/agent-workspaces\/workspaces\/([0-9a-f-]+)\/runs\/([0-9a-f-]+)$/iu,
+      );
+      if (exactRunMatch) {
+        const [, requestedWorkspaceId, requestedRunId] = exactRunMatch;
+        const status = runStates.get(requestedRunId);
+        if (!status || workspaceIdByRunId.get(requestedRunId) !== requestedWorkspaceId) {
+          response.statusCode = 404;
+          response.end();
+          return;
+        }
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({
+          run: {
+            id: requestedRunId,
+            workspaceId: requestedWorkspaceId,
+            status,
+            updatedAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+          },
+          latestCheckpoint: requestedRunId === expiredCheckpointRunId
+            ? { runId: requestedRunId, checkpointType: "analysis" }
+            : null,
+        }));
+        return;
+      }
+
       const workspaceMatch = request.url?.match(
         /^\/api\/agent-workspaces\/workspaces\/([0-9a-f-]+)$/iu,
       );
@@ -4539,6 +4683,13 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
         }
         if (currentRunId === expiredSiblingTerminalRunId) {
           currentRuns.push({ id: expiredSiblingRunId, status: "expired", updatedAt: oldTimestamp });
+        }
+        if (currentRunId === legacyOldRunId) {
+          currentRuns.push({
+            id: legacyActiveSiblingRunId,
+            status: "running",
+            updatedAt: new Date().toISOString(),
+          });
         }
         response.end(JSON.stringify({ company: testCompany, runs: currentRuns }));
         concurrentOverviewRequests -= 1;
@@ -4592,6 +4743,17 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       "expired-local-run",
       expiredLocalRunId,
     );
+    const expiredCheckpointRoot = await createLocalRunRoot(
+      origin,
+      "expired-with-checkpoint",
+      expiredCheckpointRunId,
+    );
+    const legacyOldRoot = await createLocalRunRoot(
+      origin,
+      "legacy-old-run",
+      legacyOldRunId,
+      { legacy: true },
+    );
     const unsafeSystemMetadataRoot = await createLocalRunRoot(
       origin,
       "unsafe-system-metadata",
@@ -4625,6 +4787,8 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
           busyRoot,
           expiredSiblingRoot,
           expiredLocalRoot,
+          expiredCheckpointRoot,
+          legacyOldRoot,
           unsafeSystemMetadataRoot,
           missingRegistryRoot,
         ],
@@ -4641,12 +4805,14 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
         env: { ...process.env, HOME: homeDirectory },
       },
     );
-    assert.match(preview.stdout, /Inactive Workspace roots: 2/);
+    assert.match(preview.stdout, /Inactive Workspace roots: 4/);
     assert.match(preview.stdout, /accepted-clean/);
     assert.match(preview.stdout, /workspace-with-expired-sibling/);
     assert.match(preview.stdout, /accepted-dirty · workspace_dirty · accepted/);
     assert.match(preview.stdout, /workspace-with-active-run · workspace_has_open_run · accepted/);
-    assert.match(preview.stdout, /expired-local-run · run_not_terminal · expired/);
+    assert.match(preview.stdout, /expired-local-run · expired/);
+    assert.match(preview.stdout, /expired-with-checkpoint · run_not_terminal · expired/);
+    assert.match(preview.stdout, /17171717-1717-4717-8717-171717171717 · accepted/);
     assert.match(preview.stdout, /unmanaged · unmanaged_root_entry · accepted/);
     assert.match(preview.stdout, /unsafe-system-metadata · unmanaged_root_entry · accepted/);
     assert.equal(await pathExists(acceptedRoot), true, "dry-run must not delete candidates");
@@ -4677,7 +4843,9 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     assert.equal(await pathExists(committedRoot), true, "unpublished clean commits are never deleted");
     assert.equal(await pathExists(ignoredRoot), true, "ignored user files are never deleted");
     assert.equal(await pathExists(busyRoot), true, "any open Run keeps the Workspace root active");
-    assert.equal(await pathExists(expiredLocalRoot), true, "an expired local Run remains resumable");
+    assert.equal(await pathExists(expiredLocalRoot), false, "an old empty expired Run is reclaimed");
+    assert.equal(await pathExists(expiredCheckpointRoot), true, "a checkpoint keeps an expired Run resumable");
+    assert.equal(await pathExists(legacyOldRoot), false, "a new active Run does not retain a clean old legacy child");
     assert.ok(
       maximumConcurrentOverviewRequests > 1 && maximumConcurrentOverviewRequests <= 4,
       "cleanup should read distinct Workspace states through the bounded pool",

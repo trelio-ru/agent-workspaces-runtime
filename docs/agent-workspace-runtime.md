@@ -388,13 +388,20 @@ delta. Apply принимает только текущий plan hash и explici
 читает его и последний checkpoint по exact ID через ACL-checked API. Отсутствие
 в overview не является
 доказательством активного или завершённого состояния. Затем bridge проверяет
-terminal status предыдущего локального Run и чистоту Git, сравнивает
+terminal status предыдущего локального Run и чистоту Git. Для `expired` Run
+без draft, candidate, blocker, handoff и checkpoint bridge повторно получает
+точный серверный снимок и только после 48 часов без активности допускает новый
+Run при чистой локальной истории, рабочем дереве и служебном root. Эта проверка
+действует и для прежнего `<workspace-id>/<run-id>/workspace`, а остаток только
+с read-only `context/` остаётся на месте. Недавний либо содержащий работу
+`expired` Run требует восстановления и не пропускается. Bridge сравнивает
 локальный head с current `acceptedHead` и при необходимости синхронизирует
 tracked tree. Dirty/diverged данные не перезаписываются; неизвестный server
 status или недоступный backend не допускает новый writable Run. В одном
 persistent root одновременно открывается только один локальный Run. Уже
 начатый legacy Run из `<workspace-id>/<run-id>/workspace` продолжается на месте;
-после его безопасного завершения новые Run переходят на общий root.
+после его безопасного завершения либо доказанной пустой просрочки новые Run
+переходят на общий root без удаления старого каталога.
 
 `context/company`, `context/project` и UUID-каталоги `context/related/`
 являются exact snapshot `contextHeadsJson` текущего Run. После успешной
@@ -753,14 +760,24 @@ blocker, новый Run или cancellation для этого не создаю�
 `trelio-workspace clean --dry-run` показывает exact persistent Workspace roots
 и reclaimable bytes, а для сохранённых roots выводит стабильную причину пропуска.
 Root становится кандидатом после 30 дней без локальной
-или server Run-активности, только если связанный локальный Run terminal, в
-Workspace нет другого открытого Run, Git чист и root сейчас не открывается.
+или server Run-активности, если связанный локальный Run принят/отменён или
+истёк более 48 часов назад без черновика, кандидата, блокировки, handoff и
+checkpoint. Для старого или истёкшего Run bridge запрашивает точное состояние,
+поскольку список в Workspace overview ограничен. Git должен быть чист, а
+root не должен открываться. Общий persistent root сохраняется, пока в
+Workspace есть другой открытый Run.
+Для отдельного legacy-каталога `<workspace-id>/<run-id>` срок считается по
+его собственному Run: новые Runs того же Workspace не продлевают хранение
+старой копии и не блокируют её проверенную очистку. Для общего persistent root
+активность всего Workspace по-прежнему учитывается.
 Открытыми считаются `running`, `waiting_for_human` и совместимый `review`;
-истёкший sibling Run не блокирует terminal root, но root собственного
-`expired` Run сохраняется для возможного claim. Active, unknown и dirty roots сохраняются;
+истёкший sibling Run не блокирует terminal root. Содержательный `expired` Run
+сохраняется для возможного claim. Active, unknown и dirty roots сохраняются;
 backend outage делает auto-prune no-op. Настройка
 `workspaceRetentionDays` меняет срок в пределах 1–365 дней; удалённый ключ
 `terminalRunRetentionDays` больше не читается.
+Незавершённые legacy-каталоги только с `context/` и без `.trelio-run.json`
+не проходят проверку локального Git и не удаляются автоматически.
 
 Обычные ограниченные untracked metadata-файлы `.DS_Store`, `Thumbs.db` и
 `desktop.ini` не считаются пользовательским содержимым ни рядом с `workspace/`,
