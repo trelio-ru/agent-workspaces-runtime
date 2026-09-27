@@ -150,7 +150,10 @@ test("background continuation points only to the exact validated target", async 
   });
   const session = await prepareSecretBrowserSession(f.args);
   assert.equal(session.targetId, targetId);
-  assert.equal(session.profileDirectory, "/synthetic/private/profile-background");
+  // The profile path is built by the host OS. Compare using the same path
+  // operation so the Windows security run checks the target, not slashes.
+  assert.equal(session.profileDirectory,
+    path.join(path.dirname(f.args.profileDirectory), `${path.basename(f.args.profileDirectory)}-background`));
   const hint = describeBackgroundSecretBrowserContinuation(session);
   assert.match(hint, /profile-background/u);
   assert.match(hint, new RegExp(targetId, "u"));
