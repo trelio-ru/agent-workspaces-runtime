@@ -283,6 +283,7 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
         // the same explicitly now that runtime and plugin sources are separate.
         TRELIO_PLUGIN_ROOT: pluginDirectory,
         TRELIO_PLUGIN_VERSION: pluginManifest.version,
+        TRELIO_HOST_RUNTIME_VERSION: "3.7.2",
       },
     },
   );
@@ -295,6 +296,7 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
   assert.equal(report.git.smokeTest, "ready");
   assert.equal(report.plugin.status, "ready");
   assert.equal(report.plugin.loadedVersion, pluginManifest.version);
+  assert.equal(report.hostRuntime.loadedVersion, "3.7.2");
   assert.equal(report.plugin.hooks.status, "ready");
   assert.equal(report.plugin.hooks.preToolUseScope, "trelio_mcp");
   assert.equal(report.plugin.hooks.approvalStatus, "client_managed_unknown");

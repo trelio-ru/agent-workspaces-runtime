@@ -187,6 +187,9 @@ const buildLocalSummary = (local) => ({
     },
     issues: Array.isArray(local.plugin?.issues) ? local.plugin.issues : [],
   },
+  hostRuntime: {
+    loadedVersion: local.hostRuntime?.loadedVersion ?? null,
+  },
   runtimeSessions: {
     status: local.runtimeSessions?.status ?? "unknown",
     activeCount: local.runtimeSessions?.activeCount ?? 0,

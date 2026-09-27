@@ -1158,6 +1158,10 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
     node,
     git,
     plugin,
+    // This is the immutable runtime that launched this bridge or MCP process.
+    // Session records intentionally contain no release identity and may outlive
+    // a loader update, so their counters cannot establish this version.
+    hostRuntime: { loadedVersion: HOST_RUNTIME_VERSION },
     runtimeSessions,
     connection,
     issues,
@@ -1191,7 +1195,8 @@ const doctor = async (options) => {
   process.stdout.write(
     `Локальный компонент готов: Node.js ${report.node.version}, `
       + `Git ${report.git.version} (${report.git.gitPath}).\n`
-      + `Плагин v${report.plugin.loadedVersion}; hooks ${report.plugin.hooks.status}, `
+      + `Плагин v${report.plugin.loadedVersion}; host runtime v${report.hostRuntime.loadedVersion}; `
+      + `hooks ${report.plugin.hooks.status}, `
       + "их одобрение проверяет клиент.\n"
       + `Bridge session: ${report.connection.status}; runtime sessions: `
       + `${report.runtimeSessions.activeCount} active, `

@@ -2394,6 +2394,7 @@ const readyLocalInstallationDiagnosis = {
       },
     },
   },
+  hostRuntime: { loadedVersion: "3.7.2" },
   runtimeSessions: {
     status: "ready",
     activeCount: 1,
@@ -2466,6 +2467,8 @@ test("installation diagnostic centralizes local and Codex routing decisions with
   assert.equal(payload.local.git.gitPath, undefined);
   assert.equal(payload.local.plugin.hooks.definitionSha256, undefined);
   assert.equal(payload.local.plugin.hooks.events, undefined);
+  assert.equal(payload.local.hostRuntime.loadedVersion, "3.7.2");
+  assert.equal(payload.local.runtimeSessions.loadedVersion, undefined);
   assert.equal(applyCalls, 0);
 });
 

@@ -3432,7 +3432,7 @@ const LOCAL_TOOLS = [
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
     title: "Проверить установку или подготовить настройку папки Trelio",
-    description: "Read-only: diagnostics/onboarding проверяет загруженный plugin shell, Node.js, standalone Git, runtime sessions, pairing и direct routing; folder_onboarding классифицирует одну client-selected папку и возвращает exact CAS-bound file plan с apply action. Ничего не устанавливает, не применяет и не авторизует.",
+    description: "Read-only: diagnostics/onboarding проверяет версии загруженных plugin shell и host runtime, Node.js, standalone Git, runtime sessions, pairing и direct routing; folder_onboarding классифицирует одну client-selected папку и возвращает exact CAS-bound file plan с apply action. Ничего не устанавливает, не применяет и не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

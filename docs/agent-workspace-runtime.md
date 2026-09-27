@@ -50,6 +50,11 @@ Loader передаёт shell-версию отдельно в `TRELIO_PLUGIN_VE
 требует обе точные стабильные версии; отсутствие identity не превращается в
 ложный manifest mismatch. Прямой source-tree запуск имеет явную development
 identity `0.0.0`, которая не выдаётся за опубликованный plugin или runtime.
+`bridge doctor --json` и локальный `diagnose_trelio_installation` возвращают
+`hostRuntime.loadedVersion` из identity выполняющего их runtime-процесса.
+Это версия текущего процесса, а не версия возможного последующего обновления
+в cache. `runtimeSessions` по-прежнему содержит только счётчики: сохранённая
+hook-сессия может пережить смену runtime и не закрепляет его версию.
 
 Hook принимает только непустой JSON с поддерживаемым `hook_event_name`.
 Пустой stdin или неизвестное событие завершаются блокирующим кодом `2` и
