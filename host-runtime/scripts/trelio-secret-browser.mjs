@@ -624,12 +624,10 @@ const installSecretBrowserController = (
           || buttons[0].disabled || !isVisible(buttons[0])) throw new Error("submit_changed");
         // A framework may have replaced the button together with a field; the
         // exact selector, URL and uniqueness remain the signed authority.
-        // Focus only this granted button. The host sends a browser input event
-        // after a second value-free check; HTMLElement.click() is synthetic and
-        // some login handlers reject it even though their AJAX request runs.
+        // Keep the exact button identity. The host sends a browser mouse
+        // event after a second value-free hit test; HTMLElement.click() is
+        // synthetic and keyboard Enter does not model a physical mouse click.
         state.submitTarget = buttons[0];
-        state.submitTarget.focus();
-        if (document.activeElement !== state.submitTarget) throw new Error("submit_focus_failed");
       }
       state.targets = null;
       state.status = submitSelector ? "submit_ready" : "succeeded";
@@ -642,21 +640,27 @@ const installSecretBrowserController = (
     }
   };
 
-  globalThis.__trelioSecretBrowserSubmitReady = () => {
+  globalThis.__trelioSecretBrowserSubmitPoint = () => {
     if (!submitSelector || state.status !== "submit_ready"
-      || location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)) return false;
+      || location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)) return null;
     let matches;
     try {
       matches = document.querySelectorAll(submitSelector);
     } catch {
-      return false;
+      return null;
     }
-    // Key dispatch is allowed only while the same unique, visible, enabled
-    // button still owns keyboard focus. A changed page cannot redirect Enter
-    // to a different control after the credential handoff.
-    return matches.length === 1 && matches[0] === state.submitTarget
-      && matches[0] instanceof HTMLButtonElement && !matches[0].disabled
-      && isVisible(matches[0]) && document.activeElement === matches[0];
+    const button = matches.length === 1 ? matches[0] : null;
+    if (button !== state.submitTarget || !(button instanceof HTMLButtonElement)
+      || button.disabled || !isVisible(button)) return null;
+    const box = button.getBoundingClientRect();
+    const x = box.left + box.width / 2;
+    const y = box.top + box.height / 2;
+    // Fail closed if the button is off-screen or covered. Sending a pointer
+    // event to stale coordinates could otherwise click a different control.
+    if (!Number.isFinite(x) || !Number.isFinite(y)
+      || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+    const hit = document.elementFromPoint(x, y);
+    return hit && button.contains(hit) ? { x, y } : null;
   };
 };
 
@@ -1046,25 +1050,28 @@ export const prepareSecretBrowserControllerViaDevTools = async ({
         }
         if (submitSelector) {
           // The isolated world retains only the exact button identity, not a
-          // copy of either secret. A final read-only focus check precedes one
-          // browser-generated Enter sequence, which produces a trusted click
-          // without activating the hidden Chrome window or pressing OS keys.
-          const ready = await evaluateController({
+          // copy of either secret. A final read-only hit test precedes one
+          // browser-generated mouse click inside the hidden Chrome target.
+          // No OS pointer moves and no other application gains focus.
+          const point = await evaluateController({
             client,
             sessionId,
             executionContextId: prepared.executionContextId,
-            expression: "globalThis.__trelioSecretBrowserSubmitReady?.()",
-          }).catch(() => false);
-          if (ready !== true) return { outcome: "failed", reasonCode: "field_write_failed" };
-          const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+            expression: "globalThis.__trelioSecretBrowserSubmitPoint?.()",
+          }).catch(() => null);
+          if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+            return { outcome: "failed", reasonCode: "field_write_failed" };
+          }
           try {
-            await client.request("Input.dispatchKeyEvent", {
-              type: "keyDown", ...key, text: "\r", unmodifiedText: "\r",
+            await client.request("Input.dispatchMouseEvent", {
+              type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1,
             }, sessionId);
-            await client.request("Input.dispatchKeyEvent", { type: "keyUp", ...key }, sessionId);
+            await client.request("Input.dispatchMouseEvent", {
+              type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1,
+            }, sessionId);
           } catch {
             // The first event may already have submitted the form. The grant
-            // is consumed, so never retry or dispatch a second Enter.
+            // is consumed, so never retry or dispatch a second click.
             return { outcome: "failed", reasonCode: "adapter_error" };
           }
         }
