@@ -122,7 +122,8 @@ test("a hidden embedded tab selects an isolated background profile before checko
   assert.equal(session.surface, "chrome");
   assert.equal(session.background, true);
   assert.equal(preparedInput.headless, true);
-  assert.equal(preparedInput.profileDirectory, "/synthetic/private/profile-background");
+  assert.equal(preparedInput.profileDirectory,
+    path.join(path.dirname(f.args.profileDirectory), `${path.basename(f.args.profileDirectory)}-background`));
   assert.doesNotMatch(JSON.stringify(preparedInput), /CANARY/u);
   await session.close();
 
