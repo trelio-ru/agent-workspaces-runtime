@@ -164,9 +164,13 @@ resolve.
 ## Remote MCP
 
 Декларативный `remoteMcpExecution` фиксирует HTTPS endpoint, protocol
-`2025-03-26`, auth mode, безопасные headers и одну из read-only policy:
-schema v1 с exact allowlist либо schema v2 `all_read_only` для
-credential-free provider-а. Schema v2 требует host `>=1.13.3`.
+`2025-03-26`, auth mode, безопасные headers и tool policy: schema v1 с exact
+read-only allowlist, schema v2 `all_read_only` для credential-free provider-а
+либо schema v3 `exact_with_confirmed_writes` с OAuth PKCE/DCR и точными
+непересекающимися read/write lists. Schema v2 требует host `>=1.13.3`, v3 –
+`>=3.1.0`. v3 использует same-origin OAuth metadata/endpoints и локальный
+loopback callback; токены остаются в системном защищённом хранилище и не
+попадают в Trelio либо model context.
 Bundled `trelio-remote-skills` host:
 
 - повторяет live resolve перед каждым действием;
@@ -176,6 +180,10 @@ Bundled `trelio-remote-skills` host:
 - для v2 допускает каждый актуальный tool только при допустимом уникальном
   имени и exact `readOnlyHint=true`, `destructiveHint=false`, а небезопасные и
   не полностью размеченные tools игнорирует по одному;
+- для v3 требует полного совпадения live `tools/list` с exact read/write
+  списками и ролью annotations; перед каждым write tool показывает полные
+  аргументы в локальной странице и допускает один вызов только после её
+  отдельного клика;
 - никогда не отправляет write headers;
 - завершает JSON-RPC по первому matching SSE event и применяет абсолютный
   deadline, не продлеваемый heartbeat.

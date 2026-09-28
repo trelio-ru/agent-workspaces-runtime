@@ -19,7 +19,9 @@ import {
   buildLocalProposalAppResourceMeta,
   buildLocalProposalRenderResult,
   buildRemoteMcpRequestHeaders,
+  callRemoteTool,
   collectCredentialThroughLoopback,
+  confirmRemoteWriteAction,
   doctorWithCredential,
   fingerprintCompanySkillApplyPlan,
   fingerprintRemoteMcpConfig,
@@ -40,6 +42,10 @@ import {
   validateResolvedRemoteMcp,
   validateRemoteMcpPublicationConfig,
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import {
+  connectRemoteMcpOAuth,
+  refreshRemoteMcpOAuth,
+} from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { CodexRoutingConfigError } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 import {
@@ -237,6 +243,254 @@ const liveReadOnlyConfig = {
   headers: {},
   credentialHelp: null,
 };
+
+const oauthWriteConfig = {
+  schemaVersion: 3,
+  transport: "streamable_http",
+  endpoint: "https://dodo-service.example.com/mcp",
+  protocolVersion: "2025-03-26",
+  authentication: {
+    type: "oauth2_pkce",
+    clientRegistration: "dynamic",
+    scopes: ["dodo:read", "dodo:write"],
+  },
+  toolPolicy: {
+    mode: "exact_with_confirmed_writes",
+    readTools: ["get_order"],
+    writeTools: ["update_order"],
+  },
+  headers: {},
+  credentialHelp: null,
+};
+
+test("Remote MCP OAuth/write declaration keeps exact read and write roles", () => {
+  const config = validateRemoteMcpPublicationConfig(oauthWriteConfig);
+  const resolved = validateResolvedRemoteMcp({
+    releaseId,
+    remoteMcp: { config, configFingerprint: fingerprintRemoteMcpConfig(config) },
+  });
+  assert.equal(resolved.remoteMcp.config.toolPolicy.mode, "exact_with_confirmed_writes");
+  const tools = [
+    { name: "get_order", annotations: { readOnlyHint: true, destructiveHint: false } },
+    { name: "update_order", annotations: { readOnlyHint: false, destructiveHint: true } },
+  ];
+  assert.deepEqual(selectRemoteToolsForPolicy(config, tools).writeTools, ["update_order"]);
+  assert.throws(() => validateRemoteMcpPublicationConfig({
+    ...oauthWriteConfig,
+    clientSecret: "must-never-be-stored",
+  }), (error) => error.code === "REMOTE_MCP_INVALID_TOOL_POLICY");
+  assert.throws(() => selectRemoteToolsForPolicy(config, [
+    tools[0], { ...tools[1], annotations: { readOnlyHint: true } },
+  ]), (error) => error.code === "REMOTE_MCP_TOOL_POLICY_MISMATCH");
+  assert.throws(() => selectRemoteToolsForPolicy(config, [tools[0]]),
+    (error) => error.code === "REMOTE_MCP_ALLOWLIST_MISMATCH");
+  assert.equal(
+    buildRemoteMcpRequestHeaders({ config, credential: "synthetic-oauth-token", body: null, sessionId: null }).authorization,
+    "Bearer synthetic-oauth-token",
+  );
+});
+
+test("Remote MCP OAuth uses DCR, PKCE and a state-bound local callback", async () => {
+  const calls = [];
+  const httpJson = async (url, request) => {
+    calls.push({ url, request });
+    if (url.endsWith("/.well-known/oauth-authorization-server")) {
+      return { statusCode: 200, body: {
+        issuer: "https://dodo-service.example.com",
+        authorization_endpoint: "https://dodo-service.example.com/authorize",
+        token_endpoint: "https://dodo-service.example.com/token",
+        registration_endpoint: "https://dodo-service.example.com/register",
+        code_challenge_methods_supported: ["S256"],
+      } };
+    }
+    if (url.endsWith("/register")) {
+      const body = JSON.parse(request.body);
+      assert.equal(body.token_endpoint_auth_method, "none");
+      assert.equal(body.application_type, "native");
+      return { statusCode: 201, body: {
+        client_id: "synthetic-client",
+        token_endpoint_auth_method: "none",
+        redirect_uris: body.redirect_uris,
+      } };
+    }
+    if (url.endsWith("/token")) {
+      const body = new URLSearchParams(request.body);
+      assert.equal(body.get("client_id"), "synthetic-client");
+      assert.ok(body.get("code_verifier"));
+      return { statusCode: 200, body: {
+        token_type: "Bearer",
+        access_token: "synthetic-access-token",
+        refresh_token: "synthetic-refresh-token",
+        expires_in: 3600,
+        scope: "dodo:read dodo:write",
+      } };
+    }
+    throw new Error(`Unexpected OAuth request: ${url}`);
+  };
+  const session = await connectRemoteMcpOAuth(oauthWriteConfig, {
+    httpJson,
+    openBrowserFn: async (rawUrl) => {
+      const url = new URL(rawUrl);
+      assert.equal(url.searchParams.get("code_challenge_method"), "S256");
+      assert.ok(url.searchParams.get("code_challenge"));
+      const callback = new URL(url.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", url.searchParams.get("state"));
+      callback.searchParams.set("code", "synthetic-auth-code");
+      callback.searchParams.set("iss", "https://dodo-service.example.com");
+      assert.equal((await requestLoopback(callback)).statusCode, 200);
+    },
+  });
+  assert.equal(session.clientId, "synthetic-client");
+  assert.equal(session.accessToken, "synthetic-access-token");
+  assert.equal(calls.filter((entry) => entry.url.endsWith("/token")).length, 1);
+  const next = await refreshRemoteMcpOAuth(oauthWriteConfig, session, {
+    httpJson: async (url, request) => {
+      if (url.endsWith("/.well-known/oauth-authorization-server")) return calls[0].request && {
+        statusCode: 200,
+        body: {
+          issuer: session.issuer,
+          authorization_endpoint: `${session.issuer}/authorize`,
+          token_endpoint: `${session.issuer}/token`,
+          registration_endpoint: `${session.issuer}/register`,
+        },
+      };
+      assert.equal(new URLSearchParams(request.body).get("grant_type"), "refresh_token");
+      return { statusCode: 200, body: {
+        token_type: "Bearer", access_token: "rotated-access-token",
+        refresh_token: "rotated-refresh-token", expires_in: 3600,
+      } };
+    },
+  });
+  assert.equal(next.refreshToken, "rotated-refresh-token");
+});
+
+test("Remote MCP write requires one exact browser decision", async () => {
+  const resolved = {
+    skill: { title: "Dodo IS" },
+    remoteMcp: { config: oauthWriteConfig },
+  };
+  const toolArguments = { orderId: "synthetic-42", state: "ready" };
+  await confirmRemoteWriteAction(resolved, "update_order", toolArguments, {
+    openBrowserFn: async (rawUrl) => {
+      const page = await requestLoopback(rawUrl);
+      assert.equal(page.statusCode, 200);
+      assert.match(page.body, /synthetic-42/u);
+      assert.match(page.body, /update_order/u);
+      const localOrigin = new URL(rawUrl).origin;
+      const nonce = new URL(rawUrl).searchParams.get("nonce");
+      const response = await requestLoopback(`${localOrigin}/decision`, {
+        method: "POST",
+        headers: {
+          origin: localOrigin,
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ nonce, decision: "approve" }).toString(),
+      });
+      assert.equal(response.statusCode, 200);
+    },
+  });
+});
+
+test("Remote MCP never sends a write tools/call before exact confirmation", async () => {
+  const calls = [];
+  const resolved = {
+    releaseId,
+    skill: { title: "Dodo IS" },
+    localIdentity: {
+      companyId, projectId: null, memberId, skillId: "dodo-is",
+    },
+    remoteMcp: {
+      config: oauthWriteConfig,
+      configFingerprint: fingerprintRemoteMcpConfig(oauthWriteConfig),
+    },
+  };
+  const tools = [
+    { name: "get_order", annotations: { readOnlyHint: true, destructiveHint: false } },
+    { name: "update_order", annotations: { readOnlyHint: false, destructiveHint: false } },
+  ];
+  const httpRequest = async ({ payload }) => {
+    calls.push(payload?.method);
+    if (payload?.method === "initialize") return {
+      sessionId: null,
+      message: { jsonrpc: "2.0", id: payload.id, result: { protocolVersion: "2025-03-26" } },
+    };
+    if (payload?.method === "tools/list") return {
+      sessionId: null,
+      message: { jsonrpc: "2.0", id: payload.id, result: { tools } },
+    };
+    if (payload?.method === "tools/call") {
+      assert.equal(payload.params.arguments.orderId, "synthetic-42");
+      return {
+      sessionId: null,
+      message: { jsonrpc: "2.0", id: payload.id, result: { content: [{ type: "text", text: "ok" }] } },
+      };
+    }
+    return { sessionId: null, message: null };
+  };
+  const options = {
+    loadCredential: async () => "synthetic-access-token",
+    httpRequest,
+    refreshDeclaration: async (_origin, input, options) => {
+      assert.equal(input.companyId, companyId);
+      assert.equal(options.forceRefresh, true);
+      return resolved;
+    },
+    confirmWrite: async () => { throw new Error("User denied exact action"); },
+  };
+  await assert.rejects(() => callRemoteTool("https://trelio.ru", resolved,
+    "update_order", { orderId: "synthetic-42" }, options), /User denied/u);
+  assert.equal(calls.includes("tools/call"), false);
+  const args = { orderId: "synthetic-42" };
+  await callRemoteTool("https://trelio.ru", resolved, "update_order", args, {
+      ...options,
+      confirmWrite: async (_resolved, name, args) => {
+        assert.equal(name, "update_order");
+        assert.equal(args.orderId, "synthetic-42");
+        // A caller cannot change the action after the user sees its review.
+        args.orderId = "tampered";
+      },
+    });
+  assert.equal(calls.filter((method) => method === "tools/call").length, 1);
+});
+
+test("Remote MCP rejects changed Trelio authority after a human click", async () => {
+  const resolved = {
+    releaseId,
+    skill: { title: "Dodo IS" },
+    localIdentity: { companyId, projectId: null, memberId, skillId: "dodo-is" },
+    remoteMcp: {
+      config: oauthWriteConfig,
+      configFingerprint: fingerprintRemoteMcpConfig(oauthWriteConfig),
+    },
+  };
+  let calls = 0;
+  const httpRequest = async ({ payload }) => {
+    if (payload?.method === "initialize") return {
+      sessionId: null,
+      message: { jsonrpc: "2.0", id: payload.id, result: { protocolVersion: "2025-03-26" } },
+    };
+    if (payload?.method === "tools/list") return {
+      sessionId: null,
+      message: { jsonrpc: "2.0", id: payload.id, result: { tools: [
+        { name: "get_order", annotations: { readOnlyHint: true, destructiveHint: false } },
+        { name: "update_order", annotations: { readOnlyHint: false, destructiveHint: true } },
+      ] } },
+    };
+    if (payload?.method === "tools/call") calls += 1;
+    return { sessionId: null, message: null };
+  };
+  await assert.rejects(() => callRemoteTool("https://trelio.ru", resolved,
+    "update_order", { orderId: "synthetic-42" }, {
+      loadCredential: async () => "synthetic-access-token",
+      httpRequest,
+      confirmWrite: async () => undefined,
+      refreshDeclaration: async () => ({
+        ...resolved,
+        remoteMcp: { ...resolved.remoteMcp, configFingerprint: "f".repeat(64) },
+      }),
+    }), (error) => error.code === "REMOTE_MCP_DECLARATION_CHANGED");
+  assert.equal(calls, 0);
+});
 
 const resolvedLiveReadOnly = {
   releaseId,

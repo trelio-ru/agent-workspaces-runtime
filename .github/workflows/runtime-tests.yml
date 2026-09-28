@@ -77,6 +77,7 @@ jobs:
           node tests/trelio-local-path.test.mjs
           node tests/trelio-local-context.test.mjs
           node tests/trelio-mcp-results.test.mjs
+          node tests/trelio-remote-mcp-oauth.test.mjs
           node tests/trelio-remote-mcp.test.mjs
           node tests/trelio-runtime-policy.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
@@ -164,6 +165,9 @@ jobs:
           node --test
           --test-name-pattern="stdio initialize is not blocked by Codex plugin retention"
           tests/trelio-remote-mcp.test.mjs
+
+      - name: Run Windows Remote MCP OAuth storage regressions
+        run: node tests/trelio-remote-mcp-oauth.test.mjs
 
       - name: Run Windows ACL regression as a standard user
         shell: pwsh

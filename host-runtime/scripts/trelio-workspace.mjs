@@ -2005,6 +2005,30 @@ export const getMacosBridgeSessionToken = (origin) => (
   readMacosBridgeSessionToken(BRIDGE_SESSION_KEYCHAIN_SERVICE, origin)
 );
 
+// Other trusted host features may use the same reviewed stdin-only Keychain
+// helper, but keep each value under its own service/account namespace. Never
+// reuse the bridge device-session service for an integration credential.
+export const getMacosPrivateKeychainValue = readMacosBridgeSessionToken;
+
+export const setMacosPrivateKeychainValue = async (service, account, value) => {
+  const response = await executeMacosBridgeKeychainHelper({
+    operation: "set",
+    service,
+    account,
+    value,
+    ...(MACOS_BRIDGE_KEYCHAIN_TEST_PATH
+      ? { keychainPath: MACOS_BRIDGE_KEYCHAIN_TEST_PATH }
+      : {}),
+  });
+  if (response?.status !== "stored") {
+    throw new Error("macOS Keychain не подтвердил запись локального секрета.");
+  }
+  const verified = await readMacosBridgeSessionToken(service, account);
+  if (!verified || !secretsMatch(value, verified)) {
+    throw new Error("macOS Keychain не подтвердил локальный секрет.");
+  }
+};
+
 const setMacosBridgeSessionToken = async (origin, value) => {
   const response = await executeMacosBridgeKeychainHelper({
     operation: "set",
@@ -2041,6 +2065,8 @@ const deleteMacosBridgeSessionTokenForService = async (service, origin) => {
 export const deleteMacosBridgeSessionToken = (origin) => (
   deleteMacosBridgeSessionTokenForService(BRIDGE_SESSION_KEYCHAIN_SERVICE, origin)
 );
+
+export const deleteMacosPrivateKeychainValue = deleteMacosBridgeSessionTokenForService;
 
 export const WINDOWS_BRIDGE_DPAPI_SCRIPT = String.raw`
 $ErrorActionPreference = "Stop"
