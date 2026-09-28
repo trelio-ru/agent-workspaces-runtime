@@ -25,6 +25,7 @@ const NATIVE_UNAVAILABLE = new Set([
   "backend_unavailable",
 ]);
 const NATIVE_PREFLIGHT_CHROME_RETRY = new Set(["target_url_changed", "field_not_found"]);
+const NATIVE_WRITE_PREFLIGHT_ATTEMPTS = 3;
 
 export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
   constructor(nativeReason) {
@@ -362,8 +363,23 @@ export const prepareSecretBrowserSession = async ({
       };
     });
     const executable = await buildHelper({ directory, ensurePrivateDirectory, platform });
-    channel = openChannel({ executable, platform });
-    const ready = await channel.request({ command: "prepare", clientFamily: binding.clientFamily, steps });
+    let ready;
+    for (let attempt = 0; attempt < NATIVE_WRITE_PREFLIGHT_ATTEMPTS; attempt++) {
+      channel = openChannel({ executable, platform });
+      ready = await channel.request({ command: "prepare", clientFamily: binding.clientFamily, steps });
+      if (ready.status !== "failed" || ready.reasonCode !== "field_write_failed"
+        || attempt === NATIVE_WRITE_PREFLIGHT_ATTEMPTS - 1
+        || steps.some((step) => step.activationId)) break;
+      // A web control can briefly report that AXValue/AXPress is unavailable
+      // while Chromium exposes its accessibility tree. The helper has not
+      // received any secret at this point. Close it before a bounded retry of
+      // the same URL and exact control IDs. Each helper must independently
+      // find one document; never switch browser profiles or
+      // retry an activation press, which may already have changed the page.
+      await channel.close();
+      channel = null;
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+    }
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {
       throw new EmbeddedBrowserUnavailable(ready.reasonCode);
     }

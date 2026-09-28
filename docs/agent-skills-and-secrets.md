@@ -477,7 +477,13 @@ Chrome fallback выбирается runtime только до consume, если
 компилятора, разрешения Accessibility, доступного приложения/accessibility tree
 либо native preflight не нашёл exact document/field. Chrome отдельно проверяет
 закреплённый URL и все поля до consume; неоднозначный target и ошибка записи
-остаются окончательным отказом. Старый backend с 404 на новом GET
+остаются окончательным отказом. Для `field_write_failed` именно во время
+value-free native preflight runtime до отказа делает не более трёх проверок
+того же exact URL и тех же ID controls с короткой паузой. Каждый helper
+заново требует один однозначный документ и
+закрывается до следующей проверки; при `activationSelector` повтора нет,
+поскольку press мог уже изменить страницу. После consume и при любом partial
+fill повтора нет. Старый backend с 404 на новом GET
 использует прежний Chrome flow на том же host; обычный consume всё равно
 проверяет grant. Современный backend передаёт internal `browser=embedded` только
 для финального field-only step, где нужен последующий клик в той же вкладке;

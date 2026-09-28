@@ -344,6 +344,71 @@ test("Chrome preflight failure after a native miss never receives a secret", asy
   assert.ok(f.closed);
   assert.equal(f.chromeCalls, 0);
 });
+test("transient native field write preflight retries only before secret delivery", async () => {
+  const f = fixture();
+  const attempts = [], closed = [];
+  f.args.openChannel = () => {
+    const index = attempts.length;
+    attempts.push([]);
+    return {
+      request: async (request) => {
+        attempts[index].push(request);
+        return request.command === "prepare"
+          ? index < 2 ? { status: "failed", reasonCode: "field_write_failed" } : { status: "ready" }
+          : { status: "succeeded" };
+      },
+      close: async () => { closed.push(index); },
+    };
+  };
+  const session = await prepareSecretBrowserSession(f.args);
+  assert.equal(session.surface, "embedded");
+  assert.deepEqual(closed, [0, 1]);
+  assert.equal(attempts.length, 3);
+  assert.deepEqual(attempts.map((requests) => requests.map(({ command }) => command)),
+    [["prepare"], ["prepare"], ["prepare"]]);
+  assert.doesNotMatch(JSON.stringify(attempts), /CANARY/u);
+  assert.equal(f.chromePreflights, 0);
+  assert.deepEqual(await session.fill({ secretValues: values }), { outcome: "succeeded" });
+  assert.deepEqual(attempts[2].map(({ command }) => command), ["prepare", "fill"]);
+  await session.close();
+  assert.deepEqual(closed, [0, 1, 2]);
+});
+test("persistent native field write preflight stays terminal after bounded checks", async () => {
+  const f = fixture();
+  let opened = 0, closed = 0, prepareCalls = 0;
+  f.args.openChannel = () => {
+    opened++;
+    return {
+      request: async (request) => {
+        assert.equal(request.command, "prepare");
+        assert.doesNotMatch(JSON.stringify(request), /CANARY/u);
+        prepareCalls++;
+        return { status: "failed", reasonCode: "field_write_failed" };
+      },
+      close: async () => { closed++; },
+    };
+  };
+  await assert.rejects(prepareSecretBrowserSession(f.args), (error) => (
+    error instanceof SecretBrowserFillError && error.reasonCode === "field_write_failed"
+  ));
+  assert.equal(opened, 3);
+  assert.equal(closed, 3);
+  assert.equal(prepareCalls, 3);
+  assert.equal(f.chromePreflights, 0);
+});
+test("native activation preflight is never repeated after a write failure", async () => {
+  const f = fixture({ status: "failed", reasonCode: "field_write_failed" });
+  f.args.context.browserSteps[0].activationSelector = "#login-mode";
+  let opened = 0;
+  const originalOpen = f.args.openChannel;
+  f.args.openChannel = (...args) => { opened++; return originalOpen(...args); };
+  await assert.rejects(prepareSecretBrowserSession(f.args), (error) => (
+    error instanceof SecretBrowserFillError && error.reasonCode === "field_write_failed"
+  ));
+  assert.equal(opened, 1);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.chromePreflights, 0);
+});
 for (const reasonCode of ["field_ambiguous", "adapter_error", "timeout"]) {
   test("preflight failure cannot downgrade: " + reasonCode, async () => {
     const f = fixture({ status: "failed", reasonCode });
