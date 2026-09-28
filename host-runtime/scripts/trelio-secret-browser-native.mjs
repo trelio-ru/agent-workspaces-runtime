@@ -367,10 +367,10 @@ export const prepareSecretBrowserSession = async ({
     for (let attempt = 0; attempt < NATIVE_WRITE_PREFLIGHT_ATTEMPTS; attempt++) {
       channel = openChannel({ executable, platform });
       ready = await channel.request({ command: "prepare", clientFamily: binding.clientFamily, steps });
-      if (ready.status !== "failed" || ready.reasonCode !== "field_write_failed"
+      if (ready.status !== "failed" || !["field_write_failed", "field_value_unsettable"].includes(ready.reasonCode)
         || attempt === NATIVE_WRITE_PREFLIGHT_ATTEMPTS - 1
         || steps.some((step) => step.activationId)) break;
-      // A web control can briefly report that AXValue/AXPress is unavailable
+      // A web field can briefly report that AXValue is unavailable
       // while Chromium exposes its accessibility tree. The helper has not
       // received any secret at this point. Close it before a bounded retry of
       // the same URL and exact control IDs. Each helper must independently
@@ -394,7 +394,16 @@ export const prepareSecretBrowserSession = async ({
         channel = null;
         return chrome(ready.reasonCode);
       }
-      throw new SecretBrowserFillError("Проверка встроенной вкладки отклонена.", ready.reasonCode);
+      // Some embedded Chromium buttons are visible and clickable through the
+      // browser tool but expose no AXPress action to the native helper. This
+      // failure happens before secret delivery, so the caller may request a
+      // new, final field-only grant and click the already identified button
+      // in the same tab. Never reinterpret it as a writable-field failure or
+      // silently move the credential to a different Chrome profile.
+      const message = ready.reasonCode === "submit_press_unavailable"
+        ? "Кнопка submit не поддерживает AXPress. Для финального шага подготовьте новый field-only grant без submitSelector и после успешной подстановки нажмите ранее определённую кнопку в той же embedded-вкладке без чтения заполненных полей."
+        : "Проверка встроенной вкладки отклонена.";
+      throw new SecretBrowserFillError(message, ready.reasonCode);
     }
     let used = false;
     return {

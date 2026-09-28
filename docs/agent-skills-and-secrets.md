@@ -477,7 +477,8 @@ Chrome fallback выбирается runtime только до consume, если
 компилятора, разрешения Accessibility, доступного приложения/accessibility tree
 либо native preflight не нашёл exact document/field. Chrome отдельно проверяет
 закреплённый URL и все поля до consume; неоднозначный target и ошибка записи
-остаются окончательным отказом. Для `field_write_failed` именно во время
+остаются окончательным отказом. Для `field_write_failed` или
+`field_value_unsettable` именно во время
 value-free native preflight runtime до отказа делает не более трёх проверок
 того же exact URL и тех же ID controls с короткой паузой. Каждый helper
 заново требует один однозначный документ и
@@ -491,6 +492,15 @@ fill повтора нет. Старый backend с 404 на новом GET
 hidden/read-only field, 401/403 или исчерпанные transport retries останавливают
 операцию. Никакого fallback после выдачи значения, partial fill или потерянного
 ответа consume нет.
+
+Если native preflight нашёл exact submit-кнопку, но она не предоставляет
+`AXPress`, он до передачи секрета возвращает отдельный
+`submit_press_unavailable`. Это отличается от `field_value_unsettable` для
+недоступной записи в поле. Для финального шага агент может получить новый
+field-only grant без `submitSelector` и после успешной подстановки нажать
+заранее определённую кнопку штатным browser tool в той же embedded-вкладке,
+не читая заполненные поля. Нельзя автоматически переключать такой grant в
+другой профиль или повторять подстановку после частичного результата.
 
 Если automatic native preflight недоступен до consume, Chrome fallback запускается
 без окна в отдельном owner-only постоянном профиле `profile-background`. Он не активирует

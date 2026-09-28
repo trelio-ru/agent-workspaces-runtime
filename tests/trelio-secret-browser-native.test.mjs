@@ -373,6 +373,24 @@ test("transient native field write preflight retries only before secret delivery
   await session.close();
   assert.deepEqual(closed, [0, 1, 2]);
 });
+test("transient native AXValue preflight keeps the bounded retry", async () => {
+  const f = fixture();
+  let opened = 0;
+  f.args.openChannel = () => {
+    const attempt = ++opened;
+    return {
+      request: async (request) => request.command === "prepare"
+        ? attempt < 3 ? { status: "failed", reasonCode: "field_value_unsettable" } : { status: "ready" }
+        : { status: "succeeded" },
+      close: async () => {},
+    };
+  };
+  const session = await prepareSecretBrowserSession(f.args);
+  assert.equal(opened, 3);
+  assert.equal(session.surface, "embedded");
+  assert.equal(f.chromeCalls, 0);
+  await session.close();
+});
 test("persistent native field write preflight stays terminal after bounded checks", async () => {
   const f = fixture();
   let opened = 0, closed = 0, prepareCalls = 0;
@@ -395,6 +413,28 @@ test("persistent native field write preflight stays terminal after bounded check
   assert.equal(closed, 3);
   assert.equal(prepareCalls, 3);
   assert.equal(f.chromePreflights, 0);
+});
+test("missing AXPress on a submit button gives a field-only recovery without consuming a secret", async () => {
+  const f = fixture({ status: "failed", reasonCode: "submit_press_unavailable" });
+  let opened = 0;
+  const originalOpen = f.args.openChannel;
+  f.args.openChannel = (...args) => { opened++; return originalOpen(...args); };
+  await assert.rejects(prepareSecretBrowserSession(f.args), (error) => (
+    error instanceof SecretBrowserFillError
+    && error.reasonCode === "submit_press_unavailable"
+    && /field-only grant/u.test(error.message)
+    && /той же embedded-вкладке/u.test(error.message)
+  ));
+  assert.equal(opened, 1);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].command, "prepare");
+  assert.equal(f.chromeCalls, 0);
+  assert.ok(f.closed);
+});
+test("macOS native preflight distinguishes an unwritable field from an unpressable submit", async () => {
+  const source = await fs.readFile(new URL("../host-runtime/scripts/native-secret-browser/SecretBrowser.swift", import.meta.url), "utf8");
+  assert.match(source, /Stop\.failed\("submit_press_unavailable"\)/u);
+  assert.match(source, /Stop\.failed\("field_value_unsettable"\)/u);
 });
 test("native activation preflight is never repeated after a write failure", async () => {
   const f = fixture({ status: "failed", reasonCode: "field_write_failed" });

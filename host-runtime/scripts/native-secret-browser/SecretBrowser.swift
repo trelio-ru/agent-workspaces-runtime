@@ -200,14 +200,14 @@ final class Session {
                 guard text(target, kAXRoleAttribute) == kAXButtonRole else { throw Stop.failed("field_selector_invalid") }
                 var actions: CFArray?
                 guard AXUIElementCopyActionNames(target, &actions) == .success,
-                      (actions as? [String])?.contains(kAXPressAction) == true else { throw Stop.failed("field_write_failed") }
+                      (actions as? [String])?.contains(kAXPressAction) == true else { throw Stop.failed("submit_press_unavailable") }
             } else {
                 guard ["AXTextField", "AXTextArea"].contains(text(target, kAXRoleAttribute) ?? "") else {
                     throw Stop.failed("field_selector_invalid")
                 }
                 var writable = DarwinBoolean(false)
                 guard AXUIElementIsAttributeSettable(target, kAXValueAttribute as CFString, &writable) == .success,
-                      writable.boolValue else { throw Stop.failed("field_write_failed") }
+                      writable.boolValue else { throw Stop.failed("field_value_unsettable") }
             }
             return target
         }
