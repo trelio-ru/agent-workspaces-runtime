@@ -10781,13 +10781,56 @@ const preflightWorkspaceDirectory = async ({
         }],
       });
     }
-    // The old UUID checkout and the new persistent checkout are distinct
-    // directories. Server checkpoints and even an active lease belong to the
-    // old Run and remain recoverable there; they must not veto an independently
-    // selected Run. Only local data that the bridge cannot safely reconcile
-    // requires recovery before creating the parent checkout.
-    if (await hasUnmanagedWorkspaceRootEntries(legacyRoot)
-      || await isWritableWorkspaceDirty({ rootDirectory: legacyRoot, metadata: legacyMetadata })) {
+    // The old UUID checkout is never replaced by the new persistent checkout.
+    // Its ignored bridge-owned AGENTS/CLAUDE files may use an older template:
+    // their bytes matter for deleting that old root, but not for opening a
+    // separate checkout while leaving the source untouched.
+    if (await hasUnmanagedWorkspaceRootEntries(legacyRoot)) {
+      throw new WorkspaceLayoutMigrationBlockedError({
+        workspaceId,
+        rootDirectory,
+        blockingEntries: [{
+          name: entry.name,
+          entryType: "directory",
+          reasonCode: "LEGACY_RUN_LOCAL_CHANGES",
+        }],
+      });
+    }
+    let localChanges;
+    try {
+      localChanges = await collectLegacyRunChangesForSiblingOpen(legacyMetadata);
+    } catch {
+      // An unreadable Git state cannot be described as a bounded delta. Keep
+      // the original fail-closed blocker instead of guessing what to carry.
+      throw new WorkspaceLayoutMigrationBlockedError({
+        workspaceId,
+        rootDirectory,
+        blockingEntries: [{
+          name: entry.name,
+          entryType: "directory",
+          reasonCode: "LEGACY_RUN_LOCAL_CHANGES",
+        }],
+      });
+    }
+    if (localChanges.length > 0) {
+      if (TERMINAL_RUN_STATUSES.has(materializedRunState.status)) {
+        // A terminal source cannot accept another checkpoint. Open the exact
+        // target Run in a sibling root, compare this delta, and keep every
+        // source byte available until the useful material is saved.
+        throw new WorkspaceLocalRecoveryRequiredError({
+          workspaceId,
+          sourceRunId: legacyMetadata.runId,
+          targetRunId: requestedRunId,
+          sourceRunStatus: materializedRunState.status,
+          sourceDirectory: legacyRoot,
+          sourceWorkspaceDirectory: legacyMetadata.workspaceDirectory,
+          suggestedDirectory: `${rootDirectory}-recovery-${String(requestedRunId || "new-run").slice(0, 8)}`,
+          lastSavedDraftHead: legacyMetadata.draftHead || null,
+          changes: localChanges,
+        });
+      }
+      // An active or expired source may still own recoverable server work;
+      // its lifecycle needs a separate exact decision before another Run.
       throw new WorkspaceLayoutMigrationBlockedError({
         workspaceId,
         rootDirectory,
@@ -15774,14 +15817,29 @@ const readRunStatusMap = async ({ origin, token, roots }) => {
   };
 };
 
-const hasUnmanagedIgnoredWorkspaceFiles = async (workspaceDirectory) => {
+const getUnmanagedIgnoredWorkspaceFiles = async (
+  workspaceDirectory,
+  { preserveLegacyControlFiles = false } = {},
+) => {
   const result = await runGit(
     ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
     { cwd: workspaceDirectory },
   );
   const ignoredPaths = result.stdout.split("\0").filter(Boolean);
+  const unmanagedPaths = [];
 
   for (const ignoredPath of ignoredPaths) {
+    if (["AGENTS.md", "CLAUDE.md"].includes(ignoredPath)) {
+      const fileStat = await fs.lstat(path.join(workspaceDirectory, ignoredPath));
+      // These are bridge-owned control paths. An old template is safe to leave
+      // in the old checkout, but a symlink or directory is never treated as
+      // routine metadata. Cleanup uses the stricter exact-byte path below.
+      if (!fileStat.isFile() || fileStat.isSymbolicLink()) {
+        unmanagedPaths.push(ignoredPath);
+        continue;
+      }
+      if (preserveLegacyControlFiles) continue;
+    }
     if (ignoredPath === "AGENTS.md") {
       if (
         await fs.readFile(path.join(workspaceDirectory, ignoredPath), "utf8")
@@ -15804,10 +15862,36 @@ const hasUnmanagedIgnoredWorkspaceFiles = async (workspaceDirectory) => {
       if (worklog.exists && worklog.isDefault) continue;
     }
 
-    return true;
+    unmanagedPaths.push(ignoredPath);
   }
 
-  return false;
+  return unmanagedPaths;
+};
+
+const hasUnmanagedIgnoredWorkspaceFiles = async (workspaceDirectory) => (
+  (await getUnmanagedIgnoredWorkspaceFiles(workspaceDirectory)).length > 0
+);
+
+const collectLegacyRunChangesForSiblingOpen = async (metadata) => {
+  const workspaceDirectory = metadata.workspaceDirectory;
+  const localHead = (await runGit(["rev-parse", "HEAD"], { cwd: workspaceDirectory }))
+    .stdout.trim();
+  const changes = [];
+  if (localHead !== resolveRecordedMaterializedHead(metadata)) {
+    changes.push("DIVERGED_HISTORY");
+  }
+  // The source stays at its exact path. Only unknown ignored files need
+  // reconciliation; protected historical control files are not copied into
+  // the new Run and remain subject to strict retention checks later.
+  for (const ignoredPath of await getUnmanagedIgnoredWorkspaceFiles(
+    workspaceDirectory,
+    { preserveLegacyControlFiles: true },
+  )) {
+    changes.push(`IGNORED\t${ignoredPath}`);
+  }
+  const status = await getGitStatus(workspaceDirectory, metadata.objects || []);
+  if (status) changes.push(...status.split("\n"));
+  return changes;
 };
 
 const isWritableWorkspaceDirty = async (root) => {

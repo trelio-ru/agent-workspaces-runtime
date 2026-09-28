@@ -3208,6 +3208,47 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
     await rm(path.join(expiredWorkspaceDirectory, "unsaved.txt"));
     assert.equal(startCount, 0, "unsafe legacy state must fail before server start");
 
+    // A terminal legacy Run with real local work follows the ordinary
+    // non-destructive recovery route. The agent can open the target elsewhere
+    // and compare the delta without asking to move the old directory.
+    await writeFile(path.join(legacyWorkspaceDirectory, "unsaved.txt"), "local draft\n");
+    const terminalRecovery = await readStructuredBridgeError();
+    assert.equal(terminalRecovery.code, "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED");
+    assert.equal(terminalRecovery.details.sourceDirectory, legacyRoot);
+    assert.equal(terminalRecovery.details.sourceRunId, legacyRunId);
+    assert.equal(terminalRecovery.details.targetRunId, targetRunId);
+    assert.deepEqual(terminalRecovery.details.changes, ["?? unsaved.txt"]);
+    assert.equal(terminalRecovery.details.sourceFilesMustRemainUntouched, true);
+    assert.equal(await readFile(path.join(legacyWorkspaceDirectory, "unsaved.txt"), "utf8"), "local draft\n");
+    await rm(path.join(legacyWorkspaceDirectory, "unsaved.txt"));
+    assert.equal(startCount, 0, "recovery preflight must not create another Run");
+
+    // A clean worktree can still contain unpublished commits. Opening a new
+    // checkout must surface that history for comparison, not silently skip it.
+    await writeFile(path.join(legacyWorkspaceDirectory, "committed-only.md"), "local commit\n");
+    await runGit(legacyWorkspaceDirectory, ["add", "committed-only.md"]);
+    await runGit(legacyWorkspaceDirectory, ["commit", "-m", "Local history"]);
+    const committedRecovery = await readStructuredBridgeError();
+    assert.equal(committedRecovery.code, "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED");
+    assert.deepEqual(committedRecovery.details.changes, ["DIVERGED_HISTORY"]);
+    await runGit(legacyWorkspaceDirectory, ["reset", "--hard", legacyHead]);
+
+    // The old bridge wrote these protected files outside Git. A newer
+    // template must not make a clean historical checkout block its sibling.
+    await mkdir(path.join(legacyWorkspaceDirectory, ".git", "info"), { recursive: true });
+    await writeFile(path.join(legacyWorkspaceDirectory, ".git", "info", "exclude"),
+      "AGENTS.md\nCLAUDE.md\nnotes.tmp\n", "utf8");
+    await writeFile(path.join(legacyWorkspaceDirectory, "AGENTS.md"),
+      "# Previous bridge template\n", "utf8");
+    await writeFile(path.join(legacyWorkspaceDirectory, "CLAUDE.md"),
+      "@AGENTS.md\n", "utf8");
+    await writeFile(path.join(legacyWorkspaceDirectory, "notes.tmp"),
+      "unique ignored work\n", "utf8");
+    const ignoredRecovery = await readStructuredBridgeError();
+    assert.equal(ignoredRecovery.code, "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED");
+    assert.deepEqual(ignoredRecovery.details.changes, ["IGNORED\tnotes.tmp"]);
+    await rm(path.join(legacyWorkspaceDirectory, "notes.tmp"));
+
     // This legacy checkout is still a recent expired Run with a durable server
     // checkpoint. It must remain intact while a distinct persistent checkout
     // is created for the newly selected Run.
@@ -3221,6 +3262,8 @@ test("legacy layout migration ignores only safe OS metadata and reports exact bl
       "new Run content\n",
     );
     assert.equal(await pathExists(legacyRoot), true, "legacy Run history must remain untouched");
+    assert.equal(await readFile(path.join(legacyWorkspaceDirectory, "AGENTS.md"), "utf8"),
+      "# Previous bridge template\n");
     assert.equal(await pathExists(expiredRoot), true, "expired Run history must remain untouched");
     assert.equal(await readFile(path.join(expiredWorkspaceDirectory, "old.md"), "utf8"), "old clean result\n");
     assert.equal(await readFile(contextOnlyFile, "utf8"), "old read-only context\n");
