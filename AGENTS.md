@@ -35,6 +35,11 @@ publication tooling также остаются вне этого публичн
   `hookInput.session_id`; inherited environment ID допустим только при отсутствии
   ID события. Все повторы захвата lock ограничены общим deadline, ошибки удаления
   stale lock не проглатываются и не разрешают recursive cleanup либо смену ACL.
+- При отсутствии paired bridge hook возвращает точный pairing code и публичный
+  approval nextCall; обычное подтверждение клиента сохраняется. После approval
+  один retry исходного MCP завершает pairing и admission в той же задаче.
+  Pending SessionStart observation сохраняется до регистрации; stdout hook
+  содержит только JSON, без CLI status line успешного обмена и private verifier.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.

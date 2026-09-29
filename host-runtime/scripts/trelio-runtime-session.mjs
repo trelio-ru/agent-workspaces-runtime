@@ -478,7 +478,9 @@ const createRuntimeState = async ({
   // probe, pairing request or registration, so divergent credentials still
   // share one bounded deadline with the subsequent session registration.
   let registrationSignal = null;
-  const networkOptions = {};
+  // Hook stdout is a single JSON protocol response. A completed pairing must
+  // not prepend the CLI login status line before updatedInput.
+  const networkOptions = { onStatus: () => undefined };
   Object.defineProperty(networkOptions, "signal", {
     enumerable: true,
     get: () => {
@@ -604,7 +606,11 @@ const runPreToolUse = async (hookInput) => {
       const registeredState = await readRuntimeState(filePath);
       if (registeredState) return registeredState;
       const initialObservation = await readPendingObservation(filePath);
-      await fs.rm(filePath, { force: true }).catch(() => undefined);
+      // Keep SessionStart evidence across a pairing/registration failure. The
+      // next PreToolUse may not include a model, and asking for a new chat would
+      // discard exactly the observation needed to resume this same request.
+      // Successful registration atomically replaces the pending record.
+      if (!initialObservation) await fs.rm(filePath, { force: true }).catch(() => undefined);
       return createRuntimeState({
         hookInput,
         clientSessionId,
@@ -846,6 +852,38 @@ export const formatRuntimeHookFailure = (error) => {
     && SAFE_ERROR_CODE_PATTERN.test(rawCode)
     ? rawCode
     : HOOK_FAILED_CODE;
+  if (code === "TRELIO_BRIDGE_PAIRING_REQUIRED") {
+    // Pairing is a recoverable transport prerequisite, not a generic hook
+    // failure. Project only the approved public request identity: serializing
+    // error.pairing would expose its local PKCE verifier. Never derive an
+    // executable action from an arbitrary exception message or tool input.
+    const pairing = error?.pairing;
+    const hasApprovalTarget = UUID_PATTERN.test(pairing?.pairingId || "")
+      && typeof pairing?.deviceName === "string"
+      && pairing.deviceName.trim().length > 0
+      && pairing.deviceName.length <= 120;
+    const nextCall = hasApprovalTarget
+      ? {
+          tool: "approve_agent_workspace_bridge_pairing",
+          arguments: { pairingId: pairing.pairingId, deviceName: pairing.deviceName },
+        }
+      : {
+          tool: "continue_trelio_workspace_action",
+          arguments: { schemaVersion: 1, operation: "login", parameters: {} },
+        };
+    return `${code}: hook запущен; исходный MCP-вызов остановлен до отправки. `
+      + `Для продолжения текущего запроса сразу выполни nextCall=${JSON.stringify(nextCall)}. `
+      + "Это штатное восстановление bridge: не заканчивай ответ предложением "
+      + "пользователю написать специальный промпт или начать новый чат. "
+      + "Сохрани обычное одобрение MCP-клиента; не подтверждай его за пользователя. "
+      + "Если login вернёт pairing request, передай его exact pairingId/deviceName "
+      + "в approve_agent_workspace_bridge_pairing. После успешного approval повтори "
+      + "ровно один раз исходный остановленный MCP-вызов с прежними аргументами "
+      + "и clientRequestId, без ручного runtimeSessionProof: hook сам завершит "
+      + "обмен и регистрацию. При отказе пользователя, явном запрете подключения "
+      + "или повторном сбое остановись с точной причиной. Не сбрасывай OAuth, "
+      + "Hooks или session-файлы; не выводи pairing-данные в ответ пользователю.\n";
+  }
   const rawMessage = error instanceof Error ? error.message : String(error);
   const message = /[.!?]$/u.test(rawMessage.trim())
     ? rawMessage.trim()

@@ -28,6 +28,21 @@ Runtime и plugin выпускаются независимо. Совмести�
 plugin version и не требует marketplace update. Новый plugin release нужен только
 при изменении stable shell или их публичного ABI.
 
+### Восстановление подключения из hook
+
+Первый protected call без paired bridge возвращает
+`TRELIO_BRIDGE_PAIRING_REQUIRED` и exact `nextCall` к обычному MCP approval.
+Агент сразу продолжает текущую задачу через этот вызов, сохраняя одобрение
+клиента, и повторяет исходный MCP ровно один раз после успешного approval.
+Hook сам завершает PKCE exchange и регистрацию runtime; он никогда не
+одобряет собственную заявку. Пользовательский отказ или запрет подключения
+останавливает recovery. Новый чат и специальный промпт не нужны.
+
+В recovery входят только публичные pairing ID/device name; verifier, токен
+и ключи остаются локально. При отсутствии корректной заявки выдаётся typed
+login action. Pending SessionStart observation сохраняется до регистрации,
+а CLI status line обмена подавляется, чтобы stdout содержал один JSON.
+
 ## Публичный ABI
 
 Stable shell передаёт runtime:

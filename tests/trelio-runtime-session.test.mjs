@@ -1524,3 +1524,146 @@ test("SessionEnd removes the local key before a bounded remote cleanup", async (
     await rm(temporaryHome, { recursive: true, force: true });
   }
 });
+
+test("pairing recovery resumes the original call with one JSON proof after client approval", async (t) => {
+  const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-pairing-"));
+  const pairingId = crypto.randomUUID();
+  const runtimeSessionId = crypto.randomUUID();
+  const sessionId = crypto.randomUUID();
+  const deviceName = 'Synthetic "Windows" device';
+  const token = "twb_synthetic-hook-pairing";
+  let challenge;
+  let approved = false;
+  let creates = 0;
+  let exchanges = 0;
+  let registrations = 0;
+  let registeredPublicKey;
+  let serverError;
+  const server = createServer(async (request, response) => {
+    response.setHeader("content-type", "application/json");
+    try {
+      if (request.url === "/api/agent-workspaces/bridge-pairings") {
+        assert.equal(request.headers.authorization, undefined);
+        challenge = (await readRequestBody(request)).codeChallenge;
+        creates += 1;
+        response.end(JSON.stringify({ pairingId, deviceName, expiresAt: new Date(Date.now() + 120_000).toISOString() }));
+      } else if (request.url === `/api/agent-workspaces/bridge-pairings/${pairingId}/exchange`) {
+        assert.equal(request.headers.authorization, undefined);
+        const { codeVerifier } = await readRequestBody(request);
+        assert.equal(crypto.createHash("sha256").update(codeVerifier).digest("base64url"), challenge);
+        exchanges += 1;
+        response.statusCode = approved ? 200 : 409;
+        response.end(JSON.stringify(approved
+          ? { accessToken: token }
+          : { code: "BRIDGE_PAIRING_PENDING", message: "Awaiting client approval" }));
+      } else {
+        assert.equal(request.headers.authorization, `Bearer ${token}`);
+        if (request.url === "/api/agent-workspaces/bridge-compatibility") {
+          response.end(JSON.stringify(buildTestBridgeCompatibility(request, TEST_PLUGIN_VERSION)));
+        } else if (request.url === "/api/agent-workspaces/runtime-policy/sessions") {
+          assert.equal(approved, true, "registration must never precede approval");
+          const body = await readRequestBody(request);
+          assert.equal(body.clientSessionId, sessionId);
+          assert.equal(body.observation.modelId, "gpt-6-astra");
+          registeredPublicKey = body.publicKeySpki;
+          registrations += 1;
+          response.end(JSON.stringify({ schemaVersion: 1, runtimeSessionId, expiresAt: new Date(Date.now() + 60_000).toISOString() }));
+        } else {
+          assert.fail(`Unexpected request: ${request.url}`);
+        }
+      }
+    } catch (error) {
+      serverError = error;
+      response.statusCode = 500;
+      response.end(JSON.stringify({ code: "FIXTURE_FAILURE" }));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(temporaryHome, { recursive: true, force: true });
+    if (serverError) throw serverError;
+  });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const environment = {
+    HOME: temporaryHome, USERPROFILE: temporaryHome,
+    LOCALAPPDATA: path.join(temporaryHome, "AppData", "Local"),
+    CODEX_HOME: path.join(temporaryHome, ".codex"), CODEX_THREAD_ID: sessionId,
+    TRELIO_WORKSPACE_ORIGIN: origin, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
+    CLAUDE_CODE_ENTRYPOINT: "", CLAUDE_EFFORT: "",
+  };
+  const configDirectory = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory: temporaryHome });
+  const stateDigest = crypto.createHash("sha256").update(`${origin}\n${sessionId}`).digest("hex");
+  const statePath = path.join(configDirectory, "runtime-sessions", `${stateDigest}.json`);
+  // Deliberately put model evidence only in SessionStart. Pairing must preserve
+  // that evidence so a retry never requires a new chat or model self-report.
+  const started = await runHook({ hook_event_name: "SessionStart", session_id: sessionId, model: "gpt-6-astra" }, environment);
+  assert.deepEqual(started, { exitCode: 0, stdout: "", stderr: "" });
+  const pendingBefore = await readFile(statePath, "utf8");
+  const input = {
+    hook_event_name: "PreToolUse", session_id: sessionId,
+    tool_name: "mcp__trelio__get_agent_instructions", tool_input: { companySlug: "example" },
+  };
+  const first = await runHook(input, environment);
+  const reason = assertDeniedHook(first);
+  assert.match(reason, /^TRELIO_BRIDGE_PAIRING_REQUIRED:/u);
+  assert.doesNotMatch(reason, /TRELIO_RUNTIME_HOOK_FAILED|Устраните указанную причину/u);
+  const nextCall = JSON.parse(reason.match(/nextCall=(.+?)\. Это штатное/u)[1]);
+  assert.deepEqual(nextCall, { tool: "approve_agent_workspace_bridge_pairing", arguments: { pairingId, deviceName } });
+  assert.match(reason, /ровно один раз исходный остановленный MCP-вызов/u);
+  const pending = JSON.parse(await readFile(path.join(configDirectory, "pairings.json"), "utf8"));
+  const verifier = pending[origin].codeVerifier;
+  assert.equal(typeof verifier, "string");
+  assert.equal(first.stdout.includes(verifier), false);
+  assert.equal(first.stdout.includes(token), false);
+  assert.equal(first.stdout.includes("companySlug"), false);
+  assert.equal(await readFile(statePath, "utf8"), pendingBefore);
+
+  // A premature retry must stay denied and reuse the exact pending request.
+  assert.equal(assertDeniedHook(await runHook(input, environment)), reason);
+  assert.equal(creates, 1);
+  assert.equal(registrations, 0);
+  assert.equal(await readFile(statePath, "utf8"), pendingBefore);
+  // The actual approval tool is outside admission. The mock server models its
+  // authenticated approval result, never an approval performed by the hook.
+  assert.deepEqual(await runHook({ ...input, tool_name: `mcp__trelio__${nextCall.tool}`, tool_input: nextCall.arguments }, environment), {
+    exitCode: 0, stdout: "", stderr: "",
+  });
+  approved = true;
+  const resumed = await runHook(input, environment);
+  assert.equal(resumed.exitCode, 0, resumed.stderr);
+  assert.equal(resumed.stderr, "");
+  // Parsing the entire stdout catches the former login status line corruption.
+  const output = JSON.parse(resumed.stdout).hookSpecificOutput;
+  assert.equal(output.permissionDecision, "allow");
+  const { runtimeSessionProof: proof, ...originalInput } = output.updatedInput;
+  assert.deepEqual(originalInput, input.tool_input);
+  assert.equal(proof.runtimeSessionId, runtimeSessionId);
+  const signedBytes = Buffer.from(["trelio-runtime-proof-v1", proof.runtimeSessionId, "get_agent_instructions", proof.issuedAt, proof.nonce].join("\n"));
+  assert.equal(crypto.verify(null, signedBytes, crypto.createPublicKey({ key: Buffer.from(registeredPublicKey, "base64url"), type: "spki", format: "der" }), Buffer.from(proof.signature, "base64url")), true);
+  assert.equal(resumed.stdout.includes(verifier), false);
+  assert.equal(resumed.stdout.includes(token), false);
+  await assert.rejects(readFile(path.join(configDirectory, "pairings.json")), { code: "ENOENT" });
+  assert.equal(creates, 1);
+  assert.equal(exchanges, 2);
+  assert.equal(registrations, 1);
+  const subsequent = JSON.parse((await runHook(input, environment)).stdout).hookSpecificOutput;
+  assert.equal(subsequent.permissionDecision, "allow");
+  assert.notEqual(subsequent.updatedInput.runtimeSessionProof.nonce, proof.nonce);
+  assert.equal(exchanges, 2);
+  assert.equal(registrations, 1);
+});
+
+test("pairing recovery without a valid public target requests only the typed login action", () => {
+  const error = new Error("untrusted diagnostic text containing a verifier must not be projected");
+  error.code = "TRELIO_BRIDGE_PAIRING_REQUIRED";
+  error.pairing = { pairingId: "invalid", deviceName: "device", codeVerifier: "private synthetic verifier" };
+  const reason = formatRuntimeHookFailure(error);
+  const nextCall = JSON.parse(reason.match(/nextCall=(.+?)\. Это штатное/u)[1]);
+  assert.deepEqual(nextCall, {
+    tool: "continue_trelio_workspace_action",
+    arguments: { schemaVersion: 1, operation: "login", parameters: {} },
+  });
+  assert.doesNotMatch(reason, /untrusted diagnostic|private synthetic|"pairingId"/u);
+});

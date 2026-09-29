@@ -4063,6 +4063,10 @@ export class BridgePairingRequiredError extends Error {
       `Заявка действует до ${pairing.expiresAt}.`,
       "Сразу вызовите MCP tool approve_agent_workspace_bridge_pairing с этим pairingId и deviceName, затем повторите исходную bridge-команду. Не показывайте пользователю код и не просите отдельную фразу подтверждения в чате: если MCP-клиент требует подтверждение tool-вызова, он сам покажет одну штатную кнопку.",
     ].join("\n"));
+    // Preserve the recovery discriminator through hook/MCP error projection.
+    // The private verifier remains on the error only for local bookkeeping;
+    // consumers must project the two public approval arguments explicitly.
+    this.code = "TRELIO_BRIDGE_PAIRING_REQUIRED";
     this.pairing = pairing;
   }
 }
