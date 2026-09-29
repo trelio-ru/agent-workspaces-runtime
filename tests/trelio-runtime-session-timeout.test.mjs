@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -158,7 +158,19 @@ const createFixture = async (t, { registrationDelayMilliseconds = 0, stallPath =
     }));
     child.stdin.end(JSON.stringify(input));
   });
-  return { state, statePath, configDirectory, input, runtimeSessionId, run };
+  return { state, statePath, configDirectory, input, environment, runtimeSessionId, run };
+};
+
+const assertDeniedHook = (result) => {
+  assert.equal(result.signal, null, "a structured denial must precede the host kill");
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const output = JSON.parse(result.stdout).hookSpecificOutput;
+  assert.equal(output.hookEventName, "PreToolUse");
+  assert.equal(output.permissionDecision, "deny");
+  assert.equal(output.updatedInput, undefined);
+  assert.equal(typeof output.permissionDecisionReason, "string");
+  return output.permissionDecisionReason;
 };
 
 const assertProof = (fixture, result) => {
@@ -243,10 +255,9 @@ for (const stallPath of [compatibilityPath, registrationPath]) {
     const fixture = await createFixture(t, { stallPath });
     const result = await fixture.run(7_000);
     assert.equal(result.signal, null, "internal abort must precede the host kill");
-    assert.equal(result.exitCode, 2, result.stderr);
-    assert.equal(result.stdout, "");
-    assert.match(result.stderr, /TRELIO_RUNTIME_HOOK_FAILED:/u);
-    assert.doesNotMatch(result.stderr, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
+    const reason = assertDeniedHook(result);
+    assert.match(reason, /TRELIO_RUNTIME_HOOK_FAILED:/u);
+    assert.doesNotMatch(reason, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
     assert.ok(result.elapsedMilliseconds > 15_000);
     await assert.rejects(stat(fixture.statePath), { code: "ENOENT" });
     await assert.rejects(stat(`${fixture.statePath}.lock`), { code: "ENOENT" });
@@ -270,9 +281,8 @@ test("a lock inside the host budget stays live; an expired lock is recovered aut
   assert.equal(report.registrationLockCount, 1);
   assert.equal(report.staleRegistrationLockCount, 0);
   const blocked = await fixture.run();
-  assert.equal(blocked.exitCode, 2, blocked.stderr);
-  assert.match(blocked.stderr, /другая runtime-регистрация не завершилась вовремя/u);
-  assert.equal(blocked.stdout, "");
+  const reason = assertDeniedHook(blocked);
+  assert.match(reason, /другая runtime-регистрация не завершилась вовремя/u);
   assert.equal(fixture.state.registrationCount, 0);
   assert.equal((await stat(lockPath)).mtimeMs, initialLockMtime);
 
@@ -283,4 +293,39 @@ test("a lock inside the host budget stays live; an expired lock is recovered aut
   assertProof(fixture, await fixture.run());
   assert.equal(fixture.state.registrationCount, 1);
   await assert.rejects(stat(lockPath), { code: "ENOENT" });
+});
+
+test("an undeletable stale lock returns its cause without spinning or removing contents", async (t) => {
+  const fixture = await createFixture(t);
+  const lockPath = `${fixture.statePath}.lock`;
+  await ensurePrivateDirectory(path.dirname(fixture.statePath));
+  await mkdir(lockPath, { mode: 0o700 });
+  // A nonempty lock makes rmdir fail deterministically on all three OSes,
+  // including a privileged runner where a chmod-only fixture is unreliable.
+  // Its content must survive; runtime must never escalate to recursive rm.
+  const sentinelPath = path.join(lockPath, "keep.txt");
+  await writeFile(sentinelPath, "synthetic lock content", { mode: 0o600 });
+  const stale = new Date(Date.now() - RUNTIME_STATE_LOCK_STALE_MILLISECONDS - 1_000);
+  await utimes(lockPath, stale, stale);
+  const result = await fixture.run();
+  const reason = assertDeniedHook(result);
+  assert.match(reason, /^TRELIO_RUNTIME_LOCK_RECOVERY_FAILED:/u);
+  assert.match(reason, /ENOTEMPTY|EEXIST/u);
+  assert.equal(fixture.state.registrationCount, 0);
+  assert.equal(await readFile(sentinelPath, "utf8"), "synthetic lock content");
+  assert.ok(result.elapsedMilliseconds < outerTimeoutMilliseconds);
+});
+
+test("registration and private state use the event session instead of an inherited chat ID", async (t) => {
+  const fixture = await createFixture(t);
+  const inheritedId = crypto.randomUUID();
+  fixture.environment.CODEX_THREAD_ID = inheritedId;
+  assertProof(fixture, await fixture.run());
+  assert.equal(fixture.state.registrationBody.clientSessionId, fixture.input.session_id);
+  assert.ok((await stat(fixture.statePath)).isFile());
+  const inheritedDigest = crypto.createHash("sha256")
+    .update(`${fixture.environment.TRELIO_WORKSPACE_ORIGIN}\n${inheritedId}`).digest("hex");
+  await assert.rejects(stat(path.join(fixture.configDirectory, "runtime-sessions", `${inheritedDigest}.json`)), {
+    code: "ENOENT",
+  });
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import {
   chmod,
@@ -18,7 +18,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { detectAgentRuntimeAttestation } from "../host-runtime/scripts/trelio-runtime-attestation.mjs";
+import {
+  detectAgentRuntimeAttestation,
+  resolveRuntimeClientSessionId,
+} from "../host-runtime/scripts/trelio-runtime-attestation.mjs";
 import {
   buildRuntimeSessionProof,
   cleanupStaleRuntimeSessions,
@@ -111,6 +114,45 @@ const readRequestBody = async (request) => {
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 };
+
+const assertDeniedHook = (result) => {
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const output = JSON.parse(result.stdout).hookSpecificOutput;
+  assert.equal(output.hookEventName, "PreToolUse");
+  assert.equal(output.permissionDecision, "deny");
+  assert.equal(typeof output.permissionDecisionReason, "string");
+  assert.deepEqual(Object.keys(output).sort(), [
+    "hookEventName", "permissionDecision", "permissionDecisionReason",
+  ]);
+  return output.permissionDecisionReason;
+};
+
+test("event session identity takes precedence over an inherited chat environment", async () => {
+  const currentId = "11111111-1111-4111-8111-111111111111";
+  const inheritedId = "22222222-2222-4222-8222-222222222222";
+  const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-identity-"));
+  try {
+    const environment = { CODEX_HOME: temporaryHome, CODEX_THREAD_ID: inheritedId };
+    const input = { session_id: currentId };
+    assert.equal(resolveRuntimeClientSessionId(input, environment), currentId);
+    assert.equal(resolveRuntimeClientSessionId({}, environment), inheritedId);
+    assert.equal(resolveRuntimeClientSessionId({}, { TRELIO_CLAUDE_SESSION_ID: currentId }), currentId);
+    assert.equal(resolveRuntimeClientSessionId({}, {
+      CODEX_THREAD_ID: "", TRELIO_CLAUDE_SESSION_ID: currentId,
+    }), currentId);
+    assert.equal(resolveRuntimeClientSessionId({ session_id: " " }, environment), null);
+    await mkdir(path.join(temporaryHome, "sessions"));
+    for (const [id, effort] of [[currentId, "high"], [inheritedId, "low"]]) {
+      await writeFile(path.join(temporaryHome, "sessions", `rollout-${id}.jsonl`),
+        JSON.stringify({ type: "turn_context", payload: { model: "gpt-6-sol", effort } }));
+    }
+    const observation = await detectAgentRuntimeAttestation({ hookInput: input, environment });
+    assert.equal(observation.effortLevel, "high", "must read the event's transcript");
+  } finally {
+    await rm(temporaryHome, { recursive: true, force: true });
+  }
+});
 
 test("empty or unsupported hook payload fails closed before any protected call", async () => {
   const empty = await runHook(undefined);
@@ -333,6 +375,23 @@ test("active hook applies the stable runtime update and replays the exact payloa
   assert.equal(calls[1].environment.TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE, "1");
   assert.equal(calls[1].environment.TRELIO_HOST_RUNTIME_UPDATE_REEXEC, "1");
   assert.equal(calls[1].input, `${JSON.stringify(hookInput)}\n`);
+});
+
+test("a failed runtime replay retains the original gate for a structured hook denial", async () => {
+  const error = Object.assign(new Error("synthetic runtime gate"), {
+    code: "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+  });
+  const calls = [];
+  const result = await recoverHookHostRuntimeUpgrade(error, { hook_event_name: "PreToolUse" }, {
+    environment: { TRELIO_PLUGIN_ROOT: path.resolve("synthetic-plugin") },
+    statFile: async () => ({ isFile: () => true, isSymbolicLink: () => false }),
+    runProcess: async ({ arguments: args }) => {
+      calls.push(args.at(-1));
+      return args.at(-1) === "__update" ? 0 : 2;
+    },
+  });
+  assert.deepEqual(calls, ["__update", "hook"]);
+  assert.equal(result, null, "failed recovery must use the parent denial, not exit 2");
 });
 
 test("route guard covers every native proposal renderer and both target forms", () => {
@@ -657,15 +716,17 @@ test("configured platform hook launcher starts in every Windows shell without No
       path.join(pluginDirectory, "scripts", "launch-trelio-node.cmd"),
       path.join(launcherScriptsDirectory, "launch-trelio-node.cmd"),
     );
-    // This case verifies only the configured cross-shell Node launcher. The
-    // signed loader and runtime hook have focused tests of their own, so the
-    // disposable target returns a deterministic hook-shaped failure without
-    // consulting a developer cache or the network.
+    // Use the real runtime hook behind the real platform launcher. Only the
+    // signed loader is replaced in this isolated test so there is no installed
+    // cache or network dependency. Missing model evidence fails before pairing
+    // or proof creation. Merely asserting a nonzero exit would miss PowerShell
+    // turning a blocking exit 2 into a non-blocking exit 1 in Codex.
     await writeFile(
       path.join(launcherScriptsDirectory, "trelio-host-runtime-loader.mjs"),
-      "process.stdin.resume(); process.stdin.on('end', () => {"
-        + "process.stderr.write('TRELIO_RUNTIME_HOOK_FAILED: launcher probe\\n');"
-        + "process.exitCode = 2; });\n",
+      "import { spawn } from 'node:child_process';\n"
+        + `const child = spawn(process.execPath, [${JSON.stringify(hookScriptPath)}], { stdio: 'inherit' });\n`
+        + "child.on('error', () => { process.exitCode = 2; });\n"
+        + "child.on('close', code => { process.exitCode = code ?? 2; });\n",
     );
     const hooks = JSON.parse(await readFile(
       path.join(pluginDirectory, "hooks", "hooks.json"),
@@ -689,7 +750,6 @@ test("configured platform hook launcher starts in every Windows shell without No
           name: "cmd.exe",
           program: process.env.ComSpec || path.join(systemRoot, "System32", "cmd.exe"),
           arguments: ["/d", "/s", "/c", command],
-          expectedExitCode: 2,
         },
         {
           name: "Windows PowerShell",
@@ -703,19 +763,27 @@ test("configured platform hook launcher starts in every Windows shell without No
             "-Command",
             command,
           ],
-          // Windows PowerShell's `-Command` host normalizes a failing native
-          // process to its own generic exit code 1. The exact hook diagnostic
-          // below proves that the inner launcher still reached Node and
-          // returned its intentional non-zero hook result.
-          expectedExitCode: 1,
         },
       ]
       : [{
         name: "POSIX shell",
         program: process.env.SHELL || "/bin/sh",
         arguments: ["-lc", command],
-        expectedExitCode: 2,
       }];
+    if (process.platform === "win32") {
+      // Resolve before removing Node and user PATH entries from the child.
+      // Windows CI includes PowerShell 7: absence must fail this regression,
+      // rather than silently skipping the user's actual outer shell.
+      const located = spawnSync(path.join(systemRoot, "System32", "where.exe"), ["pwsh.exe"], {
+        encoding: "utf8",
+      });
+      assert.equal(located.status, 0, "PowerShell 7 is required for Windows hook regressions");
+      shellCases.push({
+        name: "PowerShell 7 (pwsh.exe)",
+        program: located.stdout.trim().split(/\r?\n/u)[0],
+        arguments: ["-NoProfile", "-Command", command],
+      });
+    }
     const isolatedPath = process.platform === "win32"
       ? [
         path.dirname(windowsPowerShell),
@@ -733,6 +801,7 @@ test("configured platform hook launcher starts in every Windows shell without No
             ...process.env,
             HOME: shellHome,
             USERPROFILE: shellHome,
+            LOCALAPPDATA: path.join(shellHome, "AppData", "Local"),
             CODEX_HOME: shellHome,
             CODEX_THREAD_ID: `019f9fcd-899a-72b3-91f6-fdf3134381b${index}`,
             CODEX_MCP_NODE_PATH: process.execPath,
@@ -743,6 +812,7 @@ test("configured platform hook launcher starts in every Windows shell without No
             PATH: isolatedPath,
           },
           stdio: ["pipe", "pipe", "pipe"],
+          timeout: 30_000,
         });
         let stdout = "";
         let stderr = "";
@@ -751,7 +821,7 @@ test("configured platform hook launcher starts in every Windows shell without No
         child.stdout.on("data", (chunk) => { stdout += chunk; });
         child.stderr.on("data", (chunk) => { stderr += chunk; });
         child.once("error", reject);
-        child.once("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+        child.once("close", (exitCode, signal) => resolve({ exitCode, signal, stdout, stderr }));
         child.stdin.end(JSON.stringify({
           hook_event_name: "PreToolUse",
           session_id: `019f9fcd-899a-72b3-91f6-fdf3134381b${index}`,
@@ -762,19 +832,23 @@ test("configured platform hook launcher starts in every Windows shell without No
 
       // The deliberately incomplete input must reach the real hook and fail on
       // missing model attestation, not at shell or Node resolution. Exercising
-      // both native Windows shells protects Codex environments whose terminal
+      // all native Windows shells protects Codex environments whose terminal
       // selection differs from the command-prompt default.
       assert.equal(
         result.exitCode,
-        shellCase.expectedExitCode,
+        0,
         `${shellCase.name}: ${result.stderr}`,
       );
-      assert.equal(result.stdout, "", shellCase.name);
+      assert.equal(result.signal, null, shellCase.name);
+      const output = JSON.parse(result.stdout).hookSpecificOutput;
+      assert.equal(output.permissionDecision, "deny", shellCase.name);
+      assert.equal(output.hookEventName, "PreToolUse", shellCase.name);
+      assert.equal(output.updatedInput, undefined, shellCase.name);
+      assert.match(output.permissionDecisionReason, /^TRELIO_RUNTIME_HOOK_FAILED:/u, shellCase.name);
+      assert.match(output.permissionDecisionReason, /не смог определить модель/u, shellCase.name);
       // Windows PowerShell 5 may serialize its first-run progress record to
-      // stderr as CLIXML, so assert the hook code itself without requiring it
-      // to be the first byte. The exit code and absence of launcher errors
-      // still prove that the configured command reached the real hook.
-      assert.match(result.stderr, /TRELIO_RUNTIME_HOOK_FAILED:/u, shellCase.name);
+      // stderr as CLIXML. The blocking reason must nevertheless be in the
+      // parsed stdout decision, not depend on a stderr record or exit code 2.
       assert.doesNotMatch(
         result.stderr,
         /not recognized|not found|could not find Node|CouldNotAutoLoadModule/iu,
@@ -803,12 +877,12 @@ test("an active hook failure does not append unrelated setup steps", async () =>
       CLAUDE_EFFORT: "",
     });
 
-    assert.equal(result.exitCode, 2);
-    assert.match(result.stderr, /^TRELIO_RUNTIME_HOOK_FAILED:/u);
-    assert.match(result.stderr, /активный клиентский hook не смог определить модель/u);
-    assert.match(result.stderr, /Устраните указанную причину и повторите запрос в текущей задаче/u);
-    assert.doesNotMatch(result.stderr, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
-    assert.doesNotMatch(result.stderr, /Установите|обновите|trelio-workspace login/u);
+    const reason = assertDeniedHook(result);
+    assert.match(reason, /^TRELIO_RUNTIME_HOOK_FAILED:/u);
+    assert.match(reason, /активный клиентский hook не смог определить модель/u);
+    assert.match(reason, /Устраните указанную причину и повторите запрос в текущей задаче/u);
+    assert.doesNotMatch(reason, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
+    assert.doesNotMatch(reason, /Установите|обновите|trelio-workspace login/u);
   } finally {
     await rm(temporaryHome, { recursive: true, force: true });
   }
@@ -877,13 +951,12 @@ test("an active hook preserves the plugin upgrade code instead of claiming Hooks
       CLAUDE_EFFORT: "",
     });
 
-    assert.equal(result.exitCode, 2);
-    assert.equal(result.stdout, "");
+    const reason = assertDeniedHook(result);
     assert.equal(compatibilityRequests, 1);
-    assert.match(result.stderr, /^AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:/u);
-    assert.match(result.stderr, /v2\.4\.0 больше не поддерживается; требуется v1\.17\.13/u);
-    assert.match(result.stderr, /Если требуемая версия уже установлена, повторите запрос в новой задаче/u);
-    assert.doesNotMatch(result.stderr, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
+    assert.match(reason, /^AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:/u);
+    assert.match(reason, /v2\.4\.0 больше не поддерживается; требуется v1\.17\.13/u);
+    assert.match(reason, /Если требуемая версия уже установлена, повторите запрос в новой задаче/u);
+    assert.doesNotMatch(reason, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await rm(temporaryHome, { recursive: true, force: true });

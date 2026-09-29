@@ -15,7 +15,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { detectAgentRuntimeAttestation } from "./trelio-runtime-attestation.mjs";
+import {
+  detectAgentRuntimeAttestation,
+  resolveRuntimeClientSessionId,
+} from "./trelio-runtime-attestation.mjs";
 import {
   RUNTIME_PENDING_STATE_MAX_AGE_MILLISECONDS,
   RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
@@ -100,16 +103,6 @@ const readStdinJson = async () => {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 };
 
-const resolveClientSessionId = (hookInput, environment = process.env) => {
-  const value = environment.CODEX_THREAD_ID
-    || hookInput.session_id
-    || environment.TRELIO_CLAUDE_SESSION_ID
-    || null;
-  return typeof value === "string" && value.trim() && value.length <= 512
-    ? value.trim()
-    : null;
-};
-
 export const resolveTrelioMcpToolName = (hookInput) => {
   const rawName = String(hookInput?.tool_name || hookInput?.toolName || "");
   if (LOCAL_ACTION_HOST_TOOL_PATTERNS.some((pattern) => pattern.test(rawName))) {
@@ -180,31 +173,46 @@ const withRuntimeStateLock = async (filePath, operation) => {
   const startedAt = Date.now();
 
   for (;;) {
+    // Every retry, including a vanished or recovered stale lock, shares the
+    // same deadline. Checking only the live-lock branch previously allowed
+    // an undeletable stale directory to spin until the client killed us.
+    if (Date.now() - startedAt >= RUNTIME_STATE_LOCK_WAIT_MILLISECONDS) {
+      throw new Error("другая runtime-регистрация не завершилась вовремя");
+    }
     try {
       await fs.mkdir(lockPath, { mode: 0o700 });
-      if (process.platform !== "win32") {
-        await fs.chmod(lockPath, 0o700);
-      }
       break;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      const metadata = await fs.lstat(lockPath).catch(() => null);
-      if (!metadata) continue;
-      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      const metadata = await fs.lstat(lockPath).catch((statError) => {
+        // Only disappearance is an ordinary race. Permission/I/O failures
+        // must retain their cause instead of looking like an absent lock.
+        if (statError.code === "ENOENT") return null;
+        throw statError;
+      });
+      if (metadata && (!metadata.isDirectory() || metadata.isSymbolicLink())) {
         throw new Error("локальная блокировка runtime-сессии имеет небезопасный тип");
       }
-      if (Date.now() - metadata.mtimeMs > RUNTIME_STATE_LOCK_STALE_MILLISECONDS) {
-        await fs.rmdir(lockPath).catch(() => undefined);
-        continue;
-      }
-      if (Date.now() - startedAt >= RUNTIME_STATE_LOCK_WAIT_MILLISECONDS) {
-        throw new Error("другая runtime-регистрация не завершилась вовремя");
+      if (metadata && Date.now() - metadata.mtimeMs > RUNTIME_STATE_LOCK_STALE_MILLISECONDS) {
+        await fs.rmdir(lockPath).catch((removeError) => {
+          if (removeError.code === "ENOENT") return;
+          // Never recursively remove someone else's lock contents or reset
+          // ACLs. Report a bounded, value-free reason and leave it intact.
+          const failure = new Error(
+            `не удалось удалить устаревшую блокировку runtime-сессии (${removeError.code || "IO_ERROR"})`,
+            { cause: removeError },
+          );
+          failure.code = "TRELIO_RUNTIME_LOCK_RECOVERY_FAILED";
+          throw failure;
+        });
       }
       await wait(40);
     }
   }
 
   try {
+    // Once mkdir succeeds we own cleanup even if permission hardening fails.
+    if (process.platform !== "win32") await fs.chmod(lockPath, 0o700);
     return await operation();
   } finally {
     await fs.rmdir(lockPath).catch(() => undefined);
@@ -585,7 +593,7 @@ const runPreToolUse = async (hookInput) => {
     writeDeniedLocalProposalRenderer();
     return;
   }
-  const clientSessionId = resolveClientSessionId(hookInput);
+  const clientSessionId = resolveRuntimeClientSessionId(hookInput);
   if (!clientSessionId) throw new Error("клиент не передал session_id");
   const filePath = await statePathFor(clientSessionId, origin);
   let state = await readRuntimeState(filePath);
@@ -610,7 +618,7 @@ const runPreToolUse = async (hookInput) => {
 };
 
 const runSessionStart = async (hookInput) => {
-  const clientSessionId = resolveClientSessionId(hookInput);
+  const clientSessionId = resolveRuntimeClientSessionId(hookInput);
   if (!clientSessionId) return;
   const origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
   const filePath = await statePathFor(clientSessionId, origin);
@@ -649,7 +657,7 @@ const runSessionStart = async (hookInput) => {
 };
 
 const runSessionEnd = async (hookInput) => {
-  const clientSessionId = resolveClientSessionId(hookInput);
+  const clientSessionId = resolveRuntimeClientSessionId(hookInput);
   if (!clientSessionId) return;
   const origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
   const filePath = await statePathFor(clientSessionId, origin);
@@ -744,7 +752,7 @@ export const recoverHookHostRuntimeUpgrade = async (
   }).catch(() => null);
   if (updateExitCode !== 0) return null;
 
-  return await runProcess({
+  const replayExitCode = await runProcess({
     arguments: [loaderPath, "hook"],
     environment: {
       ...recoveryEnvironment,
@@ -753,6 +761,10 @@ export const recoverHookHostRuntimeUpgrade = async (
     },
     input: `${JSON.stringify(hookInput)}\n`,
   }).catch(() => null);
+  // A failed replay is still an unsuccessful recovery of the original gate.
+  // Let runHook deliver that structured denial instead of returning a raw
+  // nonzero status which an outer PowerShell could turn into a non-blocking 1.
+  return replayExitCode === 0 ? 0 : null;
 };
 
 const runHook = async () => {
@@ -788,9 +800,31 @@ const runHook = async () => {
     await executeHookInput(hookInput);
     return 0;
   } catch (error) {
-    const recoveryExitCode = await recoverHookHostRuntimeUpgrade(error, hookInput);
-    if (recoveryExitCode !== null) return recoveryExitCode;
-    throw error;
+    let failure = error;
+    try {
+      const recoveryExitCode = await recoverHookHostRuntimeUpgrade(error, hookInput);
+      if (recoveryExitCode !== null) return recoveryExitCode;
+    } catch (recoveryError) {
+      failure = recoveryError;
+    }
+    if (hookInput.hook_event_name === "PreToolUse") {
+      // PowerShell/pwsh -Command can normalize an inner exit code 2 to 1.
+      // Codex treats 1 as a non-blocking hook failure and drops the original
+      // stderr reason. A successful protocol response with an explicit deny
+      // survives every shell and prevents sending the original call without
+      // its proof. It contains only the diagnostic, never tool input or keys.
+      process.stdout.write(`${JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: formatRuntimeHookFailure(failure).trim(),
+        },
+      })}\n`);
+      return 0;
+    }
+    // Lifecycle and malformed-input errors cannot be represented as a
+    // PreToolUse decision; keep their existing stderr/exit-code contract.
+    throw failure;
   }
 };
 
@@ -798,7 +832,8 @@ const runHook = async () => {
  * Ошибка из этой ветки доказывает, что lifecycle hook уже был запущен
  * клиентом. Поэтому нельзя маркировать любой его внутренний отказ как
  * `TRELIO_RUNTIME_HOOK_REQUIRED`: этот код зарезервирован для ответа Trelio,
- * когда proof не пришёл из-за действительно выключенного/неодобренного hook.
+ * когда proof не пришёл или не прошёл проверку; сам код не доказывает
+ * выключенный hook либо отсутствие клиентского одобрения.
  *
  * Структурированные recovery-коды bridge/backend сохраняются, чтобы skill мог
  * выбрать точное действие. Неизвестные и противоречивые коды сворачиваются в

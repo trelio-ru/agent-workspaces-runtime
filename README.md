@@ -81,6 +81,25 @@ Local company search и Workspace-file search возвращают один ко
 останавливает неподходящий native proposal renderer до монтирования MCP App;
 для plain company marker снимается при подтверждённом native provider.
 
+### Ошибки lifecycle hooks
+
+После распознавания события `PreToolUse` runtime возвращает ошибки через
+`hookSpecificOutput.permissionDecision = "deny"` и `permissionDecisionReason`,
+завершая процесс с кодом `0`. Это успешная доставка запрета, а не разрешение
+MCP-вызова. Windows PowerShell и PowerShell 7 могут преобразовать внутренний
+exit `2` в `1`; Codex не обязан блокировать tool при таком коде. Поэтому
+причина не зависит от stderr внешней оболочки. JSON отказа не содержит исходные
+аргументы tool, private state, ключи или proof. Lifecycle-события и нераспознанный
+вход сохраняют прежний stderr/exit `2`; ошибка launcher до запуска runtime
+находится вне этого обработчика.
+
+ID текущего hook-события имеет приоритет над унаследованными ID окружения и
+одинаково выбирает private state и transcript для model/effort. Все повторы
+захвата registration lock входят в пятисекундный deadline. Неудаляемая stale-
+блокировка возвращает `TRELIO_RUNTIME_LOCK_RECOVERY_FAILED` с кодом ошибки ОС;
+её содержимое и ACL сохраняются. Отсутствие session-файла и lock после ошибки
+не является доказательством отсутствия запуска hook.
+
 ## Локальная разработка
 
 Требуются Node.js 22+ и standalone Git 2.28+.

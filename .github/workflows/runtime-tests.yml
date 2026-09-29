@@ -154,7 +154,7 @@ jobs:
       - name: Run Windows hook launcher regression
         run: >-
           node --test
-          --test-name-pattern="configured platform hook launcher|resume and compact|bounded cleanup"
+          --test-name-pattern="configured platform hook launcher|event session identity|resume and compact|bounded cleanup"
           tests/trelio-runtime-session.test.mjs
 
       - name: Run Windows hook timeout regressions

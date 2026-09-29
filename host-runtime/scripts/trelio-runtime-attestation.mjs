@@ -20,6 +20,21 @@ export const AGENT_RUNTIME_EFFORT_LEVELS = [
 const THREAD_ID_PATTERN = /^[0-9a-f-]{16,64}$/iu;
 const MAX_TRANSCRIPT_TAIL_BYTES = 2 * 1024 * 1024;
 
+/**
+ * The host's event identifies this invocation. An app-server process can keep
+ * an inherited CODEX_THREAD_ID from a different chat, whereas shell tools get
+ * a fresh per-call environment. Never let that inherited value select another
+ * chat's private session or model/effort transcript. Environment IDs remain a
+ * compatibility fallback only when the event omits its own session identity.
+ */
+export const resolveRuntimeClientSessionId = (hookInput, environment = process.env) => {
+  const value = hookInput.session_id
+    ?? (environment.CODEX_THREAD_ID || environment.TRELIO_CLAUDE_SESSION_ID || null);
+  return typeof value === "string" && value.trim() && value.length <= 512
+    ? value.trim()
+    : null;
+};
+
 const readFileTail = async (filePath) => {
   const handle = await fs.open(filePath, "r");
   try {
@@ -75,7 +90,7 @@ const readCodexRuntime = async ({ hookInput, environment }) => {
   const transcriptPath = typeof hookInput.transcript_path === "string"
     ? hookInput.transcript_path
     : await findCodexRolloutPath(
-        environment.CODEX_THREAD_ID || hookInput.session_id,
+        resolveRuntimeClientSessionId(hookInput, environment),
         environment,
       );
   const rows = transcriptPath ? await parseJsonLinesFromTail(transcriptPath) : [];

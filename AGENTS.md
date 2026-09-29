@@ -27,6 +27,14 @@ publication tooling также остаются вне этого публичн
   keys или production runtime packages в Git, fixtures и logs.
 - Не ослабляй exact confirmation, idempotency/CAS, bounds, attestation, package
   verification и encrypted-company fail-closed behavior.
+- Ошибка распознанного `PreToolUse` передаётся JSON-решением `deny` с причиной
+  и process exit `0`: PowerShell может превратить блокирующий exit `2` в `1`.
+  Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и
+  `pwsh.exe`; одного ненулевого exit code недостаточно для проверки блокировки.
+- Для private runtime state и поиска transcript используй один resolver текущего
+  `hookInput.session_id`; inherited environment ID допустим только при отсутствии
+  ID события. Все повторы захвата lock ограничены общим deadline, ошибки удаления
+  stale lock не проглатываются и не разрешают recursive cleanup либо смену ACL.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.
