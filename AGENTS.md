@@ -41,6 +41,10 @@ publication tooling также остаются вне этого публичн
   Pending SessionStart observation сохраняется до регистрации; stdout hook
   содержит только JSON, без CLI status line успешного обмена и private verifier.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
+- Browser fill повторяет только value-free preflight: временно отсутствующее
+  AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,
+  потерянный ответ и передача значения повторов не допускают; field-only grant
+  сохраняет привязку к embedded-вкладке даже при недоступном дереве.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.
 - Подписанный Agent Skill может получить `CODEX_THREAD_ID` из ограниченного

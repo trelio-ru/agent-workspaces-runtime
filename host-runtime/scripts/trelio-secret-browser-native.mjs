@@ -25,16 +25,24 @@ const NATIVE_UNAVAILABLE = new Set([
   "backend_unavailable",
 ]);
 const NATIVE_PREFLIGHT_CHROME_RETRY = new Set(["target_url_changed", "field_not_found"]);
-const NATIVE_WRITE_PREFLIGHT_ATTEMPTS = 3;
+const NATIVE_PREFLIGHT_ATTEMPTS = 3;
 
 export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
-  constructor(nativeReason) {
+  constructor(nativeReason, { canRetrySameTab = false } = {}) {
     const reason = NATIVE_UNAVAILABLE.has(nativeReason) ? nativeReason : "helper_unavailable";
     // These value-free explanations distinguish missing Run provenance from
     // an unsupported browser. Never copy native diagnostics, URLs or DOM data.
     const hint = reason === "client_unsupported"
       ? " В Agent Run нет поддерживаемого hook-verified клиента Codex/Claude Code; проверьте runtime identity Run."
-      : "";
+      : reason === "accessibility_unavailable"
+        ? " Native helper не видит пригодное дерево исходной вкладки; это не отказ системного разрешения Accessibility. "
+          + "Секрет ещё не запрошен, grant не израсходован этой попыткой. "
+          + (canRetrySameTab
+            ? "Покажите уже открытую исходную вкладку в её чате через штатный browser tool и повторите то же действие один раз. "
+              + "Не создавайте другую вкладку, не меняйте browser/профиль и не считывайте значения полей. "
+              + "Если ошибка сохраняется, нужен ручной вход."
+            : "Автоматически не повторяйте действие с activation; сначала проверьте состояние исходной вкладки без чтения значений полей.")
+        : "";
     super("Встроенный browser transport недоступен: " + reason + "." + hint, "browser_unavailable");
     this.nativeReason = reason;
   }
@@ -364,24 +372,30 @@ export const prepareSecretBrowserSession = async ({
     });
     const executable = await buildHelper({ directory, ensurePrivateDirectory, platform });
     let ready;
-    for (let attempt = 0; attempt < NATIVE_WRITE_PREFLIGHT_ATTEMPTS; attempt++) {
+    for (let attempt = 0; attempt < NATIVE_PREFLIGHT_ATTEMPTS; attempt++) {
       channel = openChannel({ executable, platform });
       ready = await channel.request({ command: "prepare", clientFamily: binding.clientFamily, steps });
-      if (ready.status !== "failed" || !["field_write_failed", "field_value_unsettable"].includes(ready.reasonCode)
-        || attempt === NATIVE_WRITE_PREFLIGHT_ATTEMPTS - 1
+      const treeUnavailable = ready.status === "unavailable" && ready.reasonCode === "accessibility_unavailable";
+      const transientField = ready.status === "failed"
+        && ["field_write_failed", "field_value_unsettable"].includes(ready.reasonCode);
+      if ((!treeUnavailable && !transientField)
+        || attempt === NATIVE_PREFLIGHT_ATTEMPTS - 1
         || steps.some((step) => step.activationId)) break;
-      // A web field can briefly report that AXValue is unavailable
-      // while Chromium exposes its accessibility tree. The helper has not
-      // received any secret at this point. Close it before a bounded retry of
-      // the same URL and exact control IDs. Each helper must independently
-      // find one document; never switch browser profiles or
-      // retry an activation press, which may already have changed the page.
+      // Chromium may temporarily omit the entire AX/UIA document while a tab
+      // is attached to its visible pane, not just mark AXValue unwritable.
+      // Both are value-free preparation failures: close the old helper before
+      // retrying the exact URL and controls, without bringing any app to front.
+      // Permission/signature failures, ambiguous documents, lost replies and
+      // activation plans are not transient: a click could already have run.
+      // The one-use grant is consumed only after this function returns ready.
       await channel.close();
       channel = null;
-      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, (treeUnavailable ? 500 : 200) * (attempt + 1)));
     }
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {
-      throw new EmbeddedBrowserUnavailable(ready.reasonCode);
+      throw new EmbeddedBrowserUnavailable(ready.reasonCode, {
+        canRetrySameTab: !steps.some((step) => step.activationId),
+      });
     }
     if (ready.status !== "ready") {
       // AX/UIA can omit an existing web document or a hidden mode control.

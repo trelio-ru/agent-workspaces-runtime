@@ -106,6 +106,7 @@ for (const reasonCode of ["access_required", "application_unavailable", "accessi
     assert.equal(session.surface, "chrome");
     assert.equal(session.fallbackReason, reasonCode);
     assert.equal(f.chromePreflights, 1, "isolated Chrome must be ready before checkout");
+    assert.equal(f.requests.length, reasonCode === "accessibility_unavailable" ? 3 : 1);
     assert.equal(f.chromeCalls, 0);
     assert.ok(f.closed);
     await session.fill({ secretValues: values });
@@ -113,6 +114,69 @@ for (const reasonCode of ["access_required", "application_unavailable", "accessi
     assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/);
   });
 }
+for (const mode of ["embedded", "auto"]) {
+  test("a temporarily missing accessibility tree recovers on the same surface: " + mode, async () => {
+    const f = fixture();
+    // A field-only plan reproduces the same-tab contract: there is no granted
+    // native submit and the next browser-tool click must use this document.
+    delete f.args.context.browserSteps[0].submitSelector;
+    let opened = 0;
+    const closed = [];
+    const requests = [];
+    f.args.openChannel = () => {
+      const attempt = ++opened;
+      return {
+        request: async (request) => {
+          requests.push(request);
+          return request.command === "prepare"
+            ? attempt < 3 ? { status: "unavailable", reasonCode: "accessibility_unavailable" } : { status: "ready" }
+            : { status: "succeeded" };
+        },
+        close: async () => { closed.push(attempt); },
+      };
+    };
+    const session = await prepareSecretBrowserSession({ ...f.args, mode });
+    assert.equal(session.surface, "embedded");
+    assert.equal(opened, 3);
+    assert.deepEqual(closed, [1, 2]);
+    assert.equal(f.builds, 1);
+    assert.deepEqual(requests, Array(3).fill(requests[0]), "all retries retain the exact binding");
+    assert.doesNotMatch(JSON.stringify(requests), /CANARY/u);
+    assert.equal(f.chromePreflights, 0);
+    assert.deepEqual(await session.fill({ secretValues: values }), { outcome: "succeeded" });
+    assert.deepEqual(requests.map(({ command }) => command), ["prepare", "prepare", "prepare", "fill"]);
+    await assert.rejects(session.fill({ secretValues: values }));
+    await session.close();
+    assert.deepEqual(closed, [1, 2, 3]);
+  });
+}
+test("persistent same-tab tree failure returns bounded pre-consume recovery, never Chrome", async () => {
+  const f = fixture({ status: "unavailable", reasonCode: "accessibility_unavailable" });
+  delete f.args.context.browserSteps[0].submitSelector;
+  await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
+    error instanceof EmbeddedBrowserUnavailable
+    && error.nativeReason === "accessibility_unavailable"
+    && /grant не израсходован этой попыткой/u.test(error.message)
+    && /уже открытую исходную вкладку/u.test(error.message)
+    && /повторите то же действие один раз/u.test(error.message)
+  ));
+  assert.equal(f.requests.length, 3);
+  assert.ok(f.requests.every(({ command }) => command === "prepare"));
+  assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/u);
+  assert.equal(f.chromePreflights, 0);
+  assert.ok(f.closed);
+});
+test("unavailable tree never replays an activation plan", async () => {
+  const f = fixture({ status: "unavailable", reasonCode: "accessibility_unavailable" });
+  f.args.context.browserSteps[0].activationSelector = "#login-mode";
+  await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), (error) => (
+    error instanceof EmbeddedBrowserUnavailable
+    && !/повторите то же действие один раз/u.test(error.message)
+    && /не повторяйте действие с activation/u.test(error.message)
+  ));
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.chromePreflights, 0);
+});
 test("a hidden embedded tab selects an isolated background profile before checkout", async () => {
   const f = fixture({ status: "unavailable", reasonCode: "accessibility_unavailable" });
   let preparedInput;
