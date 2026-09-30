@@ -5364,8 +5364,8 @@ test("compact protected runtime keeps the immutable Run safety kernel", () => {
     /Не создавай дубликат вручную/u,
     /Agent Secret: <текущее safe название> \(secretId: <UUID>\)/u,
     /Секретные значения никогда не передавай модели, MCP, prompt, env, argv/u,
-    /Bridge action выполняй через `continue_trelio_workspace_action`/u,
-    /без shell-команды/u,
+    /returned `action\.arguments` без изменений через `continue_trelio_workspace_action`/u,
+    /без shell/u,
     /`sources\/`.*`work\/`.*`artifacts\/`/u,
     /action `checkpoint`.*границы реплики\/сессии, compaction или передачи/u,
     /Перед блокирующим вопросом.*action `pause`/u,
@@ -6436,7 +6436,7 @@ test("hot-path skills use typed bridge actions exclusively", async () => {
   assert.match(workspaceSkill, /continue_trelio_workspace_action/u);
   assert.match(workspaceSkill, /а не shell-команду/u);
   assert.match(AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN, /continue_trelio_workspace_action/u);
-  assert.match(AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN, /без shell-команды/u);
+  assert.match(AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN, /без shell/u);
   assert.doesNotMatch(catalogSkill, /If it is available in `PATH`/u);
   assert.doesNotMatch(workspaceSkill, /logical launcher/u);
   assert.doesNotMatch(AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN, /логический launcher/u);

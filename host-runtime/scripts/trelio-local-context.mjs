@@ -183,6 +183,20 @@ const TRELIO_WORKSPACE_ACTION_OPERATIONS = new Set([
   "secret_browser_fill",
   "secret_set_file",
 ]);
+// These are recovery hints, never executable aliases. A model can confuse a
+// descriptor label/native preparation tool with its operation, but silently
+// translating that input could run a mutation it has not actually specified.
+// Keep the dispatcher closed and point back to the trusted returned envelope.
+// Only fixed public names are included; arbitrary input may contain private
+// content and must not be echoed in either the error message or its details.
+const TRELIO_WORKSPACE_ACTION_OPERATION_HINTS = new Map([
+  ["turnCheck", ["status", "bridge.actions.turnCheck.arguments"]],
+  ["turn_check", ["status", "bridge.actions.turnCheck.arguments"]],
+  ["prepare_agent_workspace_read", ["inspect", "bridge.action.arguments"]],
+  ["get_agent_workspace_file", ["download_file", "bridge.action.arguments"]],
+  ["prepare_agent_secret_checkout", ["secret_exec", "bridge.action.arguments"]],
+  ["prepare_agent_secret_browser_fill", ["secret_browser_fill", "bridge.action.arguments"]],
+]);
 const TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS = new Set([
   "status",
   "heartbeat",
@@ -9088,9 +9102,18 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
   }
   const operation = String(rawInput?.operation || "").trim();
   if (!TRELIO_WORKSPACE_ACTION_OPERATIONS.has(operation)) {
+    const hint = TRELIO_WORKSPACE_ACTION_OPERATION_HINTS.get(operation);
     throw new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      "operation is not supported by this Trelio Workspace bridge dispatcher.",
+      "operation is not supported by this Trelio Workspace bridge dispatcher. "
+        + (hint
+          ? `Execute ${hint[1]} unchanged (operation=${hint[0]}).`
+          : "Use the returned action.arguments, not an action-field or native tool name."),
+      {
+        requiredAction: "execute_returned_action_arguments",
+        argumentSource: hint?.[1] ?? "action.arguments",
+        ...(hint ? { suggestedOperation: hint[0] } : {}),
+      },
     );
   }
   const parameters = normalizeWorkspaceActionParameters(rawInput?.parameters);
@@ -11371,7 +11394,7 @@ export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
 
 export const TRELIO_WORKSPACE_ACTION_TOOL = {
   name: "continue_trelio_workspace_action",
-  description: "On TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED, repeat open in details.suggestedDirectory immediately and continue.",
+  description: "Copy action.arguments; TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED: reopen details.suggestedDirectory immediately and continue.",
   inputSchema: {
     type: "object",
     additionalProperties: false,

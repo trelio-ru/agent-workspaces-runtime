@@ -86,6 +86,15 @@ plan возвращает отдельное manual-only действие и п�
 Backend и runtime обмениваются только typed actions. Command-only ответы и
 модельная интерпретация launcher/argv не входят в публичный ABI.
 
+Агент исполняет возвращённые `action.arguments` через указанный server/tool:
+имя поля, например `turnCheck`, не является операцией (`status`). Для шаблона
+добавляются только объявленные параметры. Неизвестная операция отклоняется до
+чтения registry и запуска процесса с `TRELIO_WORKSPACE_ACTION_INVALID_INPUT`.
+Ошибка содержит `requiredAction=execute_returned_action_arguments`; для
+известной путаницы она также называет точный источник аргументов и операцию.
+Подсказка не исполняет действие и не принимает алиасы. Произвольный вход не
+копируется в ошибку; успешные ответы не получают дополнительные поля.
+
 Local company search и Workspace-file search возвращают один компактный
 `nextCall`: exact continuation tool/operation плюс mapping полей выбранного
 результата. Plugin reference хранит только authority/fail-closed правила, а не

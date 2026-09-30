@@ -83,6 +83,10 @@ publication tooling также остаются вне этого публичн
   `render_trelio_local_proposal` сохраняется только из-за MCP App metadata, а
   typed `continue_trelio_workspace_action` – как bridge ABI. Старые отдельные
   local aliases и прямой pre-envelope ABI не публикуются в MCP catalog.
+- Имена полей action и native preparation tools не становятся executable
+  aliases. Unsupported operation возвращает безопасный recovery к exact
+  `action.arguments` до registry/process access; произвольный вход не отражается.
+  Подсказки добавляются только ошибкам, а обычный context budget не увеличивается.
 - Cross-repository tests используют реальный plugin checkout через
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
   не попадает в package.

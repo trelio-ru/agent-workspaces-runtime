@@ -214,6 +214,90 @@ test("typed checkpoint actions require canonical array fields", () => {
   ));
 });
 
+test("action labels and native tools give bounded recovery without executing aliases", async () => {
+  const hints = [
+    ["turnCheck", "status", "bridge.actions.turnCheck.arguments"],
+    ["turn_check", "status", "bridge.actions.turnCheck.arguments"],
+    ["prepare_agent_workspace_read", "inspect", "bridge.action.arguments"],
+    ["get_agent_workspace_file", "download_file", "bridge.action.arguments"],
+    ["prepare_agent_secret_checkout", "secret_exec", "bridge.action.arguments"],
+    ["prepare_agent_secret_browser_fill", "secret_browser_fill", "bridge.action.arguments"],
+  ];
+  for (const [operation, suggestedOperation, argumentSource] of hints) {
+    await assert.rejects(handleTrelioWorkspaceActionOperation(
+      "https://trelio.example",
+      {
+        schemaVersion: 1,
+        operation,
+        parameters: {},
+        runIdentity: { workspaceId: actionWorkspaceId, runId: actionRunId },
+      },
+      {
+        resolveRunRootDirectory: async () => assert.fail("invalid operation must not read registry"),
+        runBridge: async () => assert.fail("recovery must not launch the suggested operation"),
+      },
+    ), (error) => {
+      assert.equal(error.code, "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
+      assert.deepEqual(error.details, {
+        requiredAction: "execute_returned_action_arguments",
+        argumentSource,
+        suggestedOperation,
+      });
+      assert.ok(error.message.includes(`operation=${suggestedOperation}`));
+      assert.ok(error.message.includes(argumentSource));
+      return true;
+    });
+  }
+});
+
+test("unknown operation recovery never reflects arbitrary input or guesses a mutation", () => {
+  const privateInput = "private-example://credential-or-content";
+  assert.throws(() => buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1,
+    operation: privateInput,
+    parameters: { privateContent: privateInput },
+  }), (error) => {
+    assert.equal(error.code, "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
+    assert.deepEqual(error.details, {
+      requiredAction: "execute_returned_action_arguments",
+      argumentSource: "action.arguments",
+    });
+    assert.equal(JSON.stringify({ message: error.message, details: error.details }).includes(privateInput), false);
+    return true;
+  });
+});
+
+test("recovered turn check uses the original identity and closed status parameters", async () => {
+  const runIdentity = { workspaceId: actionWorkspaceId, runId: actionRunId };
+  let launched = 0;
+  const status = await handleTrelioWorkspaceActionOperation(
+    "https://trelio.example",
+    { schemaVersion: 1, operation: "status", parameters: {}, runIdentity },
+    {
+      resolveRunRootDirectory: async (identity) => {
+        assert.equal(identity.workspaceId, runIdentity.workspaceId);
+        assert.equal(identity.runId, runIdentity.runId);
+        return actionWorkingDirectory;
+      },
+      runBridge: async (_origin, argv) => {
+        launched += 1;
+        assert.deepEqual(argv, ["status"]);
+        return { stdout: '{"dirty":false}', stderr: "" };
+      },
+    },
+  );
+  assert.equal(status.operation, "status");
+  assert.equal(launched, 1);
+  for (const [patch, expectedCode] of [
+    [{ runIdentity: { ...runIdentity, runId: "invalid" } }, "LOCAL_CONTEXT_INVALID_INPUT"],
+    [{ parameters: { command: "finish" } }, "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"],
+  ]) {
+    assert.throws(() => buildTrelioWorkspaceActionInvocation({
+      schemaVersion: 1, operation: "status", parameters: {}, runIdentity, ...patch,
+    }), (error) => error.code === expectedCode);
+  }
+});
+
 test("run-bound actions accept an exact identity without a model-carried cwd", async () => {
   const rootDirectory = path.resolve(os.tmpdir(), "trelio-registered-run-root");
   const workspaceDirectory = path.join(rootDirectory, "workspace");

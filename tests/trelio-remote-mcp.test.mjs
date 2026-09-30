@@ -51,7 +51,32 @@ import { CodexRoutingConfigError } from "../host-runtime/scripts/trelio-codex-ro
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
 } from "../host-runtime/scripts/trelio-proposal-route-guard.mjs";
+import { handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
+
+test("local MCP delivers action-argument recovery without a diagnostic detour", async () => {
+  const response = await handleLocalMcpMessage({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "continue_trelio_workspace_action",
+      arguments: { schemaVersion: 1, operation: "turnCheck", parameters: {} },
+    },
+  }, {
+    callTool: async (_origin, _name, args) => handleTrelioWorkspaceActionOperation(
+      "https://trelio.example",
+      args,
+      { runBridge: async () => assert.fail("an invalid operation cannot launch a bridge") },
+    ),
+  });
+  assert.equal(response.result.isError, true);
+  const error = JSON.parse(response.result.content[0].text);
+  assert.equal(error.code, "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
+  assert.equal(error.details.argumentSource, "bridge.actions.turnCheck.arguments");
+  assert.equal(error.details.suggestedOperation, "status");
+  assert.equal(error.details.requiredAction, "execute_returned_action_arguments");
+});
 
 test("large private packages raise their exact runtime host floor", () => {
   assert.equal(resolveAgentSkillPackageMinimumHostVersion({

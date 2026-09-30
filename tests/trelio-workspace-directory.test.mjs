@@ -366,7 +366,7 @@ test("same-Run draft recovery preserves both histories and exposes one exact rec
   assert.equal(calls, 1, "the host must leave exact recovery execution to the agent");
   assert.match(
     TRELIO_WORKSPACE_ACTION_TOOL.description,
-    /TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED.*repeat open in details\.suggestedDirectory immediately and continue/u,
+    /Copy action\.arguments; TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED.*reopen details\.suggestedDirectory immediately and continue/u,
   );
 
   for (const mutate of [
