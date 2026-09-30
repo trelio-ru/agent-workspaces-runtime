@@ -468,6 +468,7 @@ const createRuntimeState = async ({
   const {
     requireToken,
     registerAgentRuntimeHookSession,
+    recoverRejectedBridgeSession,
     writePrivateJsonFile,
   } = await loadWorkspaceBridgeModule();
 
@@ -490,9 +491,9 @@ const createRuntimeState = async ({
       return registrationSignal;
     },
   });
-  const token = await requireToken(origin, networkOptions);
+  let token = await requireToken(origin, networkOptions);
   registrationSignal ??= networkOptions.signal;
-  const registration = await retryIdempotentRequest(() => (
+  const register = () => retryIdempotentRequest(() => (
     registerAgentRuntimeHookSession({
       origin,
       token,
@@ -502,6 +503,17 @@ const createRuntimeState = async ({
       signal: registrationSignal,
     })
   ));
+  let registration;
+  try {
+    registration = await register();
+  } catch (error) {
+    // Registration has not admitted the protected call. Only a separately
+    // confirmed device-session 401 enters normal pairing; approval still runs
+    // through the user's MCP client. Keep the SessionStart observation and the
+    // same deadline, and retry registration at most once with a replacement.
+    token = await recoverRejectedBridgeSession(origin, token, error, networkOptions);
+    registration = await register();
+  }
   const state = {
     schemaVersion: 1,
     runtimeSessionId: registration.runtimeSessionId,

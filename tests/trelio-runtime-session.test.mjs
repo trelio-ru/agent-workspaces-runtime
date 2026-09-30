@@ -1525,13 +1525,15 @@ test("SessionEnd removes the local key before a bounded remote cleanup", async (
   }
 });
 
-test("pairing recovery resumes the original call with one JSON proof after client approval", async (t) => {
+const testPairingRecovery = async (t, expiredSession) => {
   const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-pairing-"));
   const pairingId = crypto.randomUUID();
   const runtimeSessionId = crypto.randomUUID();
   const sessionId = crypto.randomUUID();
   const deviceName = 'Synthetic "Windows" device';
   const token = "twb_synthetic-hook-pairing";
+  const rejectedToken = "twb_synthetic-expired-session";
+  let rejectedReads = 0;
   let challenge;
   let approved = false;
   let creates = 0;
@@ -1542,7 +1544,12 @@ test("pairing recovery resumes the original call with one JSON proof after clien
   const server = createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     try {
-      if (request.url === "/api/agent-workspaces/bridge-pairings") {
+      if (request.headers.authorization === `Bearer ${rejectedToken}`) {
+        assert.equal(request.url, "/api/agent-workspaces/bridge-compatibility");
+        rejectedReads += 1;
+        response.statusCode = 401;
+        response.end(JSON.stringify({ code: "BRIDGE_SESSION_INVALID", message: "Session or source grant expired" }));
+      } else if (request.url === "/api/agent-workspaces/bridge-pairings") {
         assert.equal(request.headers.authorization, undefined);
         challenge = (await readRequestBody(request)).codeChallenge;
         creates += 1;
@@ -1596,6 +1603,11 @@ test("pairing recovery resumes the original call with one JSON proof after clien
   const configDirectory = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory: temporaryHome });
   const stateDigest = crypto.createHash("sha256").update(`${origin}\n${sessionId}`).digest("hex");
   const statePath = path.join(configDirectory, "runtime-sessions", `${stateDigest}.json`);
+  if (expiredSession) {
+    await writePrivateJsonFile(path.join(configDirectory, "credentials.json"), {
+      [origin]: { bridgeSessionToken: rejectedToken },
+    });
+  }
   // Deliberately put model evidence only in SessionStart. Pairing must preserve
   // that evidence so a retry never requires a new chat or model self-report.
   const started = await runHook({ hook_event_name: "SessionStart", session_id: sessionId, model: "gpt-6-astra" }, environment);
@@ -1619,6 +1631,8 @@ test("pairing recovery resumes the original call with one JSON proof after clien
   assert.equal(first.stdout.includes(token), false);
   assert.equal(first.stdout.includes("companySlug"), false);
   assert.equal(await readFile(statePath, "utf8"), pendingBefore);
+  assert.equal(rejectedReads, expiredSession ? 2 : 0, "auth rejection requires an independent read before recovery");
+  assert.equal(first.stdout.includes(rejectedToken), false);
 
   // A premature retry must stay denied and reuse the exact pending request.
   assert.equal(assertDeniedHook(await runHook(input, environment)), reason);
@@ -1653,7 +1667,14 @@ test("pairing recovery resumes the original call with one JSON proof after clien
   assert.notEqual(subsequent.updatedInput.runtimeSessionProof.nonce, proof.nonce);
   assert.equal(exchanges, 2);
   assert.equal(registrations, 1);
-});
+};
+
+for (const expiredSession of [false, true]) {
+  const action = expiredSession ? "replaces a server-rejected session" : "resumes the original call";
+  test(`pairing recovery ${action} with one JSON proof after client approval`, (t) => (
+    testPairingRecovery(t, expiredSession)
+  ));
+}
 
 test("pairing recovery without a valid public target requests only the typed login action", () => {
   const error = new Error("untrusted diagnostic text containing a verifier must not be projected");
@@ -1667,3 +1688,70 @@ test("pairing recovery without a valid public target requests only the typed log
   });
   assert.doesNotMatch(reason, /untrusted diagnostic|private synthetic|"pairingId"/u);
 });
+
+for (const scenario of [
+  { name: "permission denial", status: 403, code: "BRIDGE_SESSION_INVALID", reads: 1 },
+  { name: "unrelated OAuth rejection", status: 401, code: "MCP_UNAUTHORIZED", reads: 1 },
+  { name: "unconfirmed session rejection", status: 401, code: "BRIDGE_SESSION_INVALID", confirmation: "ready", reads: 2 },
+  { name: "failed independent probe", status: 401, code: "BRIDGE_SESSION_INVALID", confirmation: "unavailable", reads: 2 },
+]) {
+  test(`pairing recovery preserves credentials after ${scenario.name}`, async (t) => {
+    const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-pairing-guard-"));
+    const sessionId = crypto.randomUUID();
+    const token = "twb_synthetic-retained-session";
+    let reads = 0;
+    let unexpectedRequests = 0;
+    const server = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url !== "/api/agent-workspaces/bridge-compatibility") {
+        unexpectedRequests += 1;
+        response.statusCode = 500;
+        response.end(JSON.stringify({ code: "UNEXPECTED_MUTATION" }));
+        return;
+      }
+      reads += 1;
+      if (reads === 2 && scenario.confirmation === "ready") {
+        response.end(JSON.stringify({ supported: true }));
+      } else if (reads === 2 && scenario.confirmation === "unavailable") {
+        response.statusCode = 503;
+        response.end(JSON.stringify({ code: "SERVICE_UNAVAILABLE", message: "Temporary failure" }));
+      } else {
+        response.statusCode = scenario.status;
+        response.end(JSON.stringify({ code: scenario.code, message: "Synthetic rejection" }));
+      }
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      await rm(temporaryHome, { recursive: true, force: true });
+    });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const environment = {
+      HOME: temporaryHome, USERPROFILE: temporaryHome,
+      LOCALAPPDATA: path.join(temporaryHome, "AppData", "Local"),
+      CODEX_HOME: path.join(temporaryHome, ".codex"), CODEX_THREAD_ID: sessionId,
+      TRELIO_WORKSPACE_ORIGIN: origin, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
+      CLAUDE_CODE_ENTRYPOINT: "", CLAUDE_EFFORT: "",
+    };
+    const configDirectory = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory: temporaryHome });
+    await writePrivateJsonFile(path.join(configDirectory, "credentials.json"), {
+      [origin]: { bridgeSessionToken: token },
+    });
+    const input = {
+      hook_event_name: "PreToolUse", session_id: sessionId, model: "gpt-6-astra",
+      tool_name: "mcp__trelio__get_agent_instructions", tool_input: { companySlug: "example" },
+    };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      reads = 0;
+      const result = await runHook(input, environment);
+      const reason = assertDeniedHook(result);
+      assert.match(reason, new RegExp(`^${scenario.confirmation === "unavailable" ? "SERVICE_UNAVAILABLE" : scenario.code}:`, "u"));
+      assert.doesNotMatch(reason, /TRELIO_BRIDGE_PAIRING_REQUIRED|approve_agent_workspace_bridge_pairing/u);
+      assert.equal(result.stdout.includes(token), false);
+      assert.equal(reads, scenario.reads, "a repeated invocation must still have the preserved credential");
+      assert.equal(unexpectedRequests, 0, "no pairing, revoke or registration is authorized");
+      await assert.rejects(readFile(path.join(configDirectory, "pairings.json")), { code: "ENOENT" });
+    }
+  });
+}

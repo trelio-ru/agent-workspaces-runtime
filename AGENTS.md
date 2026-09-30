@@ -40,6 +40,12 @@ publication tooling также остаются вне этого публичн
   один retry исходного MCP завершает pairing и admission в той же задаче.
   Pending SessionStart observation сохраняется до регистрации; stdout hook
   содержит только JSON, без CLI status line успешного обмена и private verifier.
+- `BRIDGE_SESSION_INVALID`/`BRIDGE_SESSION_REQUIRED` с HTTP 401 до hook admission
+  или в login требуют отдельного authenticated read-only подтверждения. Только
+  подтверждённый отказ запускает обычный pairing без ручного revoke и сброса
+  OAuth; прежний credential сохраняется до approval и защищённой записи замены.
+  403, transport/5xx, version gate и противоречивый успешный probe не разрешают
+  замену. Исходная рабочая mutation не повторяется этим recovery.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
 - Browser fill повторяет только value-free preflight: временно отсутствующее
   AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,

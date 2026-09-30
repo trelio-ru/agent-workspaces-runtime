@@ -7779,6 +7779,16 @@ test("Windows DPAPI protects and restores a bridge session for the current user"
   );
 });
 
+// Storage migrations are local operations. Exercise the exported reader rather
+// than login, which now deliberately verifies the session against the server.
+// The child reports presence only; fixture credentials never enter stdout.
+const storedSessionReadArguments = (origin) => [
+  "--input-type=module",
+  "--eval",
+  `import { loadToken } from ${JSON.stringify(pathToFileURL(bridgePath).href)}; process.stdout.write(String(Boolean(await loadToken(process.argv[1]))));`,
+  origin,
+];
+
 test("Windows DPAPI migrates a legacy plaintext bridge session before reuse", {
   skip: process.platform !== "win32",
 }, async () => {
@@ -7809,10 +7819,10 @@ test("Windows DPAPI migrates a legacy plaintext bridge session before reuse", {
 
     const migrated = await execFileAsync(
       process.execPath,
-      [bridgePath, "login", "--origin", origin],
+      storedSessionReadArguments(origin),
       { encoding: "utf8", env: childEnvironment },
     );
-    assert.match(migrated.stdout, /уже подключён через device-session/u);
+    assert.equal(migrated.stdout, "true");
 
     const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
     assert.equal(credentials[origin].bridgeSessionToken, undefined);
@@ -7824,10 +7834,10 @@ test("Windows DPAPI migrates a legacy plaintext bridge session before reuse", {
 
     const reused = await execFileAsync(
       process.execPath,
-      [bridgePath, "login", "--origin", origin],
+      storedSessionReadArguments(origin),
       { encoding: "utf8", env: childEnvironment },
     );
-    assert.match(reused.stdout, /уже подключён через device-session/u);
+    assert.equal(reused.stdout, "true");
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
@@ -7945,8 +7955,10 @@ test("Windows bridge resolves differing DPAPI and legacy file sessions from live
   const seedProtectedToken = async (token) => {
     await rm(credentialFile, { force: true });
     await writeLegacyToken(token);
-    const migrated = await runLogin();
-    assert.match(migrated.stdout, /уже подключён через device-session/u);
+    const migrated = await execFileAsync(process.execPath, storedSessionReadArguments(origin), {
+      encoding: "utf8", env: childEnvironment,
+    });
+    assert.equal(migrated.stdout, "true");
   };
   const readCredentials = async () => JSON.parse(await readFile(credentialFile, "utf8"));
 
@@ -8145,14 +8157,14 @@ test("macOS bridge migrates a legacy file session into Keychain before deleting 
 
     const result = await execFileAsync(
       process.execPath,
-      [bridgePath, "login", "--origin", origin],
+      storedSessionReadArguments(origin),
       {
         encoding: "utf8",
         env: childEnvironment,
       },
     );
 
-    assert.match(result.stdout, /уже подключён через device-session/u);
+    assert.equal(result.stdout, "true");
     const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
     assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
     // Rebuild the unsigned source-reviewed helper at the same OS user. The
@@ -8164,10 +8176,10 @@ test("macOS bridge migrates a legacy file session into Keychain before deleting 
     );
     const reused = await execFileAsync(
       process.execPath,
-      [bridgePath, "login", "--origin", origin],
+      storedSessionReadArguments(origin),
       { encoding: "utf8", env: childEnvironment },
     );
-    assert.match(reused.stdout, /уже подключён через device-session/u);
+    assert.equal(reused.stdout, "true");
     assert.equal(
       (await readdir(credentialDirectory)).filter(
         (name) => name.startsWith(".keychain-device-session-migrated-"),
@@ -8231,11 +8243,11 @@ test("macOS bridge preserves plaintext without opening UI when Keychain is locke
 
     const result = await execFileAsync(
       process.execPath,
-      [bridgePath, "login", "--origin", origin],
+      storedSessionReadArguments(origin),
       { encoding: "utf8", env: childEnvironment, timeout: 5_000 },
     );
 
-    assert.match(result.stdout, /уже подключён через device-session/u);
+    assert.equal(result.stdout, "true");
     assert.doesNotMatch(result.stdout, new RegExp(legacyToken));
     assert.doesNotMatch(result.stderr, new RegExp(legacyToken));
     const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
@@ -8384,10 +8396,10 @@ test("macOS bridge resolves differing Keychain and legacy file sessions from liv
     await writeLegacyToken(token);
     const migrated = await execFileAsync(
       process.execPath,
-      [bridgePath, "login", "--origin", origin],
+      storedSessionReadArguments(origin),
       { encoding: "utf8", env: childEnvironment },
     );
-    assert.match(migrated.stdout, /уже подключён через device-session/u);
+    assert.equal(migrated.stdout, "true");
     const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
     assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
   };
@@ -9580,6 +9592,9 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
   let createRequests = 0;
   let exchangeRequests = 0;
   let serverError = null;
+  let sessionValid = true;
+  let sessionToken = "twb_integration-device-session";
+  let rejectedReads = 0;
 
   const server = createServer(async (request, response) => {
     try {
@@ -9612,6 +9627,8 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
         && request.url === `/api/agent-workspaces/bridge-pairings/${pairingId}/exchange`
       ) {
         exchangeRequests += 1;
+        sessionToken = exchangeRequests === 1 ? sessionToken : "twb_integration-replacement-session";
+        sessionValid = true;
         assert.equal(
           createHash("sha256").update(body.codeVerifier).digest("base64url"),
           codeChallenge,
@@ -9619,7 +9636,7 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
         );
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({
-          accessToken: "twb_integration-device-session",
+          accessToken: sessionToken,
           tokenType: "Bearer",
           sessionId: "55555555-5555-4555-8555-555555555555",
           capabilities: ["workspace:read", "workspace:write"],
@@ -9629,6 +9646,18 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
         return;
       }
 
+      if (request.method === "GET" && request.url === "/api/agent-workspaces/bridge-compatibility") {
+        assert.equal(request.headers.authorization, `Bearer ${sessionToken}`);
+        response.setHeader("content-type", "application/json");
+        if (!sessionValid) {
+          rejectedReads += 1;
+          response.statusCode = 401;
+          response.end(JSON.stringify({ code: "BRIDGE_SESSION_INVALID", message: "Session expired" }));
+        } else {
+          response.end(JSON.stringify({ supported: true }));
+        }
+        return;
+      }
       response.statusCode = 404;
       response.end("Not found");
     } catch (error) {
@@ -9773,6 +9802,26 @@ test("bridge pairs once through MCP approval and reuses the narrow local device 
     assert.match(reused.stdout, /уже подключён через device-session/);
     assert.equal(createRequests, 1);
     assert.equal(exchangeRequests, 1);
+    // A persisted credential can outlive its source OAuth grant. Login must
+    // check the live session, preserve normal approval and replace it in the
+    // same platform store, without a remote revoke or manual file cleanup.
+    sessionValid = false;
+    const login = () => execFileAsync(process.execPath, [bridgePath, "login", "--origin", origin], {
+      encoding: "utf8", env: childEnvironment,
+    });
+    await assert.rejects(login(), (error) => {
+      assert.match(error.stderr, /TRELIO_BRIDGE_PAIRING_REQUIRED/u);
+      assert.doesNotMatch(error.stdout, /уже подключён/u);
+      return true;
+    });
+    assert.equal(rejectedReads, 2);
+    assert.equal(createRequests, 2);
+    const replacement = await login();
+    assert.match(replacement.stdout, /Подключение к Trelio восстановлено/u);
+    assert.equal(exchangeRequests, 2);
+    assert.equal(rejectedReads, 4);
+    assert.match((await login()).stdout, /уже подключён через device-session/u);
+    assert.equal(createRequests, 2);
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));

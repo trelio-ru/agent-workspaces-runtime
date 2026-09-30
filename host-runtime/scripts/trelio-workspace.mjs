@@ -3470,7 +3470,7 @@ const probeBridgeSessionToken = async (origin, token, { signal } = {}) => {
       && error.statusCode === 401
       && ["BRIDGE_SESSION_INVALID", "BRIDGE_SESSION_REQUIRED"].includes(error.code)
     ) {
-      return { status: "invalid" };
+      return { status: "invalid", error };
     }
     // A transport failure, hard version gate or server error says nothing
     // about the credential. Keep both local copies and let the original
@@ -5660,10 +5660,58 @@ export const requireToken = async (origin, options = {}) => {
   return beginBridgePairing(origin, options);
 };
 
+/**
+ * Recover only a server-rejected device credential, never an OAuth, policy or
+ * transport failure. A second, independent authenticated read establishes that
+ * the stored session really cannot be reused. The old credential stays in its
+ * protected store until ordinary MCP approval and verified persistence replace
+ * it: deleting/revoking an already unusable session is not a prerequisite.
+ *
+ * Callers may use this only before work starts (login or hook registration).
+ * It must never replay a Workspace/provider mutation after an ambiguous reply.
+ */
+export const recoverRejectedBridgeSession = async (origin, token, error, options = {}) => {
+  if (
+    !String(token || "").startsWith("twb_")
+    || !(error instanceof TrelioApiError)
+    || error.statusCode !== 401
+    || !["BRIDGE_SESSION_INVALID", "BRIDGE_SESSION_REQUIRED"].includes(error.code)
+  ) {
+    throw error;
+  }
+
+  const confirmation = await probeBridgeSessionToken(origin, token, options);
+  if (confirmation.status === "unknown") throw confirmation.error;
+  if (confirmation.status !== "invalid") throw error;
+
+  // Another client may have completed pairing while this process confirmed its
+  // stale token. Reuse that newer credential rather than overwrite it or start
+  // a duplicate request. The caller still validates it before doing any work.
+  const currentToken = await loadBridgeSessionToken(origin, options);
+  if (currentToken && !secretsMatch(currentToken, token)) return currentToken;
+
+  const pairedToken = await exchangePendingBridgePairing(origin, options);
+  if (pairedToken) return pairedToken;
+  return beginBridgePairing(origin, options);
+};
+
 const pairBridge = async (origin) => {
   const existingSession = await loadBridgeSessionToken(origin);
 
   if (existingSession) {
+    const probe = await probeBridgeSessionToken(origin, existingSession);
+    if (probe.status === "unknown") throw probe.error;
+    if (probe.status === "invalid") {
+      const recovered = await recoverRejectedBridgeSession(origin, existingSession, probe.error, {
+        onStatus: () => undefined,
+      });
+      // A concurrent client can supply the replacement too. Never claim ready
+      // merely because a new value exists in the local credential store.
+      const verified = await probeBridgeSessionToken(origin, recovered);
+      if (verified.status !== "ready") throw verified.error;
+      process.stdout.write("Подключение к Trelio восстановлено; device-session проверена на сервере.\n");
+      return;
+    }
     process.stdout.write("Trelio bridge уже подключён через device-session.\n");
     return;
   }
