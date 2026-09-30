@@ -9578,7 +9578,10 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
 });
 
 test("bridge pairs once through MCP approval and reuses the narrow local device session", {
-  timeout: 15_000,
+  // Two complete pairing cycles now include invalid-session recovery. Windows
+  // launches native ACL/DPAPI helpers for every isolated CLI invocation; its
+  // integration-test budget covers that work without changing runtime deadlines.
+  timeout: process.platform === "win32" ? 45_000 : 15_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-pairing-test-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
