@@ -112,6 +112,28 @@ navigation, selectors, read guards и mutation authority. Profile/session име
 namespace `skill/company/member/connection` и не переиспользуется между навыками;
 общий runtime не означает общий аккаунт, cookies или external authority.
 
+`withPersistentBrowserSession` по умолчанию использует `startInBackground=true`
+(host >= 3.2.0) и
+запускает headed messenger profile без окна и после `prepareContext` создаёт
+первую страницу через `Target.createTarget` с `background=true`, `focus=false`.
+Exact target ID привязывается к persistent context, чужое popup не принимается.
+Используется native viewport: изменение window bounds через Playwright
+`setViewportSize` может активировать Chrome на macOS. Snapshot связывается с
+фактической геометрией текущей страницы.
+Playwright 1.60 persistent launch обычно создаёт foreground `about:blank` и
+ждёт его; поэтому background path использует публичный `ignoreDefaultArgs=true`
+и host-owned launch policy. В ней сохраняются profile/pipe binding, отключение
+extensions/sync/startup network и OS credential prompts; provider arguments
+не могут переопределять profile, debug transport или startup window.
+Последующие `context.newPage` создают фоновые вкладки в том же окне, а
+`page.bringToFront` завершается без активации. Только явный
+`startInBackground=false` сохраняет foreground lifecycle; provider выбирает
+его для согласованного ручного шага по просьбе пользователя показать окно.
+Headless path сохраняет прежний контракт. Runtime не использует
+AppleScript, OS focus restoration или hide/minimize уже открытого окна.
+Provider DOM/popup guards остаются у adapter и должны останавливать
+самопроизвольные foreground popup до их открытия.
+
 При company E2EE bridge до apply локально шифрует title, description, search
 terms, instructions, summary/reason, Remote MCP config, runtime manifest и
 сам package в bounded `TRELIOE1`. Backend сохраняет только markers, ciphertext

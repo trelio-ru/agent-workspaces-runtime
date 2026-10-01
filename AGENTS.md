@@ -62,6 +62,15 @@ publication tooling также остаются вне этого публичн
   lifecycle и profile lock. Provider-specific navigation, selectors, read
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
+- Persistent messenger adapter по умолчанию использует `startInBackground=true`: headed
+  process запускается без startup window, provider guards ставятся до exact
+  inactive CDP target, viewport не изменяет native window bounds. Host не
+  активирует и не скрывает чужие приложения. Launch policy и target binding
+  проверяются deterministic tests и synthetic macOS focus smoke.
+  Последующие `context.newPage` также неактивны; `bringToFront` не меняет фокус.
+  Явный `startInBackground=false` допустим только для согласованного ручного
+  шага, когда пользователь попросил показать окно. Provider popup guards
+  обязаны исключать самопроизвольное открытие foreground-окон.
 - Playwright bootstrap допускает отдельную системную Node/npm-установку, даже
   когда host работает своим Node и очищает runtime PATH. Запускать можно только
   exact `npm-cli.js`, найденный в стандартном absolute layout либо через

@@ -423,6 +423,104 @@ const withExclusiveProfileLock = async (lock, label, callback) => {
 };
 
 /**
+ * Persistent Playwright normally opens about:blank and waits for that page
+ * before returning. Removing just the URL hangs launch; minimizing afterwards
+ * has already activated Chrome. Its public ignoreDefaultArgs=true option lets
+ * the host start with no window, then create the first target inactive via CDP.
+ * Keep this reviewed launch policy here, rather than in each provider. These
+ * switches preserve the relevant pinned Playwright 1.60 defaults (no extensions,
+ * sync, startup network, background throttling or OS credential prompts). No
+ * private Playwright fields, debug TCP endpoint or OS focus restoration is used.
+ */
+export const backgroundPersistentLaunchOptions = (profileDirectory, launchArguments = []) => {
+  if (!Array.isArray(launchArguments) || launchArguments.some((argument) => (
+    typeof argument !== "string" || !argument.startsWith("--")
+    || /^--(?:user-data-dir|remote-debugging|app|restore-last-session|new-window|headless|start-maximized|start-minimized)(?:[=-]|$)/u.test(argument)
+  ))) fail("BROWSER_SESSION_BACKGROUND_ARGUMENT_INVALID", "Background launch cannot override the managed profile, transport or initial window.");
+  return {
+    ignoreDefaultArgs: true,
+    viewport: null,
+    args: [
+      `--user-data-dir=${profileDirectory}`,
+      "--remote-debugging-pipe",
+      "--no-startup-window",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-session-crashed-bubble",
+      "--disable-blink-features=AutomationControlled",
+      "--disable-background-networking",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-back-forward-cache",
+      "--disable-breakpad",
+      "--disable-component-update",
+      "--disable-component-extensions-with-background-pages",
+      "--disable-default-apps",
+      "--disable-extensions",
+      "--disable-sync",
+      "--disable-dev-shm-usage",
+      "--disable-edgeupdater",
+      "--edge-skip-compat-layer-relaunch",
+      "--disable-search-engine-choice-screen",
+      "--disable-features=DestroyProfileOnBrowserClose,HttpsUpgrades,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
+      "--enable-features=CDPScreenshotNewSurface",
+      "--enable-unsafe-swiftshader",
+      "--allow-pre-commit-input",
+      "--disable-popup-blocking",
+      "--disable-prompt-on-repost",
+      "--force-color-profile=srgb",
+      "--metrics-recording-only",
+      "--password-store=basic",
+      "--use-mock-keychain",
+      "--no-service-autorun",
+      ...launchArguments,
+    ],
+  };
+};
+
+export const createBackgroundPersistentPage = async (context, { initial = false } = {}) => {
+  const hasPages = context.pages().some((page) => !page.isClosed());
+  if (initial && hasPages) fail("BROWSER_SESSION_BACKGROUND_START_FAILED", "Background browser unexpectedly created a startup page.");
+  const session = await context.browser().newBrowserCDPSession();
+  let targetId;
+  let resolveTarget;
+  const target = new Promise((resolve) => { resolveTarget = resolve; });
+  const ready = context.waitForEvent("page", { timeout: 10_000, predicate: async (page) => {
+    const expected = await target;
+    if (!expected || page.isClosed() || page.context() !== context) return false;
+    const binding = await context.newCDPSession(page);
+    try {
+      const { targetInfo } = await binding.send("Target.getTargetInfo");
+      // A concurrent provider popup cannot replace the exact host-created page.
+      // Chromium can report a non-empty browserContextId for its default
+      // persistent context. Public Page.context identity binds the context;
+      // absence of that protocol field is not a portable ownership criterion.
+      return targetInfo.targetId === expected;
+    } finally { await binding.detach(); }
+  } });
+  ready.catch(() => {});
+  try {
+    try {
+      ({ targetId } = await session.send("Target.createTarget", {
+        url: "about:blank", newWindow: !hasPages, background: true, focus: false,
+        ...(!hasPages ? { width: 1280, height: 1000 } : {}),
+      }));
+    } finally { resolveTarget(targetId); }
+    // Use the native viewport for the lifetime of this window. Playwright's
+    // setViewportSize changes native bounds and can activate macOS Chrome;
+    // adapters/snapshots must observe the actual viewport instead of resizing.
+    const page = await ready;
+    // Old adapters used bringToFront merely to hand out an assist session.
+    // Preserve that call's completion without silently overriding the host's
+    // background default. A provider explicitly opts into foreground launch
+    // with startInBackground=false for a user-requested visible manual step.
+    page.bringToFront = async () => {};
+    return page;
+  } finally { await session.detach(); }
+};
+
+/**
  * Open one provider-owned persistent profile under the host lease.
  * prepareContext runs before the first page is handed to the adapter, which
  * lets MAX install its WebSocket and manual-control gates before navigation.
@@ -438,7 +536,9 @@ export const withPersistentBrowserSession = async ({
   prepareContext = null,
   preparePage = null,
   launchArguments = [],
+  startInBackground = true,
 }, callback) => {
+  if (typeof startInBackground !== "boolean") fail("BROWSER_SESSION_BACKGROUND_ARGUMENT_INVALID", "startInBackground must be an explicit boolean.");
   const binding = readBrowserSessionBinding({ expectedSessionClass: "messenger-profile" });
   return withExclusiveProfileLock(lockPath, label, async () => {
     privateDirectory(profileDirectory);
@@ -463,6 +563,8 @@ export const withPersistentBrowserSession = async ({
         "--disable-blink-features=AutomationControlled",
         ...launchArguments,
       ],
+      ...(headed && startInBackground
+        ? backgroundPersistentLaunchOptions(profileDirectory, launchArguments) : {}),
     });
     let closed = false;
     context.once("close", () => { closed = true; });
@@ -478,7 +580,12 @@ export const withPersistentBrowserSession = async ({
     process.once("SIGINT", close);
     try {
       const contextValue = prepareContext ? await prepareContext(context, binding) : undefined;
-      const page = context.pages()[0] || await context.newPage();
+      const page = headed && startInBackground
+        ? await createBackgroundPersistentPage(context, { initial: true })
+        : context.pages()[0] || await context.newPage();
+      // Subsequent host-owned tabs must follow the same contract as the first.
+      // A newPage call must not become a hidden foreground override.
+      if (headed && startInBackground) context.newPage = () => createBackgroundPersistentPage(context);
       if (preparePage) await preparePage(page, contextValue, binding);
       return await callback(page, contextValue, binding);
     } finally {
