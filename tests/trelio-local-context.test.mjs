@@ -1317,8 +1317,11 @@ test("agent-guidance routing ranks skills and published procedures in one local 
     (_, index) => ({ id: `unrelated-${index}`, name: `Лишний проект ${index}` }),
   );
   mirrorWithStorageInventory.company.usageBytes = 9_999_999;
+  mirrorWithStorageInventory.agentSkills.projects = [{ projectId: mirror.projects[0].id,
+    skills: mirrorWithStorageInventory.agentSkills.company }];
   const result = handleNativeLocalContextRead(mirrorWithStorageInventory, "search_agent_guidance", {
     companySlug: "acme",
+    projectSlug: "mobile",
     query: "кто в отпуске",
     hints: ["согласование", "отсутствие"],
     limit: 5,
@@ -1343,6 +1346,42 @@ test("agent-guidance routing ranks skills and published procedures in one local 
   const skill = result.guidance.find(({ kind }) => kind === "skill");
   assert.deepEqual(skill.connection, { status: "ready", configured: true });
   assert.doesNotMatch(JSON.stringify(result), /must-never-reach-guidance-search/u);
+});
+
+test("unified local search keeps compact guidance independent of material limits and intent", () => {
+  const snapshot = structuredClone(mirror);
+  const companyProcedure = structuredClone(snapshot.agentProcedures[0]);
+  companyProcedure.project = null;
+  companyProcedure.procedure.id = "99999999-9999-4999-8999-999999999999";
+  snapshot.agentProcedures.push(companyProcedure);
+  snapshot.agentSkills.company.push(...[1, 2, 3].map((index) => ({
+    ...snapshot.agentSkills.company[0], id: `calendar-${index}`,
+  })));
+  snapshot.agentSkills.projects = [{ projectId: snapshot.projects[0].id, skills: snapshot.agentSkills.company }];
+  const input = { queries: ["fencing token"], companySlugs: ["acme"], intent: "согласование отпуска", limit: 1 };
+  const result = handleNativeLocalContextRead(snapshot, "search", input);
+  assert.deepEqual(result.results, searchCompanyContextMirror(snapshot, input.queries, 1).results);
+  assert.equal(result.guidance.items.length, 3);
+  assert.equal(result.guidance.hasMore, true);
+  assert.doesNotMatch(JSON.stringify(result.guidance), /instructionsMarkdown|Проверь календарь|must-never-reach|config|secretBindings/);
+  const expanded = handleNativeLocalContextRead(snapshot, "search", { ...input, projectSlug: "mobile", guidanceLimit: 5 });
+  const inherited = expanded.guidance.items.find((item) => item.read.arguments.procedureId === companyProcedure.procedure.id);
+  assert.deepEqual(inherited.read.arguments, { companySlug: "acme", procedureId: companyProcedure.procedure.id });
+  assert.equal(handleNativeLocalContextRead(snapshot, inherited.read.tool, inherited.read.arguments).project, null);
+  assert.equal(result.guidance.items.some((item) => item.read.arguments.procedureId === snapshot.agentProcedures[0].procedure.id), false);
+  assert.deepEqual(handleNativeLocalContextRead(snapshot, "search", { queries: ["fencing token"] }).guidance,
+    { status: "requires_scope" });
+  assert.deepEqual(handleNativeLocalContextRead({ ...snapshot, agentSkills: null }, "search", input).guidance,
+    { status: "unavailable", code: "MCP_INSUFFICIENT_SCOPE", requiredScope: "mcp:workspaces:read" });
+  assert.deepEqual(handleNativeLocalContextRead(snapshot, "search", { ...input, projectSlug: "hidden" }).guidance,
+    { status: "unavailable", code: "GUIDANCE_SCOPE_UNAVAILABLE" });
+  assert.deepEqual(handleNativeLocalContextRead({ ...snapshot, company: { ...snapshot.company, enabledModules: [] } },
+    "search", input).guidance, { status: "unavailable", code: "AGENT_WORKSPACES_MODULE_DISABLED" });
+  assert.deepEqual(handleNativeLocalContextRead(snapshot, "search", { ...input, intent: " согласование отпуска " }).guidance,
+    result.guidance, "Native trimmed arguments and direct local continuations agree");
+  for (const patch of [{ guidanceLimit: 6 }, { guidanceLimit: 1.5 }, { projectSlug: "mobile", companySlugs: [] }]) {
+    assert.throws(() => handleNativeLocalContextRead(snapshot, "search", { ...input, ...patch }));
+  }
 });
 
 test("exact local procedure read returns only immutable published authority", () => {

@@ -77,6 +77,11 @@ publication tooling также остаются вне этого публичн
   проверенную realpath-ссылку `~/.local/bin/npm`, текущим Node и с `shell:false`;
   `npm`, `npm.cmd` и другой shell-wrapper не исполняются.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
+- `search` возвращает компактный `guidance` перед материалами; matching и
+  projection генерируются из backend pure module через
+  `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.
+  Проверяй `--check`, scope parity и раздельные limits. Legacy guidance tool
+  сохраняется, а searched block не требует второго catalog call.
 
 ## Граница plugin/runtime
 

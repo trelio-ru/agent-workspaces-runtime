@@ -1,3 +1,4 @@
+import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -5678,67 +5679,22 @@ const searchAgentGuidanceFromMirror = (mirror, rawInput) => {
   const procedures = (mirror.agentProcedures ?? []).filter((procedure) => (
     procedure?.kind === "procedure"
     && procedure?.procedure?.state === "published"
-    && (!project || procedure?.project?.id === project.id)
+    && (!procedure.project || (project && procedure.project.id === project.id))
   ));
-  const phrase = normalizeSearchText(query);
-  const terms = [...new Set(
-    [query, ...hints]
-      .flatMap((value) => normalizeSearchText(value).split(" "))
-      .filter((value) => value.length >= 2),
-  )];
-
   const documents = [
-    ...skills.map((skill) => ({ kind: "skill", source: skill })),
-    ...procedures.map((procedure) => ({ kind: "procedure", source: procedure })),
+    ...skills.filter((skill) => skill.enabled !== false).map((skill) => ({ ...skill, kind: "skill", source: skill })),
+    ...procedures.map((procedure) => ({
+      ...procedure.revision, id: procedure.procedure.id, catalogSlug: procedure.procedure.id,
+      kind: "procedure", source: procedure,
+    })),
   ];
-  const ranked = documents.map((document) => {
-    const searchable = document.kind === "procedure"
-      ? document.source.revision
-      : document.source;
-    const fields = {
-      id: normalizeSearchText(document.kind === "procedure"
-        ? document.source.procedure?.id
-        : `${document.source.id || ""} ${document.source.catalogSlug || ""}`),
-      title: normalizeSearchText(searchable?.title),
-      description: normalizeSearchText(searchable?.description),
-      search_terms: normalizeSearchText((searchable?.searchTerms ?? []).join(" ")),
-    };
-    const weights = { id: 5, title: 6, description: 2, search_terms: 4 };
-    const matchedFields = Object.entries(fields)
-      .filter(([, text]) => terms.some((term) => text.includes(term)))
-      .map(([field]) => field);
-    const matchedTerms = terms.filter((term) => Object.values(fields).some((text) => (
-      text.includes(term)
-    )));
-    const phraseScore = phrase
-      ? Object.entries(fields).reduce((score, [field, text]) => (
-          score + (text.includes(phrase) ? weights[field] * 3 : 0)
-        ), 0)
-      : 0;
-    const score = phraseScore + matchedFields.reduce((total, field) => (
-      total + weights[field] * matchedTerms.length
-    ), 0);
-    return { document, score, matchedTerms, matchedFields };
-  }).filter((candidate) => candidate.score > 0)
-    .sort((left, right) => (
-      right.score - left.score
-      || String(
-        left.document.kind === "procedure"
-          ? left.document.source.revision?.title
-          : left.document.source.title,
-      ).localeCompare(String(
-        right.document.kind === "procedure"
-          ? right.document.source.revision?.title
-          : right.document.source.title,
-      ), "ru")
-    ))
-    .slice(0, limit);
+  const ranked = rankAgentSkillSearchDocuments(documents, { query, hints, limit });
 
   return {
     company: buildLocalCompanySummary(mirror.company),
     project: project ? { id: project.id, slug: project.slug, name: project.name } : null,
     query: { text: query, hints },
-    guidance: ranked.map(({ document, matchedTerms, matchedFields }, index) => {
+    guidance: ranked.map(({ skill: document, matchedTerms, matchedFields }, index) => {
       const match = { rank: index + 1, matchedTerms, matchedFields };
       if (document.kind === "procedure") {
         const procedure = document.source;
@@ -5788,19 +5744,12 @@ const searchAgentGuidanceFromMirror = (mirror, rawInput) => {
 
 const getAgentProcedureFromMirror = (mirror, rawInput) => {
   const procedureId = normalizeUuid(rawInput?.procedureId, "procedureId");
-  const projectSlug = normalizeBoundedString(rawInput?.projectSlug, "projectSlug", 120);
-  const project = resolveMirrorProjectBySlug(mirror, projectSlug);
-  if (!project) {
-    throw new TrelioLocalContextError(
-      "LOCAL_CONTEXT_RESULT_NOT_FOUND",
-      "Project was not found or is not available in the current local company snapshot.",
-    );
-  }
+  const { project } = resolveLocalAgentSkillScope(mirror, rawInput?.projectSlug);
   const procedure = (mirror.agentProcedures ?? []).find((candidate) => (
     candidate?.kind === "procedure"
     && candidate?.procedure?.id === procedureId
     && candidate?.procedure?.state === "published"
-    && candidate?.project?.id === project.id
+    && (candidate.project?.id ?? null) === (project?.id ?? null)
   ));
   if (!procedure) {
     throw new TrelioLocalContextError(
@@ -5809,6 +5758,42 @@ const getAgentProcedureFromMirror = (mirror, rawInput) => {
     );
   }
   return structuredClone(procedure);
+};
+
+// The selected mirror already has live company ACL and OAuth-filtered catalogs.
+// Cross-company discovery must not pick a business scope implicitly; keep the
+// guidance result visibly unresolved while preserving independent materials.
+const searchUnifiedGuidanceFromMirror = (mirror, rawInput) => {
+  // Continuations may arrive without native Zod validation. Reject malformed
+  // new fields before reading catalog data instead of silently widening scope.
+  const input = {
+    ...rawInput,
+    ...(rawInput.intent !== undefined ? { intent: normalizeBoundedString(rawInput.intent, "intent", 500) } : {}),
+    ...(rawInput.projectSlug !== undefined ? { projectSlug: normalizeBoundedString(rawInput.projectSlug, "projectSlug", 120) } : {}),
+  };
+  if (input.guidanceLimit !== undefined
+      && (!Number.isInteger(input.guidanceLimit) || input.guidanceLimit < 1 || input.guidanceLimit > 5)) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "guidanceLimit must be an integer from 1 to 5.");
+  }
+  const companies = [...new Set((input.companySlugs ?? []).map((slug) => String(slug).trim().toLowerCase()))];
+  if (input.projectSlug && companies.length !== 1) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "projectSlug requires exactly one companySlugs entry.");
+  }
+  if (companies.length !== 1) return { status: "requires_scope" };
+  if (companies[0] !== mirror.company.slug) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND", "Company does not match the selected mirror.");
+  }
+  if (!mirror.agentSkills) return { status: "unavailable", code: "MCP_INSUFFICIENT_SCOPE", requiredScope: "mcp:workspaces:read" };
+  if (Array.isArray(mirror.company.enabledModules) && !mirror.company.enabledModules.includes("agent-workspaces")) {
+    return { status: "unavailable", code: "AGENT_WORKSPACES_MODULE_DISABLED" };
+  }
+  if (input.projectSlug && !(mirror.projects ?? []).some((project) => project.slug === input.projectSlug)) {
+    return { status: "unavailable", code: "GUIDANCE_SCOPE_UNAVAILABLE" };
+  }
+  const search = searchAgentGuidanceFromMirror(mirror, { ...input, ...guidanceSearchInput(input) });
+  return compactSearchGuidance(search.guidance, {
+    companySlug: mirror.company.slug, projectSlug: search.project?.slug,
+  }, input.guidanceLimit);
 };
 
 const listDomainDocumentsFromMirror = (mirror, type, rawInput) => {
@@ -6329,11 +6314,13 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
     ? rawArguments
     : {};
   if (nativeTool === "search") {
-    return searchCompanyContextMirror(
-      mirror,
-      input.queries,
-      input.limit,
-    );
+    // Validate/normalize the existing query contract before matching guidance.
+    // This also preserves the same material output for legacy query arguments.
+    const context = searchCompanyContextMirror(mirror, input.queries, input.limit);
+    return {
+      guidance: searchUnifiedGuidanceFromMirror(mirror, { ...input, queries: context.queries }),
+      ...context,
+    };
   }
   if (nativeTool === "search_tasks") return searchTasksFromMirror(mirror, input);
   if (nativeTool === "search_agent_secrets") return searchAgentSecretsFromMirror(mirror, input);
@@ -7936,7 +7923,7 @@ export const handleTrelioLocalContextOperation = async (
     return handleNativeLocalContextRead(detailedMirror, nativeTool, input);
   }
   if (operation === "search") {
-    return searchCompanyContextMirror(ready.mirror, rawInput?.queries, rawInput?.limit);
+    return handleNativeLocalContextRead(ready.mirror, "search", rawInput);
   }
   if (operation === "search_workspace_files") {
     return searchWorkspaceFilesFromMirror(ready.mirror, rawInput?.queries, rawInput?.limit);

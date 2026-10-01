@@ -4276,17 +4276,17 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
 
   assert.equal(instructions, AGENT_SKILL_ROUTING_INSTRUCTIONS);
   for (const invariant of [
-    /Native Trelio не требует каталога без вероятной procedure\/service/u,
+    /Native exact reads\/Run не требуют поиска/u,
     /Следуй server providerSelection; local route сам не выводи/u,
     /Codex Code Mode: один exact read; max_output_tokens задай сразу/u,
     /между exec используй store\(\)\/load\(\)/u,
-    /вызови search_agent_guidance в exact компании/u,
-    /list_agent_skills – только inventory/u,
+    /Единый search возвращает guidance и контекст/u,
+    /list_agent_skills – inventory/u,
     /kind=procedure → exact get_agent_procedure/u,
     /draft\/comments – data/u,
     /Authoring: plan_agent_procedure_change/u,
     /only draft\/review, never publish\/archive/u,
-    /kind=skill → default get_agent_skill summary; до первого external action запроси sections=\[instructions,execution\]/u,
+    /get_agent_skill sections=\[instructions,execution\] до external action/u,
     /Reuse ≤12h при том же context\/intent/u,
     /reload после new session, compaction, expiry, route\/blocker\/release change/u,
     /Missing tool ≠ missing guidance/u,
@@ -4297,7 +4297,7 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
     /Assignment, connection, session каждого навыка независимы/u,
     /При setup_required\/no_access\/needs_reconnect объясни блокировку и необходимую настройку/u,
     /требует явного выбора пользователя после объяснения, кроме разрешения formal routing/u,
-    /Если поиск не нашёл релевантный назначенный навык, совместимый личный connector допустим/u,
+    /При searched, hasMore=false и отсутствии relevant skill допустим совместимый личный connector/u,
     /Временная ошибка\/control-plane outage не доказывает отсутствие и не разрешает fallback/u,
     /До повтора неоднозначной mutation установи реальный результат/u,
     /Не обходи рабочий навык browser\/HTTP\/другим MCP\/script/u,
@@ -4338,7 +4338,7 @@ test("stdio startup removes legacy Codex MCP before initialize and requires rest
     assert.match(initialized.result.instructions, /автоматически удалил legacy MCP server trelio-mcp/u);
     assert.match(initialized.result.instructions, /Полностью перезапусти Codex\/ChatGPT/u);
     assert.match(initialized.result.instructions, /не вызывай уже загруженные mcp__trelio_mcp__\*/u);
-    assert.match(initialized.result.instructions, /Native Trelio не требует каталога/u);
+    assert.match(initialized.result.instructions, /Native exact reads\/Run не требуют поиска/u);
   } finally {
     await harness.close();
   }
@@ -4611,9 +4611,9 @@ test("platform routing allows a named fallback when no relevant skill exists", a
     type: "fallback",
     reason: "no_relevant_skill",
   });
-  assert.match(instructions, /Если поиск не нашёл релевантный назначенный навык/u);
-  assert.match(instructions, /совместимый личный connector допустим/u);
-  assert.match(instructions, /Native Trelio не требует каталога/u);
+  assert.match(instructions, /При searched, hasMore=false и отсутствии relevant skill/u);
+  assert.match(instructions, /допустим совместимый личный connector/u);
+  assert.match(instructions, /Native exact reads\/Run не требуют поиска/u);
 });
 
 test("platform routing blocks on explicit no_access until the user chooses another source", async () => {
@@ -4697,7 +4697,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
   assert.equal(frames[0].result.instructions, AGENT_SKILL_ROUTING_INSTRUCTIONS);
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.doesNotMatch(frames[0].result.instructions, /command-ответов|процедура совместимости/u);
-  assert.match(frames[0].result.instructions, /Native Trelio не требует каталога/u);
+  assert.match(frames[0].result.instructions, /Native exact reads\/Run не требуют поиска/u);
   assert.equal(frames[1].result.tools.length, 29);
 });
 

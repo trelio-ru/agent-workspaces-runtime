@@ -8525,8 +8525,8 @@ test("workspace worker gates external services but not native Trelio work", asyn
   const catalogSkillNormalized = catalogSkill.replace(/\s+/gu, " ");
 
   assert.match(workerSkill, /Полностью прочитай файл до использования подключённого сервиса/u);
-  assert.match(workerSkill, /`search_agent_guidance` с задачей и краткими\s+hints/u);
-  assert.match(workerSkill, /`list_agent_skills` оставь для явной инвентаризации/u);
+  assert.match(workerSkill, /Используй `guidance` уже выполненного единого `search`/u);
+  assert.match(workerSkill, /`list_agent_skills` – inventory/u);
   for (const instruction of [
     workerSkillNormalized,
     catalogSkillNormalized,
@@ -8583,13 +8583,13 @@ test("workspace worker gates external services but not native Trelio work", asyn
   assert.match(workerSkill, /После обмена кратко сообщи о подключении\s+устройства и продолжай/u);
   assert.match(workerSkill, /никогда не\s+включают `mcp:agent-instructions:manage`/u);
   assert.match(workerSkill, /не начинай второй OAuth/u);
-  assert.match(catalogSkill, /вызови `search_agent_guidance` один раз/u);
-  assert.match(catalogSkill, /`list_agent_skills` нужен только по явному запросу всего каталога/u);
+  assert.match(catalogSkill, /После `guidance.status=searched` не вызывай `search_agent_guidance` ещё раз/u);
+  assert.match(catalogSkill, /`list_agent_skills` нужен только для явной инвентаризации/u);
   assert.match(catalogSkill, /`kind=procedure` читай через exact\s+`get_agent_procedure`/u);
   assert.match(catalogSkill, /не вызывай `request_plugin_install`/u);
   assert.match(catalogSkill, /личный навык\/коннектор разрешён/u);
   assert.match(catalogSkill, /не считай неготовность разрешением другого\s+источника/u);
-  assert.match(catalogSkill, /Ответ проекта уже объединяет опубликованные процедуры и эффективные\s+назначения skills/u);
+  assert.match(catalogSkill, /Он одновременно возвращает `guidance` и материалы/u);
   assert.match(catalogSkill, /Вызови точные server\/tool из `runtimeExecution\.localAction`/u);
   assert.match(catalogSkill, /Host проверяет подпись\s+package и file hashes при каждом запуске/u);
   assert.match(catalogSkill, /При `integrationRouting` используй только текущи(?:е поля|й контракт)/u);
