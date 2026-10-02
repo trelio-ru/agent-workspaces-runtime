@@ -31,6 +31,7 @@ import {
   resolveNativeProposalRouteMarkerPaths,
 } from "./trelio-proposal-route-guard.mjs";
 import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mjs";
+import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
 
 const DISCOVERY_TOOLS = new Set([
   "list_knowledge_base_pages", "list_contacts", "list_registries",
@@ -700,6 +701,18 @@ const runSessionEnd = async (hookInput) => {
 const executeHookInput = async (hookInput) => {
   if (hookInput.hook_event_name === "SessionStart") {
     await runSessionStart(hookInput);
+    // Both automatic and manual compaction arrive through the already approved
+    // SessionStart matcher. Do not rotate its observation or read private
+    // company files here. The immediate model continuation receives a compact
+    // recovery obligation even when runSessionStart reused its existing state.
+    if (hookInput.source === "compact") {
+      process.stdout.write(`${JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext: TRELIO_COMPACTION_RECOVERY_CONTEXT,
+        },
+      })}\n`);
+    }
   } else if (hookInput.hook_event_name === "PreToolUse") {
     await runPreToolUse(hookInput);
   } else if (hookInput.hook_event_name === "SessionEnd") {

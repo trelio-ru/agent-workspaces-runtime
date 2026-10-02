@@ -5359,6 +5359,7 @@ test("compact protected runtime keeps the immutable Run safety kernel", () => {
     /загружай только соответствующий reference.*не читай все references заранее/u,
     /`\.\.\/context\/agent-instructions\.md`.*`\.\.\/context\/user-profile\.md`.*`\.\.\/context\/run-checkpoint\.json`.*`WORKSPACE_CONTEXT\.md`/u,
     /pinned authority snapshot.*не заменяй его более новой live revision/u,
+    /До работы и после compaction полностью прочитай по порядку/u,
     /короткое активное резюме.*до 15 000 символов/u,
     /Формат журнала доступен read-only в `\.\.\/context\/worklog-format\.md`.*bridge сам создаёт/u,
     /Не создавай дубликат вручную/u,

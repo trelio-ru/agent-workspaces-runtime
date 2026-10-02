@@ -45,6 +45,7 @@ import {
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
+import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "../host-runtime/scripts/trelio-context-recovery.mjs";
 
 const hookScriptPath = fileURLToPath(
   new URL("../host-runtime/scripts/trelio-runtime-session.mjs", import.meta.url),
@@ -1203,10 +1204,42 @@ test("resume and compact preserve the pinned observation while clear starts a ne
         session_id: threadId,
         model: "gpt-5.4",
       }, environment);
-      assert.deepEqual(continued, { exitCode: 0, stdout: "", stderr: "" });
+      assert.equal(continued.exitCode, 0);
+      assert.equal(continued.stderr, "");
+      if (source === "compact") {
+        // Exactly one value-free JSON reply reaches the immediate continuation.
+        // No state, observation, private key or company rule text is forwarded.
+        assert.deepEqual(JSON.parse(continued.stdout), {
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: TRELIO_COMPACTION_RECOVERY_CONTEXT,
+          },
+        });
+        assert.equal(continued.stdout.trim().split("\n").length, 1);
+        assert.doesNotMatch(continued.stdout, /privateKeyPkcs8|runtimeSessionId|gpt-5/u);
+      } else {
+        assert.equal(continued.stdout, "");
+      }
       const preserved = JSON.parse(await readFile(statePath, "utf8"));
-      assert.equal(preserved.observation.modelId, "gpt-5.6-sol");
+      assert.deepEqual(preserved, initial);
     }
+
+    const registered = {
+      schemaVersion: 1,
+      runtimeSessionId: "55555555-5555-4555-8555-555555555555",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      privateKeyPkcs8: privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url"),
+      observation: initial.observation,
+    };
+    await writePrivateJsonFile(statePath, registered);
+    const compacted = await runHook({
+      hook_event_name: "SessionStart", source: "compact", session_id: threadId,
+    }, environment);
+    assert.equal(compacted.exitCode, 0);
+    assert.equal(compacted.stderr, "");
+    assert.equal(JSON.parse(compacted.stdout).hookSpecificOutput.additionalContext,
+      TRELIO_COMPACTION_RECOVERY_CONTEXT);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), registered);
 
     const cleared = await runHook({
       hook_event_name: "SessionStart",
@@ -1220,6 +1253,17 @@ test("resume and compact preserve the pinned observation while clear starts a ne
   } finally {
     await rm(temporaryHome, { recursive: true, force: true });
   }
+});
+
+test("compaction recovery contains exact Run authority and preserves user decisions without guessing scope", () => {
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /до следующего действия полностью перечитай/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /agent-instructions\.md.*user-profile\.md/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /не заменяй его live revisions/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /не создавай новый Run/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /Вне Run.*exact области.*опустив knownInstruction keys/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /недоступная authority блокирует/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /не копируй и не пересказывай восстановимые правила/u);
+  assert.match(TRELIO_COMPACTION_RECOVERY_CONTEXT, /прямые решения\/разрешения пользователя/u);
 });
 
 test("bounded cleanup removes only provably stale runtime residue", async () => {

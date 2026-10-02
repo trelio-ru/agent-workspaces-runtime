@@ -123,6 +123,18 @@ Local company search и Workspace-file search возвращают один ко
 
 ### Ошибки lifecycle hooks
 
+Успешный `SessionStart` с `source=compact` возвращает один JSON с value-free
+`additionalContext`: агент обязан до продолжения работы полностью перечитать
+rules/profile текущего Run из pinned файлов, вне Run – полную authority exact
+области без known keys. При недоступных источниках зависящая работа блокируется.
+В сводке остаются source pointers, прогресс и прямые решения пользователя,
+а восстановимый текст правил/профиля не копируется и не пересказывается.
+Runtime не изменяет саму сводку клиента и не подтверждает чтение моделью.
+Pending/registered session сохраняется; startup/resume не получают reminder.
+Используется прежняя approved `SessionStart` definition stable shell;
+изменение runtime не требует повторного одобрения hooks. Новая или изменённая
+definition требует отдельного доверия клиента.
+
 После распознавания события `PreToolUse` runtime возвращает ошибки через
 `hookSpecificOutput.permissionDecision = "deny"` и `permissionDecisionReason`,
 завершая процесс с кодом `0`. Это успешная доставка запрета, а не разрешение
@@ -192,6 +204,9 @@ Builder включает только исполняемые runtime sources. Ma
 `report-context-budget.mjs`, tests и plugin checkout в package не попадают.
 
 Offline context-budget report:
+
+Постоянные Run layers и условный `compactionRecovery` reminder измеряются
+отдельно; последний приходит только после сжатия, без company rules/profile.
 
 ```bash
 npm run report:context-budget -- \

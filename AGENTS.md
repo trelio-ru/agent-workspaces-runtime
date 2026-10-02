@@ -47,6 +47,9 @@ publication tooling также остаются вне этого публичн
   403, transport/5xx, version gate и противоречивый успешный probe не разрешают
   замену. Исходная рабочая mutation не повторяется этим recovery.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
+- `SessionStart source=compact` восстанавливает обязанность полного чтения
+  pinned authority без замены Run/session. Контракт и ограничения –
+  [README](README.md#ошибки-lifecycle-hooks); stable hook definition не меняется.
 - Browser fill повторяет только value-free preflight: временно отсутствующее
   AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,
   потерянный ответ и передача значения повторов не допускают; field-only grant

@@ -8,6 +8,7 @@ import { buildLocalAttachmentFileResult } from "./trelio-local-attachments.mjs";
 import { compactRemoteDoctorPayload } from "./trelio-mcp-results.mjs";
 
 import { AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN } from "./trelio-workspace.mjs";
+import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
 import {
   TRELIO_LOCAL_ACTION_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
@@ -359,6 +360,11 @@ export const buildPluginContextBudgetReport = async ({
       clientPrefixedTaskRunLocalToolSchemas: measureTools(taskRunLocalTools, true),
     },
     localResponses,
+    // Paid once after compaction, never on ordinary startup or per tool schema.
+    // Keep it separate from permanent layers to expose the actual recovery cost.
+    conditionalInstructions: {
+      compactionRecovery: measureContextText(TRELIO_COMPACTION_RECOVERY_CONTEXT),
+    },
     scenarios: {
       requiredTaskRunSkills,
       taskRunWithProposalBundle,
@@ -402,6 +408,7 @@ export const formatPluginContextBudgetReport = (report) => [
   "Trelio Agent Workspaces · context budget",
   "",
   formatMeasurement("Runtime AGENTS.md", report.layers.runtimeAgents),
+  formatMeasurement("After compaction: recovery reminder", report.conditionalInstructions.compactionRecovery),
   formatMeasurement("Worker SKILL.md", report.layers.workerSkill),
   formatMeasurement("Required task Run skills", report.scenarios.requiredTaskRunSkills),
   formatMeasurement(

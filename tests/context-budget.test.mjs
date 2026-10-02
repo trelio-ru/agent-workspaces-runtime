@@ -51,6 +51,8 @@ test("typical task Run plugin context stays inside explicit regression ceilings"
 
   assert.equal(report.schemaVersion, 1);
   assert.deepEqual(report.tokenizer, CONTEXT_TOKENIZER);
+  assert.ok(report.conditionalInstructions.compactionRecovery.tokensO200kBase <= 225);
+  assert.ok(report.conditionalInstructions.compactionRecovery.bytesUtf8 <= 1_500);
   assert.equal(scenarios.requiredTaskRunSkills.tokensO200kBase,
     layers.requiredSkillFiles.reduce((sum, file) => sum + file.tokensO200kBase, 0));
   for (const [name, limit] of Object.entries(PLUGIN_CONTEXT_TOKEN_LIMITS)) {
