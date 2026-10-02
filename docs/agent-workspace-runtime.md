@@ -868,10 +868,29 @@ generic local action: body преобразуется в canonical rich text и 
 Top-level description лёгкого check-пункта проходит через тот же generic
 rich-text protection, а task-пункт сохраняет описание внутри `item.task`.
 
-Local mirror schema 5 читает accepted browser manifest и bounded safe text;
+Local mirror читает accepted browser manifest и bounded safe text;
 имена binary/external файлов индексируются без их скачивания. Отсутствующая
 browser projection блокирует поиск до обновления runtime; прежний encrypted
 bundle не используется ни при какой категории ошибки.
+
+Первичная синхронизация сохраняет каждый успешно проверенный текстовый файл
+в отдельном зашифрованном scratchpad `search-files-v1` внутри schema-root mirror.
+Содержимое и имена файлов остаются ciphertext; ключ записи привязан к origin,
+компании, scope/epoch, устройству, Workspace/head и точным метаданным файла.
+Перед reuse runtime заново читает ACL-filtered Workspace overview и manifest;
+кэш не является разрешением доступа и не используется для выдачи оригинала.
+Он сохраняется после отмены, конфликта или перезапуска процесса, но никогда не
+публикуется как готовый mirror. Retention – семь дней; предел – 512 MiB и менее
+20 000 записей на schema-root компании, с удалением старых записей под writer lock.
+
+`WORKSPACE_OUTDATED` и `LOCAL_CONTEXT_GENERATION_CHANGED` при сборке запускают
+следующую из максимум трёх попыток с новым manifest. Полностью собранный, но
+неподтверждённый candidate можно использовать только как источник неизменных
+revision/head; shortcut готового поколения для него запрещён. Ошибки доступа,
+криптографии, транспорта и отмена возвращаются без такого повтора. Все начатые
+file workers завершаются до освобождения writer lock; конкурентная ошибка
+доступа/криптографии имеет приоритет над конфликтом head. Публикация `current.json`
+происходит только после совпадения начальной и конечной generation.
 
 Один file hit разрешается через `get_agent_workspace_file(delivery=local-file)`
 либо server-selected local `get_workspace_file`/`fetch`, затем typed

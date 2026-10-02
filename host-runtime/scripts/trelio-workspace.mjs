@@ -11974,13 +11974,38 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   // A small fixed pool amortizes HTTP latency without buffering many documents
   // or transferring a single binary merely to make its filename searchable.
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(4, textDocuments.length) }, async () => {
-    while (next < textDocuments.length) {
-      const document = textDocuments[next++];
-      const bytes = await readEncryptedWorkspaceSelectedFile(requestInput, byId.get(document.sourceFileId));
-      try { document.text = workspaceFileSearchText(bytes); } finally { bytes.fill(0); }
+  let failed = false;
+  // Wait for every started worker before returning a conflict or cancellation.
+  // Otherwise abandoned workers could keep downloading/writing after the mirror
+  // lock is released and race the next sync. Completed files remain encrypted
+  // in the scratchpad; no partial document list is returned to the caller.
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(4, textDocuments.length) }, async () => {
+    try {
+      while (!failed && next < textDocuments.length) {
+        input.signal?.throwIfAborted();
+        const document = textDocuments[next++];
+        const file = byId.get(document.sourceFileId);
+        const cached = await input.searchCache?.read(input, file);
+        if (cached != null) {
+          document.text = cached;
+          continue;
+        }
+        const bytes = await readEncryptedWorkspaceSelectedFile(requestInput, file);
+        try {
+          document.text = workspaceFileSearchText(bytes);
+          await input.searchCache?.write(input, file, document.text);
+        } finally { bytes.fill(0); }
+      }
+    } catch (error) {
+      failed = true;
+      throw error;
     }
   }));
+  const failures = outcomes.filter((outcome) => outcome.status === "rejected");
+  // A concurrent denial/crypto failure must not be hidden by a sibling head conflict.
+  const failure = failures.find((outcome) => outcome.reason?.code !== "WORKSPACE_OUTDATED") ?? failures[0];
+  if (failure) throw failure.reason;
+  input.signal?.throwIfAborted();
   return documents;
 };
 

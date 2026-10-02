@@ -668,6 +668,130 @@ const publishMirrorGeneration = async ({
   return payload;
 };
 
+// This cache is a resumable download scratchpad, never a readable mirror.
+// Each file is independently encrypted so an aborted first sync can retain the
+// expensive work without publishing an incomplete or stale company snapshot.
+export const createEncryptedSearchFileCache = async ({
+  paths, origin, companyEncryption, maximumBytes = 512 * 1024 * 1024,
+}) => {
+  const { company, scope, device } = companyEncryption.runtime;
+  const root = path.join(paths.root, "search-files-v1");
+  await ensurePrivateDirectory(root);
+  const entries = new Map();
+  let totalBytes = 0;
+  const cutoff = Date.now() - MIRROR_GENERATION_RETENTION_MS;
+  for (const entry of await fs.readdir(root, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue;
+    const filePath = path.join(root, entry.name);
+    const metadata = await fs.lstat(filePath);
+    if (metadata.mtimeMs < cutoff) {
+      await fs.rm(filePath);
+      continue;
+    }
+    entries.set(entry.name, { size: metadata.size, time: metadata.mtimeMs });
+    totalBytes += metadata.size;
+  }
+  const trim = async (reserve = 0) => {
+    if (totalBytes + reserve <= maximumBytes && entries.size < 20_000) return;
+    for (const [name, metadata] of [...entries].sort((a, b) => a[1].time - b[1].time)) {
+      if (totalBytes + reserve <= maximumBytes && entries.size < 20_000) break;
+      await fs.rm(path.join(root, name), { force: true });
+      totalBytes -= metadata.size;
+      entries.delete(name);
+    }
+  };
+  await trim();
+  // The company mirror writer owns this directory. Serializing the four file
+  // workers also makes quota eviction and atomic replacement deterministic.
+  let tail = Promise.resolve();
+  const serialized = (operation) => {
+    const result = tail.then(operation);
+    tail = result.catch(() => undefined);
+    return result;
+  };
+  const identity = ({ workspaceId, acceptedHead }, file) => {
+    const key = sha256(JSON.stringify([
+      1, origin, company.id, scope.id, scope.epoch, device?.id ?? null,
+      workspaceId, acceptedHead, file.id, file.path, file.sizeBytes, file.contentType,
+    ]));
+    return { key, name: `${key}.json`, aad: {
+      companyId: company.id, scopeId: scope.id, scopeEpoch: scope.epoch,
+      entityType: "agent_context.search_file", entityId: file.id,
+      entityRevision: 1, purpose: "content",
+    } };
+  };
+  return {
+    read: (workspace, file) => serialized(async () => {
+      const { key, name, aad } = identity(workspace, file);
+      if (!entries.has(name)) return null;
+      const record = await readPrivateJsonFile(path.join(root, name), { maximumBytes: 8 * 1024 * 1024 });
+      if (Object.keys(record).length === 0) return null;
+      // Encryption authenticates both the exact revision binding and text.
+      // A cache hit cannot authorize an object: the caller must first fetch a
+      // fresh ACL-filtered Workspace overview and its exact signed manifest.
+      const actualAad = record.encryptedPayload?.aad;
+      if (record.schemaVersion !== 1 || Object.entries(aad).some(([k, v]) => actualAad?.[k] !== v)) {
+        throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted search cache binding is invalid.");
+      }
+      const payload = await decryptCompanyPayload({
+        encryptedPayload: record.encryptedPayload,
+        scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
+        scopePrivateJwk: companyEncryption.scopePrivateEncryptionKey.privateJwk,
+      });
+      if (payload?.key !== key || typeof payload.text !== "string"
+        || Buffer.byteLength(payload.text, "utf8") > 3 * 1024 * 1024) {
+        throw new TrelioLocalContextError("LOCAL_CONTEXT_CACHE_INVALID", "Encrypted search cache content is invalid.");
+      }
+      entries.get(name).time = Date.now();
+      return payload.text;
+    }),
+    write: (workspace, file, text) => serialized(async () => {
+      if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 3 * 1024 * 1024) return;
+      const { key, name, aad } = identity(workspace, file);
+      const record = { schemaVersion: 1, encryptedPayload: await encryptCompanyPayload({
+        payload: { key, text }, scopePublicEncryptionJwk: scope.publicEncryptionJwk, aad,
+      }) };
+      const size = Buffer.byteLength(`${JSON.stringify(record, null, 2)}\n`, "utf8");
+      if (size > maximumBytes || size > 8 * 1024 * 1024) return;
+      await trim(size);
+      await writePrivateJsonFile(path.join(root, name), record);
+      totalBytes += size - (entries.get(name)?.size ?? 0);
+      entries.set(name, { size, time: Date.now() });
+    }),
+  };
+};
+
+// Only optimistic read conflicts restart assembly. Permission, crypto, transport
+// and caller cancellation errors keep their exact original identity.
+export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish }) => {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const startingManifest = await readManifest();
+    if (previous?.serverGeneration === startingManifest.generation) {
+      return { mirror: previous, changed: false };
+    }
+    let candidate;
+    try {
+      candidate = await buildCandidate(startingManifest, previous);
+    } catch (error) {
+      if (!["LOCAL_CONTEXT_GENERATION_CHANGED", "WORKSPACE_OUTDATED"].includes(error?.code)) throw error;
+      continue;
+    }
+    const finishingManifest = await readManifest();
+    if (finishingManifest.generation !== startingManifest.generation) {
+      // This private candidate is not published. The next build selects only
+      // records still present in its fresh manifest with matching revision/head.
+      // Mark it ineligible for the no-change shortcut until validated afresh.
+      previous = { ...candidate, serverGeneration: null };
+      continue;
+    }
+    return { mirror: await publish(candidate), changed: true };
+  }
+  throw new TrelioLocalContextError(
+    "LOCAL_CONTEXT_GENERATION_CHANGED",
+    "Company context kept changing during three bounded snapshot attempts.",
+  );
+};
+
 const readJson = async (response) => response.json();
 
 const buildEncryptedPayloadSignatureRecord = (payload) => ({
@@ -3501,6 +3625,7 @@ const buildWorkspaceRecord = async ({
   companyEncryption,
   workspace,
   signal,
+  searchCache,
 }) => ({
   ...workspace,
   documents: await readEncryptedWorkspaceSearchDocuments({
@@ -3510,6 +3635,7 @@ const buildWorkspaceRecord = async ({
     workspaceId: workspace.id,
     acceptedHead: workspace.acceptedHead,
     signal,
+    searchCache,
   }),
 });
 
@@ -3521,6 +3647,7 @@ const buildMirror = async ({
   rawManifest,
   previous,
   signal,
+  searchCache,
 }) => {
   if (
     ![1, 2].includes(rawManifest?.schemaVersion)
@@ -3648,6 +3775,7 @@ const buildMirror = async ({
           companyEncryption,
           workspace,
           signal,
+          searchCache,
         }));
   }
   const previousContextDocuments = new Map(
@@ -3781,56 +3909,17 @@ export const syncCompanyContextMirror = async ({
     // Another writer may have published between the optimistic read and our
     // lock acquisition. Always reread the atomic pointer under ownership.
     previous = await readMirrorGeneration({ paths, companyEncryption });
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const startingManifest = await fetchManifest({
-        origin: requestOrigin,
-        token,
-        companySlug,
-        signal,
-      });
-      if (previous?.serverGeneration === startingManifest.generation) {
-        return { mirror: previous, changed: false, paths };
-      }
-      let candidate;
-      try {
-        candidate = await buildMirror({
-          origin,
-          requestOrigin,
-          token,
-          companyEncryption,
-          rawManifest: startingManifest,
-          previous,
-          signal,
-        });
-      } catch (error) {
-        if (error?.code !== "LOCAL_CONTEXT_GENERATION_CHANGED") throw error;
-        // A neighboring Run can advance one task/workspace revision between
-        // manifest and projection reads. That is an optimistic read conflict,
-        // not a broken mirror: restart from the next canonical manifest within
-        // the same three-attempt bound instead of leaking the raw API 409.
-        previous = await readMirrorGeneration({ paths, companyEncryption });
-        continue;
-      }
-      const finishingManifest = await fetchManifest({
-        origin: requestOrigin,
-        token,
-        companySlug,
-        signal,
-      });
-      if (finishingManifest.generation !== startingManifest.generation) {
-        previous = await readMirrorGeneration({ paths, companyEncryption });
-        continue;
-      }
-      return {
-        mirror: await publishMirrorGeneration({ paths, companyEncryption, mirror: candidate }),
-        changed: true,
-        paths,
-      };
-    }
-    throw new TrelioLocalContextError(
-      "LOCAL_CONTEXT_GENERATION_CHANGED",
-      "Company context kept changing during three bounded snapshot attempts.",
-    );
+    const searchCache = await createEncryptedSearchFileCache({ paths, origin, companyEncryption });
+    const result = await buildStableCompanyMirror({
+      previous,
+      readManifest: () => fetchManifest({ origin: requestOrigin, token, companySlug, signal }),
+      buildCandidate: (rawManifest, reusable) => buildMirror({
+        origin, requestOrigin, token, companyEncryption, rawManifest,
+        previous: reusable, signal, searchCache,
+      }),
+      publish: (mirror) => publishMirrorGeneration({ paths, companyEncryption, mirror }),
+    });
+    return { ...result, paths };
   } finally {
     await writer.release();
   }

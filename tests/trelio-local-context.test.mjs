@@ -9,6 +9,8 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
+  buildStableCompanyMirror,
+  createEncryptedSearchFileCache,
   assertLocalAgentInstructionPublicationWithinLimit,
   assertHydratedLocalProposalPublicationMatches,
   canonicalizeProposalTargetFromMirror,
@@ -3957,4 +3959,100 @@ test("workspace tombstones are exact-readable but cannot expose even stale local
   assert.equal(searchCompanyContextMirror(mirror, ["Удалённый", "Не показывать"], 20).results.length, 0);
   assert.throws(() => getWorkspaceFileFromMirror(mirror, { workspaceId, workspaceHead, filePath: "secret.md" }),
     (error) => error.code === "WORKSPACE_DELETED");
+});
+
+
+test("company sync refreshes head conflicts and reuses only private candidates until stable", async () => {
+  const manifests = ["a", "b", "c", "d", "d"].map((generation) => ({ generation }));
+  let builds = 0;
+  const published = [];
+  const result = await buildStableCompanyMirror({
+    previous: null,
+    readManifest: async () => manifests.shift(),
+    buildCandidate: async (manifest, previous) => {
+      builds++;
+      if (builds === 1) throw Object.assign(new Error("moved"), { code: "WORKSPACE_OUTDATED" });
+      if (builds === 3) {
+        assert.equal(previous.serverGeneration, null, "unverified candidate cannot take no-change shortcut");
+        assert.equal(previous.workspaces[0].acceptedHead, "old-head");
+      }
+      return { serverGeneration: manifest.generation, workspaces: [{ acceptedHead: "old-head" }] };
+    },
+    publish: async (candidate) => { published.push(candidate); return candidate; },
+  });
+  assert.equal(builds, 3);
+  assert.equal(published.length, 1);
+  assert.equal(result.mirror.serverGeneration, "d");
+  assert.equal(result.changed, true);
+});
+
+test("company sync bounds read conflicts and never retries permissions, crypto or cancellation", async () => {
+  for (const code of ["WORKSPACE_OUTDATED", "LOCAL_CONTEXT_GENERATION_CHANGED"]) {
+    let reads = 0;
+    await assert.rejects(buildStableCompanyMirror({
+      previous: null, readManifest: async () => { reads++; return { generation: "a" }; },
+      buildCandidate: async () => { throw Object.assign(new Error(code), { code }); },
+      publish: async () => assert.fail("cannot publish partial data"),
+    }), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" });
+    assert.equal(reads, 3);
+  }
+  for (const code of ["ACCESS_DENIED", "WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID", "ABORT_ERR", "ETIMEDOUT"]) {
+    const error = Object.assign(new Error(code), { code });
+    let reads = 0;
+    await assert.rejects(buildStableCompanyMirror({
+      previous: null, readManifest: async () => { reads++; return { generation: "a" }; },
+      buildCandidate: async () => { throw error; }, publish: async () => assert.fail(),
+    }), (actual) => actual === error);
+    assert.equal(reads, 1);
+  }
+});
+
+test("search scratchpad survives restart encrypted and is fenced by origin, scope, head and file", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-search-cache-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const keys = await crypto.webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const companyEncryption = {
+    runtime: { company: { id: actionWorkspaceId }, device: { id: actionRunId }, scope: {
+      id: actionSecretId, epoch: 1, publicEncryptionJwk: await crypto.webcrypto.subtle.exportKey("jwk", keys.publicKey),
+    } },
+    scopePrivateEncryptionKey: { privateKey: keys.privateKey, privateJwk: await crypto.webcrypto.subtle.exportKey("jwk", keys.privateKey) },
+  };
+  const options = { paths: { root }, origin: "https://fixture.test", companyEncryption };
+  const workspace = { workspaceId: actionWorkspaceId, acceptedHead: "a".repeat(40) };
+  const file = { id: actionGrantId, path: "private-title.md", sizeBytes: 42, contentType: "text/plain" };
+  const text = "UNIQUE-PRIVATE-TEXT-ТОЛЬКО-В-ШИФРОТЕКСТЕ";
+  await (await createEncryptedSearchFileCache(options)).write(workspace, file, text);
+  const directory = path.join(root, "search-files-v1");
+  const names = await fs.readdir(directory);
+  assert.equal(names.length, 1);
+  const stored = await fs.readFile(path.join(directory, names[0]), "utf8");
+  assert.equal(stored.includes(text), false);
+  assert.equal(stored.includes(file.path), false);
+  assert.equal((await fs.readdir(root)).includes("current.json"), false);
+  const reopened = await createEncryptedSearchFileCache(options);
+  assert.equal(await reopened.read(workspace, file), text);
+  assert.equal(await reopened.read({ ...workspace, acceptedHead: "b".repeat(40) }, file), null);
+  assert.equal(await reopened.read(workspace, { ...file, id: actionReleaseId }), null);
+  assert.equal(await reopened.read(workspace, { ...file, path: "another.md" }), null);
+  assert.equal(await (await createEncryptedSearchFileCache({ ...options, origin: "https://foreign.test" })).read(workspace, file), null);
+  for (const runtime of [
+    { ...companyEncryption.runtime, scope: { ...companyEncryption.runtime.scope, epoch: 2 } },
+    { ...companyEncryption.runtime, device: { id: actionReleaseId } },
+  ]) {
+    assert.equal(await (await createEncryptedSearchFileCache({ ...options, companyEncryption: { ...companyEncryption, runtime } })).read(workspace, file), null);
+  }
+  const damaged = JSON.parse(stored);
+  damaged.encryptedPayload.ciphertext = "AAAA";
+  await fs.writeFile(path.join(directory, names[0]), JSON.stringify(damaged), { mode: 0o600 });
+  await assert.rejects(reopened.read(workspace, file));
+  await fs.writeFile(path.join(directory, names[0]), stored, { mode: 0o600 });
+  const tiny = await createEncryptedSearchFileCache({ ...options, maximumBytes: 1 });
+  assert.equal(await tiny.read(workspace, file), null);
+  await tiny.write(workspace, file, text);
+  assert.deepEqual(await fs.readdir(directory), []);
+  await reopened.write(workspace, file, text);
+  const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  await fs.utimes(path.join(directory, names[0]), expired, expired);
+  await createEncryptedSearchFileCache(options);
+  assert.deepEqual(await fs.readdir(directory), []);
 });

@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator } from "../host-runtime/scripts/trelio-workspace-files.mjs";
+import { createEncryptedSearchFileCache } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { readEncryptedWorkspaceSearchDocuments } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 test("encrypted discovery reads names and bounded text; delivery decrypts only the selected original", async () => {
@@ -19,11 +20,12 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
   const imageId = "66666666-6666-4666-8666-666666666666";
   const textId = "77777777-7777-4777-8777-777777777777";
   const deviceId = "88888888-8888-4888-8888-888888888888";
+  const secondTextId = "99999999-9999-4999-8999-999999999999";
   const head = "a".repeat(40);
   const scope = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
   const device = await createAgentEncryptionDevice();
   const publicJwk = await webcrypto.subtle.exportKey("jwk", scope.publicKey);
-  const companyEncryption = { runtime: { company: { id: companyId }, scope: { id: scopeId, epoch: 1 } },
+  const companyEncryption = { runtime: { company: { id: companyId }, scope: { id: scopeId, epoch: 1, publicEncryptionJwk: publicJwk }, device: { id: deviceId } },
     scopePrivateEncryptionKey: { privateKey: scope.privateKey, privateJwk: await webcrypto.subtle.exportKey("jwk", scope.privateKey) } };
   const original = Buffer.from([255, 216, 0, 1, 2, 255, 217]);
   const text = Buffer.from("Документы Марии", "utf8");
@@ -31,10 +33,11 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
     { id: imageId, path: "sources/original.jpg", sizeBytes: original.length, contentType: "image/jpeg" },
     { id: textId, path: "description.md", sizeBytes: text.length, contentType: "text/plain; charset=utf-8" },
   ];
+  files.push({ id: secondTextId, path: "second.md", sizeBytes: text.length, contentType: "text/plain" });
   const manifest = Buffer.from(JSON.stringify({ schemaVersion: 1, kind: "agent-workspace-browser-manifest", projectionId,
     workspaceId, workspaceHead: head, files }));
   const ciphertexts = new Map();
-  for (const [id, bytes, kind] of [[manifestId, manifest, "manifest"], [imageId, original, "file"], [textId, text, "file"]]) {
+  for (const [id, bytes, kind] of [[manifestId, manifest, "manifest"], [imageId, original, "file"], [textId, text, "file"], [secondTextId, text, "file"]]) {
     const sourcePath = path.join(root, `${id}.source`);
     const destinationPath = path.join(root, `${id}.trelioe1`);
     await writeFile(sourcePath, bytes, { mode: 0o600 });
@@ -45,6 +48,7 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
     ciphertexts.set(id, await readFile(destinationPath));
   }
   const requests = [];
+  let partialConflict = true;
   let stale = false;
   let corrupt = false;
   let denied = false;
@@ -61,7 +65,7 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
     const bytes = ciphertexts.get(fileId);
     if (!bytes) { response.statusCode = 404; response.end(); return; }
     response.setHeader("x-trelio-workspace-id", workspaceId);
-    response.setHeader("x-trelio-workspace-head", stale ? "b".repeat(40) : head);
+    response.setHeader("x-trelio-workspace-head", (stale || (partialConflict && fileId === secondTextId)) ? "b".repeat(40) : head);
     response.setHeader("x-trelio-ciphertext-sha256", createHash("sha256").update(bytes).digest("hex"));
     response.end(corrupt ? Buffer.alloc(bytes.length) : bytes);
   });
@@ -69,7 +73,17 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
   const input = { origin: `http://127.0.0.1:${server.address().port}`, token: "synthetic-test-token", companyEncryption,
     workspaceId, workspaceHead: head, acceptedHead: head };
   try {
+    const cacheOptions = { paths: { root: path.join(root, "cache") }, origin: input.origin, companyEncryption };
+    input.searchCache = await createEncryptedSearchFileCache(cacheOptions);
+    await assert.rejects(readEncryptedWorkspaceSearchDocuments(input), { code: "WORKSPACE_OUTDATED" });
+    assert.equal(requests.filter((url) => url.includes(textId)).length, 1);
+    // New cache object represents the next process/attempt. The first file was
+    // saved even though its sibling conflicted; the manifest is still fetched.
+    input.searchCache = await createEncryptedSearchFileCache(cacheOptions);
+    partialConflict = false;
     const documents = await readEncryptedWorkspaceSearchDocuments(input);
+    assert.equal(requests.filter((url) => url.includes(textId)).length, 1);
+    assert.equal(requests.filter((url) => url.includes(secondTextId)).length, 2);
     assert.equal(documents.find((file) => file.name === "original.jpg").text, "");
     assert.equal(documents.find((file) => file.name === "description.md").text, text.toString("utf8"));
     assert.equal(requests.some((url) => url.includes(imageId)), false, "indexing a binary name must not download its bytes");
@@ -82,6 +96,7 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
     await assert.rejects(readEncryptedWorkspaceSelectedFile(input, selected));
     corrupt = false; denied = true;
     await assert.rejects(readEncryptedWorkspaceFileManifest(input), { code: "ACCESS_DENIED" });
+    await assert.rejects(readEncryptedWorkspaceSearchDocuments(input), { code: "ACCESS_DENIED" });
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

@@ -79,6 +79,9 @@ publication tooling также остаются вне этого публичн
   exact `npm-cli.js`, найденный в стандартном absolute layout либо через
   проверенную realpath-ссылку `~/.local/bin/npm`, текущим Node и с `shell:false`;
   `npm`, `npm.cmd` и другой shell-wrapper не исполняются.
+- Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
+  зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
+  обработка read-conflicts обязательны по [runtime contract](docs/agent-workspace-runtime.md).
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - `search` возвращает компактный `guidance` перед материалами; matching и
   projection генерируются из backend pure module через
