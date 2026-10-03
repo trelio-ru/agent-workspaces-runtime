@@ -5253,7 +5253,7 @@ test("runtime CI pins Node 22 and avoids the parent test-runner IPC", async () =
   // other platforms used 22.23.2. Exact patch parity removes that mismatch.
   // Direct execution keeps each file's node:test harness in its own process
   // and avoids the parent runner's intermittent serialized IPC corruption.
-  assert.equal([...workflowSource.matchAll(/node-version: 22\.23\.2/gu)].length, 2);
+  assert.equal([...workflowSource.matchAll(/node-version: 22\.23\.2/gu)].length, 3);
   assert.doesNotMatch(workflowSource, /node-version: 22(?:\s|$)/u);
   const genericJobSource = workflowSource.slice(
     workflowSource.indexOf("node-tests:"),
