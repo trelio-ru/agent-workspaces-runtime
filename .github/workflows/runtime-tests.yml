@@ -10,12 +10,14 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT: ${{ github.workspace }}/_contracts/agent-workspaces/plugins/trelio-agent-workspaces
 
 jobs:
   git-main-guard:
+    if: github.event_name == 'pull_request'
     name: Canonical main Git guard
     runs-on: ubuntu-latest
 
@@ -27,6 +29,7 @@ jobs:
         run: npm run test:worktree-bootstrap && bash scripts/git-main-guard.test.sh
 
   node-tests:
+    if: github.event_name == 'pull_request'
     name: Runtime tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -101,6 +104,7 @@ jobs:
           cmp "$RUNNER_TEMP/runtime-a.skillpkg" "$RUNNER_TEMP/runtime-b.skillpkg"
 
   windows-acl:
+    if: github.event_name == 'pull_request'
     name: Windows runtime and private ACL
     runs-on: windows-latest
 
@@ -180,7 +184,7 @@ jobs:
   release-artifact:
     name: Tagged host runtime package
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [git-main-guard, node-tests, windows-acl]
+    needs: verified-source
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -195,3 +199,18 @@ jobs:
           name: host-runtime-package
           path: ${{ runner.temp }}/host-runtime.skillpkg
           if-no-files-found: error
+
+  verified-source:
+    name: Verify exact hosted PR gate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete successful PR gate for this exact SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=pull_request&status=success" > "$RUNNER_TEMP/runs.json"
+          node -e 'const fs=require("fs");const runs=JSON.parse(fs.readFileSync(process.argv[1])).workflow_runs.filter(r=>r.head_sha===process.env.GITHUB_SHA&&r.event==="pull_request"&&r.conclusion==="success");if(!runs.length)throw Error("Exact successful PR gate is required");fs.writeFileSync(process.argv[2],String(runs[0].id))' "$RUNNER_TEMP/runs.json" "$RUNNER_TEMP/run-id"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$(cat "$RUNNER_TEMP/run-id")/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
+          node -e 'const fs=require("fs");const jobs=JSON.parse(fs.readFileSync(process.argv[1])).jobs;for(const name of ["Canonical main Git guard","Runtime tests (ubuntu-latest)","Runtime tests (macos-latest)","Windows runtime and private ACL"])if(!jobs.some(j=>j.name===name&&j.conclusion==="success"))throw Error("Incomplete exact OS gate: "+name)' "$RUNNER_TEMP/jobs.json"

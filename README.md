@@ -122,6 +122,10 @@ Local company search и Workspace-file search возвращают один ко
 для plain company marker снимается при подтверждённом native provider.
 
 
+Tagged artifact собирается на GitHub только после проверки successful PR gate
+того же exact SHA на Linux/macOS/Windows. Main/tag не повторяют уже зелёный
+полный test set; новый source SHA сначала проходит новый PR gate.
+
 ### HTTP-диагностика браузера
 
 `trelio-browser-session.mjs` экспортирует `createDocumentHttpObserver(context,
