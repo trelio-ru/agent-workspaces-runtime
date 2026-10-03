@@ -7290,6 +7290,12 @@ export const buildAgentSkillRuntimeEnvironment = ({
           TRELIO_SKILL_CONNECTION_CONFIG_JSON: connectionConfigJson,
         }
       : {}),
+    // HTTP evidence is also available to native-supervised browser adapters
+    // without a generic lifecycle descriptor. This grants no lease or policy;
+    // inherited module URLs were stripped above and cannot select executable code.
+    ...(artifact.parsedPackage?.capabilities?.includes("browser")
+      ? { TRELIO_BROWSER_SESSION_MODULE_URL: BROWSER_SESSION_MODULE_URL }
+      : {}),
     ...(browserSession
       ? {
           TRELIO_BROWSER_SESSION_MODULE_URL: BROWSER_SESSION_MODULE_URL,

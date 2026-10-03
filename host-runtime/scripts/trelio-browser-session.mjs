@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+export { createDocumentHttpObserver, safeHttpFailure } from "./trelio-browser-http.mjs";
 
 export const BROWSER_SESSION_API_VERSION = 1;
 export const PLAYWRIGHT_VERSION = "1.60.0";

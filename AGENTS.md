@@ -65,6 +65,10 @@ publication tooling также остаются вне этого публичн
   lifecycle и profile lock. Provider-specific navigation, selectors, read
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
+- HTTP-ошибки browser document сохраняют только numeric status и approved
+  origin через общий observer; transport failure не получает выдуманного кода.
+  Provider interpretation и отсутствие credential reset/replay сохраняются по
+  [контракту HTTP-диагностики](README.md#http-диагностика-браузера).
 - Persistent messenger adapter по умолчанию использует `startInBackground=true`: headed
   process запускается без startup window, provider guards ставятся до exact
   inactive CDP target, viewport не изменяет native window bounds. Host не

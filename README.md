@@ -121,6 +121,27 @@ Local company search и Workspace-file search возвращают один ко
 останавливает неподходящий native proposal renderer до монтирования MCP App;
 для plain company marker снимается при подтверждённом native provider.
 
+
+### HTTP-диагностика браузера
+
+`trelio-browser-session.mjs` экспортирует `createDocumentHttpObserver(context,
+{isAllowedUrl, ignoreStatus})` и `safeHttpFailure`. Signed browser-capable package
+получает exact host-owned module URL даже без lifecycle descriptor; это не
+создаёт lease и не заменяет native supervisor. Provider устанавливает observer
+до навигации и проверяет `failure(page)` до определения login/UI и перед
+действиями. Выход содержит только integer `httpStatus` 400–599 и approved HTTPS
+`origin`; full URL, query, headers, body и raw exception не выходят из процесса.
+
+Наблюдается только текущий main-frame document exact Page/Request. Новая
+навигация очищает прежнее доказательство, поздний response старого Request,
+XHR, assets, iframe и соседние страницы его не заменяют. Hash-переход SPA
+сохраняет тот же document; paths/query сравниваются только в RAM. Timeout,
+DNS/reset и HTTP 200 с ошибкой в HTML не получают выдуманного HTTP-кода.
+Provider сохраняет интерпретацию 401/403/404, allowlist и распознавание HTTP 200
+error-page; 5xx не означает logout, не разрешает credential reset, новый login,
+manual fallback или replay mutation. Ошибка и безопасные поля сохраняются через
+CLI, worker, control transport и closed status. Observer не делает retry/reload.
+
 ### Ошибки lifecycle hooks
 
 Успешный `SessionStart` с `source=compact` возвращает один JSON с value-free

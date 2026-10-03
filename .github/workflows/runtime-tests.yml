@@ -65,6 +65,7 @@ jobs:
         run: |
           node tests/context-budget.test.mjs
           node tests/trelio-browser-session.test.mjs
+          node tests/trelio-browser-http.test.mjs
           node tests/trelio-codex-routing.test.mjs
           node tests/trelio-company-encryption.test.mjs
           node tests/trelio-context-search-matching.test.mjs
@@ -130,6 +131,9 @@ jobs:
           --test-name-pattern="Windows ACL command|Windows bridge applies|Windows DPAPI|Windows Node resolver|Windows Remote MCP launcher|bridge pairs once"
           tests/trelio-workspace.test.mjs
 
+      - name: Run Windows browser HTTP evidence regressions
+        run: node tests/trelio-browser-http.test.mjs
+
       - name: Run Windows Git prerequisite regressions
         run: node --test tests/trelio-git.test.mjs
 
@@ -172,3 +176,22 @@ jobs:
       - name: Run Windows ACL regression as a standard user
         shell: pwsh
         run: ./.github/scripts/run-windows-acl-standard-user.ps1
+
+  release-artifact:
+    name: Tagged host runtime package
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [git-main-guard, node-tests, windows-acl]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Build exact tagged runtime
+        shell: bash
+        run: node scripts/build-host-runtime-package.mjs --runtime-version "${GITHUB_REF_NAME#v}" --output "$RUNNER_TEMP/host-runtime.skillpkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: host-runtime-package
+          path: ${{ runner.temp }}/host-runtime.skillpkg
+          if-no-files-found: error
