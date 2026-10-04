@@ -5126,6 +5126,40 @@ const buildLocalScopedEffectiveInstructions = (
 
 const LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES = 24 * 1024;
 const LOCAL_TASK_INSTRUCTION_PART_MAX_BYTES = 4 * 1024;
+const LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE = 4;
+const LOCAL_TASK_INSTRUCTION_BATCH_MAX_BYTES = 23 * 1024;
+
+const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "pageSize must be an integer from 1 to 4.");
+  }
+  const first = pages[pageIndex];
+  // Index/revision/ACL уже проверены вызывающим exact read. Legacy формат
+  // сохраняется, чтобы старый клиент продолжал собирать те же 4-КиБ части.
+  if (pageSize === 1) return first;
+  let batch;
+  for (const page of pages.slice(pageIndex, pageIndex + pageSize)) {
+    const { part, ...metadata } = page;
+    const candidate = {
+      ...metadata,
+      responseKind: "instruction_page_batch",
+      pageIndex,
+      parts: [...(batch?.parts ?? []), part],
+    };
+    // Как в native backend: JSON escapes и финальные cache keys входят в cap.
+    // Последняя вошедшая часть определяет cursor; запрошенный размер его не
+    // сдвигает. Резерв 1 КиБ до 24 КиБ оставлен под transport summary/title hint.
+    if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > LOCAL_TASK_INSTRUCTION_BATCH_MAX_BYTES) break;
+    batch = candidate;
+  }
+  if (!batch) {
+    throw new TrelioLocalContextError(
+      "LOCAL_CONTEXT_RESULT_TOO_LARGE",
+      "Instruction part exceeds the batch result limit; retry with pageSize=1.",
+    );
+  }
+  return batch;
+};
 
 const splitLocalInstructionMarkdown = (markdown) => {
   if (!markdown) return [""];
@@ -5188,10 +5222,13 @@ const buildLocalTaskInstructionDelivery = (catalog, inlineMaxBytes) => {
     catalog: {
       schemaVersion: 3,
       status: "incomplete",
-      authority: "Instruction delivery is incomplete. Read every get_task_instruction_page with the same task locator(s), knownInstructionLayerKeys and expectedCatalogRevisionKey. Concatenate each layer's parts in partIndex order and verify its SHA-256 before interpreting task content. Restart the exact read if the revision changes.",
+      authority: "Instruction delivery is incomplete. Call get_task_instruction_page with the same task locator(s), knownInstructionLayerKeys and expectedCatalogRevisionKey. Use pageSize=recommendedPageSize and follow returned nextPageIndex until null; pageSize=1 keeps the single-part format. Concatenate each layer's parts in partIndex order and verify SHA-256 before task content. Restart the exact read if the revision changes.",
       layers: [],
       reusedLayerKeys: catalog.reusedLayerKeys,
-      delivery: { catalogRevisionKey, pageCount: pages.length, layerManifest },
+      delivery: {
+        catalogRevisionKey, pageCount: pages.length,
+        recommendedPageSize: LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE, layerManifest,
+      },
     },
     pages,
   };
@@ -5296,7 +5333,7 @@ const buildLocalExactTaskRead = (
         "The instruction catalog or page index changed. Restart the exact task read.",
       );
     }
-    return page;
+    return selectLocalTaskInstructionPage(delivery.pages, pageRequest.pageIndex, pageRequest.pageSize);
   }
   const result = {
     effectiveInstructions: delivery.catalog,
@@ -6452,6 +6489,7 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
     return buildLocalExactTaskRead(mirror, input.tasks, input.knownInstructionLayerKeys, {
       expectedCatalogRevisionKey: input.expectedCatalogRevisionKey,
       pageIndex: input.pageIndex,
+      pageSize: input.pageSize,
     });
   }
   if (nativeTool === "list_workspaces") return listWorkspacesFromMirror(mirror, input);

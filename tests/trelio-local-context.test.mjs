@@ -3876,13 +3876,79 @@ test("encrypted exact task reads page large authority and reject stale continuat
     assert.equal(crypto.createHash("sha256").update(parts.join(""), "utf8").digest("hex"),
       layer.sha256);
   }
+  assert.equal(cold.effectiveInstructions.delivery.recommendedPageSize, 4);
+  const batchedParts = [];
+  let nextPageIndex = 0;
+  let calls = 0;
+  while (nextPageIndex !== null) {
+    const page = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: nextPageIndex, pageSize: 4,
+    });
+    assert.equal(page.responseKind, "instruction_page_batch");
+    assert.equal(page.pageIndex, nextPageIndex);
+    assert.equal(page.pageCount, pageCount);
+    assert.equal(page.catalogRevisionKey, catalogRevisionKey);
+    assert.equal(page.part, undefined);
+    assert.equal(page.tasks, undefined);
+    assert.ok(page.parts.length >= 1 && page.parts.length <= 4);
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 23 * 1024);
+    batchedParts.push(...page.parts);
+    nextPageIndex = page.nextPageIndex;
+    calls += 1;
+    assert.deepEqual(page.nextExactReadArguments, nextPageIndex === null
+      ? { knownInstructionLayerKeys: cold.tasks[0].instructionScope.orderedLayerKeys } : undefined);
+  }
+  assert.equal(calls, Math.ceil(pageCount / 4));
+  assert.equal(batchedParts.length, pageCount);
+  for (const layer of layerManifest) {
+    assert.deepEqual(batchedParts.filter((part) => part.key === layer.key).map((part) => part.markdown),
+      partsByKey.get(layer.key));
+  }
+  for (const pageSize of [0, 5, -1, 1.5, "4", null]) {
+    assert.throws(() => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: 0, pageSize,
+    }), (error) => error?.code === "LOCAL_CONTEXT_INVALID_INPUT");
+  }
+  assert.throws(() => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+    tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: 0, pageSize: 4,
+    knownInstructionLayerKeys: [layerManifest[0].key],
+  }), (error) => error?.code === "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE");
   fixture.instructions.company.company = { revisionId: "company-r2", version: 2 };
   assert.throws(
     () => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
-      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: 0,
+      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: 0, pageSize: 4,
     }),
     (error) => error?.code === "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE",
   );
+});
+
+test("encrypted instruction batches cap escaped JSON and retain the actual continuation", () => {
+  const fixture = structuredClone(mirror);
+  // Внутренние tabs сохраняются нормализацией Markdown, но удваиваются в JSON.
+  // Такой input проверяет реальную wire-границу, а не только длину исходного текста.
+  fixture.instructions.company = {
+    compiledMarkdown: `Начало${"\t".repeat(20_000)}Конец`,
+    company: { revisionId: "company-r1", version: 1 },
+  };
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  const cold = handleNativeLocalContextRead(fixture, "get_task", target);
+  const { catalogRevisionKey, pageCount } = cold.effectiveInstructions.delivery;
+  let pageIndex = 0;
+  const collected = [];
+  while (pageIndex !== null) {
+    const batch = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+      tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex, pageSize: 4,
+    });
+    assert.ok(Buffer.byteLength(JSON.stringify(batch)) <= 23 * 1024);
+    assert.ok(batch.parts.length < 4);
+    assert.equal(batch.nextPageIndex, pageIndex + batch.parts.length < pageCount
+      ? pageIndex + batch.parts.length : null);
+    collected.push(...batch.parts);
+    pageIndex = batch.nextPageIndex;
+  }
+  assert.equal(collected.length, pageCount);
+  const layer = cold.effectiveInstructions.delivery.layerManifest[0];
+  assert.equal(crypto.createHash("sha256").update(collected.map((part) => part.markdown).join("")).digest("hex"), layer.sha256);
 });
 
 test("encrypted same-context task reads reuse complete authority and reload changed/lost layers", () => {
