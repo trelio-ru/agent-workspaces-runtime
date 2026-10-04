@@ -82,6 +82,7 @@ jobs:
           node tests/trelio-local-context.test.mjs
           node tests/trelio-mcp-results.test.mjs
           node tests/trelio-remote-mcp-oauth.test.mjs
+          node tests/trelio-agent-diagnostics.test.mjs
           node tests/trelio-remote-mcp.test.mjs
           node tests/trelio-runtime-policy.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
@@ -128,6 +129,9 @@ jobs:
 
       - name: Run signed setup boundary regressions
         run: node tests/trelio-skill-secret-setup.test.mjs
+
+      - name: Run Windows diagnostic regressions
+        run: node tests/trelio-agent-diagnostics.test.mjs
 
       - name: Run Windows ACL regressions
         run: >-

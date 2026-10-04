@@ -45,7 +45,9 @@ const copyRuntimeSource = async (stagingDirectory) => {
   const entries = await fs.readdir(SCRIPT_SOURCE, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (entry.isFile() && entry.name.endsWith(".mjs") && !EXCLUDED_SCRIPT_NAMES.has(entry.name)) {
+    if (entry.isFile()
+      && (entry.name.endsWith(".mjs") || entry.name === "trelio-agent-diagnostics-contract.json")
+      && !EXCLUDED_SCRIPT_NAMES.has(entry.name)) {
       await fs.copyFile(
         path.join(SCRIPT_SOURCE, entry.name),
         path.join(targetScripts, entry.name),

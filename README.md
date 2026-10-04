@@ -264,6 +264,30 @@ OS-protected read-back, без передачи token через argv, environme
 проверками: подтверждённая сессия сохраняется, а вторую runtime удаляет только
 после доказанного 401 либо успешного self-revoke.
 
+## Статистика ошибок local MCP
+
+Dispatcher отправляет content-free наблюдения пойманных ошибок `tools/call`
+в `/api/agent-workspaces/diagnostics/errors` через существующую bridge session.
+Отправка best effort в фоне, без OAuth/pairing, credential migration и UI;
+ошибка telemetry не меняет исходный MCP result. Возвращаемые provider `isError`,
+HTTP `TrelioApiError`, hooks и process crashes в этот счётчик не входят.
+
+Закрытый wire-каталог `trelio-agent-diagnostics-contract.json` ограничивает
+tool/operation/code. Payload содержит лишь UUID события, эти dimensions,
+числовые версии plugin/runtime и count. Unknown values сворачиваются; message,
+stack, args, paths, company/user/session/skill IDs и credentials исключены.
+Тот же allowlist проверяет backend. Каталоги меняются совместимо и проверяются
+при cross-repository изменении; они не входят в model-visible catalog.
+
+RAM queue ограничена 128 группами/1000 повторов; каждые 1 с – пакет до 20 групп.
+Активный пакет неизменен: после transport/5xx до трёх повторов через
+250/750/1500 мс с теми же UUID; timeout 3 с/attempt, redirects запрещены.
+4xx прекращает отправку без recovery. Shutdown отменяет отправки и удаляет
+queue без disk spool. Backend хранит события 30 дней и отправляет суперадминам
+ежедневную Telegram-сводку только при ошибках; отчёт не является error rate.
+Сначала выпускается совместимый backend, затем signed runtime; старый endpoint
+404 безопасно отключает конкретную отправку. Public plugin не меняется.
+
 См. [SECURITY.md](SECURITY.md). Не публикуйте credentials, company content,
 runtime sessions, E2EE keys, signing material и production package URLs в issue,
 fixture или log.

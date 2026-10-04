@@ -87,6 +87,9 @@ publication tooling также остаются вне этого публичн
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts обязательны по [runtime contract](docs/agent-workspace-runtime.md).
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
+- Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
+  только закрытые технические dimensions, без input/message/paths и без
+  auth recovery. Сбой сборщика не меняет ответ исходной операции.
 - `search` возвращает компактный `guidance` перед материалами; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.

@@ -9,6 +9,7 @@
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
 import crypto from "node:crypto";
+import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
@@ -6249,6 +6250,7 @@ export const handleLocalMcpMessage = async (
     requestClient = null,
     codexLegacyMcpMigration = null,
     runtimeUpgradeRecovery = null,
+    recordDiagnostic = null,
     signal,
   } = {},
 ) => {
@@ -6363,6 +6365,13 @@ export const handleLocalMcpMessage = async (
         }
       }
       const errorPayload = safeErrorPayload(effectiveError);
+      // Observe only host-thrown failures. Returned provider isError payloads
+      // are not inspected or uploaded; they can contain protected content.
+      try {
+        if (!(effectiveError instanceof TrelioApiError)) {
+          recordDiagnostic?.(message.params?.name, message.params?.arguments, errorPayload.code);
+        }
+      } catch { /* Telemetry must preserve the original result. */ }
       const isProposalCardError = errorPayload.code.startsWith("LOCAL_CONTEXT_PROPOSAL_");
       return {
         jsonrpc: "2.0",
@@ -6403,6 +6412,7 @@ export const runStdioHost = async ({
   startRuntimeDelegate = startHostRuntimeMcpDelegate,
   spawnProcess = spawn,
   statFile = fs.lstat,
+  diagnosticReporter = createAgentDiagnosticReporter({ origin, environment }),
 } = {}) => {
   const codexLegacyMcpMigration = await migrateCodexLegacyTrelioMcpForRuntime({
     environment,
@@ -6596,6 +6606,7 @@ export const runStdioHost = async ({
         clientCapabilities,
         requestClient,
         codexLegacyMcpMigration,
+        recordDiagnostic: diagnosticReporter.record,
         runtimeUpgradeRecovery: async (_error, rejectedMessage) => {
           if (
             controller
@@ -6660,6 +6671,7 @@ export const runStdioHost = async ({
   }
   await runtimeDelegate?.close();
   await outputQueue;
+  diagnosticReporter.close();
 };
 
 const main = () => runStdioHost();
