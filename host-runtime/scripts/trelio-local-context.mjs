@@ -5155,7 +5155,7 @@ const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
   if (!batch) {
     throw new TrelioLocalContextError(
       "LOCAL_CONTEXT_RESULT_TOO_LARGE",
-      "Instruction part exceeds the batch result limit; retry with pageSize=1.",
+      "Instruction part exceeds the safe result size; narrow the exact task batch or reduce the instruction size.",
     );
   }
   return batch;

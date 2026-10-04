@@ -3949,6 +3949,12 @@ test("encrypted instruction batches cap escaped JSON and retain the actual conti
   assert.equal(collected.length, pageCount);
   const layer = cold.effectiveInstructions.delivery.layerManifest[0];
   assert.equal(crypto.createHash("sha256").update(collected.map((part) => part.markdown).join("")).digest("hex"), layer.sha256);
+  fixture.instructions.company.compiledMarkdown = `Начало${"\u0000".repeat(5000)}Конец`;
+  const oversized = handleNativeLocalContextRead(fixture, "get_task", target);
+  assert.throws(() => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+    tasks: [target], expectedCatalogRevisionKey: oversized.effectiveInstructions.delivery.catalogRevisionKey,
+    pageIndex: 0, pageSize: 4,
+  }), (error) => error?.code === "LOCAL_CONTEXT_RESULT_TOO_LARGE");
 });
 
 test("encrypted same-context task reads reuse complete authority and reload changed/lost layers", () => {
