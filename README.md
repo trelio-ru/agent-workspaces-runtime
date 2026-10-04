@@ -61,6 +61,13 @@ login action. Pending SessionStart observation сохраняется до ре�
 
 ## Публичный ABI
 
+Переносимая model projection генерируется из backend
+`agent-response-projection.ts`. Секция instructions выбранного навыка включает
+отдельный личный слой `skill.personalRules` после локальной hydration.
+Summary/reuse исключают этот текст; membership и revision (включая очистку)
+входят в instruction key. Подписанный base Markdown и runtime admission не
+меняются. Это additive response contract, без нового plugin ABI или minimum.
+
 Stable shell передаёт runtime:
 
 - один entrypoint с режимами `bridge`, `hook` и `mcp`;

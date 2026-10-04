@@ -198,6 +198,8 @@ test("local skill detail loads authority sections lazily and reuses only an exac
       currentReleaseId: "release-3",
       readiness: { company: "configured", personal: "configured" },
       instructionsMarkdown: "Полные обязательные инструкции\n".repeat(300),
+      personalRules: { memberId: "member", revisionId: "personal-1", version: 1,
+        instructionsMarkdown: "Мой адрес", authority: "Личный слой" },
       connectionDefinition: { fields: [{ key: "account" }] },
       connection: { id: "connection", config: { account: "demo" }, secretBindings: [] },
       runtimeRequirements: { capabilities: ["network"] },
@@ -222,6 +224,7 @@ test("local skill detail loads authority sections lazily and reuses only an exac
   const baseArgs = { companySlug: "demo", projectSlug: "mobile", skillId: "provider-skill" };
   const summary = JSON.parse(compactLocalNativeMcpResult("get_agent_skill", envelope, baseArgs).content[0].text);
   assert.equal(summary.skill.instructionsMarkdown, undefined);
+  assert.equal(summary.skill.personalRules, undefined);
   assert.equal(summary.runtimeExecution, undefined);
   assert.deepEqual(summary.deferredData.sections, ["instructions", "connection", "execution", "publication"]);
   assert.match(summary.skill.instructionKey, /demo:mobile:provider-skill:release-3/u);
@@ -229,6 +232,7 @@ test("local skill detail loads authority sections lazily and reuses only an exac
   const selectedArgs = { ...baseArgs, sections: ["instructions", "execution"] };
   const selected = JSON.parse(compactLocalNativeMcpResult("get_agent_skill", envelope, selectedArgs).content[0].text);
   assert.equal(selected.skill.instructionsMarkdown, payload.skill.instructionsMarkdown);
+  assert.deepEqual(selected.skill.personalRules, payload.skill.personalRules);
   assert.deepEqual(selected.runtimeExecution.localAction, payload.runtimeExecution.localAction);
   assert.equal(selected.runtimeExecution.command, undefined);
   assert.equal(selected.runtimeExecution.trust.publication, undefined);
@@ -241,6 +245,21 @@ test("local skill detail loads authority sections lazily and reuses only an exac
     knownInstructionKey: summary.skill.instructionKey,
   }).content[0].text);
   assert.equal(reused.skill.instructionsMarkdown, undefined);
+  assert.equal(reused.skill.personalRules, undefined);
+  // Local hydration delivers the same separate personal layer; changing it or
+  // clearing it invalidates reuse without modifying the signed base Markdown.
+  for (const personalRules of [
+    { ...payload.skill.personalRules, revisionId: "personal-2" },
+    { ...payload.skill.personalRules, memberId: "other" },
+    { ...payload.skill.personalRules, revisionId: "personal-cleared", instructionsMarkdown: "" },
+  ]) {
+    const changed = projectMcpAgentPayload("get_agent_skill", {
+      ...payload, skill: { ...payload.skill, personalRules },
+    }, { ...selectedArgs, knownInstructionKey: selected.skill.instructionKey });
+    assert.notEqual(changed.skill.instructionKey, selected.skill.instructionKey);
+    assert.equal(changed.skill.instructionsMarkdown, payload.skill.instructionsMarkdown);
+    assert.equal(Boolean(changed.skill.personalRules), Boolean(personalRules.instructionsMarkdown));
+  }
   assert.deepEqual(reused.responseProjection.includedSections, ["execution"]);
   assert.deepEqual(reused.responseProjection.reusedSections, ["instructions"]);
   const otherProject = projectMcpAgentPayload("get_agent_skill", { ...payload, projectSlug: "other" }, {

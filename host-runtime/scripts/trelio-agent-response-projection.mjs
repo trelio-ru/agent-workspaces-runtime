@@ -1102,7 +1102,12 @@ const projectAgentSkillDetail = (payload, args) => {
     // Project scope is part of the structural key: the same catalog skill and
     // release may resolve to different effective instructions per assignment.
     // Intent remains a caller-side reuse condition and is never inferred here.
-    const instructionKey = `agent-skill:${String(payload.companySlug ?? args.companySlug ?? "unknown")}:${String(payload.projectSlug ?? args.projectSlug ?? "company")}:${skill.id}:${releaseIdentity}`;
+    const personalRules = record(skill.personalRules);
+    // Очистка и смена пользователя также инвалидируют ранее прочитанный слой.
+    const personalKey = personalRules
+        ? `:${String(personalRules.memberId)}:${String(personalRules.revisionId ?? "empty")}`
+        : "";
+    const instructionKey = `agent-skill:${String(payload.companySlug ?? args.companySlug ?? "unknown")}:${String(payload.projectSlug ?? args.projectSlug ?? "company")}:${skill.id}:${releaseIdentity}${personalKey}`;
     const requested = new Set(stringArray(args.sections).filter((section) => (MCP_AGENT_SKILL_SECTION_NAMES.includes(section))));
     const available = [
         ...(own(skill, "instructionsMarkdown") ? ["instructions"] : []),
@@ -1116,7 +1121,7 @@ const projectAgentSkillDetail = (payload, args) => {
     ];
     const reuseInstructions = requested.has("instructions")
         && args.knownInstructionKey === instructionKey;
-    const { instructionsMarkdown, connectionDefinition, connection, runtimeRequirements, runtimeRelease: _runtimeRelease, remoteMcp, ...skillSummary } = skill;
+    const { instructionsMarkdown, personalRules: _personalRules, connectionDefinition, connection, runtimeRequirements, runtimeRelease: _runtimeRelease, remoteMcp, ...skillSummary } = skill;
     let projectedSkill = {
         ...skillSummary,
         instructionKey,
@@ -1131,7 +1136,11 @@ const projectAgentSkillDetail = (payload, args) => {
         },
     };
     if (requested.has("instructions") && !reuseInstructions) {
-        projectedSkill = { ...projectedSkill, instructionsMarkdown };
+        projectedSkill = {
+            ...projectedSkill, instructionsMarkdown,
+            ...(personalRules && typeof personalRules.instructionsMarkdown === "string"
+                && personalRules.instructionsMarkdown.trim() ? { personalRules } : {}),
+        };
     }
     if (requested.has("connection")) {
         projectedSkill = { ...projectedSkill, connectionDefinition, connection };
