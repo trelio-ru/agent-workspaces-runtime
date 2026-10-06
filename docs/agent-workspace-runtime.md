@@ -368,14 +368,24 @@ read. `SessionStart` при resume/clear/compact/fork сбрасывает deliv
 set для exact catalog revision; новые прочитанные слои не меняют page offsets.
 Повторное использование страниц требует всего manifest и всех частей
 каждого слоя с правильным общим SHA-256; last-page hint сам по себе недостаточен.
-Claude Code и encrypted local route используют полный read: их журнал пока
-не подтверждает сохранность authority после очистки tool output. Это не
-блокирует операции, не меняет права и не разрешает обход runtime proof.
-Local fallback охватывает также exact чтения knowledge-base pages, contacts,
-registries и meetings: они гидратируют слои правил, хотя их native аналоги
-не объявляют instruction hints. Поля удаляются только из argument slots,
-не из business filters или содержимого документов.
-Закреплённые правила и профиль Run остаются отдельной authority.
+Direct encrypted local `continue_trelio_local_action` использует тот же adapter
+только для `route=context`, `operation=native_read` и выбранных schema-v3 mirror
+reads. Exact envelope/current call, namespace и company selector проверяются
+до reuse; native/local receipts не смешиваются. Codex 0.160.0 single `input_text`
+item разбирается целиком после проверки бюджета всей сериализации. Полные
+hydrated layers сверяются по SHA-256; keys добавляются только в
+`parameters.arguments`. Иные routes/aliases, mixed output и неподтверждённые
+форматы получают полный read. Claude Code также использует полный read: его
+журнал пока не подтверждает сохранность authority после очистки tool output.
+Fallback не блокирует операции, не меняет права и не разрешает обход proof.
+Model hints удаляются только из typed argument slots, не из business filters
+или содержимого документов. Pinned правила и профиль Run остаются authority.
+
+Офлайн fixture `report:context-budget` проводит настоящий receipt adapter над
+локальным schema-v3 payload с двумя длинными авторскими слоями. Полный
+request/result: 5 373 tokens `o200k_base`, повторный verified read: 631 (−88,3%).
+Это стоимость выбранного синтетического чтения, не всего чата или billing;
+Code Mode и чтение после compaction не получают hints и дают 0% этой экономии.
 
 Проверенный upstream-контракт:
 [history](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/context_manager/history.rs),

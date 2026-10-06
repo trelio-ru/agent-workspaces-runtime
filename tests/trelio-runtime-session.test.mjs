@@ -1151,6 +1151,36 @@ test("SessionStart pins the initial model and supported host names inject verifi
     const reusedArgs = JSON.parse(reused.stdout).hookSpecificOutput.updatedInput;
     assert.deepEqual(reusedArgs.knownInstructionLayerKeys, [layer.key]);
     assert.ok(reusedArgs.runtimeSessionProof.signature);
+    // The same real hook must inject mirror-read hints into the nested typed
+    // slot and still sign the exact native method, not the facade tool name.
+    const localEnvelope = { schemaVersion: 1, route: "context", parameters: {
+      companySlug: "synthetic", operation: "native_read", nativeTool: "get_task", arguments: locator,
+    } };
+    const localCall = (callId) => ({ timestamp: new Date().toISOString(), type: "response_item", payload: {
+      type: "function_call", namespace: "mcp__trelio_remote_skills", name: "continue_trelio_local_action",
+      call_id: callId, arguments: JSON.stringify(localEnvelope),
+    } });
+    await writeFile(transcriptPath, [
+      { type: "session_meta", payload: { id: threadId, cli_version: "0.160.0" } },
+      localCall("previous"),
+      { timestamp: new Date().toISOString(), type: "response_item", metadata: { fallback_token_limit_override: 12000 },
+        payload: { type: "function_call_output", call_id: "previous", output: [{ type: "input_text", text: JSON.stringify({
+          effectiveInstructions: { schemaVersion: 3, status: "loaded", layers: [layer] },
+        }) }] } },
+      localCall("current"),
+    ].map((item) => JSON.stringify(item)).join("\n") + "\n");
+    const localReused = await runHook({ ...reuseInput,
+      tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action", tool_input: localEnvelope }, environment);
+    assert.equal(localReused.exitCode, 0, localReused.stderr);
+    const localArgs = JSON.parse(localReused.stdout).hookSpecificOutput.updatedInput;
+    assert.deepEqual(localArgs.parameters.arguments, { ...locator, knownInstructionLayerKeys: [layer.key] });
+    assert.equal(localArgs.knownInstructionLayerKeys, undefined);
+    assert.equal(localArgs.parameters.nativeTool, "get_task");
+    assert.ok(localArgs.runtimeSessionProof.signature);
+    assert.equal(crypto.verify(null, Buffer.from([
+      "trelio-runtime-proof-v1", localArgs.runtimeSessionProof.runtimeSessionId, "get_task",
+      localArgs.runtimeSessionProof.issuedAt, localArgs.runtimeSessionProof.nonce,
+    ].join("\n")), publicKey, Buffer.from(localArgs.runtimeSessionProof.signature, "base64url")), true);
     const compacted = await runHook({ hook_event_name: "SessionStart", source: "compact",
       session_id: threadId, transcript_path: transcriptPath }, environment);
     assert.equal(compacted.exitCode, 0, compacted.stderr);

@@ -176,6 +176,10 @@ test("local initialize, visible schemas and actual compact results have regressi
   assert.ok(attachment.duplicatedBase64.tokensO200kBase > 2_000_000,
     "The binary fixture must count its base64 text; it cannot silently become an empty attachment");
   assert.equal(instructionReuse.layerCount, 2);
+  assert.equal(instructionReuse.adapter.verifiedLayerCount, instructionReuse.layerCount);
+  assert.deepEqual(instructionReuse.adapter.codeModeHints, {});
+  assert.deepEqual(instructionReuse.adapter.afterCompactionHints, {});
+  assert.ok(instructionReuse.adapter.warmRequest.tokensO200kBase > instructionReuse.adapter.coldRequest.tokensO200kBase);
   assert.ok(instructionReuse.warm.bytesUtf8
     <= PLUGIN_CONTEXT_BUDGET_LIMITS.representativeReusedInstructionResultBytes);
   assert.ok(instructionReuse.warm.tokensO200kBase

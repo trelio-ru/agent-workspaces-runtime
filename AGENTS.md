@@ -71,7 +71,8 @@ publication tooling также остаются вне этого публичн
   [README](README.md#ошибки-lifecycle-hooks); stable hook definition не меняется.
 - Поля `knownInstructionRevisionKey`/`knownInstructionLayerKeys` принадлежат
   host runtime: model hints удаляются до проверки доставки. Bounded adapter
-  подтверждает только полные direct Codex responses в текущем контексте;
+  подтверждает полные direct Codex native и typed local mirror-read responses
+  в текущем контексте; namespaces и company route не смешиваются;
   Claude, неизвестный формат, Code Mode и ошибки возвращаются к полному чтению.
   Оптимизация не ослабляет admission/proof и не кеширует тексты правил.
 - Browser fill повторяет только value-free preflight: временно отсутствующее

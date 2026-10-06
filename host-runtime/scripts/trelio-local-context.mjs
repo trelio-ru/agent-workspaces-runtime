@@ -5107,8 +5107,9 @@ const buildLocalScopedEffectiveInstructions = (
   const knownKeys = new Set(
     Array.isArray(knownInstructionLayerKeys) ? knownInstructionLayerKeys : [],
   );
-  // A key only suppresses Markdown that the caller explicitly says is still
-  // present in the current model context. Unknown and changed keys are ignored,
+  // A key only suppresses Markdown whose complete delivery/retention the host
+  // verified in the current model context; model-authored hints are stripped.
+  // Unknown and changed keys are ignored,
   // so a revision change or a read after compaction naturally restores the
   // complete authoritative layer instead of trusting a hash by itself.
   const reusedLayerKeys = snapshot.layers

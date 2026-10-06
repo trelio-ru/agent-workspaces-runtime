@@ -6,6 +6,7 @@ import { get_encoding } from "tiktoken";
 import { AGENT_SKILL_ROUTING_INSTRUCTIONS, buildLocalProposalRenderResult, handleLocalMcpMessage, handleToolCall } from "./trelio-remote-mcp.mjs";
 import { buildLocalAttachmentFileResult } from "./trelio-local-attachments.mjs";
 import { compactRemoteDoctorPayload } from "./trelio-mcp-results.mjs";
+import { collectCodexInstructionHints, instructionContextBoundary } from "./trelio-instruction-reuse.mjs";
 
 import { AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN } from "./trelio-workspace.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
@@ -247,11 +248,31 @@ const buildLocalResponseMeasurements = async () => {
     instructionMirror,
     "workspace:66666666-6666-4666-8666-666666666666",
   );
-  const warmInstructions = fetchMirrorResult(
-    instructionMirror,
-    "workspace:66666666-6666-4666-8666-666666666666",
-    coldInstructions.effectiveInstructions.nextReadArguments.knownInstructionLayerKeys,
-  );
+  // Exercise the production receipt adapter, rather than treating a returned
+  // nextReadArguments hint as proof that the model retained full Markdown.
+  // All content/session paths below are synthetic and never read from disk.
+  const localRead = { schemaVersion: 1, route: "context", parameters: {
+    companySlug: "demo", operation: "native_read", nativeTool: "fetch",
+    arguments: { id: "workspace:66666666-6666-4666-8666-666666666666" },
+  } };
+  const hookInput = { session_id: "budget-fixture", tool_use_id: "current",
+    transcript_path: path.resolve("synthetic-budget-rollout.jsonl") };
+  const timestamp = "2026-10-07T10:00:01.000Z";
+  const call = (callId) => ({ timestamp, type: "response_item", payload: {
+    type: "function_call", namespace: "mcp__trelio_remote_skills",
+    name: "continue_trelio_local_action", call_id: callId, arguments: JSON.stringify(localRead),
+  } });
+  const delivered = { timestamp, type: "response_item", metadata: { fallback_token_limit_override: 12000 },
+    payload: { type: "function_call_output", call_id: "first",
+      output: [{ type: "input_text", text: JSON.stringify(coldInstructions) }] } };
+  const inspect = (rows) => collectCodexInstructionHints({ rows, hookInput, input: localRead,
+    header: { id: hookInput.session_id, cli_version: "0.160.0" },
+    identity: { status: "local", toolName: "fetch" },
+    boundary: instructionContextBoundary(hookInput, new Date("2026-10-07T10:00:00.000Z")),
+  });
+  const hints = inspect([call("first"), delivered, call("current")]);
+  const warmInstructions = fetchMirrorResult(instructionMirror, localRead.parameters.arguments.id,
+    hints.knownInstructionLayerKeys);
   const measureLocalPayload = (payload) => measureModelResult({
     content: [{ type: "text", text: JSON.stringify(payload) }],
   });
@@ -274,6 +295,16 @@ const buildLocalResponseMeasurements = async () => {
       cold: measureLocalPayload(coldInstructions),
       warm: measureLocalPayload(warmInstructions),
       layerCount: coldInstructions.effectiveInstructions.layers.length,
+      adapter: {
+        verifiedLayerCount: hints.knownInstructionLayerKeys?.length ?? 0,
+        coldRequest: measureContextText(JSON.stringify(localRead)),
+        warmRequest: measureContextText(JSON.stringify({ ...localRead, parameters: { ...localRead.parameters,
+          arguments: { ...localRead.parameters.arguments, ...hints } } })),
+        codeModeHints: inspect([call("first"), { ...delivered,
+          payload: { ...delivered.payload, type: "custom_tool_call_output" } }, call("current")]),
+        afterCompactionHints: inspect([call("first"), delivered,
+          { timestamp, type: "compacted", payload: {} }, call("current")]),
+      },
     },
   };
 };
