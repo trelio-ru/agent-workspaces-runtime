@@ -21,6 +21,10 @@ import {
 import { execFile, spawn } from "node:child_process";
 import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
+import {
+  HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
+  prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure, resolveHostRuntimeLoader,
+} from "./trelio-host-runtime-recovery.mjs";
 import { TRELIO_PRE_TOOL_USE_MATCHER, inspectTrelioHookToolRouting } from "./trelio-hook-tool-identity.mjs";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
@@ -1340,7 +1344,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
-  if (error instanceof BridgeTransportError) return JSON.stringify(error);
+  if (error instanceof BridgeTransportError || error instanceof HostRuntimeRecoveryError) return JSON.stringify(error);
   if (
     error instanceof WorkspaceActiveRunRequiredError
     || error instanceof WorkspaceDraftRecoveryRequiredError
@@ -16756,11 +16760,6 @@ const runUpdatedBridgeEntrypoint = async (
   })
 );
 
-const HOST_RUNTIME_UPGRADE_REQUIRED_CODES = new Set([
-  "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
-  "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
-]);
-
 const runStableHostRuntimeLoader = async (
   loaderPath,
   argumentsList,
@@ -16803,6 +16802,8 @@ export const recoverBridgeHostRuntimeUpgrade = async (
     rawArguments = process.argv.slice(2),
     environment = process.env,
     spawnProcess = spawn,
+    statFile = fs.lstat,
+    accessFile = fs.access,
   } = {},
 ) => {
   if (
@@ -16821,28 +16822,11 @@ export const recoverBridgeHostRuntimeUpgrade = async (
     };
   }
 
-  const pluginRoot = String(environment.TRELIO_PLUGIN_ROOT || "").trim();
-  if (!path.isAbsolute(pluginRoot)) {
-    return {
-      handled: false,
-      error: new Error(
-        `${error.code}: stable loader недоступен; требуется обновить оболочку Trelio plugin.`,
-      ),
-    };
-  }
-  const loaderPath = path.join(pluginRoot, "scripts", "trelio-host-runtime-loader.mjs");
-
+  const recoveryOptions = { environment, spawnProcess, statFile, accessFile };
+  let prepared = false;
   try {
-    // Wait for a possible detached update from startup, then perform one exact
-    // metadata check ourselves. This bypasses only the polling cooldown, never
-    // signature, digest, package-format or minimum-shell validation.
-    await runStableHostRuntimeLoader(loaderPath, ["__update"], {
-      environment,
-      environmentOverrides: {
-        TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK: "1",
-      },
-      spawnProcess,
-    });
+    const loaderPath = await prepareHostRuntimeUpgrade(recoveryOptions);
+    prepared = true;
     const exitCode = await runStableHostRuntimeLoader(
       loaderPath,
       ["bridge", ...rawArguments],
@@ -16850,20 +16834,26 @@ export const recoverBridgeHostRuntimeUpgrade = async (
         environment,
         environmentOverrides: {
           TRELIO_HOST_RUNTIME_UPDATE_REEXEC: "1",
+          TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
         },
         allowNonzeroExit: true,
         spawnProcess,
       },
     );
+    // После запуска bridge нельзя заключить, что mutation не состоялась.
+    // Проверяем только потерю exact оболочки; обычный nonzero результат
+    // рабочего действия остаётся результатом child, без нового recovery.
+    if (exitCode !== 0) await resolveHostRuntimeLoader(recoveryOptions);
     return { handled: true, exitCode };
   } catch (updateError) {
-    return {
-      handled: false,
-      error: new Error(
-        `${error.code}: не удалось безопасно обновить подписанный Trelio host runtime. `
-        + `Повторите исходное действие; перезапуск Codex не требуется. Причина: ${buildChildProcessErrorDetail(updateError)}`,
-      ),
-    };
+    const failure = await classifyHostRuntimeRecoveryFailure(updateError, {
+      ...recoveryOptions, failureReason: prepared ? "handoff_failed" : "update_failed",
+    });
+    return { handled: false, error: failure instanceof HostRuntimeRecoveryError
+      ? new HostRuntimeRecoveryError(failure.details.reason, {
+        ...failure.details, originalCode: error.code,
+        ...(prepared ? { operationOutcome: "unknown" } : {}),
+      }) : failure };
   }
 };
 

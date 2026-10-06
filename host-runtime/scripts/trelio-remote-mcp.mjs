@@ -9,6 +9,10 @@
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
 import crypto from "node:crypto";
+import {
+  HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
+  prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
+} from "./trelio-host-runtime-recovery.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
@@ -128,10 +132,7 @@ const TRELIO_RESOLVE_TIMEOUT_MS = 20_000;
 const HOST_RUNTIME_UPDATE_TIMEOUT_MS = 180_000;
 const HOST_RUNTIME_MCP_INITIALIZE_TIMEOUT_MS = 10_000;
 const HOST_RUNTIME_MCP_CLOSE_TIMEOUT_MS = 5_000;
-const HOST_RUNTIME_UPGRADE_REQUIRED_CODES = new Set([
-  "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
-  "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
-]);
+
 const CREDENTIAL_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_BROWSER_HANDOFF_TIMEOUT_MS = 7_500;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -5885,32 +5886,6 @@ const waitWithTimeout = async (promise, timeoutMs, timeoutMessage, onTimeout) =>
   }
 };
 
-const waitForRuntimeLoaderExit = (
-  child,
-  {
-    timeoutMs = HOST_RUNTIME_UPDATE_TIMEOUT_MS,
-    operation,
-  },
-) => waitWithTimeout(
-  new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (exitCode, signal) => {
-      if (signal) {
-        reject(new Error(`${operation} завершён сигналом ${signal}.`));
-        return;
-      }
-      if ((exitCode ?? 1) !== 0) {
-        reject(new Error(`${operation} завершён с кодом ${exitCode ?? 1}.`));
-        return;
-      }
-      resolve(exitCode ?? 0);
-    });
-  }),
-  timeoutMs,
-  `${operation} не завершён за ${timeoutMs} мс.`,
-  () => child.kill?.(),
-);
-
 export const isHostRuntimeUpgradeRequiredError = (error) => (
   error instanceof TrelioApiError
   && HOST_RUNTIME_UPGRADE_REQUIRED_CODES.has(error.code)
@@ -5932,6 +5907,7 @@ export const startHostRuntimeMcpDelegate = async ({
   enqueueResponse,
   spawnProcess = spawn,
   statFile = fs.lstat,
+  accessFile = fs.access,
   currentRuntimeVersion = getHostRuntimeVersion(environment),
   updateTimeoutMs = HOST_RUNTIME_UPDATE_TIMEOUT_MS,
   initializeTimeoutMs = HOST_RUNTIME_MCP_INITIALIZE_TIMEOUT_MS,
@@ -5945,50 +5921,27 @@ export const startHostRuntimeMcpDelegate = async ({
   if (typeof enqueueResponse !== "function") {
     throw new Error("Trelio host runtime handoff требует внешний MCP transport.");
   }
-  const pluginRoot = String(environment.TRELIO_PLUGIN_ROOT || "").trim();
-  if (!path.isAbsolute(pluginRoot)) {
-    throw new Error(
-      "Stable Trelio plugin loader недоступен; требуется обновить plugin shell.",
-    );
-  }
-  const loaderPath = path.join(
-    pluginRoot,
-    "scripts",
-    "trelio-host-runtime-loader.mjs",
-  );
-  const loaderMetadata = await statFile(loaderPath).catch(() => null);
-  if (!loaderMetadata?.isFile() || loaderMetadata.isSymbolicLink()) {
-    throw new Error(
-      "Stable Trelio plugin loader отсутствует либо не является обычным файлом.",
-    );
-  }
-
-  const updateChild = spawnProcess(process.execPath, [loaderPath, "__update"], {
-    env: {
-      ...environment,
-      TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK: "1",
-    },
-    shell: false,
-    stdio: ["ignore", "ignore", "inherit"],
-    windowsHide: true,
-  });
-  await waitForRuntimeLoaderExit(updateChild, {
-    timeoutMs: updateTimeoutMs,
-    operation: "Обновление Trelio host runtime",
+  const loaderPath = await prepareHostRuntimeUpgrade({
+    environment, statFile, accessFile, spawnProcess, timeoutMs: updateTimeoutMs,
   });
 
-  const child = spawnProcess(process.execPath, [loaderPath, "mcp"], {
-    env: {
-      ...environment,
-      // The explicit __update immediately above already performed the bounded
-      // network convergence. Avoid a second startup fetch while retaining the
-      // delegate's own ability to perform a later exact hard-gate handoff.
-      TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
-    },
-    shell: false,
-    stdio: ["pipe", "pipe", "inherit"],
-    windowsHide: true,
-  });
+  let child;
+  try {
+    child = spawnProcess(process.execPath, [loaderPath, "mcp"], {
+      env: {
+        ...environment,
+        // The explicit __update immediately above already performed the bounded
+        // network convergence. Avoid a second startup fetch while retaining the
+        // delegate's own ability to perform a later exact hard-gate handoff.
+        TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
+      },
+      shell: false,
+      stdio: ["pipe", "pipe", "inherit"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    throw await classifyHostRuntimeRecoveryFailure(error, { environment, statFile, accessFile, failureReason: "handoff_failed" });
+  }
   if (!child.stdin || !child.stdout) {
     child.kill?.();
     throw new Error("Обновлённый Trelio MCP не открыл stdio transport.");
@@ -6009,6 +5962,10 @@ export const startHostRuntimeMcpDelegate = async ({
     resolveInitialize = resolve;
     rejectInitialize = reject;
   });
+
+  // An early write/spawn failure may bypass the initialize await below. Keep
+  // its rejection observed while preserving the failure for the normal await.
+  initializeResult.catch(() => undefined);
 
   const failPendingRequests = (error) => {
     if (closing) {
@@ -6132,18 +6089,26 @@ export const startHostRuntimeMcpDelegate = async ({
     return await outputQueue;
   };
 
-  await writeFrame({
-    jsonrpc: "2.0",
-    id: initializeId,
-    method: "initialize",
-    params: initializeParams,
-  });
-  const nestedInitialize = await waitWithTimeout(
-    initializeResult,
-    initializeTimeoutMs,
-    `Обновлённый Trelio MCP не ответил на initialize за ${initializeTimeoutMs} мс.`,
-    () => child.kill?.(),
-  );
+  let nestedInitialize;
+  try {
+    await writeFrame({
+      jsonrpc: "2.0",
+      id: initializeId,
+      method: "initialize",
+      params: initializeParams,
+    });
+    nestedInitialize = await waitWithTimeout(
+      initializeResult,
+      initializeTimeoutMs,
+      `Обновлённый Trelio MCP не ответил на initialize за ${initializeTimeoutMs} мс.`,
+      () => child.kill?.(),
+    );
+  } catch (error) {
+    closing = true;
+    child.kill?.();
+    childOutput.close();
+    throw await classifyHostRuntimeRecoveryFailure(error, { environment, statFile, accessFile, failureReason: "handoff_failed" });
+  }
   const nextRuntimeVersion = String(nestedInitialize?.serverInfo?.version || "");
   if (
     !STABLE_VERSION_PATTERN.test(nextRuntimeVersion)
@@ -6232,13 +6197,14 @@ const safeErrorPayload = (error) => ({
   code: error instanceof RemoteMcpHostError
     || error instanceof RemoteMcpOAuthError
     || error instanceof TrelioLocalContextError
+    || error instanceof HostRuntimeRecoveryError
     || error instanceof CodexRoutingConfigError
     ? error.code
     : String(error?.message || "").includes("TRELIO_BRIDGE_PAIRING_REQUIRED")
       ? "TRELIO_BRIDGE_PAIRING_REQUIRED"
       : "REMOTE_MCP_HOST_ERROR",
   message: error instanceof Error ? error.message : String(error),
-  ...((error instanceof RemoteMcpHostError || error instanceof TrelioLocalContextError) && error.details
+  ...((error instanceof RemoteMcpHostError || error instanceof TrelioLocalContextError || error instanceof HostRuntimeRecoveryError) && error.details
     ? { details: error.details }
     : {}),
 });
@@ -6366,6 +6332,7 @@ export const handleLocalMcpMessage = async (
           // whether a side effect already happened.
           if (await runtimeUpgradeRecovery(error, message)) return null;
         } catch (recoveryError) {
+          if (recoveryError instanceof HostRuntimeRecoveryError) recoveryError.details.originalCode = error.code;
           effectiveError = recoveryError;
         }
       }
@@ -6500,7 +6467,9 @@ export const runStdioHost = async ({
           error: {
             code: -32000,
             message: error instanceof Error ? error.message : String(error),
-            data: { code: "TRELIO_HOST_RUNTIME_HANDOFF_FAILED" },
+            data: error instanceof HostRuntimeRecoveryError
+              ? { code: error.code, ...error.details }
+              : { code: "TRELIO_HOST_RUNTIME_HANDOFF_FAILED" },
           },
         });
         return false;

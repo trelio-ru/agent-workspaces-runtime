@@ -1,3 +1,4 @@
+import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
@@ -10132,6 +10133,10 @@ export const handleTrelioWorkspaceActionOperation = async (
     }
     const stderr = truncateWorkspaceActionOutput(error?.stderr).trim();
     const stdout = truncateWorkspaceActionOutput(error?.stdout).trim();
+    const runtimeRecovery = parseHostRuntimeRecoveryError(error?.stderr);
+    if (runtimeRecovery) throw new TrelioLocalContextError(
+      runtimeRecovery.code, runtimeRecovery.message, runtimeRecovery.details,
+    );
     const transportError = parseBridgeTransportError(error?.stderr, invocation.operation);
     if (transportError) throw transportError;
     const activeRunRecovery = parseWorkspaceActiveRunRequiredError(

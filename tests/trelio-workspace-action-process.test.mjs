@@ -65,6 +65,13 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     },
   }) + "\\n");
   process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_RUNTIME_RECOVERY_FAILURE === "1") {
+  process.stderr.write("Ошибка: " + JSON.stringify({
+    code: "TRELIO_PLUGIN_RESTART_REQUIRED", message: "PRIVATE_CANARY",
+    details: { reason: "loaded_plugin_unavailable", requiredAction: "PRIVATE_CANARY",
+      originalCode: "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED", secret: "PRIVATE_CANARY" },
+  }) + "\\n");
+  process.exitCode = 7;
 } else if (process.env.TRELIO_TEST_TRANSPORT_FAILURE === "1") {
   process.stderr.write("Ошибка: " + JSON.stringify({
     code: "TRELIO_BRIDGE_TRANSPORT_FAILED",
@@ -163,7 +170,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, providerFailure = "", ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, runtimeRecoveryFailure = false, providerFailure = "", ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -177,6 +184,7 @@ const createFixture = async (t) => {
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
         TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
+        TRELIO_TEST_RUNTIME_RECOVERY_FAILURE: runtimeRecoveryFailure ? "1" : "0",
         TRELIO_TEST_LAYOUT_ROOT: workspaceDirectory,
         TRELIO_TEST_WORKSPACE_ID: workspaceId,
       },
@@ -357,4 +365,16 @@ test("real failed skill preserves the action ABI, reports only a fixed category 
     assert.equal(event.code, outcome.error.diagnosticCode);
     assert.equal(JSON.stringify(event).includes("PRIVATE_CANARY"), false);
   }
+});
+
+test("Workspace bridge preserves runtime recovery through the subprocess boundary without replay or private stderr", async (t) => {
+  const fixture = await createFixture(t);
+  const outcome = await fixture.run({ runtimeRecoveryFailure: true });
+  assert.equal(outcome.error.code, "TRELIO_PLUGIN_RESTART_REQUIRED");
+  assert.deepEqual(outcome.error.details, {
+    reason: "loaded_plugin_unavailable", requiredAction: "restart_client",
+    originalCode: "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
+  });
+  assert.equal(outcome.executions, "started\n");
+  assert.doesNotMatch(JSON.stringify(outcome), /PRIVATE_CANARY/u);
 });

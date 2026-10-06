@@ -73,6 +73,10 @@ publication tooling также остаются вне этого публичн
   AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
+- Hook/bridge/MCP используют общий recovery exact stable loader по
+  [контракту](docs/agent-workspace-runtime.md#восстановление-подписанного-рантайма).
+  Только подтверждённый missing shell требует restart; ACL, I/O и update failure
+  сохраняются отдельно. Никакого второго verifier, cache scan или blind replay.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.
 - Подписанный Agent Skill может получить `CODEX_THREAD_ID` из ограниченного

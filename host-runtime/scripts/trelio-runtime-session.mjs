@@ -10,6 +10,10 @@
  */
 import crypto from "node:crypto";
 import {
+  HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
+  prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure, resolveHostRuntimeLoader,
+} from "./trelio-host-runtime-recovery.mjs";
+import {
   readTrelioHookToolInput,
   resolveTrelioHookToolIdentity,
   TrelioHookToolIdentityError,
@@ -64,10 +68,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const HOOK_REQUIRED_CODE = "TRELIO_RUNTIME_HOOK_REQUIRED";
 const HOOK_FAILED_CODE = "TRELIO_RUNTIME_HOOK_FAILED";
 const SUPPORTED_HOOK_EVENTS = new Set(["SessionStart", "PreToolUse", "SessionEnd"]);
-const HOST_RUNTIME_RECOVERY_CODES = new Set([
-  "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",
-  "AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED",
-]);
+const HOST_RUNTIME_RECOVERY_CODES = HOST_RUNTIME_UPGRADE_REQUIRED_CODES;
 const PLUGIN_UPGRADE_REQUIRED_CODE = "AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED";
 const LEGACY_MCP_RESTART_REQUIRED_CODE = "TRELIO_CODEX_LEGACY_MCP_RESTART_REQUIRED";
 const LEGACY_MCP_REMOVAL_FAILED_CODE = "TRELIO_CODEX_LEGACY_MCP_REMOVAL_FAILED";
@@ -763,6 +764,8 @@ export const recoverHookHostRuntimeUpgrade = async (
     environment = process.env,
     statFile = fs.lstat,
     runProcess = runChildProcess,
+    runUpdate,
+    accessFile = fs.access,
   } = {},
 ) => {
   if (
@@ -772,26 +775,15 @@ export const recoverHookHostRuntimeUpgrade = async (
     return null;
   }
 
-  const pluginRoot = String(environment.TRELIO_PLUGIN_ROOT || "").trim();
-  if (!path.isAbsolute(pluginRoot)) return null;
-  const loaderPath = path.join(pluginRoot, "scripts", "trelio-host-runtime-loader.mjs");
-  const loaderMetadata = await statFile(loaderPath).catch(() => null);
-  if (!loaderMetadata?.isFile() || loaderMetadata.isSymbolicLink()) return null;
-
-  const recoveryEnvironment = {
-    ...environment,
-    TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK: "1",
-  };
-  // A launcher/spawn failure must preserve the original structured gate. The
-  // formatter can then give the precise runtime-rollout recovery instead of
-  // collapsing an operational update failure into a generic hook error.
-  const updateExitCode = await runProcess({
-    arguments: [loaderPath, "__update"],
-    environment: recoveryEnvironment,
-    input: "",
-  }).catch(() => null);
-  if (updateExitCode !== 0) return null;
-
+  const recoveryOptions = { environment, statFile, accessFile, runUpdate, signal: runtimeHookSignal() };
+  let loaderPath;
+  try {
+    loaderPath = await prepareHostRuntimeUpgrade(recoveryOptions);
+  } catch (failure) {
+    if (failure instanceof HostRuntimeRecoveryError) failure.details.originalCode = error.code;
+    throw failure;
+  }
+  const recoveryEnvironment = { ...environment, TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK: "1" };
   const replayExitCode = await runProcess({
     arguments: [loaderPath, "hook"],
     environment: {
@@ -800,10 +792,20 @@ export const recoverHookHostRuntimeUpgrade = async (
       TRELIO_HOST_RUNTIME_UPDATE_REEXEC: "1",
     },
     input: `${JSON.stringify(hookInput)}\n`,
-  }).catch(() => null);
+  }).catch(async (failure) => {
+    const typed = await classifyHostRuntimeRecoveryFailure(failure, { ...recoveryOptions, failureReason: "handoff_failed" });
+    if (typed instanceof HostRuntimeRecoveryError) typed.details.originalCode = error.code;
+    throw typed;
+  });
   // A failed replay is still an unsuccessful recovery of the original gate.
   // Let runHook deliver that structured denial instead of returning a raw
   // nonzero status which an outer PowerShell could turn into a non-blocking 1.
+  if (replayExitCode !== 0) {
+    try { await resolveHostRuntimeLoader(recoveryOptions); } catch (failure) {
+      if (failure instanceof HostRuntimeRecoveryError) failure.details.originalCode = error.code;
+      throw failure;
+    }
+  }
   return replayExitCode === 0 ? 0 : null;
 };
 
@@ -886,6 +888,9 @@ const runHook = async () => {
  * отдельный fail-closed `TRELIO_RUNTIME_HOOK_FAILED`.
  */
 export const formatRuntimeHookFailure = (error) => {
+  if (error instanceof HostRuntimeRecoveryError) {
+    return `${error.code}: ${error.message} ${JSON.stringify(error.details)}\n`;
+  }
   const rawCode = typeof error?.code === "string" ? error.code.trim() : "";
   const code = rawCode
     && rawCode !== HOOK_REQUIRED_CODE

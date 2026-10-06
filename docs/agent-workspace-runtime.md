@@ -133,6 +133,8 @@ shell-версию. Локальная Run/inspection metadata сохраняе�
 или Workspace mutation; видимое `fetch failed` само по себе не доказывает
 10-секундный timeout или потерянный process descriptor.
 
+### Восстановление подписанного рантайма
+
 Долгоживущий local MCP не требует restart задачи после публикации нового
 подписанного runtime. Если backend вернул точный
 `AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED` либо
@@ -146,6 +148,40 @@ runtime proof и результаты не попадают в argv, env, фай
 поглощения proof и до вызова операции. Любая другая ошибка, та же либо более
 старая runtime-версия и повреждённый nested transport завершаются fail-closed;
 неоднозначная mutation автоматически не повторяется.
+
+Hook, bridge и local MCP разделяют `trelio-host-runtime-recovery.mjs`:
+проверяется только exact `TRELIO_PLUGIN_ROOT/scripts/trelio-host-runtime-loader.mjs`
+как обычный читаемый файл без symlink. Отсутствие пути (`ENOENT`/`ENOTDIR`)
+возвращает `TRELIO_PLUGIN_RESTART_REQUIRED`, `reason=loaded_plugin_unavailable`,
+`requiredAction=restart_client`. Полный перезапуск клиента загружает актуальную
+установленную оболочку. Runtime не сканирует другие версии cache, не восстанавливает
+удалённую оболочку, не меняет hooks trust и не становится вторым verifier.
+Если клиент удалил launcher до запуска самого runtime, этот обработчик ещё не
+может работать: жизненный цикл установленных plugin files остаётся на стороне клиента.
+
+`EACCES`/`EPERM`, неправильный тип файла, неизвестная ошибка файловой системы,
+отсутствие exact shell identity и отказ signed update возвращают
+`TRELIO_HOST_RUNTIME_RECOVERY_FAILED` с разными закрытыми `reason` и
+`requiredAction`. Файл проверяется до update, после update и при сбое handoff;
+потеря пути в этом окне не подменяется общим советом повторить запрос.
+Успешный updater не разрешает повтор уже начавшейся операции: результат bridge
+replay сохраняется. При потере shell после запуска bridge ошибка содержит
+`operationOutcome=unknown` и требует сначала проверить результат.
+Hook/bridge имеют one-shot reexec guard; MCP проверяет строго более новую версию.
+
+Updater запускается текущим Node с `shell:false`, ждёт не более 180 секунд и
+подчиняется общему deadline hook. Завершение pipe stderr входит в этот предел.
+Вывод updater не наследуется: из максимум 16 KiB принимается только известный
+JSON diagnostic ABI stable loader. Проекция содержит `stage`, `reason` и numeric
+`httpStatus`; raw OS message, paths, URL, credentials и неизвестные поля отбрасываются.
+Network/5xx, timeout и остальные известные отказы имеют отдельные причины; неизвестный
+текст старого loader не объявляется сетевой ошибкой или доказательством испорченной установки.
+Подпись, minimum shell и выбор пакета по-прежнему проверяет только stable loader.
+
+При передаче ошибки через bridge CLI → local facade → MCP сохраняются закрытые
+`code`, `details.reason`, `requiredAction` и исходный hard-gate `originalCode`.
+MCP выдаёт `isError`; распознанный PreToolUse – прежний JSON deny с exit 0.
+Новые error-only поля не расширяют штатные successful tool responses.
 
 Bridge device-session хранится вне plugin/package cache и Workspace. На macOS
 runtime использует login Keychain с service

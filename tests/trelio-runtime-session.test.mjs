@@ -379,6 +379,10 @@ test("active hook applies the stable runtime update and replays the exact payloa
       TRELIO_HOST_RUNTIME_VERSION: "2.2.3",
     },
     statFile: async () => ({ isFile: () => true, isSymbolicLink: () => false }),
+    accessFile: async () => {},
+    runUpdate: async (loaderPath, { environment }) => {
+      calls.push({ arguments: [loaderPath, "__update"], environment: { ...environment, TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK: "1" } });
+    },
     runProcess: async (request) => {
       calls.push(request);
       return 0;
@@ -409,6 +413,8 @@ test("a failed runtime replay retains the original gate for a structured hook de
   const result = await recoverHookHostRuntimeUpgrade(error, { hook_event_name: "PreToolUse" }, {
     environment: { TRELIO_PLUGIN_ROOT: path.resolve("synthetic-plugin") },
     statFile: async () => ({ isFile: () => true, isSymbolicLink: () => false }),
+    accessFile: async () => {},
+    runUpdate: async () => { calls.push("__update"); },
     runProcess: async ({ arguments: args }) => {
       calls.push(args.at(-1));
       return args.at(-1) === "__update" ? 0 : 2;

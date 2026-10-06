@@ -1012,7 +1012,7 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
   const spawnProcess = (command, argumentsList, options) => {
     calls.push({ command, argumentsList, options });
     const child = new EventEmitter();
-    queueMicrotask(() => child.emit("exit", 0, null));
+    queueMicrotask(() => { child.emit("exit", 0, null); child.emit("close", 0, null); });
     return child;
   };
   const error = new TrelioApiError(
@@ -1029,6 +1029,8 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
       TRELIO_HOST_RUNTIME_VERSION: "2.2.3",
     },
     spawnProcess,
+    statFile: async () => ({ isFile: () => true, isSymbolicLink: () => false }),
+    accessFile: async () => {},
   });
 
   assert.deepEqual(recovery, { handled: true, exitCode: 0 });
@@ -1046,6 +1048,7 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
     "workspace-id",
   ]);
   assert.equal(calls[1].options.env.TRELIO_HOST_RUNTIME_UPDATE_REEXEC, "1");
+  assert.equal(calls[1].options.env.TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE, "1");
 });
 
 test("Codex plugin updater retries transient network failures and validates exact install", async () => {

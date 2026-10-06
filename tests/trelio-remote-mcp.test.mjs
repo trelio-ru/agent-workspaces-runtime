@@ -1040,7 +1040,7 @@ test("runtime delegate updates through the stable loader and keeps payloads on s
       queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
     };
     if (argumentsList.at(-1) === "__update") {
-      queueMicrotask(() => child.emit("exit", 0, null));
+      queueMicrotask(() => { child.emit("exit", 0, null); child.emit("close", 0, null); });
       return child;
     }
 
@@ -1097,6 +1097,7 @@ test("runtime delegate updates through the stable loader and keeps payloads on s
       if (frame.id === 7) resolveForwarded(frame);
     },
     spawnProcess,
+    accessFile: async () => {},
     statFile: async () => ({
       isFile: () => true,
       isSymbolicLink: () => false,
@@ -1136,7 +1137,7 @@ test("runtime delegate rejects a loader that keeps the same immutable version", 
     const child = new EventEmitter();
     child.kill = () => queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
     if (argumentsList.at(-1) === "__update") {
-      queueMicrotask(() => child.emit("exit", 0, null));
+      queueMicrotask(() => { child.emit("exit", 0, null); child.emit("close", 0, null); });
       return child;
     }
     child.stdin = new PassThrough();
@@ -1167,6 +1168,7 @@ test("runtime delegate rejects a loader that keeps the same immutable version", 
     initializeParams: { protocolVersion: "2025-06-18", capabilities: {} },
     enqueueResponse: async () => {},
     spawnProcess,
+    accessFile: async () => {},
     statFile: async () => ({
       isFile: () => true,
       isSymbolicLink: () => false,
@@ -1188,7 +1190,7 @@ test("runtime delegate isolates nested server request ids from stale in-flight c
     const child = new EventEmitter();
     child.kill = () => queueMicrotask(() => child.emit("exit", null, "SIGTERM"));
     if (argumentsList.at(-1) === "__update") {
-      queueMicrotask(() => child.emit("exit", 0, null));
+      queueMicrotask(() => { child.emit("exit", 0, null); child.emit("close", 0, null); });
       return child;
     }
     child.stdin = new PassThrough();
@@ -1246,6 +1248,7 @@ test("runtime delegate isolates nested server request ids from stale in-flight c
       if (frame.id === 9) resolveToolResult(frame);
     },
     spawnProcess,
+    accessFile: async () => {},
     statFile: async () => ({
       isFile: () => true,
       isSymbolicLink: () => false,
