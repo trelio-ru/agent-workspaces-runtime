@@ -4,6 +4,23 @@ import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctor
 import { projectMcpAgentPayload } from "../host-runtime/scripts/trelio-agent-response-projection.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
+test("local mutation projection preserves all equal executors and their semantic profile notes", () => {
+  const executors = [
+    { memberId: "first", displayName: "Первый", avatarUrl: "decorative" },
+    { memberId: "second", displayName: "Второй", profileNote: "Согласует договоры", initials: "В" },
+    { groupId: "group", entityType: "group", displayName: "Команда", color: "blue" },
+  ];
+  for (const tool of ["create_task", "update_task_assignee", "apply_task_patch"]) {
+    const payload = { task: { id: "task", assignee: executors[0], assignees: executors, assigneeMemberIds: ["first", "second"], assigneeGroupIds: ["group"] } };
+    const result = compactLocalNativeMcpResult(tool, { structuredContent: payload, content: [{ type: "text", text: JSON.stringify(payload) }] });
+    assert.deepEqual(result.structuredContent.task.assigneeMemberIds, ["first", "second"]);
+    assert.equal(result.structuredContent.task.assignees.length, 3);
+    assert.equal(result.structuredContent.task.assignees[1].profileNote, executors[1].profileNote);
+    assert.equal(result.structuredContent.task.assignees[2].groupId, "group");
+    assert.ok(result.structuredContent.task.assignees.every((person) => !person.avatarUrl && !person.initials && !person.color));
+  }
+});
+
 test("local MCP emits one copy of successful data without altering hidden App capabilities", async () => {
   const structuredContent = { proposalId: "proposal", revision: 2, bodyText: "private proposal".repeat(500) };
   const metadata = { ui: { resourceUri: "ui://trelio/test" }, capabilityToken: "hidden-human-only" };

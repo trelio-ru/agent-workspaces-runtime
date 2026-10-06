@@ -4151,3 +4151,27 @@ test("search scratchpad survives restart encrypted and is fenced by origin, scop
   await createEncryptedSearchFileCache(options);
   assert.deepEqual(await fs.readdir(directory), []);
 });
+
+// The first executor deliberately differs from the viewer. Neither encrypted
+// personal lists nor explicit project filters may lose the second identity.
+test("local task lists retain and match every equal member and group executor", () => {
+  const snapshot = structuredClone(mirror);
+  const task = snapshot.tasks[0].payload.task;
+  const first = {memberId: actionSecretId, displayName: "Первый"};
+  const second = {memberId: snapshot.viewer.memberId, displayName: "Второй"};
+  const group = {groupId: actionReleaseId, entityType: "group", displayName: "Команда"};
+  task.assignee = first;
+  task.assignees = [first, second, group];
+  for (const args of [{relation: "assigned"}, {assigneeMemberId: second.memberId}, {assigneeGroupId: group.groupId}]) {
+    const result = handleNativeLocalContextRead(snapshot, args.relation ? "list_my_tasks" : "list_project_tasks", {
+      companySlug: "acme", projectSlug: "mobile", ...args,
+    });
+    assert.equal(result.tasks.length, 1);
+    assert.deepEqual(result.tasks[0].assignees, task.assignees);
+  }
+  task.assignees = [first, group];
+  snapshot.viewerGroupIds = [group.groupId];
+  assert.equal(handleNativeLocalContextRead(snapshot, "list_my_tasks", {companySlug: "acme", relation: "assigned"}).tasks.length, 1);
+  snapshot.viewerGroupIds = [];
+  assert.equal(handleNativeLocalContextRead(snapshot, "list_my_tasks", {companySlug: "acme", relation: "assigned"}).tasks.length, 0);
+});

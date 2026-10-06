@@ -95,7 +95,7 @@ const checklist = (value) => mapFields(value, {
     items: list((item) => mapFields(item, { createdBy: person, completedBy: person, assignee: person })),
 });
 const task = (value) => mapFields(value, {
-    assignee: person, createdBy: person, participants: persons, participantGroups: persons,
+    assignee: person, assignees: persons, createdBy: person, participants: persons, participantGroups: persons,
     availableMembers: persons, availableMemberGroups: persons, mentionableMembers: persons,
     controls: list(control), comments: list(comment), checklists: list(checklist),
     attachments: list(attachment), deletedAttachments: list(attachment),

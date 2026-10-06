@@ -1155,7 +1155,7 @@ const buildHydratedLocalActionTaskDocument = ({ task, document, mirror, origin }
     `Создана: ${formatLocalActionDocumentDate(task.createdAt)}`,
     `Обновлена: ${formatLocalActionDocumentDate(task.updatedAt)}`,
     `Автор: ${readLocalActionDocumentDisplayName(task.createdBy) ?? "не указан"}`,
-    `Исполнитель: ${readLocalActionDocumentDisplayName(task.assignee) ?? "не указан"}`,
+    `Исполнители: ${(task.assignees ?? (task.assignee ? [task.assignee] : [])).map(readLocalActionDocumentDisplayName).filter(Boolean).join(", ") || "не указаны"}`,
   ];
 
   if (participants.length > 0) {
@@ -5525,6 +5525,7 @@ const buildLocalListedTask = (mirror, record, rawInput) => {
     status: task.status ?? null,
     createdBy: task.createdBy ?? null,
     assignee: task.assignee ?? null,
+    assignees: task.assignees ?? (task.assignee ? [task.assignee] : []),
     participants: task.participants ?? [],
     parentTask: task.parentTask ?? null,
     ...(controlDateFrom || controlDateTo ? { controls: matchingControls } : {}),
@@ -5559,15 +5560,18 @@ const listTasksFromMirror = (mirror, rawInput, { personal = false } = {}) => {
     if (rawInput?.statusCode && task.status?.code !== rawInput.statusCode) return false;
     if (rawInput?.statusKind && task.status?.kind !== rawInput.statusKind) return false;
     if (rawInput?.urgency !== undefined && Number(task.urgency) !== Number(rawInput.urgency)) return false;
-    if (rawInput?.assigneeMemberId && readTaskMemberId(task.assignee) !== String(rawInput.assigneeMemberId).toLowerCase()) return false;
-    if (rawInput?.assigneeGroupId && readTaskGroupId(task.assignee) !== String(rawInput.assigneeGroupId).toLowerCase()) return false;
+    // Full hydrated identities remain local. Filter every equal executor, not
+    // the legacy first-person pointer, before projecting the agent response.
+    const assignees = task.assignees ?? (task.assignee ? [task.assignee] : []);
+    if (rawInput?.assigneeMemberId && !assignees.some((person) => readTaskMemberId(person) === String(rawInput.assigneeMemberId).toLowerCase())) return false;
+    if (rawInput?.assigneeGroupId && !assignees.some((person) => readTaskGroupId(person) === String(rawInput.assigneeGroupId).toLowerCase())) return false;
     if (rawInput?.createdByMemberId && readTaskMemberId(task.createdBy) !== String(rawInput.createdByMemberId).toLowerCase()) return false;
     if (rawInput?.participantMemberId && !(task.participants ?? []).some((member) => readTaskMemberId(member) === String(rawInput.participantMemberId).toLowerCase())) return false;
     if (rawInput?.participantGroupId && !(task.participants ?? []).some((participant) => readTaskGroupId(participant) === String(rawInput.participantGroupId).toLowerCase())) return false;
 
     if (personal) {
-      const assigned = readTaskMemberId(task.assignee) === viewerMemberId
-        || viewerGroupIds.has(readTaskGroupId(task.assignee));
+      const assigned = assignees.some((person) => readTaskMemberId(person) === viewerMemberId
+        || viewerGroupIds.has(readTaskGroupId(person)));
       const created = readTaskMemberId(task.createdBy) === viewerMemberId;
       const participant = (task.participants ?? []).some((candidate) => (
         readTaskMemberId(candidate) === viewerMemberId
