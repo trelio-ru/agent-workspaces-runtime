@@ -5224,7 +5224,7 @@ const buildLocalTaskInstructionDelivery = (catalog, inlineMaxBytes) => {
     catalog: {
       schemaVersion: 3,
       status: "incomplete",
-      authority: "Instruction delivery is incomplete. Call get_task_instruction_page with the same task locator(s), knownInstructionLayerKeys and expectedCatalogRevisionKey. Use pageSize=recommendedPageSize and follow returned nextPageIndex until null; pageSize=1 keeps the single-part format. Concatenate each layer's parts in partIndex order and verify SHA-256 before task content. Restart the exact read if the revision changes.",
+      authority: "Instruction delivery is incomplete. Call get_task_instruction_page with the same task locator(s) and expectedCatalogRevisionKey; omit knownInstructionLayerKeys, managed by the runtime. Use pageSize=recommendedPageSize and follow returned nextPageIndex until null; pageSize=1 keeps the single-part format. Concatenate each layer's parts in partIndex order and verify SHA-256 before task content. Restart the exact read if the revision changes.",
       layers: [],
       reusedLayerKeys: catalog.reusedLayerKeys,
       delivery: {

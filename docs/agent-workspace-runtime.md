@@ -329,8 +329,9 @@ Encrypted local route соблюдает тот же контракт. Новы�
 ограничены 16 КиБ UTF-8 после нормализации, в том числе до локального
 шифрования; старые более крупные редакции остаются читаемыми.
 
-На повторном exact read агент передаёт `nextReadArguments.knownInstructionLayerKeys`
-только пока полные неизменные layers ещё в model context. `reusedLayerKeys`
+На повторном exact read runtime управляет `knownInstructionLayerKeys` и
+`knownInstructionRevisionKey`; модель опускает оба поля и не копирует их
+из `nextReadArguments`. `reusedLayerKeys`
 разрешаются через эти bytes вместе с новыми layers ответа; изменённые правила
 сервер возвращает целиком. После compaction или потери текста known keys
 опускаются. SKILL/references той же версии также не перечитываются без потери
@@ -339,8 +340,33 @@ Encrypted local route соблюдает тот же контракт. Новы�
 
 Encrypted local `fetch`, совместимый `get_task` и native exact reads применяют
 тот же schema-v3 envelope. Если ответ вернул `nextReadArguments`, следующий
-exact read той же области передаёт их только при сохранённых полных слоях;
+exact read той же области получает hints от runtime только при подтверждённых полных слоях;
 изменённый key и чтение после compaction снова возвращают Markdown целиком.
+
+Поддержанный delivery adapter читает только direct MCP `response_item` Codex
+0.160.0 после текущей границы SessionStart и последнего turn/context boundary.
+Он проверяет namespace, pair call/result, полные JSON/Markdown, SHA-256 layers
+и наличие exact текущего tool call в журнале. Полный JSON на диске не доказывает
+полноту model history: обязательный `metadata.fallback_token_limit_override`
+проверяется по правилу Codex 0.160.0 (не больше четырёх UTF-8 bytes на единицу
+этого лимита). Отсутствие metadata отключает reuse.
+Скан ограничен последними 2 МиБ и отдельным worker с бюджетом 250 мс;
+тексты и receipts не сохраняются в отдельный кэш. Неполная запись, другой
+session/agent, неизвестная версия, raw event, Code Mode или ошибка дают полный
+read. `SessionStart` при resume/clear/compact/fork сбрасывает delivery evidence,
+не заменяя admission/model snapshot. Пагинация сохраняет первоначальный reused
+set для exact catalog revision; новые прочитанные слои не меняют page offsets.
+Повторное использование страниц требует всего manifest и всех частей
+каждого слоя с правильным общим SHA-256; last-page hint сам по себе недостаточен.
+Claude Code и encrypted local route используют полный read: их журнал пока
+не подтверждает сохранность authority после очистки tool output. Это не
+блокирует операции, не меняет права и не разрешает обход runtime proof.
+Закреплённые правила и профиль Run остаются отдельной authority.
+
+Проверенный upstream-контракт:
+[history](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/context_manager/history.rs),
+[serialized budget](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/history/src/lib.rs),
+[UTF-8 bounds](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/utils/string/src/truncate.rs).
 
 После результата `get_task_review_context` объединяет свежие core/дедлайн,
 видимые controls/checklists и только выбранные `proposalKinds`. Общие коллекции

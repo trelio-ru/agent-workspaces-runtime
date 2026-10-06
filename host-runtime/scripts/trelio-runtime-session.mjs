@@ -43,6 +43,10 @@ import {
 } from "./trelio-proposal-route-guard.mjs";
 import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
+import {
+  canInspectInstructionDelivery, hasManagedInstructionKeys, instructionContextBoundary,
+  manageInstructionKeys,
+} from "./trelio-instruction-reuse.mjs";
 
 import {
   assertRuntimeHookBudget, runtimeHookSignal, withRuntimeHookPrivateSession, withRuntimeHookStage,
@@ -412,6 +416,7 @@ const createRuntimeState = async ({
   origin,
   filePath,
   initialObservation = null,
+  instructionContext = null,
 }) => {
   const currentObservation = await withRuntimeHookStage("runtime_attestation", () => (
     detectAgentRuntimeAttestation({ hookInput })
@@ -509,6 +514,7 @@ const createRuntimeState = async ({
     runtimeSessionId: registration.runtimeSessionId,
     expiresAt: registration.expiresAt,
     privateKeyPkcs8,
+    instructionContext,
   };
   await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, state));
   return state;
@@ -591,10 +597,30 @@ const shouldDenyNativeProposalRenderer = async ({ origin, toolName, toolInput })
 const runPreToolUse = async (hookInput) => {
   const identity = resolveTrelioHookToolIdentity(hookInput);
   if (identity.status === "invalid") throw new TrelioHookToolIdentityError(identity.reason);
+  if (identity.status === "unrelated") return;
   const toolName = identity.toolName;
-  if (!isProtectedTrelioToolName(toolName)) return;
   const origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
   const toolInput = resolveToolInput(hookInput);
+  if (!isProtectedTrelioToolName(toolName)) {
+    if (!hasManagedInstructionKeys(identity, toolInput)) return;
+    // Discovery must not register a protected session or change approval policy.
+    // Missing/private-state read failures disable only reuse and remove authored
+    // hints; the ordinary discovery call continues with complete authority.
+    let boundary = null;
+    try {
+      const sessionId = resolveRuntimeClientSessionId(hookInput);
+      // Unsupported clients (including Claude) must not acquire new private
+      // filesystem/ACL prerequisites just to perform an ordinary discovery.
+      if (sessionId && canInspectInstructionDelivery(hookInput, identity)) {
+        boundary = (await readStoredState(await statePathFor(sessionId, origin))).instructionContext;
+      }
+    } catch { /* Optional delivery evidence is unavailable. */ }
+    const updatedInput = await manageInstructionKeys({ hookInput, identity, input: toolInput, boundary });
+    if (JSON.stringify(updatedInput) !== JSON.stringify(toolInput)) {
+      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } }) + "\n");
+    }
+    return;
+  }
   if (await shouldDenyNativeProposalRenderer({ origin, toolName, toolInput })) {
     writeDeniedLocalProposalRenderer();
     return;
@@ -625,11 +651,16 @@ const runPreToolUse = async (hookInput) => {
         origin,
         filePath,
         initialObservation,
+        instructionContext: storedState.instructionContext ?? null,
       });
     });
   }
   assertRuntimeHookBudget();
-  writeUpdatedInput(toolInput, buildRuntimeSessionProof({ state, toolName }));
+  const updatedInput = await manageInstructionKeys({
+    hookInput, identity, input: toolInput, boundary: state.instructionContext,
+  });
+  assertRuntimeHookBudget();
+  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName }));
 };
 
 const runSessionStart = async (hookInput) => {
@@ -648,19 +679,27 @@ const runSessionStart = async (hookInput) => {
   await withRuntimeStateLock(filePath, async () => {
     const storedState = await readStoredState(filePath);
     const existing = parseRuntimeState(storedState);
-    if (source !== "clear" && existing) return;
-    if (source !== "clear" && parsePendingObservation(storedState)) return;
+    const instructionContext = instructionContextBoundary(hookInput);
+    const { writePrivateJsonFile } = await loadWorkspaceBridgeModule();
+    if (source !== "clear" && (existing || parsePendingObservation(storedState))) {
+      // Resume, fork and compact preserve admission/model pinning, but never
+      // inherit the previous context's instruction-delivery evidence.
+      await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, {
+        ...storedState, instructionContext,
+      }));
+      return;
+    }
     if (source === "clear") stateToEnd = existing;
     await fs.rm(filePath, { force: true }).catch(() => undefined);
     const observation = await withRuntimeHookStage("runtime_attestation", () => (
       detectAgentRuntimeAttestation({ hookInput })
     ));
-    const { writePrivateJsonFile } = await loadWorkspaceBridgeModule();
     await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, {
       schemaVersion: 1,
       pending: true,
       observation,
       createdAt: new Date().toISOString(),
+      instructionContext,
     }));
   });
 

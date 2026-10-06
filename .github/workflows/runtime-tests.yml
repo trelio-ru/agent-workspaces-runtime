@@ -92,6 +92,7 @@ jobs:
           node tests/trelio-hook-private-session.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
           node tests/trelio-runtime-session.test.mjs
+          node tests/trelio-instruction-reuse.test.mjs
           node tests/trelio-secret-browser-native.test.mjs
           node tests/trelio-secret-chat.test.mjs
           node tests/trelio-secret-generate.test.mjs
@@ -184,7 +185,7 @@ jobs:
       - name: Run Windows hook launcher regression
         run: >-
           node --test
-          --test-name-pattern="configured platform hook launcher|event session identity|pairing recovery|resume and compact|bounded cleanup|malformed Trelio action"
+          --test-name-pattern="configured platform hook launcher|event session identity|pairing recovery|resume and compact|bounded cleanup|malformed Trelio action|SessionStart pins|discovery strips"
           tests/trelio-runtime-session.test.mjs
 
       - name: Run Windows hook tool identity regressions
@@ -192,6 +193,9 @@ jobs:
 
       - name: Verify signed runtime hook through the complete Windows shell chain
         run: node tests/trelio-hook-signed-chain.test.mjs
+
+      - name: Run Windows instruction delivery regressions
+        run: node tests/trelio-instruction-reuse.test.mjs
 
       - name: Run Windows persisted hook settings diagnostics
         run: node --test --test-name-pattern="persisted hook" tests/trelio-codex-routing.test.mjs

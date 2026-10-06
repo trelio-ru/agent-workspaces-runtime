@@ -215,6 +215,28 @@ test("Codex hook observes model and current turn effort", async () => {
   }
 });
 
+test("discovery strips authored instruction hints without registration or approval bypass", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "trelio-discovery-instructions-"));
+  try {
+    for (const toolName of ["mcp__trelio__get_project_meta",
+      "mcp__plugin_trelio-agent-workspaces_trelio__get_project_meta"]) {
+      const input = { companySlug: "synthetic", projectSlug: "one",
+        knownInstructionRevisionKey: "a".repeat(64) };
+      const result = await runHook({ hook_event_name: "PreToolUse", session_id: crypto.randomUUID(),
+        tool_name: toolName, tool_input: input }, {
+        HOME: home, USERPROFILE: home, CODEX_HOME: home,
+        TRELIO_WORKSPACE_CONFIG_DIR: path.join(home, "private"),
+        TRELIO_WORKSPACE_ORIGIN: "http://127.0.0.1:1",
+      });
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(result.stderr, "");
+      assert.deepEqual(JSON.parse(result.stdout), { hookSpecificOutput: {
+        hookEventName: "PreToolUse", updatedInput: { companySlug: "synthetic", projectSlug: "one" },
+      } });
+    }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("hook protects context and mutation but leaves discovery and recovery open", () => {
   assert.equal(resolveTrelioMcpToolName({ tool_name: "mcp__trelio__get_task" }), "get_task");
   assert.equal(resolveTrelioMcpToolName({ tool_name: "mcp__trelio__get_tasks" }), "get_tasks");
@@ -1069,7 +1091,8 @@ test("SessionStart pins the initial model and supported host names inject verifi
       model: "gpt-5.4",
       transcript_path: transcriptPath,
       tool_name: "mcp__trelio__get_task",
-      tool_input: { companySlug: "vkus", projectSlug: "first", taskNumber: 2 },
+      tool_input: { companySlug: "vkus", projectSlug: "first", taskNumber: 2,
+        knownInstructionLayerKeys: ["instruction-layer:" + "a".repeat(64)] },
     }, environment);
     assert.equal(guarded.exitCode, 0);
     assert.equal(guarded.stderr, "");
@@ -1081,6 +1104,7 @@ test("SessionStart pins the initial model and supported host names inject verifi
     const updatedInput = hookOutput.hookSpecificOutput.updatedInput;
     const proof = updatedInput.runtimeSessionProof;
     assert.equal(updatedInput.taskNumber, 2);
+    assert.equal(updatedInput.knownInstructionLayerKeys, undefined);
     const publicKey = crypto.createPublicKey({
       key: Buffer.from(registrationBody.publicKeySpki, "base64url"),
       format: "der",
@@ -1098,6 +1122,41 @@ test("SessionStart pins the initial model and supported host names inject verifi
       publicKey,
       Buffer.from(proof.signature, "base64url"),
     ), true);
+
+    // Exercise the real PreToolUse process, private boundary and worker, not
+    // only the pure parser. The synthetic rollout has the same public wire
+    // shape as Codex; no production transcript or company rules are fixtures.
+    const locator = { companySlug: "synthetic", projectSlug: "one", taskNumber: 1 };
+    const layer = { key: "instruction-layer:" + "b".repeat(64), markdown: "Complete synthetic authority",
+      sha256: crypto.createHash("sha256").update("Complete synthetic authority").digest("hex") };
+    const timestamp = new Date().toISOString();
+    const fixtureCall = (callId) => ({ timestamp, type: "response_item", payload: {
+      type: "function_call", namespace: "mcp__trelio", name: "get_task", call_id: callId,
+      arguments: JSON.stringify(locator),
+    } });
+    await writeFile(transcriptPath, [
+      { type: "session_meta", payload: { id: threadId, cli_version: "0.160.0" } },
+      fixtureCall("previous"),
+      { timestamp, type: "response_item", metadata: { fallback_token_limit_override: 12000 },
+        payload: { type: "function_call_output", call_id: "previous", output: JSON.stringify({
+          effectiveInstructions: { schemaVersion: 3, status: "loaded", layers: [layer] },
+        }) } },
+      fixtureCall("current"),
+    ].map((item) => JSON.stringify(item)).join("\n") + "\n");
+    const reuseInput = { hook_event_name: "PreToolUse", session_id: threadId,
+      transcript_path: transcriptPath, tool_use_id: "current", tool_name: "mcp__trelio__get_task",
+      tool_input: locator };
+    const reused = await runHook(reuseInput, environment);
+    assert.equal(reused.exitCode, 0, reused.stderr);
+    const reusedArgs = JSON.parse(reused.stdout).hookSpecificOutput.updatedInput;
+    assert.deepEqual(reusedArgs.knownInstructionLayerKeys, [layer.key]);
+    assert.ok(reusedArgs.runtimeSessionProof.signature);
+    const compacted = await runHook({ hook_event_name: "SessionStart", source: "compact",
+      session_id: threadId, transcript_path: transcriptPath }, environment);
+    assert.equal(compacted.exitCode, 0, compacted.stderr);
+    const cold = await runHook(reuseInput, environment);
+    assert.equal(cold.exitCode, 0, cold.stderr);
+    assert.equal(JSON.parse(cold.stdout).hookSpecificOutput.updatedInput.knownInstructionLayerKeys, undefined);
 
     // Claude Code qualifies both plugin MCP servers in hook payloads. Reuse
     // the already registered state here so this assertion isolates name
@@ -1250,7 +1309,8 @@ test("resume and compact preserve the pinned observation while clear starts a ne
         assert.equal(continued.stdout, "");
       }
       const preserved = JSON.parse(await readFile(statePath, "utf8"));
-      assert.deepEqual(preserved, initial);
+      assert.deepEqual({ ...preserved, instructionContext: initial.instructionContext }, initial);
+      assert.ok(preserved.instructionContext.since > initial.instructionContext.since);
     }
 
     const registered = {
@@ -1268,7 +1328,10 @@ test("resume and compact preserve the pinned observation while clear starts a ne
     assert.equal(compacted.stderr, "");
     assert.equal(JSON.parse(compacted.stdout).hookSpecificOutput.additionalContext,
       TRELIO_COMPACTION_RECOVERY_CONTEXT);
-    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), registered);
+    const afterCompact = JSON.parse(await readFile(statePath, "utf8"));
+    const { instructionContext: afterCompactBoundary, ...preservedRegistration } = afterCompact;
+    assert.deepEqual(preservedRegistration, registered);
+    assert.ok(afterCompactBoundary.since);
 
     const cleared = await runHook({
       hook_event_name: "SessionStart",
