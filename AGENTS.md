@@ -153,6 +153,9 @@ publication tooling также остаются вне этого публичн
   не попадает в package.
 - Production runtime source меняется только вместе с targeted tests и актуальным
   контрактом. Generated package вручную не редактируется и не коммитится.
+- Default selection context/worklog вложений, прямой пользовательский exception
+  и E2EE local selection – [контракт proposals](docs/agent-workspace-runtime.md).
+  Pure policy генерируется из backend, вручную не дублируется.
 - Личный слой навыка в model projection сохраняется отдельно от signed base;
   lazy/reuse semantics проверяются в `tests/trelio-mcp-results.test.mjs`.
 

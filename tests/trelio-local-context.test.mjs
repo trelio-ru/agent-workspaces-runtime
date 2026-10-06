@@ -3820,6 +3820,27 @@ test("encrypted proposal paths resolve only through the exact local browser mani
   );
 });
 
+test("encrypted comment selection excludes context unless the exact files were requested", () => {
+  const projectionId = "77777777-7777-4777-8777-777777777777";
+  const workspaceId = "88888888-8888-4888-8888-888888888888";
+  const acceptedHead = "c".repeat(40);
+  for (const filePath of ["WORKSPACE_CONTEXT.md", "PROJECT_CONTEXT.md", "worklog/run.md", "worklog\\run.md"]) {
+    const manifest = {
+      schemaVersion: 1, kind: "agent-workspace-browser-manifest", projectionId, workspaceId, workspaceHead: acceptedHead,
+      files: [{ id: "99999999-9999-4999-8999-999999999999", path: filePath, sizeBytes: 42, contentType: "text/markdown" }],
+    };
+    const input = { manifest, projectionId, workspaceId, acceptedHead, projectionFileCount: 1, filePaths: [filePath] };
+    assert.throws(() => selectEncryptedProposalFilesFromManifest(input),
+      (error) => error?.code === "CONTEXT_ATTACHMENT_REQUIRES_USER_REQUEST" && !error.message.includes(filePath));
+    const selected = selectEncryptedProposalFilesFromManifest({ ...input, userExplicitlyRequestedContextAttachments: true });
+    assert.equal(selected[0].filePath, filePath);
+    // An explicit request relaxes selection only, never exact revision/source lookup.
+    assert.throws(() => selectEncryptedProposalFilesFromManifest({ ...input,
+      acceptedHead: "d".repeat(40), userExplicitlyRequestedContextAttachments: true }),
+      (error) => error?.code === "LOCAL_CONTEXT_BROWSER_PROJECTION_INVALID");
+  }
+});
+
 test("changed mirror records are hydrated in bounded mirror-wide batches", async () => {
   const hydrationCalls = [];
   const records = [{ cached: { id: "cached" } }].concat(

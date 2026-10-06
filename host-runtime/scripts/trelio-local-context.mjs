@@ -1,4 +1,5 @@
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
+import { COMMENT_ATTACHMENT_GUIDANCE, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -7048,7 +7049,11 @@ export const selectEncryptedProposalFilesFromManifest = ({
   workspaceId,
   acceptedHead,
   filePaths,
+  userExplicitlyRequestedContextAttachments,
 }) => {
+  // Apply the same native selection policy while paths are still local. It
+  // changes proposal selection only, never the accepted Workspace inventory.
+  resolveCommentContextAttachmentPolicy(filePaths, userExplicitlyRequestedContextAttachments);
   if (
     manifest?.schemaVersion !== 1
     || manifest?.kind !== "agent-workspace-browser-manifest"
@@ -7115,8 +7120,10 @@ const resolveEncryptedProposalFiles = async ({
   companySlug,
   target,
   filePaths,
+  userExplicitlyRequestedContextAttachments,
   signal,
 }) => {
+  resolveCommentContextAttachmentPolicy(filePaths, userExplicitlyRequestedContextAttachments);
   if (filePaths.length === 0) return [];
   if (new Set(filePaths).size !== filePaths.length) {
     throw new TrelioLocalContextError(
@@ -7240,6 +7247,7 @@ const resolveEncryptedProposalFiles = async ({
       workspaceId,
       acceptedHead,
       filePaths,
+      userExplicitlyRequestedContextAttachments,
     });
   } finally {
     encryptedManifest.fill(0);
@@ -7479,7 +7487,12 @@ const saveLocalProposal = async ({
           10,
           2_048,
         );
+    resolveCommentContextAttachmentPolicy(
+      filePaths ?? [], rawPayload?.userExplicitlyRequestedContextAttachments,
+    );
     const encryptedFiles = filePaths
+      // The policy check runs before any file fetch or protected payload
+      // upload, so rejected context files leave no unused encrypted objects.
       ? await resolveEncryptedProposalFiles({
           origin: dataPlaneOrigin,
           token,
@@ -7487,6 +7500,7 @@ const saveLocalProposal = async ({
           companySlug,
           target,
           filePaths,
+          userExplicitlyRequestedContextAttachments: rawPayload?.userExplicitlyRequestedContextAttachments,
           signal,
         })
       : [];
@@ -11506,7 +11520,7 @@ const TRELIO_LOCAL_PROPOSAL_RENDER_PAYLOAD_SCHEMA = {
 
 export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
   name: "render_trelio_local_proposal",
-  description: "Render after local context; save locators belong in payload.target.",
+  description: "Render after local context; save locators belong in payload.target. For comment save payloads: " + COMMENT_ATTACHMENT_GUIDANCE,
   inputSchema: {
     type: "object",
     additionalProperties: false,

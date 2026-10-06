@@ -723,6 +723,20 @@ stdio dispatcher связывает server request с исходным tool call
 использует прежний text-only flow с явной командой. В proposal включаются только
 важные итоговые и действительно полезные промежуточные файлы. Пользователь может
 убрать любой; attachments создаются при публикации, а не при подготовке.
+`WORKSPACE_CONTEXT.md`, legacy `PROJECT_CONTEXT.md` и `worklog/**` по умолчанию
+не предлагаются. Только прямой запрос пользователя прикрепить exact файлы
+разрешает `payload.userExplicitlyRequestedContextAttachments=true`; просьба
+прокомментировать, принятие Run или вывод о полезности недостаточны. Для текущего
+контекста используй ссылку на доступный Workspace. Shared pure policy из
+`trelio-comment-attachment-policy.mjs` генерируется backend helper-ом
+`scripts/build-comment-attachment-policy.mjs --runtime-root <checkout>`; `--check`
+проверяет совпадение. Runtime проверяет пути до fetch/upload, повторяет проверку
+при выборе exact accepted manifest. Direct-request flag остаётся локальным
+параметром выбора, HTTP save сохраняет прежние opaque UUID/E2EE markers.
+Отказ `CONTEXT_ATTACHMENT_REQUIRES_USER_REQUEST` не отражает private path и не
+записывает предложение. Новый runtime совместим с прежним backend без новых
+полей transport, plaintext fallback или server-side расшифровки.
+Чтение, экспорт Workspace и пользовательский выбор при publish не меняются.
 Model-visible receipt всегда содержит отдельный `interactivePresentation`:
 App payload имеет `delegated_unconfirmed`, ответ native form –
 `client_responded`, неответивший form – `not_confirmed`, а unsupported host –
