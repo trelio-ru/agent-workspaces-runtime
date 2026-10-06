@@ -107,6 +107,8 @@ publication tooling также остаются вне этого публичн
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
   только закрытые технические dimensions, без input/message/paths и без
   auth recovery. Сбой сборщика не меняет ответ исходной операции.
+  Failed child допускает только closed failure category; classification не
+  разрешает повтор mutation или передачу stdout/message в telemetry.
 - `search` возвращает компактный `guidance` перед материалами; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.

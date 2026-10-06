@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { workspaceActionFailureCode } from "../host-runtime/scripts/trelio-local-context.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsDirectory = fileURLToPath(new URL("../host-runtime/scripts/", import.meta.url));
@@ -75,6 +76,11 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     },
   }) + "\\n");
   process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_PROVIDER_FAILURE) {
+  process.stdout.write(JSON.stringify({ ok: false,
+    code: process.env.TRELIO_TEST_PROVIDER_FAILURE,
+    message: "PRIVATE_CANARY", details: { secret: "PRIVATE_CANARY" } }));
+  process.exitCode = 7;
 } else if (process.env.TRELIO_TEST_CHILD_FAILURE === "1") {
   process.stderr.write("synthetic bridge failure");
   process.exitCode = 7;
@@ -133,7 +139,7 @@ try {
   });
   outcome = { result, child: JSON.parse(result.stdout) };
 } catch (error) {
-  outcome = { error: { name: error.name, code: error.code, message: error.message, details: error.details } };
+  outcome = { error: { name: error.name, code: error.code, diagnosticCode: error.diagnosticCode, message: error.message, details: error.details } };
 }
 const finalCwd = await fs.stat(".");
 outcome.parentCwdUnchanged = initialCwd.dev === finalCwd.dev && initialCwd.ino === finalCwd.ino;
@@ -157,7 +163,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, providerFailure = "", ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -167,6 +173,7 @@ const createFixture = async (t) => {
         ...process.env,
         TRELIO_TEST_EXECUTIONS: executionsPath,
         TRELIO_TEST_CHILD_FAILURE: childFailure ? "1" : "0",
+        TRELIO_TEST_PROVIDER_FAILURE: providerFailure,
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
         TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
@@ -316,4 +323,36 @@ test("Workspace bridge preserves cancellation before checking removed plugin fil
   const outcome = await fixture.run({ removal: "plugin", abortBeforeLaunch: true });
   assert.equal(outcome.error?.name, "AbortError");
   assert.equal(outcome.executions, "");
+});
+
+test("Workspace failure categories never export provider content or authorize a replay", () => {
+  for (const code of ["MAX_ASSIST_SNAPSHOT_STALE", "MAX_ASSIST_TARGET_INVALID", "MAX_ASSIST_WORKER_FAILED", "MAX_ASSIST_WORKER_START_FAILED", "MAX_ASSIST_START_TIMEOUT"]) {
+    assert.equal(workspaceActionFailureCode({ code: 1, stdout: JSON.stringify({ ok: false, code, message: "PRIVATE_CANARY", details: { secret: "PRIVATE_CANARY" } }) }, "skill_run"), code);
+  }
+  for (const stdout of [JSON.stringify({ ok: false, code: "PRIVATE_CANARY" }), JSON.stringify({ ok: true, code: "MAX_ASSIST_SNAPSHOT_STALE" }), "prefix MAX_ASSIST_SNAPSHOT_STALE", "x".repeat(65537)]) {
+    assert.equal(workspaceActionFailureCode({ code: 1, stdout }, "skill_run"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+  }
+  assert.equal(workspaceActionFailureCode({ code: 1, stdout: JSON.stringify({ ok: false, code: "MAX_ASSIST_SNAPSHOT_STALE" }) }, "open"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+  assert.equal(workspaceActionFailureCode({ code: "ENOENT" }, "open"), "TRELIO_WORKSPACE_DIRECTORY_UNAVAILABLE");
+  assert.equal(workspaceActionFailureCode({ code: "EPERM" }, "skill_run"), "TRELIO_WORKSPACE_PERMISSION_DENIED");
+  assert.equal(workspaceActionFailureCode({ killed: true }, "skill_run"), "TRELIO_WORKSPACE_PROCESS_TERMINATED");
+  assert.equal(workspaceActionFailureCode({ killed: true, code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }, "skill_run"), "TRELIO_WORKSPACE_OUTPUT_LIMIT");
+});
+
+test("real failed skill preserves the action ABI, reports only a fixed category and is never replayed", async (t) => {
+  for (const code of ["MAX_ASSIST_SNAPSHOT_STALE", "PRIVATE_CANARY"]) {
+    const fixture = await createFixture(t);
+    const outcome = await fixture.run({ providerFailure: code });
+    assert.equal(outcome.error.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+    assert.equal(outcome.error.diagnosticCode, code === "MAX_ASSIST_SNAPSHOT_STALE"
+      ? code : "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+    assert.equal(outcome.error.details.failureCode, outcome.error.diagnosticCode);
+    assert.equal(outcome.executions, "started\n", "classification cannot repeat a child action");
+    // Local recovery may retain provider output; the telemetry serializer has
+    // its own content-free boundary and receives only diagnosticCode.
+    const { buildAgentDiagnosticEvent } = await import("../host-runtime/scripts/trelio-agent-diagnostics.mjs");
+    const event = buildAgentDiagnosticEvent("continue_trelio_workspace_action", skillAction, outcome.error.diagnosticCode);
+    assert.equal(event.code, outcome.error.diagnosticCode);
+    assert.equal(JSON.stringify(event).includes("PRIVATE_CANARY"), false);
+  }
 });

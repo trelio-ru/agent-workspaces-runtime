@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildAgentDiagnosticEvent, createAgentDiagnosticReporter, sendAgentDiagnosticBatch } from "../host-runtime/scripts/trelio-agent-diagnostics.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { TrelioLocalContextError } from "../host-runtime/scripts/trelio-local-context.mjs";
 test("unresponsive telemetry is bounded and closing the reporter never waits for it", async () => {
   let attempts = 0;
   const reporter = createAgentDiagnosticReporter({
@@ -91,4 +92,32 @@ test("host reports local validation errors without changing the actual MCP resul
   assert.equal(JSON.stringify(reports).includes("/private/canary"), false);
   const again = await handleLocalMcpMessage(request, { recordDiagnostic: () => { throw new Error("telemetry failed"); } });
   assert.deepEqual(again, response);
+});
+
+test("dispatcher uses the fixed child category while preserving local recovery and ignoring returned provider errors", async () => {
+  const reports = [];
+  const request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+    name: "continue_trelio_workspace_action",
+    arguments: { schemaVersion: 1, operation: "skill_run", parameters: {} },
+  } };
+  const error = new TrelioLocalContextError("TRELIO_WORKSPACE_ACTION_FAILED", "PRIVATE_CANARY", {
+    stdout: "PRIVATE_CANARY", failureCode: "MAX_ASSIST_SNAPSHOT_STALE",
+  });
+  error.diagnosticCode = "MAX_ASSIST_SNAPSHOT_STALE";
+  const recordDiagnostic = (...args) => reports.push(buildAgentDiagnosticEvent(...args));
+  const result = await handleLocalMcpMessage(request, {
+    callTool: async () => { throw error; }, recordDiagnostic,
+  });
+  assert.equal(result.result.isError, true);
+  assert.match(JSON.stringify(result.result), /TRELIO_WORKSPACE_ACTION_FAILED/u);
+  assert.match(JSON.stringify(result.result), /PRIVATE_CANARY/u);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].code, "MAX_ASSIST_SNAPSHOT_STALE");
+  assert.equal(JSON.stringify(reports).includes("PRIVATE_CANARY"), false);
+  const providerResult = { isError: true, content: [{ type: "text", text: "PRIVATE_CANARY" }] };
+  const returned = await handleLocalMcpMessage(request, {
+    callTool: async () => providerResult, recordDiagnostic,
+  });
+  assert.deepEqual(returned.result, providerResult);
+  assert.equal(reports.length, 1, "successful transport carrying provider isError is outside telemetry");
 });

@@ -6374,7 +6374,10 @@ export const handleLocalMcpMessage = async (
       // are not inspected or uploaded; they can contain protected content.
       try {
         if (!(effectiveError instanceof TrelioApiError)) {
-          recordDiagnostic?.(message.params?.name, message.params?.arguments, errorPayload.code);
+          recordDiagnostic?.(message.params?.name, message.params?.arguments,
+            effectiveError instanceof TrelioLocalContextError
+              ? effectiveError.diagnosticCode ?? errorPayload.code
+              : errorPayload.code);
         }
       } catch { /* Telemetry must preserve the original result. */ }
       const isProposalCardError = errorPayload.code.startsWith("LOCAL_CONTEXT_PROPOSAL_");

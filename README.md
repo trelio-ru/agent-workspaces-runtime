@@ -305,6 +305,12 @@ Dispatcher отправляет content-free наблюдения пойманн
 Отправка best effort в фоне, без OAuth/pairing, credential migration и UI;
 ошибка telemetry не меняет исходный MCP result. Возвращаемые provider `isError`,
 HTTP `TrelioApiError`, hooks и process crashes в этот счётчик не входят.
+Пойманный failed Workspace subprocess классифицируется по фиксированным Node
+признакам: directory, permission, exit, termination, output limit. Только для
+`skill_run` допустим один JSON stdout до 64 KiB с `ok=false`: извлекается лишь
+один из закрытых MAX assist codes. Message/details и произвольные коды не
+передаются в telemetry. Публичный action wrapper сохраняет прежний код, локальный
+`details.failureCode` объясняет причину. Повтор действия не выполняется.
 
 Закрытый wire-каталог `trelio-agent-diagnostics-contract.json` ограничивает
 tool/operation/code. Payload содержит лишь UUID события, эти dimensions,
@@ -312,6 +318,9 @@ tool/operation/code. Payload содержит лишь UUID события, эт
 stack, args, paths, company/user/session/skill IDs и credentials исключены.
 Тот же allowlist проверяет backend. Каталоги меняются совместимо и проверяются
 при cross-repository изменении; они не входят в model-visible catalog.
+Новые категории сначала принимает backend, затем signed runtime. Старый endpoint
+может отклонить пакет с неизвестным кодом; sender прекращает отправку этого
+пакета без изменения исходной операции.
 
 RAM queue ограничена 128 группами/1000 повторов; каждые 1 с – пакет до 20 групп.
 Активный пакет неизменен: после transport/5xx до трёх повторов через

@@ -9600,6 +9600,28 @@ const truncateWorkspaceActionOutput = (value) => {
     : `${output.slice(0, 64 * 1024)}\n[output truncated]`;
 };
 
+export const workspaceActionFailureCode = (error, operation) => {
+  // A failed signed skill can emit one JSON error before the bridge reports
+  // its exit. Extract only these fixed categories, never message/details,
+  // arbitrary code-shaped text or successful provider results. No replay is
+  // authorized by this classification, including a pre-action snapshot guard.
+  const providerCodes = ["MAX_ASSIST_SNAPSHOT_STALE", "MAX_ASSIST_TARGET_INVALID",
+    "MAX_ASSIST_WORKER_FAILED", "MAX_ASSIST_WORKER_START_FAILED", "MAX_ASSIST_START_TIMEOUT"];
+  if (operation === "skill_run" && typeof error?.stdout === "string"
+    && error.stdout.length <= 64 * 1024) {
+    try {
+      const payload = JSON.parse(error.stdout);
+      if (payload?.ok === false && providerCodes.includes(payload.code)) return payload.code;
+    } catch { /* Unstructured/oversized provider output has no safe category. */ }
+  }
+  if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "TRELIO_WORKSPACE_DIRECTORY_UNAVAILABLE";
+  if (error?.code === "EACCES" || error?.code === "EPERM") return "TRELIO_WORKSPACE_PERMISSION_DENIED";
+  if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "TRELIO_WORKSPACE_OUTPUT_LIMIT";
+  if (error?.killed === true) return "TRELIO_WORKSPACE_PROCESS_TERMINATED";
+  if (Number.isInteger(error?.code)) return "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED";
+  return "TRELIO_WORKSPACE_ACTION_FAILED";
+};
+
 const parseBridgeTransportError = (stderr, operation) => {
   if (typeof stderr !== "string" || stderr.length > 64 * 1024) return null;
   const text = stderr.trim();
@@ -10121,15 +10143,21 @@ export const handleTrelioWorkspaceActionOperation = async (
         openRecovery.details,
       );
     }
-    throw new TrelioLocalContextError(
+    const failureCode = workspaceActionFailureCode(error, invocation.operation);
+    const actionError = new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_FAILED",
       stderr || "The Trelio Workspace bridge action failed.",
       {
         operation: invocation.operation,
+        failureCode,
         ...(stdout ? { stdout } : {}),
         ...(stderr ? { stderr } : {}),
       },
     );
+    // Retain the public wrapper ABI and local stdout/stderr recovery context.
+    // Telemetry sees only the closed category, never that private context.
+    actionError.diagnosticCode = failureCode;
+    throw actionError;
   } finally {
     heartbeatManager?.endAction(activeHeartbeatEntry);
   }
