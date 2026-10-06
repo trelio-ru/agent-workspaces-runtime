@@ -40,6 +40,11 @@ if ($Child) {
   # Download snapshots use the same current-user private DACL helpers. Verify
   # that actual file materialization also works without administrator rights.
   & $nodePath (Join-Path $repositoryPath "tests\trelio-local-attachments.test.mjs")
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  # The hook-local transport must preserve the same owner/DACL guarantees
+  # without administrator privileges; a successful runner-admin check alone
+  # cannot prove the desktop-user path works.
+  & $nodePath (Join-Path $repositoryPath "tests\trelio-hook-private-session.test.mjs")
   exit $LASTEXITCODE
 }
 
