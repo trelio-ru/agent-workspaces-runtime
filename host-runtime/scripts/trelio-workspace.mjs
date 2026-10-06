@@ -6931,7 +6931,7 @@ const AGENT_SKILL_INHERITED_ENVIRONMENT_KEYS = new Set([
 ]);
 
 const normalizedWindowsInstallationRoot = (value, expectedBasename) => {
-  const candidate = path.normalize(String(value || ""));
+  const candidate = path.win32.normalize(String(value || ""));
   if (
     !path.win32.isAbsolute(candidate)
     || !/^[A-Za-z]:[\\/]/u.test(candidate)
@@ -7039,8 +7039,19 @@ export const sanitizeAgentSkillInheritedEnvironment = (inheritedEnvironment = pr
   return sanitized;
 };
 
-const pythonInvocationCandidates = (environment = process.env) => {
-  if (process.platform !== "win32") {
+// Windows environment names are case-insensitive, including when an explicit
+// environment object has been copied out of process.env for a child process.
+const windowsPythonEnvironmentValue = (environment, name) => {
+  const key = Object.keys(environment).find((value) => value.toUpperCase() === name);
+  return key ? environment[key] : undefined;
+};
+
+export const buildPythonInvocationCandidates = ({
+  environment = process.env,
+  platform = process.platform,
+  homeDirectory = os.userInfo().homedir,
+} = {}) => {
+  if (platform !== "win32") {
     return [
       "/opt/homebrew/bin/python3",
       "/usr/local/bin/python3",
@@ -7052,21 +7063,48 @@ const pythonInvocationCandidates = (environment = process.env) => {
   }
 
   const candidates = [];
+  const versions = ["314", "313", "312", "311", "310"];
   for (const [value, basename] of [
-    [environment.PROGRAMFILES, "Program Files"],
-    [environment["PROGRAMFILES(X86)"], "Program Files (x86)"],
+    [windowsPythonEnvironmentValue(environment, "PROGRAMFILES"), "Program Files"],
+    [windowsPythonEnvironmentValue(environment, "PROGRAMFILES(X86)"), "Program Files (x86)"],
   ]) {
     const root = normalizedWindowsInstallationRoot(value, basename);
     if (!root) continue;
-    for (const version of ["314", "313", "312", "311", "310"]) {
-      candidates.push({
-        executable: path.win32.join(root, `Python${version}`, "python.exe"),
-        argsPrefix: [],
-      });
+    for (const version of versions) {
+      // Keep the existing compact layout and also accept the spaced layout
+      // documented by the official all-users installer. Neither uses PATH.
+      for (const directory of [`Python${version}`, `Python 3.${version.slice(1)}`]) {
+        candidates.push({
+          executable: path.win32.join(root, directory, "python.exe"),
+          argsPrefix: [],
+        });
+      }
+    }
+  }
+
+  // The default python.org installer is per-user and does not require admin
+  // rights. Derive its fixed root from the host's current account, never from
+  // a workspace-provided PATH, LOCALAPPDATA or USERPROFILE override. This also
+  // works in an already-running desktop process whose PATH has not refreshed.
+  const userHome = path.win32.normalize(String(homeDirectory || ""));
+  if (/^[A-Za-z]:[\\/]/u.test(userHome) && path.win32.isAbsolute(userHome)) {
+    const userPythonRoot = path.win32.join(userHome, "AppData", "Local", "Programs", "Python");
+    for (const version of versions) {
+      for (const suffix of ["", "-32", "-64", "-arm64"]) {
+        const installationRoot = path.win32.join(userPythonRoot, `Python${version}${suffix}`);
+        candidates.push({
+          executable: path.win32.join(installationRoot, "python.exe"),
+          argsPrefix: [],
+          // A junction/symlink must not turn the new user-root candidate into
+          // an arbitrary interpreter elsewhere on the machine.
+          installationRoot,
+        });
+      }
     }
   }
   const systemRoot = normalizedWindowsInstallationRoot(
-    environment.SYSTEMROOT || environment.SystemRoot || environment.WINDIR,
+    windowsPythonEnvironmentValue(environment, "SYSTEMROOT")
+      || windowsPythonEnvironmentValue(environment, "WINDIR"),
     "Windows",
   );
   if (systemRoot) {
@@ -7105,7 +7143,7 @@ export const resolveTrustedPythonInvocation = async ({
   ].map((value) => path.resolve(value));
   const probeEnvironment = sanitizeAgentSkillInheritedEnvironment(environment);
 
-  for (const candidate of pythonInvocationCandidates(environment)) {
+  for (const candidate of buildPythonInvocationCandidates({ environment })) {
     if (!path.isAbsolute(candidate.executable)) continue;
     const canonicalExecutable = await fs.realpath(candidate.executable).catch(() => null);
     if (!canonicalExecutable) continue;
@@ -7117,6 +7155,8 @@ export const resolveTrustedPythonInvocation = async ({
       || (process.platform !== "win32" && (metadata.mode & 0o111) === 0)
       || (process.platform !== "win32" && (metadata.mode & 0o022) !== 0)
       || forbiddenRoots.some((root) => pathOverlaps(root, canonicalExecutable))
+      || (candidate.installationRoot
+        && !isLocalPathInside(candidate.installationRoot, canonicalExecutable))
     ) {
       continue;
     }
@@ -7189,7 +7229,7 @@ export const resolveTrustedPythonInvocation = async ({
   }
 
   throw new Error(
-    "Не найден фиксированный canonical Python 3.10+ вне workspace/temp/plugin cache. Установите системный Python и повторите запуск навыка.",
+    "Не найден подходящий Python 3.10+ в стандартных каталогах вне workspace/temp/plugin cache. Проверьте версию и расположение установленного Python; установка для всех пользователей не обязательна.",
   );
 };
 

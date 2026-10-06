@@ -133,6 +133,28 @@ Tagged artifact собирается на GitHub только после про�
 того же exact SHA на Linux/macOS/Windows. Main/tag не повторяют уже зелёный
 полный test set; новый source SHA сначала проходит новый PR gate.
 
+### Поиск Python для Agent Skills
+
+Python runtime требует Python 3.10+ и использует фиксированные пути, а не первый
+`python` из `PATH`. В Windows проверяются стандартные machine-каталоги
+`Program Files`/`Program Files (x86)` с именами `Python310`–`Python314` либо
+`Python 3.10`–`Python 3.14`, затем стандартная установка текущего пользователя
+`AppData\Local\Programs\Python\Python310`–`Python314` под его OS profile.
+Для user-каталогов поддерживаются также суффиксы `-32`, `-64`, `-arm64`.
+Последний legacy-кандидат – `Windows\py.exe -3`. Пользовательская установка
+работает без обновлённого process PATH; установка для всех пользователей и
+права администратора для этого не требуются. Нестандартные директории, venv
+и WindowsApps aliases не добавляются автоматически.
+
+Profile текущей OS identity определяется через `os.userInfo()`, без выбора
+пользователя из окружения навыка. Canonical executable не может находиться в
+workspace, temp или plugin cache; user installation не может перенаправляться
+junction/symlink за свой фиксированный каталог. Probe и запуск используют
+`-I -B` и очищенное окружение. Signed runtime root добавляется в `sys.path`
+только для его собственных sibling imports. Установленная Python stack и OS
+account остаются machine trust roots; это не защита от процесса с теми же
+правами пользователя. На macOS/Linux сохраняются прежние фиксированные пути.
+
 ### HTTP-диагностика браузера
 
 `trelio-browser-session.mjs` экспортирует `createDocumentHttpObserver(context,

@@ -80,6 +80,7 @@ jobs:
           node tests/trelio-local-attachments.test.mjs
           node tests/trelio-local-path.test.mjs
           node tests/trelio-local-context.test.mjs
+          node tests/trelio-python.test.mjs
           node tests/trelio-mcp-results.test.mjs
           node tests/trelio-remote-mcp-oauth.test.mjs
           node tests/trelio-agent-diagnostics.test.mjs
@@ -125,6 +126,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
+
+      # The Python regression relocates a real interpreter into the default
+      # per-user layout. PATH alone cannot prove this installation is accepted.
+      - name: Set up Python fixture
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run Windows Python discovery and isolation regressions
+        run: node tests/trelio-python.test.mjs
 
       - name: Run admission cache boundary regressions
         run: node tests/trelio-skill-admission.test.mjs
