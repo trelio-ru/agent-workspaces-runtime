@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  collectCodexInstructionHints, instructionContextBoundary, manageInstructionKeys,
+  collectCodexInstructionHints, hasManagedInstructionKeys, instructionContextBoundary, manageInstructionKeys,
   withoutModelInstructionKeys,
 } from "../host-runtime/scripts/trelio-instruction-reuse.mjs";
 
@@ -216,4 +216,26 @@ test("encrypted local envelope removes hints only from argument slots, preservin
   assert.equal(result.parameters.arguments.knownInstructionLayerKeys, undefined);
   assert.equal(result.parameters.arguments.content, content);
   assert.equal(result.runtimeSessionProof, envelope.runtimeSessionProof);
+});
+
+test("local domain reads cannot suppress authority with model-authored hints", async () => {
+  for (const toolName of ["get_knowledge_base_page", "get_contact", "get_registry", "get_meeting"]) {
+    const identity = { status: "local", toolName };
+    const business = { filters: { knownInstructionRevisionKey: "ordinary filter data" } };
+    const envelope = { schemaVersion: 1, route: "context", parameters: {
+      operation: "native_read", nativeTool: toolName, knownInstructionLayerKeys: [layer.key],
+      arguments: { ...business, knownInstructionLayerKeys: [layer.key], knownInstructionRevisionKey: hash("rules") },
+    } };
+    assert.equal(hasManagedInstructionKeys(identity, envelope), true);
+    const cleaned = await manageInstructionKeys({ hookInput, identity, input: envelope, boundary,
+      readTranscript: () => { throw new Error("Local delivery is never inferred from Codex history"); } });
+    assert.deepEqual(cleaned.parameters.arguments, business);
+    assert.equal(cleaned.parameters.knownInstructionLayerKeys, undefined);
+    assert.equal(cleaned.parameters.nativeTool, toolName);
+  }
+  const mutation = { parameters: { nativeTool: "update_registry_definition",
+    arguments: { knownInstructionLayerKeys: ["ordinary data"] } } };
+  const identity = { status: "local", toolName: "update_registry_definition" };
+  assert.equal(hasManagedInstructionKeys(identity, mutation), false);
+  assert.equal(withoutModelInstructionKeys(mutation, identity), mutation);
 });

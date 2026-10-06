@@ -361,6 +361,10 @@ set для exact catalog revision; новые прочитанные слои н
 Claude Code и encrypted local route используют полный read: их журнал пока
 не подтверждает сохранность authority после очистки tool output. Это не
 блокирует операции, не меняет права и не разрешает обход runtime proof.
+Local fallback охватывает также exact чтения knowledge-base pages, contacts,
+registries и meetings: они гидратируют слои правил, хотя их native аналоги
+не объявляют instruction hints. Поля удаляются только из argument slots,
+не из business filters или содержимого документов.
 Закреплённые правила и профиль Run остаются отдельной authority.
 
 Проверенный upstream-контракт:

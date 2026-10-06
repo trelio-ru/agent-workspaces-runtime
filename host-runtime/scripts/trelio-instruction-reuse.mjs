@@ -18,6 +18,13 @@ const REVISION_TOOLS = new Set([
   "get_agent_instructions", "get_project_meta", "get_task_create_meta", "get_workspace", "fetch",
 ]);
 const LAYER_TOOLS = new Set(["get_task", "get_tasks", "get_task_instruction_page"]);
+// Local domain reads hydrate schema-v3 authority even where the equivalent
+// native tool has no instruction argument. Keep that fallback boundary explicit
+// rather than stripping similarly named fields from arbitrary mutations.
+const LOCAL_AUTHORITY_TOOLS = new Set([
+  ...REVISION_TOOLS, ...LAYER_TOOLS,
+  "get_knowledge_base_page", "get_contact", "get_registry", "get_meeting",
+]);
 const FIELDS = ["knownInstructionRevisionKey", "knownInstructionLayerKeys"];
 const HASH = /^[a-f0-9]{64}$/u;
 const LAYER = /^instruction-layer:[a-f0-9]{64}$/u;
@@ -46,7 +53,7 @@ export const withoutModelInstructionKeys = (input, identity) => {
   if (!["local", "local_without_native_tool"].includes(identity.status)) return input;
   if (!record(input.parameters)) return input;
   const tool = identity.toolName || input.parameters.nativeTool || input.parameters.operation;
-  if (!REVISION_TOOLS.has(tool) && !LAYER_TOOLS.has(tool)) return input;
+  if (!LOCAL_AUTHORITY_TOOLS.has(tool)) return input;
   const parameters = strip(input.parameters);
   if (record(parameters.arguments)) parameters.arguments = strip(parameters.arguments);
   return { ...input, parameters };
@@ -54,6 +61,7 @@ export const withoutModelInstructionKeys = (input, identity) => {
 
 export const hasManagedInstructionKeys = (identity, input) => {
   const tool = identity.toolName || input.parameters?.nativeTool || input.parameters?.operation;
+  if (["local", "local_without_native_tool"].includes(identity.status)) return LOCAL_AUTHORITY_TOOLS.has(tool);
   return identity.status !== "unrelated" && (REVISION_TOOLS.has(tool) || LAYER_TOOLS.has(tool));
 };
 
