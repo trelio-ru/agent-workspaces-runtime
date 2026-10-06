@@ -108,6 +108,16 @@ current-user-only DACL/owner, без cache результата. Worker закр
 до клиентского timeout; pending observation и прежние credentials сохраняются
 для следующего вызова в той же сессии. Plugin shell/approved definition не меняются.
 
+Проверка Windows DACL читает правила сразу как `SecurityIdentifier`, включая
+explicit и inherited записи, без name-resolving PowerShell `Access`. Ошибка
+чтения private runtime state сохраняется: ACL/I/O/deadline не считаются
+отсутствием файла и не инициируют повторную регистрацию. JSON ограничен 64 KiB;
+после захвата lock registered/pending разбираются из одного свежего снимка.
+Тайм-аут сообщает только закрытые stage/operation/timeout. Worker передаёт
+value-free фазы owner/DACL, которые не продлевают срок; неизвестная фаза
+отклоняется. Подробный диагностический контракт —
+[ошибки lifecycle hooks](../README.md#ошибки-lifecycle-hooks).
+
 HTTP transport, Agent Skill admission и MCP server metadata используют
 runtime-версию, а plugin compatibility, Codex retention и Run `clientVersion` –
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
