@@ -1,5 +1,5 @@
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
-import { COMMENT_ATTACHMENT_GUIDANCE, CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
+import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -11534,7 +11534,7 @@ const TRELIO_LOCAL_PROPOSAL_RENDER_PAYLOAD_SCHEMA = {
 
 export const TRELIO_LOCAL_PROPOSAL_RENDER_TOOL = {
   name: "render_trelio_local_proposal",
-  description: "Render after local context; save locators belong in payload.target. For comment save payloads: " + COMMENT_ATTACHMENT_GUIDANCE,
+  description: "Render after local context; save locators belong in payload.target.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
