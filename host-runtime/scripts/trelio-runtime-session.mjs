@@ -41,7 +41,7 @@ import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mj
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
 
 import {
-  assertRuntimeHookBudget, runtimeHookSignal, withRuntimeHookPrivateSession,
+  assertRuntimeHookBudget, runtimeHookSignal, withRuntimeHookPrivateSession, withRuntimeHookStage,
 } from "./trelio-hook-private-session.mjs";
 
 const DISCOVERY_TOOLS = new Set([
@@ -137,10 +137,11 @@ const wait = (milliseconds) => new Promise((resolve) => {
 const withRuntimeStateLock = async (filePath, operation) => {
   const lockPath = `${filePath}.lock`;
   const { ensurePrivateDirectory } = await loadWorkspaceBridgeModule();
-  await ensurePrivateDirectory(path.dirname(filePath));
+  await withRuntimeHookStage("state_lock", () => ensurePrivateDirectory(path.dirname(filePath)));
   const startedAt = Date.now();
 
   for (;;) {
+    assertRuntimeHookBudget();
     // Every retry, including a vanished or recovered stale lock, shares the
     // same deadline. Checking only the live-lock branch previously allowed
     // an undeletable stale directory to spin until the client killed us.
@@ -187,18 +188,27 @@ const withRuntimeStateLock = async (filePath, operation) => {
   }
 };
 
-const readStoredState = async (filePath) => {
+const readStoredState = (filePath) => withRuntimeHookStage("runtime_state_read", async () => {
   try {
     const { readPrivateJsonFile } = await loadWorkspaceBridgeModule();
-    return await readPrivateJsonFile(filePath);
-  } catch {
-    return {};
+    return await readPrivateJsonFile(filePath, { maximumBytes: 64 * 1_024 });
+  } catch (error) {
+    // Only an absent/raced-away or malformed record may be replaced. ACL,
+    // cancellation and IO failures must stop this hook at the original stage,
+    // never masquerade as a missing key and trigger another registration.
+    if (error.code === "ENOENT" || error instanceof SyntaxError) return {};
+    if (error.code === HOOK_FAILED_CODE) throw error;
+    // Native fs errors and path validation include the private filename in
+    // their message. Preserve a bounded OS code, but not that original text.
+    const code = /^[A-Z][A-Z0-9_]{1,31}$/u.test(error.code || "") ? error.code : HOOK_FAILED_CODE;
+    throw Object.assign(new Error(
+      `не удалось безопасно прочитать runtime state (stage=runtime_state_read; reason=${code})`,
+    ), { code });
   }
-};
+});
 
-const readRuntimeState = async (filePath) => {
+const parseRuntimeState = (state) => {
   try {
-    const state = await readStoredState(filePath);
     if (
       state.schemaVersion !== 1
       || !UUID_PATTERN.test(String(state.runtimeSessionId || ""))
@@ -217,8 +227,9 @@ const readRuntimeState = async (filePath) => {
   }
 };
 
-const readPendingObservation = async (filePath) => {
-  const state = await readStoredState(filePath);
+const readRuntimeState = async (filePath) => parseRuntimeState(await readStoredState(filePath));
+
+const parsePendingObservation = (state) => {
   return state.schemaVersion === 1
     && state.pending === true
     && state.observation
@@ -401,7 +412,9 @@ const createRuntimeState = async ({
   filePath,
   initialObservation = null,
 }) => {
-  const currentObservation = await detectAgentRuntimeAttestation({ hookInput });
+  const currentObservation = await withRuntimeHookStage("runtime_attestation", () => (
+    detectAgentRuntimeAttestation({ hookInput })
+  ));
   assertRuntimeHookBudget();
   // SessionStart reliably supplies the selected model but Codex does not yet
   // document effort in that event. Preserve the initial model/client and fill
@@ -462,9 +475,9 @@ const createRuntimeState = async ({
       return registrationSignal;
     },
   });
-  let token = await requireToken(origin, networkOptions);
+  let token = await withRuntimeHookStage("bridge_credentials", () => requireToken(origin, networkOptions));
   registrationSignal ??= networkOptions.signal;
-  const register = () => retryIdempotentRequest(() => (
+  const register = () => withRuntimeHookStage("runtime_registration", () => retryIdempotentRequest(() => (
     registerAgentRuntimeHookSession({
       origin,
       token,
@@ -473,7 +486,7 @@ const createRuntimeState = async ({
       publicKeySpki,
       signal: registrationSignal,
     })
-  ));
+  )));
   let registration;
   try {
     registration = await register();
@@ -482,7 +495,9 @@ const createRuntimeState = async ({
     // confirmed device-session 401 enters normal pairing; approval still runs
     // through the user's MCP client. Keep the SessionStart observation and the
     // same deadline, and retry registration at most once with a replacement.
-    token = await recoverRejectedBridgeSession(origin, token, error, networkOptions);
+    token = await withRuntimeHookStage("bridge_credentials", () => (
+      recoverRejectedBridgeSession(origin, token, error, networkOptions)
+    ));
     registration = await register();
   }
   const state = {
@@ -491,7 +506,7 @@ const createRuntimeState = async ({
     expiresAt: registration.expiresAt,
     privateKeyPkcs8,
   };
-  await writePrivateJsonFile(filePath, state);
+  await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, state));
   return state;
 };
 
@@ -588,9 +603,13 @@ const runPreToolUse = async (hookInput) => {
     state = await withRuntimeStateLock(filePath, async () => {
       // The winner may have completed while this process waited. Always
       // re-read after acquiring the lock before creating a second session.
-      const registeredState = await readRuntimeState(filePath);
+      const storedState = await readStoredState(filePath);
+      const registeredState = parseRuntimeState(storedState);
       if (registeredState) return registeredState;
-      const initialObservation = await readPendingObservation(filePath);
+      // The locked read already verified this exact file. Classify that same
+      // snapshot instead of repeating Windows ACL/IO solely to parse pending
+      // evidence. Every new read and every later hook still checks live ACLs.
+      const initialObservation = parsePendingObservation(storedState);
       // Keep SessionStart evidence across a pairing/registration failure. The
       // next PreToolUse may not include a model, and asking for a new chat would
       // discard exactly the observation needed to resume this same request.
@@ -623,19 +642,22 @@ const runSessionStart = async (hookInput) => {
   await cleanupStaleRuntimeSessions().catch(() => undefined);
 
   await withRuntimeStateLock(filePath, async () => {
-    const existing = await readRuntimeState(filePath);
+    const storedState = await readStoredState(filePath);
+    const existing = parseRuntimeState(storedState);
     if (source !== "clear" && existing) return;
-    if (source !== "clear" && await readPendingObservation(filePath)) return;
+    if (source !== "clear" && parsePendingObservation(storedState)) return;
     if (source === "clear") stateToEnd = existing;
     await fs.rm(filePath, { force: true }).catch(() => undefined);
-    const observation = await detectAgentRuntimeAttestation({ hookInput });
+    const observation = await withRuntimeHookStage("runtime_attestation", () => (
+      detectAgentRuntimeAttestation({ hookInput })
+    ));
     const { writePrivateJsonFile } = await loadWorkspaceBridgeModule();
-    await writePrivateJsonFile(filePath, {
+    await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, {
       schemaVersion: 1,
       pending: true,
       observation,
       createdAt: new Date().toISOString(),
-    });
+    }));
   });
 
   if (stateToEnd) {
@@ -801,7 +823,7 @@ const runHook = async () => {
         hookInput.hook_event_name === "SessionStart"
         || hookInput.hook_event_name === "PreToolUse"
       ) {
-        const migration = await migrateCodexLegacyTrelioMcpForRuntime();
+        const migration = await withRuntimeHookStage("hook_setup", migrateCodexLegacyTrelioMcpForRuntime);
         if (migration.status === "removed") {
           const error = new Error(
             "Runtime удалил legacy MCP server trelio-mcp из пользовательского config.toml Codex",

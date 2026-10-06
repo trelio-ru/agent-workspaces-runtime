@@ -2220,7 +2220,9 @@ export const unprotectWindowsBridgeSessionToken = (
 ) => runWindowsBridgeDpapi(origin, "unprotect", ciphertext, options);
 
 export const WINDOWS_PRIVATE_ACL_SCRIPT = String.raw`
+param([scriptblock]$ReportPhase = $null)
 $ErrorActionPreference = "Stop"
+if ($ReportPhase) { & $ReportPhase "path_decode" }
 $encodedTargetPath = [Environment]::GetEnvironmentVariable(
   "TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64",
   [EnvironmentVariableTarget]::Process
@@ -2245,6 +2247,7 @@ if ([string]::IsNullOrWhiteSpace($TargetPath)) {
 if ($TargetKind -ne "directory" -and $TargetKind -ne "file") {
   throw "Private path kind is invalid."
 }
+if ($ReportPhase) { & $ReportPhase "identity" }
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 if ($TargetKind -eq "directory") {
   $targetInfo = New-Object System.IO.DirectoryInfo($TargetPath)
@@ -2273,6 +2276,7 @@ if ($TargetKind -eq "directory") {
 # that exceptional case, persist an Owner-only descriptor before touching the
 # DACL. Keeping the descriptor sections separate prevents either operation from
 # requesting the system audit ACL (SACL) or SeSecurityPrivilege.
+if ($ReportPhase) { & $ReportPhase "owner_read" }
 $ownerSecurity = $targetInfo.GetAccessControl(
   [System.Security.AccessControl.AccessControlSections]::Owner
 )
@@ -2280,6 +2284,7 @@ $ownerSid = $ownerSecurity.GetOwner(
   [System.Security.Principal.SecurityIdentifier]
 ).Value
 if ($ownerSid -ne $sid.Value) {
+  if ($ReportPhase) { & $ReportPhase "owner_write" }
   $ownerAcl.SetOwner($sid)
   $targetInfo.SetAccessControl($ownerAcl)
   $ownerSecurity = $targetInfo.GetAccessControl(
@@ -2297,6 +2302,7 @@ if ($ownerSid -ne $sid.Value) {
 # it through the typed .NET API so Owner, Group and the system audit ACL (SACL)
 # are not requested together. Set-Acl may include extra descriptor sections and
 # can consequently demand SeSecurityPrivilege from a normal desktop user.
+if ($ReportPhase) { & $ReportPhase "dacl_write" }
 $acl.SetAccessRuleProtection($true, $false)
 $acl.SetAccessRule($rule)
 $targetInfo.SetAccessControl($acl)
@@ -2305,6 +2311,7 @@ $verificationSections = (
   [System.Security.AccessControl.AccessControlSections]::Access -bor
   [System.Security.AccessControl.AccessControlSections]::Owner
 )
+if ($ReportPhase) { & $ReportPhase "dacl_verify" }
 $verified = $targetInfo.GetAccessControl($verificationSections)
 $verifiedOwnerSid = $verified.GetOwner(
   [System.Security.Principal.SecurityIdentifier]
@@ -2312,16 +2319,23 @@ $verifiedOwnerSid = $verified.GetOwner(
 if ($verifiedOwnerSid -ne $sid.Value) {
   throw "Private path owner verification failed."
 }
-$unexpected = @($verified.Access | Where-Object {
-  $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or
+# PowerShell's Access adapter requests NTAccount identities, which can consult
+# a disconnected domain before translating them back to SIDs below. Verification
+# needs only exact SIDs: read explicit AND inherited rules directly as SIDs so
+# neither account-name resolution nor network availability is part of admission.
+$accessRules = $verified.GetAccessRules(
+  $true, $true, [System.Security.Principal.SecurityIdentifier]
+)
+$unexpected = @($accessRules | Where-Object {
+  $_.IdentityReference.Value -ne $sid.Value -or
   $_.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
   $_.IsInherited
 })
 if ($unexpected.Count -ne 0) {
   throw "Private path ACL verification failed."
 }
-$expected = @($verified.Access | Where-Object {
-  $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq $sid.Value -and
+$expected = @($accessRules | Where-Object {
+  $_.IdentityReference.Value -eq $sid.Value -and
   $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
   -not $_.IsInherited -and
   ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq

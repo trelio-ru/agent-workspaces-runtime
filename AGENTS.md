@@ -45,6 +45,11 @@ publication tooling также остаются вне этого публичн
   повторно проверяет каждый путь; результат проверки прав не кешируется.
   Зависший private subprocess отменяется, lock очищается, следующий hook
   продолжает ту же client session без ручного удаления состояния.
+- Windows ACL сравнивает SID напрямую, без PowerShell `Access`/NTAccount
+  resolution. Ошибки чтения private state не означают отсутствие state:
+  ACL/I/O/deadline сохраняют исходный отказ, не запускают новую регистрацию.
+  Timeout diagnostics используют только закрытые stage/operation/timeout;
+  worker progress не продлевает deadline и не раскрывает paths/identities.
 - Для private runtime state и поиска transcript используй один resolver текущего
   `hookInput.session_id`; inherited environment ID допустим только при отсутствии
   ID события. Все повторы захвата lock ограничены общим deadline, ошибки удаления

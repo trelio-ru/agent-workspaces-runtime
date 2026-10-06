@@ -345,7 +345,10 @@ test("stalled Windows local ACL returns deny and cleans the lock before a same-c
     readline.createInterface({input: process.stdin}).on('line', line => {
       const request = JSON.parse(line);
       const file = Buffer.from(request.path, 'base64').toString('utf8');
-      if (file.endsWith('credentials.json')) return;
+      if (file.endsWith('credentials.json')) {
+        console.log(JSON.stringify({id: request.id, phase: 'owner_read'}));
+        return;
+      }
       console.log(JSON.stringify({id: request.id, ok: true}));
     });
   `;
@@ -364,8 +367,37 @@ test("stalled Windows local ACL returns deny and cleans the lock before a same-c
     syncBuiltinESMExports();
   `;
   const result = await fixture.run(0, prelude);
-  assert.match(assertDeniedHook(result), /TRELIO_RUNTIME_HOOK_FAILED/u);
+  const reason = assertDeniedHook(result);
+  assert.match(reason, /TRELIO_RUNTIME_HOOK_FAILED/u);
+  assert.match(reason, /stage=bridge_credentials; operation=windows_acl.owner_read; timeout=private_process/u);
+  assert.doesNotMatch(reason, /credentials\.json|synthetic-bridge-session/u);
   assert.equal(fixture.state.registrationCount, 0);
   await assert.rejects(stat(`${fixture.statePath}.lock`), {code: "ENOENT"});
   assertProof(fixture, await fixture.run());
 });
+
+for (const code of ["TRELIO_RUNTIME_HOOK_FAILED", "EACCES", "EIO"]) {
+  test(`runtime state ${code} stops at the first failed read without deleting or registering`, async (t) => {
+    const fixture = await createFixture(t);
+    const pending = { schemaVersion: 1, pending: true, observation: { modelId: "gpt-5.6-sol" } };
+    await writePrivateJsonFile(fixture.statePath, pending);
+    const prelude = `
+      import fs from 'node:fs/promises';
+      const actualOpen = fs.open;
+      let failed = false;
+      fs.open = async (file, ...args) => {
+        if (file === ${JSON.stringify(fixture.statePath)} && !failed) {
+          failed = true;
+          throw Object.assign(new Error('synthetic state read failure'), {code: ${JSON.stringify(code)}});
+        }
+        return actualOpen(file, ...args);
+      };
+    `;
+    const result = await fixture.run(0, prelude);
+    assert.match(assertDeniedHook(result), new RegExp(`^${code}:`));
+    assert.equal(fixture.state.registrationCount, 0);
+    assert.deepEqual(JSON.parse(await readFile(fixture.statePath, "utf8")), pending);
+    await assert.rejects(stat(`${fixture.statePath}.lock`), { code: "ENOENT" });
+    assertProof(fixture, await fixture.run());
+  });
+}

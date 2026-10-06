@@ -8,11 +8,40 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 const hookScope = new AsyncLocalStorage();
+const stageScope = new AsyncLocalStorage();
 export const PRIVATE_PROCESS_TIMEOUT_MILLISECONDS = 10_000;
 
-const budgetFailure = () => Object.assign(new Error(
-  "истёк внутренний срок hook при проверке локального состояния; повторите запрос в текущей задаче",
-), { code: "TRELIO_RUNTIME_HOOK_FAILED" });
+const HOOK_STAGES = new Set([
+  "local_state", "hook_setup", "runtime_state_read", "state_lock",
+  "runtime_attestation", "bridge_credentials", "runtime_registration", "runtime_state_write",
+]);
+const ACL_PHASES = new Set([
+  "request_dispatch", "path_decode", "identity", "owner_read", "owner_write",
+  "dacl_write", "dacl_verify",
+]);
+const currentStage = () => stageScope.getStore() || "local_state";
+const budgetFailure = ({ stage = currentStage(), phase, timeout = "hook" } = {}) => {
+  // Diagnostics have a closed vocabulary. No target path, account identity,
+  // request input or child text can enter the hook's model-visible reason.
+  const hookStage = HOOK_STAGES.has(stage) ? stage : "local_state";
+  const operation = ACL_PHASES.has(phase) ? `windows_acl.${phase}` : "local_state";
+  const timeoutKind = timeout === "private_process" ? timeout : "hook";
+  return Object.assign(new Error(
+    `истёк внутренний срок hook (stage=${hookStage}; operation=${operation}; timeout=${timeoutKind})`,
+  ), { code: "TRELIO_RUNTIME_HOOK_FAILED", hookStage, operation, timeoutKind });
+};
+
+export const withRuntimeHookStage = (stage, operation) => {
+  if (!HOOK_STAGES.has(stage)) throw new Error("Unknown runtime hook stage.");
+  return stageScope.run(stage, async () => {
+    assertRuntimeHookBudget();
+    const result = await operation();
+    // In particular, retain the attestation/read stage when an OS operation
+    // returns only after the signal expired. Never report the later caller.
+    assertRuntimeHookBudget();
+    return result;
+  });
+};
 
 export const runtimeHookSignal = () => hookScope.getStore()?.signal;
 export const assertRuntimeHookBudget = () => {
@@ -49,7 +78,10 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
     $env:TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64 = $request.path
     $env:TRELIO_WINDOWS_PRIVATE_ACL_KIND = $request.kind
-    Invoke-TrelioPrivateAcl
+    Invoke-TrelioPrivateAcl -ReportPhase {
+      param($phase)
+      [Console]::WriteLine((@{id=$request.id; phase=$phase} | ConvertTo-Json -Compress))
+    }
     [Console]::WriteLine((@{id=$request.id; ok=$true} | ConvertTo-Json -Compress))
   } catch {
     [Console]::WriteLine((@{id=$request.id; ok=$false} | ConvertTo-Json -Compress))
@@ -74,7 +106,8 @@ export const createPrivateAclWorker = ({
     // Process launch/IO/protocol errors are distinct from a consumed budget.
     // Keep only a bounded OS code, never exec arguments or child error text.
     const causeCode = /^[A-Z0-9_]{2,32}$/u.test(error?.code || "") ? error.code : "IO_ERROR";
-    failure ??= signal?.aborted ? budgetFailure() : Object.assign(new Error(
+    const active = pending.values().next().value;
+    failure ??= signal?.aborted ? budgetFailure(active) : Object.assign(new Error(
       `Windows ACL process не завершил проверку (${causeCode}).`,
     ), { code: "TRELIO_RUNTIME_HOOK_FAILED" });
     for (const entry of pending.values()) {
@@ -116,14 +149,25 @@ export const createPrivateAclWorker = ({
         reply = JSON.parse(line);
       } catch { fail(); return; }
       const entry = pending.get(reply?.id);
-      if (!entry || typeof reply.ok !== "boolean") { fail(); return; }
+      if (!entry) { fail(); return; }
+      if (Object.hasOwn(reply, "phase")) {
+        // Phase updates describe work, never renew either deadline. A noisy
+        // or incompatible child cannot keep the request alive indefinitely.
+        if (!ACL_PHASES.has(reply.phase) || Object.hasOwn(reply, "ok")
+            || ++entry.phaseCount > ACL_PHASES.size) { fail(); return; }
+        entry.phase = reply.phase;
+        return;
+      }
+      if (typeof reply.ok !== "boolean") { fail(); return; }
       clearTimeout(entry.timer);
       pending.delete(reply.id);
       if (reply.ok) entry.resolve();
       else {
         // Access/type failures are not timeout diagnostics. Both paths stop
         // this worker; never silently retry with an ordinary shell command.
-        failure = new Error("Windows не подтвердил права локального private path.");
+        failure = Object.assign(new Error(
+          `Windows не подтвердил права локального private path (stage=${entry.stage}; operation=windows_acl.${entry.phase}).`,
+        ), { code: "TRELIO_RUNTIME_HOOK_FAILED" });
         entry.reject(failure);
         fail();
       }
@@ -136,12 +180,16 @@ export const createPrivateAclWorker = ({
       if (pending.size >= 128) { fail(); throw failure; }
       const id = String(++sequence);
       await new Promise((resolve, reject) => {
-        pending.set(id, {
-          resolve, reject,
+        const entry = {
+          resolve, reject, stage: currentStage(), phase: "request_dispatch", phaseCount: 0,
           // A stalled child cannot hold the registration lock until Codex
           // kills the hook. The hook-wide signal also includes queue time.
-          timer: setTimeout(() => { failure = budgetFailure(); fail(); }, requestTimeoutMilliseconds),
-        });
+          timer: setTimeout(() => {
+            failure = budgetFailure({ ...entry, timeout: "private_process" });
+            fail();
+          }, requestTimeoutMilliseconds),
+        };
+        pending.set(id, entry);
         child.stdin.write(`${JSON.stringify({
           id, kind: targetKind, path: Buffer.from(targetPath, "utf8").toString("base64"),
         })}\n`, (error) => { if (error) fail(); });

@@ -6,9 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import {
   assertRuntimeHookBudget, createPrivateAclWorker, privateProcessOptions,
-  runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession,
+  runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage,
 } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
-import { hardenWindowsPrivatePath } from "../host-runtime/scripts/trelio-workspace.mjs";
+import {
+  hardenWindowsPrivatePath, resolveWindowsPowerShellExecutable, WINDOWS_PRIVATE_ACL_SCRIPT,
+} from "../host-runtime/scripts/trelio-workspace.mjs";
 
 // This child only implements the value-free IPC protocol. It never starts
 // PowerShell or reads a credential, and works on every supported CI platform.
@@ -19,6 +21,14 @@ lines.on('line', line => {
   const request = JSON.parse(line);
   const mode = Buffer.from(request.path, 'base64').toString('utf8');
   if (mode === 'stall') return;
+  if (mode === 'phase-stall') {
+    console.log(JSON.stringify({id: request.id, phase: 'dacl_verify'}));
+    return;
+  }
+  if (mode === 'invalid-phase') {
+    console.log(JSON.stringify({id: request.id, phase: 'private-user-path-or-secret'}));
+    return;
+  }
   if (mode === 'invalid') { console.log('not-json'); return; }
   if (mode === 'exit') { process.exit(1); return; }
   console.log(JSON.stringify({ id: request.id, ok: mode !== 'deny' }));
@@ -96,7 +106,7 @@ test("a single ACL request has its own bound and cannot silently respawn after f
   await assertStopped(state);
 });
 
-for (const mode of ["invalid", "exit"]) {
+for (const mode of ["invalid", "invalid-phase", "exit"]) {
   test(`ACL worker ${mode} response is a failure with no child output disclosure`, async () => {
     const state = { starts: 0, children: [] };
     const worker = createPrivateAclWorker(fixtureOptions(state));
@@ -104,10 +114,31 @@ for (const mode of ["invalid", "exit"]) {
       await assert.rejects(worker.harden(mode, "file"), (error) => {
         assert.equal(error.stdout, undefined);
         assert.equal(error.stderr, undefined);
-        assert.doesNotMatch(error.message, /not-json|synthetic-powershell/u);
+        assert.doesNotMatch(error.message, /not-json|synthetic-powershell|private-user-path-or-secret/u);
         return true;
       });
     } finally { await worker.close(); }
+    await assertStopped(state);
+  });
+}
+
+for (const timeoutKind of ["hook", "private_process"]) {
+  test(`ACL ${timeoutKind} timeout reports the waiting operation without disclosing the path`, async () => {
+    const state = { starts: 0, children: [] };
+    await withRuntimeHookPrivateSession(timeoutKind === "hook" ? 1_500 : 5_000, async () => {
+      const worker = scopedPrivateAclWorker({
+        ...fixtureOptions(state), requestTimeoutMilliseconds: timeoutKind === "hook" ? 5_000 : 1_500,
+      });
+      await assert.rejects(withRuntimeHookStage("runtime_state_read", () => worker.harden("phase-stall", "file")), (error) => {
+        assert.equal(error.code, "TRELIO_RUNTIME_HOOK_FAILED");
+        assert.equal(error.hookStage, "runtime_state_read");
+        assert.equal(error.operation, "windows_acl.dacl_verify");
+        assert.equal(error.timeoutKind, timeoutKind);
+        assert.match(error.message, /stage=runtime_state_read/u);
+        assert.doesNotMatch(error.message, /phase-stall/u);
+        return true;
+      });
+    });
     await assertStopped(state);
   });
 }
@@ -139,4 +170,38 @@ test("Windows hook ACL transport executes the original owner-only verification f
       await hardenWindowsPrivatePath(file, "file");
     });
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Windows ACL verification works when the PowerShell account-name adapter is unavailable", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-acl-sid-"));
+  const file = path.join(root, "private.json");
+  // Replace only PowerShell's name-resolving convenience property. Real SID
+  // identity, descriptor writes and GetAccessRules remain native Windows calls.
+  // The old verifier touches this getter; direct SID verification must not.
+  const guard = `
+$script:accountLookupCount = 0
+foreach ($typeName in @("System.Security.AccessControl.FileSecurity", "System.Security.AccessControl.DirectorySecurity")) {
+  Update-TypeData -TypeName $typeName -MemberType ScriptProperty -MemberName Access -Force -Value {
+    $script:accountLookupCount++
+    throw "Synthetic unavailable account-name resolver"
+  }
+}
+`;
+  const worker = createPrivateAclWorker({
+    executable: resolveWindowsPowerShellExecutable(),
+    aclScript: WINDOWS_PRIVATE_ACL_SCRIPT.replace(
+      '$ErrorActionPreference = "Stop"', '$ErrorActionPreference = "Stop"\n' + guard,
+    ) + '\nif ($script:accountLookupCount -ne 0) { throw "Account-name lookup was used" }',
+  });
+  try {
+    await writeFile(file, "{}\n");
+    await worker.harden(root, "directory");
+    await worker.harden(file, "file");
+    await worker.harden(file, "file");
+  } finally {
+    await worker.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });

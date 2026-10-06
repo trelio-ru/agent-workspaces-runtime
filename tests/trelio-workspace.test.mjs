@@ -7703,7 +7703,10 @@ test("Windows ACL command transports its path without PowerShell argument parsin
     /GetEnvironmentVariable\(\s*"TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64"/u,
   );
   assert.doesNotMatch(WINDOWS_PRIVATE_ACL_SCRIPT, /Import-Module/u);
-  assert.doesNotMatch(WINDOWS_PRIVATE_ACL_SCRIPT, /^param\(/mu);
+  // The optional worker-only progress callback receives no path or identity.
+  // Paths still arrive exclusively through the literal base64 transport.
+  assert.match(WINDOWS_PRIVATE_ACL_SCRIPT, /param\(\[scriptblock\]\$ReportPhase = \$null\)/u);
+  assert.doesNotMatch(WINDOWS_PRIVATE_ACL_SCRIPT, /param\([^\n]*(?:TargetPath|TargetKind)/u);
   assert.throws(
     () => buildWindowsPrivateAclPowerShellInvocation("", "directory"),
     /non-empty string/u,
