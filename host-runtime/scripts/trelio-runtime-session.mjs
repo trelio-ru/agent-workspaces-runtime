@@ -20,6 +20,7 @@ import {
   resolveRuntimeClientSessionId,
 } from "./trelio-runtime-attestation.mjs";
 import {
+  RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS,
   RUNTIME_PENDING_STATE_MAX_AGE_MILLISECONDS,
   RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
   RUNTIME_STATE_LOCK_STALE_MILLISECONDS,
@@ -32,6 +33,10 @@ import {
 } from "./trelio-proposal-route-guard.mjs";
 import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
+
+import {
+  assertRuntimeHookBudget, runtimeHookSignal, withRuntimeHookPrivateSession,
+} from "./trelio-hook-private-session.mjs";
 
 const DISCOVERY_TOOLS = new Set([
   "list_knowledge_base_pages", "list_contacts", "list_registries",
@@ -435,6 +440,7 @@ const createRuntimeState = async ({
   initialObservation = null,
 }) => {
   const currentObservation = await detectAgentRuntimeAttestation({ hookInput });
+  assertRuntimeHookBudget();
   // SessionStart reliably supplies the selected model but Codex does not yet
   // document effort in that event. Preserve the initial model/client and fill
   // only missing evidence from the first protected PreToolUse.
@@ -486,9 +492,11 @@ const createRuntimeState = async ({
   Object.defineProperty(networkOptions, "signal", {
     enumerable: true,
     get: () => {
-      registrationSignal ??= AbortSignal.timeout(
-        RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
-      );
+      assertRuntimeHookBudget();
+      registrationSignal ??= AbortSignal.any([
+        AbortSignal.timeout(RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS),
+        ...(runtimeHookSignal() ? [runtimeHookSignal()] : []),
+      ]);
       return registrationSignal;
     },
   });
@@ -633,6 +641,7 @@ const runPreToolUse = async (hookInput) => {
       });
     });
   }
+  assertRuntimeHookBudget();
   writeUpdatedInput(toolInput, buildRuntimeSessionProof({ state, toolName }));
 };
 
@@ -722,15 +731,18 @@ const executeHookInput = async (hookInput) => {
 
 const runChildProcess = async ({ arguments: childArguments, environment, input }) => (
   await new Promise((resolve, reject) => {
+    assertRuntimeHookBudget();
     const child = spawn(process.execPath, childArguments, {
       env: environment,
       shell: false,
       stdio: ["pipe", "inherit", "inherit"],
+      ...(runtimeHookSignal() ? { signal: runtimeHookSignal() } : {}),
       windowsHide: true,
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
       if (signal) {
+        if (runtimeHookSignal()?.aborted) { reject(new Error("истёк внутренний срок hook")); return; }
         process.kill(process.pid, signal);
         return;
       }
@@ -807,56 +819,62 @@ const runHook = async () => {
   ) {
     throw new Error("Hook event is missing or unsupported.");
   }
-  try {
-    if (
-      hookInput.hook_event_name === "SessionStart"
-      || hookInput.hook_event_name === "PreToolUse"
-    ) {
-      const migration = await migrateCodexLegacyTrelioMcpForRuntime();
-      if (migration.status === "removed") {
-        const error = new Error(
-          "Runtime удалил legacy MCP server trelio-mcp из пользовательского config.toml Codex",
-        );
-        error.code = LEGACY_MCP_RESTART_REQUIRED_CODE;
-        throw error;
-      }
-      if (migration.status === "blocked") {
-        const error = new Error(
-          `${migration.error?.message || "Runtime не смог удалить legacy MCP server trelio-mcp"} Выполните codex mcp remove trelio-mcp и затем полностью перезапустите Codex/ChatGPT`,
-        );
-        error.code = LEGACY_MCP_REMOVAL_FAILED_CODE;
-        throw error;
-      }
-    }
-    await executeHookInput(hookInput);
-    return 0;
-  } catch (error) {
-    let failure = error;
+  // The approved shell's outer timer includes Windows launcher startup. Keep
+  // room for startup, lock cleanup and the explicit JSON decision. Local ACL,
+  // DPAPI and network work share this signal; no result is cached across hooks.
+  const timeout = RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS[hookInput.hook_event_name];
+  return withRuntimeHookPrivateSession(timeout, async () => {
     try {
-      const recoveryExitCode = await recoverHookHostRuntimeUpgrade(error, hookInput);
-      if (recoveryExitCode !== null) return recoveryExitCode;
-    } catch (recoveryError) {
-      failure = recoveryError;
-    }
-    if (hookInput.hook_event_name === "PreToolUse") {
-      // PowerShell/pwsh -Command can normalize an inner exit code 2 to 1.
-      // Codex treats 1 as a non-blocking hook failure and drops the original
-      // stderr reason. A successful protocol response with an explicit deny
-      // survives every shell and prevents sending the original call without
-      // its proof. It contains only the diagnostic, never tool input or keys.
-      process.stdout.write(`${JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: formatRuntimeHookFailure(failure).trim(),
-        },
-      })}\n`);
+      if (
+        hookInput.hook_event_name === "SessionStart"
+        || hookInput.hook_event_name === "PreToolUse"
+      ) {
+        const migration = await migrateCodexLegacyTrelioMcpForRuntime();
+        if (migration.status === "removed") {
+          const error = new Error(
+            "Runtime удалил legacy MCP server trelio-mcp из пользовательского config.toml Codex",
+          );
+          error.code = LEGACY_MCP_RESTART_REQUIRED_CODE;
+          throw error;
+        }
+        if (migration.status === "blocked") {
+          const error = new Error(
+            `${migration.error?.message || "Runtime не смог удалить legacy MCP server trelio-mcp"} Выполните codex mcp remove trelio-mcp и затем полностью перезапустите Codex/ChatGPT`,
+          );
+          error.code = LEGACY_MCP_REMOVAL_FAILED_CODE;
+          throw error;
+        }
+      }
+      await executeHookInput(hookInput);
       return 0;
+    } catch (error) {
+      let failure = error;
+      try {
+        const recoveryExitCode = await recoverHookHostRuntimeUpgrade(error, hookInput);
+        if (recoveryExitCode !== null) return recoveryExitCode;
+      } catch (recoveryError) {
+        failure = recoveryError;
+      }
+      if (hookInput.hook_event_name === "PreToolUse") {
+        // PowerShell/pwsh -Command can normalize an inner exit code 2 to 1.
+        // Codex treats 1 as a non-blocking hook failure and drops the original
+        // stderr reason. A successful protocol response with an explicit deny
+        // survives every shell and prevents sending the original call without
+        // its proof. It contains only the diagnostic, never tool input or keys.
+        process.stdout.write(`${JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: formatRuntimeHookFailure(failure).trim(),
+          },
+        })}\n`);
+        return 0;
+      }
+      // Lifecycle and malformed-input errors cannot be represented as a
+      // PreToolUse decision; keep their existing stderr/exit-code contract.
+      throw failure;
     }
-    // Lifecycle and malformed-input errors cannot be represented as a
-    // PreToolUse decision; keep their existing stderr/exit-code contract.
-    throw failure;
-  }
+  });
 };
 
 /**

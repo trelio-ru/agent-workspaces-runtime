@@ -95,6 +95,10 @@ import {
   skillAdmissionKey,
 } from "./trelio-skill-admission.mjs";
 
+import {
+  assertRuntimeHookBudget, privateProcessOptions, scopedPrivateAclWorker,
+} from "./trelio-hook-private-session.mjs";
+
 const execFileAsync = promisify(execFile);
 const BRIDGE_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
 const BROWSER_SESSION_MODULE_URL = pathToFileURL(
@@ -2163,6 +2167,7 @@ const runWindowsBridgeDpapi = async (origin, mode, input, {
       {
         encoding: "utf8",
         maxBuffer: 1024 * 1024,
+        ...privateProcessOptions(),
         env: {
           ...environment,
           ...invocation.environment,
@@ -2382,8 +2387,16 @@ export const hardenWindowsPrivatePath = async (targetPath, targetKind) => {
     targetPath,
     targetKind,
   );
+  // Cold PowerShell startup used to occur for every directory/file check.
+  // A hook owns one bounded transport, while every request still performs the
+  // exact original DACL/owner verification. Outside hooks use one bounded child.
+  const worker = scopedPrivateAclWorker({
+    executable: resolveWindowsPowerShellExecutable(), aclScript: WINDOWS_PRIVATE_ACL_SCRIPT,
+  });
+  if (worker) return worker.harden(targetPath, targetKind);
   await execFileAsync(resolveWindowsPowerShellExecutable(), invocation.args, {
     encoding: "utf8",
+    ...privateProcessOptions(),
     env: {
       ...process.env,
       ...invocation.environment,
@@ -2422,6 +2435,7 @@ const assertPrivatePathKind = async (targetPath, targetKind) => {
 };
 
 export const ensurePrivateDirectory = async (directoryPath) => {
+  assertRuntimeHookBudget();
   let created = false;
   try {
     const existing = await fs.lstat(directoryPath);
@@ -2456,6 +2470,7 @@ export const readPrivateJsonFile = async (
   filePath,
   { maximumBytes = Number.POSITIVE_INFINITY } = {},
 ) => {
+  assertRuntimeHookBudget();
   const exists = await assertPrivateFileIfPresent(filePath);
   if (!exists) return {};
 
@@ -2491,7 +2506,9 @@ export const readPrivateJsonFile = async (
         throw new Error(`Небезопасные права ${filePath}; требуются 0600.`);
       }
     }
-    return JSON.parse(await handle.readFile("utf8"));
+    const source = await handle.readFile("utf8");
+    assertRuntimeHookBudget();
+    return JSON.parse(source);
   } finally {
     await handle.close();
   }
@@ -2510,6 +2527,7 @@ const readFallbackCredentials = async () => {
 };
 
 export const writePrivateJsonFile = async (filePath, value) => {
+  assertRuntimeHookBudget();
   await ensurePrivateDirectory(path.dirname(filePath));
   await assertPrivateFileIfPresent(filePath);
   const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`;
@@ -2526,6 +2544,8 @@ export const writePrivateJsonFile = async (filePath, value) => {
       await fs.chmod(temporaryPath, 0o600);
     }
     await assertPrivatePathKind(temporaryPath, "file");
+    // Never publish private state after the hook budget has expired.
+    assertRuntimeHookBudget();
     await fs.rename(temporaryPath, filePath);
     if (process.platform !== "win32") {
       await fs.chmod(filePath, 0o600);

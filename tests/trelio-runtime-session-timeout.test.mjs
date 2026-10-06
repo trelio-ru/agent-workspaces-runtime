@@ -130,12 +130,12 @@ const createFixture = async (t, { registrationDelayMilliseconds = 0, stallPath =
     tool_input: { companySlug: "example", projectSlug: "first", taskNumber: 2 },
   };
 
-  const run = (coldStartMilliseconds = 0) => new Promise((resolve, reject) => {
+  const run = (coldStartMilliseconds = 0, extraPrelude = "") => new Promise((resolve, reject) => {
     // Delay before importing the production hook, under the same outer clock.
     // A production test-only env switch would change the admission surface.
     // This prelude instead models cold process startup entirely in the harness.
     const prelude = "data:text/javascript," + encodeURIComponent(
-      `await new Promise(resolve => setTimeout(resolve, ${coldStartMilliseconds}));`,
+      `await new Promise(resolve => setTimeout(resolve, ${coldStartMilliseconds}));\n${extraPrelude}`,
     );
     const startedAt = performance.now();
     const child = spawn(process.execPath, ["--import", prelude, hookScriptPath], {
@@ -328,4 +328,41 @@ test("registration and private state use the event session instead of an inherit
   await assert.rejects(stat(path.join(fixture.configDirectory, "runtime-sessions", `${inheritedDigest}.json`)), {
     code: "ENOENT",
   });
+});
+
+// Simulate the local subprocess stall inside a real Windows hook, after it
+// acquired its registration lock. The HTTP fixture is healthy. All paths and
+// credentials remain disposable; the retry uses the real Windows ACL helper.
+test("stalled Windows local ACL returns deny and cleans the lock before a same-chat retry", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const fixture = await createFixture(t);
+  const fakeAclProcess = `
+    const readline = require('node:readline');
+    readline.createInterface({input: process.stdin}).on('line', line => {
+      const request = JSON.parse(line);
+      const file = Buffer.from(request.path, 'base64').toString('utf8');
+      if (file.endsWith('credentials.json')) return;
+      console.log(JSON.stringify({id: request.id, ok: true}));
+    });
+  `;
+  const prelude = `
+    import childProcess from 'node:child_process';
+    import {syncBuiltinESMExports} from 'node:module';
+    const actualSpawn = childProcess.spawn;
+    childProcess.spawn = (executable, args, options) => {
+      const encoded = args[args.indexOf('-EncodedCommand') + 1];
+      if (args.includes('-EncodedCommand') &&
+          Buffer.from(encoded, 'base64').toString('utf16le').includes('Invoke-TrelioPrivateAcl')) {
+        return actualSpawn(process.execPath, ['-e', ${JSON.stringify(fakeAclProcess)}], options);
+      }
+      return actualSpawn(executable, args, options);
+    };
+    syncBuiltinESMExports();
+  `;
+  const result = await fixture.run(0, prelude);
+  assert.match(assertDeniedHook(result), /TRELIO_RUNTIME_HOOK_FAILED/u);
+  assert.equal(fixture.state.registrationCount, 0);
+  await assert.rejects(stat(`${fixture.statePath}.lock`), {code: "ENOENT"});
+  assertProof(fixture, await fixture.run());
 });

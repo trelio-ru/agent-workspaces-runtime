@@ -85,6 +85,7 @@ jobs:
           node tests/trelio-agent-diagnostics.test.mjs
           node tests/trelio-remote-mcp.test.mjs
           node tests/trelio-runtime-policy.test.mjs
+          node tests/trelio-hook-private-session.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
           node tests/trelio-runtime-session.test.mjs
           node tests/trelio-secret-browser-native.test.mjs
@@ -168,6 +169,9 @@ jobs:
           node --test
           --test-name-pattern="configured platform hook launcher|event session identity|pairing recovery|resume and compact|bounded cleanup"
           tests/trelio-runtime-session.test.mjs
+
+      - name: Run Windows hook private process regressions
+        run: node tests/trelio-hook-private-session.test.mjs
 
       - name: Run Windows hook timeout regressions
         run: node tests/trelio-runtime-session-timeout.test.mjs

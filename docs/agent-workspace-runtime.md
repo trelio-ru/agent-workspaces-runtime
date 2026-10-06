@@ -61,6 +61,17 @@ Hook принимает только непустой JSON с поддержив
 `TRELIO_RUNTIME_HOOK_FAILED`: успешный выход без `updatedInput` для защищённого
 `PreToolUse` оставил бы MCP-вызов без proof и скрыл бы локальную причину.
 
+Локальная регистрация hook ограничена общим внутренним сроком: PreToolUse
+22 секунды, SessionStart 8 секунд, SessionEnd 2 секунды, без продления после
+ACL или credential load. HTTP сохраняет отдельный 11-секундный registration
+budget внутри общего срока. Windows hook запускает один ACL PowerShell на
+anonymous stdin/stdout: каждая операция по-прежнему применяет и проверяет
+current-user-only DACL/owner, без cache результата. Worker закрывается при
+выходе; зависший ACL/DPAPI subprocess отменяется (не больше 10 секунд на
+операцию). Внутренний отказ сохраняет JSON deny и освобождает registration lock
+до клиентского timeout; pending observation и прежние credentials сохраняются
+для следующего вызова в той же сессии. Plugin shell/approved definition не меняются.
+
 HTTP transport, Agent Skill admission и MCP server metadata используют
 runtime-версию, а plugin compatibility, Codex retention и Run `clientVersion` –
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:

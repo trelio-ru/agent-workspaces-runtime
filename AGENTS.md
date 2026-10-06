@@ -31,6 +31,11 @@ publication tooling также остаются вне этого публичн
   и process exit `0`: PowerShell может превратить блокирующий exit `2` в `1`.
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и
   `pwsh.exe`; одного ненулевого exit code недостаточно для проверки блокировки.
+- Hook выполняет ACL/DPAPI и сеть под общим непродлеваемым внутренним deadline
+  до тайм-аута клиента. Windows ACL transport живёт только в одном hook и
+  повторно проверяет каждый путь; результат проверки прав не кешируется.
+  Зависший private subprocess отменяется, lock очищается, следующий hook
+  продолжает ту же client session без ручного удаления состояния.
 - Для private runtime state и поиска transcript используй один resolver текущего
   `hookInput.session_id`; inherited environment ID допустим только при отсутствии
   ID события. Все повторы захвата lock ограничены общим deadline, ошибки удаления

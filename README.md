@@ -177,6 +177,17 @@ exit `2` в `1`; Codex не обязан блокировать tool при та
 вход сохраняют прежний stderr/exit `2`; ошибка launcher до запуска runtime
 находится вне этого обработчика.
 
+Windows hook использует один PowerShell transport для последовательных ACL
+проверок: каждый exact путь заново получает и проверяет owner-only descriptor,
+результат не кешируется. Transport закрывается при завершении hook и не
+переиспользуется между сессиями. ACL/DPAPI subprocess имеют отдельный лимит
+10 секунд; ACL, credentials и сеть дополнительно разделяют непродлеваемый
+внутренний срок (22 секунды для PreToolUse, 8 для SessionStart, 2 для SessionEnd).
+Тайм-аут отменяет subprocess и HTTP, освобождает registration lock и возвращает
+JSON deny до внешнего лимита 30 секунд, оставляя время для Windows launcher.
+Повторный вызов может продолжить ту же client session; отсутствие повторного
+client dispatch нельзя исправлять сбросом OAuth или переустановкой plugin.
+
 ID текущего hook-события имеет приоритет над унаследованными ID окружения и
 одинаково выбирает private state и transcript для model/effort. Все повторы
 захвата registration lock входят в пятисекундный deadline. Неудаляемая stale-
