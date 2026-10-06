@@ -10,11 +10,83 @@ import {
   applyCodexTrelioHookRouting,
   buildCodexLegacyMcpRemovalPatch,
   buildCodexRoutingConfigPatch,
+  inspectCodexTrelioHookSettings,
+  parseCodexTrelioHookSettings,
   migrateCodexLegacyTrelioMcpForRuntime,
   planCodexTrelioHookRouting,
   removeCodexLegacyTrelioMcpRegistration,
   resolveCodexConfigPath,
 } from "../host-runtime/scripts/trelio-codex-routing.mjs";
+
+const hookStateKey = (event) => `trelio-agent-workspaces@trelio-plugins:hooks/hooks.json:${event}:0:0`;
+
+test("persisted hook inspection separates disabled PreToolUse, saved trust and unknown live state", () => {
+  const source = [
+    'api_key = "synthetic-private-value"',
+    '[features]', 'hooks = true',
+    `[hooks.state."${hookStateKey("session_start")}"]`, 'enabled = true',
+    `[hooks.state."${hookStateKey("pre_tool_use")}"]`,
+    'enabled = false # a trusted hook can still be disabled',
+    'trusted_hash = "sha256:synthetic-private-hash"',
+    `[hooks.state."${hookStateKey("session_end")}"]`, 'enabled = true',
+  ].join('\r\n');
+  const result = parseCodexTrelioHookSettings(source);
+  assert.equal(result.scope, "user_config_on_disk");
+  assert.equal(result.effectiveState, "unknown");
+  assert.equal(result.hooksFeatureEnabled, true);
+  assert.equal(result.events.SessionStart.enabled, true);
+  assert.equal(result.events.SessionEnd.enabled, true);
+  assert.deepEqual(result.events.PreToolUse, { enabled: false, trustedHashPresent: true });
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-private|api_key|sha256:/u);
+});
+
+test("persisted hook inspection respects exact TOML keys and never merges profiles or lookalikes", () => {
+  const key = hookStateKey("pre_tool_use");
+  const source = [
+    `hooks.state.'${key}'.enabled = true`,
+    `[hooks.state.'other-${key}']`, 'enabled = false',
+    `[hooks.state.'${key}:extra']`, 'enabled = false',
+    `[profiles.work.hooks.state.'${key}']`, 'enabled = false',
+    '[unrelated]', 'notes = """',
+    `[hooks.state.'${key}']`, 'enabled = false', '"""',
+  ].join('\n');
+  const result = parseCodexTrelioHookSettings(source);
+  assert.equal(result.events.PreToolUse.enabled, true);
+  assert.equal(result.events.PreToolUse.trustedHashPresent, false);
+  assert.equal(result.events.SessionStart.enabled, null);
+  assert.equal(result.hooksFeatureEnabled, null);
+  assert.equal(parseCodexTrelioHookSettings('[features]\ncodex_hooks = false').legacyHooksFeatureEnabled, false);
+  for (const source of [
+    'hooks = { state = {} }',
+    `[hooks.state.'${key}']\nenabled = "false"`,
+    `[hooks.state.'${key}']\nenabled = false\nenabled = true`,
+    `[[hooks.state.'${key}']]\nenabled = false`,
+  ]) assert.throws(() => parseCodexTrelioHookSettings(source), CodexRoutingConfigError);
+});
+
+test("persisted hook reader is read-only and unavailable settings never become disabled", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-settings-"));
+  const configPath = path.join(directory, "config.toml");
+  try {
+    assert.equal((await inspectCodexTrelioHookSettings({ configPath })).status, "config_missing");
+    const source = `[hooks.state.'${hookStateKey("pre_tool_use")}']\nenabled = false\n`;
+    await writeFile(configPath, source);
+    const result = await inspectCodexTrelioHookSettings({ configPath });
+    assert.equal(result.events.PreToolUse.enabled, false);
+    assert.equal(await readFile(configPath, "utf8"), source);
+    await writeFile(configPath, 'hooks = { state = {} }');
+    assert.deepEqual(await inspectCodexTrelioHookSettings({ configPath }), {
+      status: "unsupported", scope: "user_config_on_disk", effectiveState: "unknown",
+    });
+    await rm(configPath);
+    await mkdir(configPath);
+    assert.deepEqual(await inspectCodexTrelioHookSettings({ configPath }), {
+      status: "unavailable", scope: "user_config_on_disk", effectiveState: "unknown",
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("Codex config path follows CODEX_HOME and the Windows user profile", () => {
   assert.equal(resolveCodexConfigPath({

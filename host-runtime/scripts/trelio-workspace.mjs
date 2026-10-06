@@ -21,6 +21,7 @@ import {
 import { execFile, spawn } from "node:child_process";
 import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
+import { TRELIO_PRE_TOOL_USE_MATCHER, inspectTrelioHookToolRouting } from "./trelio-hook-tool-identity.mjs";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -412,7 +413,7 @@ const EXPECTED_RUNTIME_HOOK_CONTRACT = Object.freeze({
     timeout: 10,
   }),
   PreToolUse: Object.freeze({
-    matcher: "^(mcp__)?trelio__[a-z0-9_]+$|^mcp__plugin_trelio-agent-workspaces_trelio__[a-z0-9_]+$|^(mcp[:./-])?trelio[:./-][a-z0-9_]+$|^(mcp__)?trelio_remote_skills__continue_trelio_local_action$|^mcp__plugin_trelio-agent-workspaces_trelio-remote-skills__continue_trelio_local_action$|^(mcp[:./-])?trelio-remote-skills[:./-]continue_trelio_local_action$",
+    matcher: TRELIO_PRE_TOOL_USE_MATCHER,
     type: "command",
     command: EXPECTED_RUNTIME_HOOK_COMMAND,
     commandWindows: EXPECTED_RUNTIME_HOOK_COMMAND_WINDOWS,
@@ -917,6 +918,7 @@ export const inspectBundledPlugin = async ({
         ? crypto.createHash("sha256").update(hooksManifest.raw).digest("hex")
         : null,
       preToolUseScope: "trelio_mcp",
+      toolRouting: inspectTrelioHookToolRouting(observedEvents.PreToolUse?.matcher),
       approvalStatus: "client_managed_unknown",
       events: Object.fromEntries(
         Object.entries(observedEvents).map(([eventName, observed]) => [

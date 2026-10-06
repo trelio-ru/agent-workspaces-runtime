@@ -9,6 +9,12 @@
  * tool output, MCP arguments, Workspace or backend storage.
  */
 import crypto from "node:crypto";
+import {
+  readTrelioHookToolInput,
+  resolveTrelioHookToolIdentity,
+  TrelioHookToolIdentityError,
+} from "./trelio-hook-tool-identity.mjs";
+export { resolveTrelioMcpToolName } from "./trelio-hook-tool-identity.mjs";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
@@ -66,17 +72,6 @@ const PLUGIN_UPGRADE_REQUIRED_CODE = "AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED";
 const LEGACY_MCP_RESTART_REQUIRED_CODE = "TRELIO_CODEX_LEGACY_MCP_RESTART_REQUIRED";
 const LEGACY_MCP_REMOVAL_FAILED_CODE = "TRELIO_CODEX_LEGACY_MCP_REMOVAL_FAILED";
 const SAFE_ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,127}$/u;
-const TRELIO_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,127}$/u;
-// Claude Code qualifies MCP servers contributed by a plugin inside hook
-// payloads. Match the exact plugin and server rather than a broad suffix: a
-// different MCP server must never receive a proof signed for a Trelio tool.
-const CLAUDE_PLUGIN_TRELIO_TOOL_PATTERN =
-  /^mcp__plugin_trelio-agent-workspaces_trelio__([a-z0-9_]+)$/iu;
-const LOCAL_ACTION_HOST_TOOL_PATTERNS = [
-  /^(?:mcp__)?trelio_remote_skills__continue_trelio_local_action$/iu,
-  /^mcp__plugin_trelio-agent-workspaces_trelio-remote-skills__continue_trelio_local_action$/iu,
-  /^(?:mcp[:./-])?trelio-remote-skills[:./-]continue_trelio_local_action$/iu,
-];
 const RUNTIME_END_TIMEOUT_MILLISECONDS = 1_500;
 const RUNTIME_STATE_EXPIRY_GRACE_MILLISECONDS = 30_000;
 // SessionStart has a ten-second host budget, including cold Node startup and
@@ -109,44 +104,11 @@ const readStdinJson = async () => {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 };
 
-export const resolveTrelioMcpToolName = (hookInput) => {
-  const rawName = String(hookInput?.tool_name || hookInput?.toolName || "");
-  if (LOCAL_ACTION_HOST_TOOL_PATTERNS.some((pattern) => pattern.test(rawName))) {
-    // The single public local tool wraps the native call in parameters. Read
-    // the method from that envelope so its proof is signed for the native
-    // method that the dispatcher will execute, never for a stale top-level
-    // alias or an untrusted argument inside parameters.arguments.
-    const input = resolveToolInput(hookInput);
-    const nativeTool = input?.schemaVersion === 1
-      ? String(input?.parameters?.nativeTool || "").trim().toLowerCase()
-      : "";
-    return TRELIO_TOOL_NAME_PATTERN.test(nativeTool) ? nativeTool : null;
-  }
-  const doubleUnderscore = rawName.match(/^(?:mcp__)?trelio__([a-z0-9_]+)$/iu);
-  if (doubleUnderscore) return doubleUnderscore[1].toLowerCase();
-  const claudePluginQualified = rawName.match(CLAUDE_PLUGIN_TRELIO_TOOL_PATTERN);
-  if (claudePluginQualified) return claudePluginQualified[1].toLowerCase();
-  const separated = rawName.match(
-    /^(?:mcp[:./-])?trelio[:./-]([a-z0-9_]+)$/iu,
-  );
-  return separated ? separated[1].toLowerCase() : null;
-};
-
 export const isProtectedTrelioToolName = (toolName) => Boolean(
   toolName && !DISCOVERY_TOOLS.has(toolName) && !RECOVERY_TOOLS.has(toolName)
 );
 
-const resolveToolInput = (hookInput) => {
-  const value = hookInput?.tool_input ?? hookInput?.toolInput ?? hookInput?.input ?? {};
-  if (typeof value !== "string") return value && typeof value === "object" ? value : {};
-  if (value.length > 256 * 1024) throw new Error("Trelio tool input is too large.");
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-};
+const resolveToolInput = readTrelioHookToolInput;
 
 const resolveRuntimeStateDirectory = async (configDirectory = null) => {
   if (configDirectory) return path.join(configDirectory, "runtime-sessions");
@@ -608,7 +570,9 @@ const shouldDenyNativeProposalRenderer = async ({ origin, toolName, toolInput })
 };
 
 const runPreToolUse = async (hookInput) => {
-  const toolName = resolveTrelioMcpToolName(hookInput);
+  const identity = resolveTrelioHookToolIdentity(hookInput);
+  if (identity.status === "invalid") throw new TrelioHookToolIdentityError(identity.reason);
+  const toolName = identity.toolName;
   if (!isProtectedTrelioToolName(toolName)) return;
   const origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
   const toolInput = resolveToolInput(hookInput);

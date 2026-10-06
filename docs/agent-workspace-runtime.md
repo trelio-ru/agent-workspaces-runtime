@@ -56,6 +56,42 @@ identity `0.0.0`, которая не выдаётся за опубликова
 в cache. `runtimeSessions` по-прежнему содержит только счётчики: сохранённая
 hook-сессия может пережить смену runtime и не закрепляет его версию.
 
+Идентичность инструментов и ожидаемый matcher задаются одним модулем
+`trelio-hook-tool-identity.mjs`. Он поддерживает direct, plugin-qualified и
+legacy-separated формы точных серверов Trelio, не допускает чужие namespaces
+по совпадению подстроки и сохраняет прежний matcher stable shell. Для local
+`route=action` имя подписываемого метода берётся только из
+`parameters.nativeTool`. Некорректный envelope, конфликт полей имени или
+невалидный native method дают `TRELIO_HOOK_TOOL_IDENTITY_INVALID` и JSON deny
+до регистрации и отправки. Чужие инструменты и discovery/recovery остаются
+в прежнем контуре; proposal/workspace templates могут законно не иметь
+`nativeTool`, поскольку не пересылают proof в native action.
+
+Doctor и `diagnose_trelio_installation` возвращают `plugin.hooks.toolRouting`
+(в локальном MCP – внутри `local`): это статическая проверка matcher/parser,
+а не подтверждение запуска hook. В Codex 0.160.0 `ToolName::Display` склеивает
+namespace и method для журнала, тогда как `McpHandler::hook_tool_name`
+собирает отдельное canonical имя через `__`. Диагностика сохраняет оба примера
+и не объявляет mismatch по dispatch display. После `reason=missing` при уже
+подтверждённом trust требуется current-chat проверка owning App Server,
+загруженного определения и его trust, effective hooks/managed-only policy и
+событий PreToolUse. Версия CLI из PATH и отсутствие доступного события не
+доказывают причину; недоступное состояние остаётся unknown. Doctor не читает
+credential/log store клиента, не меняет config/trust и не создаёт proof.
+
+Локальный MCP дополнительно читает только пользовательский config Codex
+(обычный UTF-8 файл до 1 MiB) и возвращает `codexHookSettings` с
+`scope=user_config_on_disk`, `effectiveState=unknown`. Читаются точные ключи
+published plugin `trelio-agent-workspaces@trelio-plugins`, `hooks/hooks.json`
+и handler `0:0` для SessionStart/PreToolUse/SessionEnd; похожие имена,
+profiles и другие слои не сливаются. `enabled` и `trustedHashPresent` независимы;
+отсутствующий enabled остаётся null, unsupported/unavailable не означают false.
+Сохранённое отключение общего hooks или PreToolUse даёт отдельное предупреждение
+с ручной проверкой именно этого hook, перезапуском и одним protected read.
+Чтение не выдаёт paths, значения hashes, credentials и прочий config и не
+включает hooks автоматически. Только текущий клиент подтверждает применённые
+настройки и доверие загруженному определению.
+
 Hook принимает только непустой JSON с поддерживаемым `hook_event_name`.
 Пустой stdin или неизвестное событие завершаются блокирующим кодом `2` и
 `TRELIO_RUNTIME_HOOK_FAILED`: успешный выход без `updatedInput` для защищённого

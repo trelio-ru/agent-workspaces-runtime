@@ -27,6 +27,15 @@ publication tooling также остаются вне этого публичн
   keys или production runtime packages в Git, fixtures и logs.
 - Не ослабляй exact confirmation, idempotency/CAS, bounds, attestation, package
   verification и encrypted-company fail-closed behavior.
+- Hook и doctor используют единый контракт идентичности инструмента. Парсить
+  только hook tool_name и exact local envelope; dispatch display из журнала
+  не является hook identity. Некорректный распознанный action отклоняется до
+  регистрации, а допустимые local templates без nativeTool сохраняют свой ABI.
+  Статическая совместимость matcher не доказывает dispatch или trust клиента.
+- Диагностика сохранённых Codex hooks читает только пользовательский config
+  и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
+  включает hook; дисковый снимок не является effective state App Server.
+  Диагностика ничего не меняет; исходный config и значения hashes не выдаёт.
 - Ошибка распознанного `PreToolUse` передаётся JSON-решением `deny` с причиной
   и process exit `0`: PowerShell может превратить блокирующий exit `2` в `1`.
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и

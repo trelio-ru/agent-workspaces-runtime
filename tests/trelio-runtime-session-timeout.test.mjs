@@ -209,6 +209,9 @@ test("hook definition and doctor budget cover cold startup, registration and loc
   assert.ok(RUNTIME_STATE_LOCK_STALE_MILLISECONDS > outerTimeoutMilliseconds + 5_000);
   const report = await inspectBundledPlugin({ pluginDirectory });
   assert.equal(report.hooks.status, "ready");
+  assert.equal(report.hooks.toolRouting.status, "compatible");
+  assert.equal(report.hooks.toolRouting.evidence, "static_contract_check");
+  assert.equal(report.hooks.toolRouting.dispatchDisplayIsHookIdentity, false);
   assert.equal(report.hooks.events.PreToolUse.timeout, PRE_TOOL_USE_TIMEOUT_SECONDS);
 });
 

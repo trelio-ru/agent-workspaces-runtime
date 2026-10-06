@@ -27,6 +27,7 @@ import {
   CODEX_ROUTING_PLAN_TOOL_NAME,
   CodexRoutingConfigError,
   applyCodexTrelioHookRouting,
+  inspectCodexTrelioHookSettings,
   migrateCodexLegacyTrelioMcpForRuntime,
   planCodexTrelioHookRouting,
   removeCodexLegacyTrelioMcpRegistration,
@@ -5454,6 +5455,7 @@ export const handleToolCall = async (
     localPrerequisiteDiagnosis = diagnoseLocalPrerequisites,
     folderOnboardingPrepare = prepareTrelioFolderOnboarding,
     codexRoutingPlan = planCodexTrelioHookRouting,
+    codexHookSettingsRead = inspectCodexTrelioHookSettings,
     codexRoutingApply = applyCodexTrelioHookRouting,
     codexLegacyMcpMigration = null,
   } = {},
@@ -5704,7 +5706,9 @@ export const handleToolCall = async (
     }
     const local = await localPrerequisiteDiagnosis({ origin });
     let codexRouting = null;
+    let codexHookSettings = null;
     if (rawArguments.clientKind === "codex") {
+      codexHookSettings = await codexHookSettingsRead();
       try {
         codexRouting = await codexRoutingPlan();
       } catch (error) {
@@ -5728,6 +5732,7 @@ export const handleToolCall = async (
       intent: rawArguments.intent,
       local,
       codexRouting,
+      codexHookSettings,
       codexLegacyMcpMigration,
     }));
   }

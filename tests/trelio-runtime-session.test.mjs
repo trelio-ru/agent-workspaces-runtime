@@ -167,6 +167,29 @@ test("empty or unsupported hook payload fails closed before any protected call",
   assert.match(unsupported.stderr, /^TRELIO_RUNTIME_HOOK_FAILED:.*Hook event is missing or unsupported/u);
 });
 
+test("malformed Trelio action is denied before registration without exposing its input", async () => {
+  const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-invalid-action-"));
+  try {
+    const result = await runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
+      tool_input: {
+        schemaVersion: 1, route: "action",
+        nativeTool: "create_task",
+        parameters: { arguments: { secret: "synthetic-private-value" } },
+      },
+    }, { CODEX_HOME: temporaryHome, XDG_CONFIG_HOME: temporaryHome });
+    const reason = assertDeniedHook(result);
+    assert.match(reason, /^TRELIO_HOOK_TOOL_IDENTITY_INVALID:/u);
+    assert.doesNotMatch(result.stdout + result.stderr, /synthetic-private-value|runtimeSessionProof|TRELIO_RUNTIME_HOOK_REQUIRED/u);
+    // No session_id/model/credentials were provided: identity failure must be
+    // reported before a registration, pairing or model-policy attempt.
+    assert.match(reason, /invalid_local_native_name/u);
+  } finally {
+    await rm(temporaryHome, { recursive: true, force: true });
+  }
+});
+
 test("Codex hook observes model and current turn effort", async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-hook-"));
   const transcriptPath = path.join(temporaryDirectory, "rollout.jsonl");

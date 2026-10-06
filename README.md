@@ -155,6 +155,29 @@ CLI, worker, control transport и closed status. Observer не делает retr
 
 ### Ошибки lifecycle hooks
 
+Hook и doctor используют общий parser для поддерживаемых имён Trelio.
+Некорректный распознанный local action получает
+`TRELIO_HOOK_TOOL_IDENTITY_INVALID` до регистрации и отправки; закрытые
+аргументы в ошибку не входят. Диагностика показывает статическую совместимость
+matcher/parser отдельно от фактического запуска hook и доверия клиента.
+
+В [Codex 0.160.0](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/core/src/tools/handlers/mcp.rs#L115)
+имя hook строится с `__` независимо от склеенного
+[dispatch display](https://github.com/openai/codex/blob/rust-v0.160.0/codex-rs/protocol/src/tool_name.rs#L54).
+Поэтому строка вида `mcp__trelioget_agent_instructions` в журнале сама по себе
+не доказывает несовместимость matcher. Если proof отсутствует при подтверждённом
+trust, `diagnose_trelio_installation` направляет к проверке owning App Server,
+effective hooks policy и событий текущего чата; недоступные сведения остаются
+unknown. Новый дочерний CLI-процесс не подтверждает перезапуск owner.
+
+`codexHookSettings` отдельно показывает сохранённые настройки из пользовательского
+config: общий флаг hooks и enabled/наличие trust для трёх Trelio hooks.
+`PreToolUse.enabled=false` даёт предупреждение с конкретным следующим шагом:
+пользователь проверяет и включает именно этот hook, перезапускает клиент и
+повторяет одно защищённое чтение. Сохранённый `trusted_hash` не включает hook
+и не доказывает доверие текущему определению; effective state остаётся unknown.
+Диагностика не возвращает содержимое config, paths или hashes и ничего не меняет.
+
 Успешный `SessionStart` с `source=compact` возвращает один JSON с value-free
 `additionalContext`: агент обязан до продолжения работы полностью перечитать
 rules/profile текущего Run из pinned файлов, вне Run – полную authority exact

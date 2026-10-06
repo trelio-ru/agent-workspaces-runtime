@@ -289,6 +289,98 @@ const keyPathStartsWith = (actual, expected) => (
   && expected.every((segment, index) => actual[index] === segment)
 );
 
+const CODEX_TRELIO_HOOK_EVENTS = Object.freeze({
+  SessionStart: "session_start",
+  PreToolUse: "pre_tool_use",
+  SessionEnd: "session_end",
+});
+
+/**
+ * Inspect persisted choices only; never emulate the App Server's merged/live
+ * config or infer trust from the presence of a hash. These exact keys follow
+ * openai/codex rust-v0.160.0 hooks/src/declarations.rs + hook_key in lib.rs for
+ * our published plugin and its single handler per event. No plugin-cache/path
+ * search, substring matching, credential output or configuration writes.
+ */
+export const parseCodexTrelioHookSettings = (source) => {
+  const targets = new Map();
+  const values = new Map();
+  const addTarget = (key, field) => targets.set(JSON.stringify(key), field);
+  addTarget(["features", "hooks"], "hooksFeatureEnabled");
+  addTarget(["features", "codex_hooks"], "legacyHooksFeatureEnabled");
+  for (const [event, suffix] of Object.entries(CODEX_TRELIO_HOOK_EVENTS)) {
+    const key = `trelio-agent-workspaces@trelio-plugins:hooks/hooks.json:${suffix}:0:0`;
+    addTarget(["hooks", "state", key, "enabled"], `${event}.enabled`);
+    addTarget(["hooks", "state", key, "trusted_hash"], `${event}.trustedHashPresent`);
+  }
+  let table = [];
+  for (const statement of scanTomlStatements(source)) {
+    const code = stripTrailingTomlComment(statement.text).trim();
+    if (code.startsWith("[") && code.endsWith("]")) {
+      table = parseTablePath(statement.text);
+      // Unsupported arrays in the target namespaces must not look like an
+      // absent setting. Unrelated arrays still establish a section boundary.
+      if (!table && /^\[\[\s*(hooks|features)(?:\.|\])/u.test(code)) failUnsupported("Неподдерживаемая форма настроек hooks.");
+      continue;
+    }
+    const assignment = readAssignment(statement.text);
+    if (!assignment || !table) continue;
+    const key = [...table, ...assignment.keyPath];
+    const targetKey = JSON.stringify(key);
+    const field = targets.get(targetKey);
+    if (!field) {
+      // Inline/scalar ancestors could contain any target value. Do not report
+      // defaults when this focused reader cannot prove their contents.
+      if ([...targets.keys()].some((target) => keyPathStartsWith(JSON.parse(target), key))) {
+        failUnsupported("Настройки hooks используют неподдерживаемую inline-форму.");
+      }
+      continue;
+    }
+    if (values.has(field)) failUnsupported("Дублирующаяся настройка hooks.");
+    const raw = stripTrailingTomlComment(statement.text).slice(assignment.equalsIndex + 1).trim();
+    if (field.endsWith(".trustedHashPresent")) {
+      const hash = decodeComparableTomlString(raw);
+      if (typeof hash !== "string") failUnsupported("Неподдерживаемое значение настройки trust.");
+      values.set(field, hash.length > 0);
+    } else {
+      if (raw !== "true" && raw !== "false") failUnsupported("Настройка enabled должна быть boolean.");
+      values.set(field, raw === "true");
+    }
+  }
+  return {
+    status: "observed",
+    scope: "user_config_on_disk",
+    effectiveState: "unknown",
+    hooksFeatureEnabled: values.get("hooksFeatureEnabled") ?? null,
+    legacyHooksFeatureEnabled: values.get("legacyHooksFeatureEnabled") ?? null,
+    events: Object.fromEntries(Object.keys(CODEX_TRELIO_HOOK_EVENTS).map((event) => [event, {
+      enabled: values.get(`${event}.enabled`) ?? null,
+      trustedHashPresent: values.get(`${event}.trustedHashPresent`) ?? false,
+    }])),
+  };
+};
+
+export const inspectCodexTrelioHookSettings = async ({
+  configPath = resolveCodexConfigPath(), filesystem = fs,
+} = {}) => {
+  try {
+    const state = await readCodexConfig(configPath, filesystem);
+    return {
+      ...parseCodexTrelioHookSettings(state.source),
+      status: state.exists ? "observed" : "config_missing",
+    };
+  } catch (error) {
+    // Config/path/parser details may contain private values. Keep a closed
+    // classification; inability to inspect is never evidence of disabled hooks.
+    return {
+      status: error instanceof CodexRoutingConfigError && error.code === "TRELIO_CODEX_ROUTING_CONFIG_UNSUPPORTED"
+        ? "unsupported" : "unavailable",
+      scope: "user_config_on_disk",
+      effectiveState: "unknown",
+    };
+  }
+};
+
 /**
  * Removes the exact obsolete server registration which older Trelio setup
  * commands wrote as `[mcp_servers.trelio-mcp]`. The name is a product-owned

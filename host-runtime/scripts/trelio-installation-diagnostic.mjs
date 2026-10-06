@@ -35,6 +35,11 @@ const requireEnum = (value, allowed, fieldName) => {
 const buildClientInspection = (clientKind) => (
   clientKind === "codex"
     ? {
+        hookDispatch: {
+          scope: "owning_app_server_and_current_chat",
+          checks: ["loaded_definition", "current_definition_trust_and_enabled", "effective_hooks_and_managed_only_policy", "pretooluse_started_and_completed"],
+          instructions: "Сопоставь текущий чат и call_id с владеющим App Server, его версией, effective config и hook events. Версия CLI из PATH и новый дочерний codex.exe не доказывают версию/перезапуск owner. Имя dispatch из журнала не является tool_name hook; не выводи ошибку matcher из их различия. Если клиент не раскрывает эти сведения, сохрани unknown, без изменения trust/config/OAuth.",
+        },
         pluginInventory: {
           command: "codex plugin list --json",
           proves: ["installed_plugin_version", "plugin_enabled_state"],
@@ -183,6 +188,7 @@ const buildLocalSummary = (local) => ({
     hooks: {
       status: local.plugin?.hooks?.status ?? "unknown",
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
+      toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
       approvalStatus: local.plugin?.hooks?.approvalStatus ?? "client_managed_unknown",
     },
     issues: Array.isArray(local.plugin?.issues) ? local.plugin.issues : [],
@@ -219,6 +225,7 @@ export const buildTrelioInstallationDiagnostic = ({
   intent: rawIntent,
   local,
   codexRouting = null,
+  codexHookSettings = null,
   codexLegacyMcpMigration = null,
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
@@ -255,6 +262,17 @@ export const buildTrelioInstallationDiagnostic = ({
   }
 
   const warnings = [];
+  if (clientKind === "codex" && (
+    codexHookSettings?.hooksFeatureEnabled === false
+    || codexHookSettings?.legacyHooksFeatureEnabled === false
+    || codexHookSettings?.events?.PreToolUse?.enabled === false
+  )) {
+    warnings.push({
+      code: "CODEX_TRELIO_HOOK_DISABLED_IN_USER_CONFIG",
+      effect: "persisted_disable_candidate_effective_state_unknown",
+      nextStep: "В пользовательском config сохранено отключение hooks или Trelio PreToolUse. trusted_hash не включает hook. Проверь именно PreToolUse в Hooks текущего клиента; включение и trust выполняет пользователь. После изменения полностью перезапусти приложение и повтори одно защищённое чтение. Если настройка уже включена в текущем App Server, продолжи clientInspection.hookDispatch.",
+    });
+  }
   if (local.runtimeSessions?.status === "attention") {
     warnings.push({
       code: "RUNTIME_SESSIONS_REQUIRE_ATTENTION",
@@ -287,6 +305,9 @@ export const buildTrelioInstallationDiagnostic = ({
       : "ready_for_live_verification",
     local: buildLocalSummary(local),
     codexRouting: clientKind === "codex" ? codexRouting : null,
+    codexHookSettings: clientKind === "codex"
+      ? codexHookSettings ?? { status: "unknown", scope: "user_config_on_disk", effectiveState: "unknown" }
+      : null,
     codexLegacyMcpMigration: clientKind === "codex" && codexLegacyMcpMigration
       ? {
           status: codexLegacyMcpMigration.status,
@@ -311,11 +332,18 @@ export const buildTrelioInstallationDiagnostic = ({
         nextTools: ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",
         failureCode: "TRELIO_RUNTIME_HOOK_REQUIRED",
+        failureInterpretation: {
+          missing: clientKind === "codex"
+            ? "Proof отсутствует; причина ещё не установлена. Сначала учти отдельное предупреждение о сохранённом отключении. Иначе при подтверждённом trust выполни clientInspection.hookDispatch без повторного совета включить Hooks. Отсутствие записей/state не доказывает отсутствие dispatch."
+            : "Proof отсутствует; причина ещё не установлена. При уже подтверждённом trust проверь загруженное определение и события PreToolUse текущей сессии Claude Code, не повторяй совет включить Hooks. Недоступные сведения оставь unknown.",
+          invalidIdentity: "TRELIO_HOOK_TOOL_IDENTITY_INVALID доказывает запуск hook и отказ до отправки. Проверь exact server-returned action; не подставляй имя из dispatch-лога и не создавай proof вручную.",
+        },
       },
       separation: [
         "local_doctor_does_not_prove_oauth",
         "hook_definition_integrity_does_not_prove_client_approval",
         "plugin_installation_does_not_prove_runtime_proof",
+        "static_tool_routing_check_does_not_prove_hook_dispatch",
       ],
     },
   };

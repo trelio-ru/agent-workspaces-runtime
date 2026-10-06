@@ -2667,6 +2667,11 @@ const readyLocalInstallationDiagnosis = {
     hooks: {
       status: "ready",
       approvalStatus: "client_managed_unknown",
+      toolRouting: {
+        status: "compatible",
+        evidence: "static_contract_check",
+        dispatchDisplayIsHookIdentity: false,
+      },
       definitionSha256: "a".repeat(64),
       events: {
         PreToolUse: { matcher: "mcp__trelio__.*", timeout: 120 },
@@ -2718,6 +2723,7 @@ test("installation diagnostic centralizes local and Codex routing decisions with
         assert.equal(origin, "https://trelio.ru");
         return readyLocalInstallationDiagnosis;
       },
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => routingPlan,
       codexRoutingApply: async () => {
         applyCalls += 1;
@@ -2746,9 +2752,38 @@ test("installation diagnostic centralizes local and Codex routing decisions with
   assert.equal(payload.local.git.gitPath, undefined);
   assert.equal(payload.local.plugin.hooks.definitionSha256, undefined);
   assert.equal(payload.local.plugin.hooks.events, undefined);
+  assert.deepEqual(payload.local.plugin.hooks.toolRouting, readyLocalInstallationDiagnosis.plugin.hooks.toolRouting);
   assert.equal(payload.local.hostRuntime.loadedVersion, "3.7.2");
   assert.equal(payload.local.runtimeSessions.loadedVersion, undefined);
+  assert.equal(payload.clientInspection.hookDispatch.scope, "owning_app_server_and_current_chat");
+  assert.ok(payload.clientInspection.hookDispatch.checks.includes("effective_hooks_and_managed_only_policy"));
+  assert.match(payload.liveVerification.hook.failureInterpretation.missing, /причина ещё не установлена/u);
+  assert.match(payload.liveVerification.hook.failureInterpretation.invalidIdentity, /TRELIO_HOOK_TOOL_IDENTITY_INVALID/u);
+  assert.ok(payload.liveVerification.separation.includes("static_tool_routing_check_does_not_prove_hook_dispatch"));
   assert.equal(applyCalls, 0);
+});
+
+test("installation diagnostic reports saved disabled PreToolUse without changing trust or claiming live state", async () => {
+  const settings = {
+    status: "observed", scope: "user_config_on_disk", effectiveState: "unknown",
+    hooksFeatureEnabled: true,
+    events: { PreToolUse: { enabled: false, trustedHashPresent: true } },
+  };
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    codexHookSettingsRead: async () => settings,
+    codexRoutingApply: async () => { throw new Error("diagnostics must not mutate settings"); },
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(payload.codexHookSettings, settings);
+  assert.deepEqual(payload.requiredActions, []);
+  const warning = payload.warnings.find(({ code }) => code === "CODEX_TRELIO_HOOK_DISABLED_IN_USER_CONFIG");
+  assert.equal(warning.effect, "persisted_disable_candidate_effective_state_unknown");
+  assert.match(warning.nextStep, /trusted_hash не включает hook/u);
+  assert.equal(payload.liveVerification.hook.state, "client_managed_unknown");
 });
 
 test("installation diagnostic cannot report ready after automatic legacy MCP removal", async () => {
@@ -2761,6 +2796,7 @@ test("installation diagnostic cannot report ready after automatic legacy MCP rem
         ...readyLocalInstallationDiagnosis,
         connection: { status: "ready", deviceSessionConfigured: true },
       }),
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => ({
         schemaVersion: 1,
         status: "ready",
@@ -2794,6 +2830,7 @@ test("installation diagnostic exposes the exact manual fallback only after autom
     { clientKind: "codex", intent: "diagnostics" },
     {
       localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => ({
         schemaVersion: 1,
         status: "ready",
@@ -2842,6 +2879,7 @@ test("folder onboarding intent delegates only to the host-side read-only planner
       localPrerequisiteDiagnosis: async () => {
         throw new Error("general diagnostics must not run");
       },
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => {
         throw new Error("Codex routing must not run");
       },
@@ -3026,6 +3064,7 @@ test("diagnostic intent reports bridge state without turning pairing into a requ
     { clientKind: "claude-code", intent: "diagnostics" },
     {
       localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexHookSettingsRead: async () => { throw new Error("Claude must not read Codex hook settings"); },
       codexRoutingPlan: async () => {
         throw new Error("Claude diagnostics must not read Codex config.");
       },
@@ -3037,6 +3076,10 @@ test("diagnostic intent reports bridge state without turning pairing into a requ
   assert.deepEqual(payload.requiredActions, []);
   assert.equal(payload.warnings[0].code, "BRIDGE_CONNECTION_NOT_READY");
   assert.equal(payload.codexRouting, null);
+  assert.equal(payload.codexHookSettings, null);
+  assert.equal(payload.clientInspection.hookDispatch, undefined);
+  assert.match(payload.liveVerification.hook.failureInterpretation.missing, /Claude Code/u);
+  assert.doesNotMatch(payload.liveVerification.hook.failureInterpretation.missing, /Codex|clientInspection\.hookDispatch/u);
   assert.equal(
     payload.clientInspection.mcpInventory.remoteServerName,
     "plugin:trelio-agent-workspaces:trelio",
@@ -3050,6 +3093,7 @@ test("installation diagnostic preserves local results when Codex routing is unsa
     { clientKind: "codex", intent: "diagnostics" },
     {
       localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => {
         throw new CodexRoutingConfigError(
           "TRELIO_CODEX_ROUTING_CONFIG_UNSAFE",
@@ -3124,6 +3168,7 @@ test("local MCP keeps Codex routing behind a separate plan/apply confirmation", 
     "plan_codex_trelio_hook_routing",
     {},
     {
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => planned,
       codexRoutingApply: async () => {
         throw new Error("Apply must not run during plan.");
@@ -3138,6 +3183,7 @@ test("local MCP keeps Codex routing behind a separate plan/apply confirmation", 
     "apply_codex_trelio_hook_routing",
     { planHash: planned.planHash, confirmed: true },
     {
+      codexHookSettingsRead: async () => ({ status: "config_missing", scope: "user_config_on_disk", effectiveState: "unknown" }),
       codexRoutingPlan: async () => planned,
       codexRoutingApply: async (input) => {
         appliedInputs.push(input);
