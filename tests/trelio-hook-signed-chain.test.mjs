@@ -36,6 +36,8 @@ const runProcess = (program, args, environment, input) => new Promise((resolve, 
 test("signed package reaches the real hook through the complete configured shell chain", async (t) => {
   const temporaryHome = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-signed-hook-"));
   t.after(() => fs.rm(temporaryHome, { recursive: true, force: true }));
+  const launcherPluginDirectory = path.join(temporaryHome, "plugin-alias");
+  await fs.symlink(pluginDirectory, launcherPluginDirectory, process.platform === "win32" ? "junction" : "dir");
   const packagePath = path.join(temporaryHome, "runtime.skillpkg");
   const built = await runProcess(process.execPath, [
     path.join(repositoryRoot, "scripts/build-host-runtime-package.mjs"),
@@ -105,7 +107,7 @@ test("signed package reaches the real hook through the complete configured shell
         HOME: home, USERPROFILE: home, LOCALAPPDATA: path.join(home, "AppData/Local"),
         XDG_CONFIG_HOME: path.join(home, ".config"), CODEX_HOME: path.join(home, ".codex"),
         CODEX_THREAD_ID: sessionId, CODEX_MCP_NODE_PATH: process.execPath,
-        CLAUDE_PLUGIN_ROOT: pluginDirectory, PLUGIN_ROOT: pluginDirectory,
+        CLAUDE_PLUGIN_ROOT: launcherPluginDirectory, PLUGIN_ROOT: launcherPluginDirectory,
         TRELIO_ORIGIN: origin, TRELIO_WORKSPACE_ORIGIN: origin,
         TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
         TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
@@ -143,7 +145,11 @@ test("signed package reaches the real hook through the complete configured shell
         const result = await runProcess(shell.program, shell.args, environment, input);
         assert.equal(result.code, 0, result.stderr);
         assert.equal(result.signal, null);
-        assert.equal(result.stderr, "");
+        // Windows PowerShell can write a first-use progress record as CLIXML
+        // to stderr. Codex reads the successful protocol response from stdout;
+        // progress is not a hook failure and must not invalidate a valid proof.
+        if (process.platform !== "win32") assert.equal(result.stderr, "");
+        assert.doesNotMatch(result.stderr, /TRELIO_|S="error"|not recognized|not found|could not find Node|CouldNotAutoLoadModule/iu);
         assert.ok(result.stdout.trim(), "A successful hook must not silently omit its protocol response");
         const output = JSON.parse(result.stdout).hookSpecificOutput;
         // Never put the full updatedInput/proof in an assertion failure or CI log.
