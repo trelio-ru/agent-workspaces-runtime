@@ -1,4 +1,6 @@
+import { MCP_TASK_READ_MAX_RESULT_BYTES, fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "../host-runtime/scripts/trelio-task-read-budget.mjs";
 import assert from "node:assert/strict";
+import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -3874,7 +3876,7 @@ test("encrypted exact task reads page large authority and reject stale continuat
   const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
   const cold = handleNativeLocalContextRead(fixture, "get_task", target);
   assert.equal(cold.effectiveInstructions.status, "incomplete");
-  assert.ok(Buffer.byteLength(JSON.stringify(cold), "utf8") <= 24 * 1024);
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(cold)));
   const { catalogRevisionKey, pageCount, layerManifest } = cold.effectiveInstructions.delivery;
   const partsByKey = new Map();
   for (let pageIndex = 0; pageIndex < pageCount; pageIndex += 1) {
@@ -3914,7 +3916,7 @@ test("encrypted exact task reads page large authority and reject stale continuat
     assert.equal(page.part, undefined);
     assert.equal(page.tasks, undefined);
     assert.ok(page.parts.length >= 1 && page.parts.length <= 4);
-    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 23 * 1024);
+    assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
     batchedParts.push(...page.parts);
     nextPageIndex = page.nextPageIndex;
     calls += 1;
@@ -3962,7 +3964,7 @@ test("encrypted instruction batches cap escaped JSON and retain the actual conti
     const batch = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
       tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex, pageSize: 4,
     });
-    assert.ok(Buffer.byteLength(JSON.stringify(batch)) <= 23 * 1024);
+    assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(batch)));
     assert.ok(batch.parts.length < 4);
     assert.equal(batch.nextPageIndex, pageIndex + batch.parts.length < pageCount
       ? pageIndex + batch.parts.length : null);
@@ -3972,12 +3974,22 @@ test("encrypted instruction batches cap escaped JSON and retain the actual conti
   assert.equal(collected.length, pageCount);
   const layer = cold.effectiveInstructions.delivery.layerManifest[0];
   assert.equal(crypto.createHash("sha256").update(collected.map((part) => part.markdown).join("")).digest("hex"), layer.sha256);
-  fixture.instructions.company.compiledMarkdown = `Начало${"\u0000".repeat(5000)}Конец`;
+  fixture.instructions.company.compiledMarkdown = `Начало${"\u0000".repeat(8000)}Конец`;
   const oversized = handleNativeLocalContextRead(fixture, "get_task", target);
-  assert.throws(() => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+  // JSON-escaped controls can make a batch smaller even though every raw
+  // immutable part is still 4 KiB. A single escaped part now fits and must be
+  // delivered, not rejected merely because it exceeds the old 23 KiB cap.
+  const single = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+    tasks: [target], expectedCatalogRevisionKey: oversized.effectiveInstructions.delivery.catalogRevisionKey,
+    pageIndex: 0, pageSize: 1,
+  });
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(single)));
+  const batch = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
     tasks: [target], expectedCatalogRevisionKey: oversized.effectiveInstructions.delivery.catalogRevisionKey,
     pageIndex: 0, pageSize: 4,
-  }), (error) => error?.code === "LOCAL_CONTEXT_RESULT_TOO_LARGE");
+  });
+  assert.deepEqual(batch.parts, [single.part]);
+  assert.equal(batch.nextPageIndex, single.nextPageIndex);
 });
 
 test("encrypted same-context task reads reuse complete authority and reload changed/lost layers", () => {
@@ -4174,4 +4186,30 @@ test("local task lists retain and match every equal member and group executor", 
   assert.equal(handleNativeLocalContextRead(snapshot, "list_my_tasks", {companySlug: "acme", relation: "assigned"}).tasks.length, 1);
   snapshot.viewerGroupIds = [];
   assert.equal(handleNativeLocalContextRead(snapshot, "list_my_tasks", {companySlug: "acme", relation: "assigned"}).tasks.length, 0);
+});
+
+
+test("encrypted medium rules stay inline under the complete MCP envelope budget", async () => {
+  const fixture = structuredClone(mirror);
+  fixture.instructions.company = {
+    compiledMarkdown: "Правило🙂. ".repeat(1400),
+    company: { revisionId: "company-r1", version: 1 },
+  };
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  const cold = handleNativeLocalContextRead(fixture, "get_task", target);
+  assert.equal(cold.effectiveInstructions.status, "loaded");
+  const result = await handleToolCall("https://trelio.example", "continue_trelio_local_action", {
+    schemaVersion: 1, route: "context",
+    parameters: { operation: "native_read", companySlug: "acme", nativeTool: "get_task", arguments: target },
+  }, {
+    localContextOperation: async () => cold,
+    proposalProviderSelectionRecorder: async () => {},
+  });
+  assert.deepEqual(result, buildLocalTaskReadToolResult(cold), "Dispatcher uses the measured envelope");
+  const bytes = Buffer.byteLength(JSON.stringify(result));
+  assert.ok(bytes > 24 * 1024 && bytes <= MCP_TASK_READ_MAX_RESULT_BYTES, String(bytes));
+  // Code Mode printing the whole result remains within its default 10,000
+  // estimated tokens; parse both JSON layers and compare every authority byte.
+  assert.ok(Math.ceil(bytes / 4) <= 10_000);
+  assert.deepEqual(JSON.parse(JSON.parse(JSON.stringify(result)).content[0].text), cold);
 });

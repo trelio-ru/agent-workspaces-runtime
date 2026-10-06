@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 
 /**
  * Universal local host for declarative company Remote MCP skills.
@@ -4045,12 +4046,8 @@ const LOCAL_TOOLS = [
   },
 ];
 
-const buildTextResult = (payload) => ({
-  content: [{
-    type: "text",
-    text: JSON.stringify(payload),
-  }],
-});
+// Exact task delivery budgets use this same envelope before pagination.
+const buildTextResult = buildLocalTaskReadToolResult;
 
 /**
  * Put provider-selected follow-up routing beside encrypted search results.

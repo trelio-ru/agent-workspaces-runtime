@@ -312,13 +312,23 @@ Run. Schema v1/v2 не поддерживаются: совместимая па
 использовать schema v3 и `get_task_sections`, а version
 mismatch завершается обновлением вместо fallback к монолитному payload.
 
-Если task core и полный каталог инструкций вместе превышают 24 КиБ, exact read
+Если полный MCP envelope task core и каталога инструкций превышает бюджет, exact read
 возвращает `effectiveInstructions.status=incomplete` с manifest. Агент получает
 части по 4 КиБ через `get_task_instruction_page` с теми же task locators и
 cache keys, сверяет `catalogRevisionKey` и SHA-256 каждого восстановленного
 слоя, затем применяет правила. Manifest рекомендует `pageSize=4`: значения
-2–4 возвращают `instruction_page_batch.parts` с пределом 23 КиБ JSON, включая
-escapes и финальные cache keys. Omission/1 сохраняет `instruction_page.part`.
+2–4 возвращают `instruction_page_batch.parts`. Полный text-only MCP result
+проверяется вместе с повторным JSON-экранированием и финальными cache keys.
+Omission/1 сохраняет `instruction_page.part` и проходит ту же проверку размера.
+Единая native/local policy генерируется из backend
+`shared/task-read-budget.ts` в `trelio-task-read-budget.mjs`: 10 000 output tokens
+по оценке Codex 4 UTF-8 байта, то есть 40 000 байтов result, без расходования
+дополнительного 20% allowance клиента. Это service baseline, не лимит MCP;
+см. [основание и ограничения](https://github.com/ivaschru/Trelio/blob/main/docs/mcp-agent-responses.md#task-read-delivery-budget).
+Config клиента не читается и не меняется. Уменьшенный output limit требует
+согласования на стороне клиента; несколько results в Code Mode не должны
+делить один недостаточный общий budget. Начальный inline result, manifest/core
+и `requires_scope` проверяются тем же builder envelope, что dispatcher.
 Индексы/count считают исходные части, revision не зависит от размера пакета.
 Продолжать нужно по фактическому `nextPageIndex`: byte cap может вернуть меньше
 запрошенного количества частей. Слишком большая одиночная часть даёт явную

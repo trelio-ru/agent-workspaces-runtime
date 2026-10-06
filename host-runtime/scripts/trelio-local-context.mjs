@@ -1,3 +1,4 @@
+import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
@@ -5126,10 +5127,12 @@ const buildLocalScopedEffectiveInstructions = (
   };
 };
 
-const LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES = 24 * 1024;
 const LOCAL_TASK_INSTRUCTION_PART_MAX_BYTES = 4 * 1024;
 const LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE = 4;
-const LOCAL_TASK_INSTRUCTION_BATCH_MAX_BYTES = 23 * 1024;
+// Count the same text-only envelope produced by the local MCP dispatcher,
+// including its second level of JSON escaping. Native and local share one
+// generated policy; neither assumes that a raw Markdown byte is a wire byte.
+const fitsLocalTaskReadResult = (payload) => fitsMcpTaskReadResult(buildLocalTaskReadToolResult(payload));
 
 const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE) {
@@ -5138,7 +5141,13 @@ const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
   const first = pages[pageIndex];
   // Index/revision/ACL уже проверены вызывающим exact read. Legacy формат
   // сохраняется, чтобы старый клиент продолжал собирать те же 4-КиБ части.
-  if (pageSize === 1) return first;
+  if (pageSize === 1) {
+    if (!fitsLocalTaskReadResult(first)) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_TOO_LARGE",
+        "Instruction part exceeds the safe result size; narrow the exact task batch or reduce the instruction size.");
+    }
+    return first;
+  }
   let batch;
   for (const page of pages.slice(pageIndex, pageIndex + pageSize)) {
     const { part, ...metadata } = page;
@@ -5148,10 +5157,9 @@ const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
       pageIndex,
       parts: [...(batch?.parts ?? []), part],
     };
-    // Как в native backend: JSON escapes и финальные cache keys входят в cap.
-    // Последняя вошедшая часть определяет cursor; запрошенный размер его не
-    // сдвигает. Резерв 1 КиБ до 24 КиБ оставлен под transport summary/title hint.
-    if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > LOCAL_TASK_INSTRUCTION_BATCH_MAX_BYTES) break;
+    // The last INCLUDED part owns the cursor and final cache keys. Test its
+    // complete transport envelope before advancing, including pageSize=1 above.
+    if (!fitsLocalTaskReadResult(candidate)) break;
     batch = candidate;
   }
   if (!batch) {
@@ -5182,8 +5190,8 @@ const splitLocalInstructionMarkdown = (markdown) => {
   return parts;
 };
 
-const buildLocalTaskInstructionDelivery = (catalog, inlineMaxBytes) => {
-  if (Buffer.byteLength(JSON.stringify(catalog), "utf8") <= inlineMaxBytes) {
+const buildLocalTaskInstructionDelivery = (catalog, canInline) => {
+  if (canInline(catalog)) {
     return { catalog, pages: [] };
   }
   const allLayerKeys = catalog.nextReadArguments.knownInstructionLayerKeys;
@@ -5304,18 +5312,9 @@ const buildLocalExactTaskRead = (
     connections: record.payload?.connections ?? {},
     relatedWorkspaces: record.payload?.relatedWorkspaces ?? [],
   }));
-  const taskBytes = Buffer.byteLength(JSON.stringify({ tasks: taskReads }), "utf8");
-  if (taskBytes > LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES) {
-    throw new TrelioLocalContextError(
-      "LOCAL_CONTEXT_RESULT_TOO_LARGE",
-      "Exact task cores exceed the bounded result. Narrow the task batch or load one task at a time.",
-    );
-  }
   const delivery = instructionsLoaded
-    ? buildLocalTaskInstructionDelivery(
-        effectiveInstructions,
-        Math.max(0, LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES - taskBytes),
-      )
+    ? buildLocalTaskInstructionDelivery(effectiveInstructions,
+        (catalog) => fitsLocalTaskReadResult({ effectiveInstructions: catalog, tasks: taskReads }))
     : { catalog: effectiveInstructions, pages: [] };
   if (pageRequest) {
     if (!instructionsLoaded || delivery.pages.length === 0) {
@@ -5341,7 +5340,7 @@ const buildLocalExactTaskRead = (
     effectiveInstructions: delivery.catalog,
     tasks: taskReads,
   };
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") > LOCAL_TASK_INSTRUCTION_INLINE_MAX_BYTES) {
+  if (!fitsLocalTaskReadResult(result)) {
     throw new TrelioLocalContextError(
       "LOCAL_CONTEXT_RESULT_TOO_LARGE",
       "Exact task response exceeds the bounded result. Narrow the task batch.",

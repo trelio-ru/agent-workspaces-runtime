@@ -123,7 +123,9 @@ publication tooling также остаются вне этого публичн
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts обязательны по [runtime contract](docs/agent-workspace-runtime.md).
 - Пакетное чтение больших task rules сохраняет immutable части/revision и
-  legacy single-part формат. Native/local bounds и continuation проверять
+  legacy single-part формат. Бюджет полного MCP envelope генерируется из
+  backend `shared/task-read-budget.ts`; его копию вручную не менять.
+  Native/local bounds и continuation проверять
   по [контракту exact read](docs/agent-workspace-runtime.md).
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
