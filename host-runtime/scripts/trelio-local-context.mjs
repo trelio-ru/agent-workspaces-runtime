@@ -1,5 +1,5 @@
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
-import { COMMENT_ATTACHMENT_GUIDANCE, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
+import { COMMENT_ATTACHMENT_GUIDANCE, CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -7042,6 +7042,20 @@ const postProposalRequest = async ({
   },
 ));
 
+const assertLocalCommentAttachmentSelection = (filePaths, userExplicitlyRequestedContextAttachments) => {
+  try {
+    resolveCommentContextAttachmentPolicy(filePaths, userExplicitlyRequestedContextAttachments);
+  } catch (error) {
+    // The MCP boundary preserves codes only for host-owned errors. Translate
+    // the portable policy error here instead of losing the recovery reason as
+    // REMOTE_MCP_HOST_ERROR or broadening the global error serializer.
+    if (error instanceof CommentAttachmentPolicyError) {
+      throw new TrelioLocalContextError(error.code, error.message);
+    }
+    throw error;
+  }
+};
+
 export const selectEncryptedProposalFilesFromManifest = ({
   manifest,
   projectionId,
@@ -7053,7 +7067,7 @@ export const selectEncryptedProposalFilesFromManifest = ({
 }) => {
   // Apply the same native selection policy while paths are still local. It
   // changes proposal selection only, never the accepted Workspace inventory.
-  resolveCommentContextAttachmentPolicy(filePaths, userExplicitlyRequestedContextAttachments);
+  assertLocalCommentAttachmentSelection(filePaths, userExplicitlyRequestedContextAttachments);
   if (
     manifest?.schemaVersion !== 1
     || manifest?.kind !== "agent-workspace-browser-manifest"
@@ -7123,7 +7137,7 @@ const resolveEncryptedProposalFiles = async ({
   userExplicitlyRequestedContextAttachments,
   signal,
 }) => {
-  resolveCommentContextAttachmentPolicy(filePaths, userExplicitlyRequestedContextAttachments);
+  assertLocalCommentAttachmentSelection(filePaths, userExplicitlyRequestedContextAttachments);
   if (filePaths.length === 0) return [];
   if (new Set(filePaths).size !== filePaths.length) {
     throw new TrelioLocalContextError(
@@ -7487,7 +7501,7 @@ const saveLocalProposal = async ({
           10,
           2_048,
         );
-    resolveCommentContextAttachmentPolicy(
+    assertLocalCommentAttachmentSelection(
       filePaths ?? [], rawPayload?.userExplicitlyRequestedContextAttachments,
     );
     const encryptedFiles = filePaths

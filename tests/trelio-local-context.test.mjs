@@ -15,6 +15,7 @@ import {
   assertHydratedLocalProposalPublicationMatches,
   canonicalizeProposalTargetFromMirror,
   TRELIO_LOCAL_MIRROR_MEMORY_TTL_SECONDS,
+  TrelioLocalContextError,
   TRELIO_LOCAL_ACTION_TOOL,
   TRELIO_LOCAL_PROPOSAL_RENDER_TOOL,
   TRELIO_LOCAL_PROPOSAL_RESOURCE_URI,
@@ -3831,7 +3832,8 @@ test("encrypted comment selection excludes context unless the exact files were r
     };
     const input = { manifest, projectionId, workspaceId, acceptedHead, projectionFileCount: 1, filePaths: [filePath] };
     assert.throws(() => selectEncryptedProposalFilesFromManifest(input),
-      (error) => error?.code === "CONTEXT_ATTACHMENT_REQUIRES_USER_REQUEST" && !error.message.includes(filePath));
+      (error) => error instanceof TrelioLocalContextError
+        && error.code === "CONTEXT_ATTACHMENT_REQUIRES_USER_REQUEST" && !error.message.includes(filePath));
     const selected = selectEncryptedProposalFilesFromManifest({ ...input, userExplicitlyRequestedContextAttachments: true });
     assert.equal(selected[0].filePath, filePath);
     // An explicit request relaxes selection only, never exact revision/source lookup.
