@@ -33,7 +33,7 @@ import os from "node:os";
 import path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { isLocalPathInside, sameLocalPath } from "./trelio-local-path.mjs";
+import { isDirectModuleInvocation, isLocalPathInside, sameLocalPath } from "./trelio-local-path.mjs";
 import {
   buildEncryptedWorkspaceProjectionRecord, materializeEncryptedWorkspaceChain,
   prepareCachedEncryptedWorkspaceFile, uploadEncryptedWorkspaceFile,
@@ -17112,6 +17112,6 @@ const runEntrypoint = async () => {
   }
 };
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isDirectModuleInvocation(import.meta.url)) {
   runEntrypoint().catch((error) => fail(formatBridgeCommandError(error, process.argv[2])));
 }

@@ -77,6 +77,7 @@ jobs:
           node tests/trelio-folder-onboarding.test.mjs
           node tests/trelio-git.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
+          node tests/trelio-hook-signed-chain.test.mjs
           node tests/trelio-host-runtime-recovery.test.mjs
           node tests/trelio-local-attachments.test.mjs
           node tests/trelio-local-path.test.mjs
@@ -188,6 +189,9 @@ jobs:
 
       - name: Run Windows hook tool identity regressions
         run: node tests/trelio-hook-tool-identity.test.mjs
+
+      - name: Verify signed runtime hook through the complete Windows shell chain
+        run: node tests/trelio-hook-signed-chain.test.mjs
 
       - name: Run Windows persisted hook settings diagnostics
         run: node --test --test-name-pattern="persisted hook" tests/trelio-codex-routing.test.mjs

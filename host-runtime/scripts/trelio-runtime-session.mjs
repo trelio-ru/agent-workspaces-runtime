@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 
 import {
   detectAgentRuntimeAttestation,
@@ -963,7 +963,7 @@ export const formatRuntimeHookFailure = (error) => {
   return `${code}: активный hook остановил защищённую работу Trelio. ${message} ${recovery}\n`;
 };
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isDirectModuleInvocation(import.meta.url)) {
   runHook()
     .then((exitCode) => {
       process.exitCode = exitCode;

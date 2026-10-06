@@ -24,7 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { StringDecoder } from "node:string_decoder";
-import { pathToFileURL } from "node:url";
+import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload } from "./trelio-mcp-results.mjs";
 import {
   CODEX_ROUTING_APPLY_TOOL_NAME,
@@ -6653,7 +6653,7 @@ export const runStdioHost = async ({
 
 const main = () => runStdioHost();
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isDirectModuleInvocation(import.meta.url)) {
   main().catch((error) => {
     // Stdio stdout is reserved for MCP framing. Even fatal diagnostics never
     // include credential values and go only to stderr.

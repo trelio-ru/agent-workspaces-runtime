@@ -177,6 +177,15 @@ CLI, worker, control transport и closed status. Observer не делает retr
 
 ### Ошибки lifecycle hooks
 
+Запуск CLI сравнивает реальные пути к entrypoint, поскольку Node раскрывает
+ссылки на каталоги, а `argv[1]` сохраняет исходное написание. Это поддерживает
+в том числе Windows junction в родительском пути cache: hook не должен молча
+завершаться с exit `0` без протокольного ответа. Import модулей остаётся без
+CLI-побочных эффектов; signature, hash и запрет ссылок внутри package сохраняются.
+Cross-repository CI проверяет настоящий loader, подписанный fixture package,
+entrypoint и hook через cmd.exe, Windows PowerShell и PowerShell 7, включая
+две разные подписи и JSON deny. Время MCP-запроса не заменяет время этой цепочки.
+
 Hook и doctor используют общий parser для поддерживаемых имён Trelio.
 Некорректный распознанный local action получает
 `TRELIO_HOOK_TOOL_IDENTITY_INVALID` до регистрации и отправки; закрытые
