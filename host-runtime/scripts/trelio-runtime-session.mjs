@@ -495,6 +495,9 @@ const createRuntimeState = async ({
     // confirmed device-session 401 enters normal pairing; approval still runs
     // through the user's MCP client. Keep the SessionStart observation and the
     // same deadline, and retry registration at most once with a replacement.
+    // A consumed hook budget cannot enter recovery and relabel the original
+    // failing stage as a credential failure.
+    if (runtimeHookSignal()?.aborted) throw error;
     token = await withRuntimeHookStage("bridge_credentials", () => (
       recoverRejectedBridgeSession(origin, token, error, networkOptions)
     ));
