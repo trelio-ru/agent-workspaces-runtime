@@ -679,7 +679,10 @@ const runSessionStart = async (hookInput) => {
     await endAgentRuntimeHookSession({
       origin,
       runtimeSessionId: stateToEnd.runtimeSessionId,
-      signal: AbortSignal.timeout(RUNTIME_END_TIMEOUT_MILLISECONDS),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(RUNTIME_END_TIMEOUT_MILLISECONDS),
+        ...(runtimeHookSignal() ? [runtimeHookSignal()] : []),
+      ]),
     }).catch(() => undefined);
   }
 };
@@ -699,7 +702,12 @@ const runSessionEnd = async (hookInput) => {
     await endAgentRuntimeHookSession({
       origin,
       runtimeSessionId: state.runtimeSessionId,
-      signal: AbortSignal.timeout(RUNTIME_END_TIMEOUT_MILLISECONDS),
+      // Cleanup remains best effort, but cannot renew the lifecycle deadline
+      // after local ACL/credentials have already consumed part of it.
+      signal: AbortSignal.any([
+        AbortSignal.timeout(RUNTIME_END_TIMEOUT_MILLISECONDS),
+        ...(runtimeHookSignal() ? [runtimeHookSignal()] : []),
+      ]),
     }).catch(() => undefined);
   }
   // Close a narrow race with a first registration that began just before the
