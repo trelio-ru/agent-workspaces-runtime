@@ -329,7 +329,9 @@ test("Workspace failure categories never export provider content or authorize a 
   for (const code of ["MAX_ASSIST_SNAPSHOT_STALE", "MAX_ASSIST_TARGET_INVALID", "MAX_ASSIST_WORKER_FAILED", "MAX_ASSIST_WORKER_START_FAILED", "MAX_ASSIST_START_TIMEOUT"]) {
     assert.equal(workspaceActionFailureCode({ code: 1, stdout: JSON.stringify({ ok: false, code, message: "PRIVATE_CANARY", details: { secret: "PRIVATE_CANARY" } }) }, "skill_run"), code);
   }
-  for (const stdout of [JSON.stringify({ ok: false, code: "PRIVATE_CANARY" }), JSON.stringify({ ok: true, code: "MAX_ASSIST_SNAPSHOT_STALE" }), "prefix MAX_ASSIST_SNAPSHOT_STALE", "x".repeat(65537)]) {
+  for (const stdout of [JSON.stringify({ ok: false, code: "PRIVATE_CANARY" }), JSON.stringify({ ok: true, code: "MAX_ASSIST_SNAPSHOT_STALE" }), "prefix MAX_ASSIST_SNAPSHOT_STALE", "x".repeat(65537),
+    // A short JavaScript string may still exceed the UTF-8 byte budget.
+    JSON.stringify({ ok: false, code: "MAX_ASSIST_SNAPSHOT_STALE", message: "я".repeat(33000) })]) {
     assert.equal(workspaceActionFailureCode({ code: 1, stdout }, "skill_run"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
   }
   assert.equal(workspaceActionFailureCode({ code: 1, stdout: JSON.stringify({ ok: false, code: "MAX_ASSIST_SNAPSHOT_STALE" }) }, "open"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");

@@ -9608,7 +9608,8 @@ export const workspaceActionFailureCode = (error, operation) => {
   const providerCodes = ["MAX_ASSIST_SNAPSHOT_STALE", "MAX_ASSIST_TARGET_INVALID",
     "MAX_ASSIST_WORKER_FAILED", "MAX_ASSIST_WORKER_START_FAILED", "MAX_ASSIST_START_TIMEOUT"];
   if (operation === "skill_run" && typeof error?.stdout === "string"
-    && error.stdout.length <= 64 * 1024) {
+    && error.stdout.length <= 64 * 1024
+    && Buffer.byteLength(error.stdout, "utf8") <= 64 * 1024) {
     try {
       const payload = JSON.parse(error.stdout);
       if (payload?.ok === false && providerCodes.includes(payload.code)) return payload.code;
