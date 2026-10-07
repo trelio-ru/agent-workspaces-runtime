@@ -26,6 +26,7 @@ import {
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure, resolveHostRuntimeLoader,
 } from "./trelio-host-runtime-recovery.mjs";
 import { TRELIO_PRE_TOOL_USE_MATCHER, inspectTrelioHookToolRouting } from "./trelio-hook-tool-identity.mjs";
+import { diagnoseWindowsHookStartup } from "./trelio-hook-startup-diagnostic.mjs";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -1135,13 +1136,28 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
     nodePath = process.execPath,
     nodeVersion = process.version,
     nowMilliseconds = Date.now(),
+    includeHookStartup = false,
+    signal,
+    hookStartupDiagnosis = diagnoseWindowsHookStartup,
     ...gitOptions
   } = options;
+  // Observe the cold worker before session/credential inspection starts any
+  // ACL helpers. A failed readiness probe must not fan out more copies of the
+  // same failing PowerShell startup across all saved sessions.
+  const hookStartup = includeHookStartup ? await hookStartupDiagnosis({
+    platform: gitOptions.platform || process.platform,
+    executable: (gitOptions.platform || process.platform) === "win32"
+      ? resolveWindowsPowerShellExecutable() : null,
+    aclScript: WINDOWS_PRIVATE_ACL_SCRIPT,
+    signal,
+  }) : null;
+  const skipPrivateInspection = hookStartup?.status === "attention" || signal?.aborted;
+  const skippedPrivateState = { status: "not_checked", issue: "WINDOWS_HOOK_STARTUP_NOT_READY" };
   const [git, plugin, runtimeSessions, connection] = await Promise.all([
     verifyGitRuntime(gitOptions),
     inspectBundledPlugin({ pluginDirectory, loadedPluginVersion }),
-    inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
-    inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
+    skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
+    skipPrivateInspection ? skippedPrivateState : inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
   ]);
   const nodeMajorVersion = Number.parseInt(
     String(nodeVersion).replace(/^v/u, "").split(".")[0],
@@ -1159,6 +1175,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
     ...(node.status === "ready" ? [] : ["TRELIO_NODE_22_REQUIRED"]),
     ...(git.status === "ready" ? [] : [git.code || "TRELIO_GIT_REQUIRED"]),
     ...plugin.issues,
+    ...(hookStartup?.status === "attention" ? ["WINDOWS_HOOK_STARTUP_NOT_READY"] : []),
   ];
 
   return {
@@ -1172,6 +1189,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
     // Session records intentionally contain no release identity and may outlive
     // a loader update, so their counters cannot establish this version.
     hostRuntime: { loadedVersion: HOST_RUNTIME_VERSION },
+    ...(hookStartup ? { hookStartup } : {}),
     runtimeSessions,
     connection,
     issues,
@@ -1181,6 +1199,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
 const doctor = async (options) => {
   const report = await diagnoseLocalPrerequisites({
     origin: options.origin || DEFAULT_ORIGIN,
+    includeHookStartup: true,
   });
 
   if (options.json === true) {
@@ -1200,6 +1219,9 @@ const doctor = async (options) => {
     throw new Error(
       `TRELIO_PLUGIN_DIAGNOSTIC_FAILED: ${report.plugin.issues.join(", ")}.`,
     );
+  }
+  if (report.hookStartup?.status === "attention") {
+    throw new Error("WINDOWS_HOOK_STARTUP_NOT_READY: повторите doctor --json для раздельного отчёта startup и HTTPS; настройки и credentials не меняйте.");
   }
 
   process.stdout.write(

@@ -90,6 +90,7 @@ jobs:
           node tests/trelio-runtime-policy.test.mjs
           node tests/trelio-hook-tool-identity.test.mjs
           node tests/trelio-hook-private-session.test.mjs
+          node tests/trelio-windows-startup-diagnostic.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
           node tests/trelio-runtime-session.test.mjs
           node tests/trelio-instruction-reuse.test.mjs
@@ -202,6 +203,9 @@ jobs:
 
       - name: Run Windows hook private process regressions
         run: node tests/trelio-hook-private-session.test.mjs
+
+      - name: Run read-only Windows worker startup diagnostic regressions
+        run: node tests/trelio-windows-startup-diagnostic.test.mjs
 
       - name: Run Windows hook timeout regressions
         run: node tests/trelio-runtime-session-timeout.test.mjs

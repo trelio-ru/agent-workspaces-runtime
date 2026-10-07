@@ -48,6 +48,12 @@ publication tooling также остаются вне этого публичн
 - ACL worker использует собственные UTF-8 pipes без Console.In/Out, смены
   code page и module/cmdlet pipeline. Запрос ждёт readiness под исходным deadline;
   startup/dispatch различаются, readiness не является подтверждением ACL.
+- Штатная Windows-диагностика запускает read-only readiness worker до чтения
+  private state; при отказе state остаётся `not_checked`, без повторных ACL
+  helpers. Отдельный public HTTPS probe не доказывает OAuth/MCP или причину
+  startup; ограничивай время/cleanup, не возвращай raw output/paths и не меняй
+  настройки, trust, ACL, сертификаты или credentials. Контракт –
+  [README](README.md#диагностика-windows-worker-до-готовности).
 - Windows ACL сравнивает SID напрямую, без PowerShell `Access`/NTAccount
   resolution. Ошибки чтения private state не означают отсутствие state:
   ACL/I/O/deadline сохраняют исходный отказ, не запускают новую регистрацию.

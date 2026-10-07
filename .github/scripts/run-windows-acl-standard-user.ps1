@@ -45,6 +45,10 @@ if ($Child) {
   # without administrator privileges; a successful runner-admin check alone
   # cannot prove the desktop-user path works.
   & $nodePath (Join-Path $repositoryPath "tests\trelio-hook-private-session.test.mjs")
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  # The shipped read-only diagnostic must work in the same ordinary account
+  # as the hook, without needing elevated process or ACL inspection rights.
+  & $nodePath (Join-Path $repositoryPath "tests\trelio-windows-startup-diagnostic.test.mjs")
   exit $LASTEXITCODE
 }
 

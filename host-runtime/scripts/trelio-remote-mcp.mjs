@@ -3814,7 +3814,7 @@ const LOCAL_TOOLS = [
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
     title: "Проверить установку или подготовить настройку папки Trelio",
-    description: "Read-only: diagnostics/onboarding проверяет версии загруженных plugin shell и host runtime, Node.js, standalone Git, runtime sessions, pairing и direct routing; folder_onboarding классифицирует одну client-selected папку и возвращает exact CAS-bound file plan с apply action. Ничего не устанавливает, не применяет и не авторизует.",
+    description: "Read-only: diagnostics/onboarding проверяет plugin/runtime, Node, Git, sessions, pairing, direct routing; diagnostics в Windows также измеряет ACL-worker startup и публичный HTTPS; folder_onboarding классифицирует одну client-selected папку и возвращает exact CAS-bound file plan с apply action. Ничего не устанавливает, не применяет и не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -5702,7 +5702,11 @@ export const handleToolCall = async (
     if (folderOnboardingIntent) {
       return buildTextResult(await folderOnboardingPrepare(rawArguments.folderOnboarding));
     }
-    const local = await localPrerequisiteDiagnosis({ origin });
+    const local = await localPrerequisiteDiagnosis({
+      origin,
+      includeHookStartup: rawArguments.intent === "diagnostics",
+      signal,
+    });
     let codexRouting = null;
     let codexHookSettings = null;
     if (rawArguments.clientKind === "codex") {

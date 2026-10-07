@@ -175,6 +175,56 @@ error-page; 5xx не означает logout, не разрешает credential
 manual fallback или replay mutation. Ошибка и безопасные поля сохраняются через
 CLI, worker, control transport и closed status. Observer не делает retry/reload.
 
+### Диагностика Windows worker до готовности
+
+`diagnose_trelio_installation(clientKind="codex"|"claude-code", intent="diagnostics")`
+и `bridge doctor --json` на Windows автоматически включают `hookStartup`.
+Используется код фактически загруженного signed runtime, без отдельного скрипта,
+поиска в cache и изменения plugin shell. Onboarding и folder onboarding эти
+дополнительные пробы не запускают; на других ОС возвращается `not_applicable`.
+
+`windows_acl.worker_startup` означает отсутствие подтверждения готовности до
+лимита, а не доказанную ошибку CreateProcess или доступа к Trelio. Первым, до
+чтения private state, запускается настоящий worker с открытым stdin и прежним
+stderr. Затем проверяются минимальный PowerShell marker и Node pipe. Только
+при неготовом или слишком медленном worker сравниваются piped stderr, закрытый
+stdin и системный PSModulePath дочернего процесса. ACL-функция лишь определяется,
+запрос ей не отправляется. Новый probe не читает private state/credentials,
+не регистрирует runtime session и не создаёт proof. Настройки, ACL, сертификаты,
+антивирус, OAuth и pairing не меняются.
+
+При `hookStartup.status=attention` обычное чтение private sessions/connection
+пропускается с `not_checked`, без нулевых counters или вывода об отсутствии pairing.
+MCP возвращает `REVIEW_WINDOWS_HOOK_STARTUP_DIAGNOSTIC`; следующий protected read
+не предлагается до разбора локального отказа. Успех readiness сам по себе не
+доказывает ACL, dispatch, trust или успех исходного MCP-вызова.
+
+Параллельный независимый публичный HTTPS GET к `https://trelio.ru/api/health`
+сохраняет времена DNS/TCP/TLS, HTTP status либо закрытый error code. Redirects
+не исполняются, заголовки/тело не собираются, bearer/cookies не передаются.
+Native Node route может отличаться от proxy desktop MCP. Ответ подтверждает
+только достижимость public endpoint; сетевой отказ сам по себе не объясняет
+локальное зависание до readiness и не разрешает OAuth/pairing recovery.
+
+Исходный worker получает 15 секунд диагностического времени; готовность после
+штатного 10-секундного private deadline остаётся `attention`. Остальные
+PowerShell-пробы ограничены 5 секундами, Node – 3; cleanup каждого child – до
+1,5 секунды. Локальная последовательность ограничена 47 секундами, отмена
+MCP останавливает children. HTTPS – до четырёх попыток по 3,5 секунды с паузами
+300/600/1000 мс только при transport/429/5xx. Рабочие лимиты hook не меняются.
+
+Отчёт содержит измерения, версии ОС/Node и закрытые категории без raw output,
+paths или environment. Последующие пробы могут пользоваться прогретыми caches;
+разница времени не доказывает влияние одного параметра. Для установления
+причины нужны данные с затронутого устройства и при необходимости отдельный
+согласованный A/B-проход с изменением только сети.
+
+Сетевые задержки старта PowerShell описаны в
+[документации Microsoft](https://learn.microsoft.com/en-us/powershell/scripting/dev-cross-plat/performance/startup-performance),
+но runtime уже использует `-NoProfile -NonInteractive`. Случай интерактивного
+PowerShell 7/PSReadLine не доказывает причину в Windows PowerShell 5.1 worker.
+Отключение CRL или защиты в диагностике запрещено.
+
 ### Ошибки lifecycle hooks
 
 Запуск CLI сравнивает реальные пути к entrypoint, поскольку Node раскрывает

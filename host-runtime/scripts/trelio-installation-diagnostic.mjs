@@ -196,20 +196,25 @@ const buildLocalSummary = (local) => ({
   hostRuntime: {
     loadedVersion: local.hostRuntime?.loadedVersion ?? null,
   },
+  ...(local.hookStartup ? { hookStartup: local.hookStartup } : {}),
   runtimeSessions: {
     status: local.runtimeSessions?.status ?? "unknown",
-    activeCount: local.runtimeSessions?.activeCount ?? 0,
-    pendingCount: local.runtimeSessions?.pendingCount ?? 0,
-    expiredCount: local.runtimeSessions?.expiredCount ?? 0,
-    invalidCount: local.runtimeSessions?.invalidCount ?? 0,
-    registrationLockCount: local.runtimeSessions?.registrationLockCount ?? 0,
-    staleRegistrationLockCount: local.runtimeSessions?.staleRegistrationLockCount ?? 0,
-    omittedCount: local.runtimeSessions?.omittedCount ?? 0,
+    ...(local.runtimeSessions?.status === "not_checked"
+      ? { issue: local.runtimeSessions.issue }
+      : {
+        activeCount: local.runtimeSessions?.activeCount ?? 0,
+        pendingCount: local.runtimeSessions?.pendingCount ?? 0,
+        expiredCount: local.runtimeSessions?.expiredCount ?? 0,
+        invalidCount: local.runtimeSessions?.invalidCount ?? 0,
+        registrationLockCount: local.runtimeSessions?.registrationLockCount ?? 0,
+        staleRegistrationLockCount: local.runtimeSessions?.staleRegistrationLockCount ?? 0,
+        omittedCount: local.runtimeSessions?.omittedCount ?? 0,
+      }),
   },
   connection: {
     status: local.connection?.status ?? "unknown",
-    deviceSessionConfigured: local.connection?.deviceSessionConfigured === true,
-    pendingPairing: local.connection?.pendingPairing === true,
+    deviceSessionConfigured: local.connection?.status === "not_checked" ? null : local.connection?.deviceSessionConfigured === true,
+    pendingPairing: local.connection?.status === "not_checked" ? null : local.connection?.pendingPairing === true,
     issue: local.connection?.issue ?? null,
   },
   issues: Array.isArray(local.issues) ? local.issues : [],
@@ -244,6 +249,13 @@ export const buildTrelioInstallationDiagnostic = ({
   }
 
   const requiredActions = [];
+  const startupBlocked = local.hookStartup?.status === "attention";
+  if (startupBlocked) requiredActions.push({
+    code: "REVIEW_WINDOWS_HOOK_STARTUP_DIAGNOSTIC",
+    authority: "read_only_diagnosis",
+    reasonCode: "WINDOWS_HOOK_STARTUP_NOT_READY",
+    nextStep: "Сохрани local.hookStartup: готовность worker и публичный HTTPS измерены независимо. Spawn не доказывает готовность PowerShell; поздняя готовность не укладывается в лимит hook. Сравнения зависят от прогрева. Причину уточняй по локальному отчёту, не повторяя protected read и не меняя Hooks, trust, OAuth, pairing, ACL или сертификаты. Успех диагностики не доказывает успех исходного вызова.",
+  });
   if (local.node?.status !== "ready") requiredActions.push(buildNodeAction(local));
   if (local.git?.status !== "ready") requiredActions.push(buildGitAction(local));
   if (local.plugin?.status !== "ready") requiredActions.push(buildPluginAction(local));
@@ -257,11 +269,19 @@ export const buildTrelioInstallationDiagnostic = ({
   } else if (clientKind === "codex" && codexRouting.status !== "ready") {
     requiredActions.push(buildBlockedCodexRoutingAction(codexRouting));
   }
-  if (intent === "onboarding" && local.connection?.status !== "ready") {
+  if (intent === "onboarding" && local.connection?.status !== "ready" && local.connection?.status !== "not_checked") {
     requiredActions.push(buildBridgeConnectionAction(local.connection));
   }
 
   const warnings = [];
+  const lastHttps = local.hookStartup?.publicHttps?.at(-1);
+  if (lastHttps && (lastHttps.status !== "http_response" || lastHttps.httpStatus >= 400)) {
+    warnings.push({
+      code: "PUBLIC_HTTPS_PROBE_FAILED",
+      effect: "independent_of_windows_worker_startup",
+      nextStep: "Публичный HTTPS не подтвердил успешный ответ. Сохрани DNS/TCP/TLS/HTTP и код из local.hookStartup.publicHttps. Этот запрос не использует OAuth; его отказ не разрешает login, pairing или изменение настроек. Маршрут desktop MCP может отличаться.",
+    });
+  }
   if (clientKind === "codex" && (
     codexHookSettings?.hooksFeatureEnabled === false
     || codexHookSettings?.legacyHooksFeatureEnabled === false
@@ -288,7 +308,7 @@ export const buildTrelioInstallationDiagnostic = ({
       effect: "does_not_prove_hook_or_oauth_failure",
     });
   }
-  if (intent === "diagnostics" && local.connection?.status !== "ready") {
+  if (intent === "diagnostics" && local.connection?.status !== "ready" && local.connection?.status !== "not_checked") {
     warnings.push({
       code: "BRIDGE_CONNECTION_NOT_READY",
       status: local.connection?.status ?? "unknown",
@@ -328,8 +348,8 @@ export const buildTrelioInstallationDiagnostic = ({
         successProves: "oauth_bearer_usable_for_current_client_process",
       },
       hook: {
-        state: "client_managed_unknown",
-        nextTools: ["get_agent_instructions", "get_task"],
+        state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
+        nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",
         failureCode: "TRELIO_RUNTIME_HOOK_REQUIRED",
         failureInterpretation: {

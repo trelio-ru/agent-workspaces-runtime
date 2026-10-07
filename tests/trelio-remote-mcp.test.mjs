@@ -2789,6 +2789,32 @@ test("installation diagnostic reports saved disabled PreToolUse without changing
   assert.equal(payload.liveVerification.hook.state, "client_managed_unknown");
 });
 
+test("installation diagnostic runs standard startup probes and preserves skipped private state without pairing recovery", async () => {
+  const hookStartup = { status: "attention", probes: {
+    workerOpenInput: {status:"timeout",spawnedMs:2,readyMs:null},
+  }, publicHttps: [{status:"http_response",httpStatus:200}] };
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async ({includeHookStartup}) => {
+      assert.equal(includeHookStartup, true);
+      return {...readyLocalInstallationDiagnosis, hookStartup,
+        runtimeSessions:{status:"not_checked",issue:"WINDOWS_HOOK_STARTUP_NOT_READY"},
+        connection:{status:"not_checked",issue:"WINDOWS_HOOK_STARTUP_NOT_READY"}};
+    },
+    codexRoutingPlan: async () => ({ status:"ready" }),
+    codexHookSettingsRead: async () => ({status:"observed", events:{PreToolUse:{enabled:true}}}),
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(payload.local.hookStartup, hookStartup);
+  assert.equal(payload.local.runtimeSessions.activeCount, undefined);
+  assert.equal(payload.local.connection.deviceSessionConfigured, null);
+  assert.deepEqual(payload.requiredActions.map(action => action.code), ["REVIEW_WINDOWS_HOOK_STARTUP_DIAGNOSTIC"]);
+  assert.equal(payload.liveVerification.hook.state, "blocked_by_local_startup");
+  assert.deepEqual(payload.liveVerification.hook.nextTools, []);
+  assert.equal(payload.warnings.length, 0);
+});
+
 test("installation diagnostic cannot report ready after automatic legacy MCP removal", async () => {
   const result = await handleToolCall(
     "https://trelio.ru",
