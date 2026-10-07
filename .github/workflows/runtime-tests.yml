@@ -71,6 +71,7 @@ jobs:
           node tests/trelio-browser-session.test.mjs
           node tests/trelio-browser-http.test.mjs
           node tests/trelio-codex-routing.test.mjs
+          node tests/trelio-codex-conversation.test.mjs
           node tests/trelio-company-encryption.test.mjs
           node tests/trelio-context-search-matching.test.mjs
           node tests/trelio-context-search-ranking.test.mjs
@@ -200,6 +201,9 @@ jobs:
 
       - name: Verify signed runtime hook through the complete Windows shell chain
         run: node tests/trelio-hook-signed-chain.test.mjs
+
+      - name: Run Windows Codex conversation metadata tests
+        run: node tests/trelio-codex-conversation.test.mjs
 
       - name: Run Windows instruction delivery regressions
         run: node tests/trelio-instruction-reuse.test.mjs

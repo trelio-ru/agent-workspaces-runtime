@@ -10,6 +10,7 @@
  * Run.
  */
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
+import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
 import {
   WorkspaceActiveRunRequiredError,
   WorkspaceDraftRecoveryRequiredError,
@@ -11618,6 +11619,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       lastUsedAt: new Date().toISOString(),
     });
     await registerRunRoot(rootDirectory);
+    await synchronizeRunCodexTitle({ metadata: refreshedMetadata, workspaceOrigin, token, companyEncryption });
     process.stdout.write(`${workspaceDirectory}\n`);
     return;
   }
@@ -11739,6 +11741,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     };
     await writeRunMetadata(metadataPath, metadata);
     await registerRunRoot(rootDirectory);
+    await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
     process.stdout.write(`${workspaceDirectory}\n`);
   } catch (error) {
     // Не оставляем полуматериализованный Run: следующий open должен либо найти
@@ -12377,13 +12380,59 @@ const withRun = async (handler) => {
   });
 };
 
-const heartbeat = async () => withRun(async ({ metadata, workspaceOrigin, token }) => {
+export const synchronizeRunCodexTitle = async ({ metadata, workspaceOrigin, token, companyEncryption, readTitle }) => {
+  if (metadata.scopeType !== "task") return;
+  const endpoint = `/api/agent-workspaces/runs/${metadata.runId}/codex-conversation`;
+  await syncRunCodexConversationTitle({
+    readTitle,
+    readConversation: async (signal) => {
+      let snapshot;
+      for (const delayMs of [0, 100, 200, 400]) {
+        if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (signal.aborted) return null;
+        try {
+          snapshot = await readJsonResponse(await request(workspaceOrigin, token, endpoint, { signal }));
+          break;
+        } catch (error) {
+          // Retry only the read on transport/5xx. A denied scope, old route,
+          // malformed response or a failed title mutation never triggers login
+          // recovery, another data plane, or an automatic mutation replay.
+          if (signal.aborted || !(error instanceof BridgeTransportError
+            || error instanceof TrelioApiError && error.statusCode >= 500)) throw error;
+        }
+      }
+      if (!snapshot?.conversation) return null;
+      return (await hydrateAgentCompanyEncryptedJson({
+        value: snapshot, origin: workspaceOrigin, token, companyEncryption, signal,
+      })).conversation;
+    },
+    protectTitle: async (title, signal) => {
+      if (!companyEncryption) return title;
+      // Reuse the existing field-bound api.browser_mutation title payload.
+      // Neither a title nor its plaintext hash is written to Run files/logs.
+      const { protectLocalActionArguments, uploadLocalActionPayloads } = await import("./trelio-local-context.mjs");
+      const protectedValues = await protectLocalActionArguments({
+        nativeTool: "sync_codex_conversation_titles", arguments: { title }, companyEncryption,
+      });
+      await uploadLocalActionPayloads({ origin: workspaceOrigin, token, companyEncryption,
+        payloads: protectedValues.payloads, expectedPayloadValues: protectedValues.expectedPayloadValues, signal });
+      return protectedValues.value.title;
+    },
+    writeTitle: async (body, signal) => readJsonResponse(await request(workspaceOrigin, token, endpoint, {
+      method: "PUT", headers: { "content-type": "application/json" }, signal,
+      body: JSON.stringify({ ...body, leaseId: metadata.leaseId, fencingToken: metadata.fencingToken }),
+    })),
+  });
+};
+
+const heartbeat = async () => withRun(async ({ metadata, workspaceOrigin, token, companyEncryption }) => {
   const response = await request(workspaceOrigin, token, `/api/agent-workspaces/runs/${metadata.runId}/heartbeat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ leaseId: metadata.leaseId, fencingToken: metadata.fencingToken }),
   });
   const runPayload = await response.json();
+  await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
   process.stdout.write(`Lease продлён до ${runPayload.leaseExpiresAt}.\n`);
 });
 
@@ -13274,6 +13323,7 @@ const checkpoint = async (options) => withRun(async ({
     process.stdout.write(`Draft snapshot сохранён: ${draftSnapshot.draftHead.slice(0, 12)}.\n`);
   }
   process.stdout.write(`Checkpoint сохранён: ${checkpointPayload.id}.\n`);
+  await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
 });
 
 const inspectBenignWorkspaceMetadataFile = async (workspaceDirectory, filePath) => {

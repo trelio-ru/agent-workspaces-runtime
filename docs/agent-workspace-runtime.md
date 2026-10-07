@@ -1244,3 +1244,34 @@ Local hydration сохраняет полный `task.assignees`. Личные �
 Portable projection генерируется из backend и сохраняет смысловые поля
 каждого исполнителя. UUID-списки mutations передаются без текстовой hydration;
 шифруемые поля продолжают идти через защищённые markers.
+
+## Названия связанных Codex-чатов
+
+Связь task/чат возникает только через verified Agent Run. Обсуждение и accepted
+read без Run не создают её и не требуют дополнительных инструкций модели.
+Generic runtime после успешных open/claim, heartbeat и checkpoint читает
+private `GET /api/agent-workspaces/runs/:runId/codex-conversation`. Backend
+возвращает только initiating member locator текущего task Run и CAS hash;
+унаследованный `CODEX_THREAD_ID` не выбирает чат.
+
+Exact UUID передаётся локальному `codex app-server --listen stdio://`: initialize,
+initialized, `thread/read {threadId, includeTurns:false}`. Проверяются exact ID,
+непустое название до 500 символов, 256 KiB общего stdout и timeout 3 секунды.
+CLI получает только allowlisted process environment без Trelio/provider secrets,
+stderr игнорируется, дочерний процесс завершается при любом исходе. Transcript,
+thread/list, resume и model turn не запрашиваются. Официальный контракт:
+[Codex App Server](https://learn.chatgpt.com/docs/app-server).
+
+Изменившийся title отправляется по тому же private пути PUT с exact locator,
+state hash и lease/fence. При E2EE existing title гидратируется для сравнения
+только в RAM, новое значение защищается existing `api.browser_mutation` title
+payload до отправки через server-selected data plane. Неизменившийся title
+не создаёт mutation. Названия не сохраняются в локальном metadata/Git/logs.
+Синхронизация ограничена общим deadline 6 секунд; безопасный GET имеет три
+коротких повтора transport/5xx, PUT не повторяется. Старый route/CLI, denied ACL,
+CAS/crypto/network failure молча сохраняют результат основной команды Run.
+
+Переименование отражается при следующем lifecycle событии. Фоновой подписки
+нет; без локального App Server остаётся общая подпись. Legacy MCP sync tool
+остаётся совместимым, но модель не вызывает его после prepare. Private
+bridge-only endpoint не входит в обычную Run serialization и не создаёт связи.

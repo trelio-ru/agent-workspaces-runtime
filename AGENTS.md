@@ -103,6 +103,9 @@ publication tooling также остаются вне этого публичн
   directory aliases, а argv сохраняет исходный путь. Это не меняет запрет
   symlink entries в package/private storage. Проверяй всю signed loader →
   entrypoint → hook цепочку через Windows shells, а не только stub loader.
+- Синхронизация названия task-чата – optional механика runtime после Run lifecycle,
+  без модели: [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
+  Exact locator выбирает сервер, inherited `CODEX_THREAD_ID` не заменяет его.
 - Подписанный Agent Skill может получить `CODEX_THREAD_ID` из ограниченного
   окружения для точного локального чтения названия чата. Этот ID не даёт прав
   Trelio или внешнего сервиса; название проверяется по exact ID ответа.

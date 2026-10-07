@@ -462,3 +462,12 @@ queue без disk spool. Backend хранит события 30 дней и от
 См. [SECURITY.md](SECURITY.md). Не публикуйте credentials, company content,
 runtime sessions, E2EE keys, signing material и production package URLs в issue,
 fixture или log.
+
+### Названия Codex-чатов
+
+При open, heartbeat и checkpoint runtime автоматически обновляет название
+уже связанного с task Run чата через точный read-only App Server запрос, без
+хода модели. Переименование видно при следующем таком событии; недоступный
+CLI оставляет прежнюю подпись. Малые обсуждения без Run не регистрируются.
+Bounds, private Run binding и E2EE – в
+[контракте runtime](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
