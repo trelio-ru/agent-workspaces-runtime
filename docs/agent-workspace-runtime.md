@@ -316,13 +316,13 @@ Codex/Claude Code, чтобы загрузить установленную ве
 автоматически. Workspace-контекст ищется без project-фильтра, потому что
 полезные связи могут быть межпроектными.
 
-Папка онбординга – отдельная обычная non-Git точка входа. Она не связывает
+Папка онбординга – отдельная обычная точка входа. Она не связывает
 репозиторий с Trelio: контекст приходит из правил компании и выбранного проекта,
-точной задачи или воркспейса. Строго пустую Git-оболочку,
-которую успел создать host, onboarding отделяет recoverable-переименованием
-`.git` и сообщает путь резервной копии. При любом коммите, remote, ref,
-tracked/staged-файле, parent worktree или неоднозначном состоянии настройка не
-меняет репозиторий и требует отдельную папку без Git. Standalone Git нужен
+точной задачи или воркспейса. Доказанную служебную Git-оболочку host-а,
+включая exact допустимые Codex turn-diff tree refs, onboarding сохраняет на
+месте с корневым исключением `/workspaces/`. Обычный repository с history,
+remote, tracked/staged-файлами, parent worktree или неоднозначным состоянием
+не изменяется и требует отдельной папки. Standalone Git нужен
 bridge для его временных и Run-репозиториев, а не самой папке онбординга.
 
 Production bridge использует `https://trelio.ru` как canonical control plane.
@@ -608,7 +608,8 @@ folder-local roots и созданный bridge каталог `workspaces/` п�
 plan принимает только exact client-selected absolute root, fail-closed проверяет
 standalone Git, top-level layout, refs/objects/worktrees/hooks/config и file
 types, затем после exact company/project строит managed instruction/import/ignore
-delta. Apply принимает только текущий plan hash и explicit setup assertion,
+delta. Apply принимает только текущий plan hash и explicit setup assertion либо
+ограниченное разрешение diagnostic refresh существующей привязки,
 повторяет классификацию и file CAS, сначала доказывает изоляцию служебного Git,
 затем активирует инструкции и перечитывает итог. При сбое runtime откатывает
 только файлы, которые всё ещё совпадают с записанным им digest; конкурентную
@@ -1082,6 +1083,55 @@ bounded пулом до четырёх запросов, поэтому боль
 Object cache очищается по возрасту/LRU/лимиту, signed runtime packages – только
 целыми проверенными digest-каталогами. Очистка удаляет лишь локальную копию;
 accepted revision и история Run остаются на сервере Trelio.
+
+<a id="readiness-diagnostics"></a>
+
+## Диагностика готовности
+
+Local `diagnose_trelio_installation(intent=diagnostics)` принимает реальный
+`clientKind` (`codex|claude-code|cursor`) и optional
+`folderOnboarding={folderPath}` из client-selected постоянной папки.
+Tool остаётся read-only: host-owned component checks дополняются folder state,
+`readiness` и `liveVerification`. Отсутствующий root не выводится из cwd;
+папка остаётся `not_checked`. Root проверяется существующим safe Git classifier,
+затем разрешены только инструкции, safe OS metadata и ordinary `workspaces/`.
+Чужие root materials возвращают `TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED`
+без чтения содержимого. Service Git должна уже иметь доказанный ignore.
+
+Live OAuth, exact rules/profile, личная задача и accepted Workspace проверяются
+обычными protected reads с текущими ACL/admission и server-selected E2EE route.
+Workspace materialization использует `prepare_agent_workspace_read`, без lease/Run;
+обе authority files читаются до материалов. Safe skills probes выбираются только
+после exact instructions/execution. Diagnosis не создаёт test task, Workspace,
+Run, connection, secret unlock или business mutation. Отчёт остаётся в чате;
+success чтения не доказывает save, `savingResults=not_checked`.
+Folder blocker не стирает остальные независимые read steps.
+Cursor проверяет свой manifest и не читает runtime attestation sessions;
+Codex/Claude hooks и binding/refresh для него `not_applicable`.
+
+Managed block извлекается только из единственной полной пары existing markers.
+Canonical company/project lines должны разбираться однозначно; malformed project
+не превращается в company scope. Exact block сравнивается с current signed
+template, существующая active override имеет приоритет. Без привязки diagnosis
+не выбирает компанию и не создаёт файл. При дельте `workingFolder.refresh`
+содержит exact existing `folder_onboarding_apply` action с текущим planHash,
+`userExplicitlyRequestedInstructionRefresh=true` и `instructionRefreshClientKind`.
+
+Диагностический запрос разрешает этот refresh, если пользователь не запретил
+changes. Агент объясняет delta и выполняет returned action unchanged только после
+successful protected read прежней exact области. Apply заново классифицирует root,
+проверяет неизменность scope и file CAS; personal UTF-8 bytes/whitespace вне range
+сохраняются. Codex не меняет CLAUDE.md; Claude может добавить единственный missing
+import без нормализации personal text. Conflicting import, invalid UTF-8 или
+конкурентная правка блокируют write. Ignore/config/trust/OAuth не меняются.
+Read-back и rollback принадлежат общей onboarding implementation.
+
+Stale plan требует fresh diagnosis, unchanged template — no-op. После actual
+refresh сообщается необходимость нового client task/session для загрузки файлов.
+Остальные исправления используют свой прежний setup/approval flow.
+Backend initialize содержит общий route; stable plugin shell не изменяется.
+Тесты проверяют scoped refresh, сохранность personal rules, override, Claude
+import, CAS, service Git, Cursor и независимое продолжение после folder failure.
 
 ## Учёт контекста агента
 

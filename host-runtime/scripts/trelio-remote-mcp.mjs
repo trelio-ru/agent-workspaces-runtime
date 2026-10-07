@@ -67,7 +67,11 @@ import {
   TrelioInstallationDiagnosticError,
   buildTrelioInstallationDiagnostic,
 } from "./trelio-installation-diagnostic.mjs";
-import { prepareTrelioFolderOnboarding } from "./trelio-folder-onboarding.mjs";
+import {
+  prepareTrelioFolderOnboarding,
+  prepareTrelioFolderDiagnostic,
+  TrelioFolderOnboardingError,
+} from "./trelio-folder-onboarding.mjs";
 import {
   RemoteMcpOAuthError,
   connectRemoteMcpOAuth,
@@ -3814,7 +3818,7 @@ const LOCAL_TOOLS = [
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
     title: "Проверить установку или подготовить настройку папки Trelio",
-    description: "Read-only: diagnostics/onboarding проверяет plugin/runtime, Node, Git, sessions, pairing, direct routing; diagnostics в Windows также измеряет ACL-worker startup и публичный HTTPS; folder_onboarding классифицирует одну client-selected папку и возвращает exact CAS-bound file plan с apply action. Ничего не устанавливает, не применяет и не авторизует.",
+    description: "Read-only: diagnostics проверяет компоненты и folderOnboarding.folderPath; план live reads и обновления Trelio-блока. Codex/Claude onboarding; Cursor – diagnostics без Hooks/binding. Windows: worker/HTTPS. folder_onboarding – CAS-план папки. Не применяет, не устанавливает, не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -3822,13 +3826,13 @@ const LOCAL_TOOLS = [
       properties: {
         clientKind: {
           type: "string",
-          enum: ["codex", "claude-code"],
+          enum: ["codex", "claude-code", "cursor"],
           description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
         },
         intent: {
           type: "string",
           enum: ["diagnostics", "onboarding", "folder_onboarding"],
-          description: "folder_onboarding использует folderOnboarding и не запускает общую диагностику.",
+          description: "diagnostics: optional folderOnboarding={folderPath}; folder_onboarding: отдельный setup plan.",
         },
         // The skill supplies the compact typed shape, while the trusted planner
         // performs the complete nested allowlist/bounds validation. Repeating it
@@ -5456,6 +5460,7 @@ export const handleToolCall = async (
     requestClient = null,
     localPrerequisiteDiagnosis = diagnoseLocalPrerequisites,
     folderOnboardingPrepare = prepareTrelioFolderOnboarding,
+    folderDiagnosticPrepare = prepareTrelioFolderDiagnostic,
     codexRoutingPlan = planCodexTrelioHookRouting,
     codexHookSettingsRead = inspectCodexTrelioHookSettings,
     codexRoutingApply = applyCodexTrelioHookRouting,
@@ -5691,12 +5696,11 @@ export const handleToolCall = async (
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding"].includes(key))
-      || !["codex", "claude-code"].includes(rawArguments.clientKind)
+      || !["codex", "claude-code", "cursor"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
-      || (folderOnboardingIntent !== (
-        rawArguments.folderOnboarding !== undefined
-        && rawArguments.folderOnboarding !== null
-      ))
+      || (rawArguments.clientKind === "cursor" && rawArguments.intent !== "diagnostics")
+      || (folderOnboardingIntent && !rawArguments.folderOnboarding)
+      || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
     ) {
       throw new TrelioInstallationDiagnosticError(
         "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT",
@@ -5708,6 +5712,7 @@ export const handleToolCall = async (
     }
     const local = await localPrerequisiteDiagnosis({
       origin,
+      clientKind: rawArguments.clientKind,
       includeHookStartup: rawArguments.intent === "diagnostics",
       signal,
     });
@@ -5733,6 +5738,21 @@ export const handleToolCall = async (
         };
       }
     }
+    let workingFolder = null;
+    if (rawArguments.intent === "diagnostics") {
+      try {
+        workingFolder = await folderDiagnosticPrepare(rawArguments.folderOnboarding, rawArguments.clientKind);
+      } catch (error) {
+        // Folder failure must not erase the independent component/OAuth plan.
+        // Never expose arbitrary filesystem messages or instruction-file bytes.
+        workingFolder = {
+          status: "blocked",
+          reasonCode: error instanceof TrelioFolderOnboardingError
+            ? error.code : ["EACCES", "EPERM", "ENOENT"].includes(error?.code)
+              ? error.code : "TRELIO_FOLDER_DIAGNOSTIC_FAILED",
+        };
+      }
+    }
     return buildTextResult(buildTrelioInstallationDiagnostic({
       clientKind: rawArguments.clientKind,
       intent: rawArguments.intent,
@@ -5740,6 +5760,7 @@ export const handleToolCall = async (
       codexRouting,
       codexHookSettings,
       codexLegacyMcpMigration,
+      workingFolder,
     }));
   }
   if (COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(name)) {

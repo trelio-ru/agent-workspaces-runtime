@@ -109,6 +109,30 @@ plan возвращает отдельное manual-only действие и п�
 Backend и runtime обмениваются только typed actions. Command-only ответы и
 модельная интерпретация launcher/argv не входят в публичный ABI.
 
+### Диагностика готовности
+
+Пользователь пишет «Проведи диагностику Trelio» в выбранной постоянной папке.
+Current runtime поддерживает Codex, Claude Code и Cursor; последний проверяет
+свой manifest/OAuth без Codex/Claude hooks и без автоматического folder binding.
+Tool принимает `intent=diagnostics` и optional
+`folderOnboarding={folderPath}` из client-owned project context. Отсутствующий
+root не угадывается из process cwd; проверка папки остаётся `not_checked`.
+
+Возвращённый план ведёт к независимым live reads OAuth, exact rules/profile,
+доступной личной задачи и existing accepted Workspace, затем к разрешённым
+safe probes relevant skills. Учебные задачи, Workspace/Run и отправка отчёта
+не создаются; успешное чтение не доказывает возможность сохранить результат.
+Итог показывает подтверждённое, требующее настройки, непроверенное и неприменимое.
+
+Runtime сравнивает существующий marked Trelio-блок с актуальным шаблоном.
+После успешного protected read прежней exact области диагностический запрос
+разрешает выполнить returned refresh, если пользователь не запретил изменения.
+Refresh сохраняет company/project и personal bytes вне блока, учитывает active
+`AGENTS.override.md`, а для Claude добавляет только отсутствующий import.
+Нет привязки, неоднозначные markers, небезопасная папка или stale plan — blocker;
+unchanged template — no-op. Остальная настройка сохраняет отдельный approval flow.
+После записи нужен новый клиентский чат/сессия. [Полный контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
+
 Агент исполняет возвращённые `action.arguments` через указанный server/tool:
 имя поля, например `turnCheck`, не является операцией (`status`). Для шаблона
 добавляются только объявленные параметры. Неизвестная операция отклоняется до

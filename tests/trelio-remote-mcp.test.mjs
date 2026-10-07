@@ -2637,7 +2637,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.clientKind.enum,
-    ["codex", "claude-code"],
+    ["codex", "claude-code", "cursor"],
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.intent.enum,
@@ -2700,6 +2700,75 @@ const readyLocalInstallationDiagnosis = {
   },
   issues: [],
 };
+
+test("generic diagnostics return independent live checks and never claim write readiness", async () => {
+  const folder = {
+    status: "refresh_available", scope: { companySlug: "company", projectSlug: "project" },
+    refresh: { action: { tool: "continue_trelio_workspace_action", arguments: { operation: "folder_onboarding_apply" } } },
+  };
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "claude-code", intent: "diagnostics", folderOnboarding: { folderPath: "/client/selected" },
+  }, {
+    localPrerequisiteDiagnosis: async ({ clientKind, includeHookStartup }) => {
+      assert.equal(clientKind, "claude-code");
+      assert.equal(includeHookStartup, true);
+      return readyLocalInstallationDiagnosis;
+    },
+    folderDiagnosticPrepare: async (input, clientKind) => {
+      assert.deepEqual(input, { folderPath: "/client/selected" });
+      assert.equal(clientKind, "claude-code");
+      return folder;
+    },
+    folderOnboardingPrepare: async () => assert.fail("diagnostics cannot initialize a binding"),
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(payload.workingFolder, folder);
+  assert.deepEqual(payload.liveVerification.context.arguments, folder.scope);
+  assert.equal(payload.liveVerification.workspace.nextTool, "prepare_agent_workspace_read");
+  assert.equal(payload.readiness.state, "not_confirmed");
+  for (const layer of ["oauth", "protectedContext", "workspaceRead", "skills", "savingResults"]) {
+    assert.equal(payload.readiness.checks[layer], "not_checked", layer);
+  }
+  assert.match(payload.liveVerification.instructionRefresh.instructions, /unless the user forbids changes/u);
+  assert.match(payload.liveVerification.instructionRefresh.instructions, /unchanged templates are a no-op/u);
+});
+
+test("a folder I/O blocker keeps the remaining diagnostic plan and hides private error text", async () => {
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "claude-code", intent: "diagnostics", folderOnboarding: { folderPath: "/private/folder" },
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    folderDiagnosticPrepare: async () => { throw Object.assign(new Error("PRIVATE-FILE-CANARY"), { code: "EACCES" }); },
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.status, "action_required");
+  assert.deepEqual(payload.workingFolder, { status: "blocked", reasonCode: "EACCES" });
+  assert.equal(payload.liveVerification.oauth.nextTool, "list_companies");
+  assert.equal(payload.liveVerification.workspace.nextTool, "prepare_agent_workspace_read");
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-FILE-CANARY/u);
+});
+
+test("Cursor diagnosis does not inspect Codex routing or recommend hooks and rejects onboarding", async () => {
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "cursor", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async ({ clientKind }) => {
+      assert.equal(clientKind, "cursor");
+      return readyLocalInstallationDiagnosis;
+    },
+    codexRoutingPlan: async () => assert.fail("Cursor has no Codex config"),
+    codexHookSettingsRead: async () => assert.fail("Cursor has no Codex hooks"),
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(payload.liveVerification.hook, { state: "not_applicable", nextTools: [] });
+  assert.deepEqual(payload.local.plugin.hooks, { status: "not_applicable" });
+  assert.equal(payload.codexRouting, null);
+  for (const intent of ["onboarding", "folder_onboarding"]) {
+    await assert.rejects(handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+      clientKind: "cursor", intent, folderOnboarding: { folderPath: "/client/folder" },
+    }), { code: "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT" });
+  }
+});
 
 test("installation diagnostic centralizes local and Codex routing decisions without applying them", async () => {
   let applyCalls = 0;

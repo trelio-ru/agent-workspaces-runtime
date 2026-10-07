@@ -864,7 +864,21 @@ const readObservedRuntimeHookContract = (hooksManifest, eventName) => {
 export const inspectBundledPlugin = async ({
   pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION,
+  clientKind = null,
 } = {}) => {
+  if (clientKind === "cursor") {
+    // Cursor deliberately does not discover Codex/Claude hooks. Diagnose its
+    // actual manifest, not unrelated shell definitions or session attestations.
+    const manifest = await readDiagnosticJsonFile(path.join(pluginDirectory, ".cursor-plugin", "plugin.json"));
+    const loadedVersion = STABLE_VERSION_PATTERN.test(String(loadedPluginVersion || "")) ? loadedPluginVersion : null;
+    const cursorVersion = typeof manifest.value?.version === "string" ? manifest.value.version : null;
+    const issues = !loadedVersion ? ["LOADED_PLUGIN_VERSION_INVALID"]
+      : cursorVersion !== loadedVersion ? ["CURSOR_MANIFEST_VERSION_MISMATCH"] : [];
+    return {
+      status: issues.length ? "action_required" : "ready", loadedVersion,
+      manifests: { cursorVersion }, hooks: { status: "not_applicable" }, issues,
+    };
+  }
   const [codexManifest, claudeManifest, hooksManifest] = await Promise.all([
     readDiagnosticJsonFile(path.join(pluginDirectory, ".codex-plugin", "plugin.json")),
     readDiagnosticJsonFile(path.join(pluginDirectory, ".claude-plugin", "plugin.json")),
@@ -1138,6 +1152,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
     nodeVersion = process.version,
     nowMilliseconds = Date.now(),
     includeHookStartup = false,
+    clientKind = null,
     signal,
     hookStartupDiagnosis = diagnoseWindowsHookStartup,
     ...gitOptions
@@ -1154,8 +1169,9 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   const skippedPrivateState = { status: "not_checked", issue: "WINDOWS_HOOK_STARTUP_NOT_READY" };
   const [git, plugin, runtimeSessions, connection] = await withPrivateProcessSession(() => Promise.all([
     verifyGitRuntime(gitOptions),
-    inspectBundledPlugin({ pluginDirectory, loadedPluginVersion }),
-    skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
+    inspectBundledPlugin({ pluginDirectory, loadedPluginVersion, clientKind }),
+    clientKind === "cursor" ? { status: "not_applicable" }
+      : skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
     skipPrivateInspection ? skippedPrivateState : inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
   ]), signal);
   const nodeMajorVersion = Number.parseInt(

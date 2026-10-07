@@ -38,6 +38,10 @@ publication tooling также остаются вне этого публичн
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
   включает hook; дисковый снимок не является effective state App Server.
   Диагностика ничего не меняет; исходный config и значения hashes не выдаёт.
+- Generic диагностика учитывает реальный clientKind и выбранный permanent root.
+  Refresh существующего managed блока сохраняет scope и bytes personal rules,
+  использует current template/CAS/read-back; без тестовых задач/Run и отправки
+  отчёта. Чтение не подтверждает save. [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Ошибка распознанного `PreToolUse` передаётся JSON-решением `deny` с причиной
   и process exit `0`: PowerShell может превратить блокирующий exit `2` в `1`.
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и

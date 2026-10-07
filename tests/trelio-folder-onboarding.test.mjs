@@ -10,6 +10,7 @@ import {
   TrelioFolderOnboardingError,
   applyTrelioFolderOnboarding,
   prepareTrelioFolderOnboarding,
+  prepareTrelioFolderDiagnostic,
 } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -53,6 +54,147 @@ const binding = {
   company: { name: "Тестовая компания", slug: "test-company" },
   project: { name: "Рабочий проект", slug: "work-project" },
 };
+
+const configuredRoot = async (instructionTarget = "AGENTS.md") => {
+  const root = await makeRoot();
+  if (instructionTarget === "AGENTS.override.md") {
+    await fs.writeFile(path.join(root, instructionTarget), "# Active\n");
+  }
+  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, instructionTarget, ...binding });
+  await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+  return root;
+};
+
+const makeTemplateOutdated = async (root, instructionTarget = "AGENTS.md") => {
+  const filePath = path.join(root, instructionTarget);
+  const current = await fs.readFile(filePath, "utf8");
+  const outdated = current.replace("## Trelio", "## Trelio (old template)");
+  await fs.writeFile(filePath, outdated);
+  return { current, outdated };
+};
+
+test("diagnostics without the client root do not infer a working folder", async () => {
+  assert.deepEqual(await prepareTrelioFolderDiagnostic(null, "codex"), {
+    status: "not_checked", reasonCode: "CLIENT_WORKING_FOLDER_REQUIRED",
+  });
+  const root = await makeRoot();
+  const before = await fs.readdir(root);
+  const missingBinding = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(missingBinding.status, "setup_required");
+  assert.equal(missingBinding.refresh, undefined);
+  assert.deepEqual(await fs.readdir(root), before);
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root, ...binding }, "codex"),
+    { code: "TRELIO_FOLDER_ONBOARDING_INVALID_INPUT" });
+});
+
+test("diagnostic refresh preserves personal instructions byte for byte and is idempotent", async () => {
+  const root = await configuredRoot();
+  const { current, outdated } = await makeTemplateOutdated(root);
+  const prefix = "# Personal  \r\n\r\n";
+  const suffix = "\r\n\r\nKeep this rule  \r\n";
+  await fs.writeFile(path.join(root, "AGENTS.md"), prefix + outdated + suffix);
+  const claudeBefore = await fs.readFile(path.join(root, "CLAUDE.md"));
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(diagnostic.status, "refresh_available");
+  assert.deepEqual(diagnostic.scope, { companySlug: "test-company", projectSlug: "work-project" });
+  assert.deepEqual(diagnostic.refresh.changes.map(({ path: filePath }) => filePath), ["AGENTS.md"]);
+  assert.equal(diagnostic.refresh.action.arguments.parameters.userExplicitlyRequestedFolderSetup, undefined);
+  assert.equal(diagnostic.refresh.action.arguments.parameters.userExplicitlyRequestedInstructionRefresh, true);
+  assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), prefix + outdated + suffix);
+  const result = await applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters);
+  assert.equal(result.status, "applied");
+  assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), prefix + current + suffix);
+  assert.deepEqual(await fs.readFile(path.join(root, "CLAUDE.md")), claudeBefore);
+  const repeated = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(repeated.status, "ready");
+  assert.equal(repeated.instructions.status, "current");
+  assert.equal(repeated.refresh, null);
+});
+
+test("diagnostics refresh the existing active override without changing the base file", async () => {
+  const root = await configuredRoot("AGENTS.override.md");
+  await fs.writeFile(path.join(root, "AGENTS.md"), "# Inactive base\n");
+  await makeTemplateOutdated(root, "AGENTS.override.md");
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(diagnostic.instructionTarget, "AGENTS.override.md");
+  await applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters);
+  assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), "# Inactive base\n");
+});
+
+test("instruction refresh rejects rebinding, malformed project scope and concurrent edits", async () => {
+  const root = await configuredRoot();
+  const { outdated } = await makeTemplateOutdated(root);
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  const parameters = diagnostic.refresh.action.arguments.parameters;
+  await assert.rejects(applyTrelioFolderOnboarding({ ...parameters, project: undefined }),
+    { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
+  await fs.appendFile(path.join(root, "AGENTS.md"), "\nConcurrent personal rule\n");
+  await assert.rejects(applyTrelioFolderOnboarding(parameters),
+    { code: "TRELIO_FOLDER_ONBOARDING_PLAN_STALE" });
+  assert.match(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), /Concurrent personal rule/u);
+  await fs.writeFile(path.join(root, "AGENTS.md"), outdated.replace("work-project", "invalid.project"));
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "codex"),
+    { code: "TRELIO_FOLDER_ONBOARDING_BINDING_AMBIGUOUS" });
+  await fs.writeFile(path.join(root, "AGENTS.md"), "# No binding\n");
+  await assert.rejects(applyTrelioFolderOnboarding(parameters),
+    { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
+});
+
+test("Claude diagnostic adds only its missing import and preserves personal whitespace", async () => {
+  const root = await configuredRoot();
+  const personal = "# Personal  \r\n\r\nMy rule  ";
+  await fs.writeFile(path.join(root, "CLAUDE.md"), personal);
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "claude-code");
+  assert.deepEqual(diagnostic.refresh.changes.map(({ path: filePath }) => filePath), ["CLAUDE.md"]);
+  await applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters);
+  assert.equal(await fs.readFile(path.join(root, "CLAUDE.md"), "utf8"), personal + "\n@AGENTS.md\n");
+  await fs.writeFile(path.join(root, "CLAUDE.md"), "@AGENTS.override.md\n");
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "claude-code"),
+    { code: "TRELIO_FOLDER_ONBOARDING_CLAUDE_IMPORT_CONFLICT" });
+});
+
+test("diagnostic service Git requires existing isolation and does not repair the ignore file", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+  await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+  await makeTemplateOutdated(root);
+  const ignoreBefore = await fs.readFile(path.join(root, ".gitignore"));
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  await applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters);
+  assert.deepEqual(await fs.readFile(path.join(root, ".gitignore")), ignoreBefore);
+  await fs.writeFile(path.join(root, ".gitignore"), "# Missing isolation\n");
+  const agentsBefore = await fs.readFile(path.join(root, "AGENTS.md"));
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "codex"),
+    { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
+  assert.equal(await fs.readFile(path.join(root, ".gitignore"), "utf8"), "# Missing isolation\n");
+  assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), agentsBefore);
+});
+
+test("Cursor diagnostics inspect the root without inventing a Codex binding or refresh", async () => {
+  const root = await makeRoot();
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "cursor");
+  assert.equal(diagnostic.status, "ready");
+  assert.equal(diagnostic.instructions.status, "not_applicable");
+  assert.equal(diagnostic.refresh, undefined);
+  assert.deepEqual(await fs.readdir(root), []);
+});
+
+test("diagnostics and refresh leave unrelated root materials untouched", async () => {
+  const root = await configuredRoot();
+  await makeTemplateOutdated(root);
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  const filePath = path.join(root, "user-material.txt");
+  const material = "PRIVATE-MATERIAL-CANARY";
+  await fs.writeFile(filePath, material);
+  const agentsBefore = await fs.readFile(path.join(root, "AGENTS.md"));
+  for (const action of [
+    () => prepareTrelioFolderDiagnostic({ folderPath: root }, "codex"),
+    () => applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters),
+  ]) await assert.rejects(action(), { code: "TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED" });
+  assert.equal(await fs.readFile(filePath, "utf8"), material);
+  assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), agentsBefore);
+});
 
 test.after(async () => {
   await Promise.all([...temporaryRoots].map((root) => fs.rm(root, {

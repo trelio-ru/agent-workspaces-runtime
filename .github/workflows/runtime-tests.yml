@@ -208,6 +208,9 @@ jobs:
       - name: Run Windows diagnostic regressions
         run: node tests/trelio-agent-diagnostics.test.mjs
 
+      - name: Run Windows folder diagnostic and instruction refresh regressions
+        run: node tests/trelio-folder-onboarding.test.mjs
+
       - name: Run Windows ACL regressions
         run: >-
           node --test

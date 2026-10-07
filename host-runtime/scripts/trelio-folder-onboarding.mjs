@@ -260,6 +260,48 @@ const replaceManagedBlockAtEnd = (text, block, startMarker, endMarker) => {
   return appendBlock(without, block);
 };
 
+// Diagnostics refresh an existing binding, not a newly selected scope. Parse
+// only the canonical scope lines inside one complete managed block; arbitrary
+// user instructions, folder names and similar slugs cannot select a company.
+const readManagedBinding = (text) => {
+  const ranges = findMarkerRanges(text, MANAGED_START, MANAGED_END);
+  if (ranges.length === 0) return null;
+  const block = text.slice(ranges[0].start, ranges[0].end);
+  const companyLines = [...block.matchAll(/^Папка привязана к компании «(.+)» \(`([a-z0-9_-]+)`\)\. Это контекст работы, а не привязка Git-репозитория\.$/gmu)];
+  const projectLines = [...block.matchAll(/^Работа ограничена проектом «(.+)» \(`([a-z0-9_-]+)`\)\.$/gmu)];
+  // A malformed project line must never silently widen a project binding to
+  // company scope. Count the recognized prefixes as well as exact valid lines.
+  const companyPrefixes = [...block.matchAll(/^Папка привязана к компании /gmu)];
+  const projectPrefixes = [...block.matchAll(/^Работа ограничена проектом /gmu)];
+  if (companyLines.length !== 1 || companyPrefixes.length !== companyLines.length
+    || projectLines.length > 1 || projectPrefixes.length !== projectLines.length) {
+    throw new TrelioFolderOnboardingError(
+      "TRELIO_FOLDER_ONBOARDING_BINDING_AMBIGUOUS",
+      "The managed instruction block has no unambiguous canonical company/project binding.",
+    );
+  }
+  const decodeName = (value) => value.replace(/\\([\\`*_<>])/gu, "$1");
+  return {
+    company: { name: decodeName(companyLines[0][1]), slug: companyLines[0][2] },
+    ...(projectLines.length ? {
+      project: { name: decodeName(projectLines[0][1]), slug: projectLines[0][2] },
+    } : {}),
+  };
+};
+
+const replaceExistingManagedBlock = (text, block) => {
+  const [range] = findMarkerRanges(text, MANAGED_START, MANAGED_END);
+  if (!range) {
+    throw new TrelioFolderOnboardingError(
+      "TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED",
+      "Instruction refresh requires an existing managed Trelio binding.",
+    );
+  }
+  // Preserve every byte outside the managed range, including user whitespace
+  // and rules after the block. Ordinary onboarding retains its existing layout.
+  return `${text.slice(0, range.start)}${block}${text.slice(range.end)}`;
+};
+
 const buildManagedBindingBlock = ({ company, project }) => {
   const lines = [
     MANAGED_START,
@@ -278,6 +320,8 @@ const buildManagedBindingBlock = ({ company, project }) => {
     "Не создавай рабочие материалы, `tmp/` или `output/` в корне этой папки. Для задачи или именованного воркспейса сначала открой Agent Run и работай только в пути, который вернул bridge. Новый Workspace bridge размещает в `workspaces/<workspace-id>/`; внутри `workspace/` лежат редактируемые файлы, а `context/` и `.trelio-run.json` остаются служебными.",
     "",
     "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio относятся только к выданному bridge воркспейсу.",
+    "",
+    "По запросу диагностики Trelio сначала вызови diagnose_trelio_installation с intent=diagnostics, реальным clientKind и текущей выбранной клиентом папкой в folderOnboarding.folderPath. Следуй возвращённому плану; не создавай учебные задачи или Run. Обновляй только существующий managed Trelio-блок через returned refresh action, если пользователь не запретил изменения.",
     "",
     "Каждое сообщение обрабатывай в контексте Trelio. Уже загруженные в текущей сессии правила и данные используй повторно, пока тема, объект и требования к актуальности не изменились.",
     "",
@@ -559,6 +603,23 @@ const exactManagedBlockPresent = (text, startMarker, endMarker, expectedBlock = 
   return expectedBlock === null || managedText === expectedBlock;
 };
 
+const assertDedicatedDiagnosticFolder = async (filesystem, rootPath) => {
+  // Classify names/types only. An unrelated work directory is not a Trelio
+  // control-plane root, and diagnosing it must not inspect business files.
+  const entries = await filesystem.readdir(rootPath, { withFileTypes: true });
+  const metadataNames = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
+  for (const entry of entries) {
+    if ((ROOT_ALLOWED_FILES.has(entry.name) || metadataNames.has(entry.name))
+      && entry.isFile() && !entry.isSymbolicLink()) continue;
+    if ([".git", "workspaces"].includes(entry.name)
+      && entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    throw new TrelioFolderOnboardingError(
+      "TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED",
+      "Diagnostics requires a dedicated persistent Trelio working folder; unrelated root files are left untouched.",
+    );
+  }
+};
+
 const inspectFolder = async ({
   folderPath,
   filesystem = fs,
@@ -688,7 +749,7 @@ const inspectFolder = async ({
   };
 };
 
-const buildClaudeText = (currentText, instructionTarget) => {
+const buildClaudeText = (currentText, instructionTarget, preserveBytes = false) => {
   const desiredImport = `@${instructionTarget}`;
   const otherImport = instructionTarget === "AGENTS.md"
     ? "@AGENTS.override.md"
@@ -701,6 +762,9 @@ const buildClaudeText = (currentText, instructionTarget) => {
     );
   }
   if (lines.includes(desiredImport)) return currentText;
+  // Refresh may add the missing import, but unlike initial setup it cannot
+  // normalize existing personal rules or trim their whitespace.
+  if (preserveBytes) return `${currentText}${currentText && !currentText.endsWith("\n") ? "\n" : ""}${desiredImport}\n`;
   return appendBlock(currentText, desiredImport);
 };
 
@@ -726,6 +790,8 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     "project",
     "planHash",
     "userExplicitlyRequestedFolderSetup",
+    "userExplicitlyRequestedInstructionRefresh",
+    "instructionRefreshClientKind",
   ]);
   const unknownKey = Object.keys(rawInput).find((key) => !supportedKeys.has(key));
   if (unknownKey) {
@@ -742,6 +808,9 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     gitResolver: dependencies.gitResolver,
   });
   const binding = normalizeBinding(rawInput);
+  if (rawInput.userExplicitlyRequestedInstructionRefresh === true && !binding) {
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED", "Instruction refresh requires the exact existing scope.");
+  }
   if (!binding) return { inspection, plan: null, files: null };
 
   const requestedTarget = normalizeInstructionTarget(rawInput.instructionTarget);
@@ -764,27 +833,52 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     filesystem,
     path.join(rootPath, instructionTarget),
   );
+  const refreshOnly = rawInput.userExplicitlyRequestedInstructionRefresh === true;
+  if (refreshOnly) {
+    await assertDedicatedDiagnosticFolder(filesystem, rootPath);
+    if (instructionSnapshot.exists && sha256(Buffer.from(instructionSnapshot.text, "utf8")) !== instructionSnapshot.sha256) {
+      throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE", "Managed refresh requires a valid UTF-8 instruction file.");
+    }
+    if (!["codex", "claude-code"].includes(rawInput.instructionRefreshClientKind)) {
+      throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Instruction refresh requires a supported exact client.");
+    }
+    const existing = readManagedBinding(instructionSnapshot.text);
+    if (!existing || existing.company.slug !== rawInput.company.slug
+      || (existing.project?.slug ?? null) !== (rawInput.project?.slug ?? null)) {
+      throw new TrelioFolderOnboardingError(
+        "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH",
+        "Diagnostics cannot create a binding or change its company/project scope.",
+      );
+    }
+  }
   const claudeSnapshot = await inspectOptionalRegularFile(
     filesystem,
     path.join(rootPath, "CLAUDE.md"),
   );
+  if (refreshOnly && rawInput.instructionRefreshClientKind === "claude-code"
+    && claudeSnapshot.exists && sha256(Buffer.from(claudeSnapshot.text, "utf8")) !== claudeSnapshot.sha256) {
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE", "Managed refresh requires a valid UTF-8 Claude import file.");
+  }
   const ignoreSnapshot = inspection.folder.serviceGitPreserved
     ? await inspectOptionalRegularFile(filesystem, path.join(rootPath, ".gitignore"))
     : null;
   const managedBlock = buildManagedBindingBlock(binding);
-  const instructionText = replaceManagedBlockAtEnd(
+  const instructionText = refreshOnly ? replaceExistingManagedBlock(instructionSnapshot.text, managedBlock) : replaceManagedBlockAtEnd(
     instructionSnapshot.text,
     managedBlock,
     MANAGED_START,
     MANAGED_END,
   );
-  const claudeText = buildClaudeText(claudeSnapshot.text, instructionTarget);
+  const claudeText = refreshOnly && rawInput.instructionRefreshClientKind !== "claude-code"
+    ? claudeSnapshot.text
+    : buildClaudeText(claudeSnapshot.text, instructionTarget, refreshOnly);
   const ignoreText = ignoreSnapshot
-    ? replaceManagedBlockAtEnd(ignoreSnapshot.text, IGNORE_BLOCK, IGNORE_START, IGNORE_END)
+    ? (refreshOnly ? ignoreSnapshot.text : replaceManagedBlockAtEnd(ignoreSnapshot.text, IGNORE_BLOCK, IGNORE_START, IGNORE_END))
     : null;
   const changes = [
     buildFileChange(instructionTarget, instructionSnapshot, instructionText),
-    buildFileChange("CLAUDE.md", claudeSnapshot, claudeText),
+    ...(!refreshOnly || rawInput.instructionRefreshClientKind === "claude-code"
+      ? [buildFileChange("CLAUDE.md", claudeSnapshot, claudeText)] : []),
     ...(ignoreSnapshot ? [buildFileChange(".gitignore", ignoreSnapshot, ignoreText)] : []),
   ];
   const planBasis = {
@@ -795,6 +889,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     company: binding.company,
     project: binding.project,
     changes,
+    ...(refreshOnly ? { instructionRefreshClientKind: rawInput.instructionRefreshClientKind } : {}),
   };
   const planHash = sha256(Buffer.from(JSON.stringify(planBasis), "utf8"));
   const changedFiles = changes.filter(({ action }) => action !== "none");
@@ -816,7 +911,10 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
             company: rawInput.company,
             ...(rawInput.project ? { project: rawInput.project } : {}),
             planHash,
-            userExplicitlyRequestedFolderSetup: true,
+            ...(refreshOnly ? {
+              userExplicitlyRequestedInstructionRefresh: true,
+              instructionRefreshClientKind: rawInput.instructionRefreshClientKind,
+            } : { userExplicitlyRequestedFolderSetup: true }),
           },
         },
       },
@@ -836,6 +934,58 @@ export const prepareTrelioFolderOnboarding = async (rawInput, dependencies = {})
     kind: "trelio-folder-onboarding",
     inspection: state.inspection,
     plan: state.plan,
+  };
+};
+
+/**
+ * Read-only diagnostic of the client-selected root and the current signed
+ * runtime's instruction template. The resulting refresh action still uses the
+ * onboarding CAS/read-back/rollback implementation; it never inspects Workspace
+ * materials and never creates a task, Workspace or Run.
+ */
+export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, dependencies = {}) => {
+  if (!rawInput) return { status: "not_checked", reasonCode: "CLIENT_WORKING_FOLDER_REQUIRED" };
+  if (typeof rawInput !== "object" || Array.isArray(rawInput)
+    || Object.keys(rawInput).some((key) => !["folderPath"].includes(key))) {
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Folder diagnostics accepts only the client-selected folderPath.");
+  }
+  const filesystem = dependencies.filesystem ?? fs;
+  const inspection = await inspectFolder({ folderPath: rawInput.folderPath, ...dependencies });
+  await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path);
+  // Cursor has its own OAuth profile and no automatic folder-binding contract.
+  // A valid local root does not authorize installing Codex/Claude instructions.
+  if (clientKind === "cursor") return {
+    status: "ready", folder: inspection.folder,
+    instructions: { status: "not_applicable", reasonCode: "CLIENT_FOLDER_BINDING_UNSUPPORTED" },
+  };
+  const instructionTarget = inspection.status === "instruction_target_required"
+    ? "AGENTS.override.md" : inspection.instructionTarget;
+  const snapshot = await inspectOptionalRegularFile(filesystem, path.join(inspection.folder.path, instructionTarget));
+  const binding = readManagedBinding(snapshot.text);
+  if (!binding) return {
+    status: "setup_required", folder: inspection.folder, instructionTarget,
+    reasonCode: "TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED",
+  };
+  if (inspection.folder.serviceGitPreserved) {
+    const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
+    await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
+  }
+  const state = await buildPlanState({
+    folderPath: inspection.folder.path, instructionTarget, ...binding,
+    userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind,
+  }, dependencies);
+  return {
+    status: state.plan.status === "already_configured" ? "ready" : "refresh_available",
+    folder: inspection.folder, instructionTarget,
+    scope: { companySlug: binding.company.slug, ...(binding.project ? { projectSlug: binding.project.slug } : {}) },
+    instructions: { status: state.plan.status === "already_configured" ? "current" : "outdated", templateSha256: sha256(state.plan.preview.managedBlock) },
+    refresh: state.plan.apply ? {
+      after: "successful_protected_read_for_exact_scope",
+      authority: "diagnostic_request_unless_user_forbids_changes",
+      changes: state.plan.changes.filter(({ action }) => action !== "none"),
+      action: state.plan.apply,
+      newClientSessionRequired: true,
+    } : null,
   };
 };
 
@@ -931,10 +1081,10 @@ const verifyServiceGitIsolation = async ({
 };
 
 export const applyTrelioFolderOnboarding = async (rawInput, dependencies = {}) => {
-  if (rawInput?.userExplicitlyRequestedFolderSetup !== true) {
+  if (rawInput?.userExplicitlyRequestedFolderSetup !== true && rawInput?.userExplicitlyRequestedInstructionRefresh !== true) {
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_ONBOARDING_AUTHORITY_REQUIRED",
-      "Folder onboarding apply requires an explicit user setup request.",
+      "Folder apply requires a setup request or authorized managed instruction refresh.",
     );
   }
   if (!/^[0-9a-f]{64}$/u.test(String(rawInput?.planHash || ""))) {

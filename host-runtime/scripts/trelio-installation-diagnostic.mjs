@@ -10,7 +10,7 @@
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
-const CLIENT_KINDS = new Set(["codex", "claude-code"]);
+const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
 export class TrelioInstallationDiagnosticError extends Error {
@@ -50,7 +50,13 @@ const buildClientInspection = (clientKind) => (
           doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof"],
         },
       }
-    : {
+    : clientKind === "cursor" ? {
+        mcpInventory: {
+          surface: "Cursor Plugins and MCP settings",
+          proves: ["remote_mcp_registration", "local_mcp_registration"],
+          doesNotProve: ["oauth_bearer_usable"],
+        },
+      } : {
         mcpInventory: {
           command: "claude mcp list",
           remoteServerName: "plugin:trelio-agent-workspaces:trelio",
@@ -162,7 +168,7 @@ const buildBridgeConnectionAction = (connection) => ({
  * Absolute executable/config paths, hook hashes and observed command strings are
  * useful to the host doctor but do not participate in the repair decision.
  */
-const buildLocalSummary = (local) => ({
+const buildLocalSummary = (local, clientKind) => ({
   schemaVersion: local.schemaVersion ?? 1,
   status: local.status ?? "unknown",
   platform: local.platform ?? "unknown",
@@ -184,8 +190,9 @@ const buildLocalSummary = (local) => ({
     manifests: {
       codexVersion: local.plugin?.manifests?.codexVersion ?? null,
       claudeVersion: local.plugin?.manifests?.claudeVersion ?? null,
+      ...(clientKind === "cursor" ? { cursorVersion: local.plugin?.manifests?.cursorVersion ?? null } : {}),
     },
-    hooks: {
+    hooks: clientKind === "cursor" ? { status: "not_applicable" } : {
       status: local.plugin?.hooks?.status ?? "unknown",
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
       toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
@@ -199,7 +206,7 @@ const buildLocalSummary = (local) => ({
   ...(local.hookStartup ? { hookStartup: local.hookStartup } : {}),
   runtimeSessions: {
     status: local.runtimeSessions?.status ?? "unknown",
-    ...(local.runtimeSessions?.status === "not_checked"
+    ...(local.runtimeSessions?.status === "not_applicable" ? {} : local.runtimeSessions?.status === "not_checked"
       ? { issue: local.runtimeSessions.issue }
       : {
         activeCount: local.runtimeSessions?.activeCount ?? 0,
@@ -232,9 +239,13 @@ export const buildTrelioInstallationDiagnostic = ({
   codexRouting = null,
   codexHookSettings = null,
   codexLegacyMcpMigration = null,
+  workingFolder = null,
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
+  if (clientKind === "cursor" && intent !== "diagnostics") {
+    throw new TrelioInstallationDiagnosticError("TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT", "Cursor supports diagnostics only; Codex/Claude onboarding is not its setup route.");
+  }
   if (!local || typeof local !== "object" || Array.isArray(local)) {
     throw new TrelioInstallationDiagnosticError(
       "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_RESULT",
@@ -316,14 +327,15 @@ export const buildTrelioInstallationDiagnostic = ({
     });
   }
 
+  const folder = workingFolder ?? { status: "not_checked", reasonCode: "CLIENT_WORKING_FOLDER_REQUIRED" };
   return {
     schemaVersion: 1,
     clientKind,
     intent,
-    status: requiredActions.length > 0
+    status: requiredActions.length > 0 || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
       ? "action_required"
       : "ready_for_live_verification",
-    local: buildLocalSummary(local),
+    local: buildLocalSummary(local, clientKind),
     codexRouting: clientKind === "codex" ? codexRouting : null,
     codexHookSettings: clientKind === "codex"
       ? codexHookSettings ?? { status: "unknown", scope: "user_config_on_disk", effectiveState: "unknown" }
@@ -341,13 +353,27 @@ export const buildTrelioInstallationDiagnostic = ({
     clientInspection: buildClientInspection(clientKind),
     requiredActions,
     warnings,
+    ...(intent === "diagnostics" ? {
+      workingFolder: folder,
+      readiness: {
+        state: "not_confirmed",
+        checks: {
+          workingFolder: folder.status,
+          localComponents: requiredActions.length > 0 ? "action_required" : local.status ?? "unknown",
+          oauth: "not_checked", protectedContext: "not_checked", workspaceRead: "not_checked",
+          skills: "not_checked", savingResults: "not_checked",
+        },
+        reportStates: ["confirmed", "requires_action", "not_checked", "not_applicable"],
+        instructions: "Report each actually checked layer separately. Local success never proves complete readiness or saving results. Continue independent read-only checks after a folder blocker. Do not create test tasks, Workspaces or Runs; do not send or centrally store the report.",
+      },
+    } : {}),
     liveVerification: {
       oauth: {
         state: "unverified",
         nextTool: "list_companies",
         successProves: "oauth_bearer_usable_for_current_client_process",
       },
-      hook: {
+      hook: clientKind === "cursor" ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
         nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",
@@ -359,6 +385,31 @@ export const buildTrelioInstallationDiagnostic = ({
           invalidIdentity: "TRELIO_HOOK_TOOL_IDENTITY_INVALID доказывает запуск hook и отказ до отправки. Проверь exact server-returned action; не подставляй имя из dispatch-лога и не создавай proof вручную.",
         },
       },
+      ...(intent === "diagnostics" ? {
+        context: {
+          nextTool: "get_agent_instructions",
+          ...(folder.scope ? { arguments: folder.scope } : {}),
+          selection: "Use the exact existing binding or explicit user scope; otherwise select the sole accessible company or ask. Never infer scope from folder names. Follow the server-selected encrypted provider; do not initialize encryption or repeat OAuth during diagnosis.",
+        },
+        task: {
+          when: "an_exact_accessible_task_is_known_or_selected_from_list_my_tasks",
+          nextTool: "get_task",
+        },
+        workspace: {
+          when: "the_selected_task_has_an_existing_readable_workspace",
+          nextTool: "prepare_agent_workspace_read",
+          instructions: "Execute its exact bridge.action; read both materialized authority files before accepted materials. No Run or lease. Otherwise report not_checked.",
+        },
+        skills: {
+          when: "relevant_enabled_skills_are_known_or_selected_from_exact_scope_guidance",
+          nextTool: "get_agent_skill",
+          instructions: "Load instructions/execution before only declared safe doctor/auth probes; do not set up connections, unlock secrets or execute external business actions. Lack of access is not an empty catalog.",
+        },
+        instructionRefresh: {
+          when: "workingFolder.refresh exists and the exact scope protected read succeeded",
+          instructions: "A diagnostic request includes refreshing the existing managed Trelio instructions unless the user forbids changes. Explain the exact local file delta, execute refresh.action unchanged, and verify its result. All other repairs require their existing setup/approval flow. Do not create/rebind scope, change trust/OAuth or use shell edits. Stale plans need a fresh diagnosis. Report the new-chat/session requirement after apply; unchanged templates are a no-op.",
+        },
+      } : {}),
       separation: [
         "local_doctor_does_not_prove_oauth",
         "hook_definition_integrity_does_not_prove_client_approval",

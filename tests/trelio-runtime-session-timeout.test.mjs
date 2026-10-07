@@ -242,6 +242,20 @@ test("plugin doctor does not turn a missing loader version into stale manifests"
   assert.deepEqual(report.issues, ["LOADED_PLUGIN_VERSION_INVALID"]);
 });
 
+test("Cursor plugin diagnosis uses its own manifest without a Codex/Claude hook contract", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-cursor-diagnostic-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, ".cursor-plugin"));
+  await writeFile(path.join(root, ".cursor-plugin", "plugin.json"), JSON.stringify({ version: "3.1.0" }));
+  const options = { pluginDirectory: root, loadedPluginVersion: "3.1.0", clientKind: "cursor" };
+  const report = await inspectBundledPlugin(options);
+  assert.equal(report.status, "ready");
+  assert.deepEqual(report.manifests, { cursorVersion: "3.1.0" });
+  assert.deepEqual(report.hooks, { status: "not_applicable" });
+  const mismatch = await inspectBundledPlugin({ ...options, loadedPluginVersion: "3.0.0" });
+  assert.deepEqual(mismatch.issues, ["CURSOR_MANIFEST_VERSION_MISMATCH"]);
+});
+
 test("cold startup and slow registration produce a proof after the former 15-second cutoff", async (t) => {
   const fixture = await createFixture(t, { registrationDelayMilliseconds: 7_500 });
   const result = await fixture.run(8_500);
