@@ -136,7 +136,9 @@ Hook принимает только непустой JSON с поддержив
 ACL или credential load. HTTP сохраняет отдельный 11-секундный registration
 budget внутри общего срока. Windows hook и отдельная bridge-команда запускают один подписанный native Win32 helper
 на anonymous stdin/stdout для ACL и DPAPI: каждая операция по-прежнему применяет и проверяет
-current-user-only DACL/owner, без cache результата. Worker закрывается при
+current-user-only DACL/owner, без cache результата. Exact package path и ACL paths
+передаются в extended absolute Windows form для длинных профилей/cache;
+короткая копия executable вне проверенного package не создаётся. Worker закрывается при
 выходе. Startup ограничен 20 секундами; после readiness операция получает
 10 секунд, при этом общий hook deadline не продлевается. DPAPI не запускает
 PowerShell/CLR: CurrentUser, origin-bound entropy и проверочный unprotect

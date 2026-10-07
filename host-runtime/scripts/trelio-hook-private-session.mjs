@@ -6,6 +6,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 
 const hookScope = new AsyncLocalStorage();
 const stageScope = new AsyncLocalStorage();
@@ -17,7 +18,11 @@ export const PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS = 20_000;
 export const windowsPrivateWorkerOptions = (arch = process.arch) => {
   if (!["x64", "ia32", "arm64"].includes(arch)) throw new Error("Unsupported Windows private worker architecture.");
   return {
-    executable: fileURLToPath(new URL(`./native-private-process/bin/${arch}/trelio-private-process.exe`, import.meta.url)),
+    // A content-addressed runtime under a long user profile can exceed the
+    // legacy Win32 MAX_PATH even though Node successfully verified its files.
+    // Preserve the exact package location using the extended absolute form;
+    // no shorter-path copy, PATH search or shell fallback is introduced.
+    executable: path.toNamespacedPath(fileURLToPath(new URL(`./native-private-process/bin/${arch}/trelio-private-process.exe`, import.meta.url))),
     args: [],
   };
 };

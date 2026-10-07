@@ -123,6 +123,16 @@ test("signed package reaches the real hook through the complete configured shell
       const config = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory: home });
       const pointerPath = path.join(config, "host-runtimes/current.json");
       const pointerBefore = await fs.readFile(pointerPath, "utf8");
+      const nativeRelative = `scripts/native-private-process/bin/${process.arch}/trelio-private-process.exe`;
+      if (process.platform === "win32") {
+        // File APIs can read a long installed path even when CreateProcess
+        // cannot launch its ordinary spelling. Assert delivery separately;
+        // the actual hook below must launch the exact installed native bytes.
+        const nativeInstalled = path.join(config, "host-runtimes", "0.0.0",
+          descriptor.runtime.packageSha256, nativeRelative);
+        assert.deepEqual(await fs.readFile(nativeInstalled), await fs.readFile(
+          path.join(repositoryRoot, "host-runtime", nativeRelative)));
+      }
 
       // A synthetic pre-registered session isolates proof delivery from OAuth
       // and the service. The real hook still performs its ordinary private-file

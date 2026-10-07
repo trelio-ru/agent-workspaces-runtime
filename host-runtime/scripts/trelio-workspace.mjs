@@ -2412,7 +2412,7 @@ export const hardenWindowsPrivatePath = async (targetPath, targetKind) => {
   const workerOptions = windowsPrivateWorkerOptions();
   const scopedWorker = scopedPrivateAclWorker(workerOptions);
   const worker = scopedWorker || createPrivateAclWorker(workerOptions);
-  try { await worker.harden(targetPath, targetKind); }
+  try { await worker.harden(path.toNamespacedPath(targetPath), targetKind); }
   finally { if (!scopedWorker) await worker.close(); }
 };
 

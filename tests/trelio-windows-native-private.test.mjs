@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm, symlink, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, readFile, copyFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import crypto from 'node:crypto';
 import { createPrivateAclWorker, windowsPrivateWorkerOptions, scopedPrivateAclWorker,
@@ -129,6 +129,30 @@ test('native helper rejects reparse points and wrong path kinds without touching
       try { await assert.rejects(worker.harden(name,kind)); }
       finally { await worker.close(); }
     }
+    assert.equal(await readFile(file,'utf8'),'synthetic');
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+test('native selector and ACL support installed paths beyond Win32 MAX_PATH', windows, async () => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'trelio-native-long-'));
+  try {
+    const scripts=path.join(root,...Array(6).fill('long signed runtime Ж '+ 'x'.repeat(30)));
+    const binaryDirectory=path.join(scripts,'native-private-process','bin',process.arch);
+    await mkdir(binaryDirectory,{recursive:true});
+    await copyFile(windowsPrivateWorkerOptions().executable,path.join(binaryDirectory,'trelio-private-process.exe'));
+    const modulePath=path.join(scripts,'trelio-hook-private-session.mjs');
+    await copyFile(fileURLToPath(new URL('../host-runtime/scripts/trelio-hook-private-session.mjs',import.meta.url)),modulePath);
+    // Load the exact production selector at an installed-style long location.
+    // Node fs success alone does not prove CreateProcess can execute that path.
+    const installed=await import(pathToFileURL(modulePath).href);
+    const options=installed.windowsPrivateWorkerOptions();
+    assert.ok(options.executable.length>300);
+    const result=await run(options.executable,[]);
+    assert.equal(result.code,0,result.stderr);
+    assert.equal(result.stdout,'{"ready":true}\n');
+    const file=path.join(scripts,'private.json');
+    await writeFile(file,'synthetic');
+    await hardenWindowsPrivatePath(file,'file');
     assert.equal(await readFile(file,'utf8'),'synthetic');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
