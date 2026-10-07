@@ -134,11 +134,15 @@ Hook принимает только непустой JSON с поддержив
 Локальная регистрация hook ограничена общим внутренним сроком: PreToolUse
 22 секунды, SessionStart 8 секунд, SessionEnd 2 секунды, без продления после
 ACL или credential load. HTTP сохраняет отдельный 11-секундный registration
-budget внутри общего срока. Windows hook запускает один ACL PowerShell на
-anonymous stdin/stdout: каждая операция по-прежнему применяет и проверяет
+budget внутри общего срока. Windows hook и отдельная bridge-команда запускают один private PowerShell на
+anonymous stdin/stdout для ACL и DPAPI: каждая операция по-прежнему применяет и проверяет
 current-user-only DACL/owner, без cache результата. Worker закрывается при
-выходе; зависший ACL/DPAPI subprocess отменяется (не больше 10 секунд на
-операцию). Внутренний отказ сохраняет JSON deny и освобождает registration lock
+выходе. Startup ограничен 20 секундами; после readiness операция получает
+10 секунд, при этом общий hook deadline не продлевается. DPAPI не запускает
+второй PowerShell: CurrentUser, origin-bound entropy и проверочный unprotect
+сохранены, совместимость ciphertext проверяется в обоих направлениях.
+Секретные bytes проходят только через anonymous pipes, buffers очищаются,
+ошибки не содержат child output. Результаты ACL и credentials не кешируются. Внутренний отказ сохраняет JSON deny и освобождает registration lock
 до клиентского timeout; pending observation и прежние credentials сохраняются
 для следующего вызова в той же сессии. Plugin shell/approved definition не меняются.
 

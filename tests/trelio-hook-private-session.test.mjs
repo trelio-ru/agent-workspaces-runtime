@@ -6,10 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import {
   assertRuntimeHookBudget, buildPrivateAclWorkerScript, createPrivateAclWorker, privateProcessOptions,
-  runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage,
+  runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage, withPrivateProcessSession,
 } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 import {
   hardenWindowsPrivatePath, resolveWindowsPowerShellExecutable, WINDOWS_PRIVATE_ACL_SCRIPT,
+  protectWindowsBridgeSessionToken, unprotectWindowsBridgeSessionToken, buildWindowsBridgeDpapiInvocation,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 // This child only implements the value-free IPC protocol. It never starts
@@ -218,7 +219,7 @@ test("ACL requests wait for readiness, with a separate startup diagnostic and un
     const children = [];
     let receivedBytes = 0;
     const worker = createPrivateAclWorker({
-      executable: "fixture", aclScript: "", requestTimeoutMilliseconds: 250,
+      executable: "fixture", aclScript: "", requestTimeoutMilliseconds: 250, startupTimeoutMilliseconds: 250,
       spawnProcess: (_program, _args, options) => {
         const child = spawn(process.execPath, ["-e", `
           process.stdin.resume();
@@ -289,4 +290,153 @@ function Remove-Item { throw "Unexpected provider dependency" }
 test("ACL wire script does not change console encoding or invoke module discovery", () => {
   const script = buildPrivateAclWorkerScript(WINDOWS_PRIVATE_ACL_SCRIPT);
   assert.doesNotMatch(script, /Console\]::(?:InputEncoding|OutputEncoding|ReadLine|WriteLine)|New-Object|ConvertFrom-Json|ConvertTo-Json|Where-Object|Remove-Item/u);
+});
+
+test("a slow but healthy startup does not consume the operation timeout or spawn a second worker", async () => {
+  let starts = 0;
+  const children = [];
+  const worker = createPrivateAclWorker({ executable: "fixture", aclScript: "",
+    startupTimeoutMilliseconds: 2_000, requestTimeoutMilliseconds: 200,
+    spawnProcess: (_program, _args, options) => {
+      starts++;
+      const child = spawn(process.execPath, ["-e", `
+        const rl=require('node:readline').createInterface({input:process.stdin});
+        setTimeout(()=>console.log(JSON.stringify({ready:true})), 400);
+        rl.on('line',line=> {
+          const [id,kind,entropy,value]=line.split('\\t');
+          console.log(JSON.stringify(kind==='file'?{id,ok:true}:{id,ok:true,value}));
+        });
+      `], options);
+      children.push(child); return child;
+    },
+  });
+  try {
+    await worker.harden("synthetic", "file");
+    const input = Buffer.from("synthetic-private-value");
+    const output = await worker.dpapi("protect", Buffer.alloc(32, 1), input);
+    assert.deepEqual(output, input); output.fill(0);
+    assert.equal(starts, 1);
+  } finally { await worker.close(); }
+  await assertStopped({children});
+});
+
+test("the global deadline still bounds slow startup plus successful progress", async () => {
+  const children = [];
+  await withRuntimeHookPrivateSession(450, async () => {
+    const worker = scopedPrivateAclWorker({ executable: "fixture", aclScript: "",
+      startupTimeoutMilliseconds: 2_000, requestTimeoutMilliseconds: 2_000,
+      spawnProcess: (_program, _args, options) => {
+        const child = spawn(process.execPath, ["-e", `
+          setTimeout(()=>console.log(JSON.stringify({ready:true})), 100);
+          require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+            const [id]=line.split('\\t');
+            setTimeout(()=>console.log(JSON.stringify({id,phase:'identity'})),100);
+          });
+        `], options); children.push(child); return child;
+      },
+    });
+    await assert.rejects(worker.harden("synthetic", "file"), error => {
+      assert.equal(error.timeoutKind, "hook"); return true;
+    });
+  });
+  await assertStopped({children});
+});
+
+for (const response of ['bad-json-with-synthetic-secret', '{"id":"1","ok":false,"value":"c2VjcmV0"}', '{"id":"1","ok":true,"value":"@@@"}']) {
+  test("invalid DPAPI response is rejected without disclosing plaintext: " + response.slice(0, 12), async () => {
+    const worker = createPrivateAclWorker({ executable:"fixture", aclScript:"", spawnProcess: (_program,_args,options) =>
+      spawn(process.execPath, ["-e", `console.log(JSON.stringify({ready:true}));process.stdin.once('data',()=>console.log(${JSON.stringify(response)}))`], options) });
+    try {
+      await assert.rejects(worker.dpapi("unprotect",Buffer.alloc(32,1),Buffer.from("synthetic")), error => {
+        assert.doesNotMatch(JSON.stringify(error) + error.message, /synthetic-secret|c2VjcmV0|@@@/u);
+        assert.equal(error.stdout,undefined); assert.equal(error.stderr,undefined); return true;
+      });
+    } finally { await worker.close(); }
+  });
+}
+
+test("Windows slow cold startup shares ACL and legacy-compatible DPAPI under the unchanged hook deadline", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-slow-private-worker-"));
+  const value = "synthetic-token-Ж-test";
+  const origin = "https://fixture.invalid";
+  const runLegacy = async (mode,input) => {
+    const invocation=buildWindowsBridgeDpapiInvocation(origin,mode);
+    return new Promise((resolve,reject)=>{
+      const child=spawn(invocation.executable,invocation.args,{shell:false,windowsHide:true,
+        env:{...process.env,...invocation.environment},stdio:['pipe','pipe','ignore']});
+      let output='';
+      const timer=setTimeout(()=>{child.kill();reject(Error('Synthetic legacy fixture timed out'));},10000);
+      child.stdout.on('data',chunk=>{output+=chunk;});
+      child.once('error',error=>{clearTimeout(timer);reject(error);});
+      child.once('close',code=>{clearTimeout(timer);code===0?resolve(output.trim()):reject(Error('Synthetic legacy fixture failed'));});
+      child.stdin.end(input+'\n');
+    });
+  };
+  const legacy = await runLegacy('protect',value);
+  let currentCiphertext;
+  let starts = 0;
+  try {
+    await withRuntimeHookPrivateSession(22_000, async () => {
+      const worker = scopedPrivateAclWorker({ executable:resolveWindowsPowerShellExecutable(), aclScript:WINDOWS_PRIVATE_ACL_SCRIPT,
+        spawnProcess: (program,args,options) => {
+          starts++;
+          const script = '[Threading.Thread]::Sleep(13000)\nfunction Add-Type { throw "Unexpected module dependency" }\n'
+            + Buffer.from(args.at(-1),'base64').toString('utf16le');
+          return spawn(program,[...args.slice(0,-1),Buffer.from(script,'utf16le').toString('base64')],options);
+        } });
+      await hardenWindowsPrivatePath(root,"directory");
+      assert.equal(await unprotectWindowsBridgeSessionToken(origin,legacy),value);
+      const ciphertext = await protectWindowsBridgeSessionToken(origin,value);
+      currentCiphertext=ciphertext;
+      assert.equal(await unprotectWindowsBridgeSessionToken(origin,ciphertext),value);
+      await hardenWindowsPrivatePath(root,"directory");
+      assert.equal(worker,scopedPrivateAclWorker({}));
+      assert.equal(starts,1);
+    });
+    assert.equal(await runLegacy('unprotect',currentCiphertext),value);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});
+
+
+test("standalone invocation reuses and reaps one worker without sharing it with the next invocation", async () => {
+  const state = { starts: 0, children: [] };
+  for (let index = 0; index < 2; index++) {
+    await withPrivateProcessSession(async () => {
+      const worker = scopedPrivateAclWorker(fixtureOptions(state));
+      await worker.harden("synthetic", "file");
+      await withPrivateProcessSession(async () => {
+        assert.equal(scopedPrivateAclWorker(fixtureOptions(state)), worker);
+        await worker.harden("synthetic", "file");
+      });
+    });
+    assert.equal(state.starts, index + 1);
+    await assertStopped(state);
+  }
+});
+
+test("DPAPI operation timeout retains its stage and rejects reuse without leaking input", async () => {
+  const children = [];
+  const worker = createPrivateAclWorker({ executable: "fixture", aclScript: "",
+    requestTimeoutMilliseconds: 200,
+    spawnProcess: (_program, _args, options) => {
+      const child = spawn(process.execPath, ["-e",
+        "console.log(JSON.stringify({ready:true}));process.stdin.resume()"], options);
+      children.push(child); return child;
+    },
+  });
+  try {
+    await assert.rejects(withRuntimeHookStage("bridge_credentials", () =>
+      worker.dpapi("unprotect", Buffer.alloc(32, 1), Buffer.from("synthetic-private-input"))), error => {
+      assert.equal(error.hookStage, "bridge_credentials");
+      assert.equal(error.operation, "windows_dpapi.unprotect");
+      assert.equal(error.timeoutKind, "private_process");
+      assert.doesNotMatch(error.message, /synthetic-private-input/u);
+      return true;
+    });
+    await assert.rejects(worker.harden("another-operation", "file"));
+    assert.equal(children.length, 1);
+  } finally { await worker.close(); }
+  await assertStopped({ children });
 });

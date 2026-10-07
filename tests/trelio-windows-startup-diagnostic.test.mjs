@@ -99,12 +99,12 @@ test('standard Windows diagnosis separates startup and network, uses no ACL inpu
     networkProbe: async () => [{status:'http_response',httpStatus:200}],
     runProcess: async options => {
       calls.push(options);
-      return calls.length === 1 ? { status:'ready',readyMs:11000,exitCode:0 }
+      return calls.length === 1 ? { status:'ready',readyMs:21000,exitCode:0 }
         : { status:'ready',readyMs:2,exitCode:0 };
     } });
   assert.equal(report.status, 'attention', 'a worker ready after the real hook deadline remains blocked');
   assert.equal(calls.length, 6);
-  assert.equal(calls[0].timeoutMs, 15000);
+  assert.equal(calls[0].timeoutMs, 25000);
   assert.equal(calls[0].endInput, undefined); assert.equal(calls[0].captureStderr, undefined);
   assert.equal(calls[3].captureStderr, true); assert.equal(calls[4].endInput, true);
   assert.deepEqual(Object.keys(calls[5].environment), ['PSModulePath']);
@@ -152,7 +152,7 @@ test('Windows report probes the actual installed worker without any ACL request 
   const comparisons = await diagnoseWindowsHookStartup({executable:resolveWindowsPowerShellExecutable(),
     aclScript:WINDOWS_PRIVATE_ACL_SCRIPT, networkProbe:async()=>[], runProcess:async options => {
       const result = await probeProcess(options);
-      if (first) { first = false; return {...result,readyMs:11000}; }
+      if (first) { first = false; return {...result,readyMs:21000}; }
       return result;
     }});
   assert.equal(comparisons.status, 'attention');
@@ -161,4 +161,15 @@ test('Windows report probes the actual installed worker without any ACL request 
     assert.equal(comparisons.probes[name].exitCode, 0, name);
     assert.ok(comparisons.probes[name].stdoutBytes <= 16, name);
   }
+});
+
+
+test('a 13-second worker startup fits the new budget despite a short auxiliary probe timeout', async () => {
+  let index=0;
+  const report=await diagnoseWindowsHookStartup({platform:'win32',executable:'fixture',aclScript:'',networkProbe:async()=>[],
+    runProcess:async()=>++index===1 ? {status:'ready',readyMs:13000,exitCode:0}
+      : index===2 ? {status:'timeout',readyMs:null,exitCode:null} : {status:'ready',readyMs:10,exitCode:0}});
+  assert.equal(report.status,'ready');
+  assert.equal(report.hookStartupTimeoutMs,20000);
+  assert.equal(report.hookPrivateProcessTimeoutMs,10000);
 });

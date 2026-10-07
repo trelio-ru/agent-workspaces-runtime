@@ -219,6 +219,14 @@ jobs:
       - name: Run Windows Remote MCP OAuth storage regressions
         run: node tests/trelio-remote-mcp-oauth.test.mjs
 
+      - name: Set up current Node.js for private worker compatibility
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+
+      - name: Run slow-start private worker on Node.js 24
+        run: node tests/trelio-hook-private-session.test.mjs
+
       - name: Run Windows ACL regression as a standard user
         shell: pwsh
         run: ./.github/scripts/run-windows-acl-standard-user.ps1

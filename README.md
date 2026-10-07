@@ -206,12 +206,16 @@ Native Node route может отличаться от proxy desktop MCP. Отв
 только достижимость public endpoint; сетевой отказ сам по себе не объясняет
 локальное зависание до readiness и не разрешает OAuth/pairing recovery.
 
-Исходный worker получает 15 секунд диагностического времени; готовность после
-штатного 10-секундного private deadline остаётся `attention`. Остальные
-PowerShell-пробы ограничены 5 секундами, Node – 3; cleanup каждого child – до
-1,5 секунды. Локальная последовательность ограничена 47 секундами, отмена
+Исходный worker получает 25 секунд диагностического времени; готовность после
+штатного 20-секундного startup deadline остаётся `attention`. Поля
+`hookStartupTimeoutMs` и `hookPrivateProcessTimeoutMs` разделяют запуск и запрос.
+Минимальный PowerShell marker получает 15 секунд, дополнительные сравнительные
+PowerShell-пробы – 5, Node – 3; cleanup каждого child – до 1,5 секунды.
+Короткая сравнительная проба не переопределяет успешную готовность настоящего
+worker в его бюджете. Локальная последовательность имеет до 58 секунд ожиданий
+плюс bounded cleanup; синхронный OS spawn может задержать JavaScript timers. Отмена
 MCP останавливает children. HTTPS – до четырёх попыток по 3,5 секунды с паузами
-300/600/1000 мс только при transport/429/5xx. Рабочие лимиты hook не меняются.
+300/600/1000 мс только при transport/429/5xx. Общий срок hook не продлевается.
 
 Отчёт содержит измерения, версии ОС/Node и закрытые категории без raw output,
 paths или environment. Последующие пробы могут пользоваться прогретыми caches;
@@ -281,15 +285,19 @@ exit `2` в `1`; Codex не обязан блокировать tool при та
 вход сохраняют прежний stderr/exit `2`; ошибка launcher до запуска runtime
 находится вне этого обработчика.
 
-Windows hook использует один PowerShell transport для последовательных ACL
-проверок через собственные UTF-8 stdin/stdout pipes: он не меняет кодовую
+Windows hook и отдельная bridge-команда используют один PowerShell transport
+для последовательных ACL/DPAPI операций через собственные UTF-8 stdin/stdout pipes: он не меняет кодовую
 страницу консоли, не использует Console.In/Out и PowerShell module/cmdlet pipeline.
-Фиксированный ASCII-протокол передаёт только id, kind и base64 пути; readiness
-подтверждается до передачи первого пути. Каждый exact путь заново получает и
+Фиксированный ASCII-протокол передаёт id, kind и base64 данные; readiness
+подтверждается до передачи первого запроса. DPAPI CurrentUser получает
+origin-bound entropy и bytes только через anonymous pipes; buffers очищаются,
+результат не попадает в stderr/error/argv/env. Старый ciphertext совместим,
+protect по-прежнему проверяется обратным unprotect перед сохранением. Каждый exact путь заново получает и
 проверяет owner-only descriptor,
-результат не кешируется. Transport закрывается при завершении hook и не
-переиспользуется между сессиями. ACL/DPAPI subprocess имеют отдельный лимит
-10 секунд; ACL, credentials и сеть дополнительно разделяют непродлеваемый
+результат не кешируется. Transport закрывается при завершении invocation и не
+переиспользуется между hooks/командами. Однократный startup ограничен 20 секундами;
+после readiness каждый ACL/DPAPI запрос имеет отдельный лимит 10 секунд. DPAPI
+не запускает второй PowerShell. ACL, credentials и сеть дополнительно разделяют непродлеваемый
 внутренний срок (22 секунды для PreToolUse, 8 для SessionStart, 2 для SessionEnd).
 Тайм-аут отменяет subprocess и HTTP, освобождает registration lock и возвращает
 JSON deny до внешнего лимита 30 секунд, оставляя время для Windows launcher.
@@ -307,10 +315,12 @@ Owner, полный DACL и отсутствие inherited/посторонни�
 
 Тайм-аут содержит закрытые `stage`, `operation` и `timeout`:
 например, `runtime_state_read`, `windows_acl.dacl_verify`, `private_process`.
-ACL transport сообщает этапы чтения owner, записи и проверки DACL. До readiness
+Private transport сообщает этапы чтения owner, записи и проверки DACL. До readiness
 указывается `worker_startup`, после передачи запроса и до первой ACL phase –
-`request_dispatch`. Эти этапы локализуют ожидание, но не доказывают конкретную
-причину сбоя ОС. Readiness и progress не продлевают общий срок или лимит запроса.
+`request_dispatch`. `windows_dpapi.protect/unprotect` отдельно обозначают DPAPI.
+Эти этапы локализуют ожидание, но не доказывают конкретную
+причину сбоя ОС. Readiness завершает startup и начинает ограниченный запрос; progress не продлевает
+его лимит. Общий срок hook остаётся непродлеваемым.
 Имена пользователей, SID, пути, вход MCP и вывод дочернего процесса в эту
 диагностику не входят. `missing` и внутренний тайм-аут не взаимозаменяемы.
 

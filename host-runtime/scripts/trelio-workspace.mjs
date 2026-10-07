@@ -102,7 +102,7 @@ import {
 } from "./trelio-skill-admission.mjs";
 
 import {
-  assertRuntimeHookBudget, privateProcessOptions, scopedPrivateAclWorker,
+  assertRuntimeHookBudget, scopedPrivateAclWorker, createPrivateAclWorker, withPrivateProcessSession,
 } from "./trelio-hook-private-session.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1153,12 +1153,12 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   }) : null;
   const skipPrivateInspection = hookStartup?.status === "attention" || signal?.aborted;
   const skippedPrivateState = { status: "not_checked", issue: "WINDOWS_HOOK_STARTUP_NOT_READY" };
-  const [git, plugin, runtimeSessions, connection] = await Promise.all([
+  const [git, plugin, runtimeSessions, connection] = await withPrivateProcessSession(() => Promise.all([
     verifyGitRuntime(gitOptions),
     inspectBundledPlugin({ pluginDirectory, loadedPluginVersion }),
     skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
     skipPrivateInspection ? skippedPrivateState : inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
-  ]);
+  ]), signal);
   const nodeMajorVersion = Number.parseInt(
     String(nodeVersion).replace(/^v/u, "").split(".")[0],
     10,
@@ -2187,47 +2187,33 @@ const runWindowsBridgeDpapi = async (origin, mode, input, {
   environment = process.env,
 } = {}) => {
   const invocation = buildWindowsBridgeDpapiInvocation(origin, mode, environment);
-  let result;
+  const workerOptions = { executable: invocation.executable, aclScript: WINDOWS_PRIVATE_ACL_SCRIPT, environment };
+  const scopedWorker = scopedPrivateAclWorker(workerOptions);
+  const worker = scopedWorker || createPrivateAclWorker(workerOptions);
+  // Reuse only the invocation's process, never a credential or ACL result.
+  // CurrentUser and origin-bound entropy retain the legacy ciphertext format.
+  // Sensitive bytes use anonymous pipes; no plaintext enters argv/env/logs.
+  const entropy = Buffer.from(invocation.environment.TRELIO_WINDOWS_BRIDGE_DPAPI_ENTROPY_BASE64, "base64");
+  const bytes = Buffer.from(input, mode === "protect" ? "utf8" : "base64");
+  if (mode === "unprotect" && bytes.toString("base64") !== input) {
+    entropy.fill(0); bytes.fill(0);
+    throw new Error("Windows DPAPI не выполнил операцию unprotect.");
+  }
+  let output;
   try {
-    result = await execFileWithInput(
-      invocation.executable,
-      invocation.args,
-      {
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024,
-        ...privateProcessOptions(),
-        env: {
-          ...environment,
-          ...invocation.environment,
-        },
-        windowsHide: true,
-      },
-      `${input}\n`,
-    );
-  } catch (error) {
-    // execFileWithInput attaches child stdout/stderr to its rejection. A
-    // failed unprotect process must never let a partially emitted plaintext
-    // value travel through a later diagnostic formatter or model-visible
-    // error. Deliberately discard the original error object and expose only a
-    // stable operation-level message.
-    if (error && typeof error === "object") {
-      error.stdout = "";
-      error.stderr = "";
-    }
-    throw new Error(`Windows DPAPI не выполнил операцию ${mode}.`);
+    output = await worker.dpapi(mode, entropy, bytes);
+    return mode === "protect" ? output.toString("base64") : output.toString("utf8").trim();
+  } finally {
+    entropy.fill(0); bytes.fill(0); output?.fill(0);
+    if (!scopedWorker) await worker.close();
   }
-  const output = result.stdout.trim();
-  if (!output) {
-    throw new Error(`Windows DPAPI ${mode} вернул пустой результат.`);
-  }
-  return output;
 };
 
 export const protectWindowsBridgeSessionToken = async (
   origin,
   token,
   options = {},
-) => {
+) => withPrivateProcessSession(async () => {
   const ciphertext = await runWindowsBridgeDpapi(origin, "protect", token, options);
   // Не доверяем успешному exit code как доказательству: до записи файла
   // раскрываем только что созданный ciphertext тем же CurrentUser и сравниваем
@@ -2237,7 +2223,7 @@ export const protectWindowsBridgeSessionToken = async (
     throw new Error("Windows DPAPI не подтвердил сохранённую bridge device-session.");
   }
   return ciphertext;
-};
+});
 
 export const unprotectWindowsBridgeSessionToken = (
   origin,
@@ -2424,26 +2410,11 @@ export const resolveWindowsPowerShellExecutable = (environment = process.env) =>
 };
 
 export const hardenWindowsPrivatePath = async (targetPath, targetKind) => {
-  const invocation = buildWindowsPrivateAclPowerShellInvocation(
-    targetPath,
-    targetKind,
-  );
-  // Cold PowerShell startup used to occur for every directory/file check.
-  // A hook owns one bounded transport, while every request still performs the
-  // exact original DACL/owner verification. Outside hooks use one bounded child.
-  const worker = scopedPrivateAclWorker({
-    executable: resolveWindowsPowerShellExecutable(), aclScript: WINDOWS_PRIVATE_ACL_SCRIPT,
-  });
-  if (worker) return worker.harden(targetPath, targetKind);
-  await execFileAsync(resolveWindowsPowerShellExecutable(), invocation.args, {
-    encoding: "utf8",
-    ...privateProcessOptions(),
-    env: {
-      ...process.env,
-      ...invocation.environment,
-    },
-    windowsHide: true,
-  });
+  const workerOptions = { executable: resolveWindowsPowerShellExecutable(), aclScript: WINDOWS_PRIVATE_ACL_SCRIPT };
+  const scopedWorker = scopedPrivateAclWorker(workerOptions);
+  const worker = scopedWorker || createPrivateAclWorker(workerOptions);
+  try { await worker.harden(targetPath, targetKind); }
+  finally { if (!scopedWorker) await worker.close(); }
 };
 
 const assertPrivatePathKind = async (targetPath, targetKind) => {
@@ -17098,7 +17069,7 @@ const main = async () => {
 
 const runEntrypoint = async () => {
   try {
-    await main();
+    await withPrivateProcessSession(main);
   } catch (error) {
     const runtimeRecovery = await recoverBridgeHostRuntimeUpgrade(error);
 

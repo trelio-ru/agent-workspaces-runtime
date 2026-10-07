@@ -43,10 +43,13 @@ publication tooling также остаются вне этого публичн
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и
   `pwsh.exe`; одного ненулевого exit code недостаточно для проверки блокировки.
 - Hook выполняет ACL/DPAPI и сеть под общим непродлеваемым внутренним deadline
-  до тайм-аута клиента. Windows ACL transport живёт только в одном hook и
+  до тайм-аута клиента. Windows private transport живёт только в одном hook/bridge invocation и
   повторно проверяет каждый путь; результат проверки прав не кешируется.
   Зависший private subprocess отменяется, lock очищается, следующий hook
   продолжает ту же client session без ручного удаления состояния.
+- Startup private worker ограничен 20 секундами, каждый запрос после readiness –
+  10; общий hook deadline не продлевается. ACL и DPAPI используют один процесс,
+  сохраняя CurrentUser, entropy, read-back и отсутствие секретов в argv/env/log.
 - ACL worker использует собственные UTF-8 pipes без Console.In/Out, смены
   code page и module/cmdlet pipeline. Запрос ждёт readiness под исходным deadline;
   startup/dispatch различаются, readiness не является подтверждением ACL.

@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { get } from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
-import { buildPrivateAclWorkerScript, PRIVATE_PROCESS_TIMEOUT_MILLISECONDS } from './trelio-hook-private-session.mjs';
+import { buildPrivateAclWorkerScript, PRIVATE_PROCESS_TIMEOUT_MILLISECONDS, PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS } from './trelio-hook-private-session.mjs';
 
 const SAFE_CODES = new Set(['ENOENT', 'EACCES', 'EPERM', 'ECONNRESET', 'ECONNREFUSED',
   'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
@@ -155,6 +155,7 @@ export const diagnoseWindowsHookStartup = async ({ executable, aclScript,
   const report = { schemaVersion: 1, status: 'ready', platform,
     osRelease: os.release(), nodeVersion: process.version, nodeArch: process.arch,
     hookPrivateProcessTimeoutMs: PRIVATE_PROCESS_TIMEOUT_MILLISECONDS,
+    hookStartupTimeoutMs: PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS,
     note: 'Readiness only; no ACL request or protected MCP call. Sequential local probes may benefit from warm caches. A timeout does not identify the cause.',
     probes: {} };
   // Public network measurements run independently of the local worker. A
@@ -167,12 +168,12 @@ export const diagnoseWindowsHookStartup = async ({ executable, aclScript,
   };
   // Run the real worker FIRST, before doctor reads private files or warms
   // PowerShell. This longer diagnostic budget can observe a late readiness
-  // reply without changing the hook's existing 10-second security deadline.
-  await run('workerOpenInput', { timeoutMs: 15_000 });
+  // reply without extending the production startup or overall hook deadline.
+  await run('workerOpenInput', { timeoutMs: 25_000 });
   const baseline = report.probes.workerOpenInput;
   const baselineReady = baseline.status === 'ready' && baseline.exitCode === 0
-    && baseline.readyMs < PRIVATE_PROCESS_TIMEOUT_MILLISECONDS;
-  await run('powershellMarker', { args: argumentsFor(marker), captureStderr: true });
+    && baseline.readyMs < PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS;
+  await run('powershellMarker', { args: argumentsFor(marker), captureStderr: true, timeoutMs: 15_000 });
   await run('nodePipe', { executable: process.execPath,
     args: ['-e', 'console.log(JSON.stringify({ready:true}));process.stdin.resume()'], timeoutMs: 3_000 });
   if (!baselineReady && !signal?.aborted) {
@@ -185,7 +186,9 @@ export const diagnoseWindowsHookStartup = async ({ executable, aclScript,
     localModules.PSModulePath = path.win32.join(path.win32.dirname(executable), 'Modules');
     await run('workerLocalModules', { environment: localModules });
   }
-  report.status = baselineReady && Object.values(report.probes).every((probe) => probe.status === 'ready' && probe.exitCode === 0)
+  // Short auxiliary controls may time out on a slow engine even though the
+  // actual worker met its startup budget. They are evidence, not admission.
+  report.status = baselineReady && report.probes.nodePipe.status === 'ready' && report.probes.nodePipe.exitCode === 0
     ? 'ready' : 'attention';
   report.publicHttps = await network;
   report.networkNote = 'Native Node HTTPS may use a different proxy from desktop MCP. Public reachability is independent of worker readiness; no body, headers, credentials or protected content are collected.';
