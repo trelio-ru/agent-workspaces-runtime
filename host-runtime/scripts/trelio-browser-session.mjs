@@ -139,10 +139,10 @@ export const assertManualAssistAllowed = (options = {}) => {
   return binding;
 };
 
-const environmentValue = (environment, name) => {
+const environmentValue = (environment, name, platform = process.platform) => {
   const exact = environment[name];
   if (exact !== undefined) return exact;
-  if (process.platform !== "win32") return undefined;
+  if (platform !== "win32") return undefined;
   const key = Object.keys(environment).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
   return key ? environment[key] : undefined;
 };
@@ -200,51 +200,76 @@ export const defaultBrowserExecutable = ({
 };
 
 export const npmCliCandidates = ({
+  platform = process.platform,
   nodeExecutable = process.execPath,
   environment = process.env,
 } = {}) => {
-  const executableDirectory = path.dirname(path.resolve(nodeExecutable));
-  const pathDirectories = String(environmentValue(environment, "PATH") || "")
-    .split(path.delimiter)
+  const pathApi = platform === "win32" ? path.win32 : path;
+  const executableDirectory = pathApi.dirname(pathApi.resolve(nodeExecutable));
+  const pathDirectories = String(environmentValue(environment, "PATH", platform) || "")
+    .split(pathApi.delimiter)
     .map((entry) => entry.trim())
-    .filter((entry) => entry && path.isAbsolute(entry));
+    .filter((entry) => entry && pathApi.isAbsolute(entry));
+  // A desktop's bundled Node is independent of the official standalone
+  // installation. Signed skills deliberately lose arbitrary PATH entries,
+  // including Program Files\nodejs, so that PATH must stay sanitized rather
+  // than being broadened just to make npm discoverable. Inspect only these
+  // fixed installer layouts, including the native 64-bit root of a 32-bit
+  // process. OS variable names are case-insensitive; relative roots never
+  // become a cwd/workspace-based executable candidate.
+  const windowsNodeDirectories = platform === "win32"
+    ? [
+      environmentValue(environment, "PROGRAMW6432", platform)
+        || environmentValue(environment, "PROGRAMFILES", platform) || "C:\\Program Files",
+      environmentValue(environment, "PROGRAMFILES", platform) || "C:\\Program Files",
+      environmentValue(environment, "PROGRAMFILES(X86)", platform) || "C:\\Program Files (x86)",
+    ].filter((root) => pathApi.isAbsolute(root) && /^[A-Za-z]:[\\/]/u.test(root))
+      .map((root) => pathApi.join(root, "nodejs"))
+    : [];
   const homeDirectory = String(environmentValue(environment, "HOME") || os.homedir());
   const npmDirectories = [...new Set([
     ...pathDirectories,
-    process.platform !== "win32" && path.isAbsolute(homeDirectory)
+    platform !== "win32" && path.isAbsolute(homeDirectory)
       ? path.join(homeDirectory, ".local", "bin")
       : null,
   ].filter(Boolean))];
-  const ambient = environmentValue(environment, "npm_execpath");
+  const ambient = environmentValue(environment, "npm_execpath", platform);
   return [...new Set([
-    ambient && path.isAbsolute(ambient) ? ambient : null,
-    path.join(executableDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
-    path.resolve(executableDirectory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+    ambient && pathApi.isAbsolute(ambient) ? ambient : null,
+    pathApi.join(executableDirectory, "node_modules", "npm", "bin", "npm-cli.js"),
+    pathApi.resolve(executableDirectory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
     ...npmDirectories.flatMap((directory) => [
-      path.join(directory, "node_modules", "npm", "bin", "npm-cli.js"),
+      pathApi.join(directory, "node_modules", "npm", "bin", "npm-cli.js"),
       // Desktop hosts may run skills with their own Node executable while the
       // user's standalone Node/npm bin is omitted from the sanitized PATH.
       // Official Unix installers place npm under ../lib and expose an `npm`
       // symlink from bin; resolve both forms to the JavaScript entrypoint so we
       // keep shell:false and never execute npm, npm.cmd or another wrapper.
-      path.resolve(directory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
-      path.join(directory, "npm"),
-      path.join(directory, "npm-cli.js"),
+      pathApi.resolve(directory, "..", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+      pathApi.join(directory, "npm"),
+      pathApi.join(directory, "npm-cli.js"),
     ]),
+    // The Windows installer has one npm layout. Do not extend its fixed-root
+    // fallback to unrelated lib directories or command-wrapper locations.
+    ...windowsNodeDirectories.map((directory) => (
+      pathApi.join(directory, "node_modules", "npm", "bin", "npm-cli.js")
+    )),
   ].filter(Boolean))];
 };
 
 export const resolveNpmInvocation = ({
+  platform = process.platform,
   nodeExecutable = process.execPath,
   environment = process.env,
   realpath = fs.realpathSync,
   exists = fs.existsSync,
 } = {}) => {
-  for (const candidate of npmCliCandidates({ nodeExecutable, environment })) {
+  const pathApi = platform === "win32" ? path.win32 : path;
+  for (const candidate of npmCliCandidates({ platform, nodeExecutable, environment })) {
     if (!exists(candidate)) continue;
     try {
       const resolved = realpath(candidate);
-      if (path.basename(resolved).toLowerCase() === "npm-cli.js") {
+      if (pathApi.isAbsolute(resolved) && pathApi.basename(resolved).toLowerCase() === "npm-cli.js") {
         return { executable: nodeExecutable, npmCliPath: resolved };
       }
     } catch {

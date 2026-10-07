@@ -144,6 +144,9 @@ publication tooling также остаются вне этого публичн
   exact `npm-cli.js`, найденный в стандартном absolute layout либо через
   проверенную realpath-ссылку `~/.local/bin/npm`, текущим Node и с `shell:false`;
   `npm`, `npm.cmd` и другой shell-wrapper не исполняются.
+  Windows дополнительно проверяет `nodejs` в absolute `ProgramW6432`,
+  `ProgramFiles` и `ProgramFiles(x86)` без расширения PATH; native bootstrap
+  проверяется Windows job по [контракту](docs/agent-workspace-runtime.md#browser-bootstrap).
 - Python discovery учитывает стандартную per-user установку Windows без
   ambient PATH, сохраняя canonical-path проверки и isolated startup. Не требуй
   all-users reinstall из-за отсутствия PATH; контракт и Windows fixture –

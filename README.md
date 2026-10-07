@@ -179,6 +179,15 @@ junction/symlink за свой фиксированный каталог. Probe 
 account остаются machine trust roots; это не защита от процесса с теми же
 правами пользователя. На macOS/Linux сохраняются прежние фиксированные пути.
 
+### Поиск npm для браузерных навыков
+
+Bootstrap использует standalone npm даже при собственном Node.js desktop host
+и очищенном PATH навыка. В Windows он проверяет стандартный каталог `nodejs`
+под `ProgramW6432`, `ProgramFiles` и `ProgramFiles(x86)`, затем запускает exact
+realpath `npm-cli.js` текущим Node с `shell:false`. Переустановка Node.js или
+расширение PATH ради такого layout не требуются.
+[Контракт и Windows regression](docs/agent-workspace-runtime.md#browser-bootstrap).
+
 ### Системное открытие браузера
 
 На Windows generic opener передаёт URI зарегистрированному системному handler

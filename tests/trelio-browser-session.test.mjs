@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import {
   BROWSER_SESSION_API_VERSION,
@@ -16,6 +16,7 @@ import {
   browserExecutableCandidates,
   defaultBrowserExecutable,
   inspectBrowserRuntime,
+  npmCliCandidates,
   readBrowserSessionBinding,
   resolveNpmInvocation,
   backgroundPersistentLaunchOptions,
@@ -392,6 +393,117 @@ test("shared browser runtime finds a user-local npm outside the skill PATH", {
       executable: hostNode,
       npmCliPath: fs.realpathSync(userNpmCli),
     });
+  } finally {
+    fs.rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("Windows browser bootstrap discovers standalone npm outside the sanitized skill PATH", () => {
+  const hostNode = "C:\\Desktop Host\\node.exe";
+  const npmCli = "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js";
+  const environment = { Path: "C:\\Desktop Host;C:\\Windows\\System32" };
+  assert.ok(npmCliCandidates({ platform: "win32", nodeExecutable: hostNode, environment }).includes(npmCli));
+  assert.deepEqual(resolveNpmInvocation({
+    platform: "win32",
+    nodeExecutable: hostNode,
+    environment,
+    exists: (candidate) => candidate === npmCli,
+    realpath: (candidate) => candidate,
+  }), { executable: hostNode, npmCliPath: npmCli });
+});
+
+test("Windows npm discovery handles case-insensitive installation roots and native Program Files", () => {
+  const hostNode = "C:\\Desktop Host\\node.exe";
+  const environment = {
+    Path: "C:\\Desktop Host;C:\\Windows\\System32",
+    ProgramW6432: "D:\\Program Files",
+    ProgramFiles: "E:\\Program Files (x86)",
+    "ProgramFiles(x86)": "F:\\Program Files (x86)",
+  };
+  for (const root of [environment.ProgramW6432, environment.ProgramFiles, environment["ProgramFiles(x86)"]]) {
+    const npmCli = path.win32.join(root, "nodejs", "node_modules", "npm", "bin", "npm-cli.js");
+    assert.deepEqual(resolveNpmInvocation({
+      platform: "win32",
+      nodeExecutable: hostNode,
+      environment,
+      exists: (candidate) => candidate === npmCli,
+      realpath: (candidate) => candidate,
+    }), { executable: hostNode, npmCliPath: npmCli });
+  }
+});
+
+test("Windows npm discovery rejects relative roots and wrappers without resolving an npm JavaScript entrypoint", () => {
+  const hostNode = "C:\\Desktop Host\\node.exe";
+  const environment = {
+    Path: ".;relative-bin;C:\\Standalone Node",
+    ProgramW6432: "relative-install",
+    ProgramFiles: ".\\Program Files",
+    "ProgramFiles(x86)": "..\\Program Files (x86)",
+    npm_execpath: "C:\\Standalone Node\\npm.cmd",
+  };
+  const candidates = npmCliCandidates({ platform: "win32", nodeExecutable: hostNode, environment });
+  assert.ok(candidates.every((candidate) => path.win32.isAbsolute(candidate)));
+  assert.ok(candidates.every((candidate) => !candidate.includes("relative")));
+  assert.throws(() => resolveNpmInvocation({
+    platform: "win32",
+    nodeExecutable: hostNode,
+    environment,
+    exists: () => true,
+    realpath: () => "C:\\Standalone Node\\npm.cmd",
+  }), (error) => error.code === "BROWSER_SESSION_NPM_REQUIRED");
+  const rootsWithoutDrive = npmCliCandidates({
+    platform: "win32",
+    nodeExecutable: hostNode,
+    environment: { ProgramW6432: "\\Program Files", ProgramFiles: "\\Program Files", "ProgramFiles(x86)": "\\Program Files (x86)" },
+  });
+  assert.ok(rootsWithoutDrive.every((candidate) => !candidate.includes("Program Files")));
+});
+
+test("Windows native bootstrap runs discovered npm-cli.js with the desktop Node and a path containing spaces", {
+  skip: process.platform !== "win32",
+}, () => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "trelio-browser-windows-npm-"));
+  const hostNode = path.join(temporary, "Desktop Host", "node.exe");
+  const programFiles = path.join(temporary, "Program Files");
+  const npmCli = path.join(programFiles, "nodejs", "node_modules", "npm", "bin", "npm-cli.js");
+  const root = path.join(temporary, "Browser Runtime");
+  try {
+    // A separate real Node executable reproduces the desktop host layout:
+    // it has no adjacent npm and PATH does not contain the standalone install.
+    fs.mkdirSync(path.dirname(hostNode), { recursive: true });
+    fs.copyFileSync(process.execPath, hostNode);
+    fs.mkdirSync(path.dirname(npmCli), { recursive: true });
+    fs.writeFileSync(npmCli, `
+      const assert = require("node:assert/strict");
+      const fs = require("node:fs");
+      const path = require("node:path");
+      const argv = process.argv.slice(2);
+      assert.equal(argv[0], "install");
+      assert.equal(argv[1], "--prefix");
+      assert.equal(argv.at(-1), "playwright-core@${PLAYWRIGHT_VERSION}");
+      const directory = path.join(argv[2], "node_modules", "playwright-core");
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ version: "${PLAYWRIGHT_VERSION}" }));
+      fs.writeFileSync(path.join(directory, "index.js"), "module.exports = {};");
+    `);
+    const invocation = resolveNpmInvocation({
+      nodeExecutable: hostNode,
+      environment: { Path: path.dirname(hostNode), ProgramFiles: programFiles },
+    });
+    assert.deepEqual(invocation, { executable: hostNode, npmCliPath: fs.realpathSync(npmCli) });
+    const result = bootstrapPlaywright({
+      root,
+      npmInvocation: invocation,
+      spawn: (executable, argv, options) => {
+        assert.equal(executable, hostNode);
+        assert.equal(argv[0], fs.realpathSync(npmCli));
+        assert.equal(options.shell, false);
+        assert.equal(options.windowsHide, true);
+        return spawnSync(executable, argv, options);
+      },
+    });
+    assert.equal(result.runtimeReady, true);
+    assert.equal(inspectBrowserRuntime({ root }).runtimeReady, true);
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

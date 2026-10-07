@@ -220,6 +220,9 @@ jobs:
       - name: Run Windows browser HTTP evidence regressions
         run: node tests/trelio-browser-http.test.mjs
 
+      - name: Run Windows browser bootstrap and npm discovery regressions
+        run: node tests/trelio-browser-session.test.mjs
+
       # Реальный зарегистрированный URI handler принимает synthetic query целиком.
       # Это проверяет ShellExecute, а не только mock argv или успешный spawn.
       - name: Run Windows browser URL handoff regressions

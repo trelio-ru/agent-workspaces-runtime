@@ -309,6 +309,37 @@ Codex/Claude Code, чтобы загрузить установленную ве
 указанной рабочей папки, отказ доступа и ошибка уже запущенного child сохраняют
 обычный путь ошибки; пользовательская отмена остаётся приоритетной.
 
+<a id="browser-bootstrap"></a>
+
+## Bootstrap браузерных навыков
+
+Общий `trelio-browser-session.mjs` устанавливает закреплённый `playwright-core`
+для browser-навыков. Desktop host может использовать собственный Node.js без
+npm, а окружение подписанного навыка сохраняет очищенный PATH. Наличие
+standalone Node/npm не требует добавления его каталога в PATH навыка.
+
+Поиск проверяет npm рядом с текущим Node, допустимые absolute PATH layouts и
+на Unix фиксированную realpath-ссылку `~/.local/bin/npm`. Windows дополнительно
+проверяет `nodejs\node_modules\npm\bin\npm-cli.js` под absolute installation
+roots `ProgramW6432`, `ProgramFiles` и `ProgramFiles(x86)`; имена environment
+variables нечувствительны к регистру. Без этих переменных используются стандартные
+`C:\Program Files` и `C:\Program Files (x86)`. Relative roots не разрешаются
+относительно workspace/cwd, произвольные каталоги не сканируются.
+
+После realpath допускается только absolute JavaScript entrypoint `npm-cli.js`.
+Он запускается текущим Node через отдельный argv с `shell:false`; `npm`,
+`npm.cmd` и другие shell wrappers не исполняются. Поиск и bootstrap сохраняют
+существующие bounds, pinned version/read-back и безопасную диагностику ошибок.
+Отсутствие Playwright в `doctor.runtimeReady` не доказывает отсутствие Node/npm.
+
+`tests/trelio-browser-session.test.mjs` проверяет Windows fixed layouts при
+очищенном PATH, mixed-case variables, native/x86 roots и отказ wrappers/relative
+paths. Windows job дополнительно запускает настоящий отдельный Node.exe с
+synthetic `npm-cli.js` в каталоге с пробелами: проверяются argv, отсутствие shell
+и готовность установленного synthetic Playwright без сети и provider login.
+Generic исправление совместимо с прежним browser-session ABI и не требует
+новой версии provider либо plugin; доставка происходит signed runtime release.
+
 ## Выбор scope
 
 Локальный Trelio-блок `AGENTS.md` задаёт company/control-plane binding и место
