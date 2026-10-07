@@ -50,8 +50,11 @@ publication tooling также остаются вне этого публичн
 - Startup private worker ограничен 20 секундами, каждый запрос после readiness –
   10; общий hook deadline не продлевается. ACL и DPAPI используют один процесс,
   сохраняя CurrentUser, entropy, read-back и отсутствие секретов в argv/env/log.
-- ACL worker использует собственные UTF-8 pipes без Console.In/Out, смены
-  code page и module/cmdlet pipeline. Запрос ждёт readiness под исходным deadline;
+- Production ACL/DPAPI использует подписанный native Win32 helper, без shell,
+  CLR, local compile и fallback. Hosted MSVC собирает x64/ia32/arm64; source SHA,
+  PE machine и binary hashes проверяются до упаковки. Tag использует только
+  exact PR-tested artifact; обычная учётная запись и ARM64 проверяются отдельно.
+- ACL worker использует собственные pipes без shell/CLR и смены code page. Запрос ждёт readiness под исходным deadline;
   startup/dispatch различаются, readiness не является подтверждением ACL.
 - Штатная Windows-диагностика запускает read-only readiness worker до чтения
   private state; при отказе state остаётся `not_checked`, без повторных ACL

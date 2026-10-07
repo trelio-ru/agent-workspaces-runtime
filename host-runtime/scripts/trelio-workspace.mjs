@@ -103,7 +103,7 @@ import {
 } from "./trelio-skill-admission.mjs";
 
 import {
-  assertRuntimeHookBudget, scopedPrivateAclWorker, createPrivateAclWorker, withPrivateProcessSession,
+  assertRuntimeHookBudget, scopedPrivateAclWorker, createPrivateAclWorker, withPrivateProcessSession, windowsPrivateWorkerOptions,
 } from "./trelio-hook-private-session.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1144,12 +1144,10 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   } = options;
   // Observe the cold worker before session/credential inspection starts any
   // ACL helpers. A failed readiness probe must not fan out more copies of the
-  // same failing PowerShell startup across all saved sessions.
+  // same failing native startup across all saved sessions.
   const hookStartup = includeHookStartup ? await hookStartupDiagnosis({
     platform: gitOptions.platform || process.platform,
-    executable: (gitOptions.platform || process.platform) === "win32"
-      ? resolveWindowsPowerShellExecutable() : null,
-    aclScript: WINDOWS_PRIVATE_ACL_SCRIPT,
+    ...((gitOptions.platform || process.platform) === "win32" ? windowsPrivateWorkerOptions() : {}),
     signal,
   }) : null;
   const skipPrivateInspection = hookStartup?.status === "attention" || signal?.aborted;
@@ -2188,7 +2186,7 @@ const runWindowsBridgeDpapi = async (origin, mode, input, {
   environment = process.env,
 } = {}) => {
   const invocation = buildWindowsBridgeDpapiInvocation(origin, mode, environment);
-  const workerOptions = { executable: invocation.executable, aclScript: WINDOWS_PRIVATE_ACL_SCRIPT, environment };
+  const workerOptions = { ...windowsPrivateWorkerOptions(), environment };
   const scopedWorker = scopedPrivateAclWorker(workerOptions);
   const worker = scopedWorker || createPrivateAclWorker(workerOptions);
   // Reuse only the invocation's process, never a credential or ACL result.
@@ -2411,7 +2409,7 @@ export const resolveWindowsPowerShellExecutable = (environment = process.env) =>
 };
 
 export const hardenWindowsPrivatePath = async (targetPath, targetKind) => {
-  const workerOptions = { executable: resolveWindowsPowerShellExecutable(), aclScript: WINDOWS_PRIVATE_ACL_SCRIPT };
+  const workerOptions = windowsPrivateWorkerOptions();
   const scopedWorker = scopedPrivateAclWorker(workerOptions);
   const worker = scopedWorker || createPrivateAclWorker(workerOptions);
   try { await worker.harden(targetPath, targetKind); }

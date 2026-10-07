@@ -1,14 +1,12 @@
 /**
  * Read-only Windows startup probe used by the standard installation diagnostic.
- * It never opens a session or asks for a proof. The production ACL function is
- * DEFINED but never invoked. No target
- * path is sent to the worker, so no private state/ACL/credential is accessed.
+ * It never opens a session or asks for a proof. The native worker only emits
+ * readiness; no path/request is sent and no private state/ACL/credential is accessed.
  */
 import { spawn } from 'node:child_process';
 import { get } from 'node:https';
 import os from 'node:os';
-import path from 'node:path';
-import { buildPrivateAclWorkerScript, PRIVATE_PROCESS_TIMEOUT_MILLISECONDS, PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS } from './trelio-hook-private-session.mjs';
+import { PRIVATE_PROCESS_TIMEOUT_MILLISECONDS, PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS } from './trelio-hook-private-session.mjs';
 
 const SAFE_CODES = new Set(['ENOENT', 'EACCES', 'EPERM', 'ECONNRESET', 'ECONNREFUSED',
   'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT',
@@ -42,6 +40,9 @@ export const probeProcess = ({ executable, args, environment = process.env,
   };
   const cancel = () => { result.status = 'cancelled'; stop(); };
   if (signal?.aborted) { result.status = 'cancelled'; finish(); return; }
+  // Include synchronous spawn time; Node may not dispatch a timer until the
+  // OS returns. The readiness callback also checks elapsed time explicitly.
+  timer = setTimeout(() => { result.status = 'timeout'; line = ''; stop(); }, timeoutMs);
   try {
     child = spawnProcess(executable, args, { env: environment, shell: false,
       windowsHide: true, stdio: ['pipe', 'pipe', captureStderr ? 'pipe' : 'ignore'] });
@@ -66,7 +67,9 @@ export const probeProcess = ({ executable, args, environment = process.env,
     const lines = line.split('\n'); line = lines.pop();
     for (const item of lines) {
       if (item.trim() !== '{"ready":true}') continue;
-      result.status = 'ready'; result.readyMs = elapsed(); line = '';
+      result.readyMs = elapsed(); line = '';
+      if (result.readyMs >= timeoutMs) { result.status = 'timeout'; stop(); return; }
+      result.status = 'ready';
       clearTimeout(timer);
       child.stdin.end();
       // Closing stdin normally stops the empty production request loop. Bound
@@ -82,7 +85,6 @@ export const probeProcess = ({ executable, args, environment = process.env,
     if (result.status === 'waiting') result.status = 'exited_before_ready';
     finish();
   });
-  timer = setTimeout(() => { result.status = 'timeout'; line = ''; stop(); }, timeoutMs);
   signal?.addEventListener('abort', cancel, { once: true });
   if (signal?.aborted) cancel();
   if (endInput) child.stdin.end();
@@ -144,53 +146,34 @@ export const probePublicHttpsWithRetries = async ({ signal, probe = probePublicH
   return attempts;
 };
 
-export const diagnoseWindowsHookStartup = async ({ executable, aclScript,
+export const diagnoseWindowsHookStartup = async ({ executable, args = [],
   platform = process.platform, signal, runProcess = probeProcess,
   networkProbe = probePublicHttpsWithRetries, environment = process.env } = {}) => {
   if (platform !== 'win32') return { status: 'not_applicable' };
-  const argumentsFor = (script) => ['-NoLogo', '-NoProfile', '-NonInteractive',
-    '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
-  const worker = buildPrivateAclWorkerScript(aclScript);
-  const marker = `$s=[Console]::OpenStandardOutput(); $b=[Text.Encoding]::ASCII.GetBytes('{"ready":true}'+[char]10); $s.Write($b,0,$b.Length); $s.Flush()`;
   const report = { schemaVersion: 1, status: 'ready', platform,
     osRelease: os.release(), nodeVersion: process.version, nodeArch: process.arch,
+    workerKind: 'windows_native',
     hookPrivateProcessTimeoutMs: PRIVATE_PROCESS_TIMEOUT_MILLISECONDS,
     hookStartupTimeoutMs: PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS,
-    note: 'Readiness only; no ACL request or protected MCP call. Sequential local probes may benefit from warm caches. A timeout does not identify the cause.',
+    note: 'Readiness only; no ACL request or protected MCP call. A timeout does not identify the cause.',
     probes: {} };
-  // Public network measurements run independently of the local worker. A
-  // country/network hypothesis must not conflate these two different stages.
-  const network = networkProbe({ signal });
-  const run = async (name, overrides = {}) => {
-    const options = { executable, args: argumentsFor(worker), environment,
-      timeoutMs: 5_000, signal, ...overrides };
-    report.probes[name] = { timeoutMs: options.timeoutMs, ...await runProcess(options) };
+  const run = async (name, options) => {
+    report.probes[name] = { timeoutMs: options.timeoutMs,
+      ...await runProcess({environment, signal, ...options}) };
   };
-  // Run the real worker FIRST, before doctor reads private files or warms
-  // PowerShell. This longer diagnostic budget can observe a late readiness
-  // reply without extending the production startup or overall hook deadline.
-  await run('workerOpenInput', { timeoutMs: 25_000 });
+  // Doctor launches the same signed native executable as ACL/DPAPI. No shell,
+  // compiler, private input or fallback process is needed to observe readiness.
+  await run('workerOpenInput', {executable, args, timeoutMs: 25_000});
+  await run('nodePipe', {executable:process.execPath,
+    args:['-e', 'console.log(JSON.stringify({ready:true}));process.stdin.resume()'], timeoutMs:3_000});
   const baseline = report.probes.workerOpenInput;
-  const baselineReady = baseline.status === 'ready' && baseline.exitCode === 0
-    && baseline.readyMs < PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS;
-  await run('powershellMarker', { args: argumentsFor(marker), captureStderr: true, timeoutMs: 15_000 });
-  await run('nodePipe', { executable: process.execPath,
-    args: ['-e', 'console.log(JSON.stringify({ready:true}));process.stdin.resume()'], timeoutMs: 3_000 });
-  if (!baselineReady && !signal?.aborted) {
-    await run('workerPipedError', { captureStderr: true });
-    await run('workerClosedInput', { endInput: true });
-    // Child-only module environment comparison. No user/system configuration,
-    // certificate checking, antivirus, ACL, trust or credentials are changed.
-    const localModules = Object.fromEntries(Object.entries(environment)
-      .filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH'));
-    localModules.PSModulePath = path.win32.join(path.win32.dirname(executable), 'Modules');
-    await run('workerLocalModules', { environment: localModules });
-  }
-  // Short auxiliary controls may time out on a slow engine even though the
-  // actual worker met its startup budget. They are evidence, not admission.
-  report.status = baselineReady && report.probes.nodePipe.status === 'ready' && report.probes.nodePipe.exitCode === 0
+  report.status = baseline.status === 'ready' && baseline.exitCode === 0
+    && baseline.readyMs < PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS
+    && report.probes.nodePipe.status === 'ready' && report.probes.nodePipe.exitCode === 0
     ? 'ready' : 'attention';
-  report.publicHttps = await network;
+  // Measure network AFTER synchronous spawn: otherwise a blocked event loop
+  // artificially inflates DNS/connect timings with local process startup.
+  report.publicHttps = await networkProbe({signal});
   report.networkNote = 'Native Node HTTPS may use a different proxy from desktop MCP. Public reachability is independent of worker readiness; no body, headers, credentials or protected content are collected.';
   return report;
 };

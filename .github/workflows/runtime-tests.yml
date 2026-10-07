@@ -16,6 +16,46 @@ env:
   TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT: ${{ github.workspace }}/_contracts/agent-workspaces/plugins/trelio-agent-workspaces
 
 jobs:
+  windows-private-build:
+    if: github.event_name == 'pull_request'
+    name: Build native Windows private worker
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Build deterministic native workers
+        shell: pwsh
+        run: |
+          ./scripts/build-windows-private-worker.ps1
+          Copy-Item host-runtime/scripts/native-private-process/bin/metadata.json "$env:RUNNER_TEMP/native-first.json"
+          ./scripts/build-windows-private-worker.ps1
+          node -e 'const fs=require("fs"),a=require("assert/strict");const read=p=>JSON.parse(fs.readFileSync(p,"utf8").replace(/^\uFEFF/,""));a.deepEqual(read(process.argv[1]),read(process.argv[2]))' "$env:RUNNER_TEMP/native-first.json" host-runtime/scripts/native-private-process/bin/metadata.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-private-worker
+          path: host-runtime/scripts/native-private-process/bin
+          if-no-files-found: error
+
+  windows-native-arm:
+    if: github.event_name == 'pull_request'
+    name: Native Windows private worker (arm64)
+    needs: windows-private-build
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-private-worker
+          path: host-runtime/scripts/native-private-process/bin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          architecture: arm64
+      - name: Verify native ARM64 ACL and DPAPI
+        run: node tests/trelio-windows-native-private.test.mjs
+
   git-main-guard:
     if: github.event_name == 'pull_request'
     name: Canonical main Git guard
@@ -31,6 +71,7 @@ jobs:
   node-tests:
     if: github.event_name == 'pull_request'
     name: Runtime tests (${{ matrix.os }})
+    needs: windows-private-build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -45,6 +86,11 @@ jobs:
 
       # Cross-repository tests consume the real stable shell. The checkout is
       # read-only test input and is never copied into a runtime package.
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-private-worker
+          path: host-runtime/scripts/native-private-process/bin
+
       - name: Check out plugin contract
         uses: actions/checkout@v4
         with:
@@ -93,6 +139,7 @@ jobs:
           node tests/trelio-hook-tool-identity.test.mjs
           node tests/trelio-hook-private-session.test.mjs
           node tests/trelio-windows-startup-diagnostic.test.mjs
+          node tests/trelio-windows-native-private.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
           node tests/trelio-runtime-session.test.mjs
           node tests/trelio-instruction-reuse.test.mjs
@@ -116,11 +163,17 @@ jobs:
   windows-acl:
     if: github.event_name == 'pull_request'
     name: Windows runtime and private ACL
+    needs: windows-private-build
     runs-on: windows-latest
 
     steps:
       - name: Check out runtime repository
         uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-private-worker
+          path: host-runtime/scripts/native-private-process/bin
 
       - name: Check out plugin contract
         uses: actions/checkout@v4
@@ -211,6 +264,9 @@ jobs:
       - name: Run Windows persisted hook settings diagnostics
         run: node --test --test-name-pattern="persisted hook" tests/trelio-codex-routing.test.mjs
 
+      - name: Run native Windows private process regressions
+        run: node tests/trelio-windows-native-private.test.mjs
+
       - name: Run Windows hook private process regressions
         run: node tests/trelio-hook-private-session.test.mjs
 
@@ -235,7 +291,10 @@ jobs:
           node-version: 24.21.0
 
       - name: Run slow-start private worker on Node.js 24
-        run: node tests/trelio-hook-private-session.test.mjs
+        run: |
+          node tests/trelio-hook-private-session.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-windows-native-private.test.mjs
 
       - name: Run Windows ACL regression as a standard user
         shell: pwsh
@@ -251,6 +310,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
+      - name: Download the exact PR-tested native binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-private-worker
+          path: host-runtime/scripts/native-private-process/bin
+          run-id: ${{ needs.verified-source.outputs.run-id }}
+          github-token: ${{ github.token }}
       - name: Build exact tagged runtime
         shell: bash
         run: node scripts/build-host-runtime-package.mjs --runtime-version "${GITHUB_REF_NAME#v}" --output "$RUNNER_TEMP/host-runtime.skillpkg"
@@ -261,11 +327,14 @@ jobs:
           if-no-files-found: error
 
   verified-source:
+    outputs:
+      run-id: ${{ steps.gate.outputs.run-id }}
     name: Verify exact hosted PR gate
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Require complete successful PR gate for this exact SHA
+        id: gate
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -273,4 +342,6 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=pull_request&status=success" > "$RUNNER_TEMP/runs.json"
           node -e 'const fs=require("fs");const runs=JSON.parse(fs.readFileSync(process.argv[1])).workflow_runs.filter(r=>r.head_sha===process.env.GITHUB_SHA&&r.event==="pull_request"&&r.conclusion==="success");if(!runs.length)throw Error("Exact successful PR gate is required");fs.writeFileSync(process.argv[2],String(runs[0].id))' "$RUNNER_TEMP/runs.json" "$RUNNER_TEMP/run-id"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$(cat "$RUNNER_TEMP/run-id")/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
-          node -e 'const fs=require("fs");const jobs=JSON.parse(fs.readFileSync(process.argv[1])).jobs;for(const name of ["Canonical main Git guard","Runtime tests (ubuntu-latest)","Runtime tests (macos-latest)","Windows runtime and private ACL"])if(!jobs.some(j=>j.name===name&&j.conclusion==="success"))throw Error("Incomplete exact OS gate: "+name)' "$RUNNER_TEMP/jobs.json"
+          node -e 'const fs=require("fs");const jobs=JSON.parse(fs.readFileSync(process.argv[1])).jobs;for(const name of ["Canonical main Git guard","Runtime tests (ubuntu-latest)","Runtime tests (macos-latest)","Windows runtime and private ACL","Build native Windows private worker","Native Windows private worker (arm64)"])if(!jobs.some(j=>j.name===name&&j.conclusion==="success"))throw Error("Incomplete exact OS gate: "+name)' "$RUNNER_TEMP/jobs.json"
+
+          echo "run-id=$(cat "$RUNNER_TEMP/run-id")" >> "$GITHUB_OUTPUT"

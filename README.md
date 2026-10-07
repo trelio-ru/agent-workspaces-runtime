@@ -186,21 +186,10 @@ CLI, worker, control transport и closed status. Observer не делает retr
 
 ### Диагностика Windows worker до готовности
 
-`diagnose_trelio_installation(clientKind="codex"|"claude-code", intent="diagnostics")`
-и `bridge doctor --json` на Windows автоматически включают `hookStartup`.
-Используется код фактически загруженного signed runtime, без отдельного скрипта,
-поиска в cache и изменения plugin shell. Onboarding и folder onboarding эти
-дополнительные пробы не запускают; на других ОС возвращается `not_applicable`.
-
-`windows_acl.worker_startup` означает отсутствие подтверждения готовности до
-лимита, а не доказанную ошибку CreateProcess или доступа к Trelio. Первым, до
-чтения private state, запускается настоящий worker с открытым stdin и прежним
-stderr. Затем проверяются минимальный PowerShell marker и Node pipe. Только
-при неготовом или слишком медленном worker сравниваются piped stderr, закрытый
-stdin и системный PSModulePath дочернего процесса. ACL-функция лишь определяется,
-запрос ей не отправляется. Новый probe не читает private state/credentials,
-не регистрирует runtime session и не создаёт proof. Настройки, ACL, сертификаты,
-антивирус, OAuth и pairing не меняются.
+Штатный doctor до чтения private state измеряет readiness установленного native
+worker и Node pipe control. Запросы ACL/DPAPI ему не отправляются. Проба не читает
+credentials, не регистрирует runtime session и не создаёт proof; настройки,
+ACL, сертификаты, антивирус, OAuth и pairing не меняются.
 
 При `hookStartup.status=attention` обычное чтение private sessions/connection
 пропускается с `not_checked`, без нулевых counters или вывода об отсутствии pairing.
@@ -208,23 +197,23 @@ MCP возвращает `REVIEW_WINDOWS_HOOK_STARTUP_DIAGNOSTIC`; следую�
 не предлагается до разбора локального отказа. Успех readiness сам по себе не
 доказывает ACL, dispatch, trust или успех исходного MCP-вызова.
 
-Параллельный независимый публичный HTTPS GET к `https://trelio.ru/api/health`
+Отдельный публичный HTTPS GET к `https://trelio.ru/api/health`
 сохраняет времена DNS/TCP/TLS, HTTP status либо закрытый error code. Redirects
 не исполняются, заголовки/тело не собираются, bearer/cookies не передаются.
 Native Node route может отличаться от proxy desktop MCP. Ответ подтверждает
 только достижимость public endpoint; сетевой отказ сам по себе не объясняет
 локальное зависание до readiness и не разрешает OAuth/pairing recovery.
 
-Исходный worker получает 25 секунд диагностического времени; готовность после
-штатного 20-секундного startup deadline остаётся `attention`. Поля
-`hookStartupTimeoutMs` и `hookPrivateProcessTimeoutMs` разделяют запуск и запрос.
-Минимальный PowerShell marker получает 15 секунд, дополнительные сравнительные
-PowerShell-пробы – 5, Node – 3; cleanup каждого child – до 1,5 секунды.
-Короткая сравнительная проба не переопределяет успешную готовность настоящего
-worker в его бюджете. Локальная последовательность имеет до 58 секунд ожиданий
-плюс bounded cleanup; синхронный OS spawn может задержать JavaScript timers. Отмена
-MCP останавливает children. HTTPS – до четырёх попыток по 3,5 секунды с паузами
-300/600/1000 мс только при transport/429/5xx. Общий срок hook не продлевается.
+Doctor запускает exact native Windows helper из подписанного package и отдельный
+Node pipe control. `workerKind=windows_native` явно называет реализацию; PowerShell
+больше не входит в обязательные пробы или ACL/DPAPI путь. Readiness не обращается
+к private state и не выполняет ACL/DPAPI. Worker получает 25 секунд диагностического
+времени, Node – 3; поздняя готовность за пределами штатных 20 секунд остаётся
+`attention`. `hookStartupTimeoutMs` и `hookPrivateProcessTimeoutMs` разделяют запуск
+и запрос. Время OS spawn включено в deadline; поздний callback не считается успехом.
+Отмена MCP завершает children. Public HTTPS измеряется после локальных проб, чтобы
+синхронный spawn не искажал DNS/connect timings; до четырёх попыток по 3,5 секунды
+с паузами 300/600/1000 мс только при transport/429/5xx. Общий срок hook не продлевается.
 
 Отчёт содержит измерения, версии ОС/Node и закрытые категории без raw output,
 paths или environment. Последующие пробы могут пользоваться прогретыми caches;
@@ -294,9 +283,12 @@ exit `2` в `1`; Codex не обязан блокировать tool при та
 вход сохраняют прежний stderr/exit `2`; ошибка launcher до запуска runtime
 находится вне этого обработчика.
 
-Windows hook и отдельная bridge-команда используют один PowerShell transport
-для последовательных ACL/DPAPI операций через собственные UTF-8 stdin/stdout pipes: он не меняет кодовую
-страницу консоли, не использует Console.In/Out и PowerShell module/cmdlet pipeline.
+Windows hook и отдельная bridge-команда используют один native Win32 helper
+для последовательных ACL/DPAPI операций через anonymous stdin/stdout pipes.
+C++ helper не запускает PowerShell/CLR, не требует компилятора на компьютере
+пользователя и не меняет code page. Отсутствующий или запрещённый executable
+завершается fail-closed без shell fallback. Legacy PowerShell builder остаётся
+только для явно вызванных compatibility/fault-injection tests.
 Фиксированный ASCII-протокол передаёт id, kind и base64 данные; readiness
 подтверждается до передачи первого запроса. DPAPI CurrentUser получает
 origin-bound entropy и bytes только через anonymous pipes; buffers очищаются,
@@ -306,7 +298,7 @@ protect по-прежнему проверяется обратным unprotect 
 результат не кешируется. Transport закрывается при завершении invocation и не
 переиспользуется между hooks/командами. Однократный startup ограничен 20 секундами;
 после readiness каждый ACL/DPAPI запрос имеет отдельный лимит 10 секунд. DPAPI
-не запускает второй PowerShell. ACL, credentials и сеть дополнительно разделяют непродлеваемый
+вызывает CryptProtectData/CryptUnprotectData с UI_FORBIDDEN и без LOCAL_MACHINE. ACL, credentials и сеть дополнительно разделяют непродлеваемый
 внутренний срок (22 секунды для PreToolUse, 8 для SessionStart, 2 для SessionEnd).
 Тайм-аут отменяет subprocess и HTTP, освобождает registration lock и возвращает
 JSON deny до внешнего лимита 30 секунд, оставляя время для Windows launcher.
@@ -471,3 +463,18 @@ fixture или log.
 CLI оставляет прежнюю подпись. Малые обсуждения без Run не регистрируются.
 Bounds, private Run binding и E2EE – в
 [контракте runtime](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
+## Сборка native Windows private helper
+
+`host-runtime/scripts/native-private-process/PrivateProcess.cpp` – единственный
+исходник Win32 ACL/DPAPI worker. Hosted Windows выполняет
+`scripts/build-windows-private-worker.ps1`: MSVC, static CRT, x64/ia32/arm64,
+двойная deterministic сборка. Binaries не коммитятся и не компилируются на устройстве.
+Все OS gates получают один artifact `windows-private-worker`; x64/ia32 и ARM64
+исполняются на соответствующих hosted runners, обычная Windows учётная запись
+отдельно проверяет права и DPAPI. Проверяются legacy ciphertext в обоих направлениях,
+reparse points, malformed/oversized input и отсутствие plaintext в ошибках.
+
+Tag workflow загружает native artifact только из успешного PR gate exact SHA.
+Package builder требует metadata с SHA исходника, размером/SHA и PE machine
+каждого binary; missing/stale input блокирует сборку. Готовые helpers входят
+в общий подписанный runtime и проверяются stable loader вместе с его файлами.

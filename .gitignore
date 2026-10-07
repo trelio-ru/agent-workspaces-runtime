@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 *.skillpkg
 node_modules/
+/host-runtime/scripts/native-private-process/bin/

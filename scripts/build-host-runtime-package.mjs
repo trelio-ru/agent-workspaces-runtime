@@ -13,6 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildAgentSkillPackage } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { validateWindowsPrivateWorker } from "./validate-windows-private-worker.mjs";
 
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT_SOURCE = path.join(REPOSITORY_ROOT, "host-runtime", "scripts");
@@ -40,8 +41,18 @@ const parseArguments = (rawArguments) => {
 };
 
 const copyRuntimeSource = async (stagingDirectory) => {
+  const nativeRoot = path.join(SCRIPT_SOURCE, "native-private-process");
+  await validateWindowsPrivateWorker(nativeRoot);
   const targetScripts = path.join(stagingDirectory, "scripts");
   await fs.mkdir(targetScripts, { recursive: true });
+  // The hosted Windows build is an immutable input, validated against source
+  // and each PE machine/hash before it enters the signed all-platform package.
+  for (const relative of ["PrivateProcess.cpp", "bin/metadata.json",
+    ...["x64", "ia32", "arm64"].map(arch => `bin/${arch}/trelio-private-process.exe`)]) {
+    const target = path.join(targetScripts, "native-private-process", relative);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(path.join(nativeRoot, relative), target);
+  }
   const entries = await fs.readdir(SCRIPT_SOURCE, { withFileTypes: true });
 
   for (const entry of entries) {

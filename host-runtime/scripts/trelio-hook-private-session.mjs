@@ -5,14 +5,22 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const hookScope = new AsyncLocalStorage();
 const stageScope = new AsyncLocalStorage();
 export const PRIVATE_PROCESS_TIMEOUT_MILLISECONDS = 10_000;
-// Windows may spend 10–13 seconds initializing an otherwise healthy engine.
-// Startup is paid once, independently of the per-operation bound. The enclosing
+// Startup is bounded once, independently of each operation. Production uses
+// the signed native helper, with no shell/CLR initialization. The enclosing
 // hook still has its original non-sliding 22/8/2-second deadline.
 export const PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS = 20_000;
+export const windowsPrivateWorkerOptions = (arch = process.arch) => {
+  if (!["x64", "ia32", "arm64"].includes(arch)) throw new Error("Unsupported Windows private worker architecture.");
+  return {
+    executable: fileURLToPath(new URL(`./native-private-process/bin/${arch}/trelio-private-process.exe`, import.meta.url)),
+    args: [],
+  };
+};
 const MAX_PRIVATE_VALUE_BYTES = 1024 * 1024;
 const MAX_PRIVATE_REPLY_BYTES = 1_400_000;
 
@@ -137,11 +145,11 @@ while ($null -ne ($line = $reader.ReadLine())) {
 `;
 
 export const createPrivateAclWorker = ({
-  executable, aclScript, environment = process.env, signal,
+  executable, args, aclScript, environment = process.env, signal,
   spawnProcess = spawn, requestTimeoutMilliseconds = PRIVATE_PROCESS_TIMEOUT_MILLISECONDS,
   startupTimeoutMilliseconds = PRIVATE_PROCESS_STARTUP_TIMEOUT_MILLISECONDS,
 }) => {
-  let child, failure, startupTimer;
+  let child, failure, startupTimer, startupDeadline;
   let sequence = 0, closing = false, ready = false;
   let output = Buffer.alloc(0);
   const pending = new Map();
@@ -179,6 +187,12 @@ export const createPrivateAclWorker = ({
     try { reply = JSON.parse(line.toString("utf8")); } catch { fail(); return; }
     if (Object.hasOwn(reply ?? {}, "ready")) {
       if (ready || reply.ready !== true || Object.keys(reply).length !== 1) { fail(); return; }
+      // A synchronous OS spawn can delay JS timers. Late output must not win
+      // a race against the already-expired absolute startup deadline.
+      if (performance.now() >= startupDeadline) {
+        failure = budgetFailure({ ...pending.values().next().value, phase: "worker_startup", timeout: "private_process" });
+        fail(); return;
+      }
       ready = true; clearTimeout(startupTimer);
       for (const entry of pending.values()) dispatch(entry);
       return;
@@ -218,11 +232,15 @@ export const createPrivateAclWorker = ({
     if (signal?.aborted) { fail(); throw failure; }
     // Arm BEFORE spawn: synchronous process creation is part of the startup
     // allowance too. It is not repeated per pending request or readiness frame.
+    startupDeadline = performance.now() + startupTimeoutMilliseconds;
     startupTimer = setTimeout(() => {
       failure = budgetFailure({ ...pending.values().next().value, phase: "worker_startup", timeout: "private_process" }); fail();
     }, startupTimeoutMilliseconds);
     try {
-      child = spawnProcess(executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+      // Legacy PowerShell script transport remains available only to explicit
+      // comparison/compatibility tests. Production passes the signed native
+      // executable with an empty argv, and never falls back after a failure.
+      child = spawnProcess(executable, args ?? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
         "-EncodedCommand", Buffer.from(buildPrivateAclWorkerScript(aclScript), "utf16le").toString("base64")], {
         env: environment, shell: false, windowsHide: true,
         stdio: ["pipe", "pipe", "ignore"], ...(signal ? { signal } : {}),

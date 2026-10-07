@@ -3,7 +3,8 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { diagnoseWindowsHookStartup, probeProcess, probePublicHttps, probePublicHttpsWithRetries } from '../host-runtime/scripts/trelio-hook-startup-diagnostic.mjs';
-import { diagnoseLocalPrerequisites, WINDOWS_PRIVATE_ACL_SCRIPT, resolveWindowsPowerShellExecutable } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { windowsPrivateWorkerOptions } from '../host-runtime/scripts/trelio-hook-private-session.mjs';
+import { diagnoseLocalPrerequisites } from '../host-runtime/scripts/trelio-workspace.mjs';
 
 test('startup diagnostic returns only measurements and bounds stdout/stderr without disclosing them', async () => {
   const output = await probeProcess({executable: process.execPath, captureStderr: true,
@@ -94,7 +95,7 @@ test('public probe retries transport, rate-limit and server failures only with b
 
 test('standard Windows diagnosis separates startup and network, uses no ACL input and bounds comparisons', async () => {
   const calls = [];
-  const report = await diagnoseWindowsHookStartup({ platform: 'win32', executable: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  const report = await diagnoseWindowsHookStartup({ platform: 'win32', executable: 'native-worker.exe', args: [],
     aclScript: 'throw "ACL must never run"', environment: { PSModulePath: 'private', PsModulePath: 'other-private' },
     networkProbe: async () => [{status:'http_response',httpStatus:200}],
     runProcess: async options => {
@@ -103,12 +104,11 @@ test('standard Windows diagnosis separates startup and network, uses no ACL inpu
         : { status:'ready',readyMs:2,exitCode:0 };
     } });
   assert.equal(report.status, 'attention', 'a worker ready after the real hook deadline remains blocked');
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].args, []);
+  assert.equal(report.workerKind, "windows_native");
   assert.equal(calls[0].timeoutMs, 25000);
   assert.equal(calls[0].endInput, undefined); assert.equal(calls[0].captureStderr, undefined);
-  assert.equal(calls[3].captureStderr, true); assert.equal(calls[4].endInput, true);
-  assert.deepEqual(Object.keys(calls[5].environment), ['PSModulePath']);
-  assert.equal(calls[5].environment.PSModulePath, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
   for (const call of calls) assert.equal(call.input, undefined);
   assert.doesNotMatch(JSON.stringify(report), /other-private|ACL must never|C:\\\\Windows/);
 });
@@ -133,8 +133,7 @@ test('non-Windows standard diagnosis creates no worker or network request', asyn
 test('Windows report probes the actual installed worker without any ACL request or business network', {
   skip: process.platform !== 'win32',
 }, async () => {
-  const report = await diagnoseWindowsHookStartup({executable:resolveWindowsPowerShellExecutable(),
-    aclScript:WINDOWS_PRIVATE_ACL_SCRIPT, networkProbe:async()=>[]});
+  const report = await diagnoseWindowsHookStartup({...windowsPrivateWorkerOptions(), networkProbe:async()=>[]});
   assert.deepEqual(report.publicHttps, []);
   for (const [name, result] of Object.entries(report.probes)) {
     assert.equal(result.status, 'ready', name + ': ' + JSON.stringify(result));
@@ -146,30 +145,21 @@ test('Windows report probes the actual installed worker without any ACL request 
     assert.ok(report.probes[name].stdoutBytes <= 16, name);
   }
   assert.doesNotMatch(JSON.stringify(report), /runtimeSessionProof|Bearer|C:\\\\Users/);
-  // Force only the comparison branch while still executing every real probe.
-  // This covers EOF/stderr/module-path behavior even on a fast hosted machine.
-  let first = true;
-  const comparisons = await diagnoseWindowsHookStartup({executable:resolveWindowsPowerShellExecutable(),
-    aclScript:WINDOWS_PRIVATE_ACL_SCRIPT, networkProbe:async()=>[], runProcess:async options => {
-      const result = await probeProcess(options);
-      if (first) { first = false; return {...result,readyMs:21000}; }
-      return result;
-    }});
-  assert.equal(comparisons.status, 'attention');
-  for (const name of ['workerPipedError','workerClosedInput','workerLocalModules']) {
-    assert.equal(comparisons.probes[name].status, 'ready', name);
-    assert.equal(comparisons.probes[name].exitCode, 0, name);
-    assert.ok(comparisons.probes[name].stdoutBytes <= 16, name);
-  }
-});
+ });
 
-
-test('a 13-second worker startup fits the new budget despite a short auxiliary probe timeout', async () => {
-  let index=0;
-  const report=await diagnoseWindowsHookStartup({platform:'win32',executable:'fixture',aclScript:'',networkProbe:async()=>[],
-    runProcess:async()=>++index===1 ? {status:'ready',readyMs:13000,exitCode:0}
-      : index===2 ? {status:'timeout',readyMs:null,exitCode:null} : {status:'ready',readyMs:10,exitCode:0}});
+test('native readiness inside the budget is accepted', async () => {
+  const report=await diagnoseWindowsHookStartup({platform:'win32',executable:'fixture',networkProbe:async()=>[],
+    runProcess:async()=>({status:'ready',readyMs:10,exitCode:0})});
   assert.equal(report.status,'ready');
   assert.equal(report.hookStartupTimeoutMs,20000);
   assert.equal(report.hookPrivateProcessTimeoutMs,10000);
+});
+
+test('synchronous spawn time counts against the diagnostic budget', async () => {
+  const result = await probeProcess({executable:process.execPath, args:['-e','console.log(JSON.stringify({ready:true}));process.stdin.resume()'],
+    timeoutMs:50, spawnProcess:(...args) => {
+      const start=performance.now(); while(performance.now()-start<100) { /* synthetic blocked spawn */ }
+      return spawn(...args);
+    }});
+  assert.equal(result.status,'timeout');
 });

@@ -1,0 +1,2 @@
+# Bind hosted PE provenance to identical source bytes on every build/test OS.
+host-runtime/scripts/native-private-process/PrivateProcess.cpp text eol=lf
