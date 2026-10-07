@@ -23,6 +23,7 @@ import {
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
+import { windowsPrivateWorkerOptions } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 
 // The immutable plugin now ships only the stable loader. Timing and lock
 // semantics belong to the independently released host runtime, so this test
@@ -359,9 +360,10 @@ test("stalled Windows local ACL returns deny and cleans the lock before a same-c
     import {syncBuiltinESMExports} from 'node:module';
     const actualSpawn = childProcess.spawn;
     childProcess.spawn = (executable, args, options) => {
-      const encoded = args[args.indexOf('-EncodedCommand') + 1];
-      if (args.includes('-EncodedCommand') &&
-          Buffer.from(encoded, 'base64').toString('utf16le').includes('Invoke-TrelioPrivateAcl')) {
+      // Inject only at the exact production native executable. Matching a
+      // PowerShell command would silently stop exercising the timeout path.
+      if (executable === ${JSON.stringify(windowsPrivateWorkerOptions().executable)}) {
+        if (args.length !== 0) throw new Error('Unexpected native worker argv');
         return actualSpawn(process.execPath, ['-e', ${JSON.stringify(fakeAclProcess)}], options);
       }
       return actualSpawn(executable, args, options);
