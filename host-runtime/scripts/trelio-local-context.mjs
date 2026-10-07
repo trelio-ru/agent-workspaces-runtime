@@ -1,3 +1,4 @@
+import { assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
@@ -7046,7 +7047,7 @@ const postProposalRequest = async ({
   `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/proposals/${endpoint}`,
   {
     method: "POST",
-    headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1" },
+    headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1", "x-trelio-task-review-completion": "1" },
     body: JSON.stringify(body),
     signal,
   },
@@ -7461,6 +7462,46 @@ export const prepareLocalProposalBundle = async ({
       blocks: preparedBlocks,
     },
   };
+};
+
+/** All semantic decisions stay in local memory. The read-only server request
+ * carries only opaque refs; returned descriptors are bound to the selected
+ * company, and every decision is validated before the first encrypted upload.
+ * A lost preparation response consumes the plan and is never blindly retried. */
+export const prepareLocalTaskReviewCompletions = async ({ companySlug, payload, resolve }) => {
+  if (!Array.isArray(payload?.completions) || !payload.completions.length || payload.completions.length > 5
+    || Object.keys(payload).some((key) => key !== "completions")) {
+    throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Use completions without blocks or other bundle fields.");
+  }
+  const refs = payload.completions.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || Object.keys(entry).some((key) => !["completionRef", "decisions"].includes(key))
+      || typeof entry.completionRef !== "string" || !TASK_REVIEW_COMPLETION_REF_PATTERN.test(entry.completionRef)) {
+      throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Invalid completion input.");
+    }
+    return entry.completionRef;
+  });
+  if (new Set(refs).size !== refs.length) throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Duplicate completion reference.");
+  const response = await resolve({ completionRefs: refs });
+  if (response?.schemaVersion !== 1 || !Array.isArray(response.descriptors) || response.descriptors.length !== refs.length) {
+    throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Invalid completion descriptors.");
+  }
+  const seen = new Set();
+  return response.descriptors.flatMap((entry, index) => {
+    if (entry?.completionRef !== refs[index] || entry?.companySlug !== companySlug || seen.has(entry.taskId)) {
+      throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Completion descriptor target mismatch.");
+    }
+    seen.add(entry.taskId);
+    const { completionRef: _ref, ...descriptor } = entry;
+    try {
+      return assembleTaskReviewCompletion(descriptor, payload.completions[index].decisions);
+    } catch (error) {
+      // Preserve the exact recovery code at the MCP boundary without allowing
+      // arbitrary foreign errors to opt into the host-owned error serializer.
+      if (error instanceof TaskReviewCompletionError) throw new TrelioLocalContextError(error.code, error.message);
+      throw error;
+    }
+  });
 };
 
 /** Resolve reviewed structural fields before any encryption or upload. The
@@ -8225,9 +8266,19 @@ export const handleTrelioLocalProposalOperation = async (
       );
     }
     let ready = null;
+    const rawBlocks = rawPayload.completions === undefined ? rawPayload.blocks
+      : await prepareLocalTaskReviewCompletions({ companySlug, payload: rawPayload,
+        resolve: (body) => postProposalRequest({ origin: provider.requestOrigin, token: provider.token,
+          companySlug, endpoint: "completion", body, signal }) });
+    if (rawPayload.completions !== undefined && rawBlocks.length === 0) {
+      return { schemaVersion: 1, provider: "local_company_context", proposalBundle: {
+        schemaVersion: 1, kind: "taskProposalBlocks", blocks: [{ type: "text",
+          markdown: "No proposals selected. Existing drafts and task state are unchanged." }],
+      } };
+    }
     return prepareLocalProposalBundle({
       companySlug,
-      rawBlocks: rawPayload.blocks,
+      rawBlocks,
       canonicalizeTarget: async (target) => {
         if (target.runId) return target;
         // One mirror generation canonicalizes every old project alias in the
@@ -8814,7 +8865,7 @@ export const handleTrelioLocalActionOperation = async (
       `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
       {
         method: "POST",
-        headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1" },
+        headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1", "x-trelio-task-review-completion": "1" },
         body: JSON.stringify({
           nativeTool,
           arguments: protectedRequest.value,

@@ -47,6 +47,7 @@ import {
   inspectLocalWorkspaceRevisionDiff,
   prepareLocalTaskAttachmentUploadSession,
   prepareLocalProposalBundle,
+  prepareLocalTaskReviewCompletions,
   readLocalWorkspaceRevisionFile,
   readLocalMeetingTranscriptFile,
   protectLocalActionArguments,
@@ -4256,4 +4257,56 @@ test("proposal preparation preserves legacy input and never retries or substitut
   for (const snapshot of [{}, { expectedStateRevision: -1 }, { expectedStateRevision: 7, expectedPublicCommentsSnapshotHash: "bad" }]) {
     await assert.rejects(resolveLocalProposalPreparation({ kind: "comment", target, payload, resolve: async () => snapshot }));
   }
+});
+
+
+test("completion preparation sends only refs, keeps decisions local and supplies structural bundle fields", async () => {
+  const completionRef = `tr1_${crypto.randomUUID()}`;
+  const taskId = crypto.randomUUID();
+  const descriptor = { schemaVersion: 1, completionRef, companySlug: "acme", taskId,
+    target: { companySlug: "acme", projectSlug: "project", taskNumber: 7 },
+    cards: { comment: { type: "commentProposal", expectedStateRevision: 4,
+      expectedPublicCommentsSnapshotHash: "a".repeat(64), proposalText: "MUST_NOT_OVERRIDE", publish: true } },
+    candidates: { checklist: [], status: [], control: [] } };
+  const decisions = { comment: { proposalText: "LOCAL_PRIVATE_RESULT" }, checklist: null, status: null, control: null };
+  const payload = { completions: [{ completionRef, decisions }] };
+  const requests = [];
+  const resolve = async (body) => { requests.push(body); return { schemaVersion: 1, descriptors: [descriptor] }; };
+  const blocks = await prepareLocalTaskReviewCompletions({ companySlug: "acme", payload, resolve });
+  assert.deepEqual(requests, [{ completionRefs: [completionRef] }]);
+  assert.equal(JSON.stringify(requests).includes("LOCAL_PRIVATE_RESULT"), false);
+  assert.deepEqual(blocks, [{ type: "commentProposal", ...descriptor.target, proposalText: "LOCAL_PRIVATE_RESULT",
+    expectedStateRevision: 4, expectedPublicCommentsSnapshotHash: "a".repeat(64) }]);
+  assert.equal(Object.hasOwn(blocks[0], "publish"), false);
+  assert.deepEqual(await prepareLocalTaskReviewCompletions({ companySlug: "acme", resolve,
+    payload: { completions: [{ completionRef, decisions: { ...decisions, comment: null } }] } }), []);
+});
+
+test("completion rejects mixed input, wrong company, duplicate tasks and late invalid decisions before upload", async () => {
+  const first = `tr1_${crypto.randomUUID()}`;
+  const second = `tr1_${crypto.randomUUID()}`;
+  const decisions = { comment: { proposalText: "PRIVATE" }, checklist: null, status: null, control: null };
+  const descriptor = (completionRef, taskId) => ({ schemaVersion: 1, completionRef, companySlug: "acme", taskId,
+    target: { companySlug: "acme", projectSlug: "p", taskNumber: 1 },
+    cards: { comment: { expectedStateRevision: 1, expectedPublicCommentsSnapshotHash: "a".repeat(64) } },
+    candidates: { checklist: [], status: [], control: [] } });
+  const payload = { completions: [{ completionRef: first, decisions }, { completionRef: second, decisions }] };
+  let reads = 0;
+  const resolve = async () => { reads += 1; return { schemaVersion: 1, descriptors: [descriptor(first, "one"), descriptor(second, "two")] }; };
+  for (const bad of [{ ...payload, blocks: [] }, { completions: [payload.completions[0], payload.completions[0]] }]) {
+    await assert.rejects(prepareLocalTaskReviewCompletions({ companySlug: "acme", payload: bad, resolve }), { code: "TASK_REVIEW_COMPLETION_INVALID" });
+  }
+  assert.equal(reads, 0);
+  const invalidLater = { completions: [payload.completions[0], { completionRef: second, decisions: { ...decisions, status: { targetStatusCode: "done", reason: "Guess" } } }] };
+  await assert.rejects(prepareLocalTaskReviewCompletions({ companySlug: "acme", payload: invalidLater, resolve }), { code: "TASK_REVIEW_COMPLETION_INVALID" });
+  for (const response of [
+    { schemaVersion: 1, descriptors: [descriptor(first, "one"), descriptor(second, "one")] },
+    { schemaVersion: 1, descriptors: [{ ...descriptor(first, "one"), companySlug: "other" }, descriptor(second, "two")] },
+    { schemaVersion: 1, descriptors: [descriptor(second, "one"), descriptor(first, "two")] },
+  ]) await assert.rejects(prepareLocalTaskReviewCompletions({ companySlug: "acme", payload, resolve: async () => response }), { code: "TASK_REVIEW_COMPLETION_INVALID" });
+  let attempts = 0;
+  await assert.rejects(prepareLocalTaskReviewCompletions({ companySlug: "acme", payload, resolve: async () => {
+    attempts += 1; throw Object.assign(new Error("Review changed"), { code: "TASK_REVIEW_COMPLETION_STALE" });
+  } }), { code: "TASK_REVIEW_COMPLETION_STALE" });
+  assert.equal(attempts, 1, "No automatic refresh or replay on stale/ambiguous preparation");
 });

@@ -482,6 +482,13 @@ test("route guard covers every native proposal renderer and both target forms", 
     }), companyMarkerPaths, toolName);
   }
 
+  // Completion refs hide the task locator, so its explicit company selector
+  // must still stop a known encrypted route before any plaintext dispatch.
+  assert.deepEqual(resolveNativeProposalRouteMarkerPaths({
+    configDirectory, origin, toolName: "render_task_proposals",
+    toolInput: { companySlug, completions: [{ completionRef: "tr1_opaque", decisions: {} }] },
+  }), companyMarkerPaths);
+
   const runId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const runMarkerPaths = resolveSelectedLocalProposalRouteMarkerPaths({
     configDirectory,

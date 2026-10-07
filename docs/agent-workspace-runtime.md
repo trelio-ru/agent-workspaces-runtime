@@ -1275,3 +1275,40 @@ CAS/crypto/network failure молча сохраняют результат ос
 нет; без локального App Server остаётся общая подпись. Legacy MCP sync tool
 остаётся совместимым, но модель не вызывает его после prepare. Private
 bridge-only endpoint не входит в обычную Run serialization и не создаёт связи.
+
+## Машинная подготовка итоговых task proposals
+
+После окончания всех работ запроса backend `get_task_review_context` с
+`completionPlan=true` выдаёт одноразовый план и local `nextCall`. Runtime
+объявляет поддержку заголовком `x-trelio-task-review-completion: 1`. Старый
+runtime сохраняет прежний flow и получает явный отказ только при запросе
+неподдерживаемого completion mode; plugin minimum/shell не меняются.
+
+`render_trelio_local_proposal(kind=bundle, operation=save)` принимает в payload
+либо старые `blocks`, либо `completions` с `completionRef` и четырьмя semantic
+`decisions`: comment/checklist/status/control. `null` явно оставляет kind без
+предложения. Оценка доказательств, публичной дельты и готовности всей задачи
+остаётся модели, поскольку её нельзя вывести из технических permissions.
+
+До любого encrypt/upload `prepareLocalTaskReviewCompletions` отправляет только
+`completionRefs` на server-selected `/proposals/completion`. Backend повторяет
+source-grant/runtime policy/company/task/Run ACL и full-review freshness, расходует
+планы и отдаёт структурные descriptors. Тексты/причины/пути остаются в local RAM.
+Ответ связывается с exact refs, компанией и разными задачами; assembler переносит
+только allowlisted target/CAS fields, валидирует все decisions до первой записи
+и задаёт порядок comment → checklist → status → control. Completion-status intent
+всегда `whole_task_ready`, затем действуют прежние kind-specific encryption/save.
+Пустой выбор возвращает no-op receipt без dismiss существующих drafts.
+
+`trelio-task-review-completion.mjs` генерируется из backend pure module командой
+`scripts/build-task-review-completion.mjs --runtime-root <checkout>` в продукте;
+`--check` подтверждает parity. Ручное расхождение копий запрещено. Проверки находятся
+в `tests/trelio-local-context.test.mjs`; package builder включает этот модуль.
+
+`TASK_REVIEW_COMPLETION_STALE` означает изменившийся, использованный, истёкший
+или недоступный в этом worker план. Нужны fresh read и новая оценка, без auto-refresh
+и blind retry; lost response также не разрешает повтор. Подготовка не является
+общей транзакцией: независимая ошибка save не отменяет успешную соседнюю карточку.
+Ни план, ни semantic decision не разрешают publish/apply/dismiss; это отдельные
+human actions с прежними live ACL/CAS. Backend хранит лишь keyed fingerprint и
+structural binding, максимум 2048 refs/64 на actor+grant с абсолютным TTL 15 минут.
