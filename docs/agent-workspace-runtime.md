@@ -754,6 +754,32 @@ snapshot и optimistic proposal revision. Для сложной коррекци
 публичной дискуссией или нового mention сохраняется двухшаговый
 context/render-flow.
 
+### Подстановка служебных полей предложений
+
+При наличии `preparationRef` в exact context host переносит её в headless
+`nextCall.payload` автоматически. Model/caller добавляет только semantic draft
+fields и сохраняет exact target; ручные `expected*` поля вместе со ссылкой
+запрещены. Перед encrypt/upload host обращается к read-only
+`proposals/preparation` с `{kind,target,preparationRef}` на выбранном data plane.
+Из ответа берутся только state revision, comment basis hash либо current status
+ID. Content, target, reasons и authority flags из ответа не подставляются.
+Обычный save затем сохраняет свои validation/ACL/CAS и human decision boundary.
+
+Header `x-trelio-proposal-preparation: 1` объявляет только поддержку этого
+optional контракта для context/native action. Старый backend игнорирует header;
+без ref host использует прежние exact snapshot fields. Новый backend без header
+не выдаёт ref старому host. Дополнительной версии minimum/plugin ABI нет.
+
+Ref привязана backend-ом к user/source OAuth grant, kind и canonical task/Run
+context. Срок 15 минут абсолютный, process-local store bounded: 2048 записей,
+64 на user/grant. Потеря после restart/eviction/другого worker либо изменение
+снимка возвращает `PROPOSAL_PREPARATION_STALE`. Host сохраняет ошибку, не
+подставляет актуальные revisions и не повторяет save; агент должен перечитать
+и оценить context. Неверный/mixed input – `PROPOSAL_PREPARATION_INVALID`.
+Ссылка не является правом доступа, подтверждением человека или cache контента.
+[Backend contract](https://github.com/ivaschru/Trelio/blob/main/docs/agent-workspaces-production.md#proposal-preparation)
+определяет fingerprint и guards; encrypted markers не расшифровываются сервером.
+
 Local company search и Workspace-file search получают один top-level
 `nextCall`. Он фиксирует exact local continuation и
 `copyFromSelectedResult` для `fetch` либо accepted-head file read, не повторяя

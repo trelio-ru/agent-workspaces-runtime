@@ -4870,3 +4870,16 @@ test("Remote MCP admission expires absolutely and never caches protected wire de
   }));
   assert.equal(await completed, 0, output);
 });
+
+test("headless proposal continuation copies the reviewed preparation reference without choosing content", async () => {
+  const preparationRef = "pr1_11111111-1111-4111-8111-111111111111";
+  const target = { projectSlug: "e-project", taskNumber: 1 };
+  const result = await handleToolCall("https://trelio.example", "continue_trelio_local_action", {
+    schemaVersion: 1, route: "proposal_context", parameters: { companySlug: "protected-company", kind: "comment", arguments: target },
+  }, { proposalOperation: async () => ({ provider: "local_company_context", proposal: {
+    preparationRef, stateRevision: 5, authoringBasis: { snapshotSha256: "a".repeat(64) }, currentDraft: null,
+  } }) });
+  assert.deepEqual(result.structuredContent.nextCall.arguments.payload, { target, preparationRef });
+  assert.match(result.structuredContent.nextCall.instruction, /omit expected\*/);
+  assert.equal(result._meta, undefined);
+});

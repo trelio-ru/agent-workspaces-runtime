@@ -7046,7 +7046,7 @@ const postProposalRequest = async ({
   `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/proposals/${endpoint}`,
   {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1" },
     body: JSON.stringify(body),
     signal,
   },
@@ -7463,6 +7463,36 @@ export const prepareLocalProposalBundle = async ({
   };
 };
 
+/** Resolve reviewed structural fields before any encryption or upload. The
+ * resolver is read-only and uses the selected company data plane. A stale,
+ * missing or unsupported reference never falls back to live revisions, retries
+ * a mutation, or supplies content/intent from a server response. */
+export const resolveLocalProposalPreparation = async ({ kind, target, payload, resolve }) => {
+  if (payload?.preparationRef === undefined) return payload;
+  if (typeof payload.preparationRef !== "string"
+    || !/^pr1_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(payload.preparationRef)
+    || ["expectedStateRevision", "expectedStatusId", "expectedPublicCommentsSnapshotHash"]
+      .some((field) => payload[field] !== undefined)) {
+    throw new TrelioLocalContextError("PROPOSAL_PREPARATION_INVALID",
+      "Use preparationRef without manual snapshot fields.");
+  }
+  const snapshot = await resolve({ kind, target, preparationRef: payload.preparationRef });
+  const fields = {
+    expectedStateRevision: normalizeInteger(snapshot?.expectedStateRevision, "preparation.expectedStateRevision", 0),
+  };
+  if (kind === "comment") {
+    if (typeof snapshot?.expectedPublicCommentsSnapshotHash !== "string"
+      || !SHA256_PATTERN.test(snapshot.expectedPublicCommentsSnapshotHash)) {
+      throw new TrelioLocalContextError("PROPOSAL_PREPARATION_INVALID", "Invalid preparation comment snapshot.");
+    }
+    fields.expectedPublicCommentsSnapshotHash = snapshot.expectedPublicCommentsSnapshotHash;
+  }
+  if (kind === "status") fields.expectedStatusId = normalizeUuid(snapshot?.expectedStatusId, "preparation.expectedStatusId");
+  // An allowlist prevents a response from replacing the caller's target, text,
+  // item selection, private reasons or any user-authority assertion.
+  return { ...payload, ...fields };
+};
+
 const saveLocalProposal = async ({
   origin,
   requestOrigin = null,
@@ -7479,6 +7509,12 @@ const saveLocalProposal = async ({
   const dataPlaneOrigin = requestOrigin
     ?? resolveCompanyEncryptionRequestOrigin(origin, companyEncryption);
   const target = normalizeProposalTarget(rawPayload?.target);
+  rawPayload = await resolveLocalProposalPreparation({
+    kind, target, payload: rawPayload,
+    resolve: (body) => postProposalRequest({
+      origin: dataPlaneOrigin, token, companySlug, endpoint: "preparation", body, signal,
+    }),
+  });
   const expectedStateRevision = normalizeInteger(
     rawPayload?.expectedStateRevision,
     "payload.expectedStateRevision",
@@ -8778,7 +8814,7 @@ export const handleTrelioLocalActionOperation = async (
       `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1" },
         body: JSON.stringify({
           nativeTool,
           arguments: protectedRequest.value,

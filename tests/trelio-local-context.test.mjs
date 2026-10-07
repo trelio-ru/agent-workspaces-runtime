@@ -54,6 +54,7 @@ import {
   readTaskSectionsWithRevisionRefresh,
   rebuildHydratedLocalActionTaskDocuments,
   resolveMirrorPaths,
+  resolveLocalProposalPreparation,
   searchCompanyContextMirror,
   searchAgentSecretsFromMirror,
   searchWorkspaceFilesFromMirror,
@@ -3866,7 +3867,6 @@ test("changed mirror records are hydrated in bounded mirror-wide batches", async
   assert.deepEqual(hydrated.at(-1), { id: "changed-500", hydrated: true });
 });
 
-
 test("encrypted exact task reads page large authority and reject stale continuations", () => {
   const fixture = structuredClone(mirror);
   fixture.instructions.company = {
@@ -4049,7 +4049,6 @@ test("encrypted same-context task reads reuse complete authority and reload chan
   );
 });
 
-
 test("workspace tombstones are exact-readable but cannot expose even stale local files", () => {
   const workspaceId = "11111111-1111-4111-8111-111111111111";
   const workspaceHead = "a".repeat(40);
@@ -4067,7 +4066,6 @@ test("workspace tombstones are exact-readable but cannot expose even stale local
   assert.throws(() => getWorkspaceFileFromMirror(mirror, { workspaceId, workspaceHead, filePath: "secret.md" }),
     (error) => error.code === "WORKSPACE_DELETED");
 });
-
 
 test("company sync refreshes head conflicts and reuses only private candidates until stable", async () => {
   const manifests = ["a", "b", "c", "d", "d"].map((generation) => ({ generation }));
@@ -4188,7 +4186,6 @@ test("local task lists retain and match every equal member and group executor", 
   assert.equal(handleNativeLocalContextRead(snapshot, "list_my_tasks", {companySlug: "acme", relation: "assigned"}).tasks.length, 0);
 });
 
-
 test("encrypted medium rules stay inline under the complete MCP envelope budget", async () => {
   const fixture = structuredClone(mirror);
   fixture.instructions.company = {
@@ -4212,4 +4209,51 @@ test("encrypted medium rules stay inline under the complete MCP envelope budget"
   // estimated tokens; parse both JSON layers and compare every authority byte.
   assert.ok(Math.ceil(bytes / 4) <= 10_000);
   assert.deepEqual(JSON.parse(JSON.parse(JSON.stringify(result)).content[0].text), cold);
+});
+
+test("proposal preparation resolves only structural CAS fields before protected uploads", async () => {
+  const preparationRef = `pr1_${crypto.randomUUID()}`;
+  const target = { projectSlug: "e-project", taskNumber: 1 };
+  const payload = { target, preparationRef, proposalText: "PRIVATE_LOCAL_ONLY", targetStatusCode: "review",
+    reason: "USER_REASON", controls: [], changes: [] };
+  for (const kind of ["comment", "status", "checklist", "control_clear"]) {
+    const calls = [];
+    const result = await resolveLocalProposalPreparation({ kind, target, payload, resolve: async (request) => {
+      calls.push(request);
+      return { expectedStateRevision: 7, expectedPublicCommentsSnapshotHash: "a".repeat(64), expectedStatusId: actionRunId,
+        target: { taskNumber: 99 }, proposalText: "UNTRUSTED", reason: "UNTRUSTED", confirmed: true };
+    } });
+    assert.deepEqual(calls, [{ kind, target, preparationRef }]);
+    assert.equal(JSON.stringify(calls).includes("PRIVATE_LOCAL_ONLY"), false);
+    assert.deepEqual(result, { ...payload, expectedStateRevision: 7,
+      ...(kind === "comment" ? { expectedPublicCommentsSnapshotHash: "a".repeat(64) } : {}),
+      ...(kind === "status" ? { expectedStatusId: actionRunId } : {}),
+    });
+    assert.equal(payload.expectedStateRevision, undefined);
+  }
+});
+
+test("proposal preparation preserves legacy input and never retries or substitutes a failed reference", async () => {
+  const target = { runId: actionRunId };
+  const preparationRef = `pr1_${crypto.randomUUID()}`;
+  const payload = { target, preparationRef, proposalText: "PRIVATE_LOCAL_ONLY" };
+  const forbidden = async () => { assert.fail("No network call for legacy or invalid input"); };
+  const legacy = { target, expectedStateRevision: 3 };
+  assert.equal(await resolveLocalProposalPreparation({ kind: "checklist", target, payload: legacy, resolve: forbidden }), legacy);
+  for (const invalid of [{ ...payload, expectedStateRevision: 7 }, { ...payload, expectedStatusId: actionRunId },
+    { ...payload, expectedPublicCommentsSnapshotHash: "a".repeat(64) }, { ...payload, preparationRef: "bad" }]) {
+    await assert.rejects(resolveLocalProposalPreparation({ kind: "comment", target, payload: invalid, resolve: forbidden }),
+      { code: "PROPOSAL_PREPARATION_INVALID" });
+  }
+  for (const code of ["PROPOSAL_PREPARATION_STALE", "ACCESS_DENIED", "NOT_FOUND", "NETWORK_ERROR"]) {
+    let calls = 0;
+    const error = new TrelioLocalContextError(code, "Exact failure");
+    await assert.rejects(resolveLocalProposalPreparation({ kind: "comment", target, payload, resolve: async () => {
+      calls += 1; throw error;
+    } }), (actual) => actual === error);
+    assert.equal(calls, 1);
+  }
+  for (const snapshot of [{}, { expectedStateRevision: -1 }, { expectedStateRevision: 7, expectedPublicCommentsSnapshotHash: "bad" }]) {
+    await assert.rejects(resolveLocalProposalPreparation({ kind: "comment", target, payload, resolve: async () => snapshot }));
+  }
 });

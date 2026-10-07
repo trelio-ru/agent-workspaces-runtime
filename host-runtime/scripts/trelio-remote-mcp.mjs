@@ -4975,9 +4975,13 @@ const buildLocalProposalChildResult = ({
               operation: "save",
               companySlug,
               kind,
-              payload: { target: continuationTarget },
+              payload: { target: continuationTarget,
+                ...(result.proposal.preparationRef ? { preparationRef: result.proposal.preparationRef } : {}),
+              },
             },
-            instruction: "Добавь draft и revision-поля этого контекста внутрь payload; native proposal renderer не вызывай.",
+            instruction: result.proposal.preparationRef
+              ? "Add only this card's semantic draft fields inside payload. Keep preparationRef; omit expected* snapshot fields. A stale ref requires a new context read. Do not call native proposal renderers."
+              : "Добавь draft и revision-поля этого контекста внутрь payload; native proposal renderer не вызывай.",
           },
         }
       : {}),
