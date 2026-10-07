@@ -21,6 +21,8 @@ publication tooling также остаются вне этого публичн
 
 ## Общие правила
 
+- Перед новой функцией или инструкцией модели применяй
+  [приоритет алгоритмического исполнения](docs/agent-workspace-runtime.md#algorithmic-execution).
 - Подробно комментируй нетривиальный код, особенно security, transport, ACL,
   credential и cross-platform решения.
 - Не добавляй tokens, credentials, cookies, sessions, workspace content, signing
