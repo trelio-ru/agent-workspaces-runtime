@@ -2254,10 +2254,10 @@ if ($TargetKind -ne "directory" -and $TargetKind -ne "file") {
 if ($ReportPhase) { & $ReportPhase "identity" }
 $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 if ($TargetKind -eq "directory") {
-  $targetInfo = New-Object System.IO.DirectoryInfo($TargetPath)
-  $ownerAcl = New-Object System.Security.AccessControl.DirectorySecurity
-  $acl = New-Object System.Security.AccessControl.DirectorySecurity
-  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+  $targetInfo = [System.IO.DirectoryInfo]::new($TargetPath)
+  $ownerAcl = [System.Security.AccessControl.DirectorySecurity]::new()
+  $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     $sid,
     [System.Security.AccessControl.FileSystemRights]::FullControl,
     [System.Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit",
@@ -2265,10 +2265,10 @@ if ($TargetKind -eq "directory") {
     [System.Security.AccessControl.AccessControlType]::Allow
   )
 } else {
-  $targetInfo = New-Object System.IO.FileInfo($TargetPath)
-  $ownerAcl = New-Object System.Security.AccessControl.FileSecurity
-  $acl = New-Object System.Security.AccessControl.FileSecurity
-  $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+  $targetInfo = [System.IO.FileInfo]::new($TargetPath)
+  $ownerAcl = [System.Security.AccessControl.FileSecurity]::new()
+  $acl = [System.Security.AccessControl.FileSecurity]::new()
+  $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     $sid,
     [System.Security.AccessControl.FileSystemRights]::FullControl,
     [System.Security.AccessControl.AccessControlType]::Allow
@@ -2330,22 +2330,21 @@ if ($verifiedOwnerSid -ne $sid.Value) {
 $accessRules = $verified.GetAccessRules(
   $true, $true, [System.Security.Principal.SecurityIdentifier]
 )
-$unexpected = @($accessRules | Where-Object {
-  $_.IdentityReference.Value -ne $sid.Value -or
-  $_.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
-  $_.IsInherited
-})
-if ($unexpected.Count -ne 0) {
-  throw "Private path ACL verification failed."
+# Verify directly without the PowerShell pipeline/module loader. This retains
+# every explicit/inherited SID check and still requires a full-control rule.
+$hasFullControl = $false
+foreach ($accessRule in $accessRules) {
+  if ($accessRule.IdentityReference.Value -ne $sid.Value -or
+      $accessRule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+      $accessRule.IsInherited) {
+    throw "Private path ACL verification failed."
+  }
+  if (($accessRule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq
+      [System.Security.AccessControl.FileSystemRights]::FullControl) {
+    $hasFullControl = $true
+  }
 }
-$expected = @($accessRules | Where-Object {
-  $_.IdentityReference.Value -eq $sid.Value -and
-  $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
-  -not $_.IsInherited -and
-  ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -eq
-    [System.Security.AccessControl.FileSystemRights]::FullControl
-})
-if ($expected.Count -eq 0) {
+if (-not $hasFullControl) {
   throw "Private path current-user ACL verification failed."
 }
 `;

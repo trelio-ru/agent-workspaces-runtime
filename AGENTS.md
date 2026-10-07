@@ -45,6 +45,9 @@ publication tooling также остаются вне этого публичн
   повторно проверяет каждый путь; результат проверки прав не кешируется.
   Зависший private subprocess отменяется, lock очищается, следующий hook
   продолжает ту же client session без ручного удаления состояния.
+- ACL worker использует собственные UTF-8 pipes без Console.In/Out, смены
+  code page и module/cmdlet pipeline. Запрос ждёт readiness под исходным deadline;
+  startup/dispatch различаются, readiness не является подтверждением ACL.
 - Windows ACL сравнивает SID напрямую, без PowerShell `Access`/NTAccount
   resolution. Ошибки чтения private state не означают отсутствие state:
   ACL/I/O/deadline сохраняют исходный отказ, не запускают новую регистрацию.

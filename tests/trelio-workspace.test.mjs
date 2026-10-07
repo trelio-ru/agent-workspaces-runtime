@@ -7677,7 +7677,8 @@ test("bridge private credential path and Windows ACL are explicit and user-scope
     WINDOWS_PRIVATE_ACL_SCRIPT,
     /AccessControlSections\]::Audit/u,
   );
-  assert.match(WINDOWS_PRIVATE_ACL_SCRIPT, /unexpected\.Count -ne 0/u);
+  assert.match(WINDOWS_PRIVATE_ACL_SCRIPT, /foreach \(\$accessRule in \$accessRules\)/u);
+  assert.match(WINDOWS_PRIVATE_ACL_SCRIPT, /if \(-not \$hasFullControl\)/u);
 });
 
 test("Windows ACL command transports its path without PowerShell argument parsing", () => {

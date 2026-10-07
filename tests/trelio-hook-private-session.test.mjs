@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
-  assertRuntimeHookBudget, createPrivateAclWorker, privateProcessOptions,
+  assertRuntimeHookBudget, buildPrivateAclWorkerScript, createPrivateAclWorker, privateProcessOptions,
   runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage,
 } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 import {
@@ -17,8 +17,10 @@ import {
 const fixtureSource = `
 const readline = require('node:readline');
 const lines = readline.createInterface({ input: process.stdin });
+console.log(JSON.stringify({ready: true}));
 lines.on('line', line => {
-  const request = JSON.parse(line);
+  const [id, kind, path] = line.split('\\t');
+  const request = {id, kind, path};
   const mode = Buffer.from(request.path, 'base64').toString('utf8');
   if (mode === 'stall') return;
   if (mode === 'phase-stall') {
@@ -191,9 +193,14 @@ foreach ($typeName in @("System.Security.AccessControl.FileSecurity", "System.Se
 `;
   const worker = createPrivateAclWorker({
     executable: resolveWindowsPowerShellExecutable(),
-    aclScript: WINDOWS_PRIVATE_ACL_SCRIPT.replace(
-      '$ErrorActionPreference = "Stop"', '$ErrorActionPreference = "Stop"\n' + guard,
-    ) + '\nif ($script:accountLookupCount -ne 0) { throw "Account-name lookup was used" }',
+    aclScript: WINDOWS_PRIVATE_ACL_SCRIPT
+      + '\nif ($script:accountLookupCount -ne 0) { throw "Account-name lookup was used" }',
+    spawnProcess: (program, args, options) => {
+      // Test-only type adapter registration precedes the production worker's
+      // disabled module autoload. The ACL operation itself uses only .NET.
+      const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
+      return spawn(program, [...args.slice(0, -1), Buffer.from(guard + script, "utf16le").toString("base64")], options);
+    },
   });
   try {
     await writeFile(file, "{}\n");
@@ -204,4 +211,82 @@ foreach ($typeName in @("System.Security.AccessControl.FileSecurity", "System.Se
     await worker.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("ACL requests wait for readiness, with a separate startup diagnostic and unchanged deadline", async () => {
+  for (const ready of [false, true]) {
+    const children = [];
+    let receivedBytes = 0;
+    const worker = createPrivateAclWorker({
+      executable: "fixture", aclScript: "", requestTimeoutMilliseconds: 250,
+      spawnProcess: (_program, _args, options) => {
+        const child = spawn(process.execPath, ["-e", `
+          process.stdin.resume();
+          ${ready ? "console.log(JSON.stringify({ready:true}));" : ""}
+        `], options);
+        // Observe stdin writes in the parent without recording path bytes.
+        const write = child.stdin.write.bind(child.stdin);
+        child.stdin.write = (chunk, ...args) => { receivedBytes += chunk.length; return write(chunk, ...args); };
+        children.push(child);
+        return child;
+      },
+    });
+    try {
+      await assert.rejects(worker.harden("synthetic", "file"), (error) => {
+        if (!ready) {
+          assert.equal(error.operation, "windows_acl.worker_startup");
+          assert.equal(error.timeoutKind, "private_process");
+          assert.equal(receivedBytes, 0);
+        } else {
+          assert.ok(receivedBytes > 0);
+          assert.equal(error.operation, "windows_acl.request_dispatch");
+        }
+        return true;
+      });
+    } finally { await worker.close(); }
+    await assertStopped({children});
+  }
+});
+
+test("Windows ACL helper owns raw UTF-8 pipes without console wrappers or module cmdlets", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-acl-raw-pipe-"));
+  const file = path.join(root, "unicode Ж ' $() [file].json");
+  // Fault injection before the actual production helper: a host may replace
+  // Console.In/Out, while cmdlet/module discovery is an unrelated dependency.
+  // The old worker calls New-Object before its first phase and times out here.
+  // Raw pipes and direct .NET ACL operations must remain independent of both.
+  const guard = `
+[Console]::SetIn([System.IO.StringReader]::new(""))
+[Console]::SetOut([System.IO.TextWriter]::Null)
+function New-Object { [System.Threading.Thread]::Sleep(30000) }
+function ConvertFrom-Json { throw "Unexpected JSON cmdlet dependency" }
+function ConvertTo-Json { throw "Unexpected JSON cmdlet dependency" }
+function Where-Object { throw "Unexpected pipeline dependency" }
+function Remove-Item { throw "Unexpected provider dependency" }
+`;
+  const worker = createPrivateAclWorker({
+    executable: resolveWindowsPowerShellExecutable(), aclScript: WINDOWS_PRIVATE_ACL_SCRIPT,
+    requestTimeoutMilliseconds: 5_000,
+    spawnProcess: (program, args, options) => {
+      const script = Buffer.from(args.at(-1), "base64").toString("utf16le");
+      return spawn(program, [...args.slice(0,-1), Buffer.from(guard + script, "utf16le").toString("base64")], options);
+    },
+  });
+  try {
+    await writeFile(file, "{}\n");
+    await worker.harden(root, "directory");
+    await worker.harden(file, "file");
+    // Each path still gets fresh native verification, even with no cmdlets.
+    await worker.harden(file, "file");
+  } finally {
+    await worker.close();
+    await rm(root, {recursive: true, force: true});
+  }
+});
+
+test("ACL wire script does not change console encoding or invoke module discovery", () => {
+  const script = buildPrivateAclWorkerScript(WINDOWS_PRIVATE_ACL_SCRIPT);
+  assert.doesNotMatch(script, /Console\]::(?:InputEncoding|OutputEncoding|ReadLine|WriteLine)|New-Object|ConvertFrom-Json|ConvertTo-Json|Where-Object|Remove-Item/u);
 });

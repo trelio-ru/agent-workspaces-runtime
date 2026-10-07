@@ -16,7 +16,7 @@ const HOOK_STAGES = new Set([
   "runtime_attestation", "bridge_credentials", "runtime_registration", "runtime_state_write",
 ]);
 const ACL_PHASES = new Set([
-  "request_dispatch", "path_decode", "identity", "owner_read", "owner_write",
+  "worker_startup", "request_dispatch", "path_decode", "identity", "owner_read", "owner_write",
   "dacl_write", "dacl_verify",
 ]);
 const currentStage = () => stageScope.getStore() || "local_state";
@@ -56,38 +56,46 @@ export const privateProcessOptions = () => {
   };
 };
 
-// The fixed script receives only base64 paths and a closed kind, never command
-// text. Console I/O avoids PowerShell's formatting/encoding pipeline. Errors
-// deliberately omit exception text, paths and any child stdout/stderr.
+// The helper owns the redirected pipes, not Console.In/Out or the console code
+// page shared with its launcher. Fixed ASCII framing needs no PowerShell JSON
+// cmdlets/module discovery. UTF-8 paths are base64 data, never executable text.
+// Readiness is flushed before the first request; the parent must not feed a
+// process that has not yet entered this protocol.
 export const buildPrivateAclWorkerScript = (aclScript) => `
 $ErrorActionPreference = "Stop"
-[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+$PSModuleAutoLoadingPreference = "None"
+$encoding = [System.Text.UTF8Encoding]::new($false, $true)
+$writer = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), $encoding, 1024)
+$writer.AutoFlush = $true
+$reader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), $encoding, $false, 1024)
 function Invoke-TrelioPrivateAcl {
 ${aclScript}
 }
-while ($null -ne ($line = [Console]::ReadLine())) {
-  $request = $null
+$writer.WriteLine('{"ready":true}')
+while ($null -ne ($line = $reader.ReadLine())) {
+  $id = "0"
   try {
     if ($line.Length -gt 16384) { throw "Invalid request." }
-    $request = ConvertFrom-Json -InputObject $line
-    if ($request.id -notmatch '^[0-9]+$' -or
-        $request.kind -notin @("directory", "file") -or
-        $request.path -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
+    $fields = $line.Split([char]9)
+    if ($fields.Length -ne 3 -or $fields[0] -notmatch '^[0-9]{1,16}$' -or
+        $fields[1] -notin @("directory", "file") -or
+        $fields[2] -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
       throw "Invalid request."
     }
-    $env:TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64 = $request.path
-    $env:TRELIO_WINDOWS_PRIVATE_ACL_KIND = $request.kind
+    $id = $fields[0]
+    $env:TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64 = $fields[2]
+    $env:TRELIO_WINDOWS_PRIVATE_ACL_KIND = $fields[1]
     Invoke-TrelioPrivateAcl -ReportPhase {
       param($phase)
-      [Console]::WriteLine((@{id=$request.id; phase=$phase} | ConvertTo-Json -Compress))
+      # The id is decimal and phases come only from the fixed ACL script.
+      $writer.WriteLine('{"id":"' + $id + '","phase":"' + $phase + '"}')
     }
-    [Console]::WriteLine((@{id=$request.id; ok=$true} | ConvertTo-Json -Compress))
+    $writer.WriteLine('{"id":"' + $id + '","ok":true}')
   } catch {
-    [Console]::WriteLine((@{id=$request.id; ok=$false} | ConvertTo-Json -Compress))
+    $writer.WriteLine('{"id":"' + $id + '","ok":false}')
   } finally {
-    Remove-Item Env:TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64 -ErrorAction SilentlyContinue
-    Remove-Item Env:TRELIO_WINDOWS_PRIVATE_ACL_KIND -ErrorAction SilentlyContinue
+    [Environment]::SetEnvironmentVariable("TRELIO_WINDOWS_PRIVATE_ACL_PATH_BASE64", $null, "Process")
+    [Environment]::SetEnvironmentVariable("TRELIO_WINDOWS_PRIVATE_ACL_KIND", $null, "Process")
   }
 }
 `;
@@ -101,7 +109,14 @@ export const createPrivateAclWorker = ({
   let failure;
   let sequence = 0;
   let closing = false;
+  let ready = false;
   const pending = new Map();
+  const dispatch = (entry) => {
+    entry.phase = "request_dispatch";
+    child.stdin.write(entry.payload, (error) => { if (error) fail(error); });
+    // Discard the path from the pending bookkeeping as soon as it is sent.
+    entry.payload = undefined;
+  };
   const fail = (error) => {
     // Process launch/IO/protocol errors are distinct from a consumed budget.
     // Keep only a bounded OS code, never exec arguments or child error text.
@@ -148,8 +163,16 @@ export const createPrivateAclWorker = ({
         if (line.length > 256) throw new Error();
         reply = JSON.parse(line);
       } catch { fail(); return; }
+      if (Object.hasOwn(reply ?? {}, "ready")) {
+        // Exactly one readiness response, with no request fields. It is not
+        // evidence of ACL success and never renews a request/hook deadline.
+        if (ready || reply.ready !== true || Object.keys(reply).length !== 1) { fail(); return; }
+        ready = true;
+        for (const entry of pending.values()) dispatch(entry);
+        return;
+      }
       const entry = pending.get(reply?.id);
-      if (!entry) { fail(); return; }
+      if (!ready || !entry) { fail(); return; }
       if (Object.hasOwn(reply, "phase")) {
         // Phase updates describe work, never renew either deadline. A noisy
         // or incompatible child cannot keep the request alive indefinitely.
@@ -181,7 +204,8 @@ export const createPrivateAclWorker = ({
       const id = String(++sequence);
       await new Promise((resolve, reject) => {
         const entry = {
-          resolve, reject, stage: currentStage(), phase: "request_dispatch", phaseCount: 0,
+          resolve, reject, stage: currentStage(), phase: ready ? "request_dispatch" : "worker_startup", phaseCount: 0,
+          payload: `${id}\t${targetKind}\t${Buffer.from(targetPath, "utf8").toString("base64")}\n`,
           // A stalled child cannot hold the registration lock until Codex
           // kills the hook. The hook-wide signal also includes queue time.
           timer: setTimeout(() => {
@@ -190,9 +214,7 @@ export const createPrivateAclWorker = ({
           }, requestTimeoutMilliseconds),
         };
         pending.set(id, entry);
-        child.stdin.write(`${JSON.stringify({
-          id, kind: targetKind, path: Buffer.from(targetPath, "utf8").toString("base64"),
-        })}\n`, (error) => { if (error) fail(); });
+        if (ready) dispatch(entry);
       });
     },
     async close() {
