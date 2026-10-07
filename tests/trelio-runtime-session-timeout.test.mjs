@@ -342,8 +342,10 @@ test("stalled Windows local ACL returns deny and cleans the lock before a same-c
   const fixture = await createFixture(t);
   const fakeAclProcess = `
     const readline = require('node:readline');
+    console.log(JSON.stringify({ready: true}));
     readline.createInterface({input: process.stdin}).on('line', line => {
-      const request = JSON.parse(line);
+      const [id, kind, path] = line.split('\\t');
+      const request = {id, kind, path};
       const file = Buffer.from(request.path, 'base64').toString('utf8');
       if (file.endsWith('credentials.json')) {
         console.log(JSON.stringify({id: request.id, phase: 'owner_read'}));
