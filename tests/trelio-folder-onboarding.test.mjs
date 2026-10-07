@@ -298,12 +298,14 @@ test("service Git accepts only exact Codex turn-diff refs that point to trees", 
     "1",
     "123e4567-e89b-12d3-a456-426614174000",
   ].join("/");
-  await runGit(root, "update-ref", checkpointRef, tree);
+  // Mirror the runtime's process-only longpaths option. A real checkpoint ref
+  // exceeds MAX_PATH in Windows temp roots; never alter the user's Git config.
+  await runGit(root, "-c", "core.longpaths=true", "update-ref", checkpointRef, tree);
 
   const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
   assert.equal(prepared.inspection.folder.kind, "service_git");
   await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
-  assert.equal((await runGit(root, "rev-parse", checkpointRef)).stdout.trim(), tree);
+  assert.equal((await runGit(root, "-c", "core.longpaths=true", "rev-parse", checkpointRef)).stdout.trim(), tree);
 });
 
 test("service Git rejects commit objects and orphan objects even without HEAD", async () => {
