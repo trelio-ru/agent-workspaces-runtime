@@ -952,6 +952,12 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
   const filesystem = dependencies.filesystem ?? fs;
   const inspection = await inspectFolder({ folderPath: rawInput.folderPath, ...dependencies });
   await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path);
+  // Git isolation is a folder invariant shared by every client. Cursor skips
+  // managed binding, but must not report a service root ready without its ignore.
+  if (inspection.folder.serviceGitPreserved) {
+    const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
+    await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
+  }
   // Cursor has its own OAuth profile and no automatic folder-binding contract.
   // A valid local root does not authorize installing Codex/Claude instructions.
   if (clientKind === "cursor") return {
@@ -966,10 +972,6 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
     status: "setup_required", folder: inspection.folder, instructionTarget,
     reasonCode: "TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED",
   };
-  if (inspection.folder.serviceGitPreserved) {
-    const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
-    await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
-  }
   const state = await buildPlanState({
     folderPath: inspection.folder.path, instructionTarget, ...binding,
     userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind,

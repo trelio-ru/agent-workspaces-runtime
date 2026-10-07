@@ -178,6 +178,14 @@ test("Cursor diagnostics inspect the root without inventing a Codex binding or r
   assert.equal(diagnostic.instructions.status, "not_applicable");
   assert.equal(diagnostic.refresh, undefined);
   assert.deepEqual(await fs.readdir(root), []);
+  await runGit(root, "init");
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "cursor"),
+    { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
+  await fs.writeFile(path.join(root, ".gitignore"), "/workspaces/\n");
+  const isolated = await prepareTrelioFolderDiagnostic({ folderPath: root }, "cursor");
+  assert.equal(isolated.status, "ready");
+  assert.equal(isolated.instructions.status, "not_applicable");
+  assert.equal(isolated.scope, undefined);
 });
 
 test("diagnostics and refresh leave unrelated root materials untouched", async () => {
