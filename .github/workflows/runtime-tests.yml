@@ -67,6 +67,7 @@ jobs:
       - name: Run host runtime tests
         run: |
           node tests/context-budget.test.mjs
+          node tests/trelio-browser-open.test.mjs
           node tests/trelio-browser-session.test.mjs
           node tests/trelio-browser-http.test.mjs
           node tests/trelio-codex-routing.test.mjs
@@ -161,6 +162,11 @@ jobs:
 
       - name: Run Windows browser HTTP evidence regressions
         run: node tests/trelio-browser-http.test.mjs
+
+      # Реальный зарегистрированный URI handler принимает synthetic query целиком.
+      # Это проверяет ShellExecute, а не только mock argv или успешный spawn.
+      - name: Run Windows browser URL handoff regressions
+        run: node tests/trelio-browser-open.test.mjs
 
       - name: Run Windows Git prerequisite regressions
         run: node --test tests/trelio-git.test.mjs

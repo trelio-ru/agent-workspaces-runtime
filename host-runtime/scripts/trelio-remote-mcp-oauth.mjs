@@ -287,6 +287,9 @@ const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, 
     try {
       await openBrowserFn(authorizeUrl, { signal });
     } catch {
+      // Отмена короткого OS helper остаётся отменой всего OAuth flow;
+      // общий opener catch не должен превращать её в ошибку браузера.
+      if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");
       throw fail("REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED", "Не удалось открыть OAuth-страницу в браузере.");
     }
     if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");

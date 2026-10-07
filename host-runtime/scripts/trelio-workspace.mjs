@@ -4264,6 +4264,25 @@ export class BrowserOpenError extends Error {
   }
 }
 
+// Windows разбирает `cmd /c start` как команду: `&` из OAuth query становится
+// разделителем, даже когда Node передал URL одним аргументом. Фиксированный
+// helper обращается к зарегистрированному URI handler через ShellExecute.
+// В EncodedCommand находится только код; URL приходит по анонимному UTF-8 stdin,
+// не попадая в argv, environment, temporary files или текст исключения helper.
+const WINDOWS_BROWSER_OPEN_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+try {
+  [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false, $true)
+  $url = [Console]::In.ReadToEnd()
+  if ($url.Length -eq 0 -or $url.Length -gt 32768 -or $url.IndexOf([char]0) -ge 0) { exit 1 }
+  $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+  $startInfo.FileName = $url
+  $startInfo.UseShellExecute = $true
+  [System.Diagnostics.Process]::Start($startInfo) | Out-Null
+  exit 0
+} catch { exit 1 }
+`;
+
 export const openBrowser = async (
   url,
   {
@@ -4274,26 +4293,40 @@ export const openBrowser = async (
     signal,
   } = {},
 ) => {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new Error("Открытие браузера отменено.");
+  }
+  const windows = platform === "win32";
+  if (windows && (
+    typeof url !== "string" || !url || url.length > 32_768 || /[\0\r\n]/u.test(url)
+  )) {
+    throw new BrowserOpenError("Ссылка для системного открытия браузера не прошла проверку.");
+  }
   const [command, args] = platform === "darwin"
     // Use the system binary by its absolute path. Besides avoiding a modified
     // PATH, `-a` gives the Remote MCP setup flow a private fallback to a known
     // local browser without ever returning its nonce-bearing URL to the agent.
     ? ["/usr/bin/open", application ? ["-a", application, url] : [url]]
-    : platform === "win32"
-      ? ["cmd", ["/c", "start", "", url]]
+    : windows
+      ? [resolveWindowsPowerShellExecutable(), [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-EncodedCommand", Buffer.from(WINDOWS_BROWSER_OPEN_SCRIPT, "utf16le").toString("base64"),
+      ]]
       : ["xdg-open", [url]];
 
   await new Promise((resolve, reject) => {
     let child;
     try {
       child = spawnProcess(command, args, {
-        stdio: "ignore",
+        stdio: windows ? ["pipe", "ignore", "ignore"] : "ignore",
         windowsHide: true,
+        shell: false,
       });
-    } catch (error) {
+    } catch {
       reject(new BrowserOpenError(
         "Не удалось запустить системное открытие браузера.",
-        { cause: error },
       ));
       return;
     }
@@ -4311,35 +4344,31 @@ export const openBrowser = async (
       signal?.removeEventListener("abort", handleAbort);
       callback(value);
     };
-    const handleAbort = () => {
+    const stopWithError = (error) => {
+      if (settled) return;
+      // Сначала фиксируем отказ. Синхронный close во время kill() не должен
+      // превратить timeout, отмену или ошибку передачи stdin в успех.
+      settle(reject, error);
       try {
         child.kill();
       } catch {
         // The short-lived opener may already have exited.
       }
-      settle(
-        reject,
+    };
+    const handleAbort = () => {
+      stopWithError(
         signal.reason instanceof Error
           ? signal.reason
           : new Error("Открытие браузера отменено."),
       );
     };
 
-    if (signal?.aborted) {
-      handleAbort();
-      return;
-    }
-    signal?.addEventListener("abort", handleAbort, { once: true });
-
-    // `spawn` only proves that `/usr/bin/open` itself started. LaunchServices
-    // may still fail afterwards, so success is acknowledged only when the
-    // opener process closes with code 0. The URL is intentionally absent from
-    // every diagnostic because Remote MCP setup URLs contain a one-time nonce.
-    child.once("error", (error) => settle(
-      reject,
+    // Запуск helper ещё не доказывает передачу URI системе. Ждём exit 0,
+    // но не завершения самого браузера. Raw spawn/stdin errors не сохраняем
+    // даже как cause: они могут содержать приватный URL или process arguments.
+    child.once("error", () => stopWithError(
       new BrowserOpenError(
         "Не удалось запустить системное открытие браузера.",
-        { cause: error },
       ),
     ));
     child.once("close", (code, signal) => {
@@ -4357,22 +4386,35 @@ export const openBrowser = async (
         ),
       );
     });
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+    signal?.addEventListener("abort", handleAbort, { once: true });
     timeoutId = setTimeout(() => {
       // A wedged OS opener must not turn into another invisible multi-minute
       // wait. It is a short-lived child created by this function, so stopping
       // only that child is safe; the browser, if already launched, is separate.
-      try {
-        child.kill();
-      } catch {
-        // The child may have exited between the timer firing and kill().
-      }
-      settle(
-        reject,
+      stopWithError(
         new BrowserOpenError(
           "Системное открытие браузера не завершилось вовремя.",
         ),
       );
     }, openerTimeoutMs);
+
+    if (windows) {
+      const failInput = () => stopWithError(new BrowserOpenError(
+        "Не удалось передать ссылку системному открытию браузера.",
+      ));
+      // Listener остаётся после settlement, чтобы поздний EPIPE закрытого
+      // helper не стал uncaught exception и не раскрыл содержимое pipe.
+      child.stdin.on("error", failInput);
+      try {
+        child.stdin.end(url, "utf8");
+      } catch {
+        failInput();
+      }
+    }
   });
 };
 

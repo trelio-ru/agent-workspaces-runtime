@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 
 import {
+  connectRemoteMcpOAuth,
   discoverRemoteMcpOAuth,
   oauthHttpJson,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
@@ -14,6 +17,154 @@ import { createRemoteMcpOAuthVault } from "../host-runtime/scripts/trelio-remote
 const config = {
   endpoint: "https://dodo-service.example.com/mcp",
 };
+
+const callbackConfig = { ...config, authentication: { scopes: ["synthetic:read", "synthetic:write"] } };
+const issuer = new URL(config.endpoint).origin;
+const createOAuthTransport = (onToken = () => assert.fail("нельзя обменивать code после отказа")) => async (url, request) => {
+  if (url.endsWith("/.well-known/oauth-authorization-server")) return { statusCode: 200, body: {
+    issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
+    registration_endpoint: `${issuer}/register`, code_challenge_methods_supported: ["S256"],
+  } };
+  if (url.endsWith("/register")) return { statusCode: 201, body: {
+    client_id: "synthetic-client", token_endpoint_auth_method: "none",
+    redirect_uris: JSON.parse(request.body).redirect_uris,
+  } };
+  if (url.endsWith("/token")) return onToken(request);
+  assert.fail("неожиданный synthetic OAuth endpoint");
+};
+const requestCallback = (url, headers = {}) => new Promise((resolve, reject) => {
+  const request = http.get(url, { headers, agent: false }, (response) => {
+    response.resume();
+    response.on("end", () => resolve(response.statusCode));
+  });
+  request.on("error", reject);
+});
+const assertListenerClosed = async (callback) => {
+  assert.ok(callback);
+  await new Promise((resolve, reject) => {
+    const socket = net.connect({ host: "127.0.0.1", port: Number(callback.port) });
+    socket.once("connect", () => {
+      socket.destroy();
+      reject(new Error("OAuth callback listener остался открыт"));
+    });
+    socket.once("error", (error) => error.code === "ECONNREFUSED" ? resolve() : reject(error));
+    socket.setTimeout(1_000, () => {
+      socket.destroy();
+      reject(new Error("проверка закрытого callback не завершилась"));
+    });
+  });
+};
+
+test("OAuth opener failure and cancellation close the exact loopback listener", async (t) => {
+  for (const cancel of [false, true]) {
+    await t.test(cancel ? "cancel during browser handoff" : "opener failure", async () => {
+      const controller = new AbortController();
+      let callback;
+      await assert.rejects(connectRemoteMcpOAuth(callbackConfig, {
+        signal: controller.signal, httpJson: createOAuthTransport(),
+        openBrowserFn: async (url) => {
+          callback = new URL(new URL(url).searchParams.get("redirect_uri"));
+          if (cancel) controller.abort();
+          throw new Error(url);
+        },
+      }), (error) => {
+        assert.equal(error.code, cancel ? "REMOTE_MCP_OAUTH_CANCELLED" : "REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED");
+        assert.ok(!error.message.includes("state="));
+        assert.equal(error.cause, undefined);
+        return true;
+      });
+      await assertListenerClosed(callback);
+    });
+  }
+});
+
+test("OAuth cancellation while waiting closes the exact loopback listener", async () => {
+  const controller = new AbortController();
+  let callback;
+  await assert.rejects(connectRemoteMcpOAuth(callbackConfig, {
+    signal: controller.signal, httpJson: createOAuthTransport(),
+    openBrowserFn: async (url) => {
+      callback = new URL(new URL(url).searchParams.get("redirect_uri"));
+      setImmediate(() => controller.abort());
+    },
+  }), (error) => error.code === "REMOTE_MCP_OAUTH_CANCELLED");
+  await assertListenerClosed(callback);
+});
+
+test("OAuth callback timeout closes the listener without exchanging a code", async (t) => {
+  let callback;
+  try {
+    await assert.rejects(connectRemoteMcpOAuth(callbackConfig, {
+      httpJson: createOAuthTransport(),
+      openBrowserFn: async (url) => {
+        callback = new URL(new URL(url).searchParams.get("redirect_uri"));
+        // Виртуализируем только JS timer; сам loopback server настоящий.
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        setImmediate(() => t.mock.timers.tick(10 * 60 * 1_000));
+      },
+    }), (error) => error.code === "REMOTE_MCP_OAUTH_TIMEOUT");
+  } finally {
+    t.mock.timers.reset();
+  }
+  await assertListenerClosed(callback);
+});
+
+test("OAuth callback rejects forged state, duplicate fields and wrong host before PKCE exchange", async () => {
+  let authorization;
+  let callback;
+  let tokenCalls = 0;
+  const session = await connectRemoteMcpOAuth(callbackConfig, {
+    httpJson: createOAuthTransport((request) => {
+      tokenCalls += 1;
+      const body = new URLSearchParams(request.body);
+      assert.equal(body.get("code"), "synthetic-code");
+      assert.equal(body.get("redirect_uri"), authorization.searchParams.get("redirect_uri"));
+      assert.equal(createHash("sha256").update(body.get("code_verifier")).digest("base64url"),
+        authorization.searchParams.get("code_challenge"));
+      assert.equal(authorization.searchParams.get("code_challenge_method"), "S256");
+      assert.equal(authorization.searchParams.get("scope"), "synthetic:read synthetic:write");
+      return { statusCode: 200, body: {
+        token_type: "Bearer", access_token: "synthetic-access-token", expires_in: 3_600,
+      } };
+    }),
+    openBrowserFn: async (url) => {
+      authorization = new URL(url);
+      callback = new URL(authorization.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", authorization.searchParams.get("state"));
+      callback.searchParams.set("code", "synthetic-code");
+      callback.searchParams.set("iss", issuer);
+      const forged = new URL(callback);
+      forged.searchParams.set("state", "forged-state");
+      assert.equal(await requestCallback(forged), 403);
+      for (const field of ["state", "code", "iss"]) {
+        const duplicate = new URL(callback);
+        duplicate.searchParams.append(field, duplicate.searchParams.get(field));
+        assert.equal(await requestCallback(duplicate), 403);
+      }
+      assert.equal(await requestCallback(callback, { host: "other.example.test" }), 403);
+      assert.equal(await requestCallback(callback), 200);
+    },
+  });
+  assert.equal(session.accessToken, "synthetic-access-token");
+  assert.equal(tokenCalls, 1);
+  await assertListenerClosed(callback);
+});
+
+test("OAuth callback issuer mismatch closes the listener without exchanging a code", async () => {
+  let callback;
+  await assert.rejects(connectRemoteMcpOAuth(callbackConfig, {
+    httpJson: createOAuthTransport(),
+    openBrowserFn: async (url) => {
+      const authorization = new URL(url);
+      callback = new URL(authorization.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", authorization.searchParams.get("state"));
+      callback.searchParams.set("code", "synthetic-code");
+      callback.searchParams.set("iss", "https://other.example.test");
+      assert.equal(await requestCallback(callback), 403);
+    },
+  }), (error) => error.code === "REMOTE_MCP_OAUTH_ISSUER_MISMATCH");
+  await assertListenerClosed(callback);
+});
 
 test("OAuth metadata cannot move the host to another authorization origin", async () => {
   await assert.rejects(() => discoverRemoteMcpOAuth(config, {

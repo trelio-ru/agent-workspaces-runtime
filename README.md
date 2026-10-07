@@ -155,6 +155,15 @@ junction/symlink за свой фиксированный каталог. Probe 
 account остаются machine trust roots; это не защита от процесса с теми же
 правами пользователя. На macOS/Linux сохраняются прежние фиксированные пути.
 
+### Системное открытие браузера
+
+На Windows generic opener передаёт URI зарегистрированному системному handler
+через `ProcessStartInfo.UseShellExecute`, сохраняя query целиком. URL приходит
+фиксированному PowerShell helper по анонимному stdin и не становится shell-кодом.
+Успех передачи URI и завершение OAuth callback проверяются отдельно.
+Пределы, очистка и обязательная Windows-проверка описаны в
+[контракте opener](docs/agent-workspace-runtime.md#системное-открытие-браузера).
+
 ### HTTP-диагностика браузера
 
 `trelio-browser-session.mjs` экспортирует `createDocumentHttpObserver(context,

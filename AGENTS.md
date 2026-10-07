@@ -116,6 +116,10 @@ publication tooling также остаются вне этого публичн
   origin через общий observer; transport failure не получает выдуманного кода.
   Provider interpretation и отсутствие credential reset/replay сохраняются по
   [контракту HTTP-диагностики](README.md#http-диагностика-браузера).
+- Изменения системного открытия браузера проверяй по
+  [контракту opener](docs/agent-workspace-runtime.md#системное-открытие-браузера):
+  Windows handoff требует настоящего URI handler test; mock argv не подтверждает
+  передачу полного OAuth URL, а успех helper не заменяет OAuth callback.
 - Persistent messenger adapter по умолчанию использует `startInBackground=true`: headed
   process запускается без startup window, provider guards ставятся до exact
   inactive CDP target, viewport не изменяет native window bounds. Host не

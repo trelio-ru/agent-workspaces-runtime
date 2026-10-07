@@ -171,6 +171,39 @@ shell-версию. Локальная Run/inspection metadata сохраняе�
 или Workspace mutation; видимое `fetch failed` само по себе не доказывает
 10-секундный timeout или потерянный process descriptor.
 
+### Системное открытие браузера
+
+`openBrowser` на Windows запускает exact системный Windows PowerShell без profile
+и без command shell. `EncodedCommand` содержит только фиксированный код,
+который читает UTF-8 URI из анонимного stdin и вызывает
+`ProcessStartInfo` с `UseShellExecute=true`. Query (`&`, `+`, `=`, percent-encoding)
+и fragment передаются как данные, без `cmd /c start`, интерполяции в script,
+environment либо temporary file. Вход ограничен 32 768 UTF-16 code units;
+пустая строка, NUL, CR и LF отклоняются до запуска. Helper output подавляется,
+raw process/stdin errors не сохраняются в diagnostic или `cause`.
+
+Opener ждёт exit `0` своего helper, а не только `spawn` или завершение stdin.
+Ненулевой exit, ошибка запуска/передачи и 5-секундный timeout дают
+`BROWSER_OPEN_FAILED`. Timeout и отмена останавливают только helper;
+предварительная отмена не запускает его. macOS сохраняет `/usr/bin/open`
+и выбор application, Linux – `xdg-open`.
+
+Передача URI не означает завершение OAuth. Отдельный callback слушает только
+exact IPv4 loopback, проверяет host, path, единственный state и issuer,
+сохраняет PKCE S256 и 10-минутный предел. Ошибка opener возвращает
+`REMOTE_MCP_OAUTH_BROWSER_OPEN_FAILED`, отмена, в том числе во время handoff, –
+`REMOTE_MCP_OAUTH_CANCELLED`; listener и timer очищаются в каждом исходе.
+Authorization URL и state остаются внутри процесса.
+
+`tests/trelio-browser-open.test.mjs` проверяет transport и реальные Windows
+`ShellExecute`/URI handler через уникальный временный HKCU-протокол. В fixture
+используются только synthetic данные; exact registry key и файлы удаляются,
+default HTTP handler не меняется. Этот native test обязателен в Windows job
+`runtime-tests.yml`; его skip на macOS/Linux не является Windows evidence.
+Callback/state/PKCE и очистка дополнительно проверяются
+`tests/trelio-remote-mcp-oauth.test.mjs`. Реальный login провайдера после выпуска
+требует отдельного разрешения и не заменяется synthetic CI.
+
 ### Восстановление подписанного рантайма
 
 Долгоживущий local MCP не требует restart задачи после публикации нового
