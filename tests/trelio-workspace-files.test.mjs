@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
-import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator } from "../host-runtime/scripts/trelio-workspace-files.mjs";
+import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator } from "../host-runtime/scripts/trelio-workspace-files.mjs";
+import { matchWorkspaceTextChunks } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
 import { createEncryptedSearchFileCache } from "../host-runtime/scripts/trelio-local-context.mjs";
-import { readEncryptedWorkspaceSearchDocuments } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 test("encrypted discovery reads names and bounded text; delivery decrypts only the selected original", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trelio-file-delivery-test-"));
@@ -21,6 +22,8 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
   const textId = "77777777-7777-4777-8777-777777777777";
   const deviceId = "88888888-8888-4888-8888-888888888888";
   const secondTextId = "99999999-9999-4999-8999-999999999999";
+  const largeTextId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const invalidTextId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
   const head = "a".repeat(40);
   const scope = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
   const device = await createAgentEncryptionDevice();
@@ -29,15 +32,21 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
     scopePrivateEncryptionKey: { privateKey: scope.privateKey, privateJwk: await webcrypto.subtle.exportKey("jwk", scope.privateKey) } };
   const original = Buffer.from([255, 216, 0, 1, 2, 255, 217]);
   const text = Buffer.from("Документы Марии", "utf8");
+  // Larger than both the old index budget and the independent 24 MiB download
+  // budget: indexing must stream authenticated chunks without using delivery.
+  const largeText = Buffer.from("начало " + "x ".repeat(13 * 1024 * 1024) + " договор согласован");
+  const invalidText = Buffer.concat([Buffer.from([0xff]), Buffer.alloc(2 * 1024 * 1024)]);
   const files = [
     { id: imageId, path: "sources/original.jpg", sizeBytes: original.length, contentType: "image/jpeg" },
     { id: textId, path: "description.md", sizeBytes: text.length, contentType: "text/plain; charset=utf-8" },
   ];
   files.push({ id: secondTextId, path: "second.md", sizeBytes: text.length, contentType: "text/plain" });
+  files.push({ id: largeTextId, path: "large.md", sizeBytes: largeText.length, contentType: "text/plain" });
+  files.push({ id: invalidTextId, path: "invalid.md", sizeBytes: invalidText.length, contentType: "text/plain" });
   const manifest = Buffer.from(JSON.stringify({ schemaVersion: 1, kind: "agent-workspace-browser-manifest", projectionId,
     workspaceId, workspaceHead: head, files }));
   const ciphertexts = new Map();
-  for (const [id, bytes, kind] of [[manifestId, manifest, "manifest"], [imageId, original, "file"], [textId, text, "file"], [secondTextId, text, "file"]]) {
+  for (const [id, bytes, kind] of [[manifestId, manifest, "manifest"], [imageId, original, "file"], [textId, text, "file"], [secondTextId, text, "file"], [largeTextId, largeText, "file"], [invalidTextId, invalidText, "file"]]) {
     const sourcePath = path.join(root, `${id}.source`);
     const destinationPath = path.join(root, `${id}.trelioe1`);
     await writeFile(sourcePath, bytes, { mode: 0o600 });
@@ -85,15 +94,28 @@ test("encrypted discovery reads names and bounded text; delivery decrypts only t
     assert.equal(requests.filter((url) => url.includes(textId)).length, 1);
     assert.equal(requests.filter((url) => url.includes(secondTextId)).length, 2);
     assert.equal(documents.find((file) => file.name === "original.jpg").text, "");
-    assert.equal(documents.find((file) => file.name === "description.md").text, text.toString("utf8"));
+    assert.equal(documents.find((file) => file.name === "description.md").chunks[0].text, text.toString("utf8"));
+    assert.equal(documents.find((file) => file.name === "description.md").searchCoverage.status, "complete");
+    const large = documents.find((file) => file.name === "large.md");
+    assert.equal(large.searchCoverage.indexedBytes, largeText.length);
+    assert.match(matchWorkspaceTextChunks(large.path, large.chunks, "начало договор").previewText, /договор/u);
+    assert.equal(documents.find((file) => file.name === "invalid.md").searchCoverage.status, "unsupported");
+    assert.equal(documents.find((file) => file.name === "invalid.md").chunks.length, 0);
     assert.equal(requests.some((url) => url.includes(imageId)), false, "indexing a binary name must not download its bytes");
     const selected = (await readEncryptedWorkspaceFileManifest(input)).find((file) => file.id === imageId);
+    const stagingRoot = path.join(resolveWorkspaceBridgeConfigDirectory(), "search-staging");
+    const stagingBefore = await readdir(stagingRoot);
+    const largeFile = files.find((file) => file.id === largeTextId);
+    await assert.rejects(readEncryptedWorkspaceSearchChunks({ ...input, signal: AbortSignal.abort() }, largeFile));
+    assert.deepEqual(await readdir(stagingRoot), stagingBefore, "Cancellation must remove its ciphertext staging directory");
     for (let repeat = 0; repeat < 2; repeat++) assert.deepEqual(await readEncryptedWorkspaceSelectedFile(input, selected), original);
     assert.equal(requests.some((url) => url.includes("bundle") || url.includes("original.jpg")), false);
     stale = true;
     await assert.rejects(readEncryptedWorkspaceSelectedFile(input, selected), { code: "WORKSPACE_OUTDATED" });
     stale = false; corrupt = true;
     await assert.rejects(readEncryptedWorkspaceSelectedFile(input, selected));
+    await assert.rejects(readEncryptedWorkspaceSearchChunks(input, files.find((file) => file.id === textId)));
+    assert.deepEqual(await readdir(stagingRoot), stagingBefore, "Crypto failure must leave no partial search staging");
     corrupt = false; denied = true;
     await assert.rejects(readEncryptedWorkspaceFileManifest(input), { code: "ACCESS_DENIED" });
     await assert.rejects(readEncryptedWorkspaceSearchDocuments(input), { code: "ACCESS_DENIED" });

@@ -12036,13 +12036,6 @@ const materializeWorkspaceInspection = async ({
   }
 };
 
-const COMPANY_CONTEXT_SEARCHABLE_EXTENSIONS = new Set([
-  "css", "csv", "html", "ini", "js", "json", "log", "markdown", "md", "mjs", "sql", "svg",
-  "toml", "ts", "tsx", "txt", "xml", "yaml", "yml",
-]);
-const COMPANY_CONTEXT_SEARCHABLE_FILE_BYTES = 1024 * 1024;
-const COMPANY_CONTEXT_SEARCHABLE_WORKSPACE_BYTES = 16 * 1024 * 1024;
-
 /**
  * Open one accepted encrypted Workspace only long enough to build the local
  * search generation.  The returned text stays in process memory; the private
@@ -12051,7 +12044,7 @@ const COMPANY_CONTEXT_SEARCHABLE_WORKSPACE_BYTES = 16 * 1024 * 1024;
  * caller, while unchanged heads can reuse their previous encrypted records.
  */
 export const readEncryptedWorkspaceSearchDocuments = async (input) => {
-  const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSelectedFile, workspaceFileSearchText } =
+  const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks } =
     await import("./trelio-workspace-files.mjs");
   const requestInput = { ...input, workspaceHead: input.acceptedHead };
   const files = await readEncryptedWorkspaceFileManifest(requestInput);
@@ -12059,39 +12052,31 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
     .sort((left, right) => left.sizeBytes - right.sizeBytes || (left.path < right.path ? -1 : 1))
     .map((file) => ({ kind: "workspace_file", workspaceId: input.workspaceId, workspaceHead: input.acceptedHead,
       path: file.path, name: file.path.split("/").at(-1), sizeBytes: file.sizeBytes,
-      contentType: file.contentType, sourceFileId: file.id, text: "" }));
+      contentType: file.contentType, sourceFileId: file.id, text: "", chunks: [],
+      searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } }));
   const byId = new Map(files.map((file) => [file.id, file]));
-  let indexedBytes = 0;
-  const textDocuments = documents.filter((file) => {
-    if (!file.contentType.startsWith("text/plain") || file.sizeBytes > COMPANY_CONTEXT_SEARCHABLE_FILE_BYTES
-      || indexedBytes + file.sizeBytes > COMPANY_CONTEXT_SEARCHABLE_WORKSPACE_BYTES) return false;
-    indexedBytes += file.sizeBytes;
-    return true;
-  });
-  // A small fixed pool amortizes HTTP latency without buffering many documents
-  // or transferring a single binary merely to make its filename searchable.
+  const textDocuments = documents.filter((file) => file.contentType.startsWith("text/plain"));
+  // Process one file at a time with stream backpressure. Binary names need no
+  // download; the complete generation is published only after every text file.
   let next = 0;
   let failed = false;
   // Wait for every started worker before returning a conflict or cancellation.
   // Otherwise abandoned workers could keep downloading/writing after the mirror
   // lock is released and race the next sync. Completed files remain encrypted
   // in the scratchpad; no partial document list is returned to the caller.
-  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(4, textDocuments.length) }, async () => {
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(1, textDocuments.length) }, async () => {
     try {
       while (!failed && next < textDocuments.length) {
         input.signal?.throwIfAborted();
         const document = textDocuments[next++];
         const file = byId.get(document.sourceFileId);
         const cached = await input.searchCache?.read(input, file);
-        if (cached != null) {
-          document.text = cached;
-          continue;
-        }
-        const bytes = await readEncryptedWorkspaceSelectedFile(requestInput, file);
-        try {
-          document.text = workspaceFileSearchText(bytes);
-          await input.searchCache?.write(input, file, document.text);
-        } finally { bytes.fill(0); }
+        const indexed = cached == null ? await readEncryptedWorkspaceSearchChunks(requestInput, file) : JSON.parse(cached);
+        document.chunks = indexed.chunks;
+        document.searchCoverage = indexed.searchCoverage;
+        // Scratchpad entries stay encrypted and exact-head bound. The existing
+        // per-entry size guard limits caching only, never search completeness.
+        if (cached == null) await input.searchCache?.write(input, file, JSON.stringify(indexed));
       }
     } catch (error) {
       failed = true;

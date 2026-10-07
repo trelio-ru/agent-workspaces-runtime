@@ -1032,13 +1032,23 @@ generic local action: body преобразуется в canonical rich text и 
 Top-level description лёгкого check-пункта проходит через тот же generic
 rich-text protection, а task-пункт сохраняет описание внутри `item.task`.
 
-Local mirror читает accepted browser manifest и bounded safe text;
-имена binary/external файлов индексируются без их скачивания. Отсутствующая
+Local mirror schema 8 читает accepted browser manifest и весь safe UTF-8 текст
+частями до 64 KiB плюс overlap 2048 символа; прежних лимитов 1 MiB/16 MiB у индекса
+нет. Pure chunker/matcher генерируется из backend `shared/workspace-text-chunks.ts`;
+проверка – `scripts/build-workspace-text-chunks.mjs --runtime-root <checkout> --check`.
+Один файл обрабатывается за раз с backpressure; ciphertext временно лежит в
+owner-private staging, plaintext на диск не записывается. После проверки exact
+AAD binding, размера и digest staging удаляется, включая ошибку/отмену. Полное
+поколение содержит `searchCoverage` каждого файла и chunks; бинарные/NUL/невалидные
+UTF-8 файлы имеют `unsupported` и остаются доступны по имени без binary download.
+Термины в разных частях дают один file hit; искусственные границы слова исключены. Отсутствующая
 browser projection блокирует поиск до обновления runtime; прежний encrypted
 bundle не используется ни при какой категории ошибки.
 
 Первичная синхронизация сохраняет каждый успешно проверенный текстовый файл
 в отдельном зашифрованном scratchpad `search-files-v1` внутри schema-root mirror.
+Существующий per-entry предел scratchpad ограничивает только reuse; крупные
+файлы индексируются полностью и сохраняются в итоговой encrypted generation.
 Содержимое и имена файлов остаются ciphertext; ключ записи привязан к origin,
 компании, scope/epoch, устройству, Workspace/head и точным метаданным файла.
 Перед reuse runtime заново читает ACL-filtered Workspace overview и manifest;

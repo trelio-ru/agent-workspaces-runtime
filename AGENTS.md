@@ -128,6 +128,10 @@ publication tooling также остаются вне этого публичн
   backend `shared/task-read-budget.ts`; его копию вручную не менять.
   Native/local bounds и continuation проверять
   по [контракту exact read](docs/agent-workspace-runtime.md).
+- Файловый поиск использует generated `trelio-workspace-text-chunks.mjs` из backend
+  pure module. Проверяй native/local parity, большие файлы, границы UTF-8/слов,
+  crypto binding и очистку staging по [контракту](docs/agent-workspace-runtime.md).
+  Chunk/batch bounds не являются лимитом полного индексируемого текста.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
   только закрытые технические dimensions, без input/message/paths и без

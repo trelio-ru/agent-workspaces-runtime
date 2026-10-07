@@ -3707,7 +3707,7 @@ test("encrypted mirror generations are schema-isolated while mutation coherence 
     companyId: "11111111-1111-4111-8111-111111111111",
   });
 
-  assert.equal(paths.root.endsWith("schema-7"), true);
+  assert.equal(paths.root.endsWith("schema-8"), true);
   assert.equal(paths.pointer.startsWith(paths.root), true);
   assert.equal(paths.lock.startsWith(paths.root), true);
   assert.equal(paths.generations.startsWith(paths.root), true);

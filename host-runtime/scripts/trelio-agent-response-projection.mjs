@@ -337,7 +337,7 @@ const SEARCH_MATCH_FIELDS = new Set([
 ]);
 const SEARCH_REGISTRY_ROW_FIELDS = new Set(["id", "rowKey", "verificationStatus"]);
 const SEARCH_DOCUMENT_FIELDS = new Set([
-    "path", "name", "contentType", "sizeBytes", "snippet", "artifactType", "verificationStatus",
+    "path", "name", "contentType", "sizeBytes", "snippet", "artifactType", "verificationStatus", "searchCoverage",
 ]);
 const SEARCH_SCOPE_ENTITY_FIELDS = {
     company: new Set(["id", "slug", "name"]),
@@ -356,6 +356,9 @@ const projectMcpContextSearchResult = (value) => {
     const scope = record(result?.scope);
     const matches = Array.isArray(result?.matches) ? result.matches.map(record) : null;
     const document = record(result?.document);
+    const coverage = record(document?.searchCoverage);
+    if (document?.searchCoverage && (!coverage || !hasOnlyFields(coverage, new Set(["status", "indexedBytes", "totalBytes"]))))
+        return value;
     const knownScopeEntities = scope && Object.entries(SEARCH_SCOPE_ENTITY_FIELDS).every(([key, fields]) => {
         const entity = record(scope[key]);
         return scope[key] === null || scope[key] === undefined
@@ -413,6 +416,7 @@ const projectMcpContextSearchResult = (value) => {
         regularWork: regularWork?.state,
         artifactType: document?.artifactType,
         verificationStatus: document?.verificationStatus,
+        searchCoverage: coverage ?? undefined,
     });
     const matchedSources = [...new Set(matches
             .map((match) => match.source)

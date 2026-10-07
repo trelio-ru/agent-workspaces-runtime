@@ -1,9 +1,15 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { once } from "node:events";
+import { chunkWorkspaceText } from "./trelio-workspace-text-chunks.mjs";
 import { isUtf8 } from "node:buffer";
 import {
   request, requireToken, ensureBridgeCompatibility, ensureCompanyEncryptionContext,
   resolveBridgeDataPlaneRouting, hydrateAgentCompanyEncryptedJson,
+  ensurePrivateDirectory, hardenWindowsPrivatePath, resolveWorkspaceBridgeConfigDirectory,
 } from "./trelio-workspace.mjs";
-import { decryptFileFromCompanyContainerBytes } from "./trelio-company-encryption.mjs";
+import { decryptFileFromCompanyContainer, decryptFileFromCompanyContainerBytes } from "./trelio-company-encryption.mjs";
 import { materializeLocalAttachment, LOCAL_ATTACHMENT_MAX_BYTES } from "./trelio-local-attachments.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
@@ -112,6 +118,84 @@ export const readEncryptedWorkspaceSelectedFile = async (input, file) => {
   const bytes = await openEncryptedFile({ ...input, fileId: file.id, kind: "file", maximum: Math.min(file.sizeBytes, LOCAL_ATTACHMENT_MAX_BYTES) });
   if (bytes.length !== file.sizeBytes) { bytes.fill(0); fail("WORKSPACE_FILE_SIZE_MISMATCH"); }
   return bytes;
+};
+
+/** Stream authenticated bytes into bounded index pieces without writing plaintext. */
+export const readEncryptedWorkspaceSearchChunks = async (input, file) => {
+  const config = resolveWorkspaceBridgeConfigDirectory();
+  await ensurePrivateDirectory(config);
+  const root = path.join(config, "search-staging");
+  await ensurePrivateDirectory(root);
+  const directory = await fs.mkdtemp(path.join(root, "index-"));
+  await ensurePrivateDirectory(directory);
+  const sourcePath = path.join(directory, "container");
+  let handle;
+  try {
+    const response = await request(input.origin, input.token,
+      `/api/agent-workspaces/files/${file.id}/encrypted-content`, { signal: input.signal });
+    if (response.headers.get("x-trelio-workspace-id") !== input.workspaceId
+      || response.headers.get("x-trelio-workspace-head") !== input.workspaceHead) {
+      await response.body?.cancel();
+      fail("WORKSPACE_OUTDATED");
+    }
+    handle = await fs.open(sourcePath, "wx", 0o600);
+    if (process.platform === "win32") await hardenWindowsPrivatePath(sourcePath, "file");
+    let size = 0;
+    // Bound by the exact manifest file, allowing only framing/tag overhead.
+    const maximum = file.sizeBytes + Math.ceil(file.sizeBytes / (4 * 1024 * 1024)) * 16 + 1024 * 1024 + 32;
+    for await (const bytes of response.body) {
+      input.signal?.throwIfAborted();
+      size += bytes.length;
+      if (size > maximum) fail("WORKSPACE_FILE_SIZE_MISMATCH");
+      let written = 0;
+      while (written < bytes.length) written += (await handle.write(bytes, written)).bytesWritten;
+    }
+    await handle.close(); handle = null;
+    const stream = new PassThrough({ highWaterMark: 64 * 1024 });
+    const chunks = [];
+    let invalidText = false;
+    const parsing = (async () => {
+      try { for await (const chunk of chunkWorkspaceText(stream.iterator({ destroyOnReturn: false }))) chunks.push(chunk); }
+      catch (error) {
+        if (error?.code !== "ERR_ENCODING_INVALID_ENCODED_DATA" && error?.message !== "WORKSPACE_TEXT_INVALID") throw error;
+        invalidText = true;
+        chunks.length = 0;
+        // Drain authenticated bytes after a proven non-text sequence. Crypto
+        // verification must still succeed before this becomes unsupported text.
+        stream.resume();
+      }
+    })();
+    parsing.catch(() => undefined);
+    try {
+      await decryptFileFromCompanyContainer({ sourcePath,
+        scopePrivateKey: input.companyEncryption.scopePrivateEncryptionKey.privateKey,
+        scopePrivateJwk: input.companyEncryption.scopePrivateEncryptionKey.privateJwk,
+        expectedCiphertextSha256: response.headers.get("x-trelio-ciphertext-sha256"),
+        validateHeader: (header) => {
+          const aad = header.aad;
+          if (header.plaintextSizeBytes !== file.sizeBytes || aad?.companyId !== input.companyEncryption.runtime.company.id
+            || aad?.scopeId !== input.companyEncryption.runtime.scope.id || aad?.scopeEpoch !== input.companyEncryption.runtime.scope.epoch
+            || aad?.entityType !== "agent_workspace_browser_file" || aad?.entityId !== file.id
+            || aad?.entityRevision !== 1 || aad?.purpose !== "file") fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
+        },
+        consumePlaintext: async (bytes) => {
+          input.signal?.throwIfAborted();
+          if (!invalidText && !stream.write(Buffer.from(bytes))) await once(stream, "drain");
+        },
+      });
+      stream.end();
+      await parsing;
+      return { chunks, searchCoverage: { status: invalidText ? "unsupported" : "complete",
+        indexedBytes: invalidText ? 0 : file.sizeBytes, totalBytes: file.sizeBytes } };
+    } catch (error) {
+      stream.destroy(error);
+      await parsing.catch(() => undefined);
+      throw error;
+    }
+  } finally {
+    try { await handle?.close(); }
+    finally { await fs.rm(directory, { recursive: true, force: true }); }
+  }
 };
 
 /** One exact file; fresh ACL/head and authority are read even for repeated downloads. */

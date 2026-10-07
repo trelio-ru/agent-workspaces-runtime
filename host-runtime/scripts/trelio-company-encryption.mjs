@@ -1100,6 +1100,8 @@ export const decryptFileFromCompanyContainer = async ({
   scopePrivateKey,
   scopePrivateJwk,
   expectedCiphertextSha256 = null,
+  consumePlaintext = null,
+  validateHeader = null,
 }) => {
   const sourceStat = await stat(sourcePath);
   const source = await openFile(sourcePath, "r");
@@ -1108,7 +1110,7 @@ export const decryptFileFromCompanyContainer = async ({
   let completed = false;
 
   try {
-    destination = await openFile(destinationPath, "wx", 0o600);
+    if (!consumePlaintext) destination = await openFile(destinationPath, "wx", 0o600);
     const prefix = await readExact(source, COMPANY_ENCRYPTED_FILE_MAGIC.byteLength + 4, 0);
     if (!prefix.subarray(0, COMPANY_ENCRYPTED_FILE_MAGIC.byteLength).equals(COMPANY_ENCRYPTED_FILE_MAGIC)) {
       throw new Error("File is not a TRELIOE1 encrypted container.");
@@ -1134,6 +1136,7 @@ export const decryptFileFromCompanyContainer = async ({
     ) {
       throw new Error("Encrypted file format is unsupported.");
     }
+    validateHeader?.(header);
     const aad = buildCompanyEncryptionAad(header.aad);
     dataKeyBytes = await hpkeOpen({
       recipientPrivateKey: scopePrivateKey,
@@ -1186,7 +1189,12 @@ export const decryptFileFromCompanyContainer = async ({
         ownedArrayBuffer(ciphertext),
       ));
       try {
-        outputOffset = await writeAll(destination, plaintext, outputOffset);
+        // Index consumers keep plaintext in memory only; await backpressure so
+        // one crypto chunk cannot queue an unbounded document behind the parser.
+        if (consumePlaintext) {
+          await consumePlaintext(plaintext);
+          outputOffset += plaintext.length;
+        } else outputOffset = await writeAll(destination, plaintext, outputOffset);
       } finally {
         plaintext.fill(0);
       }
@@ -1196,7 +1204,7 @@ export const decryptFileFromCompanyContainer = async ({
     if (encryptedOffset !== sourceStat.size || outputOffset !== header.plaintextSizeBytes) {
       throw new Error("Encrypted file has trailing or missing bytes.");
     }
-    await destination.sync();
+    await destination?.sync();
 
     if (expectedCiphertextSha256) {
       const digest = createHash("sha256");

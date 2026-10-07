@@ -1,3 +1,4 @@
+import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
@@ -88,10 +89,10 @@ import {
   applyTrelioFolderOnboarding,
 } from "./trelio-folder-onboarding.mjs";
 
-// Version 7 stores backend-defined search projections and keeps full task and
-// domain payloads out of the durable company mirror. Exact reads are hydrated
+// Version 8 adds complete Workspace text chunks to backend-defined search
+// projections and keeps full task/domain payloads out of the mirror. Exact reads are hydrated
 // into the bounded process cache only when the caller opens a selected object.
-const MIRROR_SCHEMA_VERSION = 7;
+const MIRROR_SCHEMA_VERSION = 8;
 const MIRROR_LOCK_STALE_MS = 10 * 60 * 1000;
 // A first company snapshot can legitimately hydrate thousands of tasks. When
 // no readable generation exists yet, simultaneous MCP hosts join that single
@@ -4248,7 +4249,7 @@ const buildWorkspaceFileSearchDocuments = (mirror) => {
         + `:${encodeURIComponent(workspace.acceptedHead)}`
         + `:${encodeURIComponent(file.path)}`;
       const fields = compactSearchFields([
-        buildSearchField("workspace-file", `${file.name}\n${file.path}\n${file.text ?? ""}`),
+        { ...buildSearchField("workspace-file", `${file.name}\n${file.path}\n${file.text ?? ""}`), chunks: file.chunks ?? [] },
       ]);
       documents.push({
         id: documentId,
@@ -4282,6 +4283,7 @@ const buildWorkspaceFileSearchDocuments = (mirror) => {
           path: file.path,
           sizeBytes: file.sizeBytes,
           contentType: file.contentType ?? "application/octet-stream",
+          searchCoverage: file.searchCoverage ?? null,
         },
       });
     }
@@ -4489,11 +4491,13 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery)
   let strongestMatch = null;
 
   for (const field of document.fields) {
-    if (!matchLocalSearchField(field, normalizedQuery)) continue;
+    const chunkMatch = field.chunks ? matchWorkspaceTextChunks(field.text, field.chunks, originalQuery) : null;
+    if (field.chunks ? !chunkMatch : !matchLocalSearchField(field, normalizedQuery)) continue;
     const match = {
       query: originalQuery,
       source: field.source,
-      previewText: field.previewText,
+      previewText: chunkMatch?.previewText ?? field.previewText,
+      ...(chunkMatch ? { lexicalQuality: chunkMatch.lexicalQuality } : {}),
       ...(field.publicPath ? { publicPath: field.publicPath } : {}),
     };
     if (
@@ -4568,6 +4572,7 @@ export const searchCompanyContextMirror = (
         previewText: `${document.scopePrefix}\n${document.text}`,
         normalizedText: `${normalizeSearchText(document.scopePrefix)} ${document.fields[0].normalizedText}`,
         referenceText: `${normalizeContextSearchReference(document.scopePrefix)}\n${document.fields[0].referenceText}`,
+        chunks: document.fields[0].chunks,
       }],
     } : document;
     const matches = findLocalSearchMatches(searchedDocument, queries);
