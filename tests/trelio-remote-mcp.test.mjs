@@ -85,12 +85,13 @@ test("local MCP preserves the known company-context HTTP conflict without exposi
     details: { taskId: "PRIVATE-TASK-ID" },
   });
   let calls = 0;
+  let diagnosticCalls = 0;
   const response = await handleLocalMcpMessage({
     jsonrpc: "2.0", id: 1, method: "tools/call",
     params: { name: "continue_trelio_local_action", arguments: {} },
   }, {
     callTool: async () => { calls += 1; throw failure; },
-    recordDiagnostic: () => assert.fail("HTTP failures must not enter host error telemetry."),
+    recordDiagnostic: () => { diagnosticCalls += 1; },
   });
 
   assert.equal(response.result.isError, true);
@@ -100,6 +101,7 @@ test("local MCP preserves the known company-context HTTP conflict without exposi
   });
   assert.doesNotMatch(JSON.stringify(response), /PRIVATE-BACKEND-PAYLOAD|PRIVATE-TASK-ID/u);
   assert.equal(calls, 1, "Serializing a conflict must not replay the original tool call.");
+  assert.equal(diagnosticCalls, 0, "HTTP failures must not enter host error telemetry.");
 });
 
 test("local MCP does not expose arbitrary HTTP codes or a forged company-context conflict", async () => {
