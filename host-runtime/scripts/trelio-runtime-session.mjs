@@ -9,6 +9,7 @@
  * tool output, MCP arguments, Workspace or backend storage.
  */
 import crypto from "node:crypto";
+import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure, resolveHostRuntimeLoader,
@@ -968,7 +969,11 @@ export const formatRuntimeHookFailure = (error) => {
       + "или повторном сбое остановись с точной причиной. Не сбрасывай OAuth, "
       + "Hooks или session-файлы; не выводи pairing-данные в ответ пользователю.\n";
   }
-  const rawMessage = error instanceof Error ? error.message : String(error);
+  // Lifecycle hooks are outside the telemetry collector, so retain the same
+  // content-free category/phase in their local deny/stderr reason too.
+  const rawMessage = error instanceof ProcessDiagnosticError
+    ? `${error.message} ${JSON.stringify(error.details)}`
+    : error instanceof Error ? error.message : String(error);
   const message = /[.!?]$/u.test(rawMessage.trim())
     ? rawMessage.trim()
     : `${rawMessage.trim()}.`;

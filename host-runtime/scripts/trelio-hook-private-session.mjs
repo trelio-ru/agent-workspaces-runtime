@@ -7,6 +7,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { ProcessDiagnosticError, processDiagnosticCauseCode } from "./trelio-process-diagnostics.mjs";
 
 const hookScope = new AsyncLocalStorage();
 const stageScope = new AsyncLocalStorage();
@@ -46,9 +47,12 @@ const budgetFailure = ({ stage = currentStage(), phase, kind, timeout = "hook" }
   const operation = ACL_PHASES.has(phase) || phase === "protect" || phase === "unprotect"
     ? `${family}.${phase}` : "local_state";
   const timeoutKind = timeout === "private_process" ? timeout : "hook";
-  return Object.assign(new Error(
+  const diagnosticCode = timeoutKind === "hook" ? "TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED"
+    : phase === "worker_startup" ? "TRELIO_WINDOWS_PRIVATE_PROCESS_START_TIMEOUT"
+    : "TRELIO_WINDOWS_PRIVATE_PROCESS_REQUEST_TIMEOUT";
+  return new ProcessDiagnosticError(diagnosticCode,
     `истёк внутренний срок hook (stage=${hookStage}; operation=${operation}; timeout=${timeoutKind})`,
-  ), { code: "TRELIO_RUNTIME_HOOK_FAILED", hookStage, operation, timeoutKind });
+    { hookStage, operation, timeoutKind });
 };
 
 export const withRuntimeHookStage = (stage, operation) => {
@@ -158,14 +162,19 @@ export const createPrivateAclWorker = ({
   let sequence = 0, closing = false, ready = false;
   let output = Buffer.alloc(0);
   const pending = new Map();
-  const fail = (error) => {
+  const fail = (error, diagnosticCode = "TRELIO_WINDOWS_PRIVATE_PROCESS_PROTOCOL_INVALID", details = {}) => {
     // Never retain child output or the caller's plaintext in an Error. Only
     // closed machine codes and operation identity cross this boundary.
-    const causeCode = /^[A-Z0-9_]{2,32}$/u.test(error?.code || "") ? error.code : "IO_ERROR";
+    const causeCode = processDiagnosticCauseCode(error);
     const active = pending.values().next().value;
-    failure ??= signal?.aborted ? budgetFailure(active) : Object.assign(new Error(
+    const family = active?.kind === "protect" || active?.kind === "unprotect" ? "windows_dpapi" : "windows_acl";
+    // The stage comes from the waiting parent, never from native response
+    // text. A process that exits before readiness differs from a denied ACL
+    // check or malformed reply; neither category authorizes fallback/retry.
+    failure ??= signal?.aborted ? budgetFailure(active) : new ProcessDiagnosticError(diagnosticCode,
       `Windows private process не завершил проверку (${causeCode}).`,
-    ), { code: "TRELIO_RUNTIME_HOOK_FAILED" });
+      { ...details, hookStage: active?.stage,
+        operation: `${family}.${active?.phase || "worker_startup"}`, causeCode });
     clearTimeout(startupTimer);
     for (const entry of pending.values()) {
       clearTimeout(entry.timer);
@@ -185,7 +194,15 @@ export const createPrivateAclWorker = ({
     }, requestTimeoutMilliseconds);
     const payload = entry.payload;
     entry.payload = undefined;
-    child.stdin.write(payload, (error) => { payload.fill(0); if (error) fail(error); });
+    try {
+      child.stdin.write(payload, (error) => {
+        payload.fill(0);
+        if (error) fail(error, "TRELIO_WINDOWS_PRIVATE_PROCESS_IO_FAILED");
+      });
+    } catch (error) {
+      payload.fill(0);
+      fail(error, "TRELIO_WINDOWS_PRIVATE_PROCESS_IO_FAILED");
+    }
   };
   const acceptLine = (line) => {
     let reply;
@@ -218,9 +235,10 @@ export const createPrivateAclWorker = ({
     }
     if (!dpapi && Object.hasOwn(reply, "value")) { fail(); return; }
     if (!reply.ok) {
-      failure = Object.assign(new Error(dpapi ? `Windows DPAPI не выполнил операцию ${entry.kind}.`
-        : `Windows не подтвердил права локального private path (stage=${entry.stage}; operation=windows_acl.${entry.phase}).`),
-      { code: "TRELIO_RUNTIME_HOOK_FAILED" });
+      failure = new ProcessDiagnosticError(dpapi ? "TRELIO_WINDOWS_PRIVATE_DPAPI_FAILED" : "TRELIO_WINDOWS_PRIVATE_ACL_FAILED",
+        dpapi ? `Windows DPAPI не выполнил операцию ${entry.kind}.`
+          : `Windows не подтвердил права локального private path (stage=${entry.stage}; operation=windows_acl.${entry.phase}).`,
+        { hookStage: entry.stage, operation: dpapi ? `windows_dpapi.${entry.kind}` : `windows_acl.${entry.phase}` });
       fail(); return;
     }
     let value;
@@ -250,10 +268,13 @@ export const createPrivateAclWorker = ({
         env: environment, shell: false, windowsHide: true,
         stdio: ["pipe", "pipe", "ignore"], ...(signal ? { signal } : {}),
       });
-    } catch (error) { fail(error); throw failure; }
-    child.on("error", fail);
-    child.on("close", () => { if (!closing || pending.size) fail(); });
-    child.stdin.on("error", fail);
+    } catch (error) { fail(error, "TRELIO_WINDOWS_PRIVATE_PROCESS_START_FAILED"); throw failure; }
+    child.on("error", error => fail(error, ready
+      ? "TRELIO_WINDOWS_PRIVATE_PROCESS_IO_FAILED" : "TRELIO_WINDOWS_PRIVATE_PROCESS_START_FAILED"));
+    child.on("close", (exitCode, signal) => {
+      if (!closing || pending.size) fail(undefined, "TRELIO_WINDOWS_PRIVATE_PROCESS_EXITED", { exitCode, signal });
+    });
+    child.stdin.on("error", error => fail(error, "TRELIO_WINDOWS_PRIVATE_PROCESS_IO_FAILED"));
     child.stdout.on("data", (chunk) => {
       if (failure || closing) { chunk.fill(0); return; }
       const limit = [...pending.values()].some(e => e.kind === "protect" || e.kind === "unprotect")

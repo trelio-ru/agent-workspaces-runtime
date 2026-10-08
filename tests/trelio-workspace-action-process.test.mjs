@@ -34,6 +34,7 @@ const openAction = {
 // connecting to Trelio, resolving a provider package or reading any credentials.
 const bridgeProbe = `
 import fs from "node:fs/promises";
+import { skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
 await fs.appendFile(process.env.TRELIO_TEST_EXECUTIONS, "started\\n");
 if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
   process.stderr.write("Ошибка: " + JSON.stringify({
@@ -88,6 +89,10 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     code: process.env.TRELIO_TEST_PROVIDER_FAILURE,
     message: "PRIVATE_CANARY", details: { secret: "PRIVATE_CANARY" } }));
   process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_INNER_EXIT) {
+  process.stderr.write("PRIVATE_CANARY provider stderr\\n");
+  process.stderr.write("Ошибка: " + JSON.stringify(skillRuntimeExitError(Number(process.env.TRELIO_TEST_INNER_EXIT))) + "\\n");
+  process.exitCode = 1;
 } else if (process.env.TRELIO_TEST_CHILD_FAILURE === "1") {
   process.stderr.write("synthetic bridge failure");
   process.exitCode = 7;
@@ -170,7 +175,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, runtimeRecoveryFailure = false, providerFailure = "", ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -181,6 +186,7 @@ const createFixture = async (t) => {
         TRELIO_TEST_EXECUTIONS: executionsPath,
         TRELIO_TEST_CHILD_FAILURE: childFailure ? "1" : "0",
         TRELIO_TEST_PROVIDER_FAILURE: providerFailure,
+        TRELIO_TEST_INNER_EXIT: String(innerExit),
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
         TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
@@ -209,6 +215,15 @@ test("Workspace bridge uses its exact loaded plugin cwd and current Node executa
   assert.equal(outcome.child.executable, process.execPath);
   assert.deepEqual(outcome.child.argv.slice(-4), ["--origin", origin, "--", "inspect"]);
   assert.equal(outcome.parentCwd, fixture.hostDirectory);
+  assert.equal(outcome.executions, "started\n");
+});
+
+test("MCP sees the inner skill exit, not the bridge CLI exit, with no action replay", async (t) => {
+  const fixture = await createFixture(t);
+  const outcome = await fixture.run({ innerExit: 5 });
+  assert.equal(outcome.error.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+  assert.equal(outcome.error.diagnosticCode, "TRELIO_SKILL_RUNTIME_EXIT_5");
+  assert.equal(outcome.error.details.process.exitCode, 5);
   assert.equal(outcome.executions, "started\n");
 });
 

@@ -20,6 +20,7 @@ import {
   WorkspaceRunReclaimRequiredError,
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
+import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
 import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
 import {
@@ -1381,6 +1382,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
+  if (error instanceof ProcessDiagnosticError) return JSON.stringify(error);
   if (error instanceof BridgeTransportError || error instanceof HostRuntimeRecoveryError) return JSON.stringify(error);
   if (
     error instanceof WorkspaceActiveRunRequiredError
@@ -7531,16 +7533,20 @@ const runMaterializedAgentSkill = async ({
     }
     child.once("error", (error) => {
       clearSupervision();
-      reject(error);
+      reject(new ProcessDiagnosticError("TRELIO_SKILL_RUNTIME_START_FAILED",
+        "Не удалось запустить runtime навыка.",
+        { operation: "skill_run", causeCode: processDiagnosticCauseCode(error) }));
     });
     child.once("exit", (code, signal) => {
       clearSupervision();
       if (deadlineExceeded) {
-        reject(new Error("Browser-session runtime превысил подписанный lease."));
+        reject(new ProcessDiagnosticError("TRELIO_SKILL_RUNTIME_LEASE_EXPIRED",
+          "Browser-session runtime превысил подписанный lease.", { operation: "skill_run" }));
         return;
       }
       if (signal) {
-        reject(new Error(`Runtime процесса завершён сигналом ${signal}.`));
+        reject(new ProcessDiagnosticError("TRELIO_SKILL_RUNTIME_TERMINATED",
+          "Runtime процесса завершён сигналом.", { operation: "skill_run", signal }));
         return;
       }
       resolve(code ?? 1);
@@ -7551,7 +7557,7 @@ const runMaterializedAgentSkill = async ({
   });
 
   if (exitCode !== 0) {
-    throw new Error(`Runtime навыка завершился с кодом ${exitCode}.`);
+    throw skillRuntimeExitError(exitCode);
   }
 };
 

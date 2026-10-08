@@ -473,8 +473,17 @@ HTTP `TrelioApiError`, hooks и process crashes в этот счётчик не 
 признакам: directory, permission, exit, termination, output limit. Только для
 `skill_run` допустим один JSON stdout до 64 KiB с `ok=false`: извлекается лишь
 один из закрытых MAX assist codes. Message/details и произвольные коды не
-передаются в telemetry. Публичный action wrapper сохраняет прежний код, локальный
-`details.failureCode` объясняет причину. Повтор действия не выполняется.
+передаются в telemetry. Последний структурированный error frame самого bridge
+сохраняет внутренний skill exit отдельно от exit внешнего CLI: категории
+`TRELIO_SKILL_RUNTIME_EXIT_1`..`_6`/`_OTHER`, start failed, termination и
+browser lease expiry. Числовой exit и закрытый signal доступны только локально.
+Значения exit не интерпретируются как универсальные причины ошибки провайдера.
+Windows ACL/DPAPI различают spawn, startup/request timeout, protocol, I/O,
+unexpected exit и отказ конкретной операции; общий hook deadline имеет свою
+категорию. Публичный action wrapper и `TRELIO_RUNTIME_HOOK_FAILED` сохраняют
+прежний ABI; локальные `details.failureCode`/`details.process` и hook deny
+содержат закрытую причину/этап. Lifecycle hooks не добавляются в общий счётчик.
+Повтор действия не выполняется.
 
 Закрытый wire-каталог `trelio-agent-diagnostics-contract.json` ограничивает
 tool/operation/code. Payload содержит лишь UUID события, эти dimensions,

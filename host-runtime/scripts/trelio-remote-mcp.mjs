@@ -15,6 +15,7 @@ import {
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
 } from "./trelio-host-runtime-recovery.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
+import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import { spawn } from "node:child_process";
 import dns from "node:dns/promises";
 import fs from "node:fs/promises";
@@ -6226,6 +6227,7 @@ const safeErrorPayload = (error) => ({
   code: error instanceof RemoteMcpHostError
     || error instanceof RemoteMcpOAuthError
     || error instanceof TrelioLocalContextError
+    || error instanceof ProcessDiagnosticError
     || error instanceof HostRuntimeRecoveryError
     || error instanceof CodexRoutingConfigError
     || (error instanceof TrelioApiError
@@ -6236,7 +6238,7 @@ const safeErrorPayload = (error) => ({
       ? "TRELIO_BRIDGE_PAIRING_REQUIRED"
       : "REMOTE_MCP_HOST_ERROR",
   message: error instanceof Error ? error.message : String(error),
-  ...((error instanceof RemoteMcpHostError || error instanceof TrelioLocalContextError || error instanceof HostRuntimeRecoveryError) && error.details
+  ...((error instanceof RemoteMcpHostError || error instanceof TrelioLocalContextError || error instanceof HostRuntimeRecoveryError || error instanceof ProcessDiagnosticError) && error.details
     ? { details: error.details }
     : {}),
 });
@@ -6374,7 +6376,7 @@ export const handleLocalMcpMessage = async (
       try {
         if (!(effectiveError instanceof TrelioApiError)) {
           recordDiagnostic?.(message.params?.name, message.params?.arguments,
-            effectiveError instanceof TrelioLocalContextError
+            effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError
               ? effectiveError.diagnosticCode ?? errorPayload.code
               : errorPayload.code);
         }

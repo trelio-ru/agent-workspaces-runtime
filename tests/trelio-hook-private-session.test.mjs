@@ -71,7 +71,11 @@ test("one hook reuses one ACL process but verifies every path, and closes it bef
     }
     // Even a previously successful path must still reach the child. An error
     // on that same transport is rejected, not hidden by a cached ACL result.
-    await assert.rejects(first.harden("deny", "file"), /Windows не подтвердил/u);
+    await assert.rejects(first.harden("deny", "file"), error => {
+      assert.match(error.message, /Windows не подтвердил/u);
+      assert.equal(error.diagnosticCode, "TRELIO_WINDOWS_PRIVATE_ACL_FAILED");
+      return true;
+    });
   });
   assert.equal(state.starts, 1);
   await assertStopped(state);
@@ -117,6 +121,9 @@ for (const mode of ["invalid", "invalid-phase", "exit"]) {
       await assert.rejects(worker.harden(mode, "file"), (error) => {
         assert.equal(error.stdout, undefined);
         assert.equal(error.stderr, undefined);
+        assert.equal(error.diagnosticCode, mode === "exit"
+          ? "TRELIO_WINDOWS_PRIVATE_PROCESS_EXITED" : "TRELIO_WINDOWS_PRIVATE_PROCESS_PROTOCOL_INVALID");
+        if (mode === "exit") assert.equal(error.details.exitCode, 1);
         assert.doesNotMatch(error.message, /not-json|synthetic-powershell|private-user-path-or-secret/u);
         return true;
       });
@@ -137,6 +144,8 @@ for (const timeoutKind of ["hook", "private_process"]) {
         assert.equal(error.hookStage, "runtime_state_read");
         assert.equal(error.operation, "windows_acl.dacl_verify");
         assert.equal(error.timeoutKind, timeoutKind);
+        assert.equal(error.diagnosticCode, timeoutKind === "hook"
+          ? "TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED" : "TRELIO_WINDOWS_PRIVATE_PROCESS_REQUEST_TIMEOUT");
         assert.match(error.message, /stage=runtime_state_read/u);
         assert.doesNotMatch(error.message, /phase-stall/u);
         return true;
@@ -237,10 +246,12 @@ test("ACL requests wait for readiness, with a separate startup diagnostic and un
         if (!ready) {
           assert.equal(error.operation, "windows_acl.worker_startup");
           assert.equal(error.timeoutKind, "private_process");
+          assert.equal(error.diagnosticCode, "TRELIO_WINDOWS_PRIVATE_PROCESS_START_TIMEOUT");
           assert.equal(receivedBytes, 0);
         } else {
           assert.ok(receivedBytes > 0);
           assert.equal(error.operation, "windows_acl.request_dispatch");
+          assert.equal(error.diagnosticCode, "TRELIO_WINDOWS_PRIVATE_PROCESS_REQUEST_TIMEOUT");
         }
         return true;
       });
@@ -439,4 +450,42 @@ test("DPAPI operation timeout retains its stage and rejects reuse without leakin
     assert.equal(children.length, 1);
   } finally { await worker.close(); }
   await assertStopped({ children });
+});
+
+test("private worker spawn failure preserves only closed errno and never respawns", async () => {
+  let starts = 0;
+  const worker = createPrivateAclWorker({ executable: "fixture", args: [],
+    spawnProcess: () => {
+      starts++;
+      throw Object.assign(new Error("PRIVATE_CANARY"), { code: "ENOENT", path: "PRIVATE_CANARY" });
+    },
+  });
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(worker.harden("PRIVATE_CANARY", "file"), error => {
+        assert.equal(error.code, "TRELIO_RUNTIME_HOOK_FAILED");
+        assert.equal(error.diagnosticCode, "TRELIO_WINDOWS_PRIVATE_PROCESS_START_FAILED");
+        assert.equal(error.details.causeCode, "ENOENT");
+        assert.equal(error.details.operation, "windows_acl.worker_startup");
+        assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE_CANARY/u);
+        return true;
+      });
+    }
+    assert.equal(starts, 1);
+  } finally { await worker.close(); }
+});
+
+test("DPAPI denial is distinct from malformed transport and does not expose the input", async () => {
+  const worker = createPrivateAclWorker({ executable: "fixture", args: [],
+    spawnProcess: (_program, _args, options) => spawn(process.execPath, ["-e",
+      "console.log(JSON.stringify({ready:true}));process.stdin.once('data',()=>console.log(JSON.stringify({id:'1',ok:false})))"], options),
+  });
+  try {
+    await assert.rejects(worker.dpapi("unprotect", Buffer.alloc(32, 1), Buffer.from("PRIVATE_CANARY")), error => {
+      assert.equal(error.diagnosticCode, "TRELIO_WINDOWS_PRIVATE_DPAPI_FAILED");
+      assert.equal(error.details.operation, "windows_dpapi.unprotect");
+      assert.doesNotMatch(JSON.stringify(error) + error.message, /PRIVATE_CANARY/u);
+      return true;
+    });
+  } finally { await worker.close(); }
 });

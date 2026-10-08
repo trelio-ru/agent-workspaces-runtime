@@ -9241,6 +9241,7 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
     path.join(sourceDirectory, "main.mjs"),
     [
       'import { readFile, writeFile } from "node:fs/promises";',
+      'if (process.argv.includes("--fail-exit-five")) process.exit(5);',
       'let stdinValue = "";',
       'if (process.argv.includes("--read-stdin")) { for await (const chunk of process.stdin) stdinValue += chunk; }',
       `const envGrant = process.env.DEPLOY_TOKEN === ${JSON.stringify(secretValues.env)};`,
@@ -9536,6 +9537,15 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
     assert.match(secondRun.stdout, new RegExp(expectedRuntimeOutput.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
     assert.equal(resolveCount, 1, "an exact bound session may reuse admission");
     assert.equal(packageDownloadCount, 1, "second invocation must use verified cache");
+    await assert.rejects(runSkill(["--fail-exit-five"]), error => {
+      // Exercise the real signed-package child and CLI boundary. The bridge
+      // itself exits 1, while its final structured frame preserves inner 5.
+      assert.equal(error.code, 1);
+      const frame = JSON.parse(error.stderr.trim().slice("Ошибка: ".length));
+      assert.equal(frame.code, "TRELIO_SKILL_RUNTIME_EXIT_5");
+      assert.equal(frame.details.exitCode, 5);
+      return true;
+    });
 
     for (const deliveryMode of ["env", "file", "stdin"]) {
       const grantedRun = await runWithGrant(deliveryMode);

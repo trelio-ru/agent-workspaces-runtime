@@ -2,6 +2,7 @@ import { assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskR
 import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
+import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
@@ -9751,6 +9752,8 @@ export const workspaceActionFailureCode = (error, operation) => {
       if (payload?.ok === false && providerCodes.includes(payload.code)) return payload.code;
     } catch { /* Unstructured/oversized provider output has no safe category. */ }
   }
+  const processDiagnostic = parseProcessDiagnostic(error?.stderr);
+  if (processDiagnostic) return processDiagnostic.failureCode;
   if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "TRELIO_WORKSPACE_DIRECTORY_UNAVAILABLE";
   if (error?.code === "EACCES" || error?.code === "EPERM") return "TRELIO_WORKSPACE_PERMISSION_DENIED";
   if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "TRELIO_WORKSPACE_OUTPUT_LIMIT";
@@ -10285,12 +10288,14 @@ export const handleTrelioWorkspaceActionOperation = async (
       );
     }
     const failureCode = workspaceActionFailureCode(error, invocation.operation);
+    const processDiagnostic = parseProcessDiagnostic(error?.stderr);
     const actionError = new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_FAILED",
       stderr || "The Trelio Workspace bridge action failed.",
       {
         operation: invocation.operation,
         failureCode,
+        ...(processDiagnostic ? { process: processDiagnostic } : {}),
         ...(stdout ? { stdout } : {}),
         ...(stderr ? { stderr } : {}),
       },
