@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
+import { appendFileSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -20,6 +21,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   detectAgentRuntimeAttestation,
+  readCodexTurnContext,
   resolveRuntimeClientSessionId,
 } from "../host-runtime/scripts/trelio-runtime-attestation.mjs";
 import {
@@ -213,6 +215,90 @@ test("Codex hook observes model and current turn effort", async () => {
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
+});
+
+test("Codex effort survives long turns and oversized UTF-8 tool output", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-long-turn-"));
+  const file = path.join(root, "rollout.jsonl");
+  const context = JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "xhigh" } });
+  const observe = () => detectAgentRuntimeAttestation({
+    hookInput: { session_id: crypto.randomUUID(), model: "gpt-5.6-sol", transcript_path: file },
+    environment: {},
+  });
+  try {
+    const output = JSON.stringify({ timestamp: "2026-01-01T00:00:00Z", type: "response_item",
+      payload: { type: "function_call_output", output: "Синтетический результат 🧪".repeat(100_000) } });
+    assert.ok(Buffer.byteLength(output) > 2 * 1024 * 1024);
+    // Giant single line, many smaller lines, CRLF and an unterminated final
+    // record all occur in real JSONL. None can hide the latest context.
+    for (const suffix of [output, `${output}\r\n`, `${JSON.stringify({ type: "event_msg", payload: "x".repeat(3000) })}\n`.repeat(1000)]) {
+      await writeFile(file, `${context}\r\n${suffix}`);
+      assert.equal((await observe()).effortLevel, "xhigh");
+    }
+    // Force a context containing multibyte text across a backwards-read block
+    // boundary. Bytes must be joined before JSON/UTF-8 decoding.
+    await writeFile(file, `${context}\n${JSON.stringify({ type: "turn_context", payload: {
+      model: "gpt-5.6-sol", effort: "low", note: "я🧪".repeat(80_000),
+    } })}\n${output}`);
+    assert.equal((await observe()).effortLevel, "low");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Codex scan never substitutes an older effort for unavailable latest context", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-context-fence-"));
+  const file = path.join(root, "rollout.jsonl");
+  const older = JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "ultra" } });
+  const output = JSON.stringify({ type: "response_item", payload: "x".repeat(3 * 1024 * 1024) });
+  try {
+    for (const latest of [
+      JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.6-sol" } }),
+      JSON.stringify({ type: "turn_context", payload: { effort: "unsupported" } }),
+      JSON.stringify({ type: "turn_context", payload: null }),
+      '{"type":"turn_context","payload":',
+      JSON.stringify({ type: "turn_context", payload: { effort: "low", note: "x".repeat(3 * 1024 * 1024) } }),
+      JSON.stringify({ type: "unknown_record", payload: "x".repeat(3 * 1024 * 1024) }),
+    ]) {
+      await writeFile(file, `${older}\n${latest}\n${output}`);
+      const result = await detectAgentRuntimeAttestation({
+        hookInput: { session_id: crypto.randomUUID(), model: "gpt-5.6-sol", transcript_path: file,
+          tool_input: { effort: "ultra" } }, environment: { MODEL_REASONING_EFFORT: "ultra" },
+      });
+      assert.equal(result.effortLevel, null);
+    }
+    // A partial append after an otherwise valid context must not use that
+    // context until the next invocation can observe a complete stable record.
+    await writeFile(file, `${older}\n{"type":"turn_context","payload":`);
+    assert.equal(await readCodexTurnContext(file), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Codex context scan has a non-sliding deadline and closes its file", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-context-deadline-"));
+  const file = path.join(root, "rollout.jsonl");
+  try {
+    await writeFile(file, JSON.stringify({ type: "turn_context", payload: { effort: "xhigh" } }));
+    let clock = 0;
+    assert.equal(await readCodexTurnContext(file, { now: () => clock++, timeoutMs: 1 }), null);
+    // No inherited deadline: a later independent invocation can inspect the
+    // same file. Windows cleanup also verifies that no open handle leaked.
+    assert.equal((await readCodexTurnContext(file)).effort, "xhigh");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Codex context scan rejects an append during its snapshot read", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-context-append-"));
+  const file = path.join(root, "rollout.jsonl");
+  try {
+    await writeFile(file, JSON.stringify({ type: "turn_context", payload: { effort: "ultra" } }) + "\n");
+    let calls = 0;
+    const result = await readCodexTurnContext(file, { now: () => {
+      if (++calls === 2) appendFileSync(file,
+        JSON.stringify({ type: "turn_context", payload: { effort: "low" } }) + "\n");
+      return 0;
+    } });
+    assert.equal(result, null, "must not return the earlier snapshot as current evidence");
+    assert.equal((await readCodexTurnContext(file)).effort, "low");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("discovery strips authored instruction hints without registration or approval bypass", async () => {
@@ -1072,7 +1158,7 @@ test("SessionStart pins the initial model and supported host names inject verifi
       transcriptPath,
       `${JSON.stringify({
         type: "turn_context",
-        payload: { model: "gpt-5.4", effort: "high" },
+        payload: { model: "gpt-5.4" },
       })}\n`,
     );
     const environment = {
@@ -1091,6 +1177,14 @@ test("SessionStart pins the initial model and supported host names inject verifi
       transcript_path: transcriptPath,
     }, environment);
     assert.deepEqual(started, { exitCode: 0, stdout: "", stderr: "" });
+
+    // Simulate the common first-turn ordering: SessionStart has a model but
+    // not an effort yet. By the first protected call, a large result has moved
+    // the actual turn_context beyond the former 2 MiB tail cutoff.
+    await writeFile(transcriptPath, [
+      JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.4", effort: "high" } }),
+      JSON.stringify({ type: "response_item", payload: { output: "synthetic".repeat(350_000) } }),
+    ].join("\n") + "\n");
 
     const guarded = await runHook({
       hook_event_name: "PreToolUse",

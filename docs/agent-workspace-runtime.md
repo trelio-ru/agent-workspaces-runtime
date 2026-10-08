@@ -131,6 +131,16 @@ Hook принимает только непустой JSON с поддержив
 `TRELIO_RUNTIME_HOOK_FAILED`: успешный выход без `updatedInput` для защищённого
 `PreToolUse` оставил бы MCP-вызов без proof и скрыл бы локальную причину.
 
+Для Codex запись model/effort берётся из ближайшего `turn_context` exact
+transcript: обратный поиск блоками по 256 KiB под двухсекундным deadline,
+с пределом одной собираемой строки 2 MiB. Общая длина хода не создаёт tail cutoff.
+Oversized non-context записи пропускаются только по известному внешнему
+заголовку Codex; неизвестный заголовок, oversized/повреждённый context и
+изменение снимка возвращают отсутствующее evidence. Нельзя переходить к более
+старому effort, брать его из tool input или настроек. SessionStart pinning,
+общий hook deadline и серверная policy остаются прежними. `EFFORT_REQUIRED`
+означает отсутствие effort, `EFFORT_TOO_LOW` — наблюдаемый уровень ниже порога.
+
 Локальная регистрация hook ограничена общим внутренним сроком: PreToolUse
 22 секунды, SessionStart 8 секунд, SessionEnd 2 секунды, без продления после
 ACL или credential load. HTTP сохраняет отдельный 11-секундный registration

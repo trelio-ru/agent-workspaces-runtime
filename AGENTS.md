@@ -75,6 +75,10 @@ publication tooling также остаются вне этого публичн
   `hookInput.session_id`; inherited environment ID допустим только при отсутствии
   ID события. Все повторы захвата lock ограничены общим deadline, ошибки удаления
   stale lock не проглатываются и не разрешают recursive cleanup либо смену ACL.
+- Codex effort ищется в ближайшем `turn_context` назад блоками с ограничением
+  памяти/времени, не фиксированным tail. Большой tool output не скрывает context;
+  неполное/повреждённое новое наблюдение не заменяется effort старого хода.
+  Контракт и fail-closed границы — [README](README.md#ошибки-lifecycle-hooks).
 - При отсутствии paired bridge hook возвращает точный pairing code и публичный
   approval nextCall; обычное подтверждение клиента сохраняется. После approval
   один retry исходного MCP завершает pairing и admission в той же задаче.
