@@ -220,6 +220,18 @@ test("runtime migration skips Claude and converts Codex write failures to a type
   assert.match(blocked.error.message, /config is a symlink/u);
 });
 
+test("native Antigravity startup never migrates a foreign Codex configuration", async (t) => {
+  const pluginRoot = await mkdtemp(path.join(os.tmpdir(), "trelio-antigravity-startup-"));
+  t.after(() => rm(pluginRoot, { recursive: true, force: true }));
+  await writeFile(path.join(pluginRoot, "plugin.json"), JSON.stringify({ name: "trelio-agent-workspaces" }));
+  const result = await migrateCodexLegacyTrelioMcpForRuntime({
+    environment: { TRELIO_PLUGIN_ROOT: pluginRoot, CODEX_HOME: "/foreign", CODEX_THREAD_ID: "inherited-thread" },
+    migrate: async () => assert.fail("Native startup must not read or change Codex config"),
+  });
+  assert.equal(result.status, "not_applicable");
+  assert.equal(result.restartRequired, false);
+});
+
 test("routing patch creates one focused Code Mode table", () => {
   const patch = buildCodexRoutingConfigPatch("model = \"gpt-test\"\n");
 

@@ -995,6 +995,24 @@ export const migrateCodexLegacyTrelioMcpForRuntime = async ({
     };
   }
   try {
+    // A native Antigravity install has a root-level plugin.json, unlike the
+    // Codex/Claude multi-client shell. Inspect only that structural marker in
+    // the exact loader-selected root: inherited CODEX_* variables must not
+    // authorize editing another client's config. This only skips a local
+    // migration; OAuth admission remains entirely server-owned.
+    if (typeof environment.TRELIO_PLUGIN_ROOT === "string"
+      && path.isAbsolute(environment.TRELIO_PLUGIN_ROOT)) {
+      const nativeManifest = await fs.lstat(path.join(environment.TRELIO_PLUGIN_ROOT, "plugin.json"))
+        .then(() => true, (error) => {
+          if (error.code === "ENOENT") return false;
+          throw error;
+        });
+      if (nativeManifest) return {
+        schemaVersion: 1,
+        status: "not_applicable",
+        restartRequired: false,
+      };
+    }
     return await migrate();
   } catch (error) {
     return {

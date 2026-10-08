@@ -41,6 +41,8 @@ publication tooling также остаются вне этого публичн
 - Cursor/Antigravity используют отдельный OAuth-допуск без hook identity.
   Diagnostics принимает их реальные clientKind, пропускает foreign hooks и
   managed binding; native shell проверяется только в exact loaded plugin root.
+  Root-level native manifest исключает startup-миграцию Codex до чтения его
+  config, даже если процесс унаследовал CODEX_*; это не OAuth admission.
 - Generic диагностика учитывает реальный clientKind и выбранный permanent root.
   Refresh существующего managed блока сохраняет scope и bytes personal rules,
   использует current template/CAS/read-back; без тестовых задач/Run и отправки

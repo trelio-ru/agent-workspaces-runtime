@@ -74,7 +74,10 @@ replacement. После реального удаления текущий local
 может всё ещё содержать `mcp__trelio_mcp__*`, и только полный restart исключает
 этот namespace. Ошибка безопасной записи не скрывается статусом ready, а
 возвращает exact manual fallback `codex mcp remove trelio-mcp`. Claude-host эту
-Codex-миграцию не выполняет. Штатные `trelio` и `trelio-remote-skills`, hook
+Codex-миграцию не выполняет. Native Antigravity root `plugin.json` также
+исключает эту миграцию до чтения config, даже при inherited `CODEX_*`.
+Проверяется только exact loader-selected root, без чтения client OAuth stores.
+Штатные `trelio` и `trelio-remote-skills`, hook
 matcher и direct-routing confirmation flow не меняются.
 
 Loader передаёт shell-версию отдельно в `TRELIO_PLUGIN_VERSION`, а версию
