@@ -2680,7 +2680,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.clientKind.enum,
-    ["codex", "claude-code", "cursor"],
+    ["codex", "claude-code", "cursor", "antigravity"],
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.intent.enum,
@@ -2796,12 +2796,13 @@ for (const clientKind of ["cursor", "antigravity"]) {
     const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
       clientKind, intent: "diagnostics",
     }, {
-      localPrerequisiteDiagnosis: async ({ clientKind }) => {
+      localPrerequisiteDiagnosis: async ({ clientKind, includeHookStartup }) => {
         assert.ok(["cursor", "antigravity"].includes(clientKind));
+        assert.equal(includeHookStartup, false);
         return readyLocalInstallationDiagnosis;
       },
       codexRoutingPlan: async () => assert.fail("OAuth-native clients have no Codex config"),
-      codexHookSettingsRead: async () => assert.fail("Cursor has no Codex hooks"),
+      codexHookSettingsRead: async () => assert.fail("OAuth-native clients have no Codex hooks"),
     });
     const payload = JSON.parse(result.content[0].text);
     assert.deepEqual(payload.liveVerification.hook, { state: "not_applicable", nextTools: [] });
@@ -2812,8 +2813,7 @@ for (const clientKind of ["cursor", "antigravity"]) {
         clientKind, intent, folderOnboarding: { folderPath: "/client/folder" },
       }), { code: "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT" });
     }
-});
-
+  });
 }
 
 test("installation diagnostic centralizes local and Codex routing decisions without applying them", async () => {

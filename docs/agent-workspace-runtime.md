@@ -1130,7 +1130,7 @@ accepted revision и история Run остаются на сервере Tre
 ## Диагностика готовности
 
 Local `diagnose_trelio_installation(intent=diagnostics)` принимает реальный
-`clientKind` (`codex|claude-code|cursor`) и optional
+`clientKind` (`codex|claude-code|cursor|antigravity`) и optional
 `folderOnboarding={folderPath}` из client-selected постоянной папки.
 Tool остаётся read-only: host-owned component checks дополняются folder state,
 `readiness` и `liveVerification`. Отсутствующий root не выводится из cwd;
