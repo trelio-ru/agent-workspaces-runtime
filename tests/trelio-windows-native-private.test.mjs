@@ -141,7 +141,12 @@ test('native selector and ACL support installed paths beyond Win32 MAX_PATH', wi
     await mkdir(binaryDirectory,{recursive:true});
     await copyFile(windowsPrivateWorkerOptions().executable,path.join(binaryDirectory,'trelio-private-process.exe'));
     const modulePath=path.join(scripts,'trelio-hook-private-session.mjs');
-    await copyFile(fileURLToPath(new URL('../host-runtime/scripts/trelio-hook-private-session.mjs',import.meta.url)),modulePath);
+    // Preserve the selector's reviewed module dependency too, as the signed
+    // package builder does. A partial source copy cannot represent an actual
+    // installed runtime and would fail module resolution before CreateProcess.
+    for (const name of ['trelio-hook-private-session.mjs','trelio-process-diagnostics.mjs']) {
+      await copyFile(fileURLToPath(new URL('../host-runtime/scripts/'+name,import.meta.url)),path.join(scripts,name));
+    }
     // Load the exact production selector at an installed-style long location.
     // Node fs success alone does not prove CreateProcess can execute that path.
     const installed=await import(pathToFileURL(modulePath).href);
