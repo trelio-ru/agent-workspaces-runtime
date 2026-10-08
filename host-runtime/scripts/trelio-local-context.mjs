@@ -770,25 +770,36 @@ export const createEncryptedSearchFileCache = async ({
 // and caller cancellation errors keep their exact original identity.
 export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish }) => {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const startingManifest = await readManifest();
-    if (previous?.serverGeneration === startingManifest.generation) {
-      return { mirror: previous, changed: false };
-    }
     let candidate;
     try {
+      // The backend assembles each manifest from revision-fenced task search
+      // projections, so either manifest read can itself conflict before a
+      // generation is returned. All three read stages share the same bounded
+      // retry budget; retrying only buildCandidate leaves those races fatal.
+      const startingManifest = await readManifest();
+      if (previous?.serverGeneration === startingManifest.generation) {
+        return { mirror: previous, changed: false };
+      }
       candidate = await buildCandidate(startingManifest, previous);
+      const finishingManifest = await readManifest();
+      if (finishingManifest.generation !== startingManifest.generation) {
+        // This private candidate is not published. The next build selects only
+        // records still present in its fresh manifest with matching revision/head.
+        // Mark it ineligible for the no-change shortcut until validated afresh.
+        previous = { ...candidate, serverGeneration: null };
+        continue;
+      }
     } catch (error) {
-      if (!["LOCAL_CONTEXT_GENERATION_CHANGED", "WORKSPACE_OUTDATED"].includes(error?.code)) throw error;
+      if (!["LOCAL_CONTEXT_GENERATION_CHANGED", "WORKSPACE_OUTDATED"].includes(error?.code)
+        || (error instanceof TrelioApiError && error.statusCode !== 409)) throw error;
+      // A conflict in the final manifest leaves a complete but unverified
+      // candidate. Reuse its exact records without ever treating it as a
+      // readable generation, just as when the final generation differs.
+      if (candidate) previous = { ...candidate, serverGeneration: null };
       continue;
     }
-    const finishingManifest = await readManifest();
-    if (finishingManifest.generation !== startingManifest.generation) {
-      // This private candidate is not published. The next build selects only
-      // records still present in its fresh manifest with matching revision/head.
-      // Mark it ineligible for the no-change shortcut until validated afresh.
-      previous = { ...candidate, serverGeneration: null };
-      continue;
-    }
+    // Publication switches the durable pointer. Keep it outside read recovery:
+    // a failed or ambiguous write never authorizes replaying that side effect.
     return { mirror: await publish(candidate), changed: true };
   }
   throw new TrelioLocalContextError(

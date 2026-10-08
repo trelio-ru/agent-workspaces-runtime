@@ -157,7 +157,9 @@ publication tooling также остаются вне этого публичн
   [README](README.md#поиск-python-для-agent-skills).
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
-  обработка read-conflicts обязательны по [runtime contract](docs/agent-workspace-runtime.md).
+  обработка read-conflicts всех этапов чтения обязательны по
+  [runtime contract](docs/agent-workspace-runtime.md). Публикация не повторяется;
+  HTTP 409 `LOCAL_CONTEXT_GENERATION_CHANGED` сохраняет code без backend payload/details.
 - Пакетное чтение больших task rules сохраняет immutable части/revision и
   legacy single-part формат. Бюджет полного MCP envelope генерируется из
   backend `shared/task-read-budget.ts`; его копию вручную не менять.

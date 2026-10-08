@@ -6219,12 +6219,18 @@ export const startHostRuntimeMcpDelegate = async ({
   };
 };
 
+// Preserve this known structural read-conflict code without exposing arbitrary
+// backend codes or HTTP payload/details, which can contain protected context.
+// Serialization alone never authorizes replaying the original tool operation.
 const safeErrorPayload = (error) => ({
   code: error instanceof RemoteMcpHostError
     || error instanceof RemoteMcpOAuthError
     || error instanceof TrelioLocalContextError
     || error instanceof HostRuntimeRecoveryError
     || error instanceof CodexRoutingConfigError
+    || (error instanceof TrelioApiError
+      && error.statusCode === 409
+      && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED")
     ? error.code
     : String(error?.message || "").includes("TRELIO_BRIDGE_PAIRING_REQUIRED")
       ? "TRELIO_BRIDGE_PAIRING_REQUIRED"

@@ -78,6 +78,47 @@ test("local MCP delivers action-argument recovery without a diagnostic detour", 
   assert.equal(error.details.requiredAction, "execute_returned_action_arguments");
 });
 
+test("local MCP preserves the known company-context HTTP conflict without exposing its payload", async () => {
+  const message = "A task changed while its search projection was being built.";
+  const failure = new TrelioApiError(409, message, null, "LOCAL_CONTEXT_GENERATION_CHANGED", {
+    privateContext: "PRIVATE-BACKEND-PAYLOAD",
+    details: { taskId: "PRIVATE-TASK-ID" },
+  });
+  let calls = 0;
+  const response = await handleLocalMcpMessage({
+    jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "continue_trelio_local_action", arguments: {} },
+  }, {
+    callTool: async () => { calls += 1; throw failure; },
+    recordDiagnostic: () => assert.fail("HTTP failures must not enter host error telemetry."),
+  });
+
+  assert.equal(response.result.isError, true);
+  assert.deepEqual(JSON.parse(response.result.content[0].text), {
+    code: "LOCAL_CONTEXT_GENERATION_CHANGED",
+    message: `Trelio API 409: ${message}`,
+  });
+  assert.doesNotMatch(JSON.stringify(response), /PRIVATE-BACKEND-PAYLOAD|PRIVATE-TASK-ID/u);
+  assert.equal(calls, 1, "Serializing a conflict must not replay the original tool call.");
+});
+
+test("local MCP does not expose arbitrary HTTP codes or a forged company-context conflict", async () => {
+  for (const failure of [
+    new TrelioApiError(409, "Unrelated conflict.", null, "PRIVATE-BACKEND-CODE"),
+    new TrelioApiError(500, "Wrong status.", null, "LOCAL_CONTEXT_GENERATION_CHANGED"),
+    Object.assign(new Error("Untyped failure."), { code: "LOCAL_CONTEXT_GENERATION_CHANGED" }),
+  ]) {
+    const response = await handleLocalMcpMessage({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "continue_trelio_local_action", arguments: {} },
+    }, { callTool: async () => { throw failure; } });
+    const payload = JSON.parse(response.result.content[0].text);
+    assert.equal(payload.code, "REMOTE_MCP_HOST_ERROR");
+    assert.equal(payload.message, failure.message);
+    assert.doesNotMatch(JSON.stringify(response), /PRIVATE-BACKEND-CODE/u);
+  }
+});
+
 test("large private packages raise their exact runtime host floor", () => {
   assert.equal(resolveAgentSkillPackageMinimumHostVersion({
     packageSizeBytes: 8 * 1024 * 1024,

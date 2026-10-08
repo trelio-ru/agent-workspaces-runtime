@@ -4092,6 +4092,135 @@ test("company sync refreshes head conflicts and reuses only private candidates u
   assert.equal(result.changed, true);
 });
 
+test("company sync retries conflicts in both manifest reads and publishes only a stable candidate", async () => {
+  for (const phase of ["starting", "finishing"]) {
+    let reads = 0;
+    let builds = 0;
+    const published = [];
+    const candidate = { serverGeneration: "stable", workspaces: [{ acceptedHead: "exact-head" }] };
+    const result = await buildStableCompanyMirror({
+      previous: null,
+      readManifest: async () => {
+        reads += 1;
+        if (reads === (phase === "starting" ? 1 : 2)) {
+          throw new TrelioApiError(409,
+            "A task changed while its search projection was being built.",
+            null, "LOCAL_CONTEXT_GENERATION_CHANGED");
+        }
+        return { generation: "stable" };
+      },
+      buildCandidate: async (_manifest, reusable) => {
+        builds += 1;
+        if (phase === "finishing" && builds === 2) {
+          assert.equal(reusable.serverGeneration, null);
+          assert.deepEqual(reusable.workspaces, candidate.workspaces);
+        }
+        return candidate;
+      },
+      publish: async (value) => { published.push(value); return value; },
+    });
+    assert.equal(reads, phase === "starting" ? 3 : 4);
+    assert.equal(builds, phase === "starting" ? 1 : 2);
+    assert.deepEqual(published, [candidate]);
+    assert.equal(result.mirror, candidate);
+    assert.equal(result.changed, true);
+  }
+});
+
+test("company sync bounds repeated manifest conflicts without publishing partial data", async () => {
+  for (const phase of ["starting", "finishing"]) {
+    let reads = 0;
+    let builds = 0;
+    await assert.rejects(buildStableCompanyMirror({
+      previous: null,
+      readManifest: async () => {
+        reads += 1;
+        if (phase === "starting" || reads % 2 === 0) {
+          throw new TrelioApiError(409, "Task search projection changed.",
+            null, "LOCAL_CONTEXT_GENERATION_CHANGED");
+        }
+        return { generation: "stable" };
+      },
+      buildCandidate: async () => {
+        builds += 1;
+        return { serverGeneration: "stable" };
+      },
+      publish: async () => assert.fail("A conflicted manifest cannot authorize publication."),
+    }), (error) => error instanceof TrelioLocalContextError
+      && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED");
+    assert.equal(reads, phase === "starting" ? 3 : 6);
+    assert.equal(builds, phase === "starting" ? 0 : 3);
+  }
+});
+
+test("company sync shares one retry budget across all three read stages", async () => {
+  let reads = 0;
+  let builds = 0;
+  const conflict = () => new TrelioApiError(409, "Generation changed.",
+    null, "LOCAL_CONTEXT_GENERATION_CHANGED");
+  await assert.rejects(buildStableCompanyMirror({
+    previous: null,
+    readManifest: async () => {
+      reads += 1;
+      // Attempt one fails before a candidate exists; attempt three fails only
+      // after assembling it. Neither stage receives a fresh retry allowance.
+      if (reads === 1 || reads === 4) throw conflict();
+      return { generation: "stable" };
+    },
+    buildCandidate: async () => {
+      builds += 1;
+      if (builds === 1) throw conflict();
+      return { serverGeneration: "stable" };
+    },
+    publish: async () => assert.fail("The shared retry budget is exhausted."),
+  }), (error) => error instanceof TrelioLocalContextError
+    && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED");
+  assert.equal(reads, 4);
+  assert.equal(builds, 2);
+});
+
+test("company sync never retries unrelated manifest failures or publication", async () => {
+  const failures = [
+    new TrelioApiError(401, "Authorization required."),
+    new TrelioApiError(403, "Access denied."),
+    new TrelioApiError(500, "Server failure."),
+    new TrelioApiError(409, "Unrelated conflict.", null, "ANOTHER_CONFLICT"),
+    ...[401, 403, 500].map((status) => new TrelioApiError(status,
+      "Not an optimistic HTTP conflict.", null, "LOCAL_CONTEXT_GENERATION_CHANGED")),
+    ...["WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID", "ABORT_ERR", "ETIMEDOUT"]
+      .map((code) => Object.assign(new Error(code), { code })),
+  ];
+  for (const phase of ["starting", "finishing"]) {
+    for (const failure of failures) {
+      let reads = 0;
+      await assert.rejects(buildStableCompanyMirror({
+        previous: null,
+        readManifest: async () => {
+          reads += 1;
+          if (phase === "starting" || reads === 2) throw failure;
+          return { generation: "stable" };
+        },
+        buildCandidate: async () => ({ serverGeneration: "stable" }),
+        publish: async () => assert.fail("Failed reads cannot publish a candidate."),
+      }), (error) => error === failure);
+      assert.equal(reads, phase === "starting" ? 1 : 2);
+    }
+  }
+
+  const publicationFailure = new TrelioApiError(409, "Publication interrupted.",
+    null, "LOCAL_CONTEXT_GENERATION_CHANGED");
+  let reads = 0;
+  let publishes = 0;
+  await assert.rejects(buildStableCompanyMirror({
+    previous: null,
+    readManifest: async () => { reads += 1; return { generation: "stable" }; },
+    buildCandidate: async () => ({ serverGeneration: "stable" }),
+    publish: async () => { publishes += 1; throw publicationFailure; },
+  }), (error) => error === publicationFailure);
+  assert.equal(reads, 2);
+  assert.equal(publishes, 1, "An ambiguous publication must never be replayed.");
+});
+
 test("company sync bounds read conflicts and never retries permissions, crypto or cancellation", async () => {
   for (const code of ["WORKSPACE_OUTDATED", "LOCAL_CONTEXT_GENERATION_CHANGED"]) {
     let reads = 0;
