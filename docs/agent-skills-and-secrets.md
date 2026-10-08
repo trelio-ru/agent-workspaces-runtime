@@ -41,8 +41,17 @@ onboarding, а не как стандартный путь ordinary operation.
 
 Из compact ranked результатов агент загружает procedure через
 `get_agent_procedure`, а skill – через default compact `get_agent_skill`.
-Только immutable published procedure является instruction authority; draft/comments не входят
-в agent read и сама процедура не запускает фоновой runtime. Перед первым
+Только immutable published procedure является instruction authority; default read
+исключает draft/comments, а процедура не запускает фоновой runtime. Для правки
+`get_agent_procedure(forEditing=true)` читает текущий draft и published baseline
+после editor ACL, без обсуждения/истории. Поручение создать/изменить draft
+разрешает `plan_agent_procedure_change` → `apply_agent_procedure_change` без
+дополнительного подтверждения сохранения. Публикация: read-only
+`plan_agent_procedure_publication` → полный результат, изменения и область →
+явное подтверждение модератора в чате → `publish_agent_procedure` с неизменными
+revision/draft/hash и stable clientRequestId. MCP App и переход в browser не нужны;
+stale требует нового preview/consent. Encrypted exact read/preview/publication
+идут в generic local action, draft не добавляется в search mirror. Перед первым
 внешним действием агент вызывает `get_agent_skill` с
 `sections=[instructions,execution]`; connection/publication добавляются только
 для setup/provenance. `knownInstructionKey` допустим лишь пока полный Markdown
