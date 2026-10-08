@@ -958,9 +958,9 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
     const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
     await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
   }
-  // Cursor has its own OAuth profile and no automatic folder-binding contract.
+  // OAuth-native clients have their own profiles and no automatic folder-binding contract.
   // A valid local root does not authorize installing Codex/Claude instructions.
-  if (clientKind === "cursor") return {
+  if (["cursor", "antigravity"].includes(clientKind)) return {
     status: "ready", folder: inspection.folder,
     instructions: { status: "not_applicable", reasonCode: "CLIENT_FOLDER_BINDING_UNSUPPORTED" },
   };

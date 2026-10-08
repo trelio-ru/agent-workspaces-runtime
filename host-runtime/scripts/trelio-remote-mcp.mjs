@@ -3822,7 +3822,7 @@ const LOCAL_TOOLS = [
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
     title: "Проверить установку или подготовить настройку папки Trelio",
-    description: "Read-only: diagnostics проверяет компоненты и folderOnboarding.folderPath; план live reads и обновления Trelio-блока. Codex/Claude onboarding; Cursor – diagnostics без Hooks/binding. Windows: worker/HTTPS. folder_onboarding – CAS-план папки. Не применяет, не устанавливает, не авторизует.",
+    description: "Read-only: компоненты и folderOnboarding.folderPath, план live reads/refresh. Codex/Claude onboarding; Cursor/Antigravity – diagnostics без Hooks/binding. Windows: worker/HTTPS. folder_onboarding – CAS-план папки. Не применяет, не устанавливает, не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -3830,7 +3830,7 @@ const LOCAL_TOOLS = [
       properties: {
         clientKind: {
           type: "string",
-          enum: ["codex", "claude-code", "cursor"],
+          enum: ["codex", "claude-code", "cursor", "antigravity"],
           description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
         },
         intent: {
@@ -5700,9 +5700,9 @@ export const handleToolCall = async (
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding"].includes(key))
-      || !["codex", "claude-code", "cursor"].includes(rawArguments.clientKind)
+      || !["codex", "claude-code", "cursor", "antigravity"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
-      || (rawArguments.clientKind === "cursor" && rawArguments.intent !== "diagnostics")
+      || (["cursor", "antigravity"].includes(rawArguments.clientKind) && rawArguments.intent !== "diagnostics")
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
     ) {
@@ -5717,7 +5717,8 @@ export const handleToolCall = async (
     const local = await localPrerequisiteDiagnosis({
       origin,
       clientKind: rawArguments.clientKind,
-      includeHookStartup: rawArguments.intent === "diagnostics",
+      includeHookStartup: rawArguments.intent === "diagnostics"
+        && !["cursor", "antigravity"].includes(rawArguments.clientKind),
       signal,
     });
     let codexRouting = null;

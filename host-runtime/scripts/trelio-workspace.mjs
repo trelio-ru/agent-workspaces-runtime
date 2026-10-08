@@ -867,6 +867,32 @@ export const inspectBundledPlugin = async ({
   loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION,
   clientKind = null,
 } = {}) => {
+  if (clientKind === "antigravity") {
+    // Antigravity auto-discovers root manifests. Its schema has no version;
+    // the installer records shell version separately and materializes absolute
+    // stdio paths. Read only closed public fields, never OAuth stores/config.
+    const [manifest, mcp] = await Promise.all([
+      readDiagnosticJsonFile(path.join(pluginDirectory, "plugin.json")),
+      readDiagnosticJsonFile(path.join(pluginDirectory, "mcp_config.json")),
+    ]);
+    let antigravityVersion = null;
+    try { antigravityVersion = (await fs.readFile(path.join(pluginDirectory, "PLUGIN_VERSION"), "utf8")).trim(); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    const loadedVersion = STABLE_VERSION_PATTERN.test(String(loadedPluginVersion || "")) ? loadedPluginVersion : null;
+    const issues = [];
+    if (!loadedVersion) issues.push("LOADED_PLUGIN_VERSION_INVALID");
+    if (antigravityVersion !== loadedVersion) issues.push("ANTIGRAVITY_MANIFEST_VERSION_MISMATCH");
+    if (manifest.value?.name !== "trelio-agent-workspaces") issues.push("ANTIGRAVITY_MANIFEST_INVALID");
+    const remote = mcp.value?.mcpServers?.trelio;
+    const local = mcp.value?.mcpServers?.["trelio-remote-skills"];
+    if (remote?.serverUrl !== "https://trelio.ru/mcp"
+      || remote?.oauth?.clientId !== "trelio_antigravity_agent_workspaces_v1"
+      || !path.isAbsolute(String(local?.command || ""))
+      || JSON.stringify(local?.args) !== JSON.stringify([path.join(pluginDirectory, "scripts/trelio-host-runtime-loader.mjs"), "mcp"])
+      || local?.cwd !== pluginDirectory) issues.push("ANTIGRAVITY_MCP_REGISTRATION_INVALID");
+    return { status: issues.length ? "action_required" : "ready", loadedVersion,
+      manifests: { antigravityVersion }, hooks: { status: "not_applicable" }, issues };
+  }
   if (clientKind === "cursor") {
     // Cursor deliberately does not discover Codex/Claude hooks. Diagnose its
     // actual manifest, not unrelated shell definitions or session attestations.
@@ -1171,7 +1197,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   const [git, plugin, runtimeSessions, connection] = await withPrivateProcessSession(() => Promise.all([
     verifyGitRuntime(gitOptions),
     inspectBundledPlugin({ pluginDirectory, loadedPluginVersion, clientKind }),
-    clientKind === "cursor" ? { status: "not_applicable" }
+    ["cursor", "antigravity"].includes(clientKind) ? { status: "not_applicable" }
       : skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
     skipPrivateInspection ? skippedPrivateState : inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
   ]), signal);

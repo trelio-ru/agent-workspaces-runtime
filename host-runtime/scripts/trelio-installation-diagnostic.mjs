@@ -10,7 +10,7 @@
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
-const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor"]);
+const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
 export class TrelioInstallationDiagnosticError extends Error {
@@ -50,9 +50,9 @@ const buildClientInspection = (clientKind) => (
           doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof"],
         },
       }
-    : clientKind === "cursor" ? {
+    : ["cursor", "antigravity"].includes(clientKind) ? {
         mcpInventory: {
-          surface: "Cursor Plugins and MCP settings",
+          surface: clientKind === "antigravity" ? "Antigravity Customizations" : "Cursor Plugins and MCP settings",
           proves: ["remote_mcp_registration", "local_mcp_registration"],
           doesNotProve: ["oauth_bearer_usable"],
         },
@@ -191,8 +191,9 @@ const buildLocalSummary = (local, clientKind) => ({
       codexVersion: local.plugin?.manifests?.codexVersion ?? null,
       claudeVersion: local.plugin?.manifests?.claudeVersion ?? null,
       ...(clientKind === "cursor" ? { cursorVersion: local.plugin?.manifests?.cursorVersion ?? null } : {}),
+      ...(clientKind === "antigravity" ? { antigravityVersion: local.plugin?.manifests?.antigravityVersion ?? null } : {}),
     },
-    hooks: clientKind === "cursor" ? { status: "not_applicable" } : {
+    hooks: ["cursor", "antigravity"].includes(clientKind) ? { status: "not_applicable" } : {
       status: local.plugin?.hooks?.status ?? "unknown",
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
       toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
@@ -243,8 +244,8 @@ export const buildTrelioInstallationDiagnostic = ({
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
-  if (clientKind === "cursor" && intent !== "diagnostics") {
-    throw new TrelioInstallationDiagnosticError("TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT", "Cursor supports diagnostics only; Codex/Claude onboarding is not its setup route.");
+  if (["cursor", "antigravity"].includes(clientKind) && intent !== "diagnostics") {
+    throw new TrelioInstallationDiagnosticError("TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT", "OAuth-native clients support diagnostics only; Codex/Claude onboarding is not their setup route.");
   }
   if (!local || typeof local !== "object" || Array.isArray(local)) {
     throw new TrelioInstallationDiagnosticError(
@@ -373,7 +374,7 @@ export const buildTrelioInstallationDiagnostic = ({
         nextTool: "list_companies",
         successProves: "oauth_bearer_usable_for_current_client_process",
       },
-      hook: clientKind === "cursor" ? { state: "not_applicable", nextTools: [] } : {
+      hook: ["cursor", "antigravity"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
         nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",

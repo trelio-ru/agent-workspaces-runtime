@@ -38,6 +38,9 @@ publication tooling также остаются вне этого публичн
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
   включает hook; дисковый снимок не является effective state App Server.
   Диагностика ничего не меняет; исходный config и значения hashes не выдаёт.
+- Cursor/Antigravity используют отдельный OAuth-допуск без hook identity.
+  Diagnostics принимает их реальные clientKind, пропускает foreign hooks и
+  managed binding; native shell проверяется только в exact loaded plugin root.
 - Generic диагностика учитывает реальный clientKind и выбранный permanent root.
   Refresh существующего managed блока сохраняет scope и bytes personal rules,
   использует current template/CAS/read-back; без тестовых задач/Run и отправки

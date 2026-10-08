@@ -1414,3 +1414,15 @@ source-grant/runtime policy/company/task/Run ACL и full-review freshness, ра�
 Ни план, ни semantic decision не разрешают publish/apply/dismiss; это отдельные
 human actions с прежними live ACL/CAS. Backend хранит лишь keyed fingerprint и
 structural binding, максимум 2048 refs/64 на actor+grant с абсолютным TTL 15 минут.
+
+## Antigravity native shell diagnostics
+
+`clientKind=antigravity` разрешён только для `intent=diagnostics`. Doctor читает
+exact installed root `plugin.json`, `PLUGIN_VERSION` и выбранные public поля
+`mcp_config.json`; native schema не содержит version. Проверяются собственный
+OAuth profile и absolute stdio loader/cwd. OAuth token stores, чужие hooks и
+runtime hook sessions не читаются. `not_applicable` не является OAuth readiness:
+защищённое server-selected чтение, pairing/crypto grant и scope/ACL остаются
+отдельными live checks. Folder diagnostics не создаёт managed binding и не
+обновляет инструкции Codex/Claude. Общий bridge использует прежний signed loader
+ABI и exact source grant; clientKind сам по себе не выдаёт admission.
