@@ -63,11 +63,11 @@ test("unresponsive telemetry is bounded and closing the reporter never waits for
   try {
     reporter.record("continue_trelio_workspace_action", { operation: "skill_run" }, "UNKNOWN");
     await reporter.flush();
-    assert.equal(attempts, 4);
+    assert.equal(attempts, 1);
     reporter.close();
     reporter.record("continue_trelio_workspace_action", {}, "UNKNOWN");
     await reporter.flush();
-    assert.equal(attempts, 4);
+    assert.equal(attempts, 1);
   } finally { reporter.close(); clearInterval(keepAlive); }
 });
 
@@ -100,9 +100,9 @@ test("duplicates coalesce; ambiguous retries reuse frozen IDs and never grow the
     for (let i = 0; i < 4; i++) reporter.record("continue_trelio_workspace_action", { operation: "skill_run" }, "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
     await reporter.flush();
     assert.deepEqual(batches[0], batches[1]);
-    assert.equal(batches[0][0].count, 4);
+    assert.equal(batches[0][0].outcomes[0].count, 4);
     await reporter.flush();
-    assert.equal(batches[2][0].count, 1);
+    assert.equal(batches[2][0].outcomes[0].count, 1);
     assert.notEqual(batches[2][0].id, batches[0][0].id);
   } finally { reporter.close(); clearInterval(keepAlive); }
 });
@@ -137,7 +137,7 @@ test("host reports local validation errors without changing the actual MCP resul
   } });
   assert.equal(response.result.isError, true);
   assert.equal(reports.length, 1);
-  assert.equal(reports[0].code, "TRELIO_WORKSPACE_ACTION_INVALID_INPUT");
+  assert.equal(reports[0].code, "TRELIO_WORKSPACE_INPUT_INVALID_VALUE");
   assert.equal(reports[0].operation, "skill_run");
   assert.equal(JSON.stringify(reports).includes("/private/canary"), false);
   const again = await handleLocalMcpMessage(request, { recordDiagnostic: () => { throw new Error("telemetry failed"); } });
@@ -169,5 +169,100 @@ test("dispatcher uses the fixed child category while preserving local recovery a
     callTool: async () => providerResult, recordDiagnostic,
   });
   assert.deepEqual(returned.result, providerResult);
-  assert.equal(reports.length, 1, "successful transport carrying provider isError is outside telemetry");
+  assert.equal(reports.length, 2);
+  assert.equal(reports[1].code, "REMOTE_MCP_PROVIDER_ERROR");
+});
+
+// Regression for the observed amplification bug: timeout must not start four
+// parallel protected-store reads, and a late read must never initiate HTTP.
+import { createObservationTransport } from "../host-runtime/scripts/trelio-diagnostic-reporter.mjs";
+import { buildDiagnosticObservation, isDiagnosticObservation } from "../host-runtime/scripts/trelio-diagnostic-observation.mjs";
+import { writeDiagnosticJournal, readDiagnosticJournal, acknowledgeDiagnosticJournal } from "../host-runtime/scripts/trelio-diagnostic-journal.mjs";
+import { recordRuntimeHookDiagnostic } from "../host-runtime/scripts/trelio-runtime-session.mjs";
+import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
+import contract from "../host-runtime/scripts/trelio-agent-diagnostics-contract.json" with { type: "json" };
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test("late credential read is single-flight and cannot fetch after timeout or shutdown", async () => {
+  let reads = 0, requests = 0, release;
+  const transport = createObservationTransport({ readToken: async () => { reads++; return new Promise(resolve => { release = resolve; }); },
+    fetchImpl: async () => { requests++; throw Error("must not fetch"); } });
+  const reporter = createAgentDiagnosticReporter({ origin: "https://fixture.invalid", journal: null,
+    send: transport, timeoutMs: 5, delayMs: 60000, retryDelays: [0, 0, 0] });
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    reporter.record("continue_trelio_workspace_action", {operation: "open"}, "UNKNOWN");
+    await reporter.flush();
+    for (let i = 0; i < 3; i++) await reporter.flush();
+    assert.equal(reads, 1); assert.equal(reporter.health().inFlight, true);
+    release("synthetic"); await sleep(20);
+    assert.equal(requests, 0); assert.equal(reporter.health().inFlight, false);
+    assert.equal(reporter.health().losses.delivery_timeout, 1);
+  } finally { reporter.close(); clearInterval(keepAlive); }
+});
+test("one credential read and exact immutable paired samples across three network retries", async () => {
+  let reads = 0, posts = 0; const bodies = [];
+  const transport = createObservationTransport({ readToken: async () => { reads++; return "synthetic"; },
+    fetchImpl: async (url, options) => {
+      if (url.pathname.endsWith("capabilities")) return new Response(JSON.stringify({schemaVersion: 2, errorCodes: contract.errorCodes}));
+      posts++; bodies.push(options.body);
+      return new Response(null, {status: posts < 4 ? 503 : 204});
+    } });
+  const reporter = createAgentDiagnosticReporter({ origin: "https://fixture.invalid", journal: null,
+    send: transport, delayMs: 60000, retryDelays: [0, 0, 0] });
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    reporter.record("continue_trelio_workspace_action", {operation: "open"});
+    reporter.record("continue_trelio_workspace_action", {operation: "open"}, "UNKNOWN");
+    await reporter.flush();
+    assert.equal(reads, 1); assert.equal(posts, 4); assert.equal(new Set(bodies).size, 1);
+    assert.deepEqual(JSON.parse(bodies[0]).samples[0].outcomes.map(r => [r.code,r.count]), [["OK",1],["UNKNOWN",1]]);
+  } finally { reporter.close(); clearInterval(keepAlive); }
+});
+test("catalog negotiation downgrades unknown codes without dropping the batch or its denominator", async () => {
+  let body;
+  const transport = createObservationTransport({ readToken: async () => "synthetic", fetchImpl: async (url, options) => {
+    if (url.pathname.endsWith("capabilities")) return new Response(JSON.stringify({ schemaVersion: 2, errorCodes: ["UNKNOWN", "DIAGNOSTICS_CODE_UNSUPPORTED"] }));
+    body = JSON.parse(options.body); return new Response(null, {status: 204});
+  } });
+  const sample = buildDiagnosticObservation("continue_trelio_workspace_action", {operation: "open"}, "TRELIO_WINDOWS_PRIVATE_ACL_FAILED");
+  sample.outcomes.push({code: "OK",field:"unknown",count:9});
+  await transport("https://fixture.invalid", [sample]);
+  assert.deepEqual(body.samples[0].outcomes.map(r=>r.code), ["DIAGNOSTICS_CODE_UNSUPPORTED","OK"]);
+  assert.deepEqual(body.samples[0].losses, [{reason:"catalog_mismatch",count:1}]);
+  assert.equal(isDiagnosticObservation(body.samples[0]),true);
+});
+test("journal is bounded content-free input, rejects pollution, expires records and acknowledges exact UUIDs", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-diagnostic-test-"));
+  try {
+    const sample = buildDiagnosticObservation("runtime_hook", {operation:"PreToolUse"}, "TRELIO_WINDOWS_PRIVATE_DPAPI_FAILED", {boundary:"hook"});
+    assert.equal(await writeDiagnosticJournal("fixture", {...sample, message:"PRIVATE_CANARY"}, {directory}), "journal_invalid");
+    assert.equal(await writeDiagnosticJournal("fixture", sample, {directory}), "queued");
+    let read = await readDiagnosticJournal("fixture", {directory}); assert.deepEqual(read.samples,[sample]);
+    assert.doesNotMatch(JSON.stringify(read),/PRIVATE_CANARY/);
+    await acknowledgeDiagnosticJournal("fixture", read.samples, {directory});
+    assert.equal((await readDiagnosticJournal("fixture", {directory})).samples.length,0);
+    await writeDiagnosticJournal("fixture",sample,{directory});
+    await fs.utimes(path.join(directory,sample.id+".json"),new Date(0),new Date(0));
+    read=await readDiagnosticJournal("fixture",{directory}); assert.equal(read.losses.journal_expired,1);
+    for (let i=0;i<256;i++) await fs.writeFile(path.join(directory,"foreign-"+i),"");
+    assert.equal(await writeDiagnosticJournal("fixture",sample,{directory}),"journal_full");
+  } finally { await fs.rm(directory,{recursive:true,force:true}); }
+});
+test("hook failures can be recorded with no credential access and never replace the hook result", async () => {
+  const samples=[];
+  await recordRuntimeHookDiagnostic("PreToolUse","TRELIO_WINDOWS_PRIVATE_PROCESS_START_FAILED", {origin:"https://fixture.invalid",write:async(_origin,s)=>samples.push(s)});
+  assert.equal(samples[0].boundary,"hook"); assert.equal(samples[0].outcomes[0].code,"TRELIO_WINDOWS_PRIVATE_PROCESS_START_FAILED");
+  await recordRuntimeHookDiagnostic("SessionEnd","OK",{write:async()=>{throw Error("PRIVATE_CANARY");}});
+});
+test("HTTP failures keep closed backend codes or an exact status class without reading payloads", async () => {
+  const reports=[];
+  const request={jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"continue_trelio_workspace_action",arguments:{operation:"open"}}};
+  for (const [status, code, expected] of [[503,"PRIVATE_CANARY","TRELIO_BACKEND_HTTP_5XX"],[409,"LEASE_EXPIRED","LEASE_EXPIRED"],[401,null,"TRELIO_BACKEND_HTTP_401"]]) {
+    await handleLocalMcpMessage(request,{callTool:async()=>{throw new TrelioApiError(status,"PRIVATE_CANARY",null,code);},recordDiagnostic:(_tool,_args,code)=>reports.push(code)});
+    assert.equal(reports.at(-1),expected);
+  }
 });

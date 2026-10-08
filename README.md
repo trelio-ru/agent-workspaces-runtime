@@ -464,45 +464,46 @@ OS-protected read-back, без передачи token через argv, environme
 
 ## Статистика ошибок local MCP
 
-Dispatcher отправляет content-free наблюдения пойманных ошибок `tools/call`
-в `/api/agent-workspaces/diagnostics/errors` через существующую bridge session.
-Отправка best effort в фоне, без OAuth/pairing, credential migration и UI;
-ошибка telemetry не меняет исходный MCP result. Возвращаемые provider `isError`,
-HTTP `TrelioApiError`, hooks и process crashes в этот счётчик не входят.
-Пойманный failed Workspace subprocess классифицируется по фиксированным Node
-признакам: directory, permission, exit, termination, output limit. Только для
-`skill_run` допустим один JSON stdout до 64 KiB с `ok=false`: извлекается лишь
-один из закрытых MAX assist codes. Message/details и произвольные коды не
-передаются в telemetry. Последний структурированный error frame самого bridge
-сохраняет внутренний skill exit отдельно от exit внешнего CLI: категории
-`TRELIO_SKILL_RUNTIME_EXIT_1`..`_6`/`_OTHER`, start failed, termination и
-browser lease expiry. Числовой exit и закрытый signal доступны только локально.
-Значения exit не интерпретируются как универсальные причины ошибки провайдера.
-Windows ACL/DPAPI различают spawn, startup/request timeout, protocol, I/O,
-unexpected exit и отказ конкретной операции; общий hook deadline имеет свою
-категорию. Публичный action wrapper и `TRELIO_RUNTIME_HOOK_FAILED` сохраняют
-прежний ABI; локальные `details.failureCode`/`details.process` и hook deny
-содержат закрытую причину/этап. Lifecycle hooks не добавляются в общий счётчик.
-Повтор действия не выполняется.
+Content-free v2 объединяет success/error в immutable sample с UUID, boundary,
+OS/architecture, tool/operation, versions, закрытыми code/field и loss counters.
+Нет company/user/session/run/skill IDs, message/stack/details, аргументов, paths,
+proofs, credentials или provider content. Legacy error-only записи остаются
+без знаменателя. Backend OS unknown, не ОС сервера вместо клиента.
 
-Закрытый wire-каталог `trelio-agent-diagnostics-contract.json` ограничивает
-tool/operation/code. Payload содержит лишь UUID события, эти dimensions,
-числовые версии plugin/runtime и count. Unknown values сворачиваются; message,
-stack, args, paths, company/user/session/skill IDs и credentials исключены.
-Тот же allowlist проверяет backend. Каталоги меняются совместимо и проверяются
-при cross-repository изменении; они не входят в model-visible catalog.
-Новые категории сначала принимает backend, затем signed runtime. Старый endpoint
-может отклонить пакет с неизвестным кодом; sender прекращает отправку этого
-пакета без изменения исходной операции.
+Local MCP считает returned isError без чтения payload, typed exceptions и
+TrelioApiError с закрытым code/HTTP-классом. Отдельная hook boundary включает
+SessionStart, относящиеся к Trelio PreToolUse и SessionEnd; JSON deny с exit 0 –
+отказ, update delegation – ROUTED. Loader/process kill до записи вне охвата.
+Action validation имеет фиксированную причину и имя поля без значения;
+внутренний skill exit сохраняется отдельно от CLI exit, без выдуманной семантики.
+MAX assist closed stdout codes имеют приоритет. Windows helper различает
+startup/request/protocol/ACL/DPAPI; wrappers прежние. Нет повторов действий.
 
-RAM queue ограничена 128 группами/1000 повторов; каждые 1 с – пакет до 20 групп.
-Активный пакет неизменен: после transport/5xx до трёх повторов через
-250/750/1500 мс с теми же UUID; timeout 3 с/attempt, redirects запрещены.
-4xx прекращает отправку без recovery. Shutdown отменяет отправки и удаляет
-queue без disk spool. Backend хранит события 30 дней и отправляет суперадминам
-ежедневную Telegram-сводку только при ошибках; отчёт не является error rate.
-Сначала выпускается совместимый backend, затем signed runtime; старый endpoint
-404 безопасно отключает конкретную отправку. Public plugin не меняется.
+GET diagnostics/capabilities согласует каталог (64 KiB/cache 5 минут).
+Неизвестный серверу код – DIAGNOSTICS_CODE_UNSUPPORTED с catalog_mismatch,
+остальной sample сохраняется. POST diagnostics/observations: 20 samples,
+64 outcome-пар/1000 исходов/sample. 404/405 capabilities выбирает legacy errors
+с UNKNOWN на минуту, без знаменателя. Другой 4xx terminal; нет OAuth/pairing.
+
+RAM: 128 групп, отправка через 5 с; transport/5xx – три повтора 250/750/1500 мс
+с теми же UUID, 3 с/attempt. Existing credential читается один раз/batch,
+AbortSignal передаётся private worker. До реального завершения игнорирующего
+отмену adapter второй read не начинается; поздний token не вызывает HTTP.
+
+Hooks пишут строгую v2 schema в user-temp journal без private store, ACL repair,
+DPAPI или сети; POSIX 0700/0600, Windows inherited user-temp ACL. 256 entries,
+16 KiB/file, TTL 24 ч, bounded read/validation, UUID filename и atomic rename.
+Это техническая очередь, не secret store/authority. MCP берёт до 10 journal
+samples/batch, удаляет после 204, проверяет каждые 30 с и при новой активности.
+Shutdown не ждёт сети и по возможности пишет content-free loss snapshot.
+Queue/delivery/credential/journal/catalog losses различаются; они не рабочие
+ошибки и не складываются в точное число потерь. Нет health-only retry loop.
+
+Backend retention 30 дней. V2 rate – только доставленные исходы одной boundary;
+ROUTED отдельно, boundaries не суммируются в уникальные запросы. Kill и failed
+journal write оставляют неизвестные потери; тишина не доказывает исправность.
+Сначала backend, затем signed runtime; plugin/minimum versions не меняются.
+Регрессии: tests/trelio-agent-diagnostics.test.mjs.
 
 См. [SECURITY.md](SECURITY.md). Не публикуйте credentials, company content,
 runtime sessions, E2EE keys, signing material и production package URLs в issue,

@@ -14,6 +14,7 @@ import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
 } from "./trelio-host-runtime-recovery.mjs";
+import { observationCode } from "./trelio-diagnostic-observation.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
 import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import { spawn } from "node:child_process";
@@ -6336,22 +6337,17 @@ export const handleLocalMcpMessage = async (
   }
   if (message.method === "tools/call") {
     try {
+      const result = compactLocalMcpResult(await callTool(
+          origin, String(message.params?.name || ""), message.params?.arguments,
+          { signal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, requestClient, codexLegacyMcpMigration },
+      ));
+      // Only the MCP envelope boolean is read, never provider text/details.
+      try { recordDiagnostic?.(message.params?.name, message.params?.arguments, result?.isError === true ? "REMOTE_MCP_PROVIDER_ERROR" : "OK"); }
+      catch { /* Keep original result. */ }
       return {
         jsonrpc: "2.0",
         id: message.id,
-        result: compactLocalMcpResult(await callTool(
-          origin,
-          String(message.params?.name || ""),
-          message.params?.arguments,
-          {
-            signal,
-            proposalProviderSelectionRecorder,
-            proposalCapabilityConfigDirectory,
-            clientCapabilities,
-            requestClient,
-            codexLegacyMcpMigration,
-          },
-        )),
+        result,
       };
     } catch (error) {
       let effectiveError = error;
@@ -6371,15 +6367,21 @@ export const handleLocalMcpMessage = async (
         }
       }
       const errorPayload = safeErrorPayload(effectiveError);
-      // Observe only host-thrown failures. Returned provider isError payloads
-      // are not inspected or uploaded; they can contain protected content.
+      let diagnosticCode = errorPayload.code;
+      if (effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError)
+        diagnosticCode = effectiveError.diagnosticCode ?? errorPayload.code;
+      else if (effectiveError instanceof TrelioApiError) {
+        const knownCode = observationCode(effectiveError.code);
+        const status = effectiveError.statusCode;
+        diagnosticCode = knownCode !== "UNKNOWN" ? knownCode
+          : [400, 401, 403, 404, 409, 429].includes(status) ? "TRELIO_BACKEND_HTTP_" + status
+          : status >= 500 && status <= 599 ? "TRELIO_BACKEND_HTTP_5XX" : "TRELIO_BACKEND_HTTP_OTHER";
+      }
+      if (["MCP_LOCAL_CONTEXT_REQUIRED", "MCP_LOCAL_BRIDGE_REQUIRED"].includes(diagnosticCode)) diagnosticCode = "ROUTED";
       try {
-        if (!(effectiveError instanceof TrelioApiError)) {
-          recordDiagnostic?.(message.params?.name, message.params?.arguments,
-            effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError
-              ? effectiveError.diagnosticCode ?? errorPayload.code
-              : errorPayload.code);
-        }
+        recordDiagnostic?.(message.params?.name, message.params?.arguments,
+          diagnosticCode,
+          { field: effectiveError instanceof TrelioLocalContextError ? effectiveError.diagnosticField : undefined });
       } catch { /* Telemetry must preserve the original result. */ }
       const isProposalCardError = errorPayload.code.startsWith("LOCAL_CONTEXT_PROPOSAL_");
       return {

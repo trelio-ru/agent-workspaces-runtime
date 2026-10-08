@@ -177,7 +177,8 @@ publication tooling также остаются вне этого публичн
   разрешает повтор mutation или передачу stdout/message в telemetry.
   Сохраняй внутренний skill exit отдельно от CLI exit; Windows private worker
   различает startup/request/protocol/ACL/DPAPI. Hook deny сохраняет закрытый
-  failureCode/phase, но lifecycle hooks не входят в общий счётчик.
+  failureCode/phase. Hooks имеют отдельную boundary и content-free user-temp
+  очередь без private helper; legacy error-only данные не входят в v2 rates.
 - `search` возвращает компактный `guidance` перед материалами; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.

@@ -101,7 +101,7 @@ test("local MCP preserves the known company-context HTTP conflict without exposi
   });
   assert.doesNotMatch(JSON.stringify(response), /PRIVATE-BACKEND-PAYLOAD|PRIVATE-TASK-ID/u);
   assert.equal(calls, 1, "Serializing a conflict must not replay the original tool call.");
-  assert.equal(diagnosticCalls, 0, "HTTP failures must not enter host error telemetry.");
+  assert.equal(diagnosticCalls, 1, "HTTP failures contribute one closed local outcome, without backend payload.");
 });
 
 test("local MCP does not expose arbitrary HTTP codes or a forged company-context conflict", async () => {

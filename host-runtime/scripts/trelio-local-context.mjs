@@ -2,6 +2,7 @@ import { assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskR
 import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
+import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
@@ -9009,98 +9010,57 @@ const runWorkspaceBridge = async (origin, argumentsList, options = {}) => {
   }
 };
 
-const normalizeWorkspaceActionParameters = (value) => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      "parameters must contain one structured Trelio Workspace action object.",
-    );
-  }
+// The diagnostic field comes from OUR validator label, never an unknown input
+// key. Strip fixed nesting/index syntax and reduce to the reviewed wire enum.
+const workspaceInputError = (message, field, reason = "INVALID_VALUE") => {
+  const candidate = String(field).replace(/^(?:parameters|runIdentity)\./u, "").split(/[.[]/u)[0];
+  const safeField = diagnosticContract.validationFields.includes(candidate) ? candidate : "unknown";
+  const error = new TrelioLocalContextError("TRELIO_WORKSPACE_ACTION_INVALID_INPUT", message,
+    { failureCode: "TRELIO_WORKSPACE_INPUT_" + reason, field: safeField });
+  error.diagnosticCode = error.details.failureCode;
+  error.diagnosticField = safeField;
+  return error;
+};
+
+const normalizeWorkspaceActionParameters = value => {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw workspaceInputError("parameters must contain one structured Trelio Workspace action object.", "parameters", value === undefined ? "MISSING_FIELD" : "WRONG_TYPE");
   return value;
 };
-
 const assertWorkspaceActionKeys = (parameters, allowedKeys) => {
-  const unknownKey = Object.keys(parameters).find((key) => !allowedKeys.has(key));
-  if (unknownKey) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `parameters.${unknownKey} is not supported for this Trelio Workspace action.`,
-    );
-  }
+  const unknownKey = Object.keys(parameters).find(key => !allowedKeys.has(key));
+  if (unknownKey) throw workspaceInputError(`parameters.${unknownKey} is not supported for this Trelio Workspace action.`, "parameters", "UNKNOWN_FIELD");
 };
-
-const normalizeWorkspaceActionString = (
-  value,
-  fieldName,
-  {
-    required = true,
-    maximumLength = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENT_LENGTH,
-    trim = true,
-    allowEmpty = false,
-  } = {},
-) => {
+const normalizeWorkspaceActionString = (value, fieldName, {
+  required = true, maximumLength = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENT_LENGTH, trim = true, allowEmpty = false,
+} = {}) => {
   if (value === undefined && !required) return null;
-  if (typeof value !== "string" || value.includes("\0")) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `${fieldName} must be one string without NUL bytes.`,
-    );
-  }
+  if (value === undefined) throw workspaceInputError(fieldName + " is required.", fieldName, "MISSING_FIELD");
+  if (typeof value !== "string") throw workspaceInputError(fieldName + " must be a string.", fieldName, "WRONG_TYPE");
+  if (value.includes("\0")) throw workspaceInputError(fieldName + " must not contain NUL bytes.", fieldName);
   const normalized = trim ? value.trim() : value;
-  if ((!allowEmpty && !normalized) || normalized.length > maximumLength) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `${fieldName} must ${allowEmpty ? "" : "not be empty and "}not exceed ${maximumLength} characters.`,
-    );
-  }
+  if (!allowEmpty && !normalized) throw workspaceInputError(fieldName + " must not be empty.", fieldName);
+  if (normalized.length > maximumLength) throw workspaceInputError(fieldName + " exceeds the maximum length.", fieldName, "LIMIT_EXCEEDED");
   return normalized;
 };
-
 const normalizeWorkspaceActionBoolean = (value, fieldName, defaultValue = false) => {
   if (value === undefined) return defaultValue;
-  if (typeof value !== "boolean") {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `${fieldName} must be a boolean.`,
-    );
-  }
+  if (typeof value !== "boolean") throw workspaceInputError(fieldName + " must be a boolean.", fieldName, "WRONG_TYPE");
   return value;
 };
-
-const normalizeWorkspaceActionStringArray = (
-  value,
-  fieldName,
-  {
-    maximumItems = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENTS,
-    allowEmptyValues = false,
-  } = {},
-) => {
+const normalizeWorkspaceActionStringArray = (value, fieldName, {
+  maximumItems = TRELIO_WORKSPACE_ACTION_MAX_ARGUMENTS, allowEmptyValues = false,
+} = {}) => {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > maximumItems) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `${fieldName} must contain at most ${maximumItems} strings.`,
-    );
-  }
-  return value.map((item, index) => normalizeWorkspaceActionString(
-    item,
-    `${fieldName}[${index}]`,
-    { trim: !allowEmptyValues, allowEmpty: allowEmptyValues },
-  ));
+  if (!Array.isArray(value)) throw workspaceInputError(fieldName + " must be an array of strings.", fieldName, "WRONG_TYPE");
+  if (value.length > maximumItems) throw workspaceInputError(fieldName + " exceeds the maximum number of items.", fieldName, "LIMIT_EXCEEDED");
+  return value.map((item, index) => normalizeWorkspaceActionString(item, fieldName + "[" + index + "]",
+    { trim: !allowEmptyValues, allowEmpty: allowEmptyValues }));
 };
-
 const normalizeWorkspaceActionAbsolutePath = (value, fieldName, { required = true } = {}) => {
-  const rawPath = normalizeWorkspaceActionString(value, fieldName, {
-    required,
-    maximumLength: 8_192,
-  });
+  const rawPath = normalizeWorkspaceActionString(value, fieldName, { required, maximumLength: 8192 });
   if (rawPath === null) return null;
-  if (!path.isAbsolute(rawPath)) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `${fieldName} must be an absolute local path.`,
-    );
-  }
+  if (!path.isAbsolute(rawPath)) throw workspaceInputError(fieldName + " must be an absolute local path.", fieldName);
   return path.resolve(rawPath);
 };
 
@@ -9274,10 +9234,7 @@ const buildWorkspaceCheckpointActionArguments = (operation, parameters) => {
       { maximumLength: 32 },
     );
     if (!TRELIO_WORKSPACE_ACTION_CHECKPOINT_TYPES.has(checkpointType)) {
-      throw new TrelioLocalContextError(
-        "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-        "parameters.type is not a supported checkpoint type.",
-      );
+      throw workspaceInputError("parameters.type is not a supported checkpoint type.", "type");
     }
     appendWorkspaceActionOption(argumentsList, "type", checkpointType);
   }
@@ -9324,10 +9281,7 @@ const buildWorkspaceCheckpointActionArguments = (operation, parameters) => {
     { required: false, maximumLength: 64 },
   );
   if (taskOutcome && !TRELIO_WORKSPACE_ACTION_TASK_OUTCOMES.has(taskOutcome)) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      "parameters.taskOutcome is not a supported task outcome.",
-    );
+    throw workspaceInputError("parameters.taskOutcome is not a supported task outcome.", "taskOutcome");
   }
   appendWorkspaceActionOption(argumentsList, "task-outcome", taskOutcome);
   appendWorkspaceActionOption(
@@ -9377,20 +9331,14 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
   ]);
   const unknownEnvelopeKey = Object.keys(rawInput).find((key) => !allowedEnvelopeKeys.has(key));
   if (unknownEnvelopeKey) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `${unknownEnvelopeKey} is not supported by the action envelope.`,
-    );
+    throw workspaceInputError("The action envelope contains an unsupported field.", "unknown", "UNKNOWN_FIELD");
   }
   if (
     rawInput.workingDirectory !== undefined
     && operation !== "open"
     && !TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS.has(operation)
   ) {
-    throw new TrelioLocalContextError(
-      "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      `workingDirectory is not supported for operation ${operation}.`,
-    );
+    throw workspaceInputError(`workingDirectory is not supported for operation ${operation}.`, "workingDirectory");
   }
 
   if (

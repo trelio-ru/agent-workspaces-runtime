@@ -3650,13 +3650,14 @@ const reconcileBridgeSessionConflict = async ({
 // Optional diagnostics must never migrate, reconcile, revoke or replace a
 // credential. Read only the current store; a missing/conflicting installation
 // simply sends no event until ordinary bridge work restores its session.
-export const readExistingBridgeSessionToken = async (origin) => {
+export const readExistingBridgeSessionToken = async (origin, { signal } = {}) => withPrivateProcessSession(async () => {
+  signal?.throwIfAborted();
   const credentials = await readFallbackCredentials();
   const credential = credentials[origin] || {};
   if (USE_MACOS_KEYCHAIN) return getMacosBridgeSessionToken(origin);
   if (process.platform === "win32") return readProtectedWindowsBridgeSession(origin, credential);
   return typeof credential.bridgeSessionToken === "string" ? credential.bridgeSessionToken : null;
-};
+}, signal);
 
 const loadBridgeSessionToken = async (origin, options = {}) => {
   const credentials = await readFallbackCredentials();

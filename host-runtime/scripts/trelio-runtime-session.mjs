@@ -9,6 +9,20 @@
  * tool output, MCP arguments, Workspace or backend storage.
  */
 import crypto from "node:crypto";
+import { buildDiagnosticObservation, observationCode } from "./trelio-diagnostic-observation.mjs";
+import { writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
+
+// Runs after the private scope is closed, including ACL/DPAPI startup failures.
+// No network, token read, state recovery or second private helper is allowed.
+export const recordRuntimeHookDiagnostic = async (event, code, { write = writeDiagnosticJournal, origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru" } = {}) => {
+  let timer;
+  try {
+    const normalizedOrigin = new URL(origin).origin;
+    await Promise.race([write(normalizedOrigin, buildDiagnosticObservation("runtime_hook", { operation: event }, code, { boundary: "hook" })),
+      new Promise(resolve => { timer = setTimeout(resolve, 100); timer.unref?.(); })]);
+  } catch { /* A telemetry failure must not alter the hook decision. */ }
+  finally { clearTimeout(timer); }
+};
 import { ProcessDiagnosticError } from "./trelio-process-diagnostics.mjs";
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
@@ -152,7 +166,7 @@ const withRuntimeStateLock = async (filePath, operation) => {
     // same deadline. Checking only the live-lock branch previously allowed
     // an undeletable stale directory to spin until the client killed us.
     if (Date.now() - startedAt >= RUNTIME_STATE_LOCK_WAIT_MILLISECONDS) {
-      throw new Error("другая runtime-регистрация не завершилась вовремя");
+      throw Object.assign(new Error("другая runtime-регистрация не завершилась вовремя"), { code: "TRELIO_RUNTIME_LOCK_TIMEOUT" });
     }
     try {
       await fs.mkdir(lockPath, { mode: 0o700 });
@@ -166,7 +180,7 @@ const withRuntimeStateLock = async (filePath, operation) => {
         throw statError;
       });
       if (metadata && (!metadata.isDirectory() || metadata.isSymbolicLink())) {
-        throw new Error("локальная блокировка runtime-сессии имеет небезопасный тип");
+        throw Object.assign(new Error("локальная блокировка runtime-сессии имеет небезопасный тип"), { code: "TRELIO_RUNTIME_LOCK_UNSAFE" });
       }
       if (metadata && Date.now() - metadata.mtimeMs > RUNTIME_STATE_LOCK_STALE_MILLISECONDS) {
         await fs.rmdir(lockPath).catch((removeError) => {
@@ -627,7 +641,7 @@ const runPreToolUse = async (hookInput) => {
     return;
   }
   const clientSessionId = resolveRuntimeClientSessionId(hookInput);
-  if (!clientSessionId) throw new Error("клиент не передал session_id");
+  if (!clientSessionId) throw Object.assign(new Error("клиент не передал session_id"), { code: "TRELIO_RUNTIME_SESSION_ID_REQUIRED" });
   const filePath = await statePathFor(clientSessionId, origin);
   let state = await readRuntimeState(filePath);
   if (!state) {
@@ -862,7 +876,10 @@ const runHook = async () => {
   // room for startup, lock cleanup and the explicit JSON decision. Local ACL,
   // DPAPI and network work share this signal; no result is cached across hooks.
   const timeout = RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS[hookInput.hook_event_name];
-  return withRuntimeHookPrivateSession(timeout, async () => {
+  let diagnosticCode = "OK";
+  const observed = hookInput.hook_event_name !== "PreToolUse"
+    || resolveTrelioHookToolIdentity(hookInput).status !== "unrelated";
+  try { return await withRuntimeHookPrivateSession(timeout, async () => {
     try {
       if (
         hookInput.hook_event_name === "SessionStart"
@@ -890,10 +907,12 @@ const runHook = async () => {
       let failure = error;
       try {
         const recoveryExitCode = await recoverHookHostRuntimeUpgrade(error, hookInput);
-        if (recoveryExitCode !== null) return recoveryExitCode;
+        if (recoveryExitCode !== null) { diagnosticCode = "ROUTED"; return recoveryExitCode; }
       } catch (recoveryError) {
         failure = recoveryError;
       }
+      diagnosticCode = observationCode(failure instanceof ProcessDiagnosticError ? failure.diagnosticCode : failure?.code);
+      if (diagnosticCode === "UNKNOWN") diagnosticCode = HOOK_FAILED_CODE;
       if (hookInput.hook_event_name === "PreToolUse") {
         // PowerShell/pwsh -Command can normalize an inner exit code 2 to 1.
         // Codex treats 1 as a non-blocking hook failure and drops the original
@@ -913,7 +932,13 @@ const runHook = async () => {
       // PreToolUse decision; keep their existing stderr/exit-code contract.
       throw failure;
     }
-  });
+  }); } catch (error) {
+    if (diagnosticCode === "OK") diagnosticCode = observationCode(error instanceof ProcessDiagnosticError ? error.diagnosticCode : error?.code);
+    if (diagnosticCode === "UNKNOWN") diagnosticCode = HOOK_FAILED_CODE;
+    throw error;
+  } finally {
+    if (observed) await recordRuntimeHookDiagnostic(hookInput.hook_event_name, diagnosticCode);
+  }
 };
 
 /**

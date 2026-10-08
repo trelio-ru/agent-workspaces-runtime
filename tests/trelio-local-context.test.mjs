@@ -217,7 +217,8 @@ test("typed checkpoint actions require canonical array fields", () => {
     },
   }), (error) => (
     error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"
-    && /parameters\.evidence must contain/u.test(error.message)
+    && error.diagnosticCode === "TRELIO_WORKSPACE_INPUT_WRONG_TYPE"
+    && error.diagnosticField === "evidence"
   ));
 });
 
