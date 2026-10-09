@@ -1492,3 +1492,55 @@ JSON TextContent после hydration/projection. Другие shells сохра
 text/media/errors сохраняются, нормализация идемпотентна. Это presentation,
 не OAuth/runtime admission. Backend учитывает эту копию в exact read/page
 budget; local text-only reads уже измеряют собственный envelope.
+
+## Личные аккаунты навыков
+
+Signed capability `local-accounts-v1` (host 3.7.0+) требует `local-session` и
+несовместима с `secret-checkout`. Host разрешает capability только после обычной
+проверки admission, scope, signature и package. Inherited account environment
+отбрасывается; текущие company/member/connection bindings никогда не заменяются
+идентичностью прежнего хранилища.
+
+`trelio-skill-accounts.mjs` владеет каталогом в
+`<config>/skill-accounts/<sha256(origin, skillId)>.json`: schemaVersion 1,
+revision, до 64 accounts и 512 company/member bindings. Название – 120 Unicode
+code points, комментарий – 2000 с переносами; весь файл – максимум 1 MiB.
+Индекс owner-only, atomic write/read-back, optimistic revision; concurrent
+writers сериализуются, подтверждённый dead PID восстанавливается без удаления
+нового lock. Повреждённый/неизвестный state и неизвестный owner fail-closed.
+
+`account list` (alias `accounts`) возвращает только id/name/comment/bound/default
+и revision. Общий каталог доступен локальному OS user; между устройствами не
+синхронизируется. Назначения Trelio и личные правила остаются company-scoped.
+Create принимает name/comment и optional UUID; update – exact UUID и новые
+метаданные. Bind/unbind/default меняют только текущую компанию. Все изменения
+требуют `--expected-revision`. Unbind не удаляет сессию. Между компаниями аккаунт
+включается только после выбора пользователя; общие комментарии – данные,
+не authority и не место для секретов или закрытого company context.
+
+`--local-account UUID` удаляется из provider argv до запуска; unknown/unbound
+selector отклоняется, дубликат тоже. Без selector используется default либо
+единственный bound account; иначе требуется выбор. Глобального active account
+нет. Provider получает host-only `TRELIO_SKILL_ACCOUNT_JSON` с id, name, comment,
+opaque providerRef и companyBinding. Новый account хранится по UUID; imported
+providerRef адресует прежние файлы, AES AAD и OS key. Credentials в индекс не
+входят, providerRef не возвращается моделью в list. Обычные permissions, live
+company config, sensitive OS unlock и sending guards сохраняются. Provider
+обязан отделять reusable storage от session/approval scope.
+
+`skill-personal-accounts-v1` зарегистрирован в product legacy registry. До
+выпуска дата поддержки не назначена. Первый вызов в exact scope запускает
+только signed `__trelio_accounts_import`: 20 секунд, 512 KiB, без grants,
+credentials, provider HTTP или login. Адаптер возвращает bounded metadata и
+opaque locator. Host фиксирует imports атомарно; ошибка не ставит marker,
+повтор не дублирует и не отменяет unbind. Company imports сохраняют свой scope;
+device-wide email deduplicates across companies, но автоматически включается
+только в компании первого импорта. Совпадение labels не объединяет accounts.
+
+После шести месяцев production доступности разработчик может удалить importer
+следующим release; исполняемого календарного переключателя нет. Постоянный
+отдельный конвертер не требуется: поздний пользователь настраивается заново.
+При этом существующие storage references нового каталога продолжают работать,
+а старые файлы автоматически не удаляются. Tests:
+`tests/trelio-skill-accounts.test.mjs`; provider storage/approval tests принадлежат
+`trelio-ru/agent-skills`.

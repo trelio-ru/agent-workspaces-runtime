@@ -10,6 +10,7 @@ import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
 import crypto from "node:crypto";
+import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
@@ -2549,6 +2550,7 @@ const maximumStableVersion = (...versions) => versions.reduce(
 );
 
 export const resolveAgentSkillPackageMinimumHostVersion = ({
+  capabilities = [],
   packageSizeBytes,
   requestedMinimum,
   encrypted = false,
@@ -2559,7 +2561,8 @@ export const resolveAgentSkillPackageMinimumHostVersion = ({
     : AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION;
   const effectiveMinimum = maximumStableVersion(
     requestedMinimum,
-    packageContractMinimum,
+    capabilities.includes(ACCOUNT_CAPABILITY)
+      ? maximumStableVersion(packageContractMinimum, ACCOUNT_MINIMUM_HOST_VERSION) : packageContractMinimum,
   );
   return encrypted
     ? maximumStableVersion(effectiveMinimum, hostRuntimeVersion)
@@ -2746,6 +2749,7 @@ const normalizePublicationExecution = async ({
     }
     const effectiveMinimum = resolveAgentSkillPackageMinimumHostVersion({
       packageSizeBytes: prepared.parsedPackage.packageSizeBytes,
+      capabilities: prepared.parsedPackage.capabilities,
       requestedMinimum,
       encrypted,
     });

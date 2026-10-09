@@ -10,6 +10,7 @@
  * Run.
  */
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
+import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError } from "./trelio-skill-accounts.mjs";
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -508,6 +509,7 @@ const AGENT_SKILL_BROWSER_SESSION_CLASSES = new Set([
 ]);
 const AGENT_SKILL_SIGNING_KEY_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const AGENT_SKILL_ALLOWED_CAPABILITIES = new Set([
+  ACCOUNT_CAPABILITY,
   "browser",
   "local-session",
   "network",
@@ -2460,7 +2462,7 @@ export const hardenWindowsPrivatePath = async (targetPath, targetKind) => {
   finally { if (!scopedWorker) await worker.close(); }
 };
 
-const assertPrivatePathKind = async (targetPath, targetKind) => {
+export const assertPrivatePathKind = async (targetPath, targetKind) => {
   const metadata = await fs.lstat(targetPath);
   if (metadata.isSymbolicLink()) {
     throw new Error(`Небезопасный локальный путь является symlink: ${targetPath}`);
@@ -6163,6 +6165,10 @@ export const parseAndValidateAgentSkillPackage = (
   if (!STABLE_VERSION_PATTERN.test(runtimeVersion)) {
     throw new Error("Runtime package version должна использовать формат X.Y.Z.");
   }
+  if (capabilities.includes(ACCOUNT_CAPABILITY) &&
+      (!capabilities.includes('local-session') || capabilities.includes('secret-checkout'))) {
+    throw new Error('Личные аккаунты требуют local-session и не объединяются с company secret checkout.');
+  }
   if (!["node", "python", "executable"].includes(interpreter)) {
     throw new Error("Runtime package содержит неподдерживаемый interpreter.");
   }
@@ -7443,6 +7449,11 @@ export const buildAgentSkillRuntimeEnvironment = ({
 
   return {
     ...cleanEnvironment,
+    // This binding comes only from the host catalogue after company selection.
+    // The provider reference is value-free storage metadata, never a credential
+    // or a replacement for the live company/member/connection identity below.
+    ...(artifact.parsedPackage?.capabilities?.includes(ACCOUNT_CAPABILITY) && executionContext.account
+      ? { TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify(executionContext.account) } : {}),
     TRELIO_SKILL_ID: artifact.skillId,
     TRELIO_SKILL_RUNTIME_VERSION: artifact.runtimeVersion,
     TRELIO_SKILL_RUNTIME_ROOT: runtimeDirectory,
@@ -8032,17 +8043,24 @@ const skillCommand = async (
   if (!cachedAdmission) {
     await saveRuntimeSkillAdmission(admissionKey, token, admissionResolution, admissionCheckedAt);
   }
+  const executionContext = {
+    companyId, projectId, releaseId,
+    localIdentity: resolution.localIdentity,
+    companyConnection: resolution.companyConnection,
+  };
+  let runtimeArguments = positional.slice(1);
+  if (artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)) {
+    const accountResult = await prepareSkillAccount({ origin, artifact: artifactForCache,
+      runtimeDirectory, executionContext, runtimeArguments });
+    if (accountResult.handled) return;
+    executionContext.account = accountResult.account;
+    runtimeArguments = accountResult.runtimeArguments;
+  }
   await runMaterializedAgentSkill({
     artifact: artifactForCache,
     runtimeDirectory,
-    runtimeArguments: positional.slice(1),
-    executionContext: {
-      companyId,
-      projectId,
-      releaseId,
-      localIdentity: resolution.localIdentity,
-      companyConnection: resolution.companyConnection,
-    },
+    runtimeArguments,
+    executionContext,
     grantedEnvironment,
     grantedStdin,
     prepareSetupEnvironment: setupCommand ? () => deliverSkillSetupEnvironment({
@@ -8050,6 +8068,69 @@ const skillCommand = async (
       projectId, skillId, releaseId, runtimeSessionId,
     }) : null,
   });
+};
+
+/** Run only the signed provider's fixed read-only migration entry. Its bounded
+ * result contains storage locators and labels; stderr is never reflected into
+ * an error. No grants, authentication, provider request or mutation is replayed.
+ * LEGACY: skill-personal-accounts-v1 in the product compatibility registry. */
+const discoverSkillAccounts = async ({ artifact, runtimeDirectory, executionContext }) => {
+  const entrypoint = path.join(runtimeDirectory, ...artifact.parsedPackage.entrypoint.path.split('/'));
+  let executable = entrypoint, args = ['__trelio_accounts_import'];
+  if (artifact.parsedPackage.entrypoint.interpreter === 'node') {
+    executable = process.execPath; args.unshift(entrypoint);
+  } else if (artifact.parsedPackage.entrypoint.interpreter === 'python') {
+    const python = await resolveTrustedPythonInvocation({ runtimeDirectory });
+    executable = python.executable;
+    args = buildIsolatedPythonRuntimeArguments({ argsPrefix: python.argsPrefix, runtimeDirectory,
+      entrypointPath: entrypoint, runtimeArguments: args });
+  }
+  try {
+    const result = await execFileAsync(executable, args, { cwd: runtimeDirectory, shell: false,
+      env: buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory, executionContext }),
+      timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 512 * 1024, encoding: 'utf8', windowsHide: true });
+    const value = JSON.parse(result.stdout);
+    if (value?.schemaVersion !== 1 || !Array.isArray(value.accounts)) throw new Error();
+    return value.accounts;
+  } catch {
+    throw new SkillAccountError('ACCOUNT_IMPORT_FAILED');
+  }
+};
+
+export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, executionContext,
+  runtimeArguments, catalogueDirectory = CONFIG_DIRECTORY,
+  discover = discoverSkillAccounts, output = value => process.stdout.write(`${JSON.stringify(value)}\n`) }) => {
+  const scope = accountScope({ origin, skillId: artifact.skillId, companyId: executionContext.companyId,
+    memberId: executionContext.localIdentity?.memberId,
+    connectionId: executionContext.localIdentity?.connectionId ?? null });
+  const catalogue = createAccountCatalogue({ directory: catalogueDirectory, scope, io: {
+    ensureDirectory: ensurePrivateDirectory, read: readPrivateJsonFile, write: writePrivateJsonFile,
+    checkDirectory: directory => assertPrivatePathKind(directory, "directory"),
+  } });
+  await catalogue.importOnce(() => discover({ artifact, runtimeDirectory, executionContext }));
+  if (runtimeArguments.length === 1 && runtimeArguments[0] === 'accounts') {
+    output({ ok: true, ...await catalogue.list() }); return { handled: true };
+  }
+  if (runtimeArguments[0] === 'account') {
+    const operation = runtimeArguments[1];
+    if (operation === 'list' && runtimeArguments.length === 2) {
+      output({ ok: true, ...await catalogue.list() }); return { handled: true };
+    }
+    const options = {};
+    for (let index = 2; index < runtimeArguments.length; index += 2) {
+      const key = runtimeArguments[index], value = runtimeArguments[index + 1];
+      if (!['--id', '--name', '--comment', '--expected-revision'].includes(key) ||
+          Object.hasOwn(options, key) || value === undefined) throw new SkillAccountError('ACCOUNT_ARGUMENTS_INVALID');
+      options[key] = value;
+    }
+    if (!/^\d+$/u.test(options['--expected-revision'] || '')) throw new SkillAccountError('ACCOUNT_REVISION_REQUIRED');
+    const result = await catalogue.change({ operation, id: options['--id'] || (operation === 'create' ? crypto.randomUUID() : null),
+      name: options['--name'], comment: options['--comment'], expectedRevision: Number(options['--expected-revision']) });
+    output({ ok: true, ...result, ...await catalogue.list() }); return { handled: true };
+  }
+  const parsed = splitAccountArguments(runtimeArguments);
+  const account = await catalogue.select(parsed.accountId);
+  return { handled: false, account, runtimeArguments: parsed.providerArguments };
 };
 
 const getCachedObjectPath = (sha256) => {
