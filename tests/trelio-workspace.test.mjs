@@ -147,6 +147,7 @@ import {
   restoreRetainedCodexPluginInstallations,
   retainLoadedCodexPluginInstallation,
   readBoundedResponseBuffer,
+  readPrivateJsonFile,
   reconcileMaterializedContextDirectories,
   request,
   renderAgentSkillDeviceConsentPage,
@@ -167,7 +168,9 @@ import {
   validateEncryptedAgentWorkspaceDerivedArtifacts,
   withEncryptedWorkspaceBrowserProjection,
   withEncryptedWorkspaceTransportCooldownRetry,
+  writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { saveRuntimeChatBinding } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
 import { parseWorkspaceDraftRecoveryRequiredError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
@@ -8844,6 +8847,16 @@ test("connection-free skill runtime receives member identity without synthetic c
 
   assert.equal(environment.SAFE_PARENT_VALUE, undefined);
   assert.equal(environment.CODEX_THREAD_ID, "11111111-1111-4111-8111-111111111111");
+  const boundContext = { companyId, releaseId, runtimeSessionId: "22222222-2222-4222-8222-222222222222",
+    localIdentity: resolution.localIdentity, codexThreadId: "11111111-1111-7111-8111-111111111111" };
+  for (const inheritedEnvironment of [{}, { CODEX_THREAD_ID: "33333333-3333-4333-8333-333333333333" }]) {
+    const bound = buildAgentSkillRuntimeEnvironment({ artifact: resolution.artifact,
+      runtimeDirectory: "/verified/runtime", executionContext: boundContext, inheritedEnvironment });
+    assert.equal(bound.CODEX_THREAD_ID, boundContext.codexThreadId, "current hook binding accepts Codex UUIDv7");
+    assert.equal(buildAgentSkillRuntimeEnvironment({ artifact: resolution.artifact,
+      runtimeDirectory: "/verified/runtime", executionContext: { ...boundContext, codexThreadId: null },
+      inheritedEnvironment }).CODEX_THREAD_ID, undefined, "missing binding must never read a stale chat");
+  }
   assert.equal(environment.CODEX_HOME, "/trusted/codex-home");
   assert.equal(environment.HOME, "/trusted/home");
   assert.equal(environment.HTTPS_PROXY, "http://127.0.0.1:3128");
@@ -9263,6 +9276,7 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
       `const stdinGrant = stdinValue === ${JSON.stringify(secretValues.stdin)};`,
       `if (process.env.TRELIO_TEST_SETUP_TOKEN) process.stdout.write("setup-authorized:" + (process.env.TRELIO_TEST_SETUP_TOKEN === ${JSON.stringify(secretValues.env)}) + "\\n");`,
       "process.stdout.write(`runtime:${process.argv.slice(2).join(',')}:${process.env.TRELIO_SKILL_RELEASE_ID}:${process.env.TRELIO_SKILL_MEMBER_ID}:${process.env.TRELIO_SKILL_CONNECTION_ID}:${process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON}:project=${process.env.TRELIO_SKILL_PROJECT_ID || 'none'}:grants=${envGrant},${fileGrant},${stdinGrant}\\n`);",
+      "process.stdout.write(`chat:${process.env.CODEX_THREAD_ID || 'none'}\\n`);",
       "",
     ].join("\n"),
     { mode: 0o755 },
@@ -9499,6 +9513,9 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
           // Even an exact-looking ambient secret is not a consumed grant and
           // must remain absent from an ordinary skill invocation.
           DEPLOY_TOKEN: secretValues.env,
+          // A long-lived MCP may have no chat ID or retain an unrelated one.
+          // The actual signed-package subprocess must ignore this stale value.
+          CODEX_THREAD_ID: "ffffffff-ffff-4fff-8fff-ffffffffffff",
         },
       },
     );
@@ -9544,7 +9561,23 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
     );
 
     const firstRun = await runSkill();
+    assert.match(firstRun.stdout, /\nchat:none\n/u);
+    // Hydrate a pre-upgrade session after its admission is already cached. The
+    // next CLI invocation must read current hook context, not cached/ambient
+    // identity. This exercises the real bridge and signed-package child.
+    const currentChatId = "01900000-0000-7000-8000-000000000001";
+    assert.equal(await saveRuntimeChatBinding({
+      configDirectory: resolveWorkspaceBridgeConfigDirectory({ homeDirectory }),
+      origin,
+      runtimeSessionId: runtimeArgv[1],
+      clientSessionId: currentChatId,
+      clientFamily: "codex",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      readPrivateJsonFile,
+      writePrivateJsonFile,
+    }), true);
     const secondRun = await runSkill();
+    assert.match(secondRun.stdout, new RegExp(`\nchat:${currentChatId}\n`, "u"));
     const expectedRuntimeOutput = `runtime:--message,hello:${releaseId}:${memberId}:${connectionId}:{"schemaVersion":1,"baseUrl":"https://example.test/"}:project=none:grants=false,false,false`;
     assert.match(firstRun.stdout, new RegExp(expectedRuntimeOutput.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
     assert.match(secondRun.stdout, new RegExp(expectedRuntimeOutput.replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&")));

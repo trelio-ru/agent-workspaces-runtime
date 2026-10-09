@@ -9,6 +9,7 @@
  * tool output, MCP arguments, Workspace or backend storage.
  */
 import crypto from "node:crypto";
+import { saveRuntimeChatBinding, runtimeChatBindingPath } from "./trelio-runtime-chat-binding.mjs";
 import { buildDiagnosticObservation, observationCode } from "./trelio-diagnostic-observation.mjs";
 import { writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
 
@@ -355,6 +356,11 @@ const removeStaleRuntimeState = async (filePath, nowMilliseconds) => {
     const reason = staleRuntimeStateReason(state, nowMilliseconds);
     if (!reason) return null;
     await fs.rm(filePath, { force: true });
+    // The companion contains only an exact chat UUID, but shares the original
+    // session lifetime. Its filename is derived without scanning other chats.
+    const binding = runtimeChatBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
+      origin: process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru", runtimeSessionId: state.runtimeSessionId });
+    if (binding) await fs.rm(binding, { force: true });
     return reason;
   } catch {
     return null;
@@ -760,6 +766,11 @@ const runPreToolUse = async (hookInput) => {
   }
   state = await refreshRuntimeState({ hookInput, state, filePath, origin, clientSessionId });
   assertRuntimeHookBudget();
+  const bridge = await loadWorkspaceBridgeModule();
+  await saveRuntimeChatBinding({ configDirectory: bridge.resolveWorkspaceBridgeConfigDirectory(),
+    origin, runtimeSessionId: state.runtimeSessionId, clientSessionId,
+    clientFamily: state.observation?.clientFamily, expiresAt: state.expiresAt,
+    readPrivateJsonFile: bridge.readPrivateJsonFile, writePrivateJsonFile: bridge.writePrivateJsonFile });
   const updatedInput = await manageInstructionKeys({
     hookInput, identity, input: toolInput, boundary: state.instructionContext,
   });
@@ -808,6 +819,11 @@ const runSessionStart = async (hookInput) => {
   });
 
   if (stateToEnd) {
+    const binding = runtimeChatBindingPath({
+      configDirectory: path.dirname(path.dirname(filePath)),
+      runtimeSessionId: stateToEnd.runtimeSessionId,
+    });
+    if (binding) await fs.rm(binding, { force: true }).catch(() => undefined);
     const { endAgentRuntimeHookSession } = await loadWorkspaceBridgeModule();
     await endAgentRuntimeHookSession({
       origin,
@@ -831,6 +847,9 @@ const runSessionEnd = async (hookInput) => {
   // server session also expires independently if the best-effort request fails.
   await fs.rm(filePath, { force: true }).catch(() => undefined);
   if (state) {
+    const binding = runtimeChatBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
+      origin, runtimeSessionId: state.runtimeSessionId });
+    if (binding) await fs.rm(binding, { force: true }).catch(() => undefined);
     const { endAgentRuntimeHookSession } = await loadWorkspaceBridgeModule();
     await endAgentRuntimeHookSession({
       origin,

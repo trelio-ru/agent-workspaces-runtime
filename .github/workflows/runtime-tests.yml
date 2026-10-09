@@ -218,7 +218,7 @@ jobs:
       - name: Run Windows ACL regressions
         run: >-
           node --test
-          --test-name-pattern="Windows ACL command|Windows bridge applies|Windows DPAPI|Windows Node resolver|Windows Remote MCP launcher|bridge pairs once"
+          --test-name-pattern="Windows ACL command|Windows bridge applies|Windows DPAPI|Windows Node resolver|Windows Remote MCP launcher|bridge pairs once|connection-free skill runtime"
           tests/trelio-workspace.test.mjs
 
       - name: Run Windows browser HTTP evidence regressions
@@ -256,7 +256,7 @@ jobs:
       - name: Run Windows hook launcher regression
         run: >-
           node --test
-          --test-name-pattern="configured platform hook launcher|event session identity|pairing recovery|resume and compact|bounded cleanup|malformed Trelio action|SessionStart pins|discovery strips"
+          --test-name-pattern="configured platform hook launcher|event session identity|pairing recovery|resume and compact|bounded cleanup|malformed Trelio action|SessionStart pins|discovery strips|chat binding"
           tests/trelio-runtime-session.test.mjs
 
       - name: Run Windows hook tool identity regressions

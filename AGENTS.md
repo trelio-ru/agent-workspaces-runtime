@@ -126,9 +126,11 @@ publication tooling также остаются вне этого публичн
 - Синхронизация названия task-чата – optional механика runtime после Run lifecycle,
   без модели: [контракт](docs/agent-workspace-runtime.md#названия-связанных-codex-чатов).
   Exact locator выбирает сервер, inherited `CODEX_THREAD_ID` не заменяет его.
-- Подписанный Agent Skill может получить `CODEX_THREAD_ID` из ограниченного
-  окружения для точного локального чтения названия чата. Этот ID не даёт прав
-  Trelio или внешнего сервиса; название проверяется по exact ID ответа.
+- Для session-bound Agent Skill `CODEX_THREAD_ID` берётся из private exact-ID
+  binding текущего hook-события, а не окружения долгоживущего MCP. Отсутствующий
+  binding исключает stale inherited ID. Этот ID не даёт прав Trelio или внешнего
+  сервиса; название проверяется по exact ID ответа. Регрессия проходит реальный
+  hook с отсутствующим/чужим environment ID и отдельный skill subprocess.
 - Browser-навыки используют общий host-owned `browser-session-v1`: signed
   descriptor выбирает класс хранения, absolute lease и opt-in manual assist;
   host один раз реализует browser discovery, Playwright bootstrap, process

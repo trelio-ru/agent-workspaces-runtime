@@ -11,6 +11,7 @@
  */
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
+import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
 import {
   WorkspaceActiveRunRequiredError,
   WorkspaceDraftRecoveryRequiredError,
@@ -7388,6 +7389,17 @@ export const buildAgentSkillRuntimeEnvironment = ({
   const connectionConfigJson = executionContext.companyConnection
     ? JSON.stringify(executionContext.companyConnection.config)
     : null;
+  // A persistent MCP process has no current per-call CODEX_THREAD_ID, or may
+  // retain one from a different chat. Only the current registered hook session
+  // may supply it for a session-bound invocation. Missing optional metadata
+  // keeps the neutral provider prompt; it never selects another chat.
+  if (executionContext.runtimeSessionId) {
+    delete cleanEnvironment.CODEX_THREAD_ID;
+    const currentChatId = normalizeRuntimeChatId(executionContext.codexThreadId);
+    if (currentChatId) {
+      cleanEnvironment.CODEX_THREAD_ID = currentChatId;
+    }
+  }
   // Only the descriptor parsed from the digest- and signature-verified package
   // may enable this capability. Resolve metadata is useful for consent UI but
   // cannot independently grant a browser session to package code.
@@ -8040,6 +8052,11 @@ const skillCommand = async (
       companyId,
       projectId,
       releaseId,
+      runtimeSessionId,
+      codexThreadId: runtimeSessionId ? await readRuntimeChatBinding({
+        configDirectory: resolveWorkspaceBridgeConfigDirectory(), origin, runtimeSessionId,
+        readPrivateJsonFile,
+      }) : null,
       localIdentity: resolution.localIdentity,
       companyConnection: resolution.companyConnection,
     },

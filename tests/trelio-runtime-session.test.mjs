@@ -49,6 +49,8 @@ import {
 import { readDiagnosticJournal } from "../host-runtime/scripts/trelio-diagnostic-journal.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "../host-runtime/scripts/trelio-context-recovery.mjs";
+import { readRuntimeChatBinding, saveRuntimeChatBinding, runtimeChatBindingPath } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
+import { readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const hookScriptPath = fileURLToPath(
   new URL("../host-runtime/scripts/trelio-runtime-session.mjs", import.meta.url),
@@ -155,6 +157,28 @@ const assertDeniedHook = (result) => {
   return output.permissionDecisionReason;
 };
 
+test("chat binding is private exact session UI context with original expiry, never a guessed fallback", async () => {
+  const configDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-chat-binding-"));
+  const options = { configDirectory, origin: "https://binding.invalid",
+    runtimeSessionId: crypto.randomUUID(), clientSessionId: "11111111-1111-7111-8111-111111111111",
+    clientFamily: "codex", expiresAt: new Date(Date.now() + 60000).toISOString(),
+    readPrivateJsonFile, writePrivateJsonFile };
+  try {
+    assert.equal(await readRuntimeChatBinding(options), null);
+    assert.equal(await saveRuntimeChatBinding(options), true);
+    assert.equal(await readRuntimeChatBinding(options), options.clientSessionId);
+    const file = runtimeChatBindingPath(options);
+    const initial = await readFile(file, "utf8");
+    assert.equal(await saveRuntimeChatBinding({ ...options, clientSessionId: crypto.randomUUID() }), false);
+    assert.equal(await readFile(file, "utf8"), initial, "a conflicting chat cannot rewrite the binding");
+    assert.equal(await readRuntimeChatBinding({ ...options, runtimeSessionId: crypto.randomUUID() }), null);
+    assert.equal(await readRuntimeChatBinding({ ...options, now: Date.parse(options.expiresAt) }), null);
+    assert.equal(await saveRuntimeChatBinding({ ...options, clientFamily: "claude-code" }), false);
+    assert.equal(await readRuntimeChatBinding({ ...options, readPrivateJsonFile: async () => { throw new Error("private path"); } }), null);
+    if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o777, 0o600);
+  } finally { await rm(configDirectory, { recursive: true, force: true }); }
+});
+
 test("same-chat refresh tracks model and effort, serializes hooks and recovers a lost response", async () => {
   const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-refresh-"));
   const transcriptPath = path.join(temporaryHome, "rollout.jsonl");
@@ -206,7 +230,7 @@ test("same-chat refresh tracks model and effort, serializes hooks and recovers a
       JSON.stringify({ [origin]: { bridgeSessionToken: "test-bridge-session" } }), { mode: 0o600 });
     const statePath = path.join(configDirectory, "runtime-sessions",
       crypto.createHash("sha256").update(`${origin}\n${threadId}`).digest("hex") + ".json");
-    const environment = { HOME: temporaryHome, USERPROFILE: temporaryHome, CODEX_THREAD_ID: threadId,
+    const environment = { HOME: temporaryHome, USERPROFILE: temporaryHome, CODEX_THREAD_ID: "ffffffff-ffff-4fff-8fff-ffffffffffff",
       TRELIO_WORKSPACE_ORIGIN: origin, CLAUDE_CODE_ENTRYPOINT: "", CLAUDE_EFFORT: "" };
     let model = "gpt-6.1-sol";
     const observe = async (nextModel, effort) => {
@@ -232,6 +256,14 @@ test("same-chat refresh tracks model and effort, serializes hooks and recovers a
     const initial = proofFrom(await call());
     await observe(model, "high");
     const upgraded = proofFrom(await call());
+    // Desktop MCP has no fresh per-call environment. The real hook event must
+    // bind the chat even when its parent inherited an unrelated thread UUID.
+    const bindingOptions = { configDirectory, origin, runtimeSessionId: upgraded.runtimeSessionId, readPrivateJsonFile };
+    assert.equal(await readRuntimeChatBinding(bindingOptions), threadId);
+    const binding = JSON.parse(await readFile(runtimeChatBindingPath(bindingOptions), "utf8"));
+    assert.deepEqual(Object.keys(binding).sort(), ["codexThreadId", "expiresAt", "origin", "runtimeSessionId", "schemaVersion"]);
+    assert.equal(binding.expiresAt, expiry);
+    assert.equal(await readRuntimeChatBinding({ ...bindingOptions, origin: "https://other.invalid" }), null);
     assert.notEqual(upgraded.runtimeSessionId, initial.runtimeSessionId);
     assert.equal(initial.observation.effortLevel, "low");
     assert.equal(upgraded.expiresAt, initial.expiresAt);

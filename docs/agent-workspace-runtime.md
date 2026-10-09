@@ -221,6 +221,27 @@ runtime-версию, а plugin compatibility, Codex retention и Run `clientVer
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
 `pluginVersion` и `hostRuntimeVersion`.
 
+### Название чата в системном запросе Agent Skill
+
+После успешного admission текущий PreToolUse сохраняет private companion
+`runtime-chat-bindings`: только Codex UUID из exact hook session, runtime session
+UUID, canonical origin и исходный expiry. Titles, transcript, signing key и proof
+в него не входят. Companion использует прежние owner-only read/write primitives;
+неизменная запись не переписывается, конфликт не исправляется угадыванием.
+Первый hook нового runtime дополняет прежнюю зарегистрированную сессию без
+ротации модели/ключа или продления TTL. Cleanup expired session и SessionEnd
+удаляют её exact companion; оставшийся после crash snapshot после expiry не читается.
+
+Каждый `skill run` с runtime session, включая admission cache hit, читает только
+её exact companion с пределом 1 KiB и проверяет origin/ID/expiry. Чтение не
+сканирует другие чаты и не открывает transcript/private signing state. Host
+заменяет inherited `CODEX_THREAD_ID` этим UUID, включая Codex UUIDv7; при
+недоступном companion убирает stale ID. Persistent MCP не обязан наследовать
+текущий ID из environment. Сам provider читает exact название локальным App
+Server и передаёт его native UI через private stdin по собственному контракту.
+Companion является только контекстом подписи, не admission/ACL или правом входа.
+Optional failure не меняет proof и сохраняет нейтральный provider prompt.
+
 Если `fetch` завершается до HTTP-ответа, bridge передаёт в CLI и local MCP
 типизированный `TRELIO_BRIDGE_TRANSPORT_FAILED` с фазой
 `bridge_compatibility` либо `api_request` и allowlisted низкоуровневым
