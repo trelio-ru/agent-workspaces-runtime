@@ -122,6 +122,10 @@ test("local MCP does not expose arbitrary HTTP codes or a forged company-context
 });
 
 test("large private packages raise their exact runtime host floor", () => {
+  for (const encrypted of [false, true]) assert.equal(resolveAgentSkillPackageMinimumHostVersion({
+    packageSizeBytes: 1, requestedMinimum: "1.4.0", hostRuntimeVersion: "3.6.2", encrypted,
+    capabilities: ["local-session", "local-accounts-v1"],
+  }), "3.7.0");
   assert.equal(resolveAgentSkillPackageMinimumHostVersion({
     packageSizeBytes: 8 * 1024 * 1024,
     requestedMinimum: "1.4.0",

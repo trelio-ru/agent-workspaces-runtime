@@ -1744,8 +1744,11 @@ const startPendingCompanyRuntimeConsentDecision = (
 };
 
 test("company runtime consent page exposes provenance and escapes admin text", () => {
+  const input = buildCompanyRuntimeConsentChallenge();
+  input.artifact.capabilities.push("local-accounts-v1");
+  input.changes.capabilitiesAdded.push("local-accounts-v1");
   const challenge = normalizeAgentSkillDeviceConsentChallenge(
-    buildCompanyRuntimeConsentChallenge(),
+    input,
   );
   const html = renderAgentSkillDeviceConsentPage({
     challenge,
@@ -1758,6 +1761,8 @@ test("company runtime consent page exposes provenance and escapes admin text", (
   assert.match(html, /Synthetic &lt;Runtime&gt;/u);
   assert.doesNotMatch(html, /Synthetic <Runtime>/u);
   assert.match(html, /Установить и запустить/u);
+  assert.ok(challenge.artifact.capabilities.includes("local-accounts-v1"));
+  assert.match(html, /Личный каталог аккаунтов с привязками к компаниям/u);
 });
 
 test("company encryption key page is local-only copy and escapes company names", () => {
