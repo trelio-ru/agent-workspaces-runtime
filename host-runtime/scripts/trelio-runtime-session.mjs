@@ -3,7 +3,7 @@
 /**
  * Always-on runtime admission for Codex and Claude Code.
  *
- * The hook observes model/effort once, registers an Ed25519 public key through
+ * The hook observes model/effort, registers an Ed25519 public key through
  * the paired bridge, and injects a fresh signature after each protected tool
  * call has been authored by the model. The private key never enters chat,
  * tool output, MCP arguments, Workspace or backend storage.
@@ -432,31 +432,20 @@ const createRuntimeState = async ({
   filePath,
   initialObservation = null,
   instructionContext = null,
+  previousState = null,
+  currentObservation: suppliedObservation = null,
 }) => {
-  const currentObservation = await withRuntimeHookStage("runtime_attestation", () => (
+  const currentObservation = suppliedObservation ?? await withRuntimeHookStage("runtime_attestation", () => (
     detectAgentRuntimeAttestation({ hookInput })
   ));
   assertRuntimeHookBudget();
-  // SessionStart reliably supplies the selected model but Codex does not yet
-  // document effort in that event. Preserve the initial model/client and fill
-  // only missing evidence from the first protected PreToolUse.
-  const observation = initialObservation
-    ? {
-        ...currentObservation,
-        clientFamily: initialObservation.clientFamily === "other"
-          ? currentObservation.clientFamily
-          : initialObservation.clientFamily,
-        modelId: initialObservation.modelId || currentObservation.modelId,
-        effortLevel: initialObservation.effortLevel || currentObservation.effortLevel,
-        source: initialObservation.source === "unknown"
-          ? currentObservation.source
-          : initialObservation.source,
-        evidenceLevel: (initialObservation.modelId || currentObservation.modelId)
-          ? "local_observed"
-          : "unavailable",
-        observedAt: currentObservation.observedAt,
-      }
-    : currentObservation;
+  // Nothing is admitted at SessionStart. Prefer the whole current observation
+  // at the first protected call; never combine an old model with a new model's
+  // effort. Pending evidence remains a fallback for clients that omit model
+  // from PreToolUse (including a retry after pairing).
+  const observation = currentObservation.modelId && currentObservation.evidenceLevel === "local_observed"
+    ? currentObservation
+    : initialObservation ? { ...initialObservation, observedAt: currentObservation.observedAt } : currentObservation;
   if (
     (observation.clientFamily === "codex" || observation.clientFamily === "claude-code")
     && (!observation.modelId || observation.evidenceLevel !== "local_observed")
@@ -465,14 +454,50 @@ const createRuntimeState = async ({
       "активный клиентский hook не смог определить модель. Повторите запрос; если ошибка сохранится, начните новую задачу",
     );
   }
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  // Persist a successor's key before HTTP. If the response is lost, the next
+  // hook retries the same idempotent registration instead of creating another
+  // snapshot. The accepted predecessor and its key remain available meanwhile.
+  const pending = previousState?.pendingRefresh;
+  const privateKey = pending && sameRuntimeConfiguration(pending.observation, observation)
+    ? crypto.createPrivateKey({ key: Buffer.from(pending.privateKeyPkcs8, "base64url"), type: "pkcs8", format: "der" })
+    : crypto.generateKeyPairSync("ed25519").privateKey;
+  const publicKey = crypto.createPublicKey(privateKey);
   const publicKeySpki = publicKey.export({ type: "spki", format: "der" }).toString("base64url");
   const privateKeyPkcs8 = privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url");
+  const { writePrivateJsonFile } = await loadWorkspaceBridgeModule();
+  if (previousState) await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, {
+    ...previousState, pendingRefresh: { privateKeyPkcs8, observation },
+  }));
+  const registration = await registerRuntimeObservation({
+    origin, clientSessionId, observation, publicKeySpki,
+    previousRuntimeSessionId: previousState?.runtimeSessionId,
+  });
+  if (previousState && (!registration.runtimeRefreshSupported
+    || Date.parse(registration.expiresAt) > Date.parse(previousState.expiresAt)
+    || !sameRuntimeConfiguration(registration.observation, observation))) {
+    throw Object.assign(new Error("сервер не подтвердил неизменяемый снимок новой конфигурации runtime"), { code: "TRELIO_RUNTIME_REFRESH_INVALID" });
+  }
+  const state = {
+    schemaVersion: 1,
+    runtimeSessionId: registration.runtimeSessionId,
+    expiresAt: registration.expiresAt,
+    privateKeyPkcs8,
+    observation: registration.observation,
+    runtimeRefreshSupported: registration.runtimeRefreshSupported,
+    instructionContext,
+  };
+  await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, state));
+  return state;
+};
+
+const sameRuntimeConfiguration = (left, right) => Boolean(left && right
+  && ["clientFamily", "modelId", "effortLevel", "source", "evidenceLevel"].every(key => left[key] === right[key]));
+
+const registerRuntimeObservation = async ({ origin, clientSessionId, observation, publicKeySpki, previousRuntimeSessionId }) => {
   const {
     requireToken,
     registerAgentRuntimeHookSession,
     recoverRejectedBridgeSession,
-    writePrivateJsonFile,
   } = await loadWorkspaceBridgeModule();
 
   // Start the shared network deadline lazily. Windows DPAPI and macOS Keychain
@@ -505,6 +530,7 @@ const createRuntimeState = async ({
       clientSessionId,
       observation,
       publicKeySpki,
+      previousRuntimeSessionId,
       signal: registrationSignal,
     })
   )));
@@ -524,15 +550,61 @@ const createRuntimeState = async ({
     ));
     registration = await register();
   }
-  const state = {
-    schemaVersion: 1,
-    runtimeSessionId: registration.runtimeSessionId,
-    expiresAt: registration.expiresAt,
-    privateKeyPkcs8,
-    instructionContext,
-  };
-  await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, state));
-  return state;
+  return registration;
+};
+
+const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientSessionId }) => {
+  // Old servers keep their original ABI. This is capability negotiation, never
+  // a plaintext/proof fallback after an error from a supported refresh route.
+  if (state.runtimeRefreshSupported === false) return state;
+  const observation = await withRuntimeHookStage("runtime_attestation", () => detectAgentRuntimeAttestation({ hookInput }));
+  if (!observation.modelId || observation.evidenceLevel !== "local_observed") {
+    throw Object.assign(new Error("текущий hook не смог определить модель; повторите запрос после появления данных текущего хода"),
+      { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
+  }
+  if (sameRuntimeConfiguration(state.observation, observation) && !state.pendingRefresh) return state;
+  return withRuntimeStateLock(filePath, async () => {
+    let current = await readRuntimeState(filePath);
+    if (!current) throw Object.assign(new Error("runtime-сессия завершилась во время обновления"), { code: "TRELIO_RUNTIME_REFRESH_INVALID" });
+    const { writePrivateJsonFile } = await loadWorkspaceBridgeModule();
+    if (current.runtimeRefreshSupported === undefined) {
+      // Older local state has no observation. Use the refresh route with its
+      // SAME key to read the pinned snapshot. Never use legacy registration:
+      // if the old snapshot was revoked, that route would create a replacement.
+      const privateKey = crypto.createPrivateKey({ key: Buffer.from(current.privateKeyPkcs8, "base64url"), type: "pkcs8", format: "der" });
+      let registration;
+      try {
+        registration = await registerRuntimeObservation({ origin, clientSessionId, observation,
+          previousRuntimeSessionId: current.runtimeSessionId,
+          publicKeySpki: crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" }).toString("base64url") });
+      } catch (error) {
+        // Only the absent additive endpoint identifies a legacy backend.
+        // Authentication, revocation, transport and policy errors stay closed.
+        if (error.statusCode !== 404) throw error;
+        current = { ...current, runtimeRefreshSupported: false };
+        await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
+        return current;
+      }
+      if (registration.runtimeSessionId !== current.runtimeSessionId || registration.expiresAt !== current.expiresAt) {
+        throw Object.assign(new Error("сервер не подтвердил исходную runtime-сессию"), { code: "TRELIO_RUNTIME_REFRESH_INVALID" });
+      }
+      current = { ...current, observation: registration.observation, runtimeRefreshSupported: registration.runtimeRefreshSupported };
+      await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
+    }
+    if (!current.runtimeRefreshSupported) return current;
+    // Missing effort is also a distinct observation: never reuse a previous
+    // turn's high effort when the current turn cannot attest it. The normal
+    // server policy decides whether an unknown effort is allowed.
+    if (sameRuntimeConfiguration(current.observation, observation)) {
+      if (current.pendingRefresh) {
+        delete current.pendingRefresh;
+        await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
+      }
+      return current;
+    }
+    return createRuntimeState({ hookInput, clientSessionId, origin, filePath,
+      previousState: current, currentObservation: observation, instructionContext: current.instructionContext });
+  });
 };
 
 export const buildRuntimeSessionProof = ({ state, toolName, now = new Date() }) => {
@@ -670,6 +742,7 @@ const runPreToolUse = async (hookInput) => {
       });
     });
   }
+  state = await refreshRuntimeState({ hookInput, state, filePath, origin, clientSessionId });
   assertRuntimeHookBudget();
   const updatedInput = await manageInstructionKeys({
     hookInput, identity, input: toolInput, boundary: state.instructionContext,

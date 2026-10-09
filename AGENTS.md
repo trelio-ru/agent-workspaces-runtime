@@ -83,6 +83,10 @@ publication tooling также остаются вне этого публичн
   памяти/времени, не фиксированным tail. Большой tool output не скрывает context;
   неполное/повреждённое новое наблюдение не заменяется effort старого хода.
   Контракт и fail-closed границы — [README](README.md#ошибки-lifecycle-hooks).
+- Переключение model/effort создаёт новый snapshot в том же чате только через
+  capability-gated refresh. Предыдущие Run bindings и expiry сохраняются;
+  pending key записывается до HTTP, unknown effort не наследует прежний high.
+  Legacy hydration не использует destructive registration; [контракт](docs/agent-workspace-runtime.md#runtime-configuration-refresh).
 - При отсутствии paired bridge hook возвращает точный pairing code и публичный
   approval nextCall; обычное подтверждение клиента сохраняется. После approval
   один retry исходного MCP завершает pairing и admission в той же задаче.

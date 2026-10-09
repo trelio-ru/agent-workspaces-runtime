@@ -142,6 +142,7 @@ test("signed package reaches the real hook through the complete configured shell
       const stateDigest = crypto.createHash("sha256").update(`${origin}\n${sessionId}`).digest("hex");
       await writePrivateJsonFile(path.join(config, "runtime-sessions", `${stateDigest}.json`), {
         schemaVersion: 1, runtimeSessionId,
+        runtimeRefreshSupported: false,
         expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
         privateKeyPkcs8: signingSession.privateKey.export({ type: "pkcs8", format: "der" }).toString("base64url"),
       });

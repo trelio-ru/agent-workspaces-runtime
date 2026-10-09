@@ -155,6 +155,176 @@ const assertDeniedHook = (result) => {
   return output.permissionDecisionReason;
 };
 
+test("same-chat refresh tracks model and effort, serializes hooks and recovers a lost response", async () => {
+  const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-refresh-"));
+  const transcriptPath = path.join(temporaryHome, "rollout.jsonl");
+  const configDirectory = path.join(temporaryHome, ".config", "trelio", "workspace-bridge");
+  const threadId = crypto.randomUUID();
+  const sessions = new Map();
+  const requests = [];
+  const expiry = new Date(Date.now() + 60_000).toISOString();
+  let loseRefreshResponse = false;
+  let legacyServer = false;
+  const server = createServer(async (request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/api/agent-workspaces/bridge-compatibility") {
+      response.end(JSON.stringify(buildTestBridgeCompatibility(request, "3.0.0")));
+      return;
+    }
+    if (request.url.endsWith("/end")) {
+      response.end(JSON.stringify({ ended: true }));
+      return;
+    }
+    const refresh = request.url.endsWith("/refresh");
+    if (refresh && legacyServer) {
+      response.writeHead(404).end(JSON.stringify({ message: "not found" }));
+      return;
+    }
+    const body = await readRequestBody(request);
+    requests.push({ url: request.url, body });
+    assert.equal(body.clientSessionId, threadId);
+    if (refresh) assert.ok([...sessions.values()].some(value => request.url.includes(value.runtimeSessionId)));
+    let session = sessions.get(body.publicKeySpki);
+    if (!session) {
+      session = { schemaVersion: 1, runtimeSessionId: crypto.randomUUID(), expiresAt: expiry,
+        observation: body.observation, runtimeRefreshSupported: !legacyServer };
+      sessions.set(body.publicKeySpki, session);
+    }
+    // Commit before the synthetic transport failure. Every retry must use the
+    // same durable key, including the next hook process after all retries fail.
+    if (refresh && loseRefreshResponse) {
+      response.writeHead(503).end(JSON.stringify({ message: "synthetic lost response" }));
+      return;
+    }
+    response.writeHead(201).end(JSON.stringify(session));
+  });
+  try {
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(configDirectory, "credentials.json"),
+      JSON.stringify({ [origin]: { bridgeSessionToken: "test-bridge-session" } }), { mode: 0o600 });
+    const statePath = path.join(configDirectory, "runtime-sessions",
+      crypto.createHash("sha256").update(`${origin}\n${threadId}`).digest("hex") + ".json");
+    const environment = { HOME: temporaryHome, USERPROFILE: temporaryHome, CODEX_THREAD_ID: threadId,
+      TRELIO_WORKSPACE_ORIGIN: origin, CLAUDE_CODE_ENTRYPOINT: "", CLAUDE_EFFORT: "" };
+    let model = "gpt-6.1-sol";
+    const observe = async (nextModel, effort) => {
+      model = nextModel;
+      await writeFile(transcriptPath, JSON.stringify({ type: "turn_context", payload: { model, effort } }) + "\n");
+    };
+    const call = () => runHook({ hook_event_name: "PreToolUse", session_id: threadId, model,
+      transcript_path: transcriptPath, tool_name: "mcp__trelio__get_task", tool_input: {} }, environment);
+    const proofFrom = result => {
+      assert.equal(result.stderr, "");
+      const proof = JSON.parse(result.stdout).hookSpecificOutput.updatedInput?.runtimeSessionProof;
+      assert.ok(proof, result.stdout);
+      const [key, session] = [...sessions].find(([, value]) => value.runtimeSessionId === proof.runtimeSessionId);
+      assert.equal(crypto.verify(null, Buffer.from(["trelio-runtime-proof-v1", proof.runtimeSessionId,
+        "get_task", proof.issuedAt, proof.nonce].join("\n")),
+      crypto.createPublicKey({ key: Buffer.from(key, "base64url"), type: "spki", format: "der" }),
+      Buffer.from(proof.signature, "base64url")), true);
+      return session;
+    };
+    await observe(model, "low");
+    const initial = proofFrom(await call());
+    await observe(model, "high");
+    const upgraded = proofFrom(await call());
+    assert.notEqual(upgraded.runtimeSessionId, initial.runtimeSessionId);
+    assert.equal(initial.observation.effortLevel, "low");
+    assert.equal(upgraded.expiresAt, initial.expiresAt);
+    assert.equal(sessions.size, 2);
+    proofFrom(await call());
+    assert.equal(requests.length, 2, "unchanged configuration must not register again");
+
+    await observe("gpt-6-astra", "medium");
+    const concurrent = await Promise.all([call(), call()]);
+    assert.equal(proofFrom(concurrent[0]).runtimeSessionId, proofFrom(concurrent[1]).runtimeSessionId);
+    assert.equal(sessions.size, 3);
+    for (const [nextModel, effort] of [["gpt-6-luna", "high"], ["gpt-6.1-sol", "low"],
+      ["gpt-6.1-sol", null], ["gpt-6.1-sol", "high"]]) {
+      await observe(nextModel, effort);
+      const session = proofFrom(await call());
+      assert.equal(session.observation.modelId, nextModel);
+      assert.equal(session.observation.effortLevel, effort);
+      assert.equal(session.expiresAt, expiry);
+    }
+
+    // Hydrate state written by an older runtime only through the safe refresh
+    // endpoint. The original key, ID, expiry and instruction boundary survive.
+    let saved = JSON.parse(await readFile(statePath, "utf8"));
+    const pinnedId = saved.runtimeSessionId;
+    delete saved.observation;
+    delete saved.runtimeRefreshSupported;
+    await writeFile(statePath, JSON.stringify(saved), { mode: 0o600 });
+    const beforeHydration = sessions.size;
+    assert.equal(proofFrom(await call()).runtimeSessionId, pinnedId);
+    assert.equal(sessions.size, beforeHydration);
+    assert.ok(requests.at(-1).url.endsWith("/refresh"));
+
+    await observe("gpt-6-astra", "high");
+    loseRefreshResponse = true;
+    assert.match(assertDeniedHook(await call()), /503|lost response/u);
+    saved = JSON.parse(await readFile(statePath, "utf8"));
+    assert.equal(saved.runtimeSessionId, pinnedId, "failed refresh preserves the usable predecessor");
+    assert.ok(saved.pendingRefresh?.privateKeyPkcs8);
+    const afterLostResponse = sessions.size;
+    loseRefreshResponse = false;
+    const recovered = proofFrom(await call());
+    assert.equal(recovered.observation.modelId, "gpt-6-astra");
+    assert.equal(sessions.size, afterLostResponse, "retry must not duplicate the committed successor");
+    assert.equal(JSON.parse(await readFile(statePath, "utf8")).pendingRefresh, undefined);
+
+    const noObservation = await runHook({ hook_event_name: "PreToolUse", session_id: threadId,
+      transcript_path: path.join(temporaryHome, "not-yet-written.jsonl"),
+      tool_name: "mcp__trelio__get_task", tool_input: {} }, environment);
+    assert.match(assertDeniedHook(noObservation), /определить модель/u);
+    assert.equal(JSON.parse(await readFile(statePath, "utf8")).runtimeSessionId, recovered.runtimeSessionId);
+
+    legacyServer = true;
+    saved = JSON.parse(await readFile(statePath, "utf8"));
+    delete saved.observation;
+    delete saved.runtimeRefreshSupported;
+    await writeFile(statePath, JSON.stringify(saved), { mode: 0o600 });
+    await observe("gpt-6.1-sol", "high");
+    assert.equal(proofFrom(await call()).runtimeSessionId, recovered.runtimeSessionId);
+    assert.equal(sessions.size, afterLostResponse, "legacy fallback never invokes destructive registration");
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await rm(temporaryHome, { recursive: true, force: true });
+  }
+});
+
+test("Codex never borrows effort from a different model or turn", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-observation-"));
+  const transcript = path.join(home, "rollout.jsonl");
+  try {
+    await writeFile(transcript, JSON.stringify({ type: "turn_context", payload: {
+      model: "gpt-6-sol", effort: "high", turn_id: "earlier-turn" } }));
+    const environment = { CODEX_HOME: home };
+    for (const hookInput of [{ model: "gpt-6.1-sol" }, { model: "gpt-6-sol", turn_id: "current-turn" }]) {
+      const result = await detectAgentRuntimeAttestation({ hookInput: { ...hookInput, transcript_path: transcript }, environment });
+      assert.equal(result.modelId, hookInput.model);
+      assert.equal(result.effortLevel, null);
+    }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Claude current hook model wins over an earlier transcript after a switch", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "trelio-claude-switch-"));
+  const transcript = path.join(home, "transcript.jsonl");
+  try {
+    await writeFile(transcript, JSON.stringify({ message: { model: "claude-old" } }));
+    const observation = await detectAgentRuntimeAttestation({
+      hookInput: { transcript_path: transcript, model: "claude-current", effort: { level: "high" } },
+      environment: { CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_EFFORT: "low" },
+    });
+    assert.equal(observation.modelId, "claude-current");
+    assert.equal(observation.effortLevel, "high");
+    assert.equal(observation.clientFamily, "claude-code");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test("event session identity takes precedence over an inherited chat environment", async () => {
   const currentId = "11111111-1111-4111-8111-111111111111";
   const inheritedId = "22222222-2222-4222-8222-222222222222";
@@ -651,6 +821,7 @@ test("a confirmed local proposal route denies the native App before execution", 
       {
         schemaVersion: 1,
         runtimeSessionId,
+        runtimeRefreshSupported: false,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         privateKeyPkcs8: privateKey.export({
           type: "pkcs8",
@@ -1141,7 +1312,7 @@ test("an active hook preserves the plugin upgrade code instead of claiming Hooks
   }
 });
 
-test("SessionStart pins the initial model and supported host names inject verifiable proofs", async () => {
+test("first protected call observes the current model and supported host names inject verifiable proofs", async () => {
   const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-e2e-"));
   const transcriptPath = path.join(temporaryHome, "rollout.jsonl");
   const configDirectory = path.join(temporaryHome, ".config", "trelio", "workspace-bridge");
@@ -1231,7 +1402,7 @@ test("SessionStart pins the initial model and supported host names inject verifi
     assert.equal(guarded.exitCode, 0);
     assert.equal(guarded.stderr, "");
     assert.ok(registrationBody);
-    assert.equal(registrationBody.observation.modelId, "gpt-5.6-sol");
+    assert.equal(registrationBody.observation.modelId, "gpt-5.4");
     assert.equal(registrationBody.observation.effortLevel, "high");
 
     const hookOutput = JSON.parse(guarded.stdout);

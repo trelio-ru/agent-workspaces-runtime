@@ -4011,6 +4011,7 @@ const normalizeRuntimeHookSessionPayload = (value) => {
     runtimeSessionId: String(value.runtimeSessionId).toLowerCase(),
     expiresAt: String(value.expiresAt),
     observation: value.observation,
+    runtimeRefreshSupported: value.runtimeRefreshSupported === true,
   };
 };
 
@@ -4025,6 +4026,7 @@ export const registerAgentRuntimeHookSession = async ({
   clientSessionId,
   observation,
   publicKeySpki,
+  previousRuntimeSessionId,
   signal,
 }) => {
   const normalizedOrigin = normalizeOrigin(origin);
@@ -4032,7 +4034,9 @@ export const registerAgentRuntimeHookSession = async ({
   const response = await request(
     normalizedOrigin,
     token,
-    "/api/agent-workspaces/runtime-policy/sessions",
+    previousRuntimeSessionId
+      ? `/api/agent-workspaces/runtime-policy/sessions/${requireUuid(previousRuntimeSessionId, "runtime session")}/refresh`
+      : "/api/agent-workspaces/runtime-policy/sessions",
     {
       method: "POST",
       signal,

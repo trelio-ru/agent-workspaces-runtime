@@ -199,7 +199,11 @@ const readCodexRuntime = async ({ hookInput, environment }) => {
     : typeof turnContext?.model === "string"
       ? turnContext.model.trim()
       : null;
-  const effortLevel = AGENT_RUNTIME_EFFORT_LEVELS.includes(turnContext?.effort)
+  // Model switches can reach hook payloads before the new turn_context is
+  // flushed. An older model/turn's effort must never attest the new model.
+  const contextMatches = (!turnContext?.model || turnContext.model === modelId)
+    && (!hookInput.turn_id || !turnContext?.turn_id || hookInput.turn_id === turnContext.turn_id);
+  const effortLevel = contextMatches && AGENT_RUNTIME_EFFORT_LEVELS.includes(turnContext?.effort)
     ? turnContext.effort
     : null;
   return {
@@ -220,8 +224,8 @@ const readClaudeRuntime = async ({ hookInput, environment }) => {
   const transcriptModel = rows
     .flatMap((row) => [row?.message?.model, row?.model, row?.payload?.model])
     .find((value) => typeof value === "string" && value.trim());
-  const modelId = transcriptModel
-    || (typeof hookInput.model === "string" ? hookInput.model.trim() : "")
+  const modelId = (typeof hookInput.model === "string" ? hookInput.model.trim() : "")
+    || transcriptModel
     || (typeof environment.TRELIO_CLAUDE_MODEL === "string"
       ? environment.TRELIO_CLAUDE_MODEL.trim()
       : "")

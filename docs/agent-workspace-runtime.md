@@ -142,9 +142,37 @@ transcript: обратный поиск блоками по 256 KiB под дв�
 Oversized non-context записи пропускаются только по известному внешнему
 заголовку Codex; неизвестный заголовок, oversized/повреждённый context и
 изменение снимка возвращают отсутствующее evidence. Нельзя переходить к более
-старому effort, брать его из tool input или настроек. SessionStart pinning,
-общий hook deadline и серверная policy остаются прежними. `EFFORT_REQUIRED`
+старому effort, брать его из tool input или настроек. Общий hook deadline
+и серверная policy сохраняются. `EFFORT_REQUIRED`
 означает отсутствие effort, `EFFORT_TOO_LOW` — наблюдаемый уровень ниже порога.
+
+<a id="runtime-configuration-refresh"></a>
+
+### Переключение модели и effort в текущем чате
+
+SessionStart сохраняет pending evidence; первая регистрация предпочитает
+целое текущее observation. Перед последующими protected calls hook сравнивает
+model/effort с принятым snapshot. При изменении создаёт новый key/snapshot через
+`POST /api/agent-workspaces/runtime-policy/sessions/:id/refresh`, только если
+backend объявил `runtimeRefreshSupported: true`. Снимок не мутирует предыдущие
+Run/skill bindings и не продлевает общий expiry. Новый вызов проходит обычную
+company policy, включая model deny, insufficient и unknown effort.
+Effort из transcript другой модели либо другого известного turn ID не подходит.
+
+Private state lock сериализует parallel hooks. Pending successor key и
+observation записываются в защищённое состояние до HTTP; потерянный ответ
+повторяется с тем же key, без нового snapshot. После подтверждения проверяются
+capability, observation и непродлённый expiry, затем атомарно сохраняется новый
+active state. Старое состояние и instruction boundary сохраняются при ошибке.
+Все network/private stages используют исходный общий hook deadline.
+
+Legacy local state читается refresh endpoint с прежним public key; ID/expiry
+должны совпасть. Только 404 отсутствующего endpoint разрешает legacy pinning;
+auth/revocation/transport failure блокируют вызов. Base registration для hydration
+не используется. Legacy backend без capability требует новую client session;
+backend rollback после capability не разрешает fallback. Backend нужно выпускать
+первым. Plugin shell, hook definition и proof envelope не меняются. SessionEnd
+удаляет локальный key и завершает все snapshots exact client chat на сервере.
 
 Локальная регистрация hook ограничена общим внутренним сроком: PreToolUse
 22 секунды, SessionStart 8 секунд, SessionEnd 2 секунды, без продления после
