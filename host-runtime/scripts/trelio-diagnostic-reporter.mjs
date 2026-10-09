@@ -7,6 +7,10 @@ class DeliveryError extends Error {
   constructor(reason, retryable = false) { super(reason); this.reason = reason; this.retryable = retryable; }
 }
 const discardBody = async response => { await response.body?.cancel(); };
+// Original v2 servers did not advertise loss reasons. This fixed baseline
+// keeps additive observation signals from rejecting an otherwise valid batch.
+const LEGACY_LOSS_REASONS = ["queue_overflow", "delivery_timeout", "delivery_transport", "delivery_rejected",
+  "credential_unavailable", "shutdown", "journal_full", "journal_invalid", "journal_expired", "catalog_mismatch", "unknown_code"];
 export const createObservationTransport = ({ fetchImpl = fetch, readToken = readExistingBridgeSessionToken } = {}) => {
   let capabilities;
   return async (origin, samples, { signal, context = {} } = {}) => {
@@ -45,7 +49,12 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
         try { data = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new DeliveryError("delivery_rejected"); }
         if (data.schemaVersion !== 2 || !Array.isArray(data.errorCodes) || data.errorCodes.length > 2000
           || !data.errorCodes.includes("DIAGNOSTICS_CODE_UNSUPPORTED")) throw new DeliveryError("delivery_rejected");
-        capabilities = { version: 2, codes: new Set(data.errorCodes.filter(code => contract.errorCodes.includes(code))), expires: Date.now() + 300000 };
+        if (data.lossReasons !== undefined && (!Array.isArray(data.lossReasons) || data.lossReasons.length > 256)) {
+          throw new DeliveryError("delivery_rejected");
+        }
+        capabilities = { version: 2, codes: new Set(data.errorCodes.filter(code => contract.errorCodes.includes(code))),
+          losses: new Set((data.lossReasons ?? LEGACY_LOSS_REASONS).filter(reason => contract.lossReasons.includes(reason))),
+          expires: Date.now() + 300000 };
       } else {
         await discardBody(response);
         throw new DeliveryError("delivery_rejected", response.status >= 500);
@@ -73,7 +82,11 @@ export const createObservationTransport = ({ fetchImpl = fetch, readToken = read
           const prior = outcomes.get(key);
           if (prior) prior.count += row.count; else outcomes.set(key, { ...row, code });
         }
-        const losses = new Map(sample.losses.map(row => [row.reason, row.count]));
+        const losses = new Map();
+        for (const row of sample.losses) {
+          const reason = selected.losses.has(row.reason) ? row.reason : "catalog_mismatch";
+          losses.set(reason, Math.min(1000000, (losses.get(reason) || 0) + row.count));
+        }
         if (unsupported) losses.set("catalog_mismatch", Math.min(1000000, (losses.get("catalog_mismatch") || 0) + unsupported));
         return { ...sample, outcomes: [...outcomes.values()], losses: [...losses].map(([reason, count]) => ({reason, count})) };
       }) }; endpoint = "observations";

@@ -235,6 +235,23 @@ test("catalog negotiation downgrades unknown codes without dropping the batch or
   assert.deepEqual(body.samples[0].losses, [{reason:"catalog_mismatch",count:1}]);
   assert.equal(isDiagnosticObservation(body.samples[0]),true);
 });
+test("missing effort is a data-loss signal alongside success and safely negotiates older servers", async () => {
+  for (const advertised of [true, false]) {
+    let body;
+    const transport = createObservationTransport({ readToken: async () => "synthetic", fetchImpl: async (url, options) => {
+      if (url.pathname.endsWith("capabilities")) return new Response(JSON.stringify({ schemaVersion: 2,
+        errorCodes: contract.errorCodes, ...(advertised ? { lossReasons: contract.lossReasons } : {}) }));
+      body = JSON.parse(options.body); return new Response(null, { status: 204 });
+    } });
+    const sample = buildDiagnosticObservation("runtime_hook", { operation: "PreToolUse" }, "OK", { boundary: "hook" });
+    sample.losses = [{ reason: "effort_observation_unavailable", count: 1 }];
+    await transport("https://fixture.invalid", [sample]);
+    assert.deepEqual(body.samples[0].outcomes, [{ code: "OK", field: "unknown", count: 1 }]);
+    assert.deepEqual(body.samples[0].losses, [{ reason: advertised ? "effort_observation_unavailable" : "catalog_mismatch", count: 1 }]);
+    assert.equal(body.samples[0].id, sample.id);
+    assert.equal(isDiagnosticObservation(body.samples[0]), true);
+  }
+});
 test("journal is bounded content-free input, rejects pollution, expires records and acknowledges exact UUIDs", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-diagnostic-test-"));
   try {

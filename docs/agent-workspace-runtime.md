@@ -141,8 +141,9 @@ transcript: обратный поиск блоками по 256 KiB под дв�
 с пределом одной собираемой строки 2 MiB. Общая длина хода не создаёт tail cutoff.
 Oversized non-context записи пропускаются только по известному внешнему
 заголовку Codex; неизвестный заголовок, oversized/повреждённый context и
-изменение снимка возвращают отсутствующее evidence. Нельзя переходить к более
-старому effort, брать его из tool input или настроек. Общий hook deadline
+изменение снимка возвращают отсутствующее evidence. Парсер не ищет более старую
+запись effort и не берёт значение из tool input или настроек. Admission recovery
+отдельно сохраняет ранее известный снимок той же модели. Общий hook deadline
 и серверная policy сохраняются. `EFFORT_REQUIRED`
 означает отсутствие effort, `EFFORT_TOO_LOW` — наблюдаемый уровень ниже порога.
 
@@ -156,8 +157,18 @@ model/effort с принятым snapshot. При изменении созда�
 `POST /api/agent-workspaces/runtime-policy/sessions/:id/refresh`, только если
 backend объявил `runtimeRefreshSupported: true`. Снимок не мутирует предыдущие
 Run/skill bindings и не продлевает общий expiry. Новый вызов проходит обычную
-company policy, включая model deny, insufficient и unknown effort.
+company policy, включая model deny, insufficient и первый unknown effort.
 Effort из transcript другой модели либо другого известного turn ID не подходит.
+
+Если текущий effort отсутствует, но у сохранённого снимка той же модели он был
+известен, hook оставляет этот snapshot и исходный expiry. Backend заново проверяет
+его по текущей company policy: прежде недостаточный effort не становится
+разрешённым, revocation и policy change не обходятся. Для другой модели и первого
+unknown значение не заимствуется. Сбой текущего чтения записывается один раз на
+hook как `losses.effort_observation_unavailable`, вместе с настоящим outcome
+hook. Это потеря наблюдения, а не отказ пользовательской операции. Журнал
+не содержит model/effort, IDs, transcript, пути, аргументы или proof; его штатно
+доставляет MCP reporter. Сбой диагностики не меняет допуск.
 
 Private state lock сериализует parallel hooks. Pending successor key и
 observation записываются в защищённое состояние до HTTP; потерянный ответ

@@ -213,8 +213,8 @@ test("same-chat refresh tracks model and effort, serializes hooks and recovers a
       model = nextModel;
       await writeFile(transcriptPath, JSON.stringify({ type: "turn_context", payload: { model, effort } }) + "\n");
     };
-    const call = () => runHook({ hook_event_name: "PreToolUse", session_id: threadId, model,
-      transcript_path: transcriptPath, tool_name: "mcp__trelio__get_task", tool_input: {} }, environment);
+    const call = (onDiagnostics) => runHook({ hook_event_name: "PreToolUse", session_id: threadId, model,
+      transcript_path: transcriptPath, tool_name: "mcp__trelio__get_task", tool_input: {} }, environment, onDiagnostics);
     const proofFrom = result => {
       assert.equal(result.stderr, "");
       const proof = JSON.parse(result.stdout).hookSpecificOutput.updatedInput?.runtimeSessionProof;
@@ -226,6 +226,8 @@ test("same-chat refresh tracks model and effort, serializes hooks and recovers a
       Buffer.from(proof.signature, "base64url")), true);
       return session;
     };
+    await observe(model, null);
+    assert.equal(proofFrom(await call()).observation.effortLevel, null, "first unknown never invents an effort");
     await observe(model, "low");
     const initial = proofFrom(await call());
     await observe(model, "high");
@@ -233,16 +235,26 @@ test("same-chat refresh tracks model and effort, serializes hooks and recovers a
     assert.notEqual(upgraded.runtimeSessionId, initial.runtimeSessionId);
     assert.equal(initial.observation.effortLevel, "low");
     assert.equal(upgraded.expiresAt, initial.expiresAt);
-    assert.equal(sessions.size, 2);
+    assert.equal(sessions.size, 3);
     proofFrom(await call());
-    assert.equal(requests.length, 2, "unchanged configuration must not register again");
+    assert.equal(requests.length, 3, "unchanged configuration must not register again");
+
+    await observe(model, null);
+    const retained = proofFrom(await call(samples => {
+      assert.equal(samples.length, 1);
+      assert.deepEqual(samples[0].outcomes, [{ code: "OK", field: "unknown", count: 1 }]);
+      assert.deepEqual(samples[0].losses, [{ reason: "effort_observation_unavailable", count: 1 }]);
+      assert.doesNotMatch(JSON.stringify(samples), /gpt-|privateKey|runtimeSessionId|rollout/u);
+    }));
+    assert.equal(retained.runtimeSessionId, upgraded.runtimeSessionId, "temporary missing effort preserves prior admission");
+    assert.equal(requests.length, 3, "missing effort must not replace a known snapshot");
 
     await observe("gpt-6-astra", "medium");
     const concurrent = await Promise.all([call(), call()]);
     assert.equal(proofFrom(concurrent[0]).runtimeSessionId, proofFrom(concurrent[1]).runtimeSessionId);
-    assert.equal(sessions.size, 3);
+    assert.equal(sessions.size, 4);
     for (const [nextModel, effort] of [["gpt-6-luna", "high"], ["gpt-6.1-sol", "low"],
-      ["gpt-6.1-sol", null], ["gpt-6.1-sol", "high"]]) {
+      ["gpt-6-sol", null], ["gpt-6.1-sol", "high"]]) {
       await observe(nextModel, effort);
       const session = proofFrom(await call());
       assert.equal(session.observation.modelId, nextModel);

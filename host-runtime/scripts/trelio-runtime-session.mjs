@@ -14,11 +14,15 @@ import { writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
 
 // Runs after the private scope is closed, including ACL/DPAPI startup failures.
 // No network, token read, state recovery or second private helper is allowed.
-export const recordRuntimeHookDiagnostic = async (event, code, { write = writeDiagnosticJournal, origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru" } = {}) => {
+export const recordRuntimeHookDiagnostic = async (event, code, { write = writeDiagnosticJournal, origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru", effortUnavailable = false } = {}) => {
   let timer;
   try {
     const normalizedOrigin = new URL(origin).origin;
-    await Promise.race([write(normalizedOrigin, buildDiagnosticObservation("runtime_hook", { operation: event }, code, { boundary: "hook" })),
+    const sample = buildDiagnosticObservation("runtime_hook", { operation: event }, code, { boundary: "hook" });
+    // This is missing observation data, not a failed user operation. Preserve
+    // the real hook outcome and its denominator, recording no model or content.
+    if (effortUnavailable) sample.losses.push({ reason: "effort_observation_unavailable", count: 1 });
+    await Promise.race([write(normalizedOrigin, sample),
       new Promise(resolve => { timer = setTimeout(resolve, 100); timer.unref?.(); })]);
   } catch { /* A telemetry failure must not alter the hook decision. */ }
   finally { clearTimeout(timer); }
@@ -425,6 +429,15 @@ const retryIdempotentRequest = async (operation) => {
   throw lastError;
 };
 
+// One flag per invocation even when initial admission and refresh both read
+// the observation. The diagnostic is flushed after the private scope closes.
+const unavailableEffortEvents = new WeakSet();
+const observeRuntimeForHook = async (hookInput) => {
+  const observation = await withRuntimeHookStage("runtime_attestation", () => detectAgentRuntimeAttestation({ hookInput }));
+  if (observation.modelId && observation.effortLevel === null) unavailableEffortEvents.add(hookInput);
+  return observation;
+};
+
 const createRuntimeState = async ({
   hookInput,
   clientSessionId,
@@ -435,9 +448,7 @@ const createRuntimeState = async ({
   previousState = null,
   currentObservation: suppliedObservation = null,
 }) => {
-  const currentObservation = suppliedObservation ?? await withRuntimeHookStage("runtime_attestation", () => (
-    detectAgentRuntimeAttestation({ hookInput })
-  ));
+  const currentObservation = suppliedObservation ?? await observeRuntimeForHook(hookInput);
   assertRuntimeHookBudget();
   // Nothing is admitted at SessionStart. Prefer the whole current observation
   // at the first protected call; never combine an old model with a new model's
@@ -557,7 +568,7 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
   // Old servers keep their original ABI. This is capability negotiation, never
   // a plaintext/proof fallback after an error from a supported refresh route.
   if (state.runtimeRefreshSupported === false) return state;
-  const observation = await withRuntimeHookStage("runtime_attestation", () => detectAgentRuntimeAttestation({ hookInput }));
+  const observation = await observeRuntimeForHook(hookInput);
   if (!observation.modelId || observation.evidenceLevel !== "local_observed") {
     throw Object.assign(new Error("текущий hook не смог определить модель; повторите запрос после появления данных текущего хода"),
       { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
@@ -592,9 +603,13 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
       await withRuntimeHookStage("runtime_state_write", () => writePrivateJsonFile(filePath, current));
     }
     if (!current.runtimeRefreshSupported) return current;
-    // Missing effort is also a distinct observation: never reuse a previous
-    // turn's high effort when the current turn cannot attest it. The normal
-    // server policy decides whether an unknown effort is allowed.
+    // A failed observation is not evidence of a configuration change. Keep
+    // the previous known effort for the SAME model and original TTL. The
+    // backend still evaluates this pinned snapshot against company policy:
+    // a previously insufficient effort does not become an admission here.
+    // Never lend another model's effort, or invent one for a first unknown.
+    if (observation.modelId === current.observation?.modelId
+      && observation.effortLevel === null && current.observation.effortLevel !== null) return current;
     if (sameRuntimeConfiguration(current.observation, observation)) {
       if (current.pendingRefresh) {
         delete current.pendingRefresh;
@@ -1010,7 +1025,8 @@ const runHook = async () => {
     if (diagnosticCode === "UNKNOWN") diagnosticCode = HOOK_FAILED_CODE;
     throw error;
   } finally {
-    if (observed) await recordRuntimeHookDiagnostic(hookInput.hook_event_name, diagnosticCode);
+    if (observed) await recordRuntimeHookDiagnostic(hookInput.hook_event_name, diagnosticCode,
+      { effortUnavailable: unavailableEffortEvents.has(hookInput) });
   }
 };
 

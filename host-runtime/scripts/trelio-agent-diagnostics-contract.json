@@ -580,7 +580,8 @@
     "journal_invalid",
     "journal_expired",
     "catalog_mismatch",
-    "unknown_code"
+    "unknown_code",
+    "effort_observation_unavailable"
   ],
   "categories": [
     "execution",
