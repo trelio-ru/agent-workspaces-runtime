@@ -8088,7 +8088,9 @@ const discoverSkillAccounts = async ({ artifact, runtimeDirectory, executionCont
   try {
     const result = await execFileAsync(executable, args, { cwd: runtimeDirectory, shell: false,
       env: buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory, executionContext }),
-      timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 512 * 1024, encoding: 'utf8', windowsHide: true });
+      // Match the catalogue's byte bound: 64 valid Unicode comments plus names
+      // can exceed 512 KiB even though every field meets its character limit.
+      timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, encoding: 'utf8', windowsHide: true });
     const value = JSON.parse(result.stdout);
     if (value?.schemaVersion !== 1 || !Array.isArray(value.accounts)) throw new Error();
     return value.accounts;

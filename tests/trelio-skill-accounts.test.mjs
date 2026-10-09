@@ -151,3 +151,21 @@ test('failed owner publication leaves an empty lock recoverable without resettin
   await make().importOnce(async () => []);
   assert.equal((await make().list()).revision, 1);
 });
+
+test('the real migration subprocess supports bounded Unicode metadata without a selected account', async t => {
+  const { directory } = await fixture(t), outputs = [];
+  const entrypoint = path.join(directory, 'probe.mjs');
+  await fs.writeFile(entrypoint, `
+    if (process.argv[2] !== '__trelio_accounts_import' || process.env.TRELIO_SKILL_ACCOUNT_JSON) process.exit(2);
+    console.log(JSON.stringify({ schemaVersion: 1, accounts: Array.from({ length: 64 }, (_, i) => ({
+      sourceKey: String(i), scope: 'device', name: '🙂'.repeat(120), comment: '🙂'.repeat(2000), providerRef: String(i),
+    })) }));
+  `);
+  await prepareSkillAccount({ origin: identity.origin, catalogueDirectory: directory, runtimeDirectory: directory,
+    artifact: { skillId: identity.skillId, runtimeVersion: '1.0.0',
+      parsedPackage: { capabilities: ['local-session', 'local-accounts-v1'], entrypoint: { path: 'probe.mjs', interpreter: 'node' } } },
+    executionContext: { companyId: company, localIdentity: { memberId: member, connectionId: connection } },
+    runtimeArguments: ['account', 'list'], output: value => outputs.push(value) });
+  assert.equal(outputs[0].accounts.length, 64);
+  assert.equal([...outputs[0].accounts[0].comment].length, 2000);
+});

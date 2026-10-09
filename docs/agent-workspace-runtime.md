@@ -1530,7 +1530,7 @@ company config, sensitive OS unlock и sending guards сохраняются. Pr
 
 `skill-personal-accounts-v1` зарегистрирован в product legacy registry. До
 выпуска дата поддержки не назначена. Первый вызов в exact scope запускает
-только signed `__trelio_accounts_import`: 20 секунд, 512 KiB, без grants,
+только signed `__trelio_accounts_import`: 20 секунд, 1 MiB, без grants,
 credentials, provider HTTP или login. Адаптер возвращает bounded metadata и
 opaque locator. Host фиксирует imports атомарно; ошибка не ставит marker,
 повтор не дублирует и не отменяет unbind. Company imports сохраняют свой scope;
