@@ -12,7 +12,7 @@ export const ACCOUNT_CAPABILITY = 'local-accounts-v1';
 export const ACCOUNT_LIMIT = 64;
 export const ACCOUNT_MINIMUM_HOST_VERSION = '3.7.0';
 const MAX_BYTES = 1024 * 1024;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -205,7 +205,14 @@ export function createAccountCatalogue({ directory, scope, io }) {
         const current = binding(state);
         if (operation === 'create') {
           requireThat(UUID.test(id) && !state.accounts.some(a => a.id === id), 'ACCOUNT_ID_CONFLICT');
+          // A provider may retain new accounts beside legacy device entries
+          // (email's TOML is one such store). Their canonical import source is
+          // the host UUID: reserve it now, so a later company's initial probe
+          // cannot duplicate or silently activate this already-known account.
+          const source = hash([scope.catalogue, id]);
+          requireThat(!Object.hasOwn(state.imports, source), 'ACCOUNT_ID_CONFLICT');
           state.accounts.push({ id, name: accountText(name, 120), comment: accountText(comment ?? '', 2000, { empty: true }), providerRef: null });
+          state.imports[source] = id;
           current.accountIds.push(id);
           if (current.accountIds.length === 1) current.defaultAccountId = id;
         } else {

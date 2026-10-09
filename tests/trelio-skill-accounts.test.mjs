@@ -64,6 +64,21 @@ test('device imports reuse the same account; company imports never merge by labe
   assert.equal((await second.list()).accounts.filter(a => a.bound).length, 1);
 });
 
+test('a new device account cannot be re-imported or auto-enabled in the next company', async t => {
+  const { make } = await fixture(t), first = make(), second = make({ companyId: crypto.randomUUID() });
+  const id = crypto.randomUUID();
+  await first.change({ operation: 'create', id, name: 'Новая почта', expectedRevision: 0 });
+  // New email mailboxes are keyed by the selected UUID in the same TOML that
+  // the bounded legacy probe reads. The host recognizes that exact source ID.
+  await second.importOnce(async () => [{ sourceKey: id, scope: 'device', name: id, comment: '', providerRef: id }]);
+  const list = await second.list();
+  assert.equal(list.accounts.length, 1);
+  assert.equal(list.accounts[0].id, id);
+  assert.equal(list.accounts[0].name, 'Новая почта');
+  assert.equal(list.accounts[0].bound, false);
+  await assert.rejects(second.select(id), { code: 'ACCOUNT_NOT_BOUND' });
+});
+
 test('failed import is retriable; parallel edits cannot silently overwrite each other', async t => {
   const { make } = await fixture(t), first = make(), second = make();
   await assert.rejects(first.importOnce(async () => { throw new Error('synthetic failure'); }));
