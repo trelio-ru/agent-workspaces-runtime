@@ -89,6 +89,10 @@ const buildTestBridgeCompatibility = (request, minimumVersion) => {
   };
 };
 
+// Concurrent hooks intentionally share one fixture HOME/origin. Do not remove
+// their journal when only the first child exits: another live hook may still
+// be writing its final observation. Production cleanup is not changed here.
+const activeFixtureJournals = new Map();
 const runHook = async (hookInput, environment = {}, onDiagnostics) => {
   const fallbackHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-test-home-"));
   const isolatedHome = environment.HOME || environment.CODEX_HOME || fallbackHome;
@@ -99,6 +103,7 @@ const runHook = async (hookInput, environment = {}, onDiagnostics) => {
   // telemetry writer enabled, but bind all subprocess state to the fixture.
   const journalDirectory = path.join(os.tmpdir(), "trelio-diagnostics-v2-"
     + crypto.createHash("sha256").update(isolatedHome + "\0" + new URL(origin).origin).digest("hex").slice(0, 24));
+  activeFixtureJournals.set(journalDirectory, (activeFixtureJournals.get(journalDirectory) || 0) + 1);
   try {
     const result = await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [hookScriptPath], {
@@ -133,7 +138,12 @@ const runHook = async (hookInput, environment = {}, onDiagnostics) => {
     }
     return result;
   } finally {
-    await rm(journalDirectory, { recursive: true, force: true });
+    const remaining = activeFixtureJournals.get(journalDirectory) - 1;
+    if (remaining) activeFixtureJournals.set(journalDirectory, remaining);
+    else {
+      activeFixtureJournals.delete(journalDirectory);
+      await rm(journalDirectory, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+    }
     await rm(fallbackHome, { recursive: true, force: true });
   }
 };
