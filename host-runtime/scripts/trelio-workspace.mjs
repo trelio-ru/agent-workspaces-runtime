@@ -4471,6 +4471,7 @@ export const openBrowser = async (
 const AGENT_SKILL_DEVICE_CONSENT_TIMEOUT_MS = 5 * 60 * 1000;
 const AGENT_SKILL_DEVICE_CONSENT_BODY_LIMIT = 8 * 1024;
 const AGENT_SKILL_DEVICE_CONSENT_CAPABILITIES = new Set([
+  ACCOUNT_CAPABILITY,
   "browser",
   "local-session",
   "network",
@@ -4596,6 +4597,7 @@ export const normalizeAgentSkillDeviceConsentChallenge = (value) => {
 };
 
 const renderAgentSkillConsentCapability = (capability) => ({
+  [ACCOUNT_CAPABILITY]: "Личный каталог аккаунтов с привязками к компаниям",
   browser: "Управление браузером",
   "local-session": "Локальная сессия",
   network: "Сетевые запросы",
