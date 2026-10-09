@@ -486,6 +486,45 @@ test("expired local Run recovery preserves the exact existing Run without retryi
   assert.equal(calls, 1, "target open must stop until the exact expired Run is prepared");
 });
 
+test("unfinished local Run recovery preserves identity, strips unknown details and never retries", async () => {
+  const error = new WorkspaceRunReclaimRequiredError({
+    workspaceId, sourceRunId: firstRun, targetRunId: newRun,
+    reasonCode: "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW",
+  });
+  const payload = error.toJSON();
+  payload.details.privateMetadata = "PRIVATE_CANARY";
+  const stderr = `Ошибка: ${JSON.stringify(payload)}\n`;
+  const parsed = parseWorkspaceRunReclaimRequiredError(stderr, workspaceId, newRun);
+  assert.equal(parsed?.details.runId, firstRun);
+  assert.equal(parsed?.details.reasonCode, "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW");
+  assert.match(parsed.message, /prepare_agent_workspace_run\(runId\)/u);
+  assert.doesNotMatch(JSON.stringify(parsed), /PRIVATE_CANARY|истёкший/u);
+  for (const mutate of [
+    (value) => { value.details.reasonCode = "PRIVATE_CANARY"; },
+    (value) => { value.details.runId = "not-a-run"; },
+    (value) => { value.details.workspaceId = secondRun; },
+    (value) => { value.details.targetRunId = secondRun; },
+    (value) => { value.details.requiredAction = "cancel_run"; },
+  ]) {
+    const copy = structuredClone(payload);
+    mutate(copy);
+    assert.equal(parseWorkspaceRunReclaimRequiredError(`Ошибка: ${JSON.stringify(copy)}`, workspaceId, newRun), null);
+  }
+  let calls = 0;
+  await assert.rejects(handleTrelioWorkspaceActionOperation(origin, {
+    schemaVersion: 1, operation: "open", parameters: { workspaceId, runId: newRun },
+  }, { runBridge: async () => {
+    calls++;
+    throw Object.assign(new Error("child failed"), { stderr });
+  } }), actual => {
+    assert.equal(actual.code, WORKSPACE_RUN_RECLAIM_REQUIRED);
+    assert.deepEqual(actual.details, parsed.details);
+    assert.equal(Object.hasOwn(actual.details, "stderr"), false);
+    return true;
+  });
+  assert.equal(calls, 1, "recovery cannot claim, cancel or repeat a new open automatically");
+});
+
 test("active Run recovery is semantic, bounded and distinct from layout migration", () => {
   const error = new WorkspaceActiveRunRequiredError("READ_ONLY_INSPECTION");
   const stderr = `Ошибка: ${formatBridgeCommandError(error, "secret")}\n`;
@@ -614,8 +653,15 @@ test("real bridge reports ambiguity before claim and cwd selection still rejects
     `/api/agent-workspaces/bridge-routing?workspaceId=${workspaceId}`,
   ]);
   for (const invoke of [() => run(path.join(f.second, "workspace")), () => run(f.root, f.second)]) {
-    await assert.rejects(invoke(), (error) => error.code === "TRELIO_WORKSPACE_ACTION_FAILED"
-      && /незавершённый Agent Run/u.test(error.message));
+    await assert.rejects(invoke(), (error) => {
+      assert.equal(error.code, WORKSPACE_RUN_RECLAIM_REQUIRED);
+      assert.equal(error.details.reasonCode, "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW");
+      assert.equal(error.details.runId, secondRun);
+      assert.equal(error.details.targetRunId, newRun);
+      assert.match(error.message, /незавершённый Agent Run/u);
+      assert.equal(Object.hasOwn(error.details, "stderr"), false);
+      return true;
+    });
   }
   assert.ok(requests.every(({ method }) => method === "GET"), "selection must not claim or start a Run");
   for (const directory of f.roots) {

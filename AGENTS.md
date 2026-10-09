@@ -183,6 +183,9 @@ publication tooling также остаются вне этого публичн
   различает startup/request/protocol/ACL/DPAPI. Hook deny сохраняет закрытый
   failureCode/phase. Hooks имеют отдельную boundary и content-free user-temp
   очередь без private helper; legacy error-only данные не входят в v2 rates.
+- Test subprocess fixtures изолируют HOME/USERPROFILE, config roots и origin:
+  CODEX_HOME не отделяет hook journal. Проверяй настоящий writer в fixture-очереди
+  с cleanup; stdio collector не должен читать рабочий журнал/credential.
 - `search` возвращает компактный `guidance` перед материалами; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.

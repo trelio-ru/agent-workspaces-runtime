@@ -3563,10 +3563,23 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       false,
       "new layout must not create a per-Run directory",
     );
+    const metadataPath = path.join(path.dirname(expectedWorkspaceDirectory), ".trelio-run.json");
+    const beforeMetadata = await readFile(metadataPath, "utf8");
+    const beforeMaterial = await readFile(path.join(expectedWorkspaceDirectory, "shared.md"), "utf8");
     await assert.rejects(
       execFileAsync(process.execPath, command, executionOptions),
-      /незавершённый Agent Run/u,
+      error => {
+        const result = JSON.parse(error.stderr.trim().slice("Ошибка: ".length));
+        assert.equal(result.code, "TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED");
+        assert.equal(result.details.reasonCode, "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW");
+        assert.equal(result.details.runId, runId);
+        assert.equal(result.details.workspaceId, workspaceId);
+        assert.equal(result.details.targetRunId, null);
+        return true;
+      },
     );
+    assert.equal(await readFile(metadataPath, "utf8"), beforeMetadata);
+    assert.equal(await readFile(path.join(expectedWorkspaceDirectory, "shared.md"), "utf8"), beforeMaterial);
     assert.equal(startCount, 1, "one local Workspace root permits only one active Run");
 
     firstRunStatus = "expired";

@@ -10894,9 +10894,17 @@ const preflightWorkspaceDirectory = async ({
             targetRunId: requestedRunId,
           });
         }
-        throw new Error(
-          "В локальной папке уже находится незавершённый Agent Run этого Workspace. Завершите или отмените его перед новым запуском.",
-        );
+        // Keep the checked local Run identity even when its server state is
+        // unavailable. A generic child failure loses this safe continuation and
+        // encourages repeated new opens or cancellation of unsaved work. The
+        // exact prepare/open still enforces live ACL, claim and fencing rules;
+        // this preflight never takes over the lease or modifies the source root.
+        throw new WorkspaceRunReclaimRequiredError({
+          workspaceId,
+          sourceRunId: existingMetadata.runId,
+          targetRunId: requestedRunId,
+          reasonCode: "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW",
+        });
       }
 
       const localHead = (await runGit(["rev-parse", "HEAD"], {

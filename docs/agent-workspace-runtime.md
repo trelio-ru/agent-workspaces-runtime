@@ -1064,6 +1064,16 @@ returned `open` и повторяет исходное действие один
 доказательством старой структуры. Настоящая migration blocker по-прежнему
 обязана содержать exact `rootDirectory` и `blockingEntries`.
 
+Если persistent root хранит другой незавершённый Run либо его server state
+не удалось подтвердить, preflight возвращает тот же structured
+`TRELIO_WORKSPACE_RUN_RECLAIM_REQUIRED` с
+`reasonCode=LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW` и exact прежним `runId`.
+Агент подготавливает и открывает прежний Run через
+`prepare_agent_workspace_run(runId)`, сохраняет изменения и разбирает его
+состояние. Bridge не повторяет новый open, не отменяет Run, не захватывает
+чужую lease и не заменяет source root; сервер заново проверяет ACL и fencing.
+Неизвестный статус не объявляется истечением или завершением.
+
 Если persistent root хранит другой `expired` Run, preflight сначала отделяет
 реальное незавершённое состояние от пустого остатка. Свежий Run, server draft,
 candidate, checkpoint, blocker/handoff, изменённый либо расходящийся Git,

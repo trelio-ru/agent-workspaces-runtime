@@ -4834,7 +4834,9 @@ test("platform routing blocks on explicit no_access until the user chooses anoth
   assert.match(instructions, /требует явного выбора пользователя после объяснения/u);
 });
 
-test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
+test("stdio host emits only newline-delimited JSON-RPC frames", async (t) => {
+  const isolatedHome = await mkdtemp(path.join(os.tmpdir(), "trelio-stdio-test-home-"));
+  t.after(() => rm(isolatedHome, { recursive: true, force: true }));
   const launcherPath = path.resolve(
     pluginDirectory,
     "scripts/launch-trelio-node",
@@ -4847,6 +4849,14 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async () => {
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
+      // Initialization may start the diagnostics collector. It must never read
+      // or deliver a developer's real hook journal or use their bridge token.
+      HOME: isolatedHome,
+      USERPROFILE: isolatedHome,
+      LOCALAPPDATA: path.join(isolatedHome, "AppData", "Local"),
+      XDG_CONFIG_HOME: path.join(isolatedHome, ".config"),
+      TRELIO_WORKSPACE_ORIGIN: "https://stdio-tests.invalid",
+      TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
       CODEX_MCP_NODE_PATH: process.execPath,
       CODEX_HOME: "",
       CODEX_CLI_PATH: "",

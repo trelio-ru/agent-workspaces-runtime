@@ -217,17 +217,26 @@ export class WorkspaceLayoutMigrationBlockedError extends Error {
   }
 }
 
+const UNFINISHED_RUN_RECLAIM_MESSAGE = "Локальная папка содержит незавершённый Agent Run этого Workspace. "
+  + "Подготовьте и откройте этот exact Run через prepare_agent_workspace_run(runId), "
+  + "сохраните его изменения и разберите состояние перед продолжением нового Run. "
+  + "Bridge не отменяет Run, не захватывает чужую lease и не заменяет локальные файлы автоматически.";
+const RUN_RECLAIM_REASON_CODES = new Set([
+  "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW", "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW",
+]);
+
 const RUN_RECLAIM_MESSAGE = "Локальная папка содержит истёкший Agent Run, который ещё нельзя "
   + "считать пустым и безопасно заменить. Подготовьте и откройте этот exact Run через "
   + "prepare_agent_workspace_run(runId), разберите его состояние и только затем продолжайте новый Run.";
 
 // Новый server Run может быть подготовлен раньше локального preflight. Если root
-// хранит recoverable expired Run, bridge не угадывает судьбу его данных и не
+// хранит другой unfinished/expired Run, bridge не угадывает судьбу его данных и не
 // подменяет target. Вместо свободного текста возвращается bounded exact locator,
 // который уже поддерживается общим lifecycle recovery flow MCP-host.
 export class WorkspaceRunReclaimRequiredError extends Error {
-  constructor({ workspaceId, sourceRunId, targetRunId }) {
-    super(RUN_RECLAIM_MESSAGE);
+  constructor({ workspaceId, sourceRunId, targetRunId, reasonCode = "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW" }) {
+    super(reasonCode === "LOCAL_UNFINISHED_RUN_REQUIRES_REVIEW"
+      ? UNFINISHED_RUN_RECLAIM_MESSAGE : RUN_RECLAIM_MESSAGE);
     this.code = WORKSPACE_RUN_RECLAIM_REQUIRED;
     this.details = {
       requiredAction: "prepare_and_open_existing_run",
@@ -235,7 +244,7 @@ export class WorkspaceRunReclaimRequiredError extends Error {
       runId: sourceRunId,
       targetRunId: targetRunId || null,
       operation: "open",
-      reasonCode: "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW",
+      reasonCode,
     };
   }
 
@@ -497,12 +506,13 @@ export const parseWorkspaceRunReclaimRequiredError = (
     || details.targetRunId !== expectedTargetRunId
     || (details.targetRunId !== null && !UUID_PATTERN.test(details.targetRunId))
     || details.operation !== "open"
-    || details.reasonCode !== "LOCAL_EXPIRED_RUN_REQUIRES_REVIEW"
+    || !RUN_RECLAIM_REASON_CODES.has(details.reasonCode)
   ) return null;
   return new WorkspaceRunReclaimRequiredError({
     workspaceId,
     sourceRunId: details.runId,
     targetRunId: details.targetRunId,
+    reasonCode: details.reasonCode,
   });
 };
 

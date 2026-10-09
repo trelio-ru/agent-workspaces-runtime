@@ -46,6 +46,7 @@ import {
   resolveWorkspaceBridgeConfigDirectory,
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { readDiagnosticJournal } from "../host-runtime/scripts/trelio-diagnostic-journal.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "../host-runtime/scripts/trelio-context-recovery.mjs";
 
@@ -86,31 +87,54 @@ const buildTestBridgeCompatibility = (request, minimumVersion) => {
   };
 };
 
-const runHook = (hookInput, environment) => new Promise((resolve, reject) => {
-  const isolatedCodexHome = environment?.CODEX_HOME
-    || path.join(environment?.HOME || os.tmpdir(), ".codex-test");
-  const child = spawn(process.execPath, [hookScriptPath], {
-    env: {
-      ...process.env,
-      // Hook tests must never inspect or migrate the developer's real Codex
-      // config inherited from the desktop application.
-      CODEX_HOME: isolatedCodexHome,
-      TRELIO_PLUGIN_VERSION: TEST_PLUGIN_VERSION,
-      TRELIO_HOST_RUNTIME_VERSION: TEST_HOST_RUNTIME_VERSION,
-      ...environment,
-    },
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => { stdout += chunk; });
-  child.stderr.on("data", (chunk) => { stderr += chunk; });
-  child.once("error", reject);
-  child.once("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
-  child.stdin.end(JSON.stringify(hookInput));
-});
+const runHook = async (hookInput, environment = {}, onDiagnostics) => {
+  const fallbackHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-test-home-"));
+  const isolatedHome = environment.HOME || environment.CODEX_HOME || fallbackHome;
+  const origin = environment.TRELIO_WORKSPACE_ORIGIN || "https://hook-tests.invalid";
+  // os.homedir() selects HOME on POSIX and USERPROFILE on Windows. CODEX_HOME
+  // alone does not isolate the hook journal: a desktop MCP could deliver those
+  // synthetic observations using the real user's credential. Keep the real
+  // telemetry writer enabled, but bind all subprocess state to the fixture.
+  const journalDirectory = path.join(os.tmpdir(), "trelio-diagnostics-v2-"
+    + crypto.createHash("sha256").update(isolatedHome + "\0" + new URL(origin).origin).digest("hex").slice(0, 24));
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [hookScriptPath], {
+        env: {
+          ...process.env,
+          TRELIO_PLUGIN_VERSION: TEST_PLUGIN_VERSION,
+          TRELIO_HOST_RUNTIME_VERSION: TEST_HOST_RUNTIME_VERSION,
+          ...environment,
+          HOME: isolatedHome,
+          USERPROFILE: isolatedHome,
+          LOCALAPPDATA: environment.LOCALAPPDATA || path.join(isolatedHome, "AppData", "Local"),
+          XDG_CONFIG_HOME: environment.XDG_CONFIG_HOME || path.join(isolatedHome, ".config"),
+          CODEX_HOME: environment.CODEX_HOME || path.join(isolatedHome, ".codex-test"),
+          TRELIO_WORKSPACE_ORIGIN: origin,
+          TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.once("error", reject);
+      child.once("close", (exitCode) => resolve({ exitCode, stdout, stderr }));
+      child.stdin.end(JSON.stringify(hookInput));
+    });
+    if (onDiagnostics) {
+      const journal = await readDiagnosticJournal(new URL(origin).origin, { directory: journalDirectory });
+      await onDiagnostics(journal.samples);
+    }
+    return result;
+  } finally {
+    await rm(journalDirectory, { recursive: true, force: true });
+    await rm(fallbackHome, { recursive: true, force: true });
+  }
+};
 
 const readRequestBody = async (request) => {
   const chunks = [];
@@ -172,6 +196,7 @@ test("empty or unsupported hook payload fails closed before any protected call",
 test("malformed Trelio action is denied before registration without exposing its input", async () => {
   const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "trelio-hook-invalid-action-"));
   try {
+    let diagnosticSamples;
     const result = await runHook({
       hook_event_name: "PreToolUse",
       tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
@@ -180,13 +205,19 @@ test("malformed Trelio action is denied before registration without exposing its
         nativeTool: "create_task",
         parameters: { arguments: { secret: "synthetic-private-value" } },
       },
-    }, { CODEX_HOME: temporaryHome, XDG_CONFIG_HOME: temporaryHome });
+    }, { CODEX_HOME: temporaryHome, XDG_CONFIG_HOME: temporaryHome }, samples => { diagnosticSamples = samples; });
     const reason = assertDeniedHook(result);
     assert.match(reason, /^TRELIO_HOOK_TOOL_IDENTITY_INVALID:/u);
     assert.doesNotMatch(result.stdout + result.stderr, /synthetic-private-value|runtimeSessionProof|TRELIO_RUNTIME_HOOK_REQUIRED/u);
     // No session_id/model/credentials were provided: identity failure must be
     // reported before a registration, pairing or model-policy attempt.
     assert.match(reason, /invalid_local_native_name/u);
+    assert.equal(diagnosticSamples.length, 1,
+      "CODEX_HOME-only fixture must journal its real hook outcome inside the isolated home");
+    assert.equal(diagnosticSamples[0].runtimeVersion, TEST_HOST_RUNTIME_VERSION);
+    assert.deepEqual(diagnosticSamples[0].outcomes, [
+      { code: "TRELIO_HOOK_TOOL_IDENTITY_INVALID", field: "unknown", count: 1 },
+    ]);
   } finally {
     await rm(temporaryHome, { recursive: true, force: true });
   }
@@ -952,6 +983,8 @@ test("configured platform hook launcher starts in every Windows shell without No
             CODEX_MCP_NODE_PATH: process.execPath,
             CLAUDE_PLUGIN_ROOT: launcherPluginDirectory,
             PLUGIN_ROOT: launcherPluginDirectory,
+            TRELIO_WORKSPACE_ORIGIN: "https://hook-tests.invalid",
+            TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
             CLAUDE_CODE_ENTRYPOINT: "",
             CLAUDE_EFFORT: "",
             PATH: isolatedPath,

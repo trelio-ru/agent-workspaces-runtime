@@ -493,7 +493,12 @@ AbortSignal передаётся private worker. До реального зав�
 Hooks пишут строгую v2 schema в user-temp journal без private store, ACL repair,
 DPAPI или сети; POSIX 0700/0600, Windows inherited user-temp ACL. 256 entries,
 16 KiB/file, TTL 24 ч, bounded read/validation, UUID filename и atomic rename.
-Это техническая очередь, не secret store/authority. MCP берёт до 10 journal
+Это техническая очередь, не secret store/authority.
+Subprocess fixtures изолируют HOME/USERPROFILE, config directories и origin;
+CODEX_HOME без HOME не изолирует журнал. Тесты сохраняют настоящий writer в
+fixture-очереди и удаляют её после проверки. Stdio fixture также изолирует
+credential store, чтобы collector не доставлял рабочие наблюдения.
+MCP берёт до 10 journal
 samples/batch, удаляет после 204, проверяет каждые 30 с и при новой активности.
 Shutdown не ждёт сети и по возможности пишет content-free loss snapshot.
 Queue/delivery/credential/journal/catalog losses различаются; они не рабочие
