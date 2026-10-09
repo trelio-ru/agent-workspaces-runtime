@@ -7,6 +7,7 @@ class DeliveryError extends Error {
   constructor(reason, retryable = false) { super(reason); this.reason = reason; this.retryable = retryable; }
 }
 const discardBody = async response => { await response.body?.cancel(); };
+// Compatibility lifecycle: diagnostics-v2-loss-catalog in Trelio's legacy registry.
 // Original v2 servers did not advertise loss reasons. This fixed baseline
 // keeps additive observation signals from rejecting an otherwise valid batch.
 const LEGACY_LOSS_REASONS = ["queue_overflow", "delivery_timeout", "delivery_transport", "delivery_rejected",

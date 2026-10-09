@@ -565,6 +565,7 @@ const registerRuntimeObservation = async ({ origin, clientSessionId, observation
 };
 
 const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientSessionId }) => {
+  // Compatibility lifecycle: runtime-session-refresh-v1 in Trelio's legacy registry.
   // Old servers keep their original ABI. This is capability negotiation, never
   // a plaintext/proof fallback after an error from a supported refresh route.
   if (state.runtimeRefreshSupported === false) return state;
