@@ -9086,6 +9086,9 @@ const buildFolderOnboardingActionInvocation = (parameters) => {
     "project",
     "planHash",
     "userExplicitlyRequestedFolderSetup",
+    "userExplicitlyRequestedInstructionRefresh",
+    "instructionRefreshClientKind",
+    "clientKind",
   ]));
   const instructionTarget = normalizeWorkspaceActionString(
     parameters.instructionTarget,
@@ -9095,7 +9098,7 @@ const buildFolderOnboardingActionInvocation = (parameters) => {
   if (!["AGENTS.md", "AGENTS.override.md"].includes(instructionTarget)) {
     throw new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
-      "parameters.instructionTarget must identify the active Codex instruction file.",
+      "parameters.instructionTarget must identify the effective instruction file.",
     );
   }
   const planHash = normalizeWorkspaceActionString(
@@ -9109,7 +9112,15 @@ const buildFolderOnboardingActionInvocation = (parameters) => {
       "parameters.planHash must be one exact SHA-256 plan hash.",
     );
   }
-  if (parameters.userExplicitlyRequestedFolderSetup !== true) {
+  const refresh = parameters.userExplicitlyRequestedInstructionRefresh === true;
+  const clientKind = refresh ? parameters.instructionRefreshClientKind : parameters.clientKind;
+  if (clientKind !== undefined && !["codex", "claude-code", "cursor", "antigravity"].includes(clientKind)) {
+    throw workspaceInputError("Folder binding requires a supported exact client.", "parameters.clientKind");
+  }
+  if (refresh && clientKind === undefined) {
+    throw workspaceInputError("Managed refresh requires the real client.", "parameters.instructionRefreshClientKind");
+  }
+  if (parameters.userExplicitlyRequestedFolderSetup !== true && !refresh) {
     throw new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_INVALID_INPUT",
       "Folder onboarding apply requires the explicit setup assertion returned by the reviewed plan.",
@@ -9123,7 +9134,11 @@ const buildFolderOnboardingActionInvocation = (parameters) => {
       ? {}
       : { project: normalizeFolderOnboardingParty(parameters.project, "parameters.project") }),
     planHash,
-    userExplicitlyRequestedFolderSetup: true,
+    ...(parameters.clientKind === undefined ? {} : { clientKind: parameters.clientKind }),
+    ...(refresh ? {
+      userExplicitlyRequestedInstructionRefresh: true,
+      instructionRefreshClientKind: clientKind,
+    } : { userExplicitlyRequestedFolderSetup: true }),
   };
   // This action terminates inside the trusted host. Keeping argv empty is a
   // deliberate boundary: no company label or local path reaches a subprocess.

@@ -244,9 +244,6 @@ export const buildTrelioInstallationDiagnostic = ({
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
-  if (["cursor", "antigravity"].includes(clientKind) && intent !== "diagnostics") {
-    throw new TrelioInstallationDiagnosticError("TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT", "OAuth-native clients support diagnostics only; Codex/Claude onboarding is not their setup route.");
-  }
   if (!local || typeof local !== "object" || Array.isArray(local)) {
     throw new TrelioInstallationDiagnosticError(
       "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_RESULT",

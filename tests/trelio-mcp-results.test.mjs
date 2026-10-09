@@ -1,8 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload } from "../host-runtime/scripts/trelio-mcp-results.mjs";
+import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload, resolveLocalMcpTextCompatibility } from "../host-runtime/scripts/trelio-mcp-results.mjs";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { projectMcpAgentPayload } from "../host-runtime/scripts/trelio-agent-response-projection.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+
+test("Antigravity text-only local delivery follows hydration/projection and keeps App grants hidden", async () => {
+  const payload = { task: { title: "Расшифрованная задача", assignee: { displayName: "Анна", profileNote: "Проверяет договоры", avatarUrl: "decorative" } } };
+  const hydrated = compactLocalNativeMcpResult("get_task", { structuredContent: payload,
+    content: [{ type: "text", text: JSON.stringify(payload) }], _meta: { capabilityToken: "hidden-human-only" } });
+  const message = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "fixture" } };
+  const normal = await handleLocalMcpMessage(message, { callTool: async () => hydrated });
+  const compatible = await handleLocalMcpMessage(message, { callTool: async () => hydrated, textCompatibility: true });
+  assert.deepEqual(compatible.result.structuredContent, normal.result.structuredContent);
+  assert.deepEqual(JSON.parse(compatible.result.content[0].text), normal.result.structuredContent);
+  assert.equal(compatible.result.structuredContent.task.assignee.profileNote, "Проверяет договоры");
+  assert.equal(compatible.result.structuredContent.task.assignee.avatarUrl, undefined);
+  assert.equal(compatible.result._meta, hydrated._meta);
+  assert.doesNotMatch(compatible.result.content[0].text, /hidden-human-only/u);
+  for (const client of ["codex", "claude-code", "cursor"]) {
+    const unchanged = await handleLocalMcpMessage(message, { callTool: async () => hydrated, textCompatibility: false });
+    assert.equal(JSON.stringify(unchanged), JSON.stringify(normal), client);
+  }
+});
+
+test("only the exact native Antigravity manifest selects local text compatibility", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-text-delivery-"));
+  try {
+    const environment = { TRELIO_PLUGIN_ROOT: root, CODEX_THREAD_ID: "unrelated", CLIENT_KIND: "antigravity" };
+    assert.equal(await resolveLocalMcpTextCompatibility(environment), false);
+    await fs.writeFile(path.join(root, "plugin.json"), JSON.stringify({ name: "trelio-agent-workspaces" }));
+    assert.equal(await resolveLocalMcpTextCompatibility(environment), true);
+    await fs.writeFile(path.join(root, "plugin.json"), JSON.stringify({ name: "other" }));
+    assert.equal(await resolveLocalMcpTextCompatibility(environment), false);
+    await fs.rm(path.join(root, "plugin.json"));
+    await fs.symlink(path.join(root, "nonexistent"), path.join(root, "plugin.json"));
+    assert.equal(await resolveLocalMcpTextCompatibility(environment), false);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test("local mutation projection preserves all equal executors and their semantic profile notes", () => {
   const executors = [

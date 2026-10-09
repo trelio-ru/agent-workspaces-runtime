@@ -28,7 +28,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
-import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload } from "./trelio-mcp-results.mjs";
+import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload, deliverLocalMcpResult, resolveLocalMcpTextCompatibility } from "./trelio-mcp-results.mjs";
 import {
   CODEX_ROUTING_APPLY_TOOL_NAME,
   CODEX_ROUTING_PLAN_TOOL_NAME,
@@ -3822,7 +3822,7 @@ const LOCAL_TOOLS = [
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
     title: "Проверить установку или подготовить настройку папки Trelio",
-    description: "Read-only: компоненты и folderOnboarding.folderPath, план live reads/refresh. Codex/Claude onboarding; Cursor/Antigravity – diagnostics без Hooks/binding. Windows: worker/HTTPS. folder_onboarding – CAS-план папки. Не применяет, не устанавливает, не авторизует.",
+    description: "Read-only: компоненты и folderOnboarding.folderPath, план live reads/refresh. Все клиенты: folder_onboarding – CAS-план AGENTS.md; Cursor/Antigravity без foreign Hooks. Windows: worker/HTTPS. Не применяет, не устанавливает, не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -5702,7 +5702,6 @@ export const handleToolCall = async (
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding"].includes(key))
       || !["codex", "claude-code", "cursor", "antigravity"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
-      || (["cursor", "antigravity"].includes(rawArguments.clientKind) && rawArguments.intent !== "diagnostics")
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
     ) {
@@ -5712,7 +5711,12 @@ export const handleToolCall = async (
       );
     }
     if (folderOnboardingIntent) {
-      return buildTextResult(await folderOnboardingPrepare(rawArguments.folderOnboarding));
+      const prepared = await folderOnboardingPrepare({
+        ...rawArguments.folderOnboarding,
+        // Select native clients' file format without changing legacy plans.
+        ...(["cursor", "antigravity"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
+      });
+      return buildTextResult(prepared);
     }
     const local = await localPrerequisiteDiagnosis({
       origin,
@@ -6256,6 +6260,7 @@ export const handleLocalMcpMessage = async (
     proposalProviderSelectionRecorder = persistLocalProposalProviderSelection,
     proposalCapabilityConfigDirectory,
     clientCapabilities = null,
+    textCompatibility = false,
     requestClient = null,
     codexLegacyMcpMigration = null,
     runtimeUpgradeRecovery = null,
@@ -6340,10 +6345,10 @@ export const handleLocalMcpMessage = async (
   }
   if (message.method === "tools/call") {
     try {
-      const result = compactLocalMcpResult(await callTool(
+      const result = deliverLocalMcpResult(await callTool(
           origin, String(message.params?.name || ""), message.params?.arguments,
           { signal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, requestClient, codexLegacyMcpMigration },
-      ));
+      ), textCompatibility);
       // Only the MCP envelope boolean is read, never provider text/details.
       try { recordDiagnostic?.(message.params?.name, message.params?.arguments, result?.isError === true ? "REMOTE_MCP_PROVIDER_ERROR" : "OK"); }
       catch { /* Keep original result. */ }
@@ -6428,6 +6433,9 @@ export const runStdioHost = async ({
   statFile = fs.lstat,
   diagnosticReporter = createAgentDiagnosticReporter({ origin, environment }),
 } = {}) => {
+  // Antigravity's exact native shell selects text delivery. No client/model
+  // self-report changes admission, and Codex/Claude/Cursor keep their bytes.
+  const textCompatibility = await resolveLocalMcpTextCompatibility(environment);
   const codexLegacyMcpMigration = await migrateCodexLegacyTrelioMcpForRuntime({
     environment,
     migrate: legacyMcpMigration,
@@ -6620,6 +6628,7 @@ export const runStdioHost = async ({
         callTool,
         signal: controller?.signal,
         clientCapabilities,
+        textCompatibility,
         requestClient,
         codexLegacyMcpMigration,
         recordDiagnostic: diagnosticReporter.record,

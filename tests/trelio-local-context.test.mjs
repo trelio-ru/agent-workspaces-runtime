@@ -438,6 +438,33 @@ test("command-only Workspace actions are outside the current ABI", () => {
   ));
 });
 
+test("native folder format and authorized refresh survive the exact local apply envelope", async () => {
+  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+    const parameters = { folderPath: actionWorkingDirectory, instructionTarget: "AGENTS.md",
+      company: { name: "Компания", slug: "company" }, planHash: "a".repeat(64),
+      userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind };
+    const result = await handleTrelioWorkspaceActionOperation("https://trelio.example", {
+      schemaVersion: 1, operation: "folder_onboarding_apply", parameters,
+    }, {
+      runBridge: async () => assert.fail("Instruction refresh must not launch a bridge child"),
+      folderOnboardingApply: async (input) => { assert.deepEqual(input, parameters); return { status: "applied" }; },
+    });
+    assert.equal(result.status, "applied");
+  }
+});
+
+test("open forwards the client-selected folder as cwd while preserving server Run identity", async () => {
+  let launched;
+  await handleTrelioWorkspaceActionOperation("https://trelio.example", {
+    schemaVersion: 1, operation: "open", workingDirectory: actionWorkingDirectory,
+    parameters: { workspaceId: actionWorkspaceId, runId: actionRunId },
+  }, { runBridge: async (_origin, argumentsList, options) => {
+    launched = { argumentsList, cwd: options.cwd };
+    return { stdout: "fixture", stderr: "" };
+  } });
+  assert.deepEqual(launched, { argumentsList: ["open", "--workspace", actionWorkspaceId, "--run", actionRunId], cwd: actionWorkingDirectory });
+});
+
 test("typed Workspace dispatcher rejects undeclared flags and implicit destructive cleanup", () => {
   assert.throws(
     () => buildTrelioWorkspaceActionInvocation({

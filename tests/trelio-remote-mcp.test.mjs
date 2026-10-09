@@ -2792,7 +2792,7 @@ test("a folder I/O blocker keeps the remaining diagnostic plan and hides private
 });
 
 for (const clientKind of ["cursor", "antigravity"]) {
-  test(`${clientKind} diagnosis skips foreign hooks and rejects onboarding`, async () => {
+  test(`${clientKind} diagnosis skips foreign hooks and supports its own folder onboarding`, async () => {
     const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
       clientKind, intent: "diagnostics",
     }, {
@@ -2808,11 +2808,16 @@ for (const clientKind of ["cursor", "antigravity"]) {
     assert.deepEqual(payload.liveVerification.hook, { state: "not_applicable", nextTools: [] });
     assert.deepEqual(payload.local.plugin.hooks, { status: "not_applicable" });
     assert.equal(payload.codexRouting, null);
-    for (const intent of ["onboarding", "folder_onboarding"]) {
-      await assert.rejects(handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
-        clientKind, intent, folderOnboarding: { folderPath: "/client/folder" },
-      }), { code: "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT" });
-    }
+    const plan = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+      clientKind, intent: "folder_onboarding", folderOnboarding: { folderPath: "/client/folder" },
+    }, {
+      folderOnboardingPrepare: async (input) => {
+        assert.deepEqual(input, { folderPath: "/client/folder", clientKind });
+        return { status: "ready_to_apply" };
+      },
+      localPrerequisiteDiagnosis: async () => assert.fail("Folder planning must not inspect foreign hooks"),
+    });
+    assert.equal(JSON.parse(plan.content[0].text).status, "ready_to_apply");
   });
 }
 

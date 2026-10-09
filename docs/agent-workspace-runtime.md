@@ -54,8 +54,10 @@ Local MCP facade запускает bundled bridge через текущий `pr
 повторно сверяет origin и запускает дочерний процесс из его `workspace/`;
 переданный `workingDirectory` остаётся только подсказкой при нескольких копиях
 того же exact Run. Старые action без identity по-прежнему требуют явный
-проверенный `workingDirectory`, а остальные операции используют корень
-загруженного плагина. Удалённый после обновления `cwd` долгоживущего host-процесса
+проверенный `workingDirectory`, для `open` агент передаёт выбранную клиентом binding папку в optional
+`workingDirectory`, сохраняя остальные returned arguments. Это placement hint,
+не Run identity; глобальная текущая папка MCP не сохраняется. Остальные операции
+используют корень загруженного плагина. Удалённый после обновления `cwd` долгоживущего host-процесса
 не наследуется; `cwd` самого host не меняется.
 
 Сравнения локальных путей Run, read-only inspection, recovery, onboarding и
@@ -1151,7 +1153,8 @@ Run, connection, secret unlock или business mutation. Отчёт остаёт
 success чтения не доказывает save, `savingResults=not_checked`.
 Folder blocker не стирает остальные независимые read steps.
 Cursor проверяет свой manifest и не читает runtime attestation sessions;
-Codex/Claude hooks и binding/refresh для него `not_applicable`.
+Codex/Claude hooks для native клиентов `not_applicable`; folder binding/refresh
+использует общий Git/CAS/read-back planner с реальным clientKind.
 
 Managed block извлекается только из единственной полной пары existing markers.
 Canonical company/project lines должны разбираться однозначно; malformed project
@@ -1420,12 +1423,23 @@ structural binding, максимум 2048 refs/64 на actor+grant с абсол
 
 ## Antigravity native shell diagnostics
 
-`clientKind=antigravity` разрешён только для `intent=diagnostics`. Doctor читает
+`clientKind=antigravity` поддерживает diagnostics/onboarding/folder_onboarding. Doctor читает
 exact installed root `plugin.json`, `PLUGIN_VERSION` и выбранные public поля
 `mcp_config.json`; native schema не содержит version. Проверяются собственный
 OAuth profile и absolute stdio loader/cwd. OAuth token stores, чужие hooks и
 runtime hook sessions не читаются. `not_applicable` не является OAuth readiness:
 защищённое server-selected чтение, pairing/crypto grant и scope/ACL остаются
-отдельными live checks. Folder diagnostics не создаёт managed binding и не
-обновляет инструкции Codex/Claude. Общий bridge использует прежний signed loader
+отдельными live checks. Folder diagnostics проверяет existing binding и готовит refresh; initial binding
+создаёт отдельный folder_onboarding plan/apply. Cursor/Antigravity читают
+AGENTS.md напрямую, без CLAUDE.md import. Codex-only override для native
+клиента блокирует настройку до явного решения. Общий bridge использует прежний signed loader
 ABI и exact source grant; clientKind сам по себе не выдаёт admission.
+
+## Native text-only delivery
+
+Exact native Antigravity shell (root plugin.json, выбранный loader-ом) включает
+JSON TextContent после hydration/projection. Другие shells сохраняют compact
+выдачу. Root App _meta/capabilities никогда не копируются в text; independent
+text/media/errors сохраняются, нормализация идемпотентна. Это presentation,
+не OAuth/runtime admission. Backend учитывает эту копию в exact read/page
+budget; local text-only reads уже измеряют собственный envelope.

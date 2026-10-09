@@ -55,6 +55,41 @@ const binding = {
   project: { name: "Рабочий проект", slug: "work-project" },
 };
 
+for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+  test(`${clientKind} binds and refreshes the folder without replacing personal instructions`, async () => {
+    const root = await makeRoot();
+    const personal = "# Personal\n\nKeep my formatting.\n";
+    await fs.writeFile(path.join(root, "AGENTS.md"), personal);
+    const native = ["cursor", "antigravity"].includes(clientKind);
+    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, clientKind, ...binding });
+    assert.deepEqual(prepared.plan.changes.map((change) => change.path), native ? ["AGENTS.md"] : ["AGENTS.md", "CLAUDE.md"]);
+    const result = await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+    assert.equal(result.status, "applied");
+    const current = await fs.readFile(path.join(root, "AGENTS.md"), "utf8");
+    assert.ok(current.startsWith(personal));
+    assert.match(current, /`open`.*`workingDirectory`/u);
+    assert.equal((current.match(/trelio-agent-workspaces:start/gu) ?? []).length, 1);
+    if (native) await assert.rejects(fs.stat(path.join(root, "CLAUDE.md")), { code: "ENOENT" });
+    const healthy = await prepareTrelioFolderDiagnostic({ folderPath: root }, clientKind);
+    assert.equal(healthy.status, "ready");
+    assert.equal(healthy.scope.companySlug, binding.company.slug);
+    await makeTemplateOutdated(root);
+    const outdated = await prepareTrelioFolderDiagnostic({ folderPath: root }, clientKind);
+    await applyTrelioFolderOnboarding(outdated.refresh.action.arguments.parameters);
+    assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), current);
+  });
+}
+
+test("native clients reject a Codex override instead of claiming an unloaded binding", async () => {
+  const root = await makeRoot();
+  await fs.writeFile(path.join(root, "AGENTS.override.md"), "# Existing override\n");
+  for (const clientKind of ["cursor", "antigravity"]) {
+    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, clientKind, ...binding }),
+      { code: "TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET" });
+  }
+  assert.deepEqual(await fs.readdir(root), ["AGENTS.override.md"]);
+});
+
 const configuredRoot = async (instructionTarget = "AGENTS.md") => {
   const root = await makeRoot();
   if (instructionTarget === "AGENTS.override.md") {
@@ -171,11 +206,10 @@ test("diagnostic service Git requires existing isolation and does not repair the
   assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), agentsBefore);
 });
 
-test("Cursor diagnostics inspect the root without inventing a Codex binding or refresh", async () => {
+test("Cursor diagnostics require a real binding and preserve service Git isolation", async () => {
   const root = await makeRoot();
   const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "cursor");
-  assert.equal(diagnostic.status, "ready");
-  assert.equal(diagnostic.instructions.status, "not_applicable");
+  assert.equal(diagnostic.status, "setup_required");
   assert.equal(diagnostic.refresh, undefined);
   assert.deepEqual(await fs.readdir(root), []);
   await runGit(root, "init");
@@ -183,8 +217,7 @@ test("Cursor diagnostics inspect the root without inventing a Codex binding or r
     { code: "TRELIO_FOLDER_ONBOARDING_IGNORE_FAILED" });
   await fs.writeFile(path.join(root, ".gitignore"), "/workspaces/\n");
   const isolated = await prepareTrelioFolderDiagnostic({ folderPath: root }, "cursor");
-  assert.equal(isolated.status, "ready");
-  assert.equal(isolated.instructions.status, "not_applicable");
+  assert.equal(isolated.status, "setup_required");
   assert.equal(isolated.scope, undefined);
 });
 

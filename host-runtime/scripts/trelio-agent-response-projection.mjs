@@ -1,6 +1,41 @@
 // Generated portable Trelio response contract. Do not edit by hand.
 import { createHash } from "node:crypto";
 export const MCP_RESPONSE_PROJECTION_VERSION = 4;
+/**
+ * Compatibility for a host which forwards only TextContent to its model.
+ * Apply AFTER semantic projection/local hydration. Only structuredContent is
+ * serialized: root _meta may contain App state and one-use capabilities, and
+ * must never become model text. Other clients keep their exact previous bytes.
+ * This is delivery selection, not runtime/model attestation or new authority.
+ */
+export const deliverMcpStructuredText = (result, enabled = false) => {
+    const source = record(result);
+    if (!enabled || !source || !own(source, "structuredContent")
+        || !Array.isArray(source.content))
+        return result;
+    const serialized = JSON.stringify(source.structuredContent);
+    if (typeof serialized !== "string")
+        return result;
+    // Idempotent even when another boundary already provided the JSON block.
+    if (source.content.some((block) => record(block)?.type === "text"
+        && record(block)?.text === serialized))
+        return result;
+    const only = source.content.length === 1 ? record(source.content[0]) : null;
+    let summary = false;
+    if (only?.type === "text" && typeof only.text === "string"
+        && Object.keys(only).every((key) => key === "type" || key === "text")) {
+        try {
+            const parsed = record(JSON.parse(only.text));
+            summary = ["trelio-structured-content-summary", "trelio-local-structured-content-summary"].includes(String(parsed?.kind));
+        }
+        catch { /* Independent prose is preserved alongside the payload. */ }
+    }
+    const text = { type: "text", text: serialized };
+    return {
+        ...source,
+        content: only && summary ? [text] : [...source.content, text],
+    };
+};
 export const MCP_RESPONSE_DETAIL_TOOLS = new Set([
     "get_contact", "get_registry", "get_knowledge_base_page", "get_project_meta",
     "get_task_create_meta", "get_regular_work", "list_recent_activity", "list_agent_skills",

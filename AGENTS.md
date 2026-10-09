@@ -39,8 +39,7 @@ publication tooling также остаются вне этого публичн
   включает hook; дисковый снимок не является effective state App Server.
   Диагностика ничего не меняет; исходный config и значения hashes не выдаёт.
 - Cursor/Antigravity используют отдельный OAuth-допуск без hook identity.
-  Diagnostics принимает их реальные clientKind, пропускает foreign hooks и
-  managed binding; native shell проверяется только в exact loaded plugin root.
+  Diagnostics принимает их реальные clientKind, пропускает foreign hooks; folder binding/refresh выполняет общий planner/apply; native shell проверяется только в exact loaded plugin root.
   Root-level native manifest исключает startup-миграцию Codex до чтения его
   config, даже если процесс унаследовал CODEX_*; это не OAuth admission.
 - Generic диагностика учитывает реальный clientKind и выбранный permanent root.

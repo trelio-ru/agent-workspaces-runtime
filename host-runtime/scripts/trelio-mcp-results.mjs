@@ -1,5 +1,26 @@
 import { isDeepStrictEqual } from "node:util";
-import { projectMcpAgentPayload } from "./trelio-agent-response-projection.mjs";
+import { projectMcpAgentPayload, deliverMcpStructuredText } from "./trelio-agent-response-projection.mjs";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+/** Exact loader-selected native shell; this selects presentation only, not ACL/admission. */
+export const resolveLocalMcpTextCompatibility = async (environment = process.env) => {
+  const root = environment.TRELIO_PLUGIN_ROOT;
+  if (typeof root !== "string" || !path.isAbsolute(root)) return false;
+  const file = path.join(root, "plugin.json");
+  try {
+    const stat = await fs.lstat(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return false;
+    const manifest = JSON.parse(await fs.readFile(file, "utf8"));
+    return manifest.name === "trelio-agent-workspaces";
+  } catch (error) {
+    if (error.code === "ENOENT" || error instanceof SyntaxError) return false;
+    throw error;
+  }
+};
+
+export const deliverLocalMcpResult = (result, textCompatibility = false) =>
+  deliverMcpStructuredText(compactLocalMcpResult(result), textCompatibility);
 
 /**
  * Keep one model-visible copy of a structured result. The App still receives

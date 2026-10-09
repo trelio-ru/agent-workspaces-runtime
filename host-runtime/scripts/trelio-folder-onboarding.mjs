@@ -22,6 +22,7 @@ const MAX_NAME_LENGTH = 200;
 const MAX_SLUG_LENGTH = 120;
 const MAX_INSTRUCTION_FILE_BYTES = 256 * 1024;
 const INSTRUCTION_FILES = new Set(["AGENTS.md", "AGENTS.override.md"]);
+const BINDING_CLIENTS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
 const ROOT_ALLOWED_FILES = new Set([
   "AGENTS.md",
   "AGENTS.override.md",
@@ -318,6 +319,7 @@ const buildManagedBindingBlock = ({ company, project }) => {
   }
   lines.push(
     "Не создавай рабочие материалы, `tmp/` или `output/` в корне этой папки. Для задачи или именованного воркспейса сначала открой Agent Run и работай только в пути, который вернул bridge. Новый Workspace bridge размещает в `workspaces/<workspace-id>/`; внутри `workspace/` лежат редактируемые файлы, а `context/` и `.trelio-run.json` остаются служебными.",
+    "Для bridge action `open` передай эту выбранную клиентом папку в `workingDirectory`; остальные returned arguments сохрани. Не подставляй cwd процесса MCP, каталог плагина или home.",
     "",
     "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio относятся только к выданному bridge воркспейсу.",
     "",
@@ -792,6 +794,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     "userExplicitlyRequestedFolderSetup",
     "userExplicitlyRequestedInstructionRefresh",
     "instructionRefreshClientKind",
+    "clientKind",
   ]);
   const unknownKey = Object.keys(rawInput).find((key) => !supportedKeys.has(key));
   if (unknownKey) {
@@ -801,6 +804,13 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     );
   }
   const filesystem = dependencies.filesystem ?? fs;
+  // The caller supplies the real client solely to select its instruction-file
+  // format. This never changes OAuth admission, hooks or company permissions.
+  // Omission retains the old Codex/Claude bootstrap ABI and its exact plan.
+  const clientKind = rawInput.instructionRefreshClientKind ?? rawInput.clientKind ?? "codex";
+  if (!BINDING_CLIENTS.has(clientKind)) {
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Folder binding requires a supported exact client.");
+  }
   const inspection = await inspectFolder({
     folderPath: rawInput.folderPath,
     filesystem,
@@ -814,6 +824,12 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
   if (!binding) return { inspection, plan: null, files: null };
 
   const requestedTarget = normalizeInstructionTarget(rawInput.instructionTarget);
+  // AGENTS.override.md belongs to Codex's precedence rules. Native clients
+  // load AGENTS.md, so never pretend that writing the override binds them.
+  if (["cursor", "antigravity"].includes(clientKind)
+    && (requestedTarget === "AGENTS.override.md" || inspection.status === "instruction_target_required")) {
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "Cursor/Antigravity require AGENTS.md; resolve the existing AGENTS.override.md before binding this shared folder.");
+  }
   if (inspection.status === "instruction_target_required" && !requestedTarget) {
     return { inspection, plan: null, files: null };
   }
@@ -839,7 +855,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     if (instructionSnapshot.exists && sha256(Buffer.from(instructionSnapshot.text, "utf8")) !== instructionSnapshot.sha256) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE", "Managed refresh requires a valid UTF-8 instruction file.");
     }
-    if (!["codex", "claude-code"].includes(rawInput.instructionRefreshClientKind)) {
+    if (!BINDING_CLIENTS.has(rawInput.instructionRefreshClientKind)) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Instruction refresh requires a supported exact client.");
     }
     const existing = readManagedBinding(instructionSnapshot.text);
@@ -869,7 +885,9 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     MANAGED_START,
     MANAGED_END,
   );
-  const claudeText = refreshOnly && rawInput.instructionRefreshClientKind !== "claude-code"
+  const managesClaudeImport = refreshOnly ? clientKind === "claude-code"
+    : ["codex", "claude-code"].includes(clientKind);
+  const claudeText = !managesClaudeImport
     ? claudeSnapshot.text
     : buildClaudeText(claudeSnapshot.text, instructionTarget, refreshOnly);
   const ignoreText = ignoreSnapshot
@@ -877,7 +895,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     : null;
   const changes = [
     buildFileChange(instructionTarget, instructionSnapshot, instructionText),
-    ...(!refreshOnly || rawInput.instructionRefreshClientKind === "claude-code"
+    ...(managesClaudeImport
       ? [buildFileChange("CLAUDE.md", claudeSnapshot, claudeText)] : []),
     ...(ignoreSnapshot ? [buildFileChange(".gitignore", ignoreSnapshot, ignoreText)] : []),
   ];
@@ -890,6 +908,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     project: binding.project,
     changes,
     ...(refreshOnly ? { instructionRefreshClientKind: rawInput.instructionRefreshClientKind } : {}),
+    ...(rawInput.clientKind ? { clientKind: rawInput.clientKind } : {}),
   };
   const planHash = sha256(Buffer.from(JSON.stringify(planBasis), "utf8"));
   const changedFiles = changes.filter(({ action }) => action !== "none");
@@ -911,6 +930,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
             company: rawInput.company,
             ...(rawInput.project ? { project: rawInput.project } : {}),
             planHash,
+            ...(rawInput.clientKind ? { clientKind: rawInput.clientKind } : {}),
             ...(refreshOnly ? {
               userExplicitlyRequestedInstructionRefresh: true,
               instructionRefreshClientKind: rawInput.instructionRefreshClientKind,
@@ -952,18 +972,14 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
   const filesystem = dependencies.filesystem ?? fs;
   const inspection = await inspectFolder({ folderPath: rawInput.folderPath, ...dependencies });
   await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path);
-  // Git isolation is a folder invariant shared by every client. Cursor skips
-  // managed binding, but must not report a service root ready without its ignore.
+  // Git isolation is a folder invariant shared by every supported client.
   if (inspection.folder.serviceGitPreserved) {
     const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
     await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
   }
-  // OAuth-native clients have their own profiles and no automatic folder-binding contract.
-  // A valid local root does not authorize installing Codex/Claude instructions.
-  if (["cursor", "antigravity"].includes(clientKind)) return {
-    status: "ready", folder: inspection.folder,
-    instructions: { status: "not_applicable", reasonCode: "CLIENT_FOLDER_BINDING_UNSUPPORTED" },
-  };
+  if (["cursor", "antigravity"].includes(clientKind) && inspection.status === "instruction_target_required") {
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "This client loads AGENTS.md; an existing override needs an explicit target decision.");
+  }
   const instructionTarget = inspection.status === "instruction_target_required"
     ? "AGENTS.override.md" : inspection.instructionTarget;
   const snapshot = await inspectOptionalRegularFile(filesystem, path.join(inspection.folder.path, instructionTarget));
@@ -1186,7 +1202,7 @@ export const applyTrelioFolderOnboarding = async (rawInput, dependencies = {}) =
       })),
     nextAction: {
       code: "START_NEW_CLIENT_TASK_OR_SESSION",
-      reason: "Folder instruction files are loaded only by a new Codex task or Claude session.",
+      reason: "Start a new client task/session to load the saved folder instructions.",
     },
   };
 };
