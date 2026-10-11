@@ -248,6 +248,12 @@ jobs:
       - name: Run Windows Workspace subprocess regressions
         run: node tests/trelio-workspace-action-process.test.mjs
 
+      - name: Run Windows Workspace saving and rate-limit regressions
+        run: >-
+          node --test
+          --test-name-pattern="bridge draft and finish survive|plain mutation retry|429 respects|HTTP retry"
+          tests/trelio-workspace.test.mjs tests/trelio-encrypted-workspace-storage.test.mjs
+
       - name: Run Windows Workspace directory selection regressions
         run: node tests/trelio-workspace-directory.test.mjs
 
