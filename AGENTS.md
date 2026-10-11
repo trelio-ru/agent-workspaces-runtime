@@ -100,6 +100,8 @@ publication tooling также остаются вне этого публичн
   403, transport/5xx, version gate и противоречивый успешный probe не разрешают
   замену. Исходная рабочая mutation не повторяется этим recovery.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
+- Сохранение после 429, immutable upload streams и совместимость старого backend
+  проверяй по [transport-контракту](docs/agent-workspace-runtime.md#saving-rate-limit-retry).
 - `SessionStart source=compact` восстанавливает обязанность полного чтения
   pinned authority без замены Run/session. Контракт и ограничения –
   [README](README.md#ошибки-lifecycle-hooks); stable hook definition не меняется.

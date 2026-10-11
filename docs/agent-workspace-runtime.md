@@ -1050,6 +1050,28 @@ accepted Run, вывод агента и условное «когда зако�
 
 ## Blocker и продолжение
 
+<a id="saving-rate-limit-retry"></a>
+
+### Сохранение после ограничения частоты
+
+Heartbeat, checkpoint и plain draft/candidate используют bounded rate-limit
+retry: максимум восемь повторов, Retry-After до пяти минут либо паузы
+1/2/4/8/16/30 секунд и далее по 30 секунд с jitter до 250 мс. Для этих mutations
+повтор разрешает только HTTP 429 с `REQUEST_RATE_LIMITED`: backend явно отказал
+до исполнения domain operation. Неизвестный proxy 429 и старый backend без
+marker не разрешают replay; 401/403/409/5xx и потерянный ответ также не
+повторяются этим механизмом. Checkpoint создаётся один раз, а bundle на каждом
+разрешённом retry читается новым stream из тех же immutable bytes.
+После исчерпания повторов файлы и Run остаются локально; сообщение об успешном
+серверном сохранении появляется только после подтверждённого ответа.
+
+Register/content upload сохраняют прежнюю идемпотентность и 429 retry;
+encrypted v2 сверяет upload/publication state перед новой mutation.
+Backend квоты разделяют файлы, control traffic и publication по verified userId
+для всех его Run/устройств; IP остаётся широким pre-auth flood ceiling.
+Storage concurrency ограничивается пользователем и backend process, чтобы
+общий офисный NAT не объединял сотрудников в одну малую квоту.
+
 Перед вопросом, без которого нельзя продолжить dirty Run, `pause` сначала
 готовит и загружает validated draft, включая external objects, затем создаёт
 blocker с exact summary/question/next action и `draftHead`. Только после
@@ -1392,8 +1414,9 @@ Inspect, draft resume, history и restore используют тот же ло�
 Heartbeat во время загрузки тоже соблюдает Retry-After. HTTP 401/403/409/5xx
 не повторяются этим механизмом. Отдельный cooldown 10–12 минут с одним повтором
 остаётся только для transport-обрыва. Backend отделяет upload metadata/parts
-от обычных mutations, ограничивает verified userId и общий IP, а также
-одновременные storage-операции. После подтверждённого acceptance cache удаляется;
+от control/publication traffic, ограничивает verified userId и оставляет широкий
+pre-auth IP ceiling. Plain/encrypted storage разделяют user/process concurrency
+pool без малой квоты на офисный IP. После подтверждённого acceptance cache удаляется;
 при ошибке он сохраняется. Server backup и maintenance учитывают upload parts,
 reused file references и зависимости full/delta истории.
 

@@ -10049,7 +10049,7 @@ test("bridge self-revokes an exchanged server session when private-file persiste
   }
 });
 
-test("bridge finish checkpoints and submits an external object without hanging", {
+test("bridge draft and finish survive explicit 429 at every saving stage without duplicate writes", {
   timeout: 15_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-submit-test-"));
@@ -10070,6 +10070,9 @@ test("bridge finish checkpoints and submits an external object without hanging",
   let registerAttempts = 0;
   let uploadAttempts = 0;
   let handoffPayload = null;
+  const attemptsByStage = new Map();
+  const refusedBodies = new Map();
+  const committedStages = new Map();
   let serverError = null;
 
   const server = createServer(async (request, response) => {
@@ -10079,14 +10082,47 @@ test("bridge finish checkpoints and submits an external object without hanging",
       assert.equal(request.headers["x-trelio-agent-workspaces-version"], PLUGIN_VERSION);
       assert.equal(request.headers.authorization, "Bearer integration-token");
 
+      const stage = request.url?.endsWith("/checkpoints")
+        ? `checkpoint-${JSON.parse(body.toString("utf8")).checkpointType}`
+        : ["heartbeat", "draft", "candidate"].find((suffix) => request.url?.endsWith(`/${suffix}`));
+      if (stage) {
+        const attempts = (attemptsByStage.get(stage) || 0) + 1;
+        attemptsByStage.set(stage, attempts);
+        if (attempts === 1) {
+          refusedBodies.set(stage, body);
+          response.statusCode = 429;
+          response.setHeader("retry-after", "0");
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ code: "REQUEST_RATE_LIMITED", message: "Rejected before execution" }));
+          return;
+        }
+        if (stage !== "heartbeat") {
+          assert.deepEqual(body, refusedBodies.get(stage), `${stage} must resend exact immutable bytes`);
+          committedStages.set(stage, (committedStages.get(stage) || 0) + 1);
+        }
+      }
+
       if (request.url?.endsWith("/heartbeat")) {
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({ leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() }));
         return;
       }
 
+      if (request.url?.endsWith("/draft")) {
+        const head = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ draft: { head }, run: { draftHead: head } }));
+        return;
+      }
       if (request.url?.endsWith("/checkpoints")) {
-        handoffPayload = JSON.parse(body.toString("utf8"));
+        const payload = JSON.parse(body.toString("utf8"));
+        if (payload.checkpointType === "draft") {
+          assert.ok(payload.draftHead);
+          response.setHeader("content-type", "application/json");
+          response.end(JSON.stringify({ id: "88888888-8888-4888-8888-888888888888", checkpointType: "draft" }));
+          return;
+        }
+        handoffPayload = payload;
         assert.equal(handoffPayload.checkpointType, "handoff");
         assert.match(handoffPayload.summary, /external object/u);
         assert.deepEqual(handoffPayload.evidence, ["Проверена передача binary pointer."]);
@@ -10120,7 +10156,7 @@ test("bridge finish checkpoints and submits an external object without hanging",
         assert.equal(registration.sha256, binaryDigest);
         assert.equal(registration.sizeBytes, binaryBytes.byteLength);
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({ uploadRequired: true }));
+        response.end(JSON.stringify({ uploadRequired: registerAttempts <= 2, pointer: expectedPointer }));
         return;
       }
 
@@ -10215,6 +10251,13 @@ test("bridge finish checkpoints and submits an external object without hanging",
       "utf8",
     );
 
+    const savedDraft = await execFileAsync(process.execPath, [bridgePath, "checkpoint", "--type", "draft",
+      "--summary", "Подготовлен переносимый external object."], {
+      cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000,
+      env: { ...process.env, HOME: homeDirectory },
+    });
+    assert.match(savedDraft.stdout, /Checkpoint сохранён/u);
+
     const submitted = await execFileAsync(
       process.execPath,
       [
@@ -10244,10 +10287,15 @@ test("bridge finish checkpoints and submits an external object without hanging",
     assert.match(submitted.stdout, /Проверены изменённые пути/u);
     assert.match(submitted.stdout, /Checkpoint сохранён/u);
     assert.ok(handoffPayload);
+    for (const stage of ["draft", "checkpoint-draft", "checkpoint-handoff", "candidate"]) {
+      assert.equal(attemptsByStage.get(stage), 2, `${stage} must retry exactly once`);
+      assert.equal(committedStages.get(stage), 1, `${stage} must be committed only once`);
+    }
+
     assert.ifError(serverError);
     assert.equal(
       seenRequests.filter((request) => request.url?.endsWith("/heartbeat")).length,
-      3,
+      6,
     );
     assert.ok(
       seenRequests.findIndex((request) => request.url?.endsWith("/heartbeat"))
@@ -10256,8 +10304,8 @@ test("bridge finish checkpoints and submits an external object without hanging",
     );
     assert.equal(
       registerAttempts,
-      2,
-      "register must retry once after Retry-After",
+      3,
+      "draft registration retries once, then finish reauthorizes the already uploaded object",
     );
     assert.equal(
       uploadAttempts,

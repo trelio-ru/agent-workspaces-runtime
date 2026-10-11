@@ -1719,6 +1719,7 @@ export const withRateLimitRetry = async (operation, {
   waitForRetry = wait,
   random = Math.random,
   report = (message) => process.stdout.write(message),
+  canRetry = () => true,
 } = {}) => {
   let retryCount = 0;
 
@@ -1729,6 +1730,7 @@ export const withRateLimitRetry = async (operation, {
       if (
         !(error instanceof TrelioApiError)
         || error.statusCode !== 429
+        || !canRetry(error)
         || retryCount >= MAX_RATE_LIMIT_RETRIES
       ) {
         throw error;
@@ -1759,10 +1761,18 @@ export const withRateLimitRetry = async (operation, {
   }
 };
 
-const requestWithRateLimitRetry = ({ origin, token, pathname, createOptions }) =>
+export const requestWithRateLimitRetry = ({
+  origin, token, pathname, createOptions,
+  rejectedBeforeExecutionOnly = false,
+}) =>
   // A consumed ReadStream cannot be reused. Each attempt opens the same
   // immutable file again through the existing options factory.
-  withRateLimitRetry(() => request(origin, token, pathname, createOptions()));
+  withRateLimitRetry(() => request(origin, token, pathname, createOptions()), {
+    // A checkpoint creates an immutable record. Repeat only an explicit
+    // backend guard rejection, never a proxy's unknown 429, timeout or 5xx.
+    // Older servers without this marker remain fail-closed for these writes.
+    canRetry: (error) => !rejectedBeforeExecutionOnly || error.code === "REQUEST_RATE_LIMITED",
+  });
 
 export const withEncryptedWorkspaceRequestRetry = (operation, options = {}) =>
   // HTTP 429 has its own short Retry-After path. A real transport failure
@@ -12591,10 +12601,13 @@ export const synchronizeRunCodexTitle = async ({ metadata, workspaceOrigin, toke
 };
 
 const heartbeat = async () => withRun(async ({ metadata, workspaceOrigin, token, companyEncryption }) => {
-  const response = await request(workspaceOrigin, token, `/api/agent-workspaces/runs/${metadata.runId}/heartbeat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ leaseId: metadata.leaseId, fencingToken: metadata.fencingToken }),
+  const response = await requestWithRateLimitRetry({ origin: workspaceOrigin, token,
+    pathname: `/api/agent-workspaces/runs/${metadata.runId}/heartbeat`, rejectedBeforeExecutionOnly: true,
+    createOptions: () => ({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ leaseId: metadata.leaseId, fencingToken: metadata.fencingToken }),
+    }),
   });
   const runPayload = await response.json();
   await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
@@ -13457,16 +13470,19 @@ const checkpoint = async (options) => withRun(async ({
         ...(openQuestions.length > 0 ? { openQuestions } : {}),
         ...(nextActionInstruction ? { nextAction: { instruction: nextActionInstruction } } : {}),
       };
-  const response = await request(workspaceOrigin, token, `/api/agent-workspaces/runs/${metadata.runId}/checkpoints`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      leaseId: metadata.leaseId,
-      fencingToken: metadata.fencingToken,
-      checkpointType,
-      ...protectedContent,
-      ...(taskOutcome ? { taskOutcome } : {}),
-      ...(draftSnapshot ? { draftHead: draftSnapshot.draftHead } : {}),
+  const response = await requestWithRateLimitRetry({ origin: workspaceOrigin, token,
+    pathname: `/api/agent-workspaces/runs/${metadata.runId}/checkpoints`, rejectedBeforeExecutionOnly: true,
+    createOptions: () => ({
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        leaseId: metadata.leaseId,
+        fencingToken: metadata.fencingToken,
+        checkpointType,
+        ...protectedContent,
+        ...(taskOutcome ? { taskOutcome } : {}),
+        ...(draftSnapshot ? { draftHead: draftSnapshot.draftHead } : {}),
+      }),
     }),
   });
   const checkpointPayload = await response.json();
@@ -14749,11 +14765,9 @@ const saveRunDraftSnapshot = async ({
         });
       }
       const bundleStat = await fs.stat(bundlePath);
-      const response = await request(
-        origin,
-        token,
-        `/api/agent-workspaces/runs/${metadata.runId}/draft`,
-        {
+      const response = await requestWithRateLimitRetry({ origin, token,
+        pathname: `/api/agent-workspaces/runs/${metadata.runId}/draft`, rejectedBeforeExecutionOnly: true,
+        createOptions: () => ({
           method: "POST",
           duplex: "half",
           headers: {
@@ -14763,8 +14777,8 @@ const saveRunDraftSnapshot = async ({
             "x-trelio-fencing-token": String(metadata.fencingToken),
           },
           body: createReadStream(bundlePath),
-        },
-      );
+        }),
+      });
       return response.json();
     },
   );
@@ -14990,16 +15004,21 @@ const submit = async (options) => withRun(async ({
     },
     async (bundlePath) => {
       const bundleStat = await fs.stat(bundlePath);
-      const response = await request(workspaceOrigin, token, `/api/agent-workspaces/runs/${metadata.runId}/candidate`, {
-        method: "POST",
-        duplex: "half",
-        headers: {
-          "content-type": "application/vnd.git.bundle",
-          "content-length": String(bundleStat.size),
-          "x-trelio-lease-id": metadata.leaseId,
-          "x-trelio-fencing-token": String(metadata.fencingToken),
-        },
-        body: createReadStream(bundlePath),
+      const response = await requestWithRateLimitRetry({
+        origin: workspaceOrigin, token,
+        pathname: `/api/agent-workspaces/runs/${metadata.runId}/candidate`,
+        rejectedBeforeExecutionOnly: true,
+        createOptions: () => ({
+          method: "POST",
+          duplex: "half",
+          headers: {
+            "content-type": "application/vnd.git.bundle",
+            "content-length": String(bundleStat.size),
+            "x-trelio-lease-id": metadata.leaseId,
+            "x-trelio-fencing-token": String(metadata.fencingToken),
+          },
+          body: createReadStream(bundlePath),
+        }),
       });
       const result = await response.json();
       if (result.run.status !== "accepted") {

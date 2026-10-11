@@ -5,6 +5,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { createServer } from "node:http";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import { createAgentEncryptionDevice, canonicalJson, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
@@ -18,7 +20,7 @@ import {
 import {
   assertEncryptedCandidateSafe, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile,
   uploadIncrementalEncryptedWorkspaceProjection,
-  TrelioApiError, withRateLimitRetry, withEncryptedWorkspaceRequestRetry,
+  TrelioApiError, withRateLimitRetry, withEncryptedWorkspaceRequestRetry, requestWithRateLimitRetry,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const exec = promisify(execFile);
@@ -361,4 +363,55 @@ test("HTTP retry and the single transport cooldown remain independent", async ()
       waitForCooldown: async () => assert.fail("not a transport failure"),
     }), (caught) => caught === error);
   }
+});
+
+test("plain mutation retry reopens bytes only after an explicit pre-execution rate rejection", async (t) => {
+  let status = 429;
+  let code = "REQUEST_RATE_LIMITED";
+  let attempts = 0;
+  let factories = 0;
+  let disconnect = false;
+  const bodies = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    bodies.push(Buffer.concat(chunks));
+    attempts++;
+    if (disconnect) { request.socket.destroy(); return; }
+    response.setHeader("content-type", "application/json");
+    response.setHeader("retry-after", "0");
+    response.statusCode = status;
+    response.end(JSON.stringify({ code, message: "synthetic response" }));
+    // A known 429 is a refused attempt: no mutation happened before this point.
+    if (status === 429 && code === "REQUEST_RATE_LIMITED") status = 200;
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const immutableBytes = Buffer.from("immutable candidate bundle fixture");
+  const save = () => requestWithRateLimitRetry({
+    origin, token: "synthetic-token", pathname: "/save", rejectedBeforeExecutionOnly: true,
+    createOptions: () => {
+      factories++;
+      return { method: "POST", duplex: "half", body: Readable.from([immutableBytes]) };
+    },
+  });
+  assert.equal((await save()).status, 200);
+  assert.equal(attempts, 2);
+  assert.equal(factories, 2);
+  assert.deepEqual(bodies, [immutableBytes, immutableBytes]);
+  // Unknown upstream 429, explicit auth/conflict/server errors and a lost
+  // response are ambiguous or terminal. They must never create another record.
+  for (const nextStatus of [429, 401, 403, 409, 500, 503]) {
+    status = nextStatus;
+    code = nextStatus === 429 ? "UNKNOWN_PROXY_RATE_LIMIT" : "REQUEST_RATE_LIMITED";
+    const previous = attempts;
+    await assert.rejects(save(), { statusCode: nextStatus });
+    assert.equal(attempts, previous + 1);
+    assert.equal(factories, attempts);
+  }
+  disconnect = true;
+  const previous = attempts;
+  await assert.rejects(save(), /transport|fetch|сети/iu);
+  assert.equal(attempts, previous + 1);
 });
