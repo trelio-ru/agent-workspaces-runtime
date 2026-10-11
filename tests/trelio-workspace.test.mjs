@@ -10054,6 +10054,13 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-submit-test-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
+  // HOME alone does not isolate Windows: its bridge uses LOCALAPPDATA.
+  // Keep every platform's credentials in this fixture, never the runner profile.
+  const childEnvironment = {
+    ...process.env, HOME: homeDirectory, USERPROFILE: homeDirectory,
+    LOCALAPPDATA: path.join(homeDirectory, "AppData", "Local"),
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
+  };
   const runDirectory = path.join(temporaryDirectory, "run");
   const workspaceDirectory = path.join(runDirectory, "workspace");
   const objectDirectory = path.join(workspaceDirectory, "sources");
@@ -10215,21 +10222,12 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
     const serverAddress = server.address();
     assert.ok(serverAddress && typeof serverAddress === "object");
     const origin = `http://127.0.0.1:${serverAddress.port}`;
-    const credentialDirectory = path.join(
-      homeDirectory,
-      ".config",
-      "trelio",
-      "workspace-bridge",
-    );
-    await mkdir(credentialDirectory, { recursive: true, mode: 0o700 });
-    if (process.platform !== "win32") {
-      await chmod(credentialDirectory, 0o700);
-    }
-    await writeFile(
-      path.join(credentialDirectory, "credentials.json"),
-      `${JSON.stringify({ [origin]: { accessToken: "integration-token" } }, null, 2)}\n`,
-      { mode: 0o600 },
-    );
+    const credentialDirectory = resolveWorkspaceBridgeConfigDirectory({
+      environment: childEnvironment, homeDirectory,
+    });
+    await writePrivateJsonFile(path.join(credentialDirectory, "credentials.json"), {
+      [origin]: { accessToken: "integration-token" },
+    });
     await writeFile(
       path.join(runDirectory, ".trelio-run.json"),
       `${JSON.stringify({
@@ -10254,7 +10252,7 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
     const savedDraft = await execFileAsync(process.execPath, [bridgePath, "checkpoint", "--type", "draft",
       "--summary", "Подготовлен переносимый external object."], {
       cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000,
-      env: { ...process.env, HOME: homeDirectory },
+      env: childEnvironment,
     });
     assert.match(savedDraft.stdout, /Checkpoint сохранён/u);
 
@@ -10276,10 +10274,7 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
         cwd: workspaceDirectory,
         encoding: "utf8",
         timeout: 8_000,
-        env: {
-          ...process.env,
-          HOME: homeDirectory,
-        },
+        env: childEnvironment,
       },
     );
 
