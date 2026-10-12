@@ -168,6 +168,10 @@ publication tooling также остаются вне этого публичн
   ambient PATH, сохраняя canonical-path проверки и isolated startup. Не требуй
   all-users reinstall из-за отсутствия PATH; контракт и Windows fixture –
   [README](README.md#поиск-python-для-agent-skills).
+- Encrypted mirror – восстановимый кэш: текущий снимок, один ограниченный
+  предыдущий и короткий compatibility grace. Startup cleanup охватывает старые
+  schema roots без чтения content/keys; sync/read locks, current pointers и
+  unsafe paths защищены по [контракту](docs/agent-workspace-runtime.md#mirror-retention).
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts всех этапов чтения обязательны по

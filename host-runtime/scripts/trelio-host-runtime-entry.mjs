@@ -8,6 +8,7 @@
  * plugin manifest и без удаления Codex plugin cache, откуда уже работают
  * открытые задачи.
  */
+import { startMirrorCacheMaintenance } from "./trelio-mirror-retention.mjs";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,7 +75,13 @@ export const runHostRuntime = async ({
 };
 
 if (isDirectModuleInvocation(import.meta.url)) {
-  runHostRuntime()
+  Promise.resolve().then(() => {
+    // Reject invalid modes/versions before even optional cache maintenance.
+    resolveHostRuntimeInvocation(process.argv.slice(2));
+    requireTrelioComponentVersions(process.env);
+    startMirrorCacheMaintenance();
+    return runHostRuntime();
+  })
     .then((exitCode) => {
       process.exitCode = exitCode;
     })

@@ -1,3 +1,4 @@
+import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
@@ -543,7 +544,7 @@ const acquireMirrorWriter = async (
   );
 };
 
-const readMirrorGeneration = async ({ paths, companyEncryption }) => {
+const readMirrorGenerationUnlocked = async ({ paths, companyEncryption }) => {
   const pointer = await readPrivateJsonFile(paths.pointer);
   if (Object.keys(pointer).length === 0) return null;
   if (pointer.schemaVersion === 1) {
@@ -594,30 +595,20 @@ const readMirrorGeneration = async ({ paths, companyEncryption }) => {
   return payload;
 };
 
-const pruneOldMirrorGenerations = async (paths, currentGeneration) => {
-  let entries;
-  try {
-    entries = await fs.readdir(paths.generations, { withFileTypes: true });
-  } catch (error) {
-    if (error.code === "ENOENT") return;
+// Reading the pointer and its immutable bytes is one local critical section.
+// Cleanup never removes a generation while a new-runtime reader is opening it;
+// network synchronization remains outside this lock, so readers still use the
+// previous complete generation while another process downloads changes.
+const readMirrorGeneration = async (input) => {
+  if (!await fs.lstat(input.paths.root).catch(error => {
+    if (error.code === "ENOENT") return null;
     throw error;
+  })) return null;
+  const result = await withMirrorRetentionLock(input.paths.root, () => readMirrorGenerationUnlocked(input));
+  if (result?.skipped === "busy") {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_SYNC_BUSY", "Local mirror maintenance is still running.");
   }
-  const cutoff = Date.now() - MIRROR_GENERATION_RETENTION_MS;
-  for (const entry of entries) {
-    const generation = entry.name.replace(/\.json$/u, "");
-    if (
-      !entry.isFile()
-      || generation === currentGeneration
-      || !MIRROR_GENERATION_PATTERN.test(generation)
-    ) {
-      continue;
-    }
-    const generationPath = path.join(paths.generations, entry.name);
-    const metadata = await fs.stat(generationPath);
-    if (metadata.mtimeMs < cutoff) {
-      await fs.rm(generationPath, { force: true });
-    }
-  }
+  return result;
 };
 
 const publishMirrorGeneration = async ({
@@ -671,7 +662,9 @@ const publishMirrorGeneration = async ({
     serverGeneration: mirror.serverGeneration,
     createdAt: mirror.createdAt,
   });
-  await pruneOldMirrorGenerations(paths, generation);
+  // Cleanup failure cannot turn a committed pointer publication into a failed
+  // mutation. Startup maintenance retries it independently.
+  await pruneMirrorSchema(paths.root).catch(() => undefined);
   return payload;
 };
 
@@ -3937,6 +3930,9 @@ export const syncCompanyContextMirror = async ({
       }),
       publish: (mirror) => publishMirrorGeneration({ paths, companyEncryption, mirror }),
     });
+    // Also prune unchanged mirrors: idle companies otherwise never reach the
+    // publication path and would retain historical files indefinitely.
+    if (!result.changed) await pruneMirrorSchema(paths.root).catch(() => undefined);
     return { ...result, paths };
   } finally {
     await writer.release();

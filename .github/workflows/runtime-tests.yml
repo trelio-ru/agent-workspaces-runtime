@@ -131,6 +131,7 @@ jobs:
           node tests/trelio-local-attachments.test.mjs
           node tests/trelio-local-path.test.mjs
           node tests/trelio-local-context.test.mjs
+          node tests/trelio-mirror-retention.test.mjs
           node tests/trelio-python.test.mjs
           node tests/trelio-mcp-results.test.mjs
           node tests/trelio-remote-mcp-oauth.test.mjs
@@ -253,6 +254,9 @@ jobs:
           node --test
           --test-name-pattern="bridge draft and finish survive|plain mutation retry|429 respects|HTTP retry"
           tests/trelio-workspace.test.mjs tests/trelio-encrypted-workspace-storage.test.mjs
+
+      - name: Run Windows encrypted mirror retention regressions
+        run: node tests/trelio-mirror-retention.test.mjs
 
       - name: Run Windows Workspace directory selection regressions
         run: node tests/trelio-workspace-directory.test.mjs

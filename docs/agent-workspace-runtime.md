@@ -1272,6 +1272,41 @@ Backend initialize содержит общий route; stable plugin shell не �
 Тесты проверяют scoped refresh, сохранность personal rules, override, Claude
 import, CAS, service Git, Cursor и независимое продолжение после folder failure.
 
+<a id="mirror-retention"></a>
+
+### Ограничение локальных зеркал компании
+
+Зеркало поиска – восстановимый encrypted cache, не история revisions.
+После успешной публикации и при sync без изменений runtime оставляет current
+и один наиболее свежий previous до 512 MiB. Current не ограничивается этим
+лимитом: большой действующий контекст нельзя удалить ради квоты. Снимки моложе
+15 минут временно сохраняются для совместимости с readers прежнего runtime;
+после grace лишние снимки удаляются независимо от прежних семи дней хранения.
+
+Pointer и encrypted bytes читаются под коротким `retention.lock`; удаление
+использует тот же lock, а сетевой sync остаётся вне него. Живой PID защищает
+reader без истечения по часам; подтверждённый dead owner восстанавливается по
+уникальному nonce-файлу. Unknown/empty/unsafe lock сохраняется. Cleanup после
+публикации best-effort: ошибка не превращает уже заменённый pointer в failed
+mutation и не разрешает повтор публикации.
+
+Каждый запуск signed entrypoint запускает отдельный тихий metadata-only sweep,
+не задерживая hook/MCP initialize. Общий lock и 15-минутный cooldown ограничивают
+повторы. Sweep охватывает известные schema 1–8 во всех origin/company roots,
+включая заброшенные форматы и компании без новых изменений. Для каждого schema
+атомарно захватывается прежний `sync.lock`; занятый root пропускается. Current
+и previous сохраняются в каждом старом формате для уже работающих старых hosts.
+Поэтому compatibility-копии и незавершённые чтения временно могут превышать
+целевой бюджет; новые schema неизвестного формата не изменяются.
+
+Удаляются только exact regular owner-private `<hash>.json` generations с
+повторной проверкой inode/size/mtime. Symlinks, hardlinks, unknown файлы, partial
+writes, повреждённые pointers и missing current сохраняются. Generation payload,
+keys, credentials и Workspace files не читаются; server state и ACL не меняются.
+Summary хранит только счётчики и время локально в `retention-state.json`.
+Scratchpad файлов сохраняет свой отдельный лимит 512 MiB/семь дней.
+Проверки: `tests/trelio-mirror-retention.test.mjs`, включая Windows gate.
+
 ## Учёт контекста агента
 
 `worktree:bootstrap` выполняет проверяемый `npm ci --include=dev --ignore-scripts`
