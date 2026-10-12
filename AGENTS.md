@@ -208,7 +208,9 @@ publication tooling также остаются вне этого публичн
   Проверяй `--check`, scope parity и раздельные limits. Legacy guidance tool
   сохраняется, а searched block не требует второго catalog call.
 
-- Для личных аккаунтов и их миграции читай [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков); provider credential code остаётся вне host.
+- Для личных аккаунтов, их миграции и гонок блокировок читай
+  [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков);
+  provider credential code остаётся вне host.
 
 ## Граница plugin/runtime
 

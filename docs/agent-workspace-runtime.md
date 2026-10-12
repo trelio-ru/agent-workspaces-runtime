@@ -1582,6 +1582,12 @@ code points, комментарий – 2000 с переносами; весь �
 Индекс owner-only, atomic write/read-back, optimistic revision; concurrent
 writers сериализуются, подтверждённый dead PID восстанавливается без удаления
 нового lock. Повреждённый/неизвестный state и неизвестный owner fail-closed.
+Если protected проверка contended lock отказала, повтор захвата разрешён только
+после свежего `lstat`, подтвердившего отсутствие самого каталога lock. Это
+закрывает окно release между Node и Windows ACL worker, сохраняет исходный
+deadline и не повторяет изменение каталога. При существующем/непроверяемом lock
+исходная ACL/I/O ошибка сохраняется; отсутствие одного `owner.json` не разрешает
+удаление, смену ACL или обход проверки.
 
 `account list` (alias `accounts`) возвращает только id/name/comment/bound/default
 и revision. Общий каталог доступен локальному OS user; между устройствами не

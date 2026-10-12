@@ -6,6 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { accountScope, accountText, createAccountCatalogue, splitAccountArguments } from '../host-runtime/scripts/trelio-skill-accounts.mjs';
 import { prepareSkillAccount, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 
 const company = crypto.randomUUID(), member = crypto.randomUUID(), connection = crypto.randomUUID();
 const identity = { origin: 'https://example.test', skillId: 'example-skill', companyId: company,
@@ -88,9 +89,70 @@ test('failed import is retriable; parallel edits cannot silently overwrite each 
   const outcomes = await Promise.allSettled([first, second].map(c => c.change({ operation: 'create',
     id: crypto.randomUUID(), name: 'Аккаунт', expectedRevision: revision })));
   assert.equal(outcomes.filter(v => v.status === 'fulfilled').length, 1);
-  assert.equal(outcomes.find(v => v.status === 'rejected').reason.code, 'ACCOUNT_CATALOGUE_CONFLICT');
+  const refusal = outcomes.find(v => v.status === 'rejected').reason;
+  // Keep hosted failures diagnosable without logging a private path, the
+  // exception message or provider state: this class carries closed dimensions.
+  assert.equal(refusal.code, 'ACCOUNT_CATALOGUE_CONFLICT', refusal instanceof ProcessDiagnosticError
+    ? JSON.stringify(refusal.details) : undefined);
   assert.equal((await first.list()).accounts.length, 1);
 });
+
+for (const stage of ['checkDirectory', 'read']) {
+  test(`a released lock during private ${stage} validation reaches the revision conflict`, async t => {
+    const { directory } = await fixture(t), scope = accountScope(identity);
+    const file = path.join(directory, 'skill-accounts', `${scope.catalogue}.json`);
+    const ownerFile = path.join(directory, 'skill-accounts', `${scope.catalogue}.lock`, 'owner.json');
+    const ownerPublished = Promise.withResolvers(), contenderEntered = Promise.withResolvers();
+    t.after(() => contenderEntered.resolve());
+    const first = createAccountCatalogue({ directory, scope, io: { ...io,
+      write: async (target, value) => {
+        // Keep the first writer's lock present until the contender reaches the
+        // exact protected read being tested; no scheduling/sleep guess is used.
+        if (target === file) await contenderEntered.promise;
+        await io.write(target, value);
+        if (target === ownerFile) ownerPublished.resolve();
+      },
+    } });
+    let firstWrite, injected = false;
+    const second = createAccountCatalogue({ directory, scope, io: { ...io,
+      [stage]: async (target, ...args) => {
+        const contended = stage === 'read' ? target === ownerFile : target.endsWith('.lock');
+        if (!contended || injected) return io[stage](target, ...args);
+        injected = true;
+        contenderEntered.resolve();
+        await firstWrite;
+        // The native worker uses this public hook code when the path vanished
+        // after lstat but before its handle/ACL check. Verify the same condition
+        // deterministically on every OS, as well as with the real Windows job.
+        throw new ProcessDiagnosticError('TRELIO_WINDOWS_PRIVATE_ACL_FAILED', 'synthetic private path failure',
+          { operation: 'windows_acl.owner_read' });
+      },
+    } });
+    firstWrite = first.change({ operation: 'create', id: crypto.randomUUID(), name: 'Первый', expectedRevision: 0 });
+    await ownerPublished.promise;
+    await assert.rejects(second.change({ operation: 'create', id: crypto.randomUUID(), name: 'Второй', expectedRevision: 0 }),
+      { code: 'ACCOUNT_CATALOGUE_CONFLICT' });
+    await firstWrite;
+    assert.equal((await first.list()).accounts.length, 1);
+  });
+
+  test(`private ${stage} failure with an existing lock preserves the original refusal`, async t => {
+    const { directory } = await fixture(t), scope = accountScope(identity);
+    const lock = path.join(directory, 'skill-accounts', `${scope.catalogue}.lock`);
+    const owner = { pid: process.pid, token: crypto.randomUUID() };
+    await ensurePrivateDirectory(lock);
+    await writePrivateJsonFile(path.join(lock, 'owner.json'), owner);
+    const failure = new ProcessDiagnosticError('TRELIO_WINDOWS_PRIVATE_ACL_FAILED', 'synthetic private path failure',
+      { operation: 'windows_acl.owner_read' });
+    const catalogue = createAccountCatalogue({ directory, scope, io: { ...io,
+      [stage]: async () => { throw failure; },
+    } });
+    await assert.rejects(catalogue.change({ operation: 'create', id: crypto.randomUUID(), name: 'Отказ', expectedRevision: 0 }),
+      error => error === failure);
+    assert.deepEqual(await readPrivateJsonFile(path.join(lock, 'owner.json')), owner);
+    await assert.rejects(fs.lstat(path.join(directory, 'skill-accounts', `${scope.catalogue}.json`)), { code: 'ENOENT' });
+  });
+}
 
 test('unknown schema is preserved and rejected; comments and selector input are bounded', async t => {
   const { directory, make } = await fixture(t), catalogue = make();
