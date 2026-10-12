@@ -158,13 +158,23 @@ const pruneIdleSchema = async root => {
   const lockId = crypto.randomUUID();
   const ownerPath = path.join(lock, "owner.json");
   const heartbeatPath = path.join(lock, `${lockId}.heartbeat.json`);
-  const stillOwnsWriter = async () => (await readPrivateJsonFile(ownerPath)).lockId === lockId;
+  let heartbeatIdentity;
+  const stillOwnsWriter = async () => {
+    // The heartbeat filename is unique to this owner. Metadata is sufficient
+    // to fence replacement and avoids reopening the Windows ACL worker for
+    // every historical generation. No private content or ACL result is cached.
+    try {
+      const current = await fs.lstat(heartbeatPath);
+      return current.isFile() && current.ino === heartbeatIdentity?.ino;
+    } catch (error) { if (isMissing(error)) return false; throw error; }
+  };
   let heartbeat;
   try {
     await writePrivateJsonFile(path.join(lock, "owner.json"), {
       schemaVersion: 1, lockId, pid: process.pid, createdAt: new Date().toISOString(),
     });
     await writePrivateJsonFile(heartbeatPath, { schemaVersion: 1, lockId });
+    heartbeatIdentity = await fs.lstat(heartbeatPath);
     // Older writers reclaim a lock after ten minutes without a heartbeat. Use
     // their existing nonce-bound protocol, including on a very slow disk.
     heartbeat = setInterval(() => {
