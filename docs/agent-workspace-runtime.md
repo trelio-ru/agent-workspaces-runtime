@@ -1315,8 +1315,11 @@ import, CAS, service Git, Cursor и независимое продолжени�
 
 Pointer и encrypted bytes читаются под коротким `retention.lock`; удаление
 использует тот же lock, а сетевой sync остаётся вне него. Живой PID защищает
-reader без истечения по часам; подтверждённый dead owner восстанавливается по
-уникальному nonce-файлу. Unknown/empty/unsafe lock сохраняется. Ошибка protected inspection допускает
+reader без истечения по часам. Contender читает только structural имя PID/nonce;
+оно разрешает лишь ожидание. Protected root validation и publication выполняет
+только владелец mkdir claim: параллельная запись parent DACL в Windows не должна
+обгонять проверку прав дочернего файла. Подтверждённый dead owner восстанавливается
+только после protected чтения exact nonce-файла и совпадения PID/id. Unknown/empty/unsafe lock сохраняется. Ошибка protected inspection допускает
 повтор только захвата lock под прежним deadline, когда fresh metadata доказывает
 исчезновение/замену exact каталога либо уникального nonce прежнего owner;
 новый owner проверяется заново. Исходная операция не повторяется. Cleanup после

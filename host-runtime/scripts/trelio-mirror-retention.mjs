@@ -40,38 +40,62 @@ const deadOwner = pid => {
   }
 };
 export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000 } = {}) => {
-  await assertPrivatePathKind(root, "directory").catch(error => {
-    error.mirrorLockStage = "root_validation";
-    throw error;
-  });
+  // Contenders inspect only structural lock metadata. Windows hardening is a
+  // write: applying a parent DACL while its owner publishes a child can race
+  // the child's DACL verification. Serialize every protected read/hardening
+  // behind the mkdir claim; no business data is touched before validation.
+  const rootStat = await fs.lstat(root);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("Unsafe mirror lock root.");
   const lock = path.join(root, "retention.lock");
   const id = crypto.randomUUID();
-  const ownerPath = path.join(lock, `${id}.json`);
+  const ownerPath = path.join(lock, `${process.pid}-${id}.json`);
   const deadline = Date.now() + waitMs;
   let attempted = false;
   for (;;) {
     if (attempted && Date.now() >= deadline) return { skipped: "busy" };
     attempted = true;
+    let claimedIdentity;
     try {
       await fs.mkdir(lock, { mode: 0o700 });
+      claimedIdentity = await fs.lstat(lock);
+      await assertPrivatePathKind(root, "directory").catch(error => {
+        error.mirrorLockStage = "root_validation";
+        throw error;
+      });
       await writePrivateJsonFile(ownerPath, { id, pid: process.pid }).catch(error => {
         error.mirrorLockStage = "owner_publication";
         throw error;
       });
       break;
     } catch (error) {
-      if (error.code !== "EEXIST") throw error;
+      if (error.code !== "EEXIST") {
+        // Failed initialization owns only its nonce and empty claim directory.
+        // Never leave a known failed acquisition as an immortal reader lock.
+        const current = await fs.lstat(lock).catch(() => null);
+        if (claimedIdentity && current?.ino === claimedIdentity.ino
+          && current.birthtimeMs === claimedIdentity.birthtimeMs) {
+          await fs.unlink(ownerPath).catch(() => undefined);
+          await fs.rmdir(lock).catch(() => undefined);
+        }
+        throw error;
+      }
       let observedLock;
       let observedOwnerPath;
       try {
         observedLock = await fs.lstat(lock);
-        await assertPrivatePathKind(lock, "directory");
+        if (!observedLock.isDirectory() || observedLock.isSymbolicLink()) throw new Error("Unsafe mirror lock.");
         const entries = await fs.readdir(lock);
-        if (entries.length === 1 && /^[a-f0-9-]{36}\.json$/u.test(entries[0])) {
+        const identity = entries.length === 1
+          ? /^(\d+)-([a-f0-9-]{36})\.json$/u.exec(entries[0]) : null;
+        // A live PID in a filename grants only waiting, never access/recovery.
+        // Validate the protected record only for a confirmed dead process; it
+        // cannot concurrently publish, and file hardening does not touch parent
+        // DACLs or a successor's differently named ownership record.
+        if (identity && deadOwner(Number(identity[1]))) {
           const observedPath = path.join(lock, entries[0]);
           observedOwnerPath = observedPath;
           const owner = await readPrivateJsonFile(observedPath, { maximumBytes: 1024 });
-          if (deadOwner(owner.pid)) {
+          if (owner.pid === Number(identity[1]) && owner.id === identity[2] && deadOwner(owner.pid)) {
             // The filename is this owner's random nonce. Competing recoverers
             // cannot unlink a successor's differently named record (the ABA
             // race of a shared owner.json). Only the successful unlink may rmdir.

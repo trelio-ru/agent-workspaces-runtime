@@ -115,10 +115,10 @@ test('dead maintenance owner is recovered; live owner is never expired by age', 
   const id = '22222222-2222-4222-8222-222222222222';
   // A completed child provides an actually dead PID rather than a guessed one.
   const { stdout } = await exec(process.execPath, ['-e', 'process.stdout.write(String(process.pid))']);
-  await writePrivateJsonFile(path.join(lock, `${id}.json`), { id, pid: Number(stdout) });
+  await writePrivateJsonFile(path.join(lock, `${Number(stdout)}-${id}.json`), { id, pid: Number(stdout) });
   assert.equal(await withMirrorRetentionLock(root, async () => 'recovered'), 'recovered');
   await ensurePrivateDirectory(lock);
-  await writePrivateJsonFile(path.join(lock, `${id}.json`), { id, pid: process.pid });
+  await writePrivateJsonFile(path.join(lock, `${process.pid}-${id}.json`), { id, pid: process.pid });
   await fs.utimes(lock, old, old);
   assert.equal((await withMirrorRetentionLock(root, async () => assert.fail(), { waitMs: 0 })).skipped, 'busy');
 });
