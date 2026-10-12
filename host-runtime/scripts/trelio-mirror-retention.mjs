@@ -40,7 +40,10 @@ const deadOwner = pid => {
   }
 };
 export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000 } = {}) => {
-  await assertPrivatePathKind(root, "directory");
+  await assertPrivatePathKind(root, "directory").catch(error => {
+    error.mirrorLockStage = "root_validation";
+    throw error;
+  });
   const lock = path.join(root, "retention.lock");
   const id = crypto.randomUUID();
   const ownerPath = path.join(lock, `${id}.json`);
@@ -51,7 +54,10 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
     attempted = true;
     try {
       await fs.mkdir(lock, { mode: 0o700 });
-      await writePrivateJsonFile(ownerPath, { id, pid: process.pid });
+      await writePrivateJsonFile(ownerPath, { id, pid: process.pid }).catch(error => {
+        error.mirrorLockStage = "owner_publication";
+        throw error;
+      });
       break;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
@@ -91,6 +97,7 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
         if (freshLock === null || (observedLock && freshLock
           && (freshLock.ino !== observedLock.ino || freshLock.birthtimeMs !== observedLock.birthtimeMs))
           || (observedOwnerPath && !await exists(observedOwnerPath).catch(() => true))) continue;
+        inspectionError.mirrorLockStage = "contended_inspection";
         throw inspectionError;
       }
       if (Date.now() >= deadline) return { skipped: "busy" };

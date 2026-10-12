@@ -196,6 +196,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Run Windows encrypted mirror retention regressions
+        run: node tests/trelio-mirror-retention.test.mjs
+
       - name: Run Windows Python discovery and isolation regressions
         run: node tests/trelio-python.test.mjs
 
@@ -254,9 +257,6 @@ jobs:
           node --test
           --test-name-pattern="bridge draft and finish survive|plain mutation retry|429 respects|HTTP retry"
           tests/trelio-workspace.test.mjs tests/trelio-encrypted-workspace-storage.test.mjs
-
-      - name: Run Windows encrypted mirror retention regressions
-        run: node tests/trelio-mirror-retention.test.mjs
 
       - name: Run Windows Workspace directory selection regressions
         run: node tests/trelio-workspace-directory.test.mjs
