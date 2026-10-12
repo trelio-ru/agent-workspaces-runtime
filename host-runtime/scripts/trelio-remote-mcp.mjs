@@ -33,6 +33,7 @@ import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctor
 import {
   CODEX_ROUTING_APPLY_TOOL_NAME,
   CODEX_ROUTING_PLAN_TOOL_NAME,
+  CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
   CodexRoutingConfigError,
   applyCodexTrelioHookRouting,
   inspectCodexTrelioHookSettings,
@@ -50,6 +51,7 @@ import {
   AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES,
   AGENT_SKILL_MAX_PACKAGE_BYTES,
   AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
+  BridgeTransportError,
   TrelioApiError,
   diagnoseLocalPrerequisites,
   ensureBridgeCompatibility,
@@ -235,8 +237,8 @@ const AGENT_SKILL_PACKAGE_MIME_TYPE = "application/vnd.trelio.agent-skill-packag
  * deciding which tool family should handle the request.
  */
 export const AGENT_SKILL_ROUTING_INSTRUCTIONS = [
-  "Native exact reads/Run не требуют поиска. Следуй server providerSelection; local route сам не выводи.",
-  "Codex Code Mode: один exact read; max_output_tokens задай сразу, между exec используй store()/load(). Не перечитывай неизменившийся результат ради другого среза.",
+  "Exact reads/Run без поиска; local route – server providerSelection.",
+  CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
   // Внешний поиск может завершиться до любого task/Run tool. Роутер обязан
   // довести этот путь до той же проверки принятого контекста, что и worker.
   "Перед итогом работы/внешнего поиска без Run выполни trelio-workspace-worker/references/workspace-context-review.md по effective rules.",
@@ -6235,25 +6237,32 @@ export const startHostRuntimeMcpDelegate = async ({
 // Preserve this known structural read-conflict code without exposing arbitrary
 // backend codes or HTTP payload/details, which can contain protected context.
 // Serialization alone never authorizes replaying the original tool operation.
-const safeErrorPayload = (error) => ({
-  code: error instanceof RemoteMcpHostError
-    || error instanceof RemoteMcpOAuthError
-    || error instanceof TrelioLocalContextError
-    || error instanceof ProcessDiagnosticError
-    || error instanceof HostRuntimeRecoveryError
-    || error instanceof CodexRoutingConfigError
-    || (error instanceof TrelioApiError
-      && error.statusCode === 409
-      && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED")
-    ? error.code
-    : String(error?.message || "").includes("TRELIO_BRIDGE_PAIRING_REQUIRED")
-      ? "TRELIO_BRIDGE_PAIRING_REQUIRED"
-      : "REMOTE_MCP_HOST_ERROR",
-  message: error instanceof Error ? error.message : String(error),
-  ...((error instanceof RemoteMcpHostError || error instanceof TrelioLocalContextError || error instanceof HostRuntimeRecoveryError || error instanceof ProcessDiagnosticError) && error.details
-    ? { details: error.details }
-    : {}),
-});
+const safeErrorPayload = (error) => {
+  // request() already strips the native fetch cause down to closed technical
+  // fields. Preserve that typed result for in-process local mirror reads just
+  // as the child bridge adapter does; never spread Error/cause/details here.
+  // This is serialization only: neither a read nor a mutation is retried.
+  if (error instanceof BridgeTransportError) return error.toJSON();
+  return {
+    code: error instanceof RemoteMcpHostError
+      || error instanceof RemoteMcpOAuthError
+      || error instanceof TrelioLocalContextError
+      || error instanceof ProcessDiagnosticError
+      || error instanceof HostRuntimeRecoveryError
+      || error instanceof CodexRoutingConfigError
+      || (error instanceof TrelioApiError
+        && error.statusCode === 409
+        && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED")
+      ? error.code
+      : String(error?.message || "").includes("TRELIO_BRIDGE_PAIRING_REQUIRED")
+        ? "TRELIO_BRIDGE_PAIRING_REQUIRED"
+        : "REMOTE_MCP_HOST_ERROR",
+    message: error instanceof Error ? error.message : String(error),
+    ...((error instanceof RemoteMcpHostError || error instanceof TrelioLocalContextError || error instanceof HostRuntimeRecoveryError || error instanceof ProcessDiagnosticError) && error.details
+      ? { details: error.details }
+      : {}),
+  };
+};
 
 export const handleLocalMcpMessage = async (
   message,

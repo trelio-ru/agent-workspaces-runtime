@@ -1222,9 +1222,39 @@ Object cache очищается по возрасту/LRU/лимиту, signed r
 целыми проверенными digest-каталогами. Очистка удаляет лишь локальную копию;
 accepted revision и история Run остаются на сервере Trelio.
 
+<a id="bridge-transport-diagnostics"></a>
+
+## Диагностика transport bridge
+
+`BridgeTransportError` до HTTP-ответа сохраняет публичный
+`TRELIO_BRIDGE_TRANSPORT_FAILED`, `phase` (`api_request` либо
+`bridge_compatibility`) и закрытый `causeCode`. Неизвестные значения
+проецируются в `unknown`/`UNKNOWN`; native cause, stack, endpoints,
+proxy diagnostics, произвольные details и provider payload не выдаются.
+In-process company mirror и child bridge используют эту же проекцию.
+Local MCP не заменяет типизированный отказ общим `REMOTE_MCP_HOST_ERROR`;
+code-shaped поле нетипизированной внешней ошибки не принимается как authority.
+Сериализация не повторяет ни чтение, ни mutation и не сбрасывает credentials.
+Telemetry использует уже опубликованный закрытый код, без details.
+
 <a id="readiness-diagnostics"></a>
 
 ## Диагностика готовности
+
+В Codex `mcp__trelio` и `mcp__trelio_remote_skills` вызываются напрямую,
+вне `functions.exec`, чтобы клиент исполнил `PreToolUse`. `ALL_TOOLS`
+описывает доступные nested calls; отсутствие direct namespaces в нём не является
+отказом MCP. Подсказки Code Mode/output budget и `store()/load()` применяются
+только к реально доступным nested tools. Общий текст формируется одним runtime
+источником для initialize, диагностики и managed folder block.
+
+`clientInspection.toolExposure` задаёт ожидаемые namespaces и две проверки:
+direct schema в текущем ходе и безопасное прямое чтение. Сам local MCP не видит
+model toolset owner-процесса, поэтому exposure и `readiness.checks.toolExposure`
+остаются `not_checked`; config, CLI inventory и server `ready` не подтверждают
+их. Успешный вызов доказывает только проверенный инструмент/ход. Если прямой
+schema нет, сохраняется client exposure blocker без изменения OAuth, trust или
+routing. Непроверенное состояние не объявляется недоступностью.
 
 Local `diagnose_trelio_installation(intent=diagnostics)` принимает реальный
 `clientKind` (`codex|claude-code|cursor|antigravity`) и optional

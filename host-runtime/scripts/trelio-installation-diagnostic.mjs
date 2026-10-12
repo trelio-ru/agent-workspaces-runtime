@@ -8,6 +8,8 @@
  * actions that a bundled skill can apply under its existing confirmation rules.
  */
 
+import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPACES } from "./trelio-codex-routing.mjs";
+
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
 const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
@@ -35,6 +37,18 @@ const requireEnum = (value, allowed, fieldName) => {
 const buildClientInspection = (clientKind) => (
   clientKind === "codex"
     ? {
+        // These are expected client capabilities, not observations made by
+        // this stdio process. A disk config or successful MCP initialize cannot
+        // tell us which direct schemas the owner delivered to the current turn.
+        toolExposure: {
+          state: "not_checked",
+          scope: "current_chat_model_tools",
+          invocation: "direct",
+          expectedNamespaces: [...CODEX_TRELIO_DIRECT_TOOL_NAMESPACES],
+          nestedInventoryIsComplete: false,
+          checks: ["direct_tool_schema_present", "safe_direct_read_result"],
+          instructions: CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
+        },
         hookDispatch: {
           scope: "owning_app_server_and_current_chat",
           checks: ["loaded_definition", "current_definition_trust_and_enabled", "effective_hooks_and_managed_only_policy", "pretooluse_started_and_completed"],
@@ -47,7 +61,7 @@ const buildClientInspection = (clientKind) => (
         mcpInventory: {
           command: "codex mcp list --json",
           proves: ["remote_mcp_registration", "local_mcp_registration"],
-          doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof"],
+          doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof", "current_chat_model_tool_exposure"],
         },
       }
     : ["cursor", "antigravity"].includes(clientKind) ? {
@@ -360,12 +374,20 @@ export const buildTrelioInstallationDiagnostic = ({
           localComponents: requiredActions.length > 0 ? "action_required" : local.status ?? "unknown",
           oauth: "not_checked", protectedContext: "not_checked", workspaceRead: "not_checked",
           skills: "not_checked", savingResults: "not_checked",
+          ...(clientKind === "codex" ? { toolExposure: "not_checked" } : {}),
         },
         reportStates: ["confirmed", "requires_action", "not_checked", "not_applicable"],
         instructions: "Report each actually checked layer separately. Local success never proves complete readiness or saving results. Continue independent read-only checks after a folder blocker. Do not create test tasks, Workspaces or Runs; do not send or centrally store the report.",
       },
     } : {}),
     liveVerification: {
+      ...(clientKind === "codex" ? {
+        toolExposure: {
+          state: "not_checked",
+          inspection: "clientInspection.toolExposure",
+          successProves: "only_the_direct_tool_and_current_turn_actually_checked",
+        },
+      } : {}),
       oauth: {
         state: "unverified",
         nextTool: "list_companies",

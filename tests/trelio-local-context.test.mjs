@@ -275,6 +275,34 @@ test("unknown operation recovery never reflects arbitrary input or guesses a mut
   });
 });
 
+test("child transport diagnostics keep the same closed cause contract as in-process reads", async () => {
+  for (const causeCode of ["ECONNRESET", "PRIVATE_CAUSE_CANARY"]) {
+    let calls = 0;
+    await assert.rejects(handleTrelioWorkspaceActionOperation(
+      "https://trelio.example",
+      { schemaVersion: 1, operation: "doctor", parameters: {} },
+      { runBridge: async () => {
+        calls += 1;
+        throw Object.assign(new Error("PRIVATE_NATIVE_CAUSE"), {
+          stderr: "Ошибка: " + JSON.stringify({
+            code: "TRELIO_BRIDGE_TRANSPORT_FAILED",
+            details: { phase: "api_request", causeCode, privatePath: "PRIVATE_PATH" },
+          }),
+        });
+      } },
+    ), (error) => {
+      assert.equal(error.code, "TRELIO_BRIDGE_TRANSPORT_FAILED");
+      assert.deepEqual(error.details, {
+        operation: "doctor", phase: "api_request",
+        causeCode: causeCode === "ECONNRESET" ? causeCode : "UNKNOWN",
+      });
+      assert.doesNotMatch(JSON.stringify(error.details), /PRIVATE/u);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
 test("recovered turn check uses the original identity and closed status parameters", async () => {
   const runIdentity = { workspaceId: actionWorkspaceId, runId: actionRunId };
   let launched = 0;

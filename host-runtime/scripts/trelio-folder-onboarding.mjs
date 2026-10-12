@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { sameLocalPath } from "./trelio-local-path.mjs";
+import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS } from "./trelio-codex-routing.mjs";
 
 import {
   GIT_DISABLED_GLOBAL_CONFIG_PATH,
@@ -322,6 +323,8 @@ const buildManagedBindingBlock = ({ company, project }) => {
     "Для bridge action `open` передай эту выбранную клиентом папку в `workingDirectory`; остальные returned arguments сохрани. Не подставляй cwd процесса MCP, каталог плагина или home.",
     "",
     "Если в корне осталась служебная `.git` клиента, сохраняй её и корневое исключение `/workspaces/` в `.gitignore`. Не выполняй Git add/commit/push из корня и не добавляй туда remote. Git-операции Trelio относятся только к выданному bridge воркспейсу.",
+    "",
+    CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS,
     "",
     "По запросу диагностики Trelio сначала вызови diagnose_trelio_installation с intent=diagnostics, реальным clientKind и текущей выбранной клиентом папкой в folderOnboarding.folderPath. Следуй возвращённому плану; не создавай учебные задачи или Run. Обновляй только существующий managed Trelio-блок через returned refresh action, если пользователь не запретил изменения.",
     "",
