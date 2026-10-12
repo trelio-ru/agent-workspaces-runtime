@@ -72,7 +72,10 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
           }
         }
       } catch (inspectionError) {
-        if (isMissing(inspectionError)) continue;
+        // Windows may report an ACL-worker failure if the owner removed the
+        // directory between lstat and validation. Only fresh absence permits
+        // retry; an existing/unverifiable lock preserves the original refusal.
+        if (!await exists(lock).catch(() => true)) continue;
         throw inspectionError;
       }
       if (Date.now() >= deadline) return { skipped: "busy" };

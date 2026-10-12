@@ -181,3 +181,27 @@ test('real entrypoint runs background maintenance using only its isolated local 
   }
   assert.fail('background maintenance did not release its lock');
 });
+
+
+test('independent processes serialize updates while lock directories repeatedly disappear', async t => {
+  const f = await fixture(t); const root = await f.schema();
+  const counter = path.join(root, 'counter.json');
+  await fs.writeFile(counter, '0', { mode: 0o600 });
+  const moduleUrl = new URL('../host-runtime/scripts/trelio-mirror-retention.mjs', import.meta.url).href;
+  const source = `import fs from 'node:fs/promises';
+    import { withMirrorRetentionLock } from ${JSON.stringify(moduleUrl)};
+    for (let n = 0; n < 12; n++) {
+      const result = await withMirrorRetentionLock(process.argv[1], async () => {
+        const count = Number(await fs.readFile(process.argv[2], 'utf8'));
+        await fs.writeFile(process.argv[2], String(count + 1));
+        return true;
+      });
+      if (result !== true) throw Error('lock acquisition did not complete');
+    }`;
+  const env = { ...process.env, HOME: f.base, USERPROFILE: f.base,
+    LOCALAPPDATA: path.join(f.base, 'AppData', 'Local'), CODEX_HOME: path.join(f.base, '.codex'),
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: '1' };
+  await Promise.all(Array.from({ length: 3 }, () => exec(process.execPath,
+    ['--input-type=module', '-e', source, root, counter], { env })));
+  assert.equal(Number(await fs.readFile(counter, 'utf8')), 36);
+});
