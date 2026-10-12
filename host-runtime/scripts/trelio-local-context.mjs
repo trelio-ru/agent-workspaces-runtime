@@ -48,6 +48,7 @@ import {
   LEGACY_WORKSPACE_CONTEXT_FILE_NAME,
   TrelioApiError,
   WORKSPACE_CONTEXT_FILE_NAME,
+  buildBridgeTransportDiagnosticDetails,
   ensureBridgeCompatibility,
   ensureCompanyEncryptionContext,
   ensurePrivateDirectory,
@@ -9732,7 +9733,7 @@ const parseBridgeTransportError = (stderr, operation) => {
   const causeCode = payload?.details?.causeCode;
   if (
     payload?.code !== "TRELIO_BRIDGE_TRANSPORT_FAILED"
-    || !["api_request", "bridge_compatibility"].includes(phase)
+    || !["api_request", "bridge_compatibility", "unknown"].includes(phase)
     || !/^(?:UNKNOWN|[A-Z][A-Z0-9_]{1,63})$/u.test(causeCode)
   ) return null;
 
@@ -9742,7 +9743,7 @@ const parseBridgeTransportError = (stderr, operation) => {
   return new TrelioLocalContextError(
     payload.code,
     "Trelio bridge transport failed before an HTTP response.",
-    { operation, phase, causeCode },
+    { operation, ...buildBridgeTransportDiagnosticDetails(phase, causeCode) },
   );
 };
 

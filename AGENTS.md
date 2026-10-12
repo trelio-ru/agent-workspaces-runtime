@@ -34,6 +34,10 @@ publication tooling также остаются вне этого публичн
   не является hook identity. Некорректный распознанный action отклоняется до
   регистрации, а допустимые local templates без nativeTool сохраняют свой ABI.
   Статическая совместимость matcher не доказывает dispatch или trust клиента.
+- Codex direct routing и выдача инструментов текущей модели проверяются отдельно:
+  [диагностика](docs/agent-workspace-runtime.md#readiness-diagnostics).
+  Пустой nested `ALL_TOOLS` не доказывает недоступность direct tools;
+  бюджетные подсказки bundled skill относятся только к доступным nested tools.
 - Диагностика сохранённых Codex hooks читает только пользовательский config
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
   включает hook; дисковый снимок не является effective state App Server.
@@ -196,6 +200,9 @@ publication tooling также остаются вне этого публичн
   различает startup/request/protocol/ACL/DPAPI. Hook deny сохраняет закрытый
   failureCode/phase. Hooks имеют отдельную boundary и content-free user-temp
   очередь без private helper; legacy error-only данные не входят в v2 rates.
+- In-process и child bridge сохраняют один закрытый transport error contract:
+  [контракт](docs/agent-workspace-runtime.md#bridge-transport-diagnostics).
+  Не раскрывай native cause/stack и не добавляй автоматический повтор исходного действия.
 - Test subprocess fixtures изолируют HOME/USERPROFILE, config roots и origin:
   CODEX_HOME не отделяет hook journal. Проверяй настоящий writer в fixture-очереди
   с cleanup; stdio collector не должен читать рабочий журнал/credential.
@@ -205,7 +212,9 @@ publication tooling также остаются вне этого публичн
   Проверяй `--check`, scope parity и раздельные limits. Legacy guidance tool
   сохраняется, а searched block не требует второго catalog call.
 
-- Для личных аккаунтов и их миграции читай [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков); provider credential code остаётся вне host.
+- Для личных аккаунтов, их миграции и гонок блокировок читай
+  [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков);
+  provider credential code остаётся вне host.
 
 ## Граница plugin/runtime
 

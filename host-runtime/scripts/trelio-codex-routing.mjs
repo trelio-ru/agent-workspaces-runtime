@@ -8,6 +8,13 @@ export const CODEX_TRELIO_DIRECT_TOOL_NAMESPACES = Object.freeze([
   "mcp__trelio",
   "mcp__trelio_remote_skills",
 ]);
+// The namespaces are deliberately excluded from nested Code Mode dispatch so
+// the client can run PreToolUse before every protected call. ALL_TOOLS is an
+// inventory of nested-call capabilities, not evidence of model tool exposure.
+// Keep this explanation shared by initialize, diagnostics and folder binding:
+// an older bundled skill's output-budget advice must not reverse that routing.
+export const CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS =
+  "Codex: Trelio MCP – direct, вне functions.exec. ALL_TOOLS ≠ direct inventory; ready/CLI ≠ tools модели. Проверь direct schema без OAuth/trust/routing repair. Code Mode – nested.";
 export const CODEX_LEGACY_TRELIO_MCP_SERVER_NAME = "trelio-mcp";
 
 export const CODEX_ROUTING_PLAN_TOOL_NAME = "plan_codex_trelio_hook_routing";

@@ -859,6 +859,11 @@ test("bridge transport diagnostics preserve phase and safe cause code without le
   });
   assert.doesNotMatch(formatBridgeCommandError(diagnostic), /private-proxy|secret-token/u);
   assert.equal(isEncryptedWorkspaceRetryableTransportError(diagnostic), true);
+  const enriched = new BridgeTransportError(privateText, new Error(privateText));
+  enriched.causeCode = privateText;
+  enriched.details = { privateText };
+  assert.deepEqual(enriched.toJSON().details, { phase: "unknown", causeCode: "UNKNOWN" });
+  assert.doesNotMatch(JSON.stringify(enriched), /private-proxy|secret-token/u);
 
   const server = createServer((incoming) => incoming.socket.destroy());
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));

@@ -1366,6 +1366,11 @@ const BRIDGE_TRANSPORT_CAUSE_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
+export const buildBridgeTransportDiagnosticDetails = (phase, causeCode) => ({
+  phase: ["api_request", "bridge_compatibility"].includes(phase) ? phase : "unknown",
+  causeCode: BRIDGE_TRANSPORT_CAUSE_CODES.has(causeCode) ? causeCode : "UNKNOWN",
+});
+
 const bridgeTransportCauseCode = (error) => {
   const seen = new Set();
   for (let current = error, depth = 0; current && depth < 6 && !seen.has(current); depth += 1) {
@@ -1391,7 +1396,10 @@ export class BridgeTransportError extends Error {
     return {
       code: this.code,
       message: this.message,
-      details: { phase: this.phase, causeCode: this.causeCode },
+      // The MCP serializer consumes this same projection for in-process
+      // failures. Enrichment of the Error must never broaden the two public
+      // dimensions, even if a caller supplies an unexpected diagnostic phase.
+      details: buildBridgeTransportDiagnosticDetails(this.phase, this.causeCode),
     };
   }
 }

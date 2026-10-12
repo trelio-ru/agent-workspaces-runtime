@@ -104,6 +104,15 @@ export function createAccountCatalogue({ directory, scope, io }) {
     const value = await io.read(file, { maximumBytes: MAX_BYTES });
     return validateState(value);
   };
+  const lockWasReleased = async () => {
+    // Windows ACL validation opens the path after its lstat. Another writer
+    // can release the lock in that interval, so the private worker reports an
+    // ACL failure rather than Node's ENOENT. Only a fresh absence observation
+    // permits another acquisition attempt: an existing/unverifiable path keeps
+    // the original error. This probe grants no access and never removes a lock.
+    try { await fs.lstat(lock); return false; }
+    catch (error) { return error.code === 'ENOENT'; }
+  };
   async function transaction(operation) {
     await io.ensureDirectory(root);
     const token = crypto.randomUUID(), deadline = Date.now() + 5000;
@@ -127,9 +136,17 @@ export function createAccountCatalogue({ directory, scope, io }) {
         // Do not remove an ownerless/unknown lock: it may be between mkdir and
         // protected owner publication. Crash recovery is an explicit safe error.
         // Validation must never recreate a lock another writer just released.
-        try { await io.checkDirectory(lock); }
-        catch (missing) { if (missing.code === 'ENOENT') continue; throw missing; }
-        const owner = await io.read(path.join(lock, 'owner.json'), { maximumBytes: 1024 });
+        let owner;
+        try {
+          await io.checkDirectory(lock);
+          owner = await io.read(path.join(lock, 'owner.json'), { maximumBytes: 1024 });
+        } catch (error) {
+          // Retry only lock acquisition, under the original deadline and before
+          // the catalogue operation. Missing owner.json with a still-present
+          // directory is not proof of release or permission to reclaim it.
+          if (await lockWasReleased()) continue;
+          throw error;
+        }
         if (Number.isSafeInteger(owner.pid) && owner.pid > 0) {
           try { process.kill(owner.pid, 0); }
           catch (e) {

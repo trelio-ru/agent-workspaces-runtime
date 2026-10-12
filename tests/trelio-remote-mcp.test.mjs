@@ -46,7 +46,7 @@ import {
   connectRemoteMcpOAuth,
   refreshRemoteMcpOAuth,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
-import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { BridgeTransportError, TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { CodexRoutingConfigError } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
@@ -119,6 +119,44 @@ test("local MCP does not expose arbitrary HTTP codes or a forged company-context
     assert.equal(payload.message, failure.message);
     assert.doesNotMatch(JSON.stringify(response), /PRIVATE-BACKEND-CODE/u);
   }
+});
+
+test("in-process bridge transport errors retain closed diagnostics without replay or private causes", async () => {
+  for (const phase of ["api_request", "bridge_compatibility"]) {
+    const failure = new BridgeTransportError(phase, Object.assign(new Error("PRIVATE-TRANSPORT-URL"), {
+      cause: Object.assign(new Error("PRIVATE-CREDENTIAL"), { code: "ECONNRESET" }),
+    }));
+    failure.details = { privatePath: "PRIVATE-WORKSPACE" };
+    let calls = 0;
+    const observations = [];
+    const response = await handleLocalMcpMessage({
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "continue_trelio_local_action", arguments: {} },
+    }, {
+      callTool: async () => { calls += 1; throw failure; },
+      recordDiagnostic: (_tool, _arguments, code) => observations.push(code),
+    });
+    assert.equal(response.result.isError, true);
+    assert.deepEqual(JSON.parse(response.result.content[0].text), {
+      code: "TRELIO_BRIDGE_TRANSPORT_FAILED",
+      message: "Trelio bridge transport failed before an HTTP response.",
+      details: { phase, causeCode: "ECONNRESET" },
+    });
+    assert.doesNotMatch(JSON.stringify(response), /PRIVATE-/u);
+    assert.equal(calls, 1);
+    assert.deepEqual(observations, ["TRELIO_BRIDGE_TRANSPORT_FAILED"]);
+  }
+  // A code-shaped field on an untyped external error is not admission to the
+  // diagnostic projection; it must not expose provider-controlled details.
+  const forged = Object.assign(new Error("Untyped failure."), {
+    code: "TRELIO_BRIDGE_TRANSPORT_FAILED", details: { phase: "PRIVATE-PHASE", causeCode: "PRIVATE-CAUSE" },
+  });
+  const response = await handleLocalMcpMessage({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "continue_trelio_local_action", arguments: {} },
+  }, { callTool: async () => { throw forged; } });
+  assert.equal(JSON.parse(response.result.content[0].text).code, "REMOTE_MCP_HOST_ERROR");
+  assert.doesNotMatch(JSON.stringify(response), /PRIVATE-/u);
 });
 
 test("large private packages raise their exact runtime host floor", () => {
@@ -2780,6 +2818,29 @@ test("generic diagnostics return independent live checks and never claim write r
   assert.match(payload.liveVerification.instructionRefresh.instructions, /unchanged templates are a no-op/u);
 });
 
+test("Codex diagnostics keep direct model tool exposure unverified despite ready components and routing", async () => {
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    codexHookSettingsRead: async () => ({ status: "observed", effectiveState: "unknown" }),
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.codexRouting.status, "ready");
+  assert.equal(payload.clientInspection.toolExposure.state, "not_checked");
+  assert.equal(payload.clientInspection.toolExposure.invocation, "direct");
+  assert.equal(payload.clientInspection.toolExposure.nestedInventoryIsComplete, false);
+  assert.deepEqual(payload.clientInspection.toolExposure.expectedNamespaces, ["mcp__trelio", "mcp__trelio_remote_skills"]);
+  assert.match(payload.clientInspection.toolExposure.instructions, /ALL_TOOLS/u);
+  assert.match(payload.clientInspection.toolExposure.instructions, /вне functions\.exec/u);
+  assert.ok(payload.clientInspection.mcpInventory.doesNotProve.includes("current_chat_model_tool_exposure"));
+  assert.equal(payload.readiness.checks.toolExposure, "not_checked");
+  assert.equal(payload.liveVerification.toolExposure.state, "not_checked");
+  assert.equal(payload.liveVerification.toolExposure.inspection, "clientInspection.toolExposure");
+  assert.equal(payload.requiredActions.length, 0, "Expected direct routing does not authorize config or credential repair.");
+});
+
 test("a folder I/O blocker keeps the remaining diagnostic plan and hides private error text", async () => {
   const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
     clientKind: "claude-code", intent: "diagnostics", folderOnboarding: { folderPath: "/private/folder" },
@@ -4475,10 +4536,13 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
 
   assert.equal(instructions, AGENT_SKILL_ROUTING_INSTRUCTIONS);
   for (const invariant of [
-    /Native exact reads\/Run не требуют поиска/u,
-    /Следуй server providerSelection; local route сам не выводи/u,
-    /Codex Code Mode: один exact read; max_output_tokens задай сразу/u,
-    /между exec используй store\(\)\/load\(\)/u,
+    /Exact reads\/Run без поиска/u,
+    /local route – server providerSelection/u,
+    /Codex: Trelio MCP – direct/u,
+    /вне functions\.exec/u,
+    /ALL_TOOLS ≠ direct inventory/u,
+    /ready\/CLI ≠ tools модели/u,
+    /Code Mode – nested/u,
     /Единый search возвращает guidance и контекст/u,
     /list_agent_skills – inventory/u,
     /kind=procedure → exact get_agent_procedure/u,
@@ -4538,7 +4602,7 @@ test("stdio startup removes legacy Codex MCP before initialize and requires rest
     assert.match(initialized.result.instructions, /автоматически удалил legacy MCP server trelio-mcp/u);
     assert.match(initialized.result.instructions, /Полностью перезапусти Codex\/ChatGPT/u);
     assert.match(initialized.result.instructions, /не вызывай уже загруженные mcp__trelio_mcp__\*/u);
-    assert.match(initialized.result.instructions, /Native exact reads\/Run не требуют поиска/u);
+    assert.match(initialized.result.instructions, /Exact reads\/Run без поиска/u);
   } finally {
     await harness.close();
   }
@@ -4793,7 +4857,7 @@ test("platform routing is purpose-based and works for an unknown future skill", 
     skillId: "future-orbital-inventory",
   });
   assert.match(instructions, /search_agent_guidance/u);
-  assert.match(instructions, /store\(\).*load\(\)/u);
+  assert.match(instructions, /Code Mode – nested/u);
   assert.doesNotMatch(
     instructions,
     /signed-inventory-runtime|remote-knowledge|future-orbital-inventory/iu,
@@ -4813,7 +4877,7 @@ test("platform routing allows a named fallback when no relevant skill exists", a
   });
   assert.match(instructions, /При searched, hasMore=false и отсутствии relevant skill/u);
   assert.match(instructions, /допустим совместимый личный connector/u);
-  assert.match(instructions, /Native exact reads\/Run не требуют поиска/u);
+  assert.match(instructions, /Exact reads\/Run без поиска/u);
 });
 
 test("platform routing blocks on explicit no_access until the user chooses another source", async () => {
@@ -4907,7 +4971,7 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async (t) => {
   assert.equal(frames[0].result.instructions, AGENT_SKILL_ROUTING_INSTRUCTIONS);
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.doesNotMatch(frames[0].result.instructions, /command-ответов|процедура совместимости/u);
-  assert.match(frames[0].result.instructions, /Native exact reads\/Run не требуют поиска/u);
+  assert.match(frames[0].result.instructions, /Exact reads\/Run без поиска/u);
   assert.equal(frames[1].result.tools.length, 29);
 });
 

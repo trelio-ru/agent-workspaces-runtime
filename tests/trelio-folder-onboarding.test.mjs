@@ -298,6 +298,9 @@ test("an active AGENTS.override.md requires an explicit target decision", async 
   });
   assert.equal(prepared.plan.instructionTarget, "AGENTS.override.md");
   assert.match(prepared.plan.preview.managedBlock, /Тестовая компания/u);
+  assert.match(prepared.plan.preview.managedBlock, /Trelio MCP – direct/u);
+  assert.match(prepared.plan.preview.managedBlock, /ALL_TOOLS ≠ direct inventory/u);
+  assert.match(prepared.plan.preview.managedBlock, /ready\/CLI ≠ tools модели/u);
 });
 
 test("service Git is preserved and bridge paths are proven ignored", async () => {
