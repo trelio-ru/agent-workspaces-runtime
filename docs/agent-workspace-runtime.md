@@ -1,5 +1,25 @@
 # Agent Workspace Runtime
 
+## Универсальный импорт данных
+
+`upload_import_package` использует обычный `continue_trelio_local_action` с
+absolute `localFilePath`, companySlug и стабильным clientRequestId. Native MCP
+резервирует metadata, host передаёт выбранный манифест/ZIP immutable binary
+stream. Манифест ограничен 16 МиБ; encrypted company отклоняется до mirror/file
+обработки. Plugin shell и model-visible local ABI не меняются.
+
+Server-returned missing file sessions остаются внутри host. Он разрешает лишь
+portable `files/` paths под каталогом выбранного манифеста, отвергает traversal,
+symlink ancestors, чужой upload namespace и несовпадение size/SHA-256. Каждый
+файл отдельно snapshot-ится и передаётся по authenticated
+`/api/agent-workspaces/import-files/:UUID/content` до 64 МиБ, затем temporary
+snapshot удаляется. Пакет ограничен 2 000 файлами/1 ГиБ; remote URLs не скачиваются.
+Reservation/file retries привязаны к тем же IDs и bytes; uncertain result
+восстанавливается authenticated import-upload read. В модель возвращается
+только компактный import receipt, counts/warnings/planHash, без file sessions,
+bytes, source paths или stream tokens. Успех staging не запускает импорт:
+`start_import` отдельно проверяет plan, live domain scopes и разрешение пользователя.
+
 ## Содержание
 
 - Приоритет алгоритмического исполнения

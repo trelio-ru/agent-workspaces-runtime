@@ -2642,8 +2642,12 @@ export const buildLocalTaskAttachmentStreamRequest = async ({
   staging,
   companyEncryption = null,
 }) => {
-  if (!["upload_attachment", "upload_knowledge_base_attachment"].includes(nativeTool)) {
+  if (!["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package"].includes(nativeTool)) {
     throw new TrelioLocalContextError("LOCAL_ACTION_INVALID_UPLOAD_TARGET", "Unsupported attachment owner.");
+  }
+  const isImport = nativeTool === "upload_import_package";
+  if (isImport && (companyEncryption || staging.sizeBytes > 16 * 1024 * 1024)) {
+    throw new TrelioLocalContextError("IMPORT_ENCRYPTION_OR_SIZE_UNSUPPORTED", "Import v1 requires a plain company and a package of at most 16 MiB.");
   }
   const isKnowledgeBase = nativeTool === "upload_knowledge_base_attachment";
   if (rawArguments?.asInlineImage) {
@@ -2671,7 +2675,7 @@ export const buildLocalTaskAttachmentStreamRequest = async ({
   // that a misplaced path, base64 body or future local-only field never leaks.
   const baseArguments = {
     companySlug: argumentCompanySlug,
-    ...(isKnowledgeBase
+    ...(isImport ? {} : isKnowledgeBase
       ? { pageSlug: normalizeBoundedString(rawArguments?.pageSlug, "pageSlug", 120) }
       : { projectSlug: rawArguments?.projectSlug, taskNumber: rawArguments?.taskNumber }),
     clientRequestId: stableRequestId,
@@ -2682,7 +2686,7 @@ export const buildLocalTaskAttachmentStreamRequest = async ({
       value: {
         ...baseArguments,
         fileName: originalName,
-        contentType: mimeType,
+        ...(isImport ? {} : { contentType: mimeType }),
         sizeBytes: staging.sizeBytes,
         sha256: staging.sha256,
         delivery: "local-stream",
@@ -2812,12 +2816,16 @@ const isRetryableLocalTaskAttachmentUploadError = (error) => {
   ].includes(error?.code ?? error?.cause?.code);
 };
 
-const parseLocalTaskAttachmentUploadSession = (rawResult, expected) => {
+const parseLocalTaskAttachmentUploadSession = (rawResult, expected, nativeTool = "upload_attachment") => {
   const uploadSession = rawResult?.structuredContent?.uploadSession;
   if (!uploadSession) return null;
 
   const uploadId = normalizeUuid(uploadSession.id, "uploadSession.id");
-  const expectedUploadPath = `/api/agent-workspaces/task-attachment-uploads/${uploadId}/content`;
+  // Never trust a returned arbitrary destination: package and attachment
+  // uploads have distinct authenticated endpoint namespaces.
+  const expectedUploadPath = nativeTool === "upload_import_file" ? `/api/agent-workspaces/import-files/${uploadId}/content` : nativeTool === "upload_import_package"
+    ? `/api/agent-workspaces/import-uploads/${uploadId}/content`
+    : `/api/agent-workspaces/task-attachment-uploads/${uploadId}/content`;
   if (
     uploadSession.uploadPath !== expectedUploadPath
     || uploadSession.sizeBytes !== expected.sizeBytes
@@ -2912,15 +2920,15 @@ export const resolveLocalTaskAttachmentUploadSession = async ({
     "clientRequestId",
     255,
   );
-  if (!["upload_attachment", "upload_knowledge_base_attachment"].includes(nativeTool)) {
+  if (!["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package"].includes(nativeTool)) {
     throw new TrelioLocalContextError("LOCAL_ACTION_INVALID_UPLOAD_TARGET", "Unsupported attachment owner.");
   }
   const query = new URLSearchParams({ clientRequestId: normalizedRequestId });
   // Old task recovery URLs remain byte-for-byte compatible. The extra target
   // selects a separate idempotency namespace and knowledge-base OAuth scope.
-  if (nativeTool !== "upload_attachment") query.set("nativeTool", nativeTool);
+  if (!["upload_attachment", "upload_import_package"].includes(nativeTool)) query.set("nativeTool", nativeTool);
   const pathname = `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}`
-    + `/task-attachment-uploads/resolve?${query.toString()}`;
+    + `/${nativeTool === "upload_import_package" ? "import-uploads" : "task-attachment-uploads"}/resolve?${query.toString()}`;
 
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
@@ -8640,7 +8648,7 @@ const handleLocalTaskAttachmentStreamOperation = async ({
     const uploadSession = parseLocalTaskAttachmentUploadSession(preparedResult, {
       sizeBytes: protectedRequest.sizeBytes,
       sha256: protectedRequest.sha256,
-    });
+    }, nativeTool);
     let rawResult = preparedResult;
     if (uploadSession) {
       try {
@@ -8671,13 +8679,14 @@ const handleLocalTaskAttachmentStreamOperation = async ({
         if (parseLocalTaskAttachmentUploadSession(recoveryResult, {
           sizeBytes: protectedRequest.sizeBytes,
           sha256: protectedRequest.sha256,
-        })) {
+        }, nativeTool)) {
           throw error;
         }
         rawResult = recoveryResult;
       }
     }
 
+    if (nativeTool === "upload_import_package") return uploadLocalImportFiles({ rawResult, manifestPath: rawInput.localFilePath, origin: provider.requestOrigin, token: provider.token, signal });
     if (!provider.companyEncryption) return rawResult;
     return hydrateLocalActionResult({
       rawResult,
@@ -8700,6 +8709,41 @@ const handleLocalTaskAttachmentStreamOperation = async ({
       });
     }
   }
+};
+
+export const uploadLocalImportFiles = async ({ rawResult, manifestPath, origin, token, signal }) => {
+  // Only the trusted host sees missing file sessions. Resolve portable
+  // paths relative to the operator-selected manifest, reject symlinked
+  // ancestors/escape and upload immutable local snapshots one at a time.
+  // The MCP result contains a compact receipt, never the source bytes or
+  // thousands of internal binary-upload sessions.
+  if (rawResult?.isError) return rawResult;
+  if (!rawResult?.structuredContent?.import?.id) throw new TrelioLocalContextError("IMPORT_INVALID_RECEIPT", "Invalid import receipt.");
+  const sessions = rawResult?.structuredContent?.fileUploads ?? [];
+  if (!Array.isArray(sessions) || sessions.length > 2000) throw new TrelioLocalContextError("IMPORT_INVALID_FILE_SESSIONS", "Invalid import file sessions.");
+  const root = await fs.realpath(path.dirname(manifestPath));
+  for (const session of sessions) {
+    const relative = session?.path;
+    if (typeof relative !== "string" || relative.length > 500 || !relative.startsWith("files/") || /[\\:\u0000-\u001f]/u.test(relative) || relative.split("/").some((part) => !part || part === "." || part === "..")) throw new TrelioLocalContextError("IMPORT_INVALID_FILE_PATH", "Invalid import source path.");
+    let target = root;
+    for (const part of relative.split("/")) {
+      target = path.join(target, part);
+      const metadata = await fs.lstat(target);
+      if (metadata.isSymbolicLink()) throw new TrelioLocalContextError("IMPORT_INVALID_FILE_PATH", "Import source paths cannot follow symlinks.");
+    }
+    const snapshot = await stageLocalTaskAttachmentUpload(target);
+    try {
+      const uploadSession = parseLocalTaskAttachmentUploadSession({ structuredContent: { uploadSession: session } }, { sizeBytes: snapshot.sizeBytes, sha256: snapshot.sha256 }, "upload_import_file");
+      const uploaded = await uploadLocalTaskAttachmentStream({ origin, token, uploadSession, uploadFilePath: snapshot.stagedFilePath, signal });
+      if (uploaded.structuredContent?.uploaded !== true) throw new TrelioLocalContextError("IMPORT_FILE_UPLOAD_FAILED", "File upload did not complete.");
+    } finally { await fs.rm(snapshot.temporaryDirectory, { recursive: true, force: true }); }
+  }
+  const { fileUploads: _sessions, ...receipt } = rawResult.structuredContent;
+  if (sessions.length) {
+    receipt.import.status = "ready";
+    receipt.missingFiles = { count: 0, paths: [] };
+  }
+  return { structuredContent: receipt, content: [{ type: "text", text: "Import package staged and validated. Review the receipt and plan before start_import." }] };
 };
 
 export const handleTrelioLocalActionOperation = async (
@@ -8748,13 +8792,13 @@ export const handleTrelioLocalActionOperation = async (
     ? "native_trelio"
     : "local_company_context");
   const hasLocalFilePath = rawInput.localFilePath !== undefined;
-  if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment", "add_meeting_source", "create_meeting"].includes(nativeTool)) {
+  if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package", "add_meeting_source", "create_meeting"].includes(nativeTool)) {
     throw new TrelioLocalContextError(
       "LOCAL_ACTION_INVALID_UPLOAD_PATH",
-      "localFilePath supports task attachments, knowledge-base attachments and meeting transcripts only.",
+      "localFilePath supports attachments, import packages and meeting transcripts only.",
     );
   }
-  if (nativeTool === "upload_attachment" && !hasLocalFilePath) {
+  if (["upload_attachment", "upload_import_package"].includes(nativeTool) && !hasLocalFilePath) {
     throw new TrelioLocalContextError(
       "LOCAL_ACTION_UPLOAD_PATH_REQUIRED",
       "Task attachment uploads require localFilePath and the streaming transport.",
@@ -8763,6 +8807,10 @@ export const handleTrelioLocalActionOperation = async (
   if (provider.nativeProvider && !hasLocalFilePath) return {
     content: [{ type: "text", text: JSON.stringify(provider.result) }],
   };
+
+  if (nativeTool === "upload_import_package" && !provider.nativeProvider) {
+    throw new TrelioLocalContextError("IMPORT_ENCRYPTION_UNSUPPORTED", "Universal import v1 is available only for plain companies.");
+  }
 
   if (hasLocalFilePath && ["add_meeting_source", "create_meeting"].includes(nativeTool) && provider.nativeProvider) {
     return handleLocalMeetingTranscriptOperation({

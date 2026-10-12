@@ -106,6 +106,9 @@ publication tooling также остаются вне этого публичн
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
 - Сохранение после 429, immutable upload streams и совместимость старого backend
   проверяй по [transport-контракту](docs/agent-workspace-runtime.md#saving-rate-limit-retry).
+- Универсальный импорт использует [локальный transport](docs/agent-workspace-runtime.md#универсальный-импорт-данных):
+  bounded immutable streams, paths только внутри выбранного пакета и compact
+  receipts без файловых bytes/sessions; encrypted v1 fail-closed.
 - `SessionStart source=compact` восстанавливает обязанность полного чтения
   pinned authority без замены Run/session. Контракт и ограничения –
   [README](README.md#ошибки-lifecycle-hooks); stable hook definition не меняется.

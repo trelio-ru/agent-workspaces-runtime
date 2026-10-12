@@ -63,6 +63,7 @@ import {
   signalLocalCompanyMirrorMutation,
   stageLocalTaskAttachmentUpload,
   uploadLocalTaskAttachmentStream,
+  uploadLocalImportFiles,
   uploadLocalTaskAttachmentPayloads,
   uploadLocalActionPayloads,
 } from "../host-runtime/scripts/trelio-local-context.mjs";
@@ -1778,7 +1779,40 @@ test("local meeting create and source addition inject the whole selected file", 
   }
 });
 
-for (const nativeTool of ["upload_attachment", "upload_knowledge_base_attachment"]) {
+test("universal import uploads only declared local snapshots and hides internal file sessions", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-import-files-test-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, "files"));
+  const bytes = Buffer.from("historical import file");
+  await fs.writeFile(path.join(root, "files", "data.txt"), bytes);
+  const id = crypto.randomUUID(), fileId = crypto.randomUUID();
+  const session = { id: fileId, path: "files/data.txt", sizeBytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), expiresAt: new Date(Date.now() + 3600000).toISOString(), uploadPath: `/api/agent-workspaces/import-files/${fileId}/content` };
+  const receipt = () => ({ structuredContent: { import: { id, status: "awaiting_files" }, fileUploads: [session] } });
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let uploads = 0;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(new URL(url).pathname, session.uploadPath);
+    const chunks = []; for await (const chunk of options.body) chunks.push(Buffer.from(chunk));
+    assert.deepEqual(Buffer.concat(chunks), bytes); uploads++;
+    return new Response(JSON.stringify({ uploaded: true, remainingFiles: 0 }), { status: 200 });
+  };
+  const args = { manifestPath: path.join(root, "import.json"), origin: "https://trelio.test", token: "synthetic-token" };
+  const result = await uploadLocalImportFiles({ ...args, rawResult: receipt() });
+  assert.equal(uploads, 1); assert.equal(result.structuredContent.import.status, "ready");
+  assert.equal("fileUploads" in result.structuredContent, false); assert.equal(JSON.stringify(result).includes("historical import file"), false);
+  for (const patch of [{ path: "files/../../outside" }, { sha256: "0".repeat(64) }, { uploadPath: "https://other.test/exfiltrate" }]) {
+    await assert.rejects(() => uploadLocalImportFiles({ ...args, rawResult: { structuredContent: { import: { id }, fileUploads: [{ ...session, ...patch }] } } }));
+  }
+  assert.equal(uploads, 1);
+  await fs.symlink(path.join(root, "files"), path.join(root, "linked"));
+  await fs.symlink(path.join(root, "linked"), path.join(root, "files", "link"));
+  await assert.rejects(() => uploadLocalImportFiles({ ...args, rawResult: { structuredContent: { import: { id }, fileUploads: [{ ...session, path: "files/link/data.txt" }] } } }), /symlinks/u);
+  const denied = { isError: true, content: [{ type: "text", text: "IMPORT_ACCESS_DENIED" }] };
+  assert.equal(await uploadLocalImportFiles({ ...args, rawResult: denied }), denied);
+});
+
+for (const nativeTool of ["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package"]) {
   test(`${nativeTool} staging keeps the path local and builds plain stream metadata`, async () => {
     const sourceDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-local-upload-test-"));
     const sourcePath = path.join(sourceDirectory, "Планы этажей.pdf");
@@ -1807,7 +1841,12 @@ for (const nativeTool of ["upload_attachment", "upload_knowledge_base_attachment
         staging,
       });
       assert.equal(prepared.value.fileName, "Планы этажей.pdf");
-      assert.equal(prepared.value.contentType, "application/pdf");
+      if (nativeTool === "upload_import_package") {
+        assert.equal(Object.hasOwn(prepared.value, "contentType"), false);
+        assert.equal(Object.hasOwn(prepared.value, "taskNumber"), false);
+        assert.equal(Object.hasOwn(prepared.value, "projectSlug"), false);
+        await assert.rejects(() => buildLocalTaskAttachmentStreamRequest({ nativeTool, rawArguments: { companySlug: "acme", clientRequestId: "encrypted-import" }, staging, companyEncryption: {} }), /plain company/u);
+      } else assert.equal(prepared.value.contentType, "application/pdf");
       assert.equal(prepared.value.delivery, "local-stream");
       if (nativeTool === "upload_knowledge_base_attachment") {
         assert.equal(prepared.value.pageSlug, "knowledge");
@@ -1828,6 +1867,7 @@ for (const nativeTool of ["upload_attachment", "upload_knowledge_base_attachment
     }
   });
 
+  if (nativeTool === "upload_import_package") continue;
   test(`${nativeTool} encryption stays binary and decrypts to the staged source`, async () => {
     const sourceDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-encrypted-upload-test-"));
     const sourcePath = path.join(sourceDirectory, "secret.pdf");
