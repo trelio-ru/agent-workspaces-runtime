@@ -7,6 +7,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { workspaceActionFailureCode } from "../host-runtime/scripts/trelio-local-context.mjs";
+import {
+  bridgeHttpDiagnosticCode, buildBridgeHttpErrorFrame, parseBridgeHttpDiagnostic,
+} from "../host-runtime/scripts/trelio-bridge-http-diagnostics.mjs";
 
 const execFileAsync = promisify(execFile);
 const scriptsDirectory = fileURLToPath(new URL("../host-runtime/scripts/", import.meta.url));
@@ -35,6 +38,7 @@ const openAction = {
 const bridgeProbe = `
 import fs from "node:fs/promises";
 import { skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
+import { buildBridgeHttpErrorFrame } from "./trelio-bridge-http-diagnostics.mjs";
 await fs.appendFile(process.env.TRELIO_TEST_EXECUTIONS, "started\\n");
 if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
   process.stderr.write("Ошибка: " + JSON.stringify({
@@ -84,6 +88,13 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
     },
   }) + "\\n");
   process.exitCode = 7;
+} else if (process.env.TRELIO_TEST_HTTP_STATUS) {
+  process.stderr.write("PRIVATE_CANARY provider stderr\\n");
+  process.stderr.write("Ошибка: " + JSON.stringify(buildBridgeHttpErrorFrame(
+    Number(process.env.TRELIO_TEST_HTTP_STATUS), process.env.TRELIO_TEST_HTTP_CODE,
+    "PRIVATE_CANARY original local explanation",
+  )) + "\\n");
+  process.exitCode = 1;
 } else if (process.env.TRELIO_TEST_PROVIDER_FAILURE) {
   process.stdout.write(JSON.stringify({ ok: false,
     code: process.env.TRELIO_TEST_PROVIDER_FAILURE,
@@ -175,7 +186,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", httpStatus = "", httpCode = "", ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -187,6 +198,8 @@ const createFixture = async (t) => {
         TRELIO_TEST_CHILD_FAILURE: childFailure ? "1" : "0",
         TRELIO_TEST_PROVIDER_FAILURE: providerFailure,
         TRELIO_TEST_INNER_EXIT: String(innerExit),
+        TRELIO_TEST_HTTP_STATUS: String(httpStatus),
+        TRELIO_TEST_HTTP_CODE: httpCode,
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
         TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
@@ -225,6 +238,61 @@ test("MCP sees the inner skill exit, not the bridge CLI exit, with no action rep
   assert.equal(outcome.error.diagnosticCode, "TRELIO_SKILL_RUNTIME_EXIT_5");
   assert.equal(outcome.error.details.process.exitCode, 5);
   assert.equal(outcome.executions, "started\n");
+});
+
+test("HTTP diagnostics share the in-process projection and reject private or legacy frames", () => {
+  const frame = (status, backendCode) => "Ошибка: " + JSON.stringify(
+    buildBridgeHttpErrorFrame(status, backendCode, "PRIVATE_CANARY"),
+  ) + "\n";
+  for (const [status, backendCode, expected] of [
+    [400, "PRIVATE_CANARY", "TRELIO_BACKEND_HTTP_400"],
+    [401, null, "TRELIO_BACKEND_HTTP_401"],
+    [403, null, "TRELIO_BACKEND_HTTP_403"],
+    [404, null, "TRELIO_BACKEND_HTTP_404"],
+    [409, null, "TRELIO_BACKEND_HTTP_409"],
+    [429, "REQUEST_RATE_LIMITED", "TRELIO_BACKEND_HTTP_429"],
+    [429, "UNKNOWN", "TRELIO_BACKEND_HTTP_429"],
+    [503, null, "TRELIO_BACKEND_HTTP_5XX"],
+    [422, null, "TRELIO_BACKEND_HTTP_OTHER"],
+    [422, "INVALID_INPUT", "INVALID_INPUT"],
+  ]) {
+    assert.equal(bridgeHttpDiagnosticCode(status, backendCode), expected);
+    const parsed = parseBridgeHttpDiagnostic("PRIVATE_CANARY prelude\n" + frame(status, backendCode));
+    assert.deepEqual(parsed, { httpStatus: status, failureCode: expected });
+    assert.doesNotMatch(JSON.stringify(parsed), /PRIVATE_CANARY/u);
+    assert.equal(workspaceActionFailureCode({ code: 1, stderr: frame(status, backendCode) }, "open"), expected);
+  }
+  for (const stderr of [
+    frame(429) + "Ошибка: legacy failure\n",
+    "Ошибка: Trelio API 429: arbitrary legacy/provider prose",
+    "Ошибка: " + JSON.stringify({ code: "TRELIO_BRIDGE_HTTP_ERROR", details: { httpStatus: "429" } }),
+    "Ошибка: " + JSON.stringify({ code: "TRELIO_BRIDGE_HTTP_ERROR", details: { httpStatus: 429, backendCode: "PRIVATE_CANARY" } }),
+    frame(200), frame(600), frame(429).replace("PRIVATE_CANARY", "я".repeat(33000)),
+    frame(429).replace("PRIVATE_CANARY", "x".repeat(8200)),
+  ]) {
+    assert.equal(parseBridgeHttpDiagnostic(stderr), null);
+    assert.equal(workspaceActionFailureCode({ code: 1, stderr }, "open"), "TRELIO_WORKSPACE_CHILD_PROCESS_FAILED");
+  }
+});
+
+test("real HTTP bridge failures preserve the action wrapper and never repeat a child", async (t) => {
+  const { buildAgentDiagnosticEvent } = await import("../host-runtime/scripts/trelio-agent-diagnostics.mjs");
+  for (const [httpStatus, httpCode, expected] of [
+    [429, "REQUEST_RATE_LIMITED", "TRELIO_BACKEND_HTTP_429"],
+    [400, "PRIVATE_CANARY", "TRELIO_BACKEND_HTTP_400"],
+    [422, "INVALID_INPUT", "INVALID_INPUT"],
+    [403, "", "TRELIO_BACKEND_HTTP_403"],
+  ]) {
+    const fixture = await createFixture(t);
+    const outcome = await fixture.run({ action: openAction, httpStatus, httpCode });
+    assert.equal(outcome.error.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+    assert.equal(outcome.error.diagnosticCode, expected);
+    assert.deepEqual(outcome.error.details.http, { httpStatus, failureCode: expected });
+    assert.equal(outcome.executions, "started\n", "an HTTP classification cannot replay open");
+    const event = buildAgentDiagnosticEvent("continue_trelio_workspace_action", openAction, outcome.error.diagnosticCode);
+    assert.equal(event.code, expected);
+    assert.doesNotMatch(JSON.stringify(event), /PRIVATE_CANARY|httpStatus|backendCode/u);
+  }
 });
 
 test("Workspace bridge starts when a long-lived host inherited a deleted cwd", {

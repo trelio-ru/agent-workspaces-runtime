@@ -5,6 +5,7 @@ import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-ta
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
+import { parseBridgeHttpDiagnostic } from "./trelio-bridge-http-diagnostics.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
@@ -9762,6 +9763,8 @@ export const workspaceActionFailureCode = (error, operation) => {
   }
   const processDiagnostic = parseProcessDiagnostic(error?.stderr);
   if (processDiagnostic) return processDiagnostic.failureCode;
+  const httpDiagnostic = parseBridgeHttpDiagnostic(error?.stderr);
+  if (httpDiagnostic) return httpDiagnostic.failureCode;
   if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return "TRELIO_WORKSPACE_DIRECTORY_UNAVAILABLE";
   if (error?.code === "EACCES" || error?.code === "EPERM") return "TRELIO_WORKSPACE_PERMISSION_DENIED";
   if (error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "TRELIO_WORKSPACE_OUTPUT_LIMIT";
@@ -10297,6 +10300,7 @@ export const handleTrelioWorkspaceActionOperation = async (
     }
     const failureCode = workspaceActionFailureCode(error, invocation.operation);
     const processDiagnostic = parseProcessDiagnostic(error?.stderr);
+    const httpDiagnostic = parseBridgeHttpDiagnostic(error?.stderr);
     const actionError = new TrelioLocalContextError(
       "TRELIO_WORKSPACE_ACTION_FAILED",
       stderr || "The Trelio Workspace bridge action failed.",
@@ -10304,6 +10308,7 @@ export const handleTrelioWorkspaceActionOperation = async (
         operation: invocation.operation,
         failureCode,
         ...(processDiagnostic ? { process: processDiagnostic } : {}),
+        ...(httpDiagnostic ? { http: httpDiagnostic } : {}),
         ...(stdout ? { stdout } : {}),
         ...(stderr ? { stderr } : {}),
       },

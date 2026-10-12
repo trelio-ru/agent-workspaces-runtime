@@ -23,6 +23,7 @@ import {
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
 import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
+import { buildBridgeHttpErrorFrame } from "./trelio-bridge-http-diagnostics.mjs";
 import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
 import {
@@ -1458,6 +1459,13 @@ export const formatBridgeCommandError = (error, command = "") => {
     !(error instanceof TrelioApiError)
     || error.code !== COMPANY_STORAGE_BALANCE_REQUIRED_CODE
   ) {
+    // execFile otherwise replaces a typed HTTP failure with the enclosing CLI
+    // exit 1. Preserve a bounded frame so MCP can distinguish rate limiting,
+    // validation and access from an actual process failure. Existing lease and
+    // storage recovery branches above/below retain their specific instructions.
+    if (error instanceof TrelioApiError) {
+      return JSON.stringify(buildBridgeHttpErrorFrame(error.statusCode, error.code, error.message));
+    }
     return error instanceof Error ? error.message : String(error);
   }
 

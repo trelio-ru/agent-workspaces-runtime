@@ -199,6 +199,9 @@ publication tooling также остаются вне этого публичн
   auth recovery. Сбой сборщика не меняет ответ исходной операции.
   Failed child допускает только closed failure category; classification не
   разрешает повтор mutation или передачу stdout/message в telemetry.
+  Typed HTTP failure bridge передаётся отдельным final frame: только exact
+  status и allowlisted backend code участвуют в той же проекции, что in-process.
+  Legacy prose не разбирается как HTTP; wrapper и правила повторов сохраняются.
   Сохраняй внутренний skill exit отдельно от CLI exit; Windows private worker
   различает startup/request/protocol/ACL/DPAPI. Hook deny сохраняет закрытый
   failureCode/phase. Hooks имеют отдельную boundary и content-free user-temp

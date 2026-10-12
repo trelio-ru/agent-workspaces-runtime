@@ -11,6 +11,7 @@ import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
  */
 import crypto from "node:crypto";
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
+import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
@@ -6392,11 +6393,7 @@ export const handleLocalMcpMessage = async (
       if (effectiveError instanceof TrelioLocalContextError || effectiveError instanceof ProcessDiagnosticError)
         diagnosticCode = effectiveError.diagnosticCode ?? errorPayload.code;
       else if (effectiveError instanceof TrelioApiError) {
-        const knownCode = observationCode(effectiveError.code);
-        const status = effectiveError.statusCode;
-        diagnosticCode = knownCode !== "UNKNOWN" ? knownCode
-          : [400, 401, 403, 404, 409, 429].includes(status) ? "TRELIO_BACKEND_HTTP_" + status
-          : status >= 500 && status <= 599 ? "TRELIO_BACKEND_HTTP_5XX" : "TRELIO_BACKEND_HTTP_OTHER";
+        diagnosticCode = bridgeHttpDiagnosticCode(effectiveError.statusCode, effectiveError.code);
       }
       if (["MCP_LOCAL_CONTEXT_REQUIRED", "MCP_LOCAL_BRIDGE_REQUIRED"].includes(diagnosticCode)) diagnosticCode = "ROUTED";
       try {

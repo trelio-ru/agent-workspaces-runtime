@@ -837,6 +837,16 @@ test("storage billing blocker preserves the current Run and gives one exact reco
     /^STALE_FENCING_TOKEN:.*не выполняйте автоматический takeover/u,
   );
   assert.equal(formatBridgeCommandError(new Error("обычная ошибка"), "finish"), "обычная ошибка");
+  const httpError = new TrelioApiError(429, "Rate limited", 1000, "PRIVATE_CANARY", {
+    message: "PRIVATE_CANARY protected response", credentials: "PRIVATE_CANARY",
+  });
+  const httpFrame = JSON.parse(formatBridgeCommandError(httpError, "open"));
+  assert.deepEqual(httpFrame, {
+    code: "TRELIO_BRIDGE_HTTP_ERROR",
+    message: "Trelio API 429: Rate limited",
+    details: { httpStatus: 429 },
+  });
+  assert.doesNotMatch(JSON.stringify(httpFrame), /PRIVATE_CANARY|credentials|retryAfter/u);
   assert.equal(
     formatBridgeCommandError(
       new SecretBrowserFillError("Browser preflight failed.", "field_not_found"),

@@ -1257,6 +1257,25 @@ code-shaped поле нетипизированной внешней ошибк�
 Сериализация не повторяет ни чтение, ни mutation и не сбрасывает credentials.
 Telemetry использует уже опубликованный закрытый код, без details.
 
+### HTTP-отказ через дочерний bridge
+
+Владелец проекции – generic runtime. Typed `TrelioApiError` после специальных
+lease/storage recovery branches сериализуется final JSON frame
+`TRELIO_BRIDGE_HTTP_ERROR` с прежним bounded локальным message, numeric
+`details.httpStatus` и optional allowlisted `details.backendCode`.
+Backend payload, headers, URL, credentials и arbitrary Error properties в
+frame не переносятся. Closed backend code либо fixed HTTP bucket выбирается
+одним pure helper для in-process и child execution; telemetry schema не меняется.
+
+Parser принимает только последнюю complete строку `Ошибка: {...}`, до 8 KiB
+при stderr до 64 KiB UTF-8, и status 400–599. Legacy prose, произвольный code
+и malformed frame не интерпретируются как HTTP. Public MCP wrapper остаётся
+`TRELIO_WORKSPACE_ACTION_FAILED`; local details сохраняют numeric status,
+а diagnosticCode получает исходную HTTP/domain категорию вместо CLI exit.
+Эта механика не повторяет action, не меняет квоты и не разрешает auth recovery.
+Регрессии проверяют real subprocess, 400/422/429, 401/403, bounds/privacy,
+один child launch и неизменность специальных lease/storage branches.
+
 <a id="readiness-diagnostics"></a>
 
 ## Диагностика готовности

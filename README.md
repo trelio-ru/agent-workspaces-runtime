@@ -491,6 +491,14 @@ Action validation имеет фиксированную причину и имя
 MAX assist closed stdout codes имеют приоритет. Windows helper различает
 startup/request/protocol/ACL/DPAPI; wrappers прежние. Нет повторов действий.
 
+Typed HTTP-отказ bridge сохраняет final frame с exact status и закрытым backend
+code. Child MCP применяет ту же проекцию, что in-process: 400/401/403/404/409/429,
+5XX либо OTHER; известный domain code имеет приоритет. HTTP 429 больше не
+подменяется generic child exit. Response payload/headers/URL не копируются;
+локальное прежнее пояснение остаётся в bounded message, а telemetry видит только
+code. Legacy text, неверный frame и provider lookalike перед финальной обычной
+ошибкой сохраняют generic category. Классификация не меняет retry policy.
+
 GET diagnostics/capabilities согласует каталог (64 KiB/cache 5 минут).
 Неизвестный серверу код – DIAGNOSTICS_CODE_UNSUPPORTED с catalog_mismatch,
 остальной sample сохраняется. POST diagnostics/observations: 20 samples,
