@@ -45,18 +45,25 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
   const id = crypto.randomUUID();
   const ownerPath = path.join(lock, `${id}.json`);
   const deadline = Date.now() + waitMs;
+  let attempted = false;
   for (;;) {
+    if (attempted && Date.now() >= deadline) return { skipped: "busy" };
+    attempted = true;
     try {
       await fs.mkdir(lock, { mode: 0o700 });
       await writePrivateJsonFile(ownerPath, { id, pid: process.pid });
       break;
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
+      let observedLock;
+      let observedOwnerPath;
       try {
+        observedLock = await fs.lstat(lock);
         await assertPrivatePathKind(lock, "directory");
         const entries = await fs.readdir(lock);
         if (entries.length === 1 && /^[a-f0-9-]{36}\.json$/u.test(entries[0])) {
           const observedPath = path.join(lock, entries[0]);
+          observedOwnerPath = observedPath;
           const owner = await readPrivateJsonFile(observedPath, { maximumBytes: 1024 });
           if (deadOwner(owner.pid)) {
             // The filename is this owner's random nonce. Competing recoverers
@@ -72,10 +79,18 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
           }
         }
       } catch (inspectionError) {
-        // Windows may report an ACL-worker failure if the owner removed the
-        // directory between lstat and validation. Only fresh absence permits
-        // retry; an existing/unverifiable lock preserves the original refusal.
-        if (!await exists(lock).catch(() => true)) continue;
+        // Windows ACL validation runs out of process. The observed owner can
+        // release and a successor can already hold the same directory name by
+        // the time the failed validation returns. Fresh absence, a different
+        // directory identity, or disappearance of the *unique observed nonce*
+        // proves that inspection raced release. Retry acquisition, never the
+        // operation, and validate the successor again under the same deadline.
+        // A missing shared owner.json would not prove this; our nonce cannot
+        // belong to the next owner. Existing/unverifiable paths retain refusal.
+        const freshLock = await fs.lstat(lock).catch(error => isMissing(error) ? null : undefined);
+        if (freshLock === null || (observedLock && freshLock
+          && (freshLock.ino !== observedLock.ino || freshLock.birthtimeMs !== observedLock.birthtimeMs))
+          || (observedOwnerPath && !await exists(observedOwnerPath).catch(() => true))) continue;
         throw inspectionError;
       }
       if (Date.now() >= deadline) return { skipped: "busy" };

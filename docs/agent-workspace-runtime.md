@@ -1316,7 +1316,10 @@ import, CAS, service Git, Cursor и независимое продолжени�
 Pointer и encrypted bytes читаются под коротким `retention.lock`; удаление
 использует тот же lock, а сетевой sync остаётся вне него. Живой PID защищает
 reader без истечения по часам; подтверждённый dead owner восстанавливается по
-уникальному nonce-файлу. Unknown/empty/unsafe lock сохраняется. Cleanup после
+уникальному nonce-файлу. Unknown/empty/unsafe lock сохраняется. Ошибка protected inspection допускает
+повтор только захвата lock под прежним deadline, когда fresh metadata доказывает
+исчезновение/замену exact каталога либо уникального nonce прежнего owner;
+новый owner проверяется заново. Исходная операция не повторяется. Cleanup после
 публикации best-effort: ошибка не превращает уже заменённый pointer в failed
 mutation и не разрешает повтор публикации.
 
