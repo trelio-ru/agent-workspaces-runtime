@@ -35,7 +35,12 @@ const MANAGED_END = "<!-- trelio-agent-workspaces:end -->";
 const IGNORE_START = "# trelio-agent-workspaces:ignore:start";
 const IGNORE_END = "# trelio-agent-workspaces:ignore:end";
 const IGNORE_BLOCK = [IGNORE_START, "/workspaces/", IGNORE_END].join("\n");
-const CODEX_CHECKPOINT_REF = /^refs\/codex\/turn-diffs\/checkpoints\/[0-9a-f]{64}\/[0-9a-f]{64}\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+// Codex checkpoint scope/turn identifiers use either two 32-hex segments or
+// two 64-hex segments. They are not the Git object ID stored in the ref. Match
+// only these complete known pairs: a width range or independent alternatives
+// would silently admit unobserved layouts. Object type, tree contents and the
+// complete object inventory are still checked separately in inspectServiceGit.
+const CODEX_CHECKPOINT_REF = /^refs\/codex\/turn-diffs\/checkpoints\/(?:[0-9a-f]{32}\/[0-9a-f]{32}|[0-9a-f]{64}\/[0-9a-f]{64})\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CODEX_CAPTURE_REF = /^refs\/codex\/turn-diffs\/captures\/[1-9][0-9]*\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/(?:base|head)$/u;
 const SHA_PATTERN = /^[0-9a-f]{40,64}$/u;
 const ALLOWED_LOCAL_CONFIG_KEYS = new Set([

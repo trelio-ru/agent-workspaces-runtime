@@ -322,26 +322,124 @@ test("service Git is preserved and bridge paths are proven ignored", async () =>
   assert.equal(returning.plan.status, "already_configured");
 });
 
-test("service Git accepts only exact Codex turn-diff refs that point to trees", async () => {
-  const root = await makeRoot();
-  await runGit(root, "init");
-  await fs.writeFile(path.join(root, "AGENTS.md"), "# Existing instructions\n", "utf8");
-  const tree = await writeTurnDiffTree(root);
-  const checkpointRef = [
-    "refs/codex/turn-diffs/checkpoints",
-    "a".repeat(64),
-    "b".repeat(64),
-    "1",
-    "123e4567-e89b-12d3-a456-426614174000",
-  ].join("/");
-  // Mirror the runtime's process-only longpaths option. A real checkpoint ref
-  // exceeds MAX_PATH in Windows temp roots; never alter the user's Git config.
-  await runGit(root, "-c", "core.longpaths=true", "update-ref", checkpointRef, tree);
+for (const segmentLength of [32, 64]) {
+  test(`service Git preserves ${segmentLength}-hex Codex checkpoints with instruction trees`, async () => {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    await fs.writeFile(path.join(root, "AGENTS.md"), "# Existing instructions\n", "utf8");
+    const tree = await writeTurnDiffTree(root);
+    const checkpointRef = [
+      "refs/codex/turn-diffs/checkpoints",
+      "a".repeat(segmentLength),
+      "b".repeat(segmentLength),
+      "1",
+      "123e4567-e89b-12d3-a456-426614174000",
+    ].join("/");
+    // Mirror the runtime's process-only longpaths option. A real checkpoint ref
+    // exceeds MAX_PATH in Windows temp roots; never alter the user's Git config.
+    await runGit(root, "-c", "core.longpaths=true", "update-ref", checkpointRef, tree);
 
-  const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
-  assert.equal(prepared.inspection.folder.kind, "service_git");
-  await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
-  assert.equal((await runGit(root, "-c", "core.longpaths=true", "rev-parse", checkpointRef)).stdout.trim(), tree);
+    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    assert.equal(prepared.inspection.folder.kind, "service_git");
+    await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+    assert.equal((await runGit(root, "-c", "core.longpaths=true", "rev-parse", checkpointRef)).stdout.trim(), tree);
+  });
+}
+
+for (const segmentLength of [32, 64]) {
+  test(`service Git accepts ${segmentLength}-hex checkpoints and captures sharing one empty tree`, async () => {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    // Reproduce feedback #18 with real Git: no commits, index entries or blobs,
+    // and both refs point at the same empty tree. The scope segments are ref
+    // identifiers, independent of the 40/64-hex Git object ID stored in the ref.
+    const tree = (await runGit(root, "write-tree")).stdout.trim();
+    const uuid = "123e4567-e89b-12d3-a456-426614174000";
+    const refs = [
+      `refs/codex/turn-diffs/captures/1720000000000/${uuid}/base`,
+      `refs/codex/turn-diffs/checkpoints/${"a".repeat(segmentLength)}/${"b".repeat(segmentLength)}/1720000000000/${uuid}`,
+    ];
+    for (const ref of refs) {
+      await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, tree);
+    }
+    const beforeRefs = (await runGit(root, "-c", "core.longpaths=true", "for-each-ref")).stdout;
+    const beforeObjects = (await runGit(root, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype) %(objectsize)")).stdout;
+    assert.equal(beforeObjects.trim(), `${tree} tree 0`);
+
+    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    assert.equal(prepared.inspection.folder.kind, "service_git");
+    await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+    const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+    assert.equal(diagnostic.status, "ready");
+    assert.equal((await runGit(root, "-c", "core.longpaths=true", "for-each-ref")).stdout, beforeRefs);
+    assert.equal((await runGit(root, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype) %(objectsize)")).stdout, beforeObjects);
+  });
+}
+
+test("service Git rejects unknown checkpoint widths and malformed ref components", async () => {
+  const prefix = "refs/codex/turn-diffs/checkpoints";
+  const uuid = "123e4567-e89b-12d3-a456-426614174000";
+  const validSuffix = `1720000000000/${uuid}`;
+  const rejectedRefs = [
+    ...[[31, 32], [33, 32], [63, 64], [65, 64], [32, 64], [64, 32]].map(
+      ([firstLength, secondLength]) => `${prefix}/${"a".repeat(firstLength)}/${"b".repeat(secondLength)}/${validSuffix}`,
+    ),
+    `${prefix}/${"A".repeat(32)}/${"b".repeat(32)}/${validSuffix}`,
+    `${prefix}/${"a".repeat(32)}/${"g".repeat(32)}/${validSuffix}`,
+    `${prefix}/${"a".repeat(32)}/${"b".repeat(32)}/0/${uuid}`,
+    `${prefix}/${"a".repeat(32)}/${"b".repeat(32)}/01720000000000/${uuid}`,
+    `${prefix}/${"a".repeat(32)}/${"b".repeat(32)}/1720000000000/not-a-uuid`,
+    `${prefix}/${"a".repeat(32)}/${"b".repeat(32)}/1720000000000/${uuid}/extra`,
+    `refs/codex/snapshots/${validSuffix}`,
+  ];
+  for (const ref of rejectedRefs) {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    const tree = (await runGit(root, "write-tree")).stdout.trim();
+    await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, tree);
+    await assert.rejects(
+      prepareTrelioFolderOnboarding({ folderPath: root }),
+      (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+      ref,
+    );
+  }
+});
+
+test("32-hex checkpoint names do not admit commit, tag or forbidden tree content", async () => {
+  const ref = `refs/codex/turn-diffs/checkpoints/${"a".repeat(32)}/${"b".repeat(32)}/1/123e4567-e89b-12d3-a456-426614174000`;
+  for (const objectKind of ["commit", "tag", "forbidden-tree"]) {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    let objectId = objectKind === "forbidden-tree"
+      ? null
+      : (await runGit(root, "write-tree")).stdout.trim();
+    if (objectKind === "commit") {
+      objectId = (await runGit(root, "-c", "user.name=Trelio Test", "-c", "user.email=test@example.invalid", "commit-tree", objectId, "-m", "history")).stdout.trim();
+    } else if (objectKind === "tag") {
+      await runGit(root, "-c", "user.name=Trelio Test", "-c", "user.email=test@example.invalid", "tag", "-a", "fixture", objectId, "-m", "tagged tree");
+      objectId = (await runGit(root, "rev-parse", "refs/tags/fixture")).stdout.trim();
+      // Remove the ordinary tag ref so only the allowlisted checkpoint name
+      // remains. Its object type must still block onboarding before any write.
+      await runGit(root, "update-ref", "-d", "refs/tags/fixture");
+    } else {
+      const indexPath = path.join(root, ".git", "onboarding-test-index");
+      const environment = { GIT_INDEX_FILE: indexPath };
+      await fs.writeFile(path.join(root, "private.txt"), "synthetic forbidden content\n");
+      await runGitWithEnvironment(root, environment, "add", "private.txt");
+      objectId = (await runGitWithEnvironment(root, environment, "write-tree")).stdout.trim();
+      await fs.rm(indexPath);
+      await fs.rm(path.join(root, "private.txt"));
+      // Keep no forbidden root file or orphan tree: the snapshot itself must
+      // cause rejection, after the checkpoint name and object type pass.
+    }
+    await runGit(root, "-c", "core.longpaths=true", "update-ref", ref, objectId);
+    await assert.rejects(
+      prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+      (error) => error?.code === "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT",
+      objectKind,
+    );
+    assert.deepEqual(await fs.readdir(root), [".git"]);
+  }
 });
 
 test("service Git rejects commit objects and orphan objects even without HEAD", async () => {

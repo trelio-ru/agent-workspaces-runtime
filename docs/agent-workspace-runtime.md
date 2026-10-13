@@ -768,6 +768,8 @@ Binding ищется от текущего `cwd` вверх только по о
 folder-local roots и созданный bridge каталог `workspaces/` получают owner-only
 права; существующий `workspaces/` обязан быть обычным каталогом, а не symlink.
 
+<a id="folder-service-git"></a>
+
 Создание binding выполняет host-side `folder_onboarding` state machine. Read-only
 plan принимает только exact client-selected absolute root, fail-closed проверяет
 standalone Git, top-level layout, refs/objects/worktrees/hooks/config и file
@@ -778,6 +780,19 @@ delta. Apply принимает только текущий plan hash и explici
 затем активирует инструкции и перечитывает итог. При сбое runtime откатывает
 только файлы, которые всё ещё совпадают с записанным им digest; конкурентную
 правку он не перезаписывает. Plugin/model не повторяют этот алгоритм shell-кодом.
+
+Допустимые Codex tree refs имеют только формы
+`refs/codex/turn-diffs/checkpoints/<checkpoint-key>/<turn-id>/<milliseconds>/<uuid>`
+и `refs/codex/turn-diffs/captures/<milliseconds>/<uuid>/base` либо `/head`.
+Два checkpoint-сегмента содержат либо оба ровно 32, либо оба ровно 64 lowercase
+hex-символа; смешанная длина и промежуточные значения не допускаются. Это
+идентификаторы имени ref, а не Git object ID. Timestamp остаётся положительным
+десятичным числом без ведущего нуля, UUID – каноническим. Каждый ref обязан быть
+non-symbolic ссылкой прямо на `tree`; каждый tree из полной инвентаризации
+обязан быть значением такого ref и содержать только разрешённые regular root
+instruction/ignore blobs либо быть пустым. Commit/tag, orphan tree/blob и
+постороннее содержимое блокируют flow, включая unreachable objects. Проверка
+повторяется перед apply; `.git`, refs и objects сохраняются без изменений.
 
 Следующие Run переиспользуют тот же `workspace/`, а не создают копию по
 `run-id`. Перед `start` или `claim` bridge получает live server overview; если
