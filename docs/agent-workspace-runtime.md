@@ -1345,8 +1345,23 @@ direct schema в текущем ходе и безопасное прямое ч
 model toolset owner-процесса, поэтому exposure и `readiness.checks.toolExposure`
 остаются `not_checked`; config, CLI inventory и server `ready` не подтверждают
 их. Успешный вызов доказывает только проверенный инструмент/ход. Если прямой
-schema нет, сохраняется client exposure blocker без изменения OAuth, trust или
-routing. Непроверенное состояние не объявляется недоступностью.
+schema нет, агент сразу запускает `trelio-diagnostics`, а не заканчивает работу
+общим отказом. Один local `diagnose_trelio_installation` с
+`clientKind=codex,intent=diagnostics` собирает проверяемые факты; если tool тоже
+не доступен напрямую, допускается только read-only bootstrap навыка с exact
+loaded plugin launcher и routing plan. Protected calls через nested exec,
+browser/HTTP/другой MCP этим не разрешаются. Непроверенное состояние не объявляется
+недоступностью; само отсутствие schema не доказывает неисправность config или OAuth.
+
+Агент предлагает только подтверждённое диагностикой исправление.
+`REVIEW_CODEX_DIRECT_ROUTING` сохраняет отдельное подтверждение показанного exact
+`planHash`, CAS apply, полный restart Codex/ChatGPT и исходное protected read в
+том же чате. При ready routing сохраняется client exposure blocker без
+необоснованного изменения config, OAuth или trust. Недоступный bootstrap
+возвращается как конкретное ограничение с разрешённым следующим шагом.
+Отсутствие schema до вызова видит только клиент/модель; runtime не может
+автоматически наблюдать owner toolset. Поэтому переход к диагностике задаётся
+общей инструкцией, а сбор фактов и guarded repair остаются алгоритмическими.
 
 Local `diagnose_trelio_installation(intent=diagnostics)` принимает реальный
 `clientKind` (`codex|claude-code|cursor|antigravity`) и optional

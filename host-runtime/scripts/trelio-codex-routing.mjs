@@ -13,8 +13,12 @@ export const CODEX_TRELIO_DIRECT_TOOL_NAMESPACES = Object.freeze([
 // inventory of nested-call capabilities, not evidence of model tool exposure.
 // Keep this explanation shared by initialize, diagnostics and folder binding:
 // an older bundled skill's output-budget advice must not reverse that routing.
+// The runtime cannot observe model tool exposure before a call reaches it.
+// Missing direct schema therefore needs a client-side diagnostic transition,
+// not a terminal refusal or an inferred config/credential mutation. Recovery
+// mechanics and confirmation stay in the existing diagnostic skill/plan.
 export const CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS =
-  "Codex: Trelio MCP – direct, вне functions.exec. ALL_TOOLS ≠ direct inventory; ready/CLI ≠ tools модели. Проверь direct schema без OAuth/trust/routing repair. Code Mode – nested.";
+  "Codex: Trelio MCP – direct, вне functions.exec. ALL_TOOLS ≠ direct inventory; ready/CLI ≠ tools модели. Нет direct schema – сразу read-only trelio-diagnostics. Code Mode – nested.";
 export const CODEX_LEGACY_TRELIO_MCP_SERVER_NAME = "trelio-mcp";
 
 export const CODEX_ROUTING_PLAN_TOOL_NAME = "plan_codex_trelio_hook_routing";

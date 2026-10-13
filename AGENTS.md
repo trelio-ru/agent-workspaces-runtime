@@ -42,6 +42,8 @@ publication tooling также остаются вне этого публичн
   [диагностика](docs/agent-workspace-runtime.md#readiness-diagnostics).
   Пустой nested `ALL_TOOLS` не доказывает недоступность direct tools;
   бюджетные подсказки bundled skill относятся только к доступным nested tools.
+  Missing direct schema сразу направляет в read-only диагностику по этому
+  контракту; исправление предлагается по evidence с сохранением approval.
 - Диагностика сохранённых Codex hooks читает только пользовательский config
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
   включает hook; дисковый снимок не является effective state App Server.

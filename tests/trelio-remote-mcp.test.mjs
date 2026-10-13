@@ -8,7 +8,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 
 import {
   AGENT_SKILL_ROUTING_INSTRUCTIONS,
@@ -47,7 +47,7 @@ import {
   refreshRemoteMcpOAuth,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { BridgeTransportError, TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
-import { CodexRoutingConfigError } from "../host-runtime/scripts/trelio-codex-routing.mjs";
+import { CodexRoutingConfigError, planCodexTrelioHookRouting } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
 } from "../host-runtime/scripts/trelio-proposal-route-guard.mjs";
@@ -2834,11 +2834,50 @@ test("Codex diagnostics keep direct model tool exposure unverified despite ready
   assert.deepEqual(payload.clientInspection.toolExposure.expectedNamespaces, ["mcp__trelio", "mcp__trelio_remote_skills"]);
   assert.match(payload.clientInspection.toolExposure.instructions, /ALL_TOOLS/u);
   assert.match(payload.clientInspection.toolExposure.instructions, /вне functions\.exec/u);
+  assert.match(payload.clientInspection.toolExposure.instructions, /Нет direct schema – сразу read-only trelio-diagnostics/u);
   assert.ok(payload.clientInspection.mcpInventory.doesNotProve.includes("current_chat_model_tool_exposure"));
   assert.equal(payload.readiness.checks.toolExposure, "not_checked");
   assert.equal(payload.liveVerification.toolExposure.state, "not_checked");
   assert.equal(payload.liveVerification.toolExposure.inspection, "clientInspection.toolExposure");
   assert.equal(payload.requiredActions.length, 0, "Expected direct routing does not authorize config or credential repair.");
+});
+
+test("missing direct routing is diagnosed from the real config and offered as a separately confirmed repair", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-missing-direct-tools-"));
+  const configPath = path.join(directory, "config.toml");
+  const source = '[features.code_mode]\nenabled = true\ndirect_only_tool_namespaces = ["mcp__other"]\n';
+  try {
+    await writeFile(configPath, source, { mode: 0o600 });
+    // No native task tool is involved: the local diagnostic can discover the
+    // dispatch defect before protected content/OAuth is checked. Use the real
+    // planner so the offered hash and preserved settings are not canned prose.
+    const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+      clientKind: "codex", intent: "diagnostics",
+    }, {
+      localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexRoutingPlan: async () => planCodexTrelioHookRouting({ configPath }),
+      codexHookSettingsRead: async () => ({ status: "observed", effectiveState: "unknown" }),
+      codexRoutingApply: async () => assert.fail("diagnosis cannot apply a config repair"),
+    });
+    const payload = JSON.parse(result.content[0].text);
+    assert.deepEqual(payload.requiredActions.map(({ code }) => code), ["REVIEW_CODEX_DIRECT_ROUTING"]);
+    const action = payload.requiredActions[0];
+    assert.equal(action.reasonCode, "TRELIO_CODEX_DIRECT_ROUTING_REQUIRED");
+    assert.equal(action.authority, "separate_explicit_confirmation_required");
+    assert.deepEqual(action.plan.missingNamespaces, ["mcp__trelio", "mcp__trelio_remote_skills"]);
+    assert.deepEqual(action.plan.change.add, action.plan.missingNamespaces);
+    assert.match(action.plan.planHash, /^[a-f0-9]{64}$/u);
+    assert.equal(action.apply.toolName, "apply_codex_trelio_hook_routing");
+    assert.equal(action.apply.argumentsAfterConfirmation.planHash, action.plan.planHash);
+    assert.equal(action.plan.restartRequired, true);
+    assert.match(action.plan.verification, /вернитесь в этот же чат/u);
+    assert.equal(payload.readiness.checks.oauth, "not_checked");
+    assert.equal(payload.readiness.checks.protectedContext, "not_checked");
+    assert.equal(payload.readiness.checks.toolExposure, "not_checked");
+    assert.equal(await readFile(configPath, "utf8"), source);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("a folder I/O blocker keeps the remaining diagnostic plan and hides private error text", async () => {
@@ -4542,6 +4581,7 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
     /вне functions\.exec/u,
     /ALL_TOOLS ≠ direct inventory/u,
     /ready\/CLI ≠ tools модели/u,
+    /Нет direct schema – сразу read-only trelio-diagnostics/u,
     /Code Mode – nested/u,
     /Единый search возвращает guidance и контекст/u,
     /list_agent_skills – inventory/u,
