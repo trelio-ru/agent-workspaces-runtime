@@ -35,6 +35,7 @@ import {
  * without sending the query or snippets back to Trelio.
  */
 import crypto from "node:crypto";
+import { prepareRuntimeProofSubmission, submitPreparedRuntimeProof } from "./trelio-runtime-proof-preparation.mjs";
 import { Buffer, isUtf8 } from "node:buffer";
 import { execFile } from "node:child_process";
 import { constants as fsConstants, createReadStream } from "node:fs";
@@ -62,6 +63,7 @@ import {
   request,
   requireToken,
   resolveBridgeDataPlaneRouting,
+  resolveWorkspaceBridgeConfigDirectory,
   resolveCompanyEncryptionRequestOrigin,
   resolveCompanyContextMirrorDirectory,
   resolveRegisteredWorkspaceRootDirectory,
@@ -8514,7 +8516,7 @@ export const buildLocalMeetingTranscriptArguments = async ({
 };
 
 const handleLocalMeetingTranscriptOperation = async ({
-  origin, companySlug, nativeTool, rawInput, provider, mirror = null, signal,
+  origin, companySlug, nativeTool, rawInput, provider, mirror = null, signal, proofPreparation,
 }) => {
   const argumentsWithText = await buildLocalMeetingTranscriptArguments({
     companySlug,
@@ -8554,7 +8556,9 @@ const handleLocalMeetingTranscriptOperation = async ({
     });
   }
   try {
-    const response = await request(
+    const result = await submitPreparedRuntimeProof({
+      preparation: proofPreparation,
+      submit: async proof => readJson(await request(
       provider.requestOrigin,
       provider.token,
       `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
@@ -8564,14 +8568,12 @@ const handleLocalMeetingTranscriptOperation = async ({
         body: JSON.stringify({
           nativeTool,
           arguments: { ...protectedRequest.value, localFileDelivery: true },
-          ...(rawInput.runtimeSessionProof
-            ? { runtimeSessionProof: rawInput.runtimeSessionProof }
-            : {}),
+          ...(proof ? { runtimeSessionProof: proof } : {}),
         }),
         signal,
       },
-    );
-    const result = await readJson(response);
+      )),
+    });
     return provider.companyEncryption
       ? await hydrateLocalActionResult({
           rawResult: result,
@@ -8603,6 +8605,7 @@ const handleLocalTaskAttachmentStreamOperation = async ({
   provider,
   mirror = null,
   signal,
+  proofPreparation,
 }) => {
   const argumentCompanySlug = normalizeCompanySlug(rawArguments?.companySlug);
   if (argumentCompanySlug !== companySlug) {
@@ -8632,19 +8635,16 @@ const handleLocalTaskAttachmentStreamOperation = async ({
       });
     }
 
-    const actionRequest = {
-      nativeTool,
-      arguments: protectedRequest.value,
-      ...(rawInput.runtimeSessionProof
-        ? { runtimeSessionProof: rawInput.runtimeSessionProof }
-        : {}),
-    };
-    const preparedResult = await prepareLocalTaskAttachmentUploadSession({
+    const preparedResult = await submitPreparedRuntimeProof({
+      preparation: proofPreparation,
+      submit: proof => prepareLocalTaskAttachmentUploadSession({
       origin: provider.requestOrigin,
       token: provider.token,
       companySlug,
-      actionRequest,
+      actionRequest: { nativeTool, arguments: protectedRequest.value,
+        ...(proof ? { runtimeSessionProof: proof } : {}) },
       signal,
+      }),
     });
     const uploadSession = parseLocalTaskAttachmentUploadSession(preparedResult, {
       sizeBytes: protectedRequest.sizeBytes,
@@ -8750,7 +8750,25 @@ export const uploadLocalImportFiles = async ({ rawResult, manifestPath, origin, 
 export const handleTrelioLocalActionOperation = async (
   origin,
   rawInput,
-  { signal, onProviderSelected } = {},
+  options = {},
+) => {
+  // Capture and validate hook authority before provider/mirror/file preparation.
+  // The signer is invocation-local, expires with the original session and is
+  // closed on every success/error/cancellation; no background key cache exists.
+  const preparation = await prepareRuntimeProofSubmission({
+    origin, nativeTool: String(rawInput?.nativeTool || "").trim(),
+    proof: rawInput?.runtimeSessionProof,
+    configDirectory: resolveWorkspaceBridgeConfigDirectory(), readPrivateJsonFile,
+  });
+  try { return await executeTrelioLocalActionOperation(origin, rawInput, {
+    ...options, proofPreparation: preparation,
+  }); } finally { preparation.close(); }
+};
+
+const executeTrelioLocalActionOperation = async (
+  origin,
+  rawInput,
+  { signal, onProviderSelected, proofPreparation } = {},
 ) => {
   const companySlug = normalizeCompanySlug(rawInput?.companySlug);
   const nativeTool = String(rawInput?.nativeTool || "").trim();
@@ -8775,14 +8793,16 @@ export const handleTrelioLocalActionOperation = async (
     // native-provider fallback. Both company modes use one memory-only local
     // primitive; its atomic server path retains the native runtime proof.
     const { handleKnownAgentSecretChatSave } = await import("./trelio-secret-chat.mjs");
-    return handleKnownAgentSecretChatSave(origin, rawInput, { signal });
+    return handleKnownAgentSecretChatSave(origin, rawInput, { signal,
+      proofForSubmission: () => proofPreparation.forSubmission() });
   }
   if (nativeTool === "generate_agent_secret") {
     // The generic adapter must not observe generated bytes. The dedicated
     // module derives them in memory only after a value-free ACL/Run preflight
     // and returns a structural receipt rather than the generated password.
     const { handleGeneratedAgentSecretSave } = await import("./trelio-secret-generate.mjs");
-    return handleGeneratedAgentSecretSave(origin, rawInput, { signal });
+    return handleGeneratedAgentSecretSave(origin, rawInput, { signal,
+      proofForSubmission: () => proofPreparation.forSubmission() });
   }
   const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal });
   // Legacy native reads can arrive through route=action. Record the bridge's
@@ -8815,7 +8835,7 @@ export const handleTrelioLocalActionOperation = async (
 
   if (hasLocalFilePath && ["add_meeting_source", "create_meeting"].includes(nativeTool) && provider.nativeProvider) {
     return handleLocalMeetingTranscriptOperation({
-      origin, companySlug, nativeTool, rawInput, provider, signal,
+      origin, companySlug, nativeTool, rawInput, provider, signal, proofPreparation,
     });
   }
 
@@ -8828,6 +8848,7 @@ export const handleTrelioLocalActionOperation = async (
       arguments: rawInput.arguments,
       provider,
       signal,
+      proofPreparation,
     });
   }
 
@@ -8881,7 +8902,7 @@ export const handleTrelioLocalActionOperation = async (
   if (hasLocalFilePath) {
     if (["add_meeting_source", "create_meeting"].includes(nativeTool)) {
       return handleLocalMeetingTranscriptOperation({
-        origin, companySlug, nativeTool, rawInput, provider, mirror: actionMirror, signal,
+        origin, companySlug, nativeTool, rawInput, provider, mirror: actionMirror, signal, proofPreparation,
       });
     }
     return handleLocalTaskAttachmentStreamOperation({
@@ -8893,6 +8914,7 @@ export const handleTrelioLocalActionOperation = async (
       provider,
       mirror: actionMirror,
       signal,
+      proofPreparation,
     });
   }
   const protectedRequest = nativeTool === "upload_inline_image"
@@ -8918,7 +8940,9 @@ export const handleTrelioLocalActionOperation = async (
 
   const mayMutateCompanyContext = localActionMayMutateCompanyContext(nativeTool);
   try {
-    const response = await request(
+    const rawResult = await submitPreparedRuntimeProof({
+      preparation: proofPreparation,
+      submit: async proof => readJson(await request(
       provider.requestOrigin,
       provider.token,
       `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
@@ -8928,14 +8952,12 @@ export const handleTrelioLocalActionOperation = async (
         body: JSON.stringify({
           nativeTool,
           arguments: protectedRequest.value,
-          ...(rawInput.runtimeSessionProof
-            ? { runtimeSessionProof: rawInput.runtimeSessionProof }
-            : {}),
+          ...(proof ? { runtimeSessionProof: proof } : {}),
         }),
         signal,
       },
-    );
-    const rawResult = await readJson(response);
+      )),
+    });
     const hydrated = await hydrateLocalActionResult({
       rawResult,
       origin: provider.requestOrigin,

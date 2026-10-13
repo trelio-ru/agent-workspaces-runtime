@@ -7,6 +7,7 @@
  * argv, a file, the local mirror, logs or the returned receipt.
  */
 import crypto from "node:crypto";
+import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 
 import {
   BridgePairingRequiredError,
@@ -231,6 +232,7 @@ export const handleGeneratedAgentSecretSave = async (
     checkCompatibility = ensureBridgeCompatibility,
     getEncryptionContext = ensureCompanyEncryptionContext,
     sendRequest = request,
+    proofForSubmission = () => rawInput.runtimeSessionProof,
   } = {},
 ) => {
   try {
@@ -270,6 +272,7 @@ export const handleGeneratedAgentSecretSave = async (
       input, context, companyEncryption, token,
     });
     signal?.throwIfAborted();
+    const proof = proofForSubmission();
     const result = await (await sendRequest(
       origin,
       token,
@@ -278,7 +281,7 @@ export const handleGeneratedAgentSecretSave = async (
         method: "POST", headers: { "content-type": "application/json" }, signal,
         body: JSON.stringify({
           nativeTool: "generate_agent_secret", arguments: transport,
-          ...(rawInput.runtimeSessionProof ? { runtimeSessionProof: rawInput.runtimeSessionProof } : {}),
+          ...(proof ? { runtimeSessionProof: proof } : {}),
         }),
       },
     )).json();
@@ -315,7 +318,8 @@ export const handleGeneratedAgentSecretSave = async (
       content: [{ type: "text", text: "Пароль сгенерирован и сохранён. Значение не раскрывалось модели." }],
     };
   } catch (error) {
-    if (error instanceof BridgePairingRequiredError || error instanceof BridgePluginUpgradeRequiredError) {
+    if (error instanceof BridgePairingRequiredError || error instanceof BridgePluginUpgradeRequiredError
+      || error instanceof RuntimeProofPreparationError) {
       throw error;
     }
     const safe = error instanceof AgentSecretGenerateError

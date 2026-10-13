@@ -29,6 +29,10 @@ publication tooling также остаются вне этого публичн
   keys или production runtime packages в Git, fixtures и logs.
 - Не ослабляй exact confirmation, idempotency/CAS, bounds, attestation, package
   verification и encrypted-company fail-closed behavior.
+- Долгая подготовка local action обновляет proof алгоритмически по
+  [контракту](docs/agent-workspace-runtime.md#runtime-proof-preparation): только
+  проверенная hook-подпись, прежние nonce/session/expiry и bounded invocation;
+  неоднозначная mutation не повторяется, TTL proof не увеличивается.
 - Hook и doctor используют единый контракт идентичности инструмента. Парсить
   только hook tool_name и exact local envelope; dispatch display из журнала
   не является hook identity. Некорректный распознанный action отклоняется до

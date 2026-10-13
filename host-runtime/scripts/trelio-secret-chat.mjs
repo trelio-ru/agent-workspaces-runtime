@@ -7,6 +7,7 @@
  * transaction. The original chat/tool input can still remain in the AI client.
  */
 import crypto from "node:crypto";
+import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 
 import {
   BridgePairingRequiredError,
@@ -273,6 +274,7 @@ export const handleKnownAgentSecretChatSave = async (
     checkCompatibility = ensureBridgeCompatibility,
     getEncryptionContext = ensureCompanyEncryptionContext,
     sendRequest = request,
+    proofForSubmission = () => rawInput.runtimeSessionProof,
   } = {},
 ) => {
   try {
@@ -300,6 +302,7 @@ export const handleKnownAgentSecretChatSave = async (
     }
     const transport = await buildKnownAgentSecretChatWrite({ input, context, companyEncryption, token });
     signal?.throwIfAborted();
+    const proof = proofForSubmission();
     const result = await (await sendRequest(
       origin, token,
       "/api/agent-workspaces/company-context/" + encodeURIComponent(companySlug) + "/actions/execute",
@@ -307,7 +310,7 @@ export const handleKnownAgentSecretChatSave = async (
         method: "POST", headers: { "content-type": "application/json" }, signal,
         body: JSON.stringify({
           nativeTool: "save_known_agent_secret", arguments: transport,
-          ...(rawInput.runtimeSessionProof ? { runtimeSessionProof: rawInput.runtimeSessionProof } : {}),
+          ...(proof ? { runtimeSessionProof: proof } : {}),
         }),
       },
     )).json();
@@ -340,7 +343,8 @@ export const handleKnownAgentSecretChatSave = async (
   } catch (error) {
     // Preserve approved local host routing for one-time pairing and upgrades.
     // These typed errors contain no value-bearing request or server response.
-    if (error instanceof BridgePairingRequiredError || error instanceof BridgePluginUpgradeRequiredError) {
+    if (error instanceof BridgePairingRequiredError || error instanceof BridgePluginUpgradeRequiredError
+      || error instanceof RuntimeProofPreparationError) {
       throw error;
     }
     // Upstream validation/proxy errors may echo request fragments. Never expose

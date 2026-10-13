@@ -145,6 +145,7 @@ jobs:
           node tests/trelio-windows-native-private.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
           node tests/trelio-runtime-session.test.mjs
+          node tests/trelio-runtime-proof-preparation.test.mjs
           node tests/trelio-instruction-reuse.test.mjs
           node tests/trelio-secret-browser-native.test.mjs
           node tests/trelio-secret-chat.test.mjs
@@ -275,6 +276,11 @@ jobs:
 
       - name: Run Windows hook tool identity regressions
         run: node tests/trelio-hook-tool-identity.test.mjs
+
+      - name: Run Windows proof preparation regressions
+        run: |
+          node tests/trelio-runtime-proof-preparation.test.mjs
+          node --test --test-name-pattern="first protected call" tests/trelio-runtime-session.test.mjs
 
       - name: Verify signed runtime hook through the complete Windows shell chain
         run: node tests/trelio-hook-signed-chain.test.mjs

@@ -10,6 +10,7 @@
  */
 import crypto from "node:crypto";
 import { saveRuntimeChatBinding, runtimeChatBindingPath } from "./trelio-runtime-chat-binding.mjs";
+import { saveRuntimeProofBinding, runtimeProofBindingPath } from "./trelio-runtime-proof-preparation.mjs";
 import { buildDiagnosticObservation, observationCode } from "./trelio-diagnostic-observation.mjs";
 import { writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
 
@@ -361,6 +362,9 @@ const removeStaleRuntimeState = async (filePath, nowMilliseconds) => {
     const binding = runtimeChatBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
       origin: process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru", runtimeSessionId: state.runtimeSessionId });
     if (binding) await fs.rm(binding, { force: true });
+    const proofBinding = runtimeProofBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
+      runtimeSessionId: state.runtimeSessionId });
+    if (proofBinding) await fs.rm(proofBinding, { force: true });
     return reason;
   } catch {
     return null;
@@ -774,6 +778,16 @@ const runPreToolUse = async (hookInput) => {
   const updatedInput = await manageInstructionKeys({
     hookInput, identity, input: toolInput, boundary: state.instructionContext,
   });
+  if (identity.status === "local" && toolInput.route === "action") {
+    // A private locator lets the local host validate this hook's original
+    // signature before a long preparation and renew only that same nonce.
+    // No key/model/effort is added to the MCP envelope or client environment.
+    await withRuntimeHookStage("runtime_state_write", () => saveRuntimeProofBinding({
+      configDirectory: bridge.resolveWorkspaceBridgeConfigDirectory(), origin, clientSessionId,
+      runtimeSessionId: state.runtimeSessionId, expiresAt: state.expiresAt,
+      writePrivateJsonFile: bridge.writePrivateJsonFile,
+    }));
+  }
   assertRuntimeHookBudget();
   writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName }));
 };
@@ -824,6 +838,10 @@ const runSessionStart = async (hookInput) => {
       runtimeSessionId: stateToEnd.runtimeSessionId,
     });
     if (binding) await fs.rm(binding, { force: true }).catch(() => undefined);
+    const proofBinding = runtimeProofBindingPath({
+      configDirectory: path.dirname(path.dirname(filePath)), runtimeSessionId: stateToEnd.runtimeSessionId,
+    });
+    if (proofBinding) await fs.rm(proofBinding, { force: true }).catch(() => undefined);
     const { endAgentRuntimeHookSession } = await loadWorkspaceBridgeModule();
     await endAgentRuntimeHookSession({
       origin,
@@ -850,6 +868,9 @@ const runSessionEnd = async (hookInput) => {
     const binding = runtimeChatBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
       origin, runtimeSessionId: state.runtimeSessionId });
     if (binding) await fs.rm(binding, { force: true }).catch(() => undefined);
+    const proofBinding = runtimeProofBindingPath({ configDirectory: path.dirname(path.dirname(filePath)),
+      runtimeSessionId: state.runtimeSessionId });
+    if (proofBinding) await fs.rm(proofBinding, { force: true }).catch(() => undefined);
     const { endAgentRuntimeHookSession } = await loadWorkspaceBridgeModule();
     await endAgentRuntimeHookSession({
       origin,

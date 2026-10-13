@@ -51,6 +51,7 @@ import { pluginDirectory } from "./test-layout.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "../host-runtime/scripts/trelio-context-recovery.mjs";
 import { readRuntimeChatBinding, saveRuntimeChatBinding, runtimeChatBindingPath } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
 import { readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { prepareRuntimeProofSubmission, runtimeProofBindingPath } from "../host-runtime/scripts/trelio-runtime-proof-preparation.mjs";
 
 const hookScriptPath = fileURLToPath(
   new URL("../host-runtime/scripts/trelio-runtime-session.mjs", import.meta.url),
@@ -1388,7 +1389,7 @@ test("first protected call observes the current model and supported host names i
       response.end(JSON.stringify({
         schemaVersion: 1,
         runtimeSessionId,
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
         observation: registrationBody.observation,
       }));
       return;
@@ -1546,6 +1547,31 @@ test("first protected call observes the current model and supported host names i
     const cold = await runHook(reuseInput, environment);
     assert.equal(cold.exitCode, 0, cold.stderr);
     assert.equal(JSON.parse(cold.stdout).hookSpecificOutput.updatedInput.knownInstructionLayerKeys, undefined);
+
+    // The actual approved PreToolUse process writes the private locator. Renew
+    // through that protected filesystem boundary after simulated slow mirror
+    // preparation, without passing a key or inherited chat ID to the MCP host.
+    const localAction = await runHook({ ...reuseInput,
+      tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
+      tool_input: { ...localEnvelope, route: "action" },
+    }, environment);
+    assert.equal(localAction.exitCode, 0, localAction.stderr);
+    const actionProof = JSON.parse(localAction.stdout).hookSpecificOutput.updatedInput.runtimeSessionProof;
+    const proofIndex = runtimeProofBindingPath({ configDirectory, runtimeSessionId: actionProof.runtimeSessionId });
+    const indexText = await readFile(proofIndex, "utf8");
+    assert.equal(indexText.includes("privateKey"), false);
+    if (process.platform !== "win32") assert.equal((await stat(proofIndex)).mode & 0o777, 0o600);
+    let proofClock = Date.parse(actionProof.issuedAt);
+    const preparedProof = await prepareRuntimeProofSubmission({ origin, nativeTool: "get_task",
+      proof: actionProof, configDirectory, readPrivateJsonFile, now: () => proofClock });
+    proofClock += 245_000;
+    const renewedProof = preparedProof.forSubmission();
+    assert.equal(renewedProof.nonce, actionProof.nonce);
+    assert.equal(Date.parse(renewedProof.issuedAt) - Date.parse(actionProof.issuedAt), 245_000);
+    assert.equal(crypto.verify(null, Buffer.from(["trelio-runtime-proof-v1", renewedProof.runtimeSessionId,
+      "get_task", renewedProof.issuedAt, renewedProof.nonce].join("\n")), publicKey,
+    Buffer.from(renewedProof.signature, "base64url")), true);
+    preparedProof.close();
 
     // Claude Code qualifies both plugin MCP servers in hook payloads. Reuse
     // the already registered state here so this assertion isolates name

@@ -167,6 +167,44 @@ Oversized non-context записи пропускаются только по и
 и серверная policy сохраняются. `EFFORT_REQUIRED`
 означает отсутствие effort, `EFFORT_TOO_LOW` — наблюдаемый уровень ниже порога.
 
+<a id="runtime-proof-preparation"></a>
+
+### Proof после долгой подготовки local action
+
+PreToolUse для `continue_trelio_local_action(route=action)` записывает owner-private
+индекс runtime ID → basename runtime state, origin и исходный expiry. Индекс не
+содержит ключа, observation, аргументов или company content и сам не даёт права
+подписывать. Host до provider/mirror/file подготовки читает оба файла через
+обычный private reader, сверяет exact origin/session/expiry и проверяет свежесть
+и Ed25519-подпись входного proof для exact nativeTool. Inherited chat ID не
+используется. Изменённый метод, неверная подпись и уже старый proof не получают
+продолжения. Старый hook без индекса сохраняет прежний backend validation path.
+
+Проверенный ключ остаётся только внутри этого invocation. Непосредственно перед
+POST host обновляет timestamp и подпись, сохраняя исходные runtimeSessionId и
+nonce. Серверный TTL proof остаётся 120 секунд, clock skew – 30; TTL runtime
+session не продлевается. Все варианты envelope суммарно могут потребить один
+nonce только один раз. Подготовка ограничена 660 секундами; истечение исходной
+session остаётся terminal. После успеха, ошибки и отмены signer закрывается;
+SessionEnd/clear и bounded stale-state cleanup удаляют companion index. Новый
+model/effort snapshot не подменяет observation уже начатого вызова. Сервер перед
+действием заново проверяет session, bridge/source grant, policy, scopes и ACL.
+
+Backend для local action проверяет proof до domain callback. Только структурированный
+`TRELIO_RUNTIME_HOOK_REQUIRED`, `reason=expired`, `expiredCause=proof_age` и
+`beforeDispatch=true` разрешает один автоматический повтор того же подготовленного
+POST со свежей подписью и прежним nonce. Ciphertext/file preparation не повторяется.
+Transport/5xx, неоднозначная запись, replay, invalid, clock skew, session/bridge/grant
+expiry либо legacy refusal без beforeDispatch не запускают retry или auth recovery.
+Error diagnostics содержат только закрытую причину, optional proofAgeMs и факт
+pre-dispatch; keys/proofs/IDs/аргументы в ответ и telemetry не попадают.
+
+Простой возраст proof внутри подготовки устраняется runtime и не требует решения
+пользователя или остановки агента. Unknown/небезопасный отказ сохраняет обычный gate.
+Regression проходит настоящий PreToolUse/private filesystem, подготовку 245 секунд
+на управляемых часах, Ed25519 verification, сохранение nonce/TTL и negative cases;
+backend отдельно проверяет PostgreSQL replay fence для обновлённого timestamp.
+
 <a id="runtime-configuration-refresh"></a>
 
 ### Переключение модели и effort в текущем чате

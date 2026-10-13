@@ -10,6 +10,7 @@ import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
 import crypto from "node:crypto";
+import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
 import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import {
@@ -6244,6 +6245,7 @@ const safeErrorPayload = (error) => {
   // as the child bridge adapter does; never spread Error/cause/details here.
   // This is serialization only: neither a read nor a mutation is retried.
   if (error instanceof BridgeTransportError) return error.toJSON();
+  if (error instanceof RuntimeProofPreparationError) return error.toJSON();
   return {
     code: error instanceof RemoteMcpHostError
       || error instanceof RemoteMcpOAuthError
