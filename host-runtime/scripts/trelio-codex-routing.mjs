@@ -23,8 +23,11 @@ export const CODEX_LEGACY_TRELIO_MCP_SERVER_NAME = "trelio-mcp";
 
 export const CODEX_ROUTING_PLAN_TOOL_NAME = "plan_codex_trelio_hook_routing";
 export const CODEX_ROUTING_APPLY_TOOL_NAME = "apply_codex_trelio_hook_routing";
+// Both plan and apply deliver this recovery instruction before the next
+// protected read. Preserve the client's selected folder without requiring
+// host project metadata, and keep a new chat conditional on the live retry.
 export const CODEX_ROUTING_RESTART_VERIFICATION =
-  "После apply полностью перезапустите Codex/ChatGPT, вернитесь в этот же чат и повторите одно защищённое чтение Trelio. Новый чат того же проекта нужен только если проверка здесь снова не прошла.";
+  "После apply полностью перезапустите Codex/ChatGPT, вернитесь в этот же чат и повторите одно защищённое чтение Trelio. Новый чат с той же выбранной папкой нужен только если проверка здесь снова не прошла.";
 
 const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;

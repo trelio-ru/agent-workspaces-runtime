@@ -53,6 +53,8 @@ publication tooling также остаются вне этого публичн
   Root-level native manifest исключает startup-миграцию Codex до чтения его
   config, даже если процесс унаследовал CODEX_*; это не OAuth admission.
 - Generic диагностика учитывает реальный clientKind и выбранный permanent root.
+  Routing recovery сначала повторяет protected read в том же чате после restart;
+  при необходимом новом чате сохраняется выбранная папка без требования проекта.
   Refresh существующего managed блока сохраняет scope и bytes personal rules,
   использует current template/CAS/read-back; без тестовых задач/Run и отправки
   отчёта. Чтение не подтверждает save. [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).

@@ -2710,7 +2710,10 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   assert.equal(routingApplyTool.inputSchema.properties.confirmed.const, true);
   assert.match(routingApplyTool.description, /полностью перезапустите Codex\/ChatGPT/u);
   assert.match(routingApplyTool.description, /в этом же чате/u);
-  assert.match(routingApplyTool.description, /новый чат проекта нужен лишь при сбое/u);
+  assert.match(routingApplyTool.description, /новый чат с той же выбранной папкой нужен лишь при сбое/u);
+  // Exercise the actual tools/list projection: nullable host project metadata
+  // must not turn an otherwise valid selected folder into a recovery blocker.
+  assert.doesNotMatch(routingApplyTool.description, /новый чат\s+(?:того же )?проекта/iu);
   assert.doesNotMatch(routingApplyTool.description, /новой задаче/u);
   const installationDiagnosticTool = response.result.tools.find(
     ({ name }) => name === "diagnose_trelio_installation",

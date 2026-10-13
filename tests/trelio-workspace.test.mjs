@@ -5668,7 +5668,8 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   assert.match(onboardingSkill, /основная папка открытого локального проекта/u);
   assert.match(onboardingSkill, /"intent":"folder_onboarding"/u);
   assert.match(onboardingSkill, /единственная каноническая классификация папки/u);
-  assert.match(onboardingSkill, /отдельную обычную\s+папку проекта без Git/u);
+  assert.match(onboardingSkill, /отдельную обычную\s+постоянную папку без Git/u);
+  assert.doesNotMatch(onboardingSkill, /папку проекта без Git/u);
   assert.doesNotMatch(normalized, /git check-ignore|git ls-files|git cat-file|git ls-tree/u);
   assert.match(onboardingSkill, /`plan\.preview\.managedBlock`/u);
   assert.match(onboardingSkill, /`folder_onboarding_apply`/u);
@@ -5695,7 +5696,8 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   assert.match(onboardingSkill, /Stale plan\s+перечитай/u);
   assert.match(onboardingSkill, /полностью перезапусти Codex\/ChatGPT/u);
   assert.match(onboardingSkill, /вернись в этот\s+же чат/u);
-  assert.match(onboardingSkill, /Новый чат того же проекта нужен только/u);
+  assert.match(onboardingSkill, /Новый чат с той же выбранной папкой нужен только/u);
+  assert.doesNotMatch(onboardingSkill, /новый чат\s+(?:того же )?проекта/iu);
   assert.match(onboardingSkill, /bootstrap fallback/u);
   assert.match(onboardingSkill, /trelio-host-runtime-loader\.mjs bridge doctor --json/u);
   assert.match(onboardingSkill, /Не сканируй caches/u);
@@ -5774,7 +5776,8 @@ test("Codex installation reuses approved hooks and gates missing proof before st
       /(?:полностью\s+перезапустите|полный\s+(?:restart|перезапуск)) Codex\/ChatGPT/u,
     );
     assert.match(instructions, /этом же\s+чате/u);
-    assert.match(instructions, /новый чат того же проекта нужен только/iu);
+    assert.match(instructions, /новый чат с той же выбранной папкой нужен только/iu);
+    assert.doesNotMatch(instructions, /новый чат\s+(?:того же )?проекта/iu);
   }
 });
 
@@ -5834,7 +5837,8 @@ test("plugin exposes focused value-free diagnostics through one runtime plan", a
   assert.match(diagnosticsSkill, /`apply_codex_trelio_hook_routing`/u);
   assert.match(diagnosticsSkill, /не включает Hooks и не\s+меняет их trust/u);
   assert.match(diagnosticsSkill, /вернись в этот же чат/u);
-  assert.match(diagnosticsSkill, /Новый чат того же проекта нужен\s+только/u);
+  assert.match(diagnosticsSkill, /Новый чат с той же выбранной папкой\s+нужен\s+только/u);
+  assert.doesNotMatch(diagnosticsSkill, /новый чат\s+(?:того же )?проекта/iu);
   assert.match(diagnosticsSkill, /счётчики без ID и ключей/u);
   assert.match(diagnosticsAgentMetadata, /Диагностика Trelio/u);
   assert.match(diagnosticsAgentMetadata, /\$trelio-diagnostics/u);

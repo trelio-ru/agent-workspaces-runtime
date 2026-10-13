@@ -3878,7 +3878,7 @@ const LOCAL_TOOLS = [
   {
     name: CODEX_ROUTING_APPLY_TOOL_NAME,
     title: "Применить подтверждённый direct routing Trelio в Codex",
-    description: "Добавьте только отсутствующие Trelio MCP namespaces в пользовательский config.toml Codex по exact CAS-bound planHash. Вызывайте confirmed=true лишь после отдельного явного подтверждения показанного плана пользователем. После успеха полностью перезапустите Codex/ChatGPT и повторите protected read в этом же чате; новый чат проекта нужен лишь при сбое.",
+    description: "Добавьте только отсутствующие Trelio MCP namespaces в пользовательский config.toml Codex по exact CAS-bound planHash. Вызывайте confirmed=true лишь после отдельного явного подтверждения показанного плана пользователем. После успеха полностью перезапустите Codex/ChatGPT и повторите protected read в этом же чате; новый чат с той же выбранной папкой нужен лишь при сбое.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
