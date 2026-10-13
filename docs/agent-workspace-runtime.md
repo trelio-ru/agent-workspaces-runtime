@@ -794,6 +794,17 @@ instruction/ignore blobs либо быть пустым. Commit/tag, orphan tree
 постороннее содержимое блокируют flow, включая unreachable objects. Проверка
 повторяется перед apply; `.git`, refs и objects сохраняются без изменений.
 
+Любая диагностика в stderr metadata-read, даже при exit 0, блокирует неполную
+классификацию до записи: Git может пропустить повреждённый ref и вернуть
+успешный exit. Проверка не зависит от языка warning. Стандартный `core.symlinks`,
+который Git init может сохранить после filesystem probe, допускается и не
+перезаписывается; physical symlinks и symlink modes в tree остаются запрещены.
+Единственный primary worktree разбирается по полному уже проверенному real root,
+без trim либо разделения имени папки по строкам. Пробелы, кириллица и допустимые
+на POSIX control characters сохраняются буквально; дополнительные, неполные и
+неизвестные worktree records блокируются. Используется Git 2.28-compatible
+`worktree list --porcelain`, без требования более нового `-z`.
+
 Следующие Run переиспользуют тот же `workspace/`, а не создают копию по
 `run-id`. Перед `start` или `claim` bridge получает live server overview; если
 прежний локальный или продолжаемый Run вышел из списка последних 50, bridge

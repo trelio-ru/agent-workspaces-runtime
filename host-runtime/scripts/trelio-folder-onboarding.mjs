@@ -50,6 +50,9 @@ const ALLOWED_LOCAL_CONFIG_KEYS = new Set([
   "core.logallrefupdates",
   "core.precomposeunicode",
   "core.repositoryformatversion",
+  // Git init can write this after probing symlink support (notably on
+  // Windows). It does not relax the separate filesystem/tree symlink guards.
+  "core.symlinks",
 ]);
 const UNFINISHED_GIT_PATHS = [
   "BISECT_LOG",
@@ -192,8 +195,22 @@ const runGit = async (gitPath, argumentsList, cwd, execFileCommand = execFileAsy
         },
       },
     );
-    return { ok: true, stdout: result.stdout || "", stderr: result.stderr || "" };
+    // These calls inspect metadata, not progress-producing Git mutations.
+    // Git can exit successfully while omitting broken refs and warning on
+    // stderr. Treat any diagnostic as an incomplete read, regardless of its
+    // language, instead of interpreting the remaining stdout as a full list.
+    const stderr = result.stderr || "";
+    if (stderr.trim()) {
+      throw new TrelioFolderOnboardingError(
+        "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED",
+        "Git metadata inspection returned diagnostics; onboarding stopped without changing files.",
+      );
+    }
+    return { ok: true, stdout: result.stdout || "", stderr };
   } catch (error) {
+    // A diagnostic from a successful read must not become the expected
+    // non-repository/unborn-HEAD failure used by classification branches.
+    if (error instanceof TrelioFolderOnboardingError) throw error;
     return {
       ok: false,
       stdout: error?.stdout || "",
@@ -350,10 +367,33 @@ const buildManagedBindingBlock = ({ company, project }) => {
   return lines.join("\n");
 };
 
-const parseWorktreePaths = (stdout) => String(stdout || "")
-  .split(/\r?\n/u)
-  .filter((line) => line.startsWith("worktree "))
-  .map((line) => line.slice("worktree ".length));
+const parseSingleServiceWorktree = (stdout, rootPath) => {
+  // Git 2.28, our supported minimum, cannot emit worktree list with -z.
+  // A service repository must have exactly its main worktree, whose real
+  // root was already verified independently. Consume that exact path as a
+  // length-delimited prefix: newlines or record-looking text in a filename
+  // cannot become attributes or additional worktrees. Then validate the
+  // entire remaining record; another worktree, truncation or unknown fields
+  // fail closed. Do not trim paths or decode them as quoted shell strings.
+  const windows = process.platform === "win32";
+  const output = windows ? String(stdout || "").replaceAll("\r\n", "\n") : String(stdout || "");
+  const gitPath = windows ? rootPath.replaceAll("\\", "/") : rootPath;
+  const prefix = `worktree ${gitPath}\n`;
+  const actualPrefix = output.slice(0, prefix.length);
+  if ((windows ? actualPrefix.toLowerCase() : actualPrefix)
+    !== (windows ? prefix.toLowerCase() : prefix)) return null;
+  const attributes = output.slice(prefix.length);
+  return /^HEAD (?:[0-9a-f]{40}|[0-9a-f]{64})\n(?:branch refs\/[^\0\s]+|detached)\n\n$/u.test(attributes)
+    ? rootPath : null;
+};
+
+const readGitPathOutput = (stdout) => {
+  // Remove only Git's one output terminator. trim() also removes valid path
+  // bytes such as a trailing space, tab, CR or an actual newline in POSIX.
+  const output = String(stdout || "");
+  const terminator = process.platform === "win32" ? /\r?\n$/u : /\n$/u;
+  return terminator.test(output) ? output.replace(terminator, "") : null;
+};
 
 const parseObjectInventory = (stdout) => String(stdout || "")
   .split(/\r?\n/u)
@@ -445,12 +485,12 @@ const inspectServiceGit = async ({
       "The selected folder contains remotes or indexed paths.",
     );
   }
-  const worktreePaths = parseWorktreePaths(worktrees.stdout);
-  const worktreeRealPath = worktreePaths.length === 1
-    ? await filesystem.realpath(worktreePaths[0]).catch(() => null)
+  const worktreePath = parseSingleServiceWorktree(worktrees.stdout, rootPath);
+  const worktreeRealPath = worktreePath
+    ? await filesystem.realpath(worktreePath).catch(() => null)
     : null;
   if (
-    worktreePaths.length !== 1
+    !worktreePath
     || !worktreeRealPath
     || !sameLocalPath(worktreeRealPath, rootPath)
   ) {
@@ -684,7 +724,9 @@ const inspectFolder = async ({
   );
   let serviceGit = false;
   if (topLevel.ok) {
-    const topLevelPath = await filesystem.realpath(topLevel.stdout.trim()).catch(() => null);
+    const reportedPath = readGitPathOutput(topLevel.stdout);
+    const topLevelPath = reportedPath
+      ? await filesystem.realpath(reportedPath).catch(() => null) : null;
     if (!topLevelPath || !sameLocalPath(topLevelPath, rootPath)) {
       throw new TrelioFolderOnboardingError(
         "TRELIO_FOLDER_ONBOARDING_PARENT_GIT",

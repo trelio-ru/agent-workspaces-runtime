@@ -58,8 +58,9 @@ publication tooling также остаются вне этого публичн
   отчёта. Чтение не подтверждает save. [Контракт](docs/agent-workspace-runtime.md#readiness-diagnostics).
 - Форматы служебных Codex refs и полную проверку Git-объектов при онбординге
   меняй по [контракту](docs/agent-workspace-runtime.md#folder-service-git).
-  Проверяй реальные Git fixtures, сохранение refs/objects и отказы до записи;
-  похожий prefix либо допустимое имя сами по себе не доказывают service Git.
+  Проверяй реальные Git fixtures, сохранение refs/objects/config, stderr при
+  exit 0 и literal paths без повышения Git minimum; отказы проверяй до записи.
+  Похожий prefix либо допустимое имя сами по себе не доказывают service Git.
 - Ошибка распознанного `PreToolUse` передаётся JSON-решением `deny` с причиной
   и process exit `0`: PowerShell может превратить блокирующий exit `2` в `1`.
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и

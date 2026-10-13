@@ -323,6 +323,176 @@ test("service Git is preserved and bridge paths are proven ignored", async () =>
   assert.equal(returning.plan.status, "already_configured");
 });
 
+for (const value of ["false", "true"]) {
+  test(`service Git preserves the standard core.symlinks=${value} setting`, async () => {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    // Git init probes the filesystem and may persist false on Windows. It is
+    // normal repository metadata; onboarding must not rewrite it to proceed.
+    await runGit(root, "config", "core.symlinks", value);
+    const configBefore = await fs.readFile(path.join(root, ".git", "config"));
+    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    assert.equal(prepared.inspection.folder.kind, "service_git");
+    await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+    assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
+    assert.deepEqual(await fs.readFile(path.join(root, ".git", "config")), configBefore);
+  });
+}
+
+test("allowing core.symlinks still rejects unrelated local config before writing", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  await runGit(root, "config", "core.symlinks", "false");
+  await runGit(root, "config", "core.autocrlf", "true");
+  const configBefore = await fs.readFile(path.join(root, ".git", "config"));
+  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+    { code: "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED" });
+  assert.deepEqual(await fs.readdir(root), [".git"]);
+  assert.deepEqual(await fs.readFile(path.join(root, ".git", "config")), configBefore);
+});
+
+test("core.symlinks=false does not admit a physical instruction symlink", {
+  skip: process.platform === "win32" ? "Unprivileged Windows cannot reliably create symlinks" : false,
+}, async () => {
+  const root = await makeRoot();
+  const targetRoot = await makeRoot();
+  const target = path.join(targetRoot, "instructions.md");
+  await fs.writeFile(target, "# Keep this external file\n");
+  await runGit(root, "init");
+  await runGit(root, "config", "core.symlinks", "false");
+  await fs.symlink(target, path.join(root, "AGENTS.md"));
+  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+    { code: "TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE" });
+  assert.deepEqual((await fs.readdir(root)).sort(), [".git", "AGENTS.md"]);
+  assert.equal(await fs.readFile(target, "utf8"), "# Keep this external file\n");
+});
+
+test("core.symlinks=false does not admit symlink modes in Codex trees on any platform", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  await runGit(root, "config", "core.symlinks", "false");
+  const source = path.join(root, ".git", "synthetic-symlink-target");
+  await fs.writeFile(source, "external-instructions.md");
+  const blob = (await runGit(root, "hash-object", "-w", source)).stdout.trim();
+  await fs.rm(source);
+  const indexPath = path.join(root, ".git", "onboarding-test-index");
+  const environment = { GIT_INDEX_FILE: indexPath };
+  // Construct the actual Git symlink object without OS symlink privileges;
+  // this negative path also runs on the unprivileged Windows CI account.
+  await runGitWithEnvironment(root, environment, "update-index", "--add", "--cacheinfo", `120000,${blob},AGENTS.md`);
+  const tree = (await runGitWithEnvironment(root, environment, "write-tree")).stdout.trim();
+  await fs.rm(indexPath);
+  const ref = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/base";
+  await runGit(root, "update-ref", ref, tree);
+  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+    { code: "TRELIO_FOLDER_ONBOARDING_GIT_HISTORY_PRESENT" });
+  assert.deepEqual(await fs.readdir(root), [".git"]);
+  assert.equal((await runGit(root, "rev-parse", ref)).stdout.trim(), tree);
+});
+
+for (const ref of [
+  "refs/heads/broken",
+  "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/base",
+]) {
+  test(`a broken ${ref} stops preparation and apply before any writes`, async () => {
+    const root = await makeRoot();
+    await runGit(root, "init");
+    const healthyRef = "refs/codex/turn-diffs/captures/1720000000000/123e4567-e89b-12d3-a456-426614174000/head";
+    const tree = (await runGit(root, "write-tree")).stdout.trim();
+    await runGit(root, "update-ref", healthyRef, tree);
+    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    const headBefore = await fs.readFile(path.join(root, ".git", "HEAD"));
+    const configBefore = await fs.readFile(path.join(root, ".git", "config"));
+    const refPath = path.join(root, ".git", ref);
+    await fs.mkdir(path.dirname(refPath), { recursive: true });
+    const brokenBytes = "not-an-object-id\n";
+    await fs.writeFile(refPath, brokenBytes);
+    // Real Git exits zero while omitting the broken ref, retaining the healthy
+    // one and warning on stderr. A partial list must not prove a ref-safe repo.
+    const enumerated = await runGit(root, "for-each-ref");
+    assert.match(enumerated.stdout, new RegExp(healthyRef, "u"));
+    assert.ok(enumerated.stderr.trim());
+    for (const action of [
+      () => prepareTrelioFolderOnboarding({ folderPath: root, ...binding }),
+      () => applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters),
+    ]) await assert.rejects(action(), { code: "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED" });
+    assert.deepEqual(await fs.readdir(root), [".git"]);
+    assert.equal(await fs.readFile(refPath, "utf8"), brokenBytes);
+    assert.equal((await runGit(root, "rev-parse", healthyRef)).stdout.trim(), tree);
+    assert.deepEqual(await fs.readFile(path.join(root, ".git", "HEAD")), headBefore);
+    assert.deepEqual(await fs.readFile(path.join(root, ".git", "config")), configBefore);
+  });
+}
+
+test("all successful metadata reads fail closed on diagnostics regardless of language", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  for (const command of ["rev-parse", "remote", "ls-files", "worktree", "config", "for-each-ref", "cat-file"]) {
+    const execFileCommand = async (executable, argumentsList, options) => {
+      const result = await execFileAsync(executable, argumentsList, options);
+      return argumentsList.includes(command)
+        ? { ...result, stderr: "Диагностика неполного чтения\n" } : result;
+    };
+    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+      { code: "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED" }, command);
+    assert.deepEqual(await fs.readdir(root), [".git"]);
+  }
+});
+
+test("a successful Git probe with diagnostics cannot fall back to ordinary-folder onboarding", async () => {
+  const root = await makeRoot();
+  const execFileCommand = async (executable, argumentsList, options) => {
+    if (options.cwd === await fs.realpath(root) && argumentsList.includes("rev-parse")) {
+      return { stdout: "", stderr: "synthetic incomplete Git probe\n" };
+    }
+    return execFileAsync(executable, argumentsList, options);
+  };
+  await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+    { code: "TRELIO_FOLDER_ONBOARDING_GIT_INSPECTION_FAILED" });
+  assert.deepEqual(await fs.readdir(root), []);
+});
+
+const unusualFolderNames = process.platform === "win32"
+  ? ["Рабочая папка"]
+  : ["Рабочая папка", "Work\nFolder", "Work\rFolder", "Work\tFolder", "Work ", "Work\n",
+    "Work\nHEAD 0000000\n\nworktree fake"];
+for (const name of unusualFolderNames) {
+  test(`service Git handles the literal folder name ${JSON.stringify(name)}`, async () => {
+    const parent = await makeRoot();
+    const root = path.join(parent, name);
+    await fs.mkdir(root);
+    await runGit(root, "init");
+    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, ...binding });
+    assert.equal(prepared.inspection.folder.kind, "service_git");
+    await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+    assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
+  });
+}
+
+test("worktree parsing keeps Git 2.28 commands and rejects extra or incomplete records", async () => {
+  const root = await makeRoot();
+  await runGit(root, "init");
+  const transformOutput = [
+    (stdout) => `${stdout}worktree ${root}\nHEAD ${"0".repeat(40)}\nbranch refs/heads/other\n\n`,
+    (stdout) => stdout.slice(0, -1),
+    (stdout) => stdout.replace(/HEAD [0-9a-f]+\n/u, ""),
+    (stdout) => `${stdout.slice(0, -1)}unknown attribute\n\n`,
+  ];
+  for (const transform of transformOutput) {
+    const execFileCommand = async (executable, argumentsList, options) => {
+      const result = await execFileAsync(executable, argumentsList, options);
+      if (!argumentsList.includes("worktree")) return result;
+      // -z is unavailable in Git 2.28; do not hide an increased minimum behind
+      // fixtures running a newer developer/hosted Git installation.
+      assert.deepEqual(argumentsList.slice(-3), ["worktree", "list", "--porcelain"]);
+      return { ...result, stdout: transform(result.stdout) };
+    };
+    await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, ...binding }, { execFileCommand }),
+      { code: "TRELIO_FOLDER_ONBOARDING_GIT_UNSUPPORTED" });
+    assert.deepEqual(await fs.readdir(root), [".git"]);
+  }
+});
+
 for (const segmentLength of [32, 64]) {
   test(`service Git preserves ${segmentLength}-hex Codex checkpoints with instruction trees`, async () => {
     const root = await makeRoot();
