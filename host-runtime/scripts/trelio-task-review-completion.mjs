@@ -15,7 +15,9 @@ export const appendAutomaticWorkStartCards = (blocks, explicitStatusTargets = []
     const statusTasks = new Set(blocks.filter((block) => block.type === "statusProposal")
         .map((block) => block.proposal?.task?.id).filter(Boolean));
     const additions = [];
-    const cardCount = blocks.filter((entry) => entry.type !== "text").length;
+    // The envelope limit counts display-only blocks too. Adding a companion
+    // must not turn a valid 20-block input into an invalid saved result.
+    const cardCount = blocks.length;
     const carry = (companions) => {
         if (!Array.isArray(companions))
             return;
