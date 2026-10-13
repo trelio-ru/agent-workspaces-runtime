@@ -1557,13 +1557,22 @@ test("first protected call observes the current model and supported host names i
     }, environment);
     assert.equal(localAction.exitCode, 0, localAction.stderr);
     const actionProof = JSON.parse(localAction.stdout).hookSpecificOutput.updatedInput.runtimeSessionProof;
-    const proofIndex = runtimeProofBindingPath({ configDirectory, runtimeSessionId: actionProof.runtimeSessionId });
+    // Credentials above exercise the supported legacy config migration. New
+    // runtime state uses the platform-native root (LOCALAPPDATA on Windows),
+    // resolved with exactly the isolated environment passed by runHook.
+    const runtimeConfigDirectory = resolveWorkspaceBridgeConfigDirectory({
+      environment: { ...environment, LOCALAPPDATA: path.join(temporaryHome, "AppData", "Local"),
+        XDG_CONFIG_HOME: path.join(temporaryHome, ".config") },
+      homeDirectory: temporaryHome,
+    });
+    const proofIndex = runtimeProofBindingPath({ configDirectory: runtimeConfigDirectory,
+      runtimeSessionId: actionProof.runtimeSessionId });
     const indexText = await readFile(proofIndex, "utf8");
     assert.equal(indexText.includes("privateKey"), false);
     if (process.platform !== "win32") assert.equal((await stat(proofIndex)).mode & 0o777, 0o600);
     let proofClock = Date.parse(actionProof.issuedAt);
     const preparedProof = await prepareRuntimeProofSubmission({ origin, nativeTool: "get_task",
-      proof: actionProof, configDirectory, readPrivateJsonFile, now: () => proofClock });
+      proof: actionProof, configDirectory: runtimeConfigDirectory, readPrivateJsonFile, now: () => proofClock });
     proofClock += 245_000;
     const renewedProof = preparedProof.forSubmission();
     assert.equal(renewedProof.nonce, actionProof.nonce);
