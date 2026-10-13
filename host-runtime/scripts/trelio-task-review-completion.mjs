@@ -7,6 +7,44 @@
  */
 export const TASK_REVIEW_COMPLETION_REF_PATTERN = /^tr1_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 export const TASK_REVIEW_COMPLETION_KINDS = ["comment", "checklist", "status", "control"];
+/** Native and local renderers receive companions only from fresh server reads.
+ * Carry the existing start draft into this single App result; do not translate
+ * it into a new work_started save against an accepted Run. Explicit status
+ * decisions (including failures) win, and cards remain independently bounded. */
+export const appendAutomaticWorkStartCards = (blocks, explicitStatusTargets = [], automaticStarts = []) => {
+    const statusTasks = new Set(blocks.filter((block) => block.type === "statusProposal")
+        .map((block) => block.proposal?.task?.id).filter(Boolean));
+    const additions = [];
+    const cardCount = blocks.filter((entry) => entry.type !== "text").length;
+    const carry = (companions) => {
+        if (!Array.isArray(companions))
+            return;
+        for (const companion of companions) {
+            const draft = companion?.currentDraft;
+            const target = companion?.contextRequest;
+            const taskId = companion?.task?.id;
+            const explicit = explicitStatusTargets.some((value) => value.runId !== undefined
+                ? value.runId === target?.runId
+                : value.companySlug === companion?.company?.slug && value.projectSlug === companion?.project?.slug
+                    && String(value.taskNumber) === String(companion?.task?.number));
+            if (!taskId || statusTasks.has(taskId) || explicit || draft?.reasonKind !== "run_open"
+                || draft.intent !== "work_started" || draft.isStale || draft.isApplying
+                || cardCount + additions.length >= 20)
+                continue;
+            statusTasks.add(taskId);
+            additions.push({ type: "statusProposal", itemId: `automatic-start-${additions.length + 1}`, status: "ready", proposal: companion });
+        }
+    };
+    const cleaned = blocks.map((block) => {
+        if (!Array.isArray(block.proposal?.automaticWorkStartProposals))
+            return block;
+        const { automaticWorkStartProposals: companions, ...proposal } = block.proposal;
+        carry(companions);
+        return { ...block, proposal };
+    });
+    carry(automaticStarts);
+    return [...cleaned, ...additions];
+};
 /** Wire plan, shared by the live reader and context-budget fixtures. The nulls
  * are a safe template, not inferred semantic decisions or human approval. */
 export const buildTaskReviewCompletionPlan = (input) => {

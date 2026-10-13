@@ -11497,7 +11497,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       `/api/agent-workspaces/runs/${requestedRunId}/claim`,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-trelio-work-start-presentation": "1" },
         body: JSON.stringify({
           expectedFencingToken: existingRun.fencingToken,
           clientKind: "workspace-bridge",

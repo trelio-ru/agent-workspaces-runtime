@@ -267,7 +267,7 @@ publication tooling также остаются вне этого публичн
 - Optional proposal `preparationRef` подставляет только structural CAS fields:
   [контракт](docs/agent-workspace-runtime.md#подстановка-служебных-полей-предложений).
   Stale требует нового чтения, без auto-refresh/save; legacy fields сохраняются.
-- Итоговые task proposals собирает общий generated assembler по
+- Сохранённый start и итоговые task proposals собирает общий generated assembler по
   [контракту completion](docs/agent-workspace-runtime.md#машинная-подготовка-итоговых-task-proposals).
   Решения остаются локально; stale/использованный план не повторять автоматически.
 - Default selection context/worklog вложений, прямой пользовательский exception

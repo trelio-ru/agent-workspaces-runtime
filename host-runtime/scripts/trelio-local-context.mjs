@@ -1,5 +1,5 @@
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
-import { assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
+import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
@@ -7068,7 +7068,7 @@ const postProposalRequest = async ({
   `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/proposals/${endpoint}`,
   {
     method: "POST",
-    headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1", "x-trelio-task-review-completion": "1" },
+    headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1", "x-trelio-task-review-completion": "1", "x-trelio-work-start-presentation": "1" },
     body: JSON.stringify(body),
     signal,
   },
@@ -7417,6 +7417,7 @@ export const prepareLocalProposalBundle = async ({
   rawBlocks,
   canonicalizeTarget,
   saveProposal,
+  automaticStarts = [],
 }) => {
   const blocks = normalizeProposalBundleBlocks(companySlug, rawBlocks);
   const preparedBlocks = [];
@@ -7480,7 +7481,7 @@ export const prepareLocalProposalBundle = async ({
     proposalBundle: {
       schemaVersion: 1,
       kind: "taskProposalBlocks",
-      blocks: preparedBlocks,
+      blocks: appendAutomaticWorkStartCards(preparedBlocks, blocks.filter((block) => block.kind === "status").map((block) => ({ companySlug, ...block.target })), automaticStarts),
     },
   };
 };
@@ -7489,7 +7490,7 @@ export const prepareLocalProposalBundle = async ({
  * carries only opaque refs; returned descriptors are bound to the selected
  * company, and every decision is validated before the first encrypted upload.
  * A lost preparation response consumes the plan and is never blindly retried. */
-export const prepareLocalTaskReviewCompletions = async ({ companySlug, payload, resolve }) => {
+export const prepareLocalTaskReviewCompletions = async ({ companySlug, payload, resolve, onAutomaticStart = () => {} }) => {
   if (!Array.isArray(payload?.completions) || !payload.completions.length || payload.completions.length > 5
     || Object.keys(payload).some((key) => key !== "completions")) {
     throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Use completions without blocks or other bundle fields.");
@@ -7508,7 +7509,7 @@ export const prepareLocalTaskReviewCompletions = async ({ companySlug, payload, 
     throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Invalid completion descriptors.");
   }
   const seen = new Set();
-  return response.descriptors.flatMap((entry, index) => {
+  const blocks = response.descriptors.flatMap((entry, index) => {
     if (entry?.completionRef !== refs[index] || entry?.companySlug !== companySlug || seen.has(entry.taskId)) {
       throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "Completion descriptor target mismatch.");
     }
@@ -7523,6 +7524,18 @@ export const prepareLocalTaskReviewCompletions = async ({ companySlug, payload, 
       throw error;
     }
   });
+  // All semantic choices have passed validation before carrying any existing
+  // decision. Only the selected server descriptor can provide this context.
+  for (const entry of response.descriptors) {
+    const start = entry.automaticWorkStartProposal;
+    if (start) {
+      if (start.company?.slug !== companySlug || start.task?.id !== entry.taskId) {
+        throw new TrelioLocalContextError("TASK_REVIEW_COMPLETION_INVALID", "The existing start belongs to another review target.");
+      }
+      onAutomaticStart(start);
+    }
+  }
+  return blocks;
 };
 
 /** Resolve reviewed structural fields before any encryption or upload. The
@@ -8287,10 +8300,20 @@ export const handleTrelioLocalProposalOperation = async (
       );
     }
     let ready = null;
+    const rawAutomaticStarts = [];
     const rawBlocks = rawPayload.completions === undefined ? rawPayload.blocks
       : await prepareLocalTaskReviewCompletions({ companySlug, payload: rawPayload,
+        onAutomaticStart: (start) => rawAutomaticStarts.push(start),
         resolve: (body) => postProposalRequest({ origin: provider.requestOrigin, token: provider.token,
           companySlug, endpoint: "completion", body, signal }) });
+    const automaticStarts = await Promise.all(rawAutomaticStarts.map((value) => hydrateAgentCompanyEncryptedJson({
+      value, origin: provider.requestOrigin, token: provider.token, companyEncryption: provider.companyEncryption, signal,
+    })));
+    if (!rawBlocks.length && automaticStarts.length) {
+      return { schemaVersion: 1, provider: "local_company_context", proposalBundle: {
+        schemaVersion: 1, kind: "taskProposalBlocks", blocks: appendAutomaticWorkStartCards([], [], automaticStarts),
+      } };
+    }
     if (rawPayload.completions !== undefined && rawBlocks.length === 0) {
       return { schemaVersion: 1, provider: "local_company_context", proposalBundle: {
         schemaVersion: 1, kind: "taskProposalBlocks", blocks: [{ type: "text",
@@ -8300,6 +8323,7 @@ export const handleTrelioLocalProposalOperation = async (
     return prepareLocalProposalBundle({
       companySlug,
       rawBlocks,
+      automaticStarts,
       canonicalizeTarget: async (target) => {
         if (target.runId) return target;
         // One mirror generation canonicalizes every old project alias in the
@@ -8411,6 +8435,14 @@ export const handleTrelioLocalProposalOperation = async (
       expectedBodyText: rawPayload?.bodyText,
       expectedBodyJson,
     });
+  }
+  if (operation === "save" && kind === "comment" && Array.isArray(hydrated?.automaticWorkStartProposals)
+    && hydrated.automaticWorkStartProposals.length) {
+    return { schemaVersion: 1, provider: "local_company_context", proposalBundle: {
+      schemaVersion: 1, kind: "taskProposalBlocks", blocks: appendAutomaticWorkStartCards([
+        { type: "commentProposal", itemId: "proposal-1", status: "ready", proposal: hydrated },
+      ]),
+    } };
   }
   return buildProposalLocalResult(origin, hydrated);
 };
@@ -8948,7 +8980,7 @@ const executeTrelioLocalActionOperation = async (
       `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/actions/execute`,
       {
         method: "POST",
-        headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1", "x-trelio-task-review-completion": "1" },
+        headers: { "content-type": "application/json", "x-trelio-proposal-preparation": "1", "x-trelio-task-review-completion": "1", "x-trelio-work-start-presentation": "1" },
         body: JSON.stringify({
           nativeTool,
           arguments: protectedRequest.value,

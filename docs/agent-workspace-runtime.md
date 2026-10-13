@@ -1685,12 +1685,14 @@ runtime сохраняет прежний flow и получает явный о
 До любого encrypt/upload `prepareLocalTaskReviewCompletions` отправляет только
 `completionRefs` на server-selected `/proposals/completion`. Backend повторяет
 source-grant/runtime policy/company/task/Run ACL и full-review freshness, расходует
-планы и отдаёт структурные descriptors. Тексты/причины/пути остаются в local RAM.
+планы и отдаёт descriptors. Optional saved-start projection сохраняет
+исходные protected markers и гидратируется локально перед presentation. Тексты/причины/пути остаются в local RAM.
 Ответ связывается с exact refs, компанией и разными задачами; assembler переносит
 только allowlisted target/CAS fields, валидирует все decisions до первой записи
 и задаёт порядок comment → checklist → status → control. Completion-status intent
 всегда `whole_task_ready`, затем действуют прежние kind-specific encryption/save.
-Пустой выбор возвращает no-op receipt без dismiss существующих drafts.
+Пустой выбор не пишет и не dismiss-ит drafts; при существующем допустимом
+auto start общий assembler может вернуть только эту сохранённую карточку.
 
 `trelio-task-review-completion.mjs` генерируется из backend pure module командой
 `scripts/build-task-review-completion.mjs --runtime-root <checkout>` в продукте;
@@ -1704,6 +1706,16 @@ source-grant/runtime policy/company/task/Run ACL и full-review freshness, ра�
 Ни план, ни semantic decision не разрешают publish/apply/dismiss; это отдельные
 human actions с прежними live ACL/CAS. Backend хранит лишь keyed fingerprint и
 structural binding, максимум 2048 refs/64 на actor+grant с абсолютным TTL 15 минут.
+
+Bridge claim и proposal requests объявляют `x-trelio-work-start-presentation: 1`.
+Backend при successful claim готовит private start только с source scopes и
+owner-task edit ACL; открытые enum/IDs не содержат prose, authored reasons
+по-прежнему encrypted. Final bundle либо single-comment save переносит уже
+сохранённый start после hydration с прежними UUID/revision и отдельной capability.
+Explicit completion/status, dismissal, stale epoch и applying state имеют
+приоритет; новый work_started save после acceptance не выполняется. Controller
+не переносит модели ref/revision bookkeeping. Feature negotiation additive:
+старый bridge не вызывает automatic staging; plugin shell/minimum не меняются.
 
 ## Antigravity native shell diagnostics
 

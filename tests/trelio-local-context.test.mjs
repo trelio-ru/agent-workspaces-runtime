@@ -4535,3 +4535,35 @@ test("completion rejects mixed input, wrong company, duplicate tasks and late in
   } }), { code: "TASK_REVIEW_COMPLETION_STALE" });
   assert.equal(attempts, 1, "No automatic refresh or replay on stale/ambiguous preparation");
 });
+
+test("local final bundle carries the server-staged start without another protected save", async () => {
+  const companion = { company: { slug: "acme" }, project: { slug: "mobile" }, task: { id: "task", number: 17 },
+    contextRequest: { runId: "11111111-1111-4111-8111-111111111111" },
+    currentDraft: { proposalId: "persisted-start", revision: 4, reasonKind: "run_open", intent: "work_started", isStale: false, isApplying: false } };
+  const saves = [];
+  const result = await prepareLocalProposalBundle({ companySlug: "acme",
+    rawBlocks: [{ type: "commentProposal", companySlug: "acme", projectSlug: "mobile", taskNumber: 17,
+      proposalText: "Сохранил результат", expectedStateRevision: 2, expectedPublicCommentsSnapshotHash: "a".repeat(64) }],
+    canonicalizeTarget: async (target) => target,
+    saveProposal: async (input) => { saves.push(input); return { task: { id: "task" }, currentDraft: { proposalId: "comment" }, automaticWorkStartProposals: [companion] }; },
+  });
+  assert.deepEqual(saves.map((entry) => entry.kind), ["comment"]);
+  assert.deepEqual(result.proposalBundle.blocks.map((entry) => entry.type), ["commentProposal", "statusProposal"]);
+  assert.equal(result.proposalBundle.blocks[1].proposal.currentDraft.proposalId, "persisted-start");
+  assert.equal(result.proposalBundle.blocks[1].proposal.currentDraft.revision, 4);
+  assert.equal(Object.hasOwn(result.proposalBundle.blocks[0].proposal, "automaticWorkStartProposals"), false);
+});
+
+test("an empty semantic completion can carry only an existing exact server start", async () => {
+  const reference = "tr1_11111111-1111-4111-8111-111111111111";
+  const start = { company: { slug: "acme" }, task: { id: "task" } };
+  const carried = [];
+  const blocks = await prepareLocalTaskReviewCompletions({ companySlug: "acme",
+    payload: { completions: [{ completionRef: reference, decisions: { comment: null, checklist: null, status: null, control: null } }] },
+    resolve: async () => ({ schemaVersion: 1, descriptors: [{ schemaVersion: 1, completionRef: reference, companySlug: "acme", taskId: "task",
+      target: { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 }, cards: {}, candidates: { checklist: [], status: [], control: [] },
+      automaticWorkStartProposal: start }] }), onAutomaticStart: (value) => carried.push(value),
+  });
+  assert.deepEqual(blocks, []);
+  assert.deepEqual(carried, [start]);
+});

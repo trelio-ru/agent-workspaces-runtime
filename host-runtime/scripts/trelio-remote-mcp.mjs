@@ -4790,7 +4790,7 @@ const maybeElicitLocalProposalReview = async ({
 const buildLocalProposalRenderPayload = ({ result, companySlug, kind, operation }) => {
   if (result?.provider === "native_trelio") return result;
 
-  if (kind === "bundle") {
+  if (kind === "bundle" || result?.proposalBundle) {
     const bundle = result?.proposalBundle;
     if (!bundle || bundle.kind !== "taskProposalBlocks" || !Array.isArray(bundle.blocks)) {
       throw new TrelioLocalContextError(
