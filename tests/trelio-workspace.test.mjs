@@ -117,6 +117,7 @@ import {
   hardenWindowsPrivatePath,
   resolveWindowsPowerShellExecutable,
   getGitStatus,
+  runGit as runWorkspaceGit,
   hydrateAgentCompanyEncryptedJson,
   hydrateEncryptedAgentSkillRuntimeResolution,
   inspectWorkspaceFile,
@@ -11457,6 +11458,48 @@ test("bridge preserves the leading status column for the first changed path", as
   } finally {
     await rm(workspaceDirectory, { recursive: true, force: true });
   }
+});
+
+test("bridge rejects status exit 0 with an unreadable untracked directory", {
+  skip: process.platform === "win32" || process.getuid?.() === 0,
+}, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-partial-status-"));
+  const hidden = path.join(directory, "unreadable");
+  try {
+    await runGit(directory, ["init", "--initial-branch=main"]);
+    await mkdir(hidden);
+    await writeFile(path.join(hidden, "work.txt"), "unsaved work\n");
+    await chmod(hidden, 0);
+    const observed = await runGit(directory, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]);
+    assert.equal(observed.stdout, "");
+    assert.match(observed.stderr, /could not open directory/);
+    await assert.rejects(getGitStatus(directory), /Git read returned diagnostics/);
+  } finally {
+    await chmod(hidden, 0o700).catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Workspace Git selectors are literal for diffs and index mode reads", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-runtime-literal-paths-"));
+  try {
+    await runGit(directory, ["init", "--initial-branch=main"]);
+    await runGit(directory, ["config", "user.name", "Fixture"]);
+    await runGit(directory, ["config", "user.email", "fixture@example.invalid"]);
+    await writeFile(path.join(directory, "note[1].md"), "selected\n");
+    await writeFile(path.join(directory, "note1.md"), "sibling\n");
+    await runGit(directory, ["add", "--all"]);
+    // Different modes catch the sibling selection that previously changed the
+    // executable bit when replacing an external file with an index pointer.
+    await runGit(directory, ["update-index", "--chmod=+x", "note1.md"]);
+    await runGit(directory, ["commit", "-m", "Fixture"]);
+    await writeFile(path.join(directory, "note[1].md"), "selected change\n");
+    await writeFile(path.join(directory, "note1.md"), "sibling change\n");
+    assert.equal((await runWorkspaceGit(["diff", "--name-only", "-z", "HEAD", "--", "note[1].md"], { cwd: directory })).stdout, "note[1].md\0");
+    const index = await runWorkspaceGit(["ls-files", "-s", "-z", "--", "note[1].md"], { cwd: directory });
+    assert.match(index.stdout, /^100644 /);
+    assert.equal(index.stdout.split("\0").length, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("bridge ignores only safe untracked OS metadata inside the Git workspace", async () => {

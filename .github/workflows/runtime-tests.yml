@@ -66,7 +66,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run canonical main guard regressions
-        run: npm run test:worktree-bootstrap && bash scripts/git-main-guard.test.sh
+        run: npm run test:worktree-bootstrap && npm run test:git-guard
 
   node-tests:
     if: github.event_name == 'pull_request'

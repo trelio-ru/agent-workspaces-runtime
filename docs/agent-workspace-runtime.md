@@ -705,6 +705,17 @@ file удаляется. Очистка назначена через час; п
 
 ## Контекст и файлы
 
+<a id="git-output"></a>
+
+Git metadata reads (status/index/tree/diff/object inventory) требуют полного
+stdout без stderr, включая exit 0: unreadable directory не считается clean.
+NUL framing сохраняет exact filenames, включая whitespace и newline; malformed
+records блокируются до принятия state. Workspace file selectors всегда literal:
+brackets/glob/pathspec magic не выбирают соседний файл и не меняют его index mode.
+Fetch/commit/bundle progress сохраняет штатный stderr; Git minimum остаётся 2.28.
+Maintainer cleanup удаляет только Git line terminator в scalar paths и
+блокируется при неполной worktree/status inventory.
+
 Новая initial revision содержит только `WORKSPACE_CONTEXT.md`; технический
 README, `.trelio/workspace.json` и пустые `.gitkeep` в ней отсутствуют.
 `README.md`, если его создал пользователь или агент, – обычный редактируемый

@@ -292,6 +292,7 @@ publication tooling также остаются вне этого публичн
   `npm run git:push-main`; raw push в `main` запрещён.
 - После интеграции выполни из canonical checkout
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
+  Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
 - Stable runtime tag создаётся только по явной команде на runtime release и
   пушится атомарно через `npm run git:push-main -- --tag vX.Y.Z`.
 

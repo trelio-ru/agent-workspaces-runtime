@@ -810,9 +810,13 @@ export const runGit = async (args, options = {}) => {
   // templates, hooks, signing config and pagers are not part of the workspace
   // contract, so every invocation gets an isolated config boundary without a
   // shell. Local repository config remains available for bridge-owned values.
-  return run(
+  const result = await run(
     resolvedGit.gitPath,
     [
+      // Paths supplied by Workspace files are literal names. Brackets, '*' or
+      // pathspec magic must never widen a per-file diff/staging operation.
+      // Refs/refspec wildcards are a separate Git grammar and stay unchanged.
+      "--literal-pathspecs",
       "-c",
       `core.hooksPath=${GIT_DISABLED_HOOKS_PATH}`,
       "-c",
@@ -833,6 +837,15 @@ export const runGit = async (args, options = {}) => {
       },
     },
   );
+  const command = args[0] === "--git-dir" ? args[2] : args[0];
+  // Metadata commands have no progress output. A warning can accompany exit 0
+  // and a partial/empty inventory (notably an unreadable untracked directory).
+  // Fail before treating that inventory as clean; mutation progress is valid.
+  if (["status", "ls-files", "ls-tree", "diff", "rev-list", "rev-parse", "cat-file", "merge-base", "grep"].includes(command)
+    && result.stderr.length > 0) {
+    throw new Error("Git read returned diagnostics; its output cannot establish complete Workspace state.");
+  }
+  return result;
 };
 
 const readDiagnosticJsonFile = async (filePath) => {
@@ -13593,10 +13606,16 @@ const getGitStatusEntries = async (workspaceDirectory, knownObjects = []) => {
   // NUL-delimited porcelain сохраняет exact path даже для пробелов, кавычек и
   // переводов строки. --no-renames оставляет одну запись на record, поэтому
   // model-facing text можно строить отдельно, не используя его как parser.
-  let statusEntries = result.stdout
-    .split("\0")
-    .filter((record) => record.length > 0)
-    .map((record) => ({ status: record.slice(0, 2), filePath: record.slice(3) }));
+  if (result.stdout && !result.stdout.endsWith("\0")) {
+    throw new Error("Git status returned an incomplete porcelain record.");
+  }
+  let statusEntries = (result.stdout ? result.stdout.slice(0, -1).split("\0") : [])
+    .map((record) => {
+      if (!/^(?:\?\?|[ MTADRCU]{2}) /u.test(record) || record.length < 4) {
+        throw new Error("Git status returned an invalid porcelain record.");
+      }
+      return { status: record.slice(0, 2), filePath: record.slice(3) };
+    });
 
   const legacyWorklogEntry = statusEntries.find((entry) => (
     entry.status === "??" && entry.filePath === LEGACY_WORKLOG_FILE_NAME

@@ -3427,6 +3427,8 @@ test("local encrypted history reproduces bounded native diff and file reads", as
       fs.writeFile(path.join(repository, "README.md"), "base readme\n"),
       fs.writeFile(path.join(repository, ".trelio", "workspace.json"), "base metadata\n"),
       fs.writeFile(path.join(repository, "artifacts", "report.md"), "base line\nsecond line\n"),
+      fs.writeFile(path.join(repository, "artifacts", "note[1].md"), "selected base\n"),
+      fs.writeFile(path.join(repository, "artifacts", "note1.md"), "sibling base\n"),
       fs.writeFile(path.join(repository, "artifacts", "old-name.md"), "rename me\n"),
       fs.writeFile(path.join(repository, "sources", "manual.pdf"), objectPointer),
     ]);
@@ -3439,6 +3441,8 @@ test("local encrypted history reproduces bounded native diff and file reads", as
       fs.writeFile(path.join(repository, "README.md"), "accepted readme\n"),
       fs.writeFile(path.join(repository, ".trelio", "workspace.json"), "after metadata\n"),
       fs.writeFile(path.join(repository, "artifacts", "report.md"), "after line\nsecond line\nthird line\n"),
+      fs.writeFile(path.join(repository, "artifacts", "note[1].md"), "selected after\n"),
+      fs.writeFile(path.join(repository, "artifacts", "note1.md"), "sibling after\n"),
     ]);
     await git(["mv", "artifacts/old-name.md", "artifacts/new-name.md"]);
     await git(["add", "--all"]);
@@ -3466,6 +3470,11 @@ test("local encrypted history reproduces bounded native diff and file reads", as
     assert.equal(boundedPatch.patch.length, 12);
     assert.equal(boundedPatch.patchTruncated, true);
     assert.equal(boundedPatch.nextPatchOffset, 12);
+    const literalPatch = await inspectLocalWorkspaceRevisionDiff({
+      repositoryDirectory: repository, baseHead, acceptedHead, filePath: "artifacts/note[1].md",
+    });
+    assert.match(literalPatch.patch, /selected after/);
+    assert.doesNotMatch(literalPatch.patch, /sibling after/);
 
     const before = await readLocalWorkspaceRevisionFile({
       repositoryDirectory: repository,

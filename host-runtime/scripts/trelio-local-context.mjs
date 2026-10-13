@@ -10463,7 +10463,12 @@ const normalizeLocalWorkspaceDiffStatus = (statusCode) => {
 };
 
 const parseLocalWorkspaceNameStatusDiff = (rawOutput) => {
-  const fields = String(rawOutput || "").split("\0").filter(Boolean);
+  // Keep empty fields visible to validation instead of shifting record pairs;
+  // the final NUL is framing, while whitespace/newlines belong to the path.
+  if (rawOutput && !rawOutput.endsWith("\0")) {
+    throw new TrelioLocalContextError("LOCAL_WORKSPACE_DIFF_INVALID", "The local Workspace Git diff output is incomplete.");
+  }
+  const fields = rawOutput ? rawOutput.slice(0, -1).split("\0") : [];
   const files = [];
 
   for (let index = 0; index < fields.length;) {
@@ -10474,7 +10479,8 @@ const parseLocalWorkspaceNameStatusDiff = (rawOutput) => {
     const secondPath = hasTwoPaths ? fields[index++] || "" : "";
     const similarityValue = hasTwoPaths ? Number(statusCode.slice(1)) : Number.NaN;
 
-    if (!statusCode || !firstPath || (hasTwoPaths && !secondPath)) {
+    if (!/^(?:[ADTU]|[MX](?:\d{1,3})?|[RC]\d{1,3})$/u.test(statusCode)
+      || !firstPath || (hasTwoPaths && (!secondPath || similarityValue > 100))) {
       throw new TrelioLocalContextError(
         "LOCAL_WORKSPACE_DIFF_INVALID",
         "The local Workspace Git diff returned an invalid name-status record.",
