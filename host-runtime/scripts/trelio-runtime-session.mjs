@@ -64,6 +64,7 @@ import {
 } from "./trelio-proposal-route-guard.mjs";
 import { migrateCodexLegacyTrelioMcpForRuntime } from "./trelio-codex-routing.mjs";
 import { TRELIO_COMPACTION_RECOVERY_CONTEXT } from "./trelio-context-recovery.mjs";
+import { recoverLocalContinuationArguments, validateLocalContinuationArguments } from "./trelio-local-continuation.mjs";
 import {
   canInspectInstructionDelivery, hasManagedInstructionKeys, instructionContextBoundary,
   manageInstructionKeys,
@@ -721,9 +722,18 @@ const runPreToolUse = async (hookInput) => {
   if (identity.status === "unrelated") return;
   const toolName = identity.toolName;
   const origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
-  const toolInput = resolveToolInput(hookInput);
+  let toolInput = resolveToolInput(hookInput);
+  if (identity.status === "local") {
+    toolInput = await recoverLocalContinuationArguments({ hookInput, input: toolInput });
+    validateLocalContinuationArguments(toolInput);
+  }
   if (!isProtectedTrelioToolName(toolName)) {
-    if (!hasManagedInstructionKeys(identity, toolInput)) return;
+    if (!hasManagedInstructionKeys(identity, toolInput)) {
+      if (JSON.stringify(toolInput) !== JSON.stringify(resolveToolInput(hookInput))) {
+        process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: toolInput } }) + "\n");
+      }
+      return;
+    }
     // Discovery must not register a protected session or change approval policy.
     // Missing/private-state read failures disable only reuse and remove authored
     // hints; the ordinary discovery call continues with complete authority.
@@ -737,7 +747,7 @@ const runPreToolUse = async (hookInput) => {
       }
     } catch { /* Optional delivery evidence is unavailable. */ }
     const updatedInput = await manageInstructionKeys({ hookInput, identity, input: toolInput, boundary });
-    if (JSON.stringify(updatedInput) !== JSON.stringify(toolInput)) {
+    if (JSON.stringify(updatedInput) !== JSON.stringify(resolveToolInput(hookInput))) {
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } }) + "\n");
     }
     return;

@@ -148,6 +148,7 @@ jobs:
           node tests/trelio-runtime-session.test.mjs
           node tests/trelio-runtime-proof-preparation.test.mjs
           node tests/trelio-instruction-reuse.test.mjs
+          node tests/trelio-local-continuation.test.mjs
           node tests/trelio-secret-browser-native.test.mjs
           node tests/trelio-secret-chat.test.mjs
           node tests/trelio-secret-generate.test.mjs
@@ -293,7 +294,9 @@ jobs:
         run: node tests/trelio-codex-conversation.test.mjs
 
       - name: Run Windows instruction delivery regressions
-        run: node tests/trelio-instruction-reuse.test.mjs
+        run: |
+          node tests/trelio-instruction-reuse.test.mjs
+          node tests/trelio-local-continuation.test.mjs
 
       - name: Run Windows persisted hook settings diagnostics
         run: node --test --test-name-pattern="persisted hook" tests/trelio-codex-routing.test.mjs

@@ -5612,6 +5612,10 @@ export const handleToolCall = async (
         "The local route requires schemaVersion=1 and an object parameters payload.",
       );
     }
+    // Check completeness before provider sync, credential IO or native action
+    // preparation. Clients without hooks may use the explicit original input.
+    const { validateLocalContinuationArguments } = await import("./trelio-local-continuation.mjs");
+    validateLocalContinuationArguments(rawArguments);
     const parameters = rawArguments.parameters;
     const nativeArguments = parameters.arguments;
     if (

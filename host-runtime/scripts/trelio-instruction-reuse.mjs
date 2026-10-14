@@ -101,7 +101,7 @@ const callIdentity = (payload, args) => {
   return localReadArguments(args, identity) ? identity : null;
 };
 
-const parseOutput = (output, metadata, local = false) => {
+export const parseCodexMcpOutput = (output, metadata, local = false) => {
   // Codex 0.160.0 serializes unstructured MCP text as input_text items.
   // Accept exactly one item on the local route, never arbitrary quoted JSON
   // or mixed media. Budget the entire serialized array conservatively before
@@ -236,7 +236,7 @@ export const collectCodexInstructionHints = ({ rows, header, hookInput, input, i
       calls.delete(payload.call_id);
       if (!call) continue;
       if (payload.success === false) continue;
-      const result = parseOutput(payload.output, row.metadata, call.local);
+      const result = parseCodexMcpOutput(payload.output, row.metadata, call.local);
       if (!result) continue;
       if (!call.local && REVISION_TOOLS.has(call.tool)) {
         const key = revisionReceipt(result);
@@ -282,7 +282,7 @@ export const collectCodexInstructionHints = ({ rows, header, hookInput, input, i
   return key ? { knownInstructionRevisionKey: key } : {};
 };
 
-const readCodexTranscript = async (filePath) => {
+export const readCodexTranscript = async (filePath) => {
   if (typeof filePath !== "string" || !path.isAbsolute(filePath)) return null;
   const info = await fs.lstat(filePath);
   if (!info.isFile() || info.isSymbolicLink()) return null;

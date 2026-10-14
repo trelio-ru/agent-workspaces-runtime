@@ -1869,3 +1869,36 @@ device-wide email deduplicates across companies, но автоматически
 а старые файлы автоматически не удаляются. Tests:
 `tests/trelio-skill-accounts.test.mjs`; provider storage/approval tests принадлежат
 `trelio-ru/agent-skills`.
+
+## Исходные аргументы local continuation
+
+Backend возвращает готовый `providerSelection.arguments`: ограниченные
+structural args, а при наличии protected/unknown полей — случайный
+`parameters.nativeCallRef` и `nativeArgumentKeys`. Ref только связывает ответ
+с исходным запросом; capability, server request cache и новые права отсутствуют.
+
+`trelio-local-continuation.mjs` до регистрации/proof восстанавливает точный
+native request из owner-owned Codex transcript текущего чата. Поддержаны
+проверенные direct MCP форматы `0.160.0`/`0.162.0-alpha.17.2`; проверяются
+header/session, witnessed current call, namespace, method, company, operation,
+полный server envelope, structural seed, unique call/result и возраст до
+15 минут. Turn/compaction, unknown/Claude/subagent, missing/truncated/racing
+журнал, symlink, mismatch и worker timeout не допускают восстановления.
+
+Shared transcript reader ограничен 2 MiB, owner/inode/regular-file/read-race
+checks; отдельный worker ограничен 250 ms и не пишет cache/state/content.
+Исходные proof и instruction hints удаляются. Обычный approved hook затем
+выполняет instruction delivery и добавляет fresh proof; private key/session
+не входят в correlation. Discovery не получает регистрацию или proof.
+
+Неподтверждённое восстановление оставляет input; completeness validator до
+provider sync/credentials/dispatch требует все nativeArgumentKeys и совпадение
+company. Отказ `LOCAL_CONTEXT_INVALID_INPUT` допускает exact read либо
+полный original explicit input, не автоматический replay mutation. Старые
+explicit envelopes без ref остаются рабочими. Correlation не заменяет
+backend schema/ACL, OAuth, live provider state, CAS/idempotency и человеческое
+подтверждение. Нового plugin/minimum/runtime release эта source-правка
+сама по себе не выполняет.
+
+Проверки: `trelio-local-continuation.test.mjs`, реальные PreToolUse subprocess
+regressions, dispatcher/input transport, immutable proof и instruction delivery.

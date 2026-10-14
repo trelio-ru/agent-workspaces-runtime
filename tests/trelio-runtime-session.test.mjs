@@ -1541,6 +1541,40 @@ test("first protected call observes the current model and supported host names i
       "trelio-runtime-proof-v1", localArgs.runtimeSessionProof.runtimeSessionId, "get_task",
       localArgs.runtimeSessionProof.issuedAt, localArgs.runtimeSessionProof.nonce,
     ].join("\n")), publicKey, Buffer.from(localArgs.runtimeSessionProof.signature, "base64url")), true);
+    // Exercise the real PreToolUse path, not only the pure journal parser.
+    // The route proves that the native call never dispatched its domain work;
+    // recovery retains original content and obtains a new method-bound proof.
+    for (const [nativeTool, route, originalInput, seed] of [
+      ["get_agent_skill", "action", { companySlug: "synthetic", skillId: "synthetic-skill" }, { companySlug: "synthetic" }],
+      ["search", "context", { companySlugs: ["synthetic"], queries: ["PRIVATE-CONTINUATION-CANARY"] }, { companySlugs: ["synthetic"] }],
+    ]) {
+      const envelope = { schemaVersion: 1, route, parameters: { companySlug: "synthetic", nativeTool,
+        ...(route === "context" ? { operation: "native_read" } : {}), arguments: seed,
+        nativeCallRef: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", nativeArgumentKeys: Object.keys(originalInput) } };
+      const call = (id, namespace, name, args) => ({ timestamp: new Date().toISOString(), type: "response_item",
+        payload: { type: "function_call", call_id: id, namespace, name, arguments: JSON.stringify(args) } });
+      await writeFile(transcriptPath, [
+        { type: "session_meta", payload: { id: threadId, cli_version: "0.162.0-alpha.17.2" } },
+        call("source", "mcp__trelio", nativeTool, originalInput),
+        { timestamp: new Date().toISOString(), type: "response_item", metadata: { fallback_token_limit_override: 12000 },
+          payload: { type: "function_call_output", call_id: "source", output: JSON.stringify({
+            code: "MCP_LOCAL_CONTEXT_REQUIRED", providerSelection: { automatic: true, provider: "local_company_context",
+              server: "trelio-remote-skills", tool: "continue_trelio_local_action", companySlug: "synthetic", nativeTool,
+              arguments: envelope } }) } },
+        call("current", "mcp__trelio_remote_skills", "continue_trelio_local_action", envelope),
+      ].map((row) => JSON.stringify(row)).join("\n") + "\n");
+      const recovered = await runHook({ ...reuseInput, tool_name: "mcp__trelio_remote_skills__continue_trelio_local_action",
+        tool_input: envelope }, environment);
+      assert.equal(recovered.exitCode, 0, recovered.stderr);
+      const next = JSON.parse(recovered.stdout).hookSpecificOutput.updatedInput;
+      assert.deepEqual(next.parameters.arguments, originalInput);
+      assert.equal(next.parameters.nativeCallRef, undefined);
+      if (route === "action") assert.equal(crypto.verify(null, Buffer.from([
+        "trelio-runtime-proof-v1", next.runtimeSessionProof.runtimeSessionId, nativeTool,
+        next.runtimeSessionProof.issuedAt, next.runtimeSessionProof.nonce,
+      ].join("\n")), publicKey, Buffer.from(next.runtimeSessionProof.signature, "base64url")), true);
+      else assert.equal(next.runtimeSessionProof, undefined, "discovery must not gain a protected proof");
+    }
     const compacted = await runHook({ hook_event_name: "SessionStart", source: "compact",
       session_id: threadId, transcript_path: transcriptPath }, environment);
     assert.equal(compacted.exitCode, 0, compacted.stderr);
