@@ -979,6 +979,15 @@ export const inspectBundledPlugin = async ({
       JSON.stringify(observedEvents[eventName]) === JSON.stringify(expected)
     ),
   );
+  // The original admission ABI remains compatible with an installed old shell.
+  // The turn pair is reported separately; a partial/mismatched declaration is
+  // never called ready, and installed definitions are never rewritten here.
+  const turnEvents = ["UserPromptSubmit", "Stop"];
+  const turnHooksPresent = turnEvents.some(event => hooksManifest.value?.hooks?.[event]);
+  const turnHooksReady = turnEvents.every(event =>
+    JSON.stringify(readObservedRuntimeHookContract(hooksManifest.value, event))
+      === JSON.stringify(EXPECTED_RUNTIME_HOOK_CONTRACT.SessionStart));
+  if (turnHooksPresent && !turnHooksReady) issues.push("UNFILED_TURN_HOOK_CONTRACT_MISMATCH");
   if (!hooksReady) {
     issues.push("RUNTIME_HOOK_CONTRACT_MISMATCH");
   }
@@ -995,6 +1004,7 @@ export const inspectBundledPlugin = async ({
       definitionSha256: hooksManifest.raw
         ? crypto.createHash("sha256").update(hooksManifest.raw).digest("hex")
         : null,
+      unfiledResponseReminder: turnHooksReady ? "defined_approval_unconfirmed" : "not_available",
       preToolUseScope: "trelio_mcp",
       toolRouting: inspectTrelioHookToolRouting(observedEvents.PreToolUse?.matcher),
       approvalStatus: "client_managed_unknown",
@@ -1516,7 +1526,7 @@ export const formatBridgeCommandError = (error, command = "") => {
 };
 
 export const request = async (origin, token, pathname, options = {}) => {
-  const { diagnosticPhase = "api_request", ...fetchOptions } = options;
+  const { diagnosticPhase = "api_request", maximumErrorResponseBytes, ...fetchOptions } = options;
   const headers = buildBridgeRequestHeaders(token, fetchOptions.headers || {});
 
   let response;
@@ -1530,7 +1540,11 @@ export const request = async (origin, token, pathname, options = {}) => {
   }
 
   if (!response.ok) {
-    const responseText = await response.text();
+    // Advisory bounded readers must bound failures too; a proxy's error body
+    // cannot allocate arbitrary memory under a short lifecycle-hook deadline.
+    const responseText = maximumErrorResponseBytes
+      ? (await readBoundedResponseBuffer(response, maximumErrorResponseBytes, "HTTP error")).toString("utf8")
+      : await response.text();
     let message = responseText;
     let code = null;
     let errorPayload = null;

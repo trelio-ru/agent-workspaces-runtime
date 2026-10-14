@@ -2089,20 +2089,26 @@ export const protectLocalActionArguments = async ({
     };
   }
   if (nativeTool === "delete_workspace") {
-    if (normalizedArguments.userRequestedDeletion !== true || typeof normalizedArguments.reason !== "string"
-      || !normalizedArguments.reason.trim() || normalizedArguments.reason.trim().length > 2000) {
-      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Deletion requires an explicit user request and the user's nonempty reason.");
-    }
-    normalizedArguments.reason = normalizedArguments.reason.trim();
     const workspace = mirror?.workspaceEntries?.find((entry) => entry.id === normalizedArguments.workspaceId);
     if (!workspace?.title || !workspace.updatedAt) {
       throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_NOT_FOUND", "Read the exact Workspace before deletion.");
     }
-    // A fresh title/reason payload prevents retaining deleted description bytes
-    // that shared the original title's encryption envelope. CAS on the server
-    // prevents a stale mirror from replacing the most recent title.
-    normalizedArguments.title = workspace.title;
+    const unfiled = workspace.placement === "unfiled";
+    const reason = typeof normalizedArguments.reason === "string" ? normalizedArguments.reason.trim() : "";
+    if (normalizedArguments.userRequestedDeletion !== true || reason.length > 2000 || (!unfiled && !reason)) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Deletion requires an explicit user request; ordinary Workspaces also require the user's reason.");
+    }
     normalizedArguments.expectedUpdatedAt = workspace.updatedAt;
+    if (unfiled) {
+      // Temporary materials leave no content tombstone. No new title/reason
+      // payload is necessary: server verifies personal placement and CAS, then
+      // purges the exact material. A stale mirror cannot weaken ordinary rules.
+      delete normalizedArguments.reason;
+      delete normalizedArguments.title;
+    } else {
+      normalizedArguments.reason = reason;
+      normalizedArguments.title = workspace.title;
+    }
   }
   assertLocalAgentInstructionPublicationWithinLimit({
     nativeTool,

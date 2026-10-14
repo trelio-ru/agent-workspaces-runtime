@@ -538,7 +538,9 @@
   "hookEvents": [
     "SessionStart",
     "PreToolUse",
-    "SessionEnd"
+    "SessionEnd",
+    "UserPromptSubmit",
+    "Stop"
   ],
   "validationFields": [
     "unknown",

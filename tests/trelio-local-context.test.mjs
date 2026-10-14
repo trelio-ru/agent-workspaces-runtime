@@ -2275,7 +2275,14 @@ test("local action protects nested task content and converts Markdown before upl
   assert.deepEqual(deletionValues.values, { deletion_reason: "Создан дважды", title: "Лишний воркспейс" });
   await assert.rejects(protectLocalActionArguments({ nativeTool: "delete_workspace",
     arguments: { workspaceId: deletedWorkspaceId, reason: "  ", userRequestedDeletion: true },
-    mirror: deletionMirror, companyEncryption }), /user's nonempty reason/);
+    mirror: deletionMirror, companyEncryption }), /ordinary Workspaces also require the user's reason/);
+
+  const unfiledDeletion = await protectLocalActionArguments({ nativeTool: "delete_workspace",
+    arguments: { workspaceId: deletedWorkspaceId, userRequestedDeletion: true },
+    mirror: { workspaceEntries: [{ ...deletionMirror.workspaceEntries[0], placement: "unfiled" }] }, companyEncryption });
+  assert.equal(unfiledDeletion.payloads.length, 0, "Temporary deletion retains no title/reason payload");
+  assert.deepEqual(unfiledDeletion.value, { workspaceId: deletedWorkspaceId, userRequestedDeletion: true,
+    expectedUpdatedAt: deletionMirror.workspaceEntries[0].updatedAt });
 
   const contactRequest = await protectLocalActionArguments({
     nativeTool: "create_contact",
