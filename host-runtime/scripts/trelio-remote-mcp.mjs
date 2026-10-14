@@ -13,6 +13,7 @@ import crypto from "node:crypto";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
 import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
+import { LOCAL_PROPOSAL_FILES } from "./trelio-proposal-local-files.mjs";
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
@@ -200,6 +201,8 @@ const localProposalAppCapabilityByToken = new Map();
 const localProposalAppActionCapabilityByToken = new Map();
 const localProposalAppSigningKeyPromiseByPath = new Map();
 const LOCAL_PROPOSAL_APP_RESOURCE_PATH_BY_URI = new Map([
+  // The v14 UI URI busts the client cache; its HTTP route deliberately stays
+  // compatible with old backends, whose HTML simply keeps file downloads.
   [TRELIO_LOCAL_PROPOSAL_RESOURCE_URI, "/api/agent-workspaces/mcp-app-resources/task-proposals-v13"],
   ...TRELIO_LOCAL_PROPOSAL_LEGACY_RESOURCE_URIS.map((uri) => {
     // Keep every immutable ui:// generation paired with the matching backend
@@ -4918,6 +4921,8 @@ export const buildLocalProposalRenderResult = async ({
   requestClient = null,
   signal,
 }) => {
+  const localFiles = result?.proposalBundle?.blocks?.flatMap((block) => block?.proposal?.[LOCAL_PROPOSAL_FILES] ?? [])
+    ?? result?.proposal?.[LOCAL_PROPOSAL_FILES] ?? [];
   const structuredContent = buildLocalProposalRenderPayload({
     result,
     companySlug,
@@ -4955,6 +4960,7 @@ export const buildLocalProposalRenderResult = async ({
       ui: { resourceUri: TRELIO_LOCAL_PROPOSAL_RESOURCE_URI },
       "openai/outputTemplate": TRELIO_LOCAL_PROPOSAL_RESOURCE_URI,
       "trelio/taskProposalPayload": structuredContent,
+      ...(localFiles.length ? { "trelio/taskProposalLocalFiles": localFiles } : {}),
       ...(capability
         ? {
             "trelio/taskProposalApp": {

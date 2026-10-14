@@ -2667,7 +2667,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   assert.doesNotMatch(JSON.stringify(providerTools), /encrypt|e2ee|cipher|private key/iu);
   const renderTool = providerTools.find(({ name }) => name === "render_trelio_local_proposal");
   assert.equal(renderTool.annotations.readOnlyHint, false);
-  assert.equal(renderTool._meta.ui.resourceUri, "ui://trelio/task-proposals/v13.html");
+  assert.equal(renderTool._meta.ui.resourceUri, "ui://trelio/task-proposals/v14.html");
   assert.deepEqual(
     renderTool.inputSchema.properties.payload.properties.blocks,
     {
@@ -3468,7 +3468,7 @@ test("local MCP exposes the proposal App resource without adding its HTML to too
     method: "resources/list",
     params: {},
   });
-  const uri = "ui://trelio/task-proposals/v13.html";
+  const uri = "ui://trelio/task-proposals/v14.html";
   assert.deepEqual(listed.result.resources.map((resource) => resource.uri), [uri]);
   assert.equal(listed.result.resources[0]._meta.ui.csp.frameDomains, undefined);
   assert.equal(listed.result.resources[0]._meta["openai/widgetCSP"].frame_domains, undefined);
@@ -3539,7 +3539,7 @@ test("local proposal App keeps current and legacy fetches cache-safe", async () 
     },
   };
   const origin = "https://proposal-cache-test.invalid";
-  const currentUri = "ui://trelio/task-proposals/v13.html";
+  const currentUri = "ui://trelio/task-proposals/v14.html";
   const legacyV5Uri = "ui://trelio/task-proposals/v5.html";
   const legacyV4Uri = "ui://trelio/task-proposals/v4.html";
   const legacyV3Uri = "ui://trelio/task-proposals/v3.html";
@@ -3592,7 +3592,7 @@ test("local proposal render returns a real MCP App result instead of JSON text o
     },
   });
 
-  assert.equal(result._meta.ui.resourceUri, "ui://trelio/task-proposals/v13.html");
+  assert.equal(result._meta.ui.resourceUri, "ui://trelio/task-proposals/v14.html");
   assert.equal(result._meta["trelio/taskProposalApp"].schemaVersion, 2);
   assert.match(result._meta["trelio/taskProposalApp"].capabilityToken, /^v2\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u);
   assert.equal(result.structuredContent.kind, "taskProposalBlocks");

@@ -9954,7 +9954,7 @@ const readLocalSettings = async () => {
   };
 };
 
-const readRunRegistry = async () => {
+export const readRunRegistry = async () => {
   try {
     const payload = JSON.parse(await fs.readFile(RUN_REGISTRY_FILE, "utf8"));
     return Array.isArray(payload?.roots)
@@ -14070,7 +14070,7 @@ const prepareLocalCandidateSnapshot = async ({
   };
 };
 
-const isHumanFacingEncryptedWorkspacePath = (filePath) => {
+export const isHumanFacingEncryptedWorkspacePath = (filePath) => {
   const normalizedPath = String(filePath || "").replaceAll("\\", "/");
   const basename = normalizedPath.split("/").at(-1) || "";
 

@@ -633,7 +633,7 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
   });
 };
 
-export const buildRuntimeSessionProof = ({ state, toolName, now = new Date() }) => {
+export const buildRuntimeSessionProof = ({ state, toolName, now = new Date(), localFiles = [], localFilePayload }) => {
   const issuedAt = now.toISOString();
   const nonce = crypto.randomUUID();
   const payload = Buffer.from([
@@ -648,13 +648,21 @@ export const buildRuntimeSessionProof = ({ state, toolName, now = new Date() }) 
     format: "der",
     type: "pkcs8",
   });
-  return {
+  const proof = {
     schemaVersion: 1,
     runtimeSessionId: state.runtimeSessionId,
     issuedAt,
     nonce,
     signature: crypto.sign(null, payload, privateKey).toString("base64url"),
   };
+  // Keep the original v1 admission signature byte-for-byte compatible. This
+  // independent optional signature binds preview paths to the same tool,
+  // session and one-use nonce; an old backend simply strips the extension.
+  if (localFiles.length && localFilePayload) proof.localFilePreviews = {
+    files: localFiles,
+    signature: crypto.sign(null, localFilePayload(proof, toolName, localFiles), privateKey).toString("base64url"),
+  };
+  return proof;
 };
 
 const writeUpdatedInput = (toolInput, proof) => {
@@ -789,7 +797,21 @@ const runPreToolUse = async (hookInput) => {
     }));
   }
   assertRuntimeHookBudget();
-  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName }));
+  let localFiles = [], localFilePayload;
+  if (identity.status === "native" && state.observation?.clientFamily === "codex") {
+    const previews = await import("./trelio-proposal-local-files.mjs");
+    const files = previews.selectNativeProposalFiles(toolName, updatedInput);
+    if (files.length) {
+      // Preview preparation is optional and cannot consume the admission
+      // deadline. A short independent budget leaves the original proof and
+      // download flow available on slow disks or a large Run registry.
+      const previewSignal = AbortSignal.any([runtimeHookSignal(), AbortSignal.timeout(2_000)]);
+      localFiles = await previews.prepareLocalProposalFiles({ origin, files, signal: previewSignal });
+      localFilePayload = previews.localProposalFileProofPayload;
+    }
+  }
+  assertRuntimeHookBudget();
+  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }));
 };
 
 const runSessionStart = async (hookInput) => {

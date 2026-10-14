@@ -8,6 +8,7 @@ import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
 import { parseBridgeHttpDiagnostic } from "./trelio-bridge-http-diagnostics.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
+import { LOCAL_PROPOSAL_FILES, prepareLocalProposalFiles, bindLocalProposalFilePreviews } from "./trelio-proposal-local-files.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -116,8 +117,9 @@ const MIRROR_STALE_READ_REFRESH_WAIT_MS = 30 * 1000;
 const MIRROR_LOCK_HEARTBEAT_MS = 20 * 1000;
 const MIRROR_GENERATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 export const TRELIO_LOCAL_MIRROR_MEMORY_TTL_SECONDS = 600;
-export const TRELIO_LOCAL_PROPOSAL_RESOURCE_URI = "ui://trelio/task-proposals/v13.html";
+export const TRELIO_LOCAL_PROPOSAL_RESOURCE_URI = "ui://trelio/task-proposals/v14.html";
 export const TRELIO_LOCAL_PROPOSAL_LEGACY_RESOURCE_URIS = [
+  "ui://trelio/task-proposals/v13.html",
   "ui://trelio/task-proposals/v9.html",
   "ui://trelio/task-proposals/v8.html",
   "ui://trelio/task-proposals/v5.html",
@@ -7136,12 +7138,19 @@ export const selectEncryptedProposalFilesFromManifest = ({
         "Decrypted Workspace browser manifest contains an invalid file descriptor.",
       );
     }
-    byPath.set(filePath, {
+    const selected = {
       sourceFileId: fileId,
       filePath,
       fileName: filePath.split("/").at(-1) || filePath,
       contentType,
+    };
+    // This authenticated plaintext digest stays entirely on the local host.
+    // A symbol avoids changing the HTTP save, model projection or old manifest
+    // contract; legacy manifests without a digest simply retain download.
+    if (SHA256_PATTERN.test(String(file.plaintextSha256 || ""))) Object.defineProperty(selected, LOCAL_PROPOSAL_FILES, {
+      value: { workspaceId, sha256: file.plaintextSha256, sizeBytes: file.sizeBytes, sourceFileId: fileId },
     });
+    byPath.set(filePath, selected);
   }
 
   return filePaths.map((filePath) => {
@@ -7596,6 +7605,7 @@ const saveLocalProposal = async ({
     0,
   );
   let body;
+  let localFilePreviews = [];
 
   if (kind === "comment") {
     const proposalText = normalizeBoundedString(
@@ -7639,6 +7649,10 @@ const saveLocalProposal = async ({
           signal,
         })
       : [];
+    localFilePreviews = await prepareLocalProposalFiles({ origin, allowEncrypted: true, signal,
+      files: encryptedFiles.flatMap((file) => file[LOCAL_PROPOSAL_FILES]
+        ? [{ ...file[LOCAL_PROPOSAL_FILES], sourceRunId: target.runId, filePath: file.filePath }] : []),
+    });
     const protectedValues = {
       proposal_text: proposalText,
       ...Object.fromEntries(encryptedFiles.flatMap((file, index) => [
@@ -7787,7 +7801,7 @@ const saveLocalProposal = async ({
   }
 
   try {
-    return await postProposalRequest({
+    const result = await postProposalRequest({
       origin: dataPlaneOrigin,
       token,
       companySlug,
@@ -7795,6 +7809,8 @@ const saveLocalProposal = async ({
       body,
       signal,
     });
+    Object.defineProperty(result, LOCAL_PROPOSAL_FILES, { value: bindLocalProposalFilePreviews(result, localFilePreviews) });
+    return result;
   } finally {
     // A lost response can still mean that the proposal was persisted. Mark
     // the mirror after every dispatched save so task activity and proposal
@@ -8342,13 +8358,15 @@ export const handleTrelioLocalProposalOperation = async (
           rawPayload: blockPayload,
           signal,
         });
-        return hydrateAgentCompanyEncryptedJson({
+        const hydrated = await hydrateAgentCompanyEncryptedJson({
           value: rawResult,
           origin: provider.requestOrigin,
           token: provider.token,
           companyEncryption: provider.companyEncryption,
           signal,
         });
+        Object.defineProperty(hydrated, LOCAL_PROPOSAL_FILES, { value: rawResult[LOCAL_PROPOSAL_FILES] ?? [] });
+        return hydrated;
       },
     });
   }
@@ -8418,6 +8436,7 @@ export const handleTrelioLocalProposalOperation = async (
     companyEncryption: provider.companyEncryption,
     signal,
   });
+  Object.defineProperty(hydrated, LOCAL_PROPOSAL_FILES, { value: rawResult[LOCAL_PROPOSAL_FILES] ?? [] });
   if (
     operation === "action"
     && kind === "comment"

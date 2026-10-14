@@ -129,6 +129,7 @@ jobs:
           node tests/trelio-hook-signed-chain.test.mjs
           node tests/trelio-host-runtime-recovery.test.mjs
           node tests/trelio-local-attachments.test.mjs
+          node tests/trelio-proposal-local-files.test.mjs
           node tests/trelio-local-path.test.mjs
           node tests/trelio-local-context.test.mjs
           node tests/trelio-mirror-retention.test.mjs
@@ -243,6 +244,9 @@ jobs:
 
       - name: Run Windows Git prerequisite regressions
         run: node --test tests/trelio-git.test.mjs
+
+      - name: Run Windows proposal local file regressions
+        run: node tests/trelio-proposal-local-files.test.mjs
 
       - name: Run Windows private attachment delivery regressions
         run: node tests/trelio-local-attachments.test.mjs

@@ -1033,6 +1033,39 @@ snapshot и optimistic proposal revision. Для сложной коррекци
 публичной дискуссией или нового mention сохраняется двухшаговый
 context/render-flow.
 
+### Локальное открытие proposal-файлов в Codex
+
+Когда файл уже есть в зарегистрированной папке exact Run, runtime готовит
+private read-only snapshot вместо открытия изменяемого worktree. Plain Codex
+`PreToolUse` добавляет optional independently signed `localFilePreviews` к
+admission v1: source Run/Workspace/path, SHA-256/size, local path/expiry связаны
+с исходными session/tool/issuedAt/one-use nonce. Backend сверяет accepted
+attachment после ACL; extension не даёт полномочий и не попадает в DB/log/index.
+Старый backend игнорирует поле, старый runtime оставляет downloads; plugin ABI
+и minimum не меняются. Optional hook preparation имеет отдельный бюджет две
+секунды внутри непродлеваемого общего deadline.
+
+В encrypted-компании native hook snapshots не готовит. Local proposal save
+берёт `plaintextSha256` из authenticated decrypted accepted manifest и сравнивает
+с локальными bytes/size перед созданием snapshot. Descriptor передаётся между
+локальными этапами non-enumerable Symbol, не меняя HTTP save или model receipt.
+Legacy manifest без digest и отсутствующий/изменённый файл сохраняют скачивание.
+Только model-hidden App `_meta["trelio/taskProposalLocalFiles"]` получает точную
+proposal/attachment/digest/path/expiry привязку; encrypted binding содержит
+existing ciphertext attachment digest, plaintext digest не отправляется серверу.
+
+Копии вне Git и Run живут 31 день при review grant не больше 30; подготовка
+ограничена 20 файлами/24 MiB за вызов и private cache 512 MiB/512 entries.
+POSIX использует 0500/0400, Windows – current-user private DACL/read-only file.
+Cleanup удаляет только просроченные validated собственные snapshots, не
+вытесняя живые карточки и не полагаясь на сохранность исходного Run.
+При исчерпании бюджета сохраняется download. Remote revoke локальную копию
+не стирает, но App на каждом клике повторяет live ACL и точный file binding.
+Advertised experimental `openai/files` вызывает `openai/files/open({path})`;
+ошибка/unsupported/missing/stale ведут к прежнему download. Смешанный bundle
+пропускает opener только для assigned path своей дочерней карточки.
+Полный [backend/UI contract](https://github.com/ivaschru/Trelio/blob/main/docs/agent-workspaces-production.md#task-comment-attachments).
+
 ### Подстановка служебных полей предложений
 
 При наличии `preparationRef` в exact context host переносит её в headless
@@ -1077,7 +1110,7 @@ preflight. Первый подтверждённый local company read сохр
 owner-private marker без company content; он позволяет
 `PreToolUse` остановить ошибочный native renderer до MCP/App. Для plain company
 поля нет, поэтому обычный one-call `propose_task_comment` и его model context
-не меняются. Local proposal App v13 выдаёт подписанную review capability только
+не меняются. Local proposal App v14 выдаёт подписанную review capability только
 в hidden metadata сроком до 30 дней. Owner-private signing key хранится вне
 workspace, поэтому карточка переживает restart local MCP. Review grant не
 разрешает mutation. Перед publish/apply/dismiss App перечитывает live state и
