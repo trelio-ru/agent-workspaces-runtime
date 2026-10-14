@@ -1,3 +1,4 @@
+import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
 import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
@@ -9086,7 +9087,8 @@ const normalizeGitHead = (value, fieldName) => {
   return head;
 };
 
-const runLocalProcess = async (executable, argumentsList, { cwd, signal, input } = {}) => {
+const runLocalProcess = async (executable, argumentsList, { cwd, signal, input, onProgress } = {}) => {
+  if (onProgress) return runWorkspaceFinishProcess(executable, argumentsList, { cwd, signal, onProgress });
   const pending = execFileAsync(executable, argumentsList, {
     ...(cwd ? { cwd } : {}),
     ...(signal ? { signal } : {}),
@@ -9612,7 +9614,8 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
         : normalizeWorkspaceActionUuid(parameters.runtimeSessionId, "parameters.runtimeSessionId"),
     );
   } else if (operation === "status" || operation === "heartbeat") {
-    assertWorkspaceActionKeys(parameters, new Set());
+    assertWorkspaceActionKeys(parameters, new Set(operation === "status" ? ["finishOperationId"] : []));
+    if (parameters.finishOperationId !== undefined) normalizeWorkspaceActionUuid(parameters.finishOperationId, "parameters.finishOperationId");
     argumentsList = [operation];
   } else if (operation === "context_sync") {
     assertWorkspaceActionKeys(parameters, new Set());
@@ -10209,13 +10212,63 @@ const workspaceRunHeartbeatManager = createWorkspaceRunHeartbeatManager({
   resolveOpenedDirectory: (stdout) => resolveOpenedWorkspaceDirectory(stdout),
 });
 
-export const handleTrelioWorkspaceActionOperation = async (
+const workspaceFinishOperations = createWorkspaceFinishOperations({
+  errorFactory: (code, message, details) => new TrelioLocalContextError(code, message, details),
+});
+
+export const handleTrelioWorkspaceActionOperation = async (origin, rawInput, options = {}) => {
+  const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
+  // Keep injected compatibility executors synchronous unless their test opts
+  // into the production manager explicitly. Native checkpoint stdin is never
+  // retained by this registry or written to a progress file.
+  const managed = !options.runBridge || options.finishOperations;
+  if (!managed || !TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS.has(invocation.operation)) {
+    return executeTrelioWorkspaceActionOperation(origin, rawInput, options);
+  }
+  const directory = await resolveWorkspaceActionWorkingDirectory(origin, invocation,
+    options.resolveRunRootDirectory ?? resolveRegisteredWorkspaceRootDirectory);
+  let canonicalDirectory;
+  try { canonicalDirectory = await fs.realpath(directory); }
+  catch {
+    // Preserve the existing typed process/recovery error for a missing or
+    // inaccessible cwd; this preflight must not substitute another directory.
+    return executeTrelioWorkspaceActionOperation(origin, rawInput, options);
+  }
+  const key = `${origin}:${canonicalDirectory}`;
+  const manager = options.finishOperations ?? workspaceFinishOperations;
+  let scope;
+  if (invocation.operation === "finish" || invocation.parameters.finishOperationId) {
+    const identity = await (options.resolveFinishRunIdentity ?? readOpenedWorkspaceRunIdentity)(directory, origin);
+    scope = `${identity.workspaceId}:${identity.runId}`;
+  }
+  if (invocation.operation === "status" && invocation.parameters.finishOperationId) {
+    return manager.poll(key, invocation.parameters.finishOperationId, options.signal, scope);
+  }
+  if (invocation.operation === "finish") {
+    return manager.start({ key, scope, fingerprint: JSON.stringify(invocation.argumentsList), signal: options.signal,
+      pollAction: { schemaVersion: 1, operation: "status", workingDirectory: directory,
+        ...(rawInput.runIdentity ? { runIdentity: rawInput.runIdentity } : {}) },
+      execute: (onProgress) => executeTrelioWorkspaceActionOperation(origin,
+        { ...rawInput, workingDirectory: directory }, { ...options, signal: undefined, onProgress }),
+    });
+  }
+  const active = manager.active(key);
+  if (active && invocation.operation !== "heartbeat") {
+    if (invocation.operation === "status") return active;
+    throw new TrelioLocalContextError("TRELIO_WORKSPACE_FINISH_IN_PROGRESS",
+      "Сначала дождитесь результата выполняющегося finish.", active);
+  }
+  return executeTrelioWorkspaceActionOperation(origin, rawInput, options);
+};
+
+const executeTrelioWorkspaceActionOperation = async (
   origin,
   rawInput,
   {
     signal,
     runBridge = runWorkspaceBridge,
     runHeartbeatManager,
+    onProgress,
     folderOnboardingApply = applyTrelioFolderOnboarding,
     resolveRunRootDirectory = resolveRegisteredWorkspaceRootDirectory,
   } = {},
@@ -10252,6 +10305,7 @@ export const handleTrelioWorkspaceActionOperation = async (
     const result = await runBridge(origin, invocation.argumentsList, {
       ...(workingDirectory ? { cwd: workingDirectory } : {}),
       signal,
+      ...(onProgress ? { onProgress } : {}),
       ...(invocation.parameters.nativeInput ? { input: JSON.stringify(invocation.parameters.nativeInput) } : {}),
     });
     if (heartbeatManager && invocation.operation === "open") {

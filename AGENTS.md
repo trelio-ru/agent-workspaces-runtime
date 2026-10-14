@@ -117,6 +117,9 @@ publication tooling также остаются вне этого публичн
   403, transport/5xx, version gate и противоречивый успешный probe не разрешают
   замену. Исходная рабочая mutation не повторяется этим recovery.
 - После неоднозначной mutation сначала установи live state; blind retry запрещён.
+- Долгий `finish` возвращает bounded operation/poll по [контракту](docs/agent-workspace-runtime.md#finish-progress).
+  Повтор не создаёт второго writer; прогресс содержит только стадии/счётчики,
+  а timeout ожидания не означает принятия candidate или отмены сохранения.
 - Сохранение после 429, immutable upload streams и совместимость старого backend
   проверяй по [transport-контракту](docs/agent-workspace-runtime.md#saving-rate-limit-retry).
 - Универсальный импорт использует [локальный transport](docs/agent-workspace-runtime.md#универсальный-импорт-данных):

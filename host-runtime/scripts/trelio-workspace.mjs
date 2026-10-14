@@ -9,6 +9,17 @@
  * fallback на Linux) и отправляет на сервер только candidate bundle текущего
  * Run.
  */
+import { writeFinishProgress } from "./trelio-workspace-finish-progress.mjs";
+
+// Only an actual CLI finish emits these content-free frames. Imported helpers
+// and unrelated commands keep their existing stdout/stderr contract.
+let finishProgressStage = null;
+const reportFinishProgress = (stage, counts = {}) => {
+  if (finishProgressStage === null) return;
+  finishProgressStage = stage;
+  writeFinishProgress({ stage, ...counts });
+};
+
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError } from "./trelio-skill-accounts.mjs";
@@ -1738,7 +1749,10 @@ export const withEncryptedWorkspaceTransportCooldownRetry = async (
       + `Run и локальные изменения сохранены; новых соединений не будет ${cooldownMinutes} мин. `
       + "После паузы bridge один раз повторит exact запрос.\n",
     );
+    const previousStage = finishProgressStage;
+    reportFinishProgress("retry_wait", { retryAfterMs: cooldownMilliseconds });
     await waitForCooldown(cooldownMilliseconds);
+    reportFinishProgress(previousStage);
     return operation();
   }
 };
@@ -1787,7 +1801,10 @@ export const withRateLimitRetry = async (operation, {
           Math.ceil(delayMilliseconds / 1000)
         } сек.\n`,
       );
+      const previousStage = finishProgressStage;
+      reportFinishProgress("retry_wait", { retryAfterMs: delayMilliseconds });
       await waitForRetry(delayMilliseconds);
+      reportFinishProgress(previousStage);
     }
   }
 };
@@ -10494,13 +10511,13 @@ const isProcessRunning = (pid) => {
   }
 };
 
-const acquireWorkspaceOpenLock = async (workspaceId) => {
+const acquireWorkspaceOpenLock = async (workspaceId, kind = "open") => {
   await ensurePrivateDirectory(CONFIG_DIRECTORY);
   // Lock-и находятся вне видимого Workspace, но всё равно являются частью
   // trust boundary bridge. Проверяем owner/mode/type каталога, а не только
   // создаём его рекурсивно: существующий symlink здесь недопустим.
   await ensurePrivateDirectory(WORKSPACE_OPEN_LOCK_DIRECTORY);
-  const lockPath = path.join(WORKSPACE_OPEN_LOCK_DIRECTORY, `${workspaceId}.lock`);
+  const lockPath = path.join(WORKSPACE_OPEN_LOCK_DIRECTORY, `${kind === "finish" ? "finish-" : ""}${workspaceId}.lock`);
   const ownerToken = crypto.randomUUID();
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -10552,9 +10569,11 @@ const acquireWorkspaceOpenLock = async (workspaceId) => {
 
     if (liveOwner || initializing) {
       const lockError = new Error(
-        "Этот Agent Workspace уже открывается другим локальным процессом. Дождитесь завершения открытия и повторите команду.",
+        kind === "finish"
+          ? "TRELIO_WORKSPACE_FINISH_IN_PROGRESS: finish этого Run ещё выполняется другим локальным процессом. Проверьте его состояние; второй процесс сохранения не запущен."
+          : "Этот Agent Workspace уже открывается другим локальным процессом. Дождитесь завершения открытия и повторите команду.",
       );
-      lockError.code = "TRELIO_WORKSPACE_OPEN_LOCKED";
+      lockError.code = kind === "finish" ? "TRELIO_WORKSPACE_FINISH_IN_PROGRESS" : "TRELIO_WORKSPACE_OPEN_LOCKED";
       throw lockError;
     }
 
@@ -10578,8 +10597,8 @@ const releaseWorkspaceOpenLock = async ({ lockPath, ownerToken }) => {
   }
 };
 
-const withWorkspaceOpenLock = async (workspaceId, handler) => {
-  const lock = await acquireWorkspaceOpenLock(workspaceId);
+const withWorkspaceOpenLock = async (workspaceId, handler, kind = "open") => {
+  const lock = await acquireWorkspaceOpenLock(workspaceId, kind);
 
   try {
     return await handler();
@@ -13696,6 +13715,8 @@ const status = async () => withRun(async ({ metadata }) => {
     runId: metadata.runId,
     baseHead: metadata.baseHead,
     draftHead: metadata.draftHead || null,
+    terminalStatus: metadata.terminalStatus || null,
+    candidateHead: metadata.candidateHead || null,
     workspaceDirectory: metadata.workspaceDirectory,
     contexts: Array.isArray(metadata.contexts) ? metadata.contexts : [],
     dirty: Boolean(gitStatus),
@@ -13737,21 +13758,47 @@ const pause = async (options) => {
   await checkpoint({ ...options, type: "blocker" });
 };
 
-const finish = async (options) => {
-  await assertRunHasMeaningfulChanges("finish");
-  // Handoff checkpoint is itself lease-guarded. Renew before creating it: a
-  // heartbeat hidden inside submit would run too late and leave a still-valid
-  // Run failing at the first finalization mutation near the lease boundary.
-  await heartbeat();
-  await checkpoint({ ...options, type: "handoff" });
-  // `submit` сам продлевает lease до и после подготовки candidate. Отдельный
-  // model-facing heartbeat здесь не нужен и только создавал лишнее состояние.
-  await submit(options);
+export const withWorkspaceFinishLock = (runId, handler) =>
+  withWorkspaceOpenLock(requireUuid(runId, "run"), handler, "finish");
 
-  // После terminal transition можно убрать другие давно неактивные roots.
-  // Ошибка best-effort retention не превращает уже принятый результат Run в
-  // ошибку finish; следующий запуск bridge повторит cleanup после cooldown.
-  await runAutomaticLocalCleanupForCurrentRun().catch(() => undefined);
+const finish = async (options) => {
+  const { metadata } = await findRunMetadata();
+  const runId = requireUuid(metadata.runId, "run");
+  // The MCP registry prevents repeats within one host. This private process
+  // lock also fences a second host/CLI while the original child is still alive.
+  // Dead-owner recovery never changes upload IDs; normal encrypted read-back
+  // reconciles the retained immutable cache before the next mutation.
+  return withWorkspaceFinishLock(runId, async () => {
+    const current = (await findRunMetadata()).metadata;
+    if (current.terminalStatus === "accepted") {
+      // A receipt is valid for the accepted tree only. Edits made afterwards
+      // need a new Run; never present them as saved by this idempotent shortcut.
+      const head = await runGit(["rev-parse", "HEAD"], { cwd: current.workspaceDirectory });
+      if (head.stdout.trim() !== current.candidateHead
+        || await getGitStatus(current.workspaceDirectory, current.objects || [])) {
+        throw new Error("Run уже принят, но локальные файлы изменились. Подготовьте новый Run от принятой ревизии и сохраните изменения в нём.");
+      }
+      process.stdout.write("Run уже принят; повторная загрузка не требуется.\n");
+      return;
+    }
+    finishProgressStage = "validating";
+    try {
+      reportFinishProgress("validating");
+      await assertRunHasMeaningfulChanges("finish");
+      reportFinishProgress("heartbeat");
+      await heartbeat();
+      reportFinishProgress("checkpoint");
+      await checkpoint({ ...options, type: "handoff" });
+      reportFinishProgress("preparing");
+      await submit(options);
+      reportFinishProgress("cleanup");
+      // Cleanup cannot turn confirmed acceptance into a failed save.
+      await runAutomaticLocalCleanupForCurrentRun().catch(() => undefined);
+      reportFinishProgress("accepted");
+    } finally {
+      finishProgressStage = null;
+    }
+  });
 };
 
 const registerWorkspaceObject = async ({
@@ -14461,6 +14508,7 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
       const externalObjects = new Map((metadata.objects || []).map((object) => [object.filePath, object]));
       const manifestFiles = [];
       const files = [];
+      reportFinishProgress("projection", { completedFiles: 0, totalFiles: filePaths.length });
       for (const filePath of filePaths) {
         const expectedExternalObject = externalObjects.get(filePath) || null;
         const verifySource = () => verifyEncryptedProjectionSource({ metadata, workspaceHead, filePath, expectedExternalObject });
@@ -14479,6 +14527,7 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
           && prior.file.contentType === manifestFile.contentType) {
           files.push(prior.reference);
           manifestFiles.push({ ...manifestFile, id: prior.file.id });
+          reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles: filePaths.length });
           continue;
         }
         const file = await prepareCachedEncryptedWorkspaceFile({ cacheDirectory,
@@ -14488,10 +14537,14 @@ export const uploadIncrementalEncryptedWorkspaceProjection = async ({
           originalName: filePath.split("/").at(-1), mimeType: manifestFile.contentType,
           ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile });
         await verifySource();
-        await uploadEncryptedWorkspaceFile({ file, metadata, api, retry, onProgress });
+        await uploadEncryptedWorkspaceFile({ file, metadata, api, retry, onProgress: async (progress) => {
+          reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles: filePaths.length, ...progress });
+          await onProgress(progress);
+        } });
         files.push({ id: file.uploadId, kind: "content", sizeBytes: file.ciphertextSizeBytes,
           ciphertextSha256: file.ciphertextSha256 });
         manifestFiles.push({ ...manifestFile, id: file.uploadId });
+        reportFinishProgress("projection", { completedFiles: manifestFiles.length, totalFiles: filePaths.length });
       }
       const { projectionId } = await cacheEncryptedWorkspaceRecord({ cacheDirectory,
         key: { ...binding, kind: "projection-id", workspaceHead }, readPrivateJsonFile, writePrivateJsonFile,
@@ -14564,8 +14617,13 @@ const uploadEncryptedAgentWorkspaceRevision = async ({
     sourcePath: bundlePath, kind: "revision", metadata, companyEncryption,
     originalName: "workspace.bundle", mimeType: "application/vnd.git.bundle", ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile });
   const api = (pathname, options) => request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token, pathname, options);
+  const progressHeartbeat = createEncryptedUploadHeartbeat(metadata, api);
+  reportFinishProgress("revision");
   await uploadEncryptedWorkspaceFile({ file, metadata, api, retry: withEncryptedWorkspaceRequestRetry,
-    onProgress: createEncryptedUploadHeartbeat(metadata, api) });
+    onProgress: async (progress) => {
+      reportFinishProgress("revision", progress);
+      await progressHeartbeat(progress);
+    } });
   const body = await cacheEncryptedWorkspaceRecord({ cacheDirectory,
     key: { ...binding, ...bundlePlan, workspaceHead, revisionKind, uploadId: file.uploadId,
       browserProjectionId, derivedArtifactsSha256 }, readPrivateJsonFile, writePrivateJsonFile,
@@ -14582,6 +14640,7 @@ const uploadEncryptedAgentWorkspaceRevision = async ({
             workspaceId: binding.workspaceId, runId: binding.runId, revisionKind })) };
     },
   });
+  reportFinishProgress("publishing");
   return publishEncryptedWorkspaceRecord({ metadata, kind: revisionKind, api,
     retry: withEncryptedWorkspaceRequestRetry,
     record: buildEncryptedAgentWorkspaceRevisionRecord({ ...body, ...binding, revisionKind }), signature: body.signature,
@@ -14906,6 +14965,7 @@ const submit = async (options) => withRun(async ({
     // instead of colliding with an already stored entity revision.
     await writeRunMetadata(metadataPath, submissionMetadata);
     await heartbeat();
+    reportFinishProgress("derived");
     await stageEncryptedDerivedArtifactInventory({
       metadata: submissionMetadata,
       origin,
@@ -14918,6 +14978,7 @@ const submit = async (options) => withRun(async ({
       && UUID_PATTERN.test(String(submissionMetadata.browserProjection?.projectionId || ""))
       ? submissionMetadata.browserProjection
       : null;
+    reportFinishProgress("projection");
     const projection = reusableProjection || await uploadEncryptedAgentWorkspaceBrowserProjection({
       metadata: submissionMetadata,
       metadataPath,
@@ -14971,6 +15032,7 @@ const submit = async (options) => withRun(async ({
         derivedArtifactsSha256: encryptedDerivedArtifactInventory.derivedArtifactsSha256,
       }),
     );
+    reportFinishProgress("revision");
     let result;
     let promotedDraft = false;
 

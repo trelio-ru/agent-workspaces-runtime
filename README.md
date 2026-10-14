@@ -153,6 +153,13 @@ Local company search и Workspace-file search возвращают один ко
 для plain company marker снимается при подтверждённом native provider.
 
 
+Длительный `finish` возвращает состояние и exact status-вызов максимум через
+10 секунд. Повторный finish присоединяется к операции; отмена ожидания не
+запускает новую загрузку. Прогресс показывает стадии, файлы и bytes без
+содержимого документов. После перезапуска host сначала проверяется Run;
+неизвестный operation ID не разрешает blind retry.
+[Контракт](docs/agent-workspace-runtime.md#finish-progress).
+
 Tagged artifact собирается на GitHub только после проверки successful PR gate
 того же exact SHA на Linux/macOS/Windows. Main/tag не повторяют уже зелёный
 полный test set; новый source SHA сначала проходит новый PR gate.

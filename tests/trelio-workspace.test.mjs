@@ -10299,6 +10299,13 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
     );
 
     assert.match(submitted.stdout, /Статус: принят автоматически/);
+    const acceptedRequestCount = seenRequests.length;
+    const repeatedFinish = await execFileAsync(process.execPath, [bridgePath, "finish", "--summary", "Повтор"], {
+      cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: childEnvironment,
+    });
+    assert.match(repeatedFinish.stdout, /Run уже принят/u);
+    assert.equal(seenRequests.length, acceptedRequestCount, "accepted finish must not upload or checkpoint again");
+    assert.match(submitted.stderr, /TRELIO_FINISH_PROGRESS.*"stage":"accepted"/u);
     assert.match(submitted.stdout, /Проверены изменённые пути/u);
     assert.match(submitted.stdout, /Checkpoint сохранён/u);
     assert.ok(handoffPayload);

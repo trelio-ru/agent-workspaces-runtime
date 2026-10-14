@@ -1022,6 +1022,34 @@ clean Git и принятый head проверяются обычным preflig
 7. Trelio принимает candidate атомарно, только пока current accepted head
    совпадает с pinned base head.
 
+<a id="finish-progress"></a>
+
+### Длительный finish и прогресс
+
+Local MCP ждёт `finish` не более 10 секунд за вызов. Если child ещё работает,
+ответ содержит `state=running`, `operationId`, elapsed time, закрытую стадию,
+счётчики файлов/bytes и exact `nextCall` для `status` с `finishOperationId`.
+Агент продолжает опрос; running не подтверждает сохранение и не разрешает
+завершить работу или менять файлы. Отмена отдельного MCP-ожидания не отменяет
+само сохранение. После child exit возвращаются исходный результат либо ошибка;
+`completed` не подменяет server-side проверку acceptance внутри CLI.
+
+Реестр живёт в текущем MCP-host, ограничен 64 операциями и хранит завершённые
+результаты 30 минут. Одновременные одинаковые `finish` присоединяются к одной
+операции; другие параметры и конкурирующие mutations требуют дождаться её
+результата. Отдельный private process lock на exact Run также запрещает второй
+`finish` из другого host/CLI. После restart неизвестный operation ID требует
+обычного status и server read-back до нового finish; это не сервис фоновых jobs.
+Принятый local Run повторно не загружается. При утрате ответа существующий
+immutable encrypted cache и upload/publication read-back сохраняют прежние
+UUID/подписи и пропускают готовые части.
+
+Child передаёт allowlisted progress frames сразу: validation, heartbeat,
+checkpoint, preparation, derived/projection/revision/publication, retry wait и
+acceptance. В progress нет paths, имён, текста файлов, credentials или raw
+HTTP errors. Обычный stdout/stderr остаётся локальным bounded terminal output;
+большое число progress frames не убивает child из-за `execFile.maxBuffer`.
+
 `WORKSPACE_OUTDATED` не обходится force push: агент начинает новый Run от
 current head и осознанно переносит inspected changes. Restore создаёт новую
 accepted revision со старым деревом, не переписывая историю.
