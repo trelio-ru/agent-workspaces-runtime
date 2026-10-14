@@ -1,4 +1,4 @@
-import { MCP_TASK_READ_MAX_RESULT_BYTES, fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "../host-runtime/scripts/trelio-task-read-budget.mjs";
+import { MCP_TASK_READ_MAX_RESULT_BYTES, measureMcpTaskReadResultBytes, fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "../host-runtime/scripts/trelio-task-read-budget.mjs";
 import assert from "node:assert/strict";
 import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import crypto from "node:crypto";
@@ -1541,6 +1541,46 @@ test("native exact-task reads preserve schema-v3 instruction and deferred-sectio
     result.tasks[0].task.deferredSections.available.find(({ name }) => name === "comments")?.itemCount,
     null,
   );
+});
+
+test("encrypted exact task title reminders require loaded authority and one human title", () => {
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  const loaded = handleNativeLocalContextRead(mirror, "get_task", target);
+  assert.match(loaded.codexThreadTitleReminder ?? "", /call codex_app__set_thread_title once with tasks\[0\]\.task\.title/u);
+  assert.match(loaded.codexThreadTitleReminder, /new top-level chat not named by the user/u);
+  assert.match(loaded.codexThreadTitleReminder, /Skip existing, forked or delegated chats and unavailable tools/u);
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(loaded)));
+
+  const unavailable = structuredClone(mirror);
+  delete unavailable.instructions;
+  const requiresScope = handleNativeLocalContextRead(unavailable, "get_task", target);
+  assert.equal(requiresScope.effectiveInstructions.status, "requires_scope");
+  assert.equal(requiresScope.codexThreadTitleReminder, undefined);
+  for (const title of ["", "  ", null, undefined]) {
+    const untitled = structuredClone(mirror);
+    untitled.tasks[0].payload.task.title = title;
+    assert.equal(handleNativeLocalContextRead(untitled, "get_task", target).codexThreadTitleReminder, undefined);
+  }
+
+  const multiple = structuredClone(mirror);
+  const second = structuredClone(multiple.tasks[0]);
+  second.id = "88888888-8888-4888-8888-888888888888";
+  second.number = 18;
+  multiple.tasks.push(second);
+  const targets = [target, { ...target, taskNumber: 18 }];
+  assert.equal(handleNativeLocalContextRead(multiple, "get_tasks", { tasks: targets }).codexThreadTitleReminder, undefined);
+  // A final page for several tasks still has no uniquely selected chat topic.
+  multiple.instructions.company = {
+    compiledMarkdown: "Большое правило компании. ".repeat(1_000),
+    company: { revisionId: "company-r1", version: 1 },
+  };
+  const paged = handleNativeLocalContextRead(multiple, "get_tasks", { tasks: targets });
+  const { catalogRevisionKey, pageCount } = paged.effectiveInstructions.delivery;
+  const finalPage = handleNativeLocalContextRead(multiple, "get_task_instruction_page", {
+    tasks: targets, expectedCatalogRevisionKey: catalogRevisionKey, pageIndex: pageCount - 1,
+  });
+  assert.equal(finalPage.nextPageIndex, null);
+  assert.equal(finalPage.codexThreadTitleReminder, undefined);
 });
 
 test("local task cores never present the manual-search subset as the full comment count", () => {
@@ -3982,6 +4022,7 @@ test("encrypted exact task reads page large authority and reject stale continuat
   const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
   const cold = handleNativeLocalContextRead(fixture, "get_task", target);
   assert.equal(cold.effectiveInstructions.status, "incomplete");
+  assert.equal(cold.codexThreadTitleReminder, undefined);
   assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(cold)));
   const { catalogRevisionKey, pageCount, layerManifest } = cold.effectiveInstructions.delivery;
   const partsByKey = new Map();
@@ -3999,7 +4040,12 @@ test("encrypted exact task reads page large authority and reject stale continuat
     if (pageIndex === pageCount - 1) {
       assert.deepEqual(page.nextExactReadArguments.knownInstructionLayerKeys,
         cold.tasks[0].instructionScope.orderedLayerKeys);
+      assert.match(page.codexThreadTitleReminder ?? "", /after assembling and verifying every instruction page/u);
+      assert.match(page.codexThreadTitleReminder, /tasks\[0\]\.task\.title/u);
+    } else {
+      assert.equal(page.codexThreadTitleReminder, undefined);
     }
+    assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
   }
   for (const layer of layerManifest) {
     const parts = partsByKey.get(layer.key);
@@ -4025,6 +4071,11 @@ test("encrypted exact task reads page large authority and reject stale continuat
     assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
     batchedParts.push(...page.parts);
     nextPageIndex = page.nextPageIndex;
+    if (nextPageIndex === null) {
+      assert.match(page.codexThreadTitleReminder ?? "", /after assembling and verifying every instruction page/u);
+    } else {
+      assert.equal(page.codexThreadTitleReminder, undefined);
+    }
     calls += 1;
     assert.deepEqual(page.nextExactReadArguments, nextPageIndex === null
       ? { knownInstructionLayerKeys: cold.tasks[0].instructionScope.orderedLayerKeys } : undefined);
@@ -4051,6 +4102,50 @@ test("encrypted exact task reads page large authority and reject stale continuat
     }),
     (error) => error?.code === "LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE",
   );
+});
+
+test("encrypted title reminders participate in inline and final batch delivery budgets", () => {
+  const fixture = structuredClone(mirror);
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  fixture.instructions.company = {
+    compiledMarkdown: "a".repeat(200),
+    company: { revisionId: "company-r1", version: 1 },
+  };
+  const baseline = handleNativeLocalContextRead(fixture, "get_task", target);
+  // Plain ASCII grows the fully escaped envelope by one byte per character.
+  // Put the real inline reply one byte over budget while its old, reminder-free
+  // envelope still fits; this must select pagination rather than reject/truncate.
+  const inlineCharacters = 200 + MCP_TASK_READ_MAX_RESULT_BYTES
+    - measureMcpTaskReadResultBytes(buildLocalTaskReadToolResult(baseline)) + 1;
+  fixture.instructions.company.compiledMarkdown = "a".repeat(inlineCharacters);
+  const paged = handleNativeLocalContextRead(fixture, "get_task", target);
+  assert.equal(paged.effectiveInstructions.status, "incomplete");
+  assert.equal(paged.codexThreadTitleReminder, undefined);
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(paged)));
+
+  // These escaped tabs place four immutable parts just below the old limit.
+  // The final reminder makes that complete batch too large, so the dispatcher
+  // must return three parts first, then the last part with the reminder.
+  fixture.instructions.company.compiledMarkdown = `Начало${"\t".repeat(12_800)}Конец`;
+  const cold = handleNativeLocalContextRead(fixture, "get_task", target);
+  const { catalogRevisionKey, pageCount } = cold.effectiveInstructions.delivery;
+  const readPage = (pageIndex) => handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+    tasks: [target], expectedCatalogRevisionKey: catalogRevisionKey, pageIndex, pageSize: 4,
+  });
+  const first = readPage(0);
+  assert.equal(pageCount, 4);
+  assert.equal(first.parts.length, 3);
+  assert.equal(first.nextPageIndex, 3);
+  assert.equal(first.codexThreadTitleReminder, undefined);
+  const last = readPage(first.nextPageIndex);
+  assert.equal(last.parts.length, 1);
+  assert.equal(last.nextPageIndex, null);
+  assert.match(last.codexThreadTitleReminder ?? "", /after assembling and verifying every instruction page/u);
+  const hypotheticalComplete = { ...last, pageIndex: 0, parts: [...first.parts, ...last.parts] };
+  const { codexThreadTitleReminder: _reminder, ...withoutReminder } = hypotheticalComplete;
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(withoutReminder)));
+  assert.equal(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(hypotheticalComplete)), false);
+  for (const page of [first, last]) assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
 });
 
 test("encrypted instruction batches cap escaped JSON and retain the actual continuation", () => {

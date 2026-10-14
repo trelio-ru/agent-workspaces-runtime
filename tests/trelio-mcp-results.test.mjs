@@ -7,6 +7,21 @@ import path from "node:path";
 import { projectMcpAgentPayload } from "../host-runtime/scripts/trelio-agent-response-projection.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
+test("local exact task and final instruction page delivery preserve the chat title reminder", () => {
+  const reminder = "Codex only: after assembling and verifying every instruction page, call codex_app__set_thread_title once with tasks[0].task.title";
+  for (const [tool, payload] of [
+    ["get_task", { effectiveInstructions: { status: "loaded" }, tasks: [{ task: { title: "Human title" } }], codexThreadTitleReminder: reminder }],
+    ["get_task_instruction_page", { responseKind: "instruction_page_batch", nextPageIndex: null, parts: [{ markdown: "Working rules" }], codexThreadTitleReminder: reminder }],
+  ]) {
+    const textOnly = compactLocalNativeMcpResult(tool, { content: [{ type: "text", text: JSON.stringify(payload) }] });
+    assert.equal(JSON.parse(textOnly.content[0].text).codexThreadTitleReminder, reminder);
+    const structured = compactLocalNativeMcpResult(tool, { structuredContent: payload,
+      content: [{ type: "text", text: JSON.stringify(payload) }] });
+    assert.equal(structured.structuredContent.codexThreadTitleReminder, reminder);
+    if (tool === "get_task_instruction_page") assert.equal(structured.structuredContent.tasks, undefined);
+  }
+});
+
 test("Antigravity text-only local delivery follows hydration/projection and keeps App grants hidden", async () => {
   const payload = { task: { title: "Расшифрованная задача", assignee: { displayName: "Анна", profileNote: "Проверяет договоры", avatarUrl: "decorative" } } };
   const hydrated = compactLocalNativeMcpResult("get_task", { structuredContent: payload,
