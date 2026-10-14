@@ -1491,6 +1491,33 @@ loaded plugin launcher и routing plan. Protected calls через nested exec,
 browser/HTTP/другой MCP этим не разрешаются. Непроверенное состояние не объявляется
 недоступностью; само отсутствие schema не доказывает неисправность config или OAuth.
 
+Diagnostic runtime автоматически проверяет anonymous GET `/mcp` (ожидаемый 405),
+`/.well-known/oauth-protected-resource/mcp` и
+`/.well-known/oauth-authorization-server` (200 и canonical resource/issuer).
+Публичный origin берётся из host configuration; redirects, credentials и
+произвольные model URLs не используются. Metadata ограничена 16 KiB, каждый
+запрос – тремя секундами. Только network/timeout/429/5xx повторяются до четырёх
+попыток с паузами 2/5/15 секунд; успешные и permanent-отказы не повторяются.
+Больший Retry-After завершает probe без раннего повтора и продления бюджета.
+Один алгоритм используется и в CLI bootstrap `bridge doctor --json`.
+Результат `publicService` хранит только closed outcomes, numeric HTTP status и
+номер/паузу попытки: `available`, `recovered`, `unavailable`,
+`unexpected_response`, `cancelled` либо `not_checked`. Response bytes и native
+exceptions не выходят из probe. Этот алгоритм работает независимо от folder
+blocker и не выполняется в чистом onboarding/folder plan.
+
+`liveVerification.connectionRecovery` явно сохраняет `connectionRetried=false`:
+doctor и public probes не переподключают remote MCP. `available/recovered`
+требует проверки direct schema и одного безопасного обычного чтения в текущем
+чате; OAuth/proof/exposure остаются непроверенными до этого чтения. При отсутствии
+schema штатный reconnect используется только если клиент предоставляет такую
+функцию; неизвестную команду не изобретать. Runtime не наблюдает toolset клиента,
+поэтому этот шаг остаётся модели. Старый 5xx не является текущим отказом после
+восстановления. Без отдельного matching evidence/requiredAction не советовать
+restart/new chat, login/pairing или переустановку; отсутствие reconnect-функции
+не доказывает необходимость restart. Сохраняется конкретный client exposure
+blocker, без циклического повторения doctor и без обхода admission.
+
 Агент предлагает только подтверждённое диагностикой исправление.
 `REVIEW_CODEX_DIRECT_ROUTING` сохраняет отдельное подтверждение показанного exact
 `planHash`, CAS apply, полный restart Codex/ChatGPT и исходное protected read в

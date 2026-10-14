@@ -27,7 +27,7 @@ import {
   fingerprintRemoteMcpConfig,
   handleLocalMcpMessage as handleLocalMcpMessageProduction,
   loadLocalMcpCatalogPermissions,
-  handleToolCall,
+  handleToolCall as handleToolCallProduction,
   isHostRuntimeUpgradeRequiredError,
   normalizeCompanyPrivateSkillAuthoringContract,
   openCredentialFormInBrowser,
@@ -43,6 +43,12 @@ import {
   validateResolvedRemoteMcp,
   validateRemoteMcpPublicationConfig,
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { diagnosePublicTrelioService } from "../host-runtime/scripts/trelio-public-service-diagnostic.mjs";
+// Ordinary diagnostic fixtures must never probe the real public service.
+const handleToolCall = (origin, name, args, options = {}) => handleToolCallProduction(origin, name, args, {
+  publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }), ...options,
+});
+
 // Static descriptor tests retain the complete fictional owner catalogue;
 // live discovery is tested separately through the actual protocol handler.
 const handleLocalMcpMessage = (message, options = {}) => handleLocalMcpMessageProduction(message, {
@@ -2847,6 +2853,162 @@ const readyLocalInstallationDiagnosis = {
   },
   issues: [],
 };
+
+const publicMetadataResponse = (url) => {
+  const endpoint = new URL(url);
+  if (endpoint.pathname === "/mcp") return new Response(null, { status: 405 });
+  return Response.json(endpoint.pathname.includes("protected-resource")
+    ? { resource: `${endpoint.origin}/mcp` } : { issuer: endpoint.origin });
+};
+
+test("public service diagnostics retry transient routes and report recovery without credentials or reconnect", async () => {
+  const counts = new Map();
+  const delays = [];
+  const publicService = await diagnosePublicTrelioService("https://trelio.example", {
+    wait: async (delay) => { delays.push(delay); },
+    fetchImpl: async (url, options) => {
+      assert.equal(options.method, "GET");
+      assert.equal(options.redirect, "manual");
+      assert.equal(options.credentials, "omit");
+      assert.deepEqual(options.headers, { accept: "application/json" });
+      const key = url.pathname;
+      const count = (counts.get(key) ?? 0) + 1;
+      counts.set(key, count);
+      return key === "/mcp" && count < 3
+        ? new Response("PRIVATE-PROXY-CANARY", { status: 502 }) : publicMetadataResponse(url);
+    },
+  });
+  assert.equal(publicService.state, "recovered");
+  assert.deepEqual(delays, [2_000, 5_000]);
+  assert.equal(counts.get("/mcp"), 3);
+  assert.equal(counts.get("/.well-known/oauth-authorization-server"), 1);
+  assert.equal(publicService.attempts[0].checks[0].httpStatus, 502);
+  assert.equal(publicService.attempts[2].checks[0].httpStatus, 405);
+  const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    codexHookSettingsRead: async () => ({ status: "observed", effectiveState: "unknown" }),
+    publicServiceDiagnosis: async () => publicService,
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.publicService.state, "recovered");
+  assert.equal(payload.liveVerification.connectionRecovery.state, "verify_current_client_tools");
+  assert.equal(payload.liveVerification.connectionRecovery.connectionRetried, false);
+  assert.equal(payload.liveVerification.connectionRecovery.restartRequired, false);
+  assert.equal(payload.readiness.checks.toolExposure, "not_checked");
+  assert.equal(payload.readiness.checks.oauth, "not_checked");
+  assert.match(payload.liveVerification.connectionRecovery.instructions, /не советуй restart/u);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE-PROXY-CANARY/u);
+});
+
+test("public service diagnostics bound persistent network and HTTP failures to four attempts", async () => {
+  for (const failure of [429, 503, "network"]) {
+    let calls = 0;
+    const delays = [];
+    const result = await diagnosePublicTrelioService("https://trelio.example", {
+      wait: async (delay) => { delays.push(delay); },
+      fetchImpl: async () => {
+        calls += 1;
+        if (failure === "network") throw new Error("PRIVATE-NETWORK-CANARY");
+        return new Response("PRIVATE-UPSTREAM-CANARY", { status: failure });
+      },
+    });
+    assert.equal(result.state, "unavailable");
+    assert.equal(calls, 12);
+    assert.deepEqual(delays, [2_000, 5_000, 15_000]);
+    assert.equal(result.attempts.length, 4);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE/u);
+  }
+});
+
+test("public service diagnostics do not retry permanent errors, redirects or invalid metadata", async () => {
+  for (const failure of [401, 403, 302, "invalid", "oversized"]) {
+    let calls = 0;
+    const result = await diagnosePublicTrelioService("https://trelio.example", {
+      wait: async () => assert.fail("permanent errors cannot trigger retries"),
+      fetchImpl: async (url) => {
+        calls += 1;
+        if (typeof failure === "number") return new Response(null, { status: failure });
+        if (url.pathname === "/mcp") return publicMetadataResponse(url);
+        return new Response(failure === "invalid" ? '{"issuer":"https://other.example"}'
+          : ' '.repeat(16 * 1024 + 1), { status: 200 });
+      },
+    });
+    assert.equal(result.state, "unexpected_response");
+    assert.equal(result.attempts.length, 1);
+    assert.equal(calls, 3);
+  }
+});
+
+test("public service diagnostics abort a stalled request at the fixed deadline and then recover", async (context) => {
+  const keepAlive = setInterval(() => {}, 1_000);
+  context.after(() => clearInterval(keepAlive));
+  let first = true;
+  const result = await diagnosePublicTrelioService("https://trelio.example", {
+    wait: async () => {},
+    fetchImpl: async (url, { signal }) => {
+      if (url.pathname !== "/mcp" || !first) return publicMetadataResponse(url);
+      first = false;
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  });
+  assert.equal(result.state, "recovered");
+  assert.equal(result.attempts.length, 2);
+  assert.equal(result.attempts[0].checks[0].outcome, "timeout");
+});
+
+test("public service diagnostics respect Retry-After without extending the diagnostic budget", async () => {
+  const result = await diagnosePublicTrelioService("https://trelio.example", {
+    wait: async () => assert.fail("cannot retry before Retry-After"),
+    fetchImpl: async () => new Response(null, { status: 503, headers: { "retry-after": "120" } }),
+  });
+  assert.equal(result.state, "unavailable");
+  assert.equal(result.attempts.length, 1);
+  assert.ok(result.attempts[0].checks.every((check) => check.outcome === "retry_after_exceeds_budget"));
+});
+
+test("public service diagnostics use the real anonymous HTTP route and bound a stalled body on cancellation", async () => {
+  const controller = new AbortController();
+  const requests = [];
+  const server = http.createServer((request, response) => {
+    requests.push({ url: request.url, authorization: request.headers.authorization, cookie: request.headers.cookie });
+    if (request.url === "/mcp") { response.writeHead(405).end(); return; }
+    if (request.url.includes("protected-resource")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"resource":');
+      controller.abort();
+    } else response.writeHead(200).end(JSON.stringify({ issuer: `http://127.0.0.1:${server.address().port}` }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const result = await diagnosePublicTrelioService(`http://127.0.0.1:${server.address().port}`, { signal: controller.signal });
+    assert.equal(result.state, "cancelled");
+    assert.equal(result.attempts.length, 1);
+    assert.ok(requests.length >= 2);
+    assert.ok(requests.every((request) => request.authorization === undefined && request.cookie === undefined));
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("public service diagnostics cancellation stops backoff and rejects unsupported origins", async () => {
+  const controller = new AbortController();
+  const result = await diagnosePublicTrelioService("https://trelio.example", {
+    signal: controller.signal,
+    wait: async (_delay, { signal }) => { controller.abort(); signal.throwIfAborted(); },
+    fetchImpl: async () => new Response(null, { status: 502 }),
+  });
+  assert.equal(result.state, "cancelled");
+  assert.equal(result.attempts.length, 1);
+  for (const origin of ["http://remote.example", "https://trelio.example/private", "https://user:secret@trelio.example"]) {
+    const blocked = await diagnosePublicTrelioService(origin, { fetchImpl: async () => assert.fail("unsafe origin") });
+    assert.equal(blocked.state, "not_checked");
+    assert.doesNotMatch(JSON.stringify(blocked), /secret|private/u);
+  }
+});
 
 test("generic diagnostics return independent live checks and never claim write readiness", async () => {
   const folder = {

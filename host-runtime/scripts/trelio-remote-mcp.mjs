@@ -72,6 +72,7 @@ import {
   resolveWorkspaceBridgeConfigDirectory,
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
+import { diagnosePublicTrelioService } from "./trelio-public-service-diagnostic.mjs";
 import {
   TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
   TrelioInstallationDiagnosticError,
@@ -5523,6 +5524,7 @@ export const handleToolCall = async (
     clientCapabilities = null,
     requestClient = null,
     localPrerequisiteDiagnosis = diagnoseLocalPrerequisites,
+    publicServiceDiagnosis = diagnosePublicTrelioService,
     folderOnboardingPrepare = prepareTrelioFolderOnboarding,
     folderDiagnosticPrepare = prepareTrelioFolderDiagnostic,
     codexRoutingPlan = planCodexTrelioHookRouting,
@@ -5851,6 +5853,10 @@ export const handleToolCall = async (
         };
       }
     }
+    // Public reachability is independent of local prerequisites and folder ACL.
+    // It cannot load client tools or replay the failed business operation.
+    const publicService = rawArguments.intent === "diagnostics"
+      ? await publicServiceDiagnosis(origin, { signal }) : null;
     return buildTextResult(buildTrelioInstallationDiagnostic({
       clientKind: rawArguments.clientKind,
       intent: rawArguments.intent,
@@ -5859,6 +5865,7 @@ export const handleToolCall = async (
       codexHookSettings,
       codexLegacyMcpMigration,
       workingFolder,
+      publicService,
     }));
   }
   if (COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(name)) {

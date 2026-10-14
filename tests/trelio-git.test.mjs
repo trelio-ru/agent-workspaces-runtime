@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import http from "node:http";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -267,14 +268,23 @@ test("real Git runtime completes init, add and commit on the current OS", async 
   assert.equal(path.isAbsolute(result.gitPath), true);
 });
 
-test("bridge doctor exposes machine-readable local prerequisite status", async () => {
+test("bridge doctor exposes machine-readable local prerequisite status", async (context) => {
+  const server = http.createServer((request, response) => {
+    assert.equal(request.headers.authorization, undefined);
+    if (request.url === "/mcp") { response.writeHead(405).end(); return; }
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    response.writeHead(200).end(JSON.stringify(request.url.includes("protected-resource")
+      ? { resource: `${origin}/mcp` } : { issuer: origin }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => new Promise((resolve) => server.close(resolve)));
   const pluginManifest = JSON.parse(await readFile(
     path.join(pluginDirectory, ".codex-plugin", "plugin.json"),
     "utf8",
   ));
   const { stdout } = await execFileAsync(
     process.execPath,
-    [bridgePath, "doctor", "--json"],
+    [bridgePath, "doctor", "--json", "--origin", `http://127.0.0.1:${server.address().port}`],
     {
       encoding: "utf8",
       env: {
@@ -291,6 +301,9 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
 
   assert.equal(report.status, "ready", JSON.stringify(report));
   assert.equal(report.schemaVersion, 1);
+  assert.equal(report.publicService.state, "available");
+  assert.equal(report.connectionRecovery.connectionRetried, false);
+  assert.equal(report.connectionRecovery.restartRequired, false);
   assert.equal(report.node.status, "ready");
   assert.equal(report.git.status, "ready");
   assert.equal(report.git.smokeTest, "ready");

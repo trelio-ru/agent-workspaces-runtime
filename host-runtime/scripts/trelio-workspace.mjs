@@ -9,6 +9,8 @@
  * fallback на Linux) и отправляет на сервер только candidate bundle текущего
  * Run.
  */
+import { diagnosePublicTrelioService } from "./trelio-public-service-diagnostic.mjs";
+import { buildTrelioConnectionRecovery } from "./trelio-installation-diagnostic.mjs";
 import { writeFinishProgress } from "./trelio-workspace-finish-progress.mjs";
 
 // Only an actual CLI finish emits these content-free frames. Imported helpers
@@ -1272,6 +1274,12 @@ const doctor = async (options) => {
     origin: options.origin || DEFAULT_ORIGIN,
     includeHookStartup: true,
   });
+
+  // Bootstrap diagnostics must retain public recovery evidence even when the
+  // local MCP schema itself is unavailable to the current model. This remains
+  // anonymous and does not reconnect MCP, read bearer tokens or repair config.
+  report.publicService = await diagnosePublicTrelioService(normalizeOrigin(options.origin || DEFAULT_ORIGIN));
+  report.connectionRecovery = buildTrelioConnectionRecovery(report.publicService);
 
   if (options.json === true) {
     process.stdout.write(`${JSON.stringify(report)}\n`);

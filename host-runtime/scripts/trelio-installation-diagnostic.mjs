@@ -12,6 +12,15 @@ import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPA
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
+export const buildTrelioConnectionRecovery = (publicService, requiredActions = []) => ({
+  state: ["available", "recovered"].includes(publicService?.state)
+    ? "verify_current_client_tools" : "public_service_not_confirmed",
+  connectionRetried: false,
+  restartRequired: requiredActions.some((action) => action.restartRequired === true
+    || action.plan?.restartRequired === true),
+  instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema нет, используй штатный reconnect только при наличии такой функции клиента, затем проверь доступ снова; не придумывай команды. Не повторяй doctor как reconnect и не объявляй старый 5xx текущей ошибкой. Нет matching evidence или exact requiredAction – не советуй restart/new chat, login, pairing или переустановку. Сохрани конкретный client tool-exposure blocker; отсутствие функции reconnect не доказывает необходимость restart.",
+});
+
 const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
@@ -255,6 +264,7 @@ export const buildTrelioInstallationDiagnostic = ({
   codexHookSettings = null,
   codexLegacyMcpMigration = null,
   workingFolder = null,
+  publicService = null,
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
@@ -339,15 +349,22 @@ export const buildTrelioInstallationDiagnostic = ({
     });
   }
 
+  const publicServiceBlocked = publicService && !["available", "recovered"].includes(publicService.state);
+  if (publicServiceBlocked) warnings.push({
+    code: "PUBLIC_TRELIO_SERVICE_NOT_CONFIRMED",
+    state: publicService.state,
+    effect: "public_reachability_only_no_auth_or_client_repair",
+  });
   const folder = workingFolder ?? { status: "not_checked", reasonCode: "CLIENT_WORKING_FOLDER_REQUIRED" };
   return {
     schemaVersion: 1,
     clientKind,
     intent,
-    status: requiredActions.length > 0 || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
+    status: requiredActions.length > 0 || publicServiceBlocked || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
       ? "action_required"
       : "ready_for_live_verification",
     local: buildLocalSummary(local, clientKind),
+    ...(publicService ? { publicService } : {}),
     codexRouting: clientKind === "codex" ? codexRouting : null,
     codexHookSettings: clientKind === "codex"
       ? codexHookSettings ?? { status: "unknown", scope: "user_config_on_disk", effectiveState: "unknown" }
@@ -372,6 +389,7 @@ export const buildTrelioInstallationDiagnostic = ({
         checks: {
           workingFolder: folder.status,
           localComponents: requiredActions.length > 0 ? "action_required" : local.status ?? "unknown",
+          ...(publicService ? { publicService: publicService.state } : {}),
           oauth: "not_checked", protectedContext: "not_checked", workspaceRead: "not_checked",
           skills: "not_checked", savingResults: "not_checked",
           ...(clientKind === "codex" ? { toolExposure: "not_checked" } : {}),
@@ -381,6 +399,9 @@ export const buildTrelioInstallationDiagnostic = ({
       },
     } : {}),
     liveVerification: {
+      ...(intent === "diagnostics" ? {
+        connectionRecovery: buildTrelioConnectionRecovery(publicService, requiredActions),
+      } : {}),
       ...(clientKind === "codex" ? {
         toolExposure: {
           state: "not_checked",

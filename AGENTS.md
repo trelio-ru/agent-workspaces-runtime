@@ -44,6 +44,8 @@ publication tooling также остаются вне этого публичн
   бюджетные подсказки bundled skill относятся только к доступным nested tools.
   Missing direct schema сразу направляет в read-only диагностику по этому
   контракту; исправление предлагается по evidence с сохранением approval.
+  Public availability/recovery измеряется bounded anonymous probes; doctor
+  не считается reconnect. Restart/new chat требует отдельного evidence.
 - Диагностика сохранённых Codex hooks читает только пользовательский config
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
   включает hook; дисковый снимок не является effective state App Server.
