@@ -78,6 +78,11 @@ test("native checkpoint continuation recovers all fields and enters the same Run
 
 test("native checkpoint validates exact bounds, JSON evidence and caller lease before IO", async () => {
   assert.deepEqual(await readNativeCheckpointInput(Readable.from([JSON.stringify(nativeCheckpoint)])), nativeCheckpoint);
+  const normalized = validateNativeCheckpoint({ ...nativeCheckpoint, summary: "  Result  ",
+    filesChanged: ["  artifacts/result.md  "], openQuestions: ["  Question  "] });
+  assert.equal(normalized.summary, "Result");
+  assert.deepEqual(normalized.filesChanged, ["artifacts/result.md"]);
+  assert.deepEqual(normalized.openQuestions, ["Question"]);
   const metadata = { ...nativeCheckpoint, baseHead: "a".repeat(40) };
   assert.doesNotThrow(() => assertNativeCheckpointBinding(nativeCheckpoint, metadata));
   for (const patch of [{ leaseId: nativeCheckpoint.runId }, { runId: nativeCheckpoint.leaseId }, { fencingToken: 3 }, { draftHead: "b".repeat(40) }]) {

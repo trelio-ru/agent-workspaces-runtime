@@ -55,7 +55,11 @@ export const validateNativeCheckpoint = input => {
   try { wire = JSON.stringify(input); } catch { fail(); }
   if (Buffer.byteLength(wire, "utf8") > NATIVE_CHECKPOINT_MAX_BYTES
     || !isDeepStrictEqual(input, JSON.parse(wire))) fail();
-  return input;
+  // Match the native Zod trim boundary locally. The encrypted REST receiver
+  // sees array markers and cannot normalize the plaintext leaves afterwards.
+  return { ...input, summary: input.summary.trim(),
+    ...(input.filesChanged !== undefined ? { filesChanged: input.filesChanged.map(value => value.trim()) } : {}),
+    ...(input.openQuestions !== undefined ? { openQuestions: input.openQuestions.map(value => value.trim()) } : {}) };
 };
 
 export const assertNativeCheckpointBinding = (input, metadata) => {
