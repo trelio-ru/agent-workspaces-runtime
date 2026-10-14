@@ -1517,7 +1517,10 @@ reader без истечения по часам. Contender читает тол�
 только после protected чтения exact nonce-файла и совпадения PID/id. Unknown/empty/unsafe lock сохраняется. Ошибка protected inspection допускает
 повтор только захвата lock под прежним deadline, когда fresh metadata доказывает
 исчезновение/замену exact каталога либо уникального nonce прежнего owner;
-новый owner проверяется заново. Исходная операция не повторяется. Cleanup после
+новый owner проверяется заново. ENOENT самого первого lstat после contended
+mkdir тоже доказывает отсутствие: successor, успевший появиться до следующего
+lstat, не отменяет bounded retry лишь захвата. Permission/unknown ошибки
+сохраняют отказ; successor не удаляется и операция не повторяется. Cleanup после
 публикации best-effort: ошибка не превращает уже заменённый pointer в failed
 mutation и не разрешает повтор публикации.
 

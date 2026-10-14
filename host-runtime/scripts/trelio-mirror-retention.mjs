@@ -109,6 +109,12 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
           }
         }
       } catch (inspectionError) {
+        // EEXIST belongs to mkdir's earlier observation. If the FIRST lstat
+        // already saw absence, no identity/private record was inspected yet.
+        // A successor may appear before another lstat; its presence cannot
+        // invalidate that proven release. Retry only mkdir under the original
+        // deadline and validate the next owner normally, never run/steal work.
+        if (!observedLock && isMissing(inspectionError)) continue;
         // Windows ACL validation runs out of process. The observed owner can
         // release and a successor can already hold the same directory name by
         // the time the failed validation returns. Fresh absence, a different

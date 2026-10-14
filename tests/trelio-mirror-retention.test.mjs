@@ -205,3 +205,44 @@ test('independent processes serialize updates while lock directories repeatedly 
     ['--input-type=module', '-e', source, root, counter], { env })));
   assert.equal(Number(await fs.readFile(counter, 'utf8')), 36);
 });
+
+test('missing first lock inspection retries only acquisition even when a successor already exists', async t => {
+  const f = await fixture(t); const root = await f.schema();
+  const lock = path.join(root, 'retention.lock'); await fs.mkdir(lock, { mode: 0o700 });
+  const originalLstat = fs.lstat;
+  let replaced = false;
+  let operations = 0;
+  fs.lstat = async (target, ...args) => {
+    if (target === lock && !replaced) {
+      replaced = true;
+      await fs.rmdir(lock);
+      await fs.mkdir(lock, { mode: 0o700 });
+      // Inject the actual kernel observation before the successor won mkdir.
+      // A later lstat sees the replacement, so fresh absence cannot help.
+      throw Object.assign(new Error('synthetic missing lock'), { code: 'ENOENT' });
+    }
+    return originalLstat(target, ...args);
+  };
+  try {
+    const result = await withMirrorRetentionLock(root, async () => { operations++; }, { waitMs: 0 });
+    assert.equal(result.skipped, 'busy');
+    assert.equal(operations, 0);
+    assert.equal((await originalLstat(lock)).isDirectory(), true, 'successor remains untouched');
+  } finally { fs.lstat = originalLstat; }
+});
+
+test('first lock inspection retains permission refusal while the lock still exists', async t => {
+  const f = await fixture(t); const root = await f.schema();
+  const lock = path.join(root, 'retention.lock'); await fs.mkdir(lock, { mode: 0o700 });
+  const originalLstat = fs.lstat;
+  const denied = Object.assign(new Error('synthetic permission refusal'), { code: 'EACCES' });
+  let refused = false;
+  fs.lstat = async (target, ...args) => {
+    if (target === lock && !refused) { refused = true; throw denied; }
+    return originalLstat(target, ...args);
+  };
+  try {
+    await assert.rejects(withMirrorRetentionLock(root, async () => assert.fail(), { waitMs: 0 }), error => error === denied);
+    assert.equal((await originalLstat(lock)).isDirectory(), true);
+  } finally { fs.lstat = originalLstat; }
+});

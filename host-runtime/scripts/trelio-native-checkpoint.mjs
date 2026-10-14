@@ -28,7 +28,7 @@ export const parseNativeCheckpointError = stderr => {
     return value.message === error.message ? error : null;
   } catch { return null; }
 };
-const string = (value, maximum) => typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
+const string = (value, maximum) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= maximum;
 const strings = (value, maximumItems, maximumLength) => value === undefined
   || Array.isArray(value) && value.length <= maximumItems && value.every(item => string(item, maximumLength));
 
