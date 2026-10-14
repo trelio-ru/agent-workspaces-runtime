@@ -5,11 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { buildUnfiledQueueResponseSuffix, runUnfiledQueueHook, readUnfiledCompanyBinding, UNFILED_QUEUE_UNAVAILABLE_NOTICE } from "../host-runtime/scripts/trelio-unfiled-queue.mjs";
 
 const fixtureQueue = (count = 1) => ({ schemaVersion: 1, companySlug: "synthetic", timeZone: "Europe/Moscow", count,
   workspaces: count ? [{ id: "11111111-1111-4111-8111-111111111111", expiresAt: "2026-11-13T23:00:00.000Z" }] : [] });
 const dependencies = (queue) => ({ origin: "https://example.test", bridge: {}, readBinding: async () => ({ companySlug: "synthetic" }), readQueue: async () => queue });
+// URL.pathname retains /D:/ and percent encoding on Windows. The executable
+// must receive a native filesystem path, just like the shipping loader does.
+const hookEntrypoint = fileURLToPath(new URL("../host-runtime/scripts/trelio-runtime-session.mjs", import.meta.url));
 
 test("empty queues inject no instruction at either turn boundary", async () => {
   for (const hook_event_name of ["UserPromptSubmit", "Stop"]) assert.deepEqual(await runUnfiledQueueHook({ hook_event_name }, dependencies(fixtureQueue(0))), {});
@@ -83,7 +87,7 @@ test("real unpaired hook is silent in any folder without starting pairing", asyn
   try {
     for (const hook_event_name of ["UserPromptSubmit", "Stop"]) {
       const result = await new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [new URL("../host-runtime/scripts/trelio-runtime-session.mjs", import.meta.url).pathname], {
+        const child = spawn(process.execPath, [hookEntrypoint], {
           env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: root, TRELIO_WORKSPACE_CONFIG_DIR: root, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" }, stdio: ["pipe", "pipe", "pipe"],
         });
         let stdout = "", stderr = "";
@@ -113,7 +117,7 @@ test("real turn hook uses a bounded authenticated queue read and rechecks after 
     const config = path.join(root, ".config", "trelio", "workspace-bridge"); await mkdir(config, { recursive: true, mode: 0o700 });
     await writeFile(path.join(config, "credentials.json"), JSON.stringify({ [origin]: { bridgeSessionToken: "synthetic-queue-token" } }), { mode: 0o600 });
     const run = (hook_event_name, last_assistant_message = "Готово") => new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [new URL("../host-runtime/scripts/trelio-runtime-session.mjs", import.meta.url).pathname], {
+      const child = spawn(process.execPath, [hookEntrypoint], {
         env: { ...process.env, HOME: root, USERPROFILE: root, CODEX_HOME: root, TRELIO_WORKSPACE_CONFIG_DIR: config,
           TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1", TRELIO_WORKSPACE_ORIGIN: origin }, stdio: ["pipe", "pipe", "pipe"],
       });
