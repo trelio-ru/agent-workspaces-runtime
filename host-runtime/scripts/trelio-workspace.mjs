@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 
 /**
  * Локальный bridge для Trelio Agent Workspaces.
@@ -979,15 +980,6 @@ export const inspectBundledPlugin = async ({
       JSON.stringify(observedEvents[eventName]) === JSON.stringify(expected)
     ),
   );
-  // The original admission ABI remains compatible with an installed old shell.
-  // The turn pair is reported separately; a partial/mismatched declaration is
-  // never called ready, and installed definitions are never rewritten here.
-  const turnEvents = ["UserPromptSubmit", "Stop"];
-  const turnHooksPresent = turnEvents.some(event => hooksManifest.value?.hooks?.[event]);
-  const turnHooksReady = turnEvents.every(event =>
-    JSON.stringify(readObservedRuntimeHookContract(hooksManifest.value, event))
-      === JSON.stringify(EXPECTED_RUNTIME_HOOK_CONTRACT.SessionStart));
-  if (turnHooksPresent && !turnHooksReady) issues.push("UNFILED_TURN_HOOK_CONTRACT_MISMATCH");
   if (!hooksReady) {
     issues.push("RUNTIME_HOOK_CONTRACT_MISMATCH");
   }
@@ -1004,7 +996,6 @@ export const inspectBundledPlugin = async ({
       definitionSha256: hooksManifest.raw
         ? crypto.createHash("sha256").update(hooksManifest.raw).digest("hex")
         : null,
-      unfiledResponseReminder: turnHooksReady ? "defined_approval_unconfirmed" : "not_available",
       preToolUseScope: "trelio_mcp",
       toolRouting: inspectTrelioHookToolRouting(observedEvents.PreToolUse?.matcher),
       approvalStatus: "client_managed_unknown",
@@ -13732,6 +13723,9 @@ export const getGitStatus = async (workspaceDirectory, knownObjects = []) => {
 
 const status = async () => withRun(async ({ metadata }) => {
   const gitStatus = await getGitStatus(metadata.workspaceDirectory, metadata.objects || []);
+  // turnCheck already runs before final responses. Refresh placement through
+  // that existing read, without a new hook or changes to pinned Run authority.
+  const unfiledQueue = await readUnfiledResponseContext(metadata.origin, metadata.company?.slug);
   process.stdout.write(`${JSON.stringify({
     workspaceId: metadata.workspaceId,
     runId: metadata.runId,
@@ -13741,6 +13735,7 @@ const status = async () => withRun(async ({ metadata }) => {
     candidateHead: metadata.candidateHead || null,
     workspaceDirectory: metadata.workspaceDirectory,
     contexts: Array.isArray(metadata.contexts) ? metadata.contexts : [],
+    ...(unfiledQueue ? { unfiledQueue } : {}),
     dirty: Boolean(gitStatus),
     changes: gitStatus ? gitStatus.split("\n") : [],
   }, null, 2)}\n`);

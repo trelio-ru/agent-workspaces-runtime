@@ -146,7 +146,7 @@ jobs:
           node tests/trelio-windows-native-private.test.mjs
           node tests/trelio-runtime-session-timeout.test.mjs
           node tests/trelio-runtime-session.test.mjs
-          node tests/trelio-unfiled-queue.test.mjs
+          node tests/trelio-unfiled-context.test.mjs
           node tests/trelio-runtime-proof-preparation.test.mjs
           node tests/trelio-instruction-reuse.test.mjs
           node tests/trelio-local-continuation.test.mjs
@@ -287,8 +287,8 @@ jobs:
       - name: Run Windows hook tool identity regressions
         run: node tests/trelio-hook-tool-identity.test.mjs
 
-      - name: Run Windows company-scoped unfiled reminder regressions
-        run: node tests/trelio-unfiled-queue.test.mjs
+      - name: Run Windows company-scoped unfiled contract regressions
+        run: node tests/trelio-unfiled-context.test.mjs
 
       - name: Run Windows proof preparation regressions
         run: |

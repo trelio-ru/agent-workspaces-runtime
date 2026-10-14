@@ -12,7 +12,6 @@ export const PRE_TOOL_USE_TIMEOUT_SECONDS = 30;
 // eight seconds for the Windows launcher, Node startup and final teardown.
 export const RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS = Object.freeze({
   PreToolUse: 22_000, SessionStart: 8_000, SessionEnd: 2_000,
-  UserPromptSubmit: 8_000, Stop: 8_000,
 });
 export const RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS = 11_000;
 export const RUNTIME_STATE_LOCK_WAIT_MILLISECONDS = 5_000;

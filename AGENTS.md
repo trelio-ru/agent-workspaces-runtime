@@ -21,8 +21,9 @@ publication tooling также остаются вне этого публичн
 
 ## Общие правила
 
-- Личная очередь и response hooks – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
-  Пустая очередь молчит; fresh metadata не требует private content/unlock.
+- Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
+  Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.
+  Новые plugin hooks и перехват final response для этого не добавляются.
 
 - Перед новой функцией или инструкцией модели применяй
   [приоритет алгоритмического исполнения](docs/agent-workspace-runtime.md#algorithmic-execution).

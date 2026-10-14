@@ -1,3 +1,4 @@
+import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
@@ -5319,6 +5320,12 @@ const buildLocalExactTaskRead = (
   knownInstructionLayerKeys = [],
   pageRequest = null,
 ) => {
+  // Live delivery belongs to this exact company, outside the persisted mirror.
+  // Never reuse a sibling company's obligation in a decrypted task envelope.
+  const unfiledQueue = mirror.unfiledQueue;
+  if (unfiledQueue && unfiledQueue.companySlug !== mirror.company.slug) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Unfiled response context belongs to another company.");
+  }
   const records = rawLocators.map((locator) => {
     if (String(locator?.companySlug || "").toLowerCase() !== mirror.company.slug.toLowerCase()) {
       throw new TrelioLocalContextError(
@@ -5386,6 +5393,7 @@ const buildLocalExactTaskRead = (
   const buildResult = (catalog) => withLocalTaskTitleReminder({
     effectiveInstructions: catalog,
     tasks: taskReads,
+    ...(unfiledQueue ? { unfiledQueue } : {}),
   }, taskReads);
   const delivery = instructionsLoaded
     ? buildLocalTaskInstructionDelivery(effectiveInstructions,
@@ -5410,7 +5418,8 @@ const buildLocalExactTaskRead = (
       );
     }
     return selectLocalTaskInstructionPage(delivery.pages, pageRequest.pageIndex, pageRequest.pageSize,
-      (selectedPage) => withLocalTaskTitleReminder(selectedPage, taskReads));
+      (selectedPage) => withLocalTaskTitleReminder({ ...selectedPage,
+        ...(unfiledQueue ? { unfiledQueue } : {}) }, taskReads));
   }
   const result = buildResult(delivery.catalog);
   if (!fitsLocalTaskReadResult(result)) {
@@ -8149,7 +8158,7 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }
 export const handleTrelioLocalContextOperation = async (
   origin,
   rawInput,
-  { signal } = {},
+  { signal, readUnfiledQueue } = {},
 ) => {
   const operation = String(rawInput?.operation || "").trim();
   const companySlug = normalizeCompanySlug(rawInput?.companySlug);
@@ -8206,6 +8215,12 @@ export const handleTrelioLocalContextOperation = async (
   });
   if (ready.nativeProvider) return ready.result;
 
+  const unfiledQueue = await readUnfiledResponseContext(origin, companySlug,
+    { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) });
+  const liveMirror = mirror => unfiledQueue ? { ...mirror, unfiledQueue } : mirror;
+  const liveResult = result => unfiledQueue && result && typeof result === "object"
+    ? { ...result, unfiledQueue } : result;
+
   if (operation === "native_read") {
     const nativeTool = String(rawInput?.nativeTool || "").trim();
     if (!LOCAL_ACTION_TOOL_NAME_PATTERN.test(nativeTool)) {
@@ -8255,7 +8270,7 @@ export const handleTrelioLocalContextOperation = async (
       input,
       signal,
     });
-    return handleNativeLocalContextRead(detailedMirror, nativeTool, input);
+    return liveResult(handleNativeLocalContextRead(liveMirror(detailedMirror), nativeTool, input));
   }
   if (operation === "search") {
     return handleNativeLocalContextRead(ready.mirror, "search", rawInput);
@@ -8304,7 +8319,7 @@ export const handleTrelioLocalContextOperation = async (
       input,
       signal,
     });
-    return buildLocalExactTaskRead(detailedMirror, [input], rawInput?.knownInstructionLayerKeys);
+    return buildLocalExactTaskRead(liveMirror(detailedMirror), [input], rawInput?.knownInstructionLayerKeys);
   }
   if (operation === "fetch") {
     const detailedMirror = await hydrateMirrorForNativeRead({
@@ -8313,11 +8328,9 @@ export const handleTrelioLocalContextOperation = async (
       input: { id: rawInput?.resultId },
       signal,
     });
-    return fetchMirrorResult(
-      detailedMirror,
-      rawInput?.resultId,
-      rawInput?.knownInstructionLayerKeys,
-    );
+    return liveResult(fetchMirrorResult(
+      liveMirror(detailedMirror), rawInput?.resultId, rawInput?.knownInstructionLayerKeys,
+    ));
   }
   if (operation === "get_workspace_file") {
     return getWorkspaceFileFromMirror(ready.mirror, {

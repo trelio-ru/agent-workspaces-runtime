@@ -93,7 +93,7 @@ const RECOVERY_TOOLS = new Set([
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HOOK_REQUIRED_CODE = "TRELIO_RUNTIME_HOOK_REQUIRED";
 const HOOK_FAILED_CODE = "TRELIO_RUNTIME_HOOK_FAILED";
-const SUPPORTED_HOOK_EVENTS = new Set(["SessionStart", "PreToolUse", "SessionEnd", "UserPromptSubmit", "Stop"]);
+const SUPPORTED_HOOK_EVENTS = new Set(["SessionStart", "PreToolUse", "SessionEnd"]);
 const HOST_RUNTIME_RECOVERY_CODES = HOST_RUNTIME_UPGRADE_REQUIRED_CODES;
 const PLUGIN_UPGRADE_REQUIRED_CODE = "AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED";
 const LEGACY_MCP_RESTART_REQUIRED_CODE = "TRELIO_CODEX_LEGACY_MCP_RESTART_REQUIRED";
@@ -921,11 +921,7 @@ const runSessionEnd = async (hookInput) => {
 };
 
 const executeHookInput = async (hookInput) => {
-  if (["UserPromptSubmit", "Stop"].includes(hookInput.hook_event_name)) {
-    const { runUnfiledQueueHook } = await import("./trelio-unfiled-queue.mjs");
-    const result = await runUnfiledQueueHook(hookInput, { signal: runtimeHookSignal() });
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-  } else if (hookInput.hook_event_name === "SessionStart") {
+  if (hookInput.hook_event_name === "SessionStart") {
     await runSessionStart(hookInput);
     // Both automatic and manual compaction arrive through the already approved
     // SessionStart matcher. Do not rotate its observation or read private

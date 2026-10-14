@@ -1018,7 +1018,7 @@ test("plugin pins a stable Trelio-only runtime hook contract without the title h
   // предупреждения `clamping SessionEnd hook timeout to 3s` при загрузке.
   assert.deepEqual(sessionEndHandlers.map((handler) => handler.timeout), [3]);
   assert.deepEqual(
-    Object.fromEntries(Object.entries(hooks.hooks).filter(([eventName]) => !["UserPromptSubmit", "Stop"].includes(eventName)).map(([eventName, groups]) => [
+    Object.fromEntries(Object.entries(hooks.hooks).map(([eventName, groups]) => [
       eventName,
       groups.map((group) => ({
         matcher: group.matcher,
@@ -1060,7 +1060,6 @@ test("plugin pins a stable Trelio-only runtime hook contract without the title h
       }],
     },
   );
-  for (const event of ["UserPromptSubmit", "Stop"]) assert.deepEqual(hooks.hooks[event], hooks.hooks.SessionStart);
   const preToolUseMatcher = new RegExp(hooks.hooks.PreToolUse[0].matcher, "u");
   assert.equal(preToolUseMatcher.test("mcp__trelio__get_task"), true);
   assert.equal(preToolUseMatcher.test("mcp__trelio__get_tasks"), true);

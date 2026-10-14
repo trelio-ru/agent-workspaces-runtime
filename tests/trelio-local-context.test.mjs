@@ -4678,3 +4678,34 @@ test("an empty semantic completion can carry only an existing exact server start
   assert.deepEqual(blocks, []);
   assert.deepEqual(carried, [start]);
 });
+
+
+test("live unfiled contract is company-scoped, outside pinned authority and inside every page budget", () => {
+  const fixture = structuredClone(mirror);
+  fixture.instructions.company = { compiledMarkdown: "Большое правило компании. ".repeat(1000),
+    company: { revisionId: "company-r1", version: 1 } };
+  const originalInstructions = structuredClone(fixture.instructions);
+  fixture.unfiledQueue = { companySlug: "acme", count: 1,
+    reminder: { count: 1, instruction: "Every final response must ask for a project or deletion. ".repeat(20) },
+    workspace: { id: actionWorkspaceId, workspaceUrl: "https://example.test/acme/workspaces/catalog/" + actionWorkspaceId + "/", expiresAt: "2026-11-14T12:00:00Z" } };
+  const target = { companySlug: "acme", projectSlug: "mobile", taskNumber: 17 };
+  const cold = handleNativeLocalContextRead(fixture, "get_task", target);
+  assert.deepEqual(cold.unfiledQueue, fixture.unfiledQueue);
+  assert.equal(cold.effectiveInstructions.status, "incomplete");
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(cold)));
+  for (let pageIndex = 0; pageIndex < cold.effectiveInstructions.delivery.pageCount; pageIndex++) {
+    const page = handleNativeLocalContextRead(fixture, "get_task_instruction_page", {
+      tasks: [target], expectedCatalogRevisionKey: cold.effectiveInstructions.delivery.catalogRevisionKey, pageIndex, pageSize: 4,
+    });
+    assert.deepEqual(page.unfiledQueue, fixture.unfiledQueue);
+    assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
+  }
+  assert.deepEqual(fixture.instructions, originalInstructions);
+  fixture.unfiledQueue = { companySlug: "acme", count: 0 };
+  const empty = handleNativeLocalContextRead(fixture, "get_task", target);
+  assert.deepEqual(empty.unfiledQueue, fixture.unfiledQueue);
+  assert.equal(empty.unfiledQueue.reminder, undefined);
+  assert.deepEqual(fixture.instructions, originalInstructions);
+  fixture.unfiledQueue.companySlug = "another";
+  assert.throws(() => handleNativeLocalContextRead(fixture, "get_task", target), error => error.code === "LOCAL_CONTEXT_COMPANY_MISMATCH");
+});

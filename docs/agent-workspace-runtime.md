@@ -70,52 +70,39 @@ Stale input, неизвестный результат mutation и непров�
 
 ## Очередь «Неразобранные» перед каждым ответом
 
-Очередью владеет backend: personal placement, live ACL, accepted-edit TTL и
-server purge не реализуются в host. Host исполняет только детерминированный
-response check; выбор проекта и содержательный capture остаются у модели и
-пользователя. Если проект уже известен, материалы сохраняются сразу туда.
-Временное размещение не расширяет полномочия на запись или чужую аудиторию.
+Очередью владеет backend: personal placement, live ACL, сохранённые правки и
+30-дневный TTL/server purge не реализуются в host. При известном проекте
+агент сохраняет материалы туда сразу; temporary placement не расширяет права.
 
-Stable shell объявляет `UserPromptSubmit` и `Stop` через прежний verified loader,
-без новых MCP namespaces или trust automation. Это необходимое shell-изменение:
-рантайм сам не может зарегистрировать событие клиента, а старые SessionStart /
-PreToolUse / SessionEnd не исполняются перед каждым ответом без tool call.
-Original admission hooks сохраняют ABI. Doctor проверяет пару отдельно:
-старое определение остаётся совместимым, частичная/неверная пара не считается
-готовой; наличие файлов не доказывает client dispatch или approval.
+Напоминание – условный серверный/model contract в существующих ответах MCP
+и `status`/turnCheck. Плагин, bundled instructions и lifecycle definitions
+не меняются. Host поддерживает только прежние SessionStart/PreToolUse/SessionEnd;
+UserPromptSubmit/Stop, анализ final response, JSON block и отдельной response
+capability doctor нет. Контракт требует напоминать в каждом ответе, но не
+обещает принудительный перехват текстового ответа без вызова инструмента.
 
-`trelio-unfiled-queue.mjs` проверяет только компанию текущей папки: exact
-managed `AGENTS.md` либо `.trelio-run.json` в bounded цепочке до четырёх
-предков, regular файл до 64 KiB, без symlink. Обычные упоминания slug не
-выбирают компанию; Run metadata имеет приоритет над родительским binding.
-Без привязки hook молчит. Existing paired credential используется только
-для bounded `/api/agent-workspaces/unfiled-queue?companySlug=…`; очереди других
-компаний не запрашиваются. Backend проверяет module/scope/member/MCP ACL.
-На каждом событии выполняется свежий read, без queue/content cache,
-загрузки правил/title/Git/files/E2EE mirror и запуска pairing/recovery.
-Неподключённый аккаунт молчит. Deadline включает private storage и сеть.
+`trelio-unfiled-context.mjs` получает exact компанию из текущего успешного
+local read либо открытого Run, без сканирования папок или account-wide списка.
+Existing paired session читает bounded structural endpoint
+`/api/agent-workspaces/unfiled-queue?companySlug=…`: свежие ACL/scope/module,
+count, URL/expiry/timeZone и `responseContext` с server instruction. Нет title,
+файлов, decrypt/unlock, persisted queue, pairing/recovery или mutation replay.
+Ошибки не включают raw content; advisory failure сохраняет успех исходной
+операции и возвращает unavailable, без ложного count=0.
 
-При нулевом count оба события возвращают `{}` без additionalContext. При
-непустой очереди suffix содержит общий count, точную ссылку на старейший по
-expiry/id Workspace, вопрос «проект или удалить» и дату в company timeZone.
-Однословный ответ относится к exact ссылке предыдущего вопроса, без implicit
-batch. `UserPromptSubmit` добавляет conditional context. `Stop` сверяет свежий
-suffix с `last_assistant_message`: JSON block просит дополнить ответ, без
-повтора законченных операций; continuation также проверяется заново.
-Клиент без `last_assistant_message` получает одну просьбу дополнить ответ;
-continuation допускается без ложного утверждения о проверке и бесконечного loop.
-Удаление/перенос последнего объекта сразу убирает obligation. Failed read
-использует bounded notice о непроверенной очереди; исключения/credentials/paths
-не выводятся. Это не empty и не бесконечный сетевой retry.
+Контекст живёт отдельно от pinned authority и не кешируется в decrypted mirror.
+При непустой очереди он требует перед каждым ответом штатный exact refresh
+только этой компании, count, одну exact ссылку/expiry и выбор проекта/удаления.
+При смене компании прежнее напоминание приостанавливается; однословный ответ
+разбирает Workspace предыдущего вопроса, без implicit batch. Empty response
+context содержит только companySlug/count, без reminder prose. Task pagination
+учитывает live context до измерения полного text-only envelope.
 
-Fresh native `get_unfiled_workspaces` использует server-selected encrypted
-local action, а не mirror freshness. Temporary `delete_workspace` после exact
-read требует явного решения пользователя и CAS, но не создаёт retained
-reason/title payload. Обычная Workspace deletion требует прежнюю причину.
-Для клиента без обоих lifecycle events every-answer enforcement недоступен:
-conditional model contract сохраняется, алгоритмическая гарантия не заявляется.
-Выпуск shell/runtime/backend согласуется отдельно, source commit не активирует
-установленный runtime и не меняет hook trust.
+Native `get_unfiled_workspaces` использует fresh server-selected local action.
+Temporary delete после exact read требует явное решение и CAS, но не
+retained reason/title; обычное удаление сохраняет обязательную причину.
+Backend/native descriptions определяют исключения над generic bootstrap.
+Backend/runtime source выпускается независимо от plugin release/minimum/trust.
 
 ## Запуск локального bridge
 

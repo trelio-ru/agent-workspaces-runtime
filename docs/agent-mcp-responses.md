@@ -85,3 +85,9 @@ input schema, включая required arguments. `schemaSelection.found=false`
 а `report:context-budget` считает токены и bytes отдельно от постоянных
 instructions/schemas. Экономия каталога/справочника условна: последующее выбранное
 чтение возвращает стоимость только запрошенного содержимого.
+
+`unfiledQueue` – live structural context exact текущей компании. Он приходит
+через существующий read/status, вне pinned rules и persisted mirror. Empty
+count снимает прежнее напоминание без инструкции; unavailable не считается
+empty. Exact task/page считает этот контекст до выбора envelope pagination.
+Обязанность повторения задаёт server/model contract, без новых plugin hooks.
