@@ -25,7 +25,8 @@ import {
   doctorWithCredential,
   fingerprintCompanySkillApplyPlan,
   fingerprintRemoteMcpConfig,
-  handleLocalMcpMessage,
+  handleLocalMcpMessage as handleLocalMcpMessageProduction,
+  loadLocalMcpCatalogPermissions,
   handleToolCall,
   isHostRuntimeUpgradeRequiredError,
   normalizeCompanyPrivateSkillAuthoringContract,
@@ -42,6 +43,12 @@ import {
   validateResolvedRemoteMcp,
   validateRemoteMcpPublicationConfig,
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+// Static descriptor tests retain the complete fictional owner catalogue;
+// live discovery is tested separately through the actual protocol handler.
+const handleLocalMcpMessage = (message, options = {}) => handleLocalMcpMessageProduction(message, {
+  loadCatalogPermissions: async () => ({ companySkillManagement: true }), ...options,
+});
+
 import {
   connectRemoteMcpOAuth,
   refreshRemoteMcpOAuth,
@@ -2599,6 +2606,58 @@ test("personal credential path follows the stable local integration namespace", 
   );
 });
 
+test("local discovery removes owner-only definitions with fresh rights and preserves independent setup", async () => {
+  let allowed = false;
+  const list = () => handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {
+    loadCatalogPermissions: async () => ({ companySkillManagement: allowed }),
+  });
+  const ordinary = (await list()).result.tools;
+  assert.ok(ordinary.some(tool => tool.name === "diagnose_trelio_installation"));
+  assert.ok(ordinary.some(tool => tool.name === "continue_trelio_local_action"));
+  assert.ok(!ordinary.some(tool => tool.name === "plan_company_private_agent_skill_create"));
+  allowed = true;
+  const owner = (await list()).result.tools;
+  assert.ok(owner.some(tool => tool.name === "plan_company_private_agent_skill_create"));
+  assert.ok(Buffer.byteLength(JSON.stringify(ordinary)) < Buffer.byteLength(JSON.stringify(owner)));
+  allowed = false;
+  assert.deepEqual((await list()).result.tools, ordinary);
+  const failure = await handleLocalMcpMessageProduction({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {
+    loadCatalogPermissions: async () => { throw new Error("PRIVATE_CREDENTIAL_CANARY"); },
+  });
+  assert.equal(failure.result._meta["trelio/catalogCode"], "LOCAL_MCP_CATALOG_UNAVAILABLE");
+  assert.deepEqual(failure.result.tools, ordinary);
+  assert.doesNotMatch(JSON.stringify(failure), /PRIVATE_CREDENTIAL_CANARY/u);
+});
+
+test("catalogue transport reads no company content and never pairs or repairs credentials", async () => {
+  const noRequest = async () => assert.fail("unpaired discovery cannot request protected content");
+  for (const token of [null, "legacy-oauth-token"]) {
+    assert.deepEqual(await loadLocalMcpCatalogPermissions("https://trelio.test", {
+      readToken: async () => token, requestCatalog: noRequest,
+    }), { companySkillManagement: false });
+  }
+  let current = false;
+  const transport = async (origin, token, pathname) => {
+    assert.equal(origin, "https://trelio.test"); assert.equal(token, "twb_fixture");
+    assert.equal(pathname, "/api/agent-workspaces/mcp-tool-catalog");
+    return { json: async () => ({ schemaVersion: 1, companySkillManagement: current }) };
+  };
+  const read = () => loadLocalMcpCatalogPermissions("https://trelio.test", {
+    readToken: async () => "twb_fixture", requestCatalog: transport,
+  });
+  assert.equal((await read()).companySkillManagement, false);
+  current = true;
+  assert.equal((await read()).companySkillManagement, true);
+  await assert.rejects(loadLocalMcpCatalogPermissions("https://trelio.test", {
+    readToken: async () => "twb_fixture",
+    requestCatalog: async () => { throw new Error("PRIVATE_HTTP_CANARY"); },
+  }), error => error.code === "LOCAL_MCP_CATALOG_UNAVAILABLE" && !error.message.includes("PRIVATE_HTTP_CANARY"));
+  await assert.rejects(loadLocalMcpCatalogPermissions("https://trelio.test", {
+    readToken: async () => "twb_fixture",
+    requestCatalog: async () => ({ json: async () => ({ schemaVersion: 1 }) }),
+  }), error => error.code === "LOCAL_MCP_CATALOG_UNAVAILABLE");
+});
+
 test("local MCP exposes bounded provider routes plus skill-management and execution tools", async () => {
   const response = await handleLocalMcpMessage({
     jsonrpc: "2.0",
@@ -5015,7 +5074,10 @@ test("stdio host emits only newline-delimited JSON-RPC frames", async (t) => {
   assert.match(frames[0].result.instructions, /runtimeExecution\.localAction/u);
   assert.doesNotMatch(frames[0].result.instructions, /command-ответов|процедура совместимости/u);
   assert.match(frames[0].result.instructions, /Exact reads\/Run без поиска/u);
-  assert.equal(frames[1].result.tools.length, 29);
+  const names = frames[1].result.tools.map(tool => tool.name);
+  assert.ok(names.includes("diagnose_trelio_installation"));
+  assert.ok(names.includes("continue_trelio_local_action"));
+  assert.ok(!names.includes("plan_company_private_agent_skill_create"), "unpaired stdio cannot expose owner-only methods");
 });
 
 test("Remote MCP admission expires absolutely and never caches protected wire declarations", { timeout: 15000 }, async () => {

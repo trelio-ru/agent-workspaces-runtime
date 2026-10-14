@@ -652,6 +652,31 @@ primary project. Registry/contact/meeting связи semantic и сами дос
 
 ## Компактные ответы агента
 
+<a id="catalog-permissions"></a>
+
+Local MCP фильтрует пять company-private skill management definitions в
+`tools/list` по свежему `companySkillManagement` из paired
+`GET /api/agent-workspaces/mcp-tool-catalog`. Backend выводит только этот boolean
+и `schemaVersion:1` из открытых ролей, module/MCP access metadata во всех
+компаниях аккаунта: owner/admin и Agent Workspaces должны совпадать в одной
+доступной компании. Company content/IDs/имена, E2EE payload, инструкции и
+credential в ответ не входят. Permission cache и новый Run отсутствуют.
+
+Enumeration не начинает pairing/login и не чинит credentials. Unpaired,
+legacy OAuth, старый backend без endpoint и подтверждённый HTTP 401/403 скрывают
+owner-only definitions; setup/diagnostic и generic continuation tools остаются.
+Транспортный отказ, повреждённый ответ и 503 также скрывают owner-only tools,
+сохраняя независимые setup/diagnostic tools. Result `_meta` отмечает
+`unavailable / LOCAL_MCP_CATALOG_UNAVAILABLE` без raw cause; полный каталог
+не используется как fallback.
+Общий deadline ограничивает credential read, HTTP и JSON. Следующее чтение того
+же процесса учитывает изменённые роли. Клиентский кеш definitions обновляется
+по правилам клиента. Все call handlers сохраняют серверный live ACL и отдельные
+human confirmation/CAS, включая cached method.
+
+Offline context report измеряет полный каталог фиктивного owner; runtime
+discovery не может улучшить historical ceiling скрытием tools в report.
+
 Компактные native/local DTO, exact `deferredData` reads, сохранение заметок
 и pinned Run snapshots описаны в [контракте ответов MCP](agent-mcp-responses.md).
 Проекция выполняется после hydration и не меняет App state либо ошибки.

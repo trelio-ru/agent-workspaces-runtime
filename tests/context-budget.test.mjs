@@ -33,7 +33,9 @@ test("offline o200k counts Russian, Latin and literal special markers independen
 
 test("every local method has an individual schema budget, including App-only methods", async () => {
   const fixture = JSON.parse(await readFile(new URL("./fixtures/local-tool-schema-budget.json", import.meta.url), "utf8"));
-  const response = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+  const response = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }, {
+    loadCatalogPermissions: async () => ({ companySkillManagement: true }),
+  });
   const tools = response.result.tools;
   assert.deepEqual(tools.map((tool) => tool.name).sort(), Object.keys(fixture.tools).sort(), "New tools require explicit per-method budgets");
   for (const tool of tools) {

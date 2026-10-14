@@ -316,7 +316,11 @@ export const buildPluginContextBudgetReport = async ({
   // report accepts the exact plugin checkout instead of recreating or vendoring
   // its model-visible files inside the runtime repository.
   const resolvedPluginRoot = path.resolve(pluginRoot);
-  const listed = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  // A fixed fictional owner measures the full historical surface offline.
+  // Live rights filtering must not make this ceiling pass by dropping tools.
+  const listed = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, {
+    loadCatalogPermissions: async () => ({ companySkillManagement: true }),
+  });
   const localTools = listed.result.tools.filter(isModelVisibleLocalTool);
   const taskRunLocalTools = localTools.filter((tool) => tool.name === TRELIO_WORKSPACE_ACTION_TOOL.name);
   if (taskRunLocalTools.length !== 1) throw new Error("Task Run local action descriptor is missing or hidden.");

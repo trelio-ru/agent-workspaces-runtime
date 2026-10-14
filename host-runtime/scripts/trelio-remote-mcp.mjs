@@ -62,6 +62,7 @@ import {
   ensurePrivateDirectory,
   hydrateAgentCompanyEncryptedJson,
   normalizeOrigin,
+  loadToken,
   openBrowser,
   parseAndValidateAgentSkillPackage,
   readPrivateJsonFile,
@@ -225,6 +226,45 @@ const COMPANY_SKILL_MANAGEMENT_TOOL_NAMES = new Set([
   "plan_company_private_agent_skill_release",
   "publish_company_private_agent_skill_release",
 ]);
+
+/**
+ * Native backend owns business ACL/module decisions. Local tools/list reads
+ * only one fresh boolean, never company names, rules, content or ciphertext.
+ * Do not call requireToken here: enumeration must not create a pairing request
+ * or open an authorization surface. Missing credentials/legacy backend omit
+ * owner-only definitions; diagnostic and setup tools remain discoverable.
+ * No permission cache: role changes apply on the next list in the same process.
+ */
+export const loadLocalMcpCatalogPermissions = async (origin, {
+  signal, readToken = loadToken, requestCatalog = request,
+} = {}) => runWithAbortDeadline({
+  signal, timeoutMs: TRELIO_RESOLVE_TIMEOUT_MS,
+  timeoutError: () => new RemoteMcpHostError("LOCAL_MCP_CATALOG_UNAVAILABLE", "Проверка прав MCP-каталога не завершилась вовремя."),
+  operation: async operationSignal => {
+    const token = await readToken(origin, { signal: operationSignal });
+    if (!token || !String(token).startsWith("twb_")) return { companySkillManagement: false };
+    let response;
+    try {
+      response = await requestCatalog(origin, token, "/api/agent-workspaces/mcp-tool-catalog", {
+        signal: operationSignal,
+      });
+    } catch (error) {
+      // The additive endpoint rolls out with the backend; old servers and
+      // rejected credentials grant no catalogue permission. Do not reset login,
+      // try a different transport or repeat any business operation.
+      if (error instanceof TrelioApiError && [401, 403, 404].includes(error.statusCode)) {
+        return { companySkillManagement: false };
+      }
+      throw new RemoteMcpHostError("LOCAL_MCP_CATALOG_UNAVAILABLE",
+        "Не удалось проверить права MCP-каталога. Повторите чтение или используйте диагностику.");
+    }
+    const payload = await response.json();
+    if (payload?.schemaVersion !== 1 || typeof payload.companySkillManagement !== "boolean") {
+      throw new RemoteMcpHostError("LOCAL_MCP_CATALOG_UNAVAILABLE", "Trelio вернул несовместимый MCP-каталог.");
+    }
+    return { companySkillManagement: payload.companySkillManagement };
+  },
+});
 const CODEX_ROUTING_TOOL_NAMES = new Set([
   CODEX_ROUTING_PLAN_TOOL_NAME,
   CODEX_ROUTING_APPLY_TOOL_NAME,
@@ -6286,6 +6326,7 @@ export const handleLocalMcpMessage = async (
     requestClient = null,
     codexLegacyMcpMigration = null,
     runtimeUpgradeRecovery = null,
+    loadCatalogPermissions = loadLocalMcpCatalogPermissions,
     recordDiagnostic = null,
     signal,
   } = {},
@@ -6318,11 +6359,22 @@ export const handleLocalMcpMessage = async (
     return { jsonrpc: "2.0", id: message.id, result: {} };
   }
   if (message.method === "tools/list") {
-    return {
-      jsonrpc: "2.0",
-      id: message.id,
-      result: { tools: LOCAL_TOOLS },
-    };
+    try {
+      const permissions = await loadCatalogPermissions(origin, { signal });
+      return {
+        jsonrpc: "2.0", id: message.id,
+        result: { tools: LOCAL_TOOLS.filter(tool => permissions.companySkillManagement
+          || !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name)) },
+      };
+    } catch {
+      // Fail closed for owner-only definitions without hiding the very setup
+      // and diagnostic tools needed to recover an initial connection outage.
+      // Keep the failure content-free; never reflect private native/HTTP causes.
+      return { jsonrpc: "2.0", id: message.id, result: {
+        tools: LOCAL_TOOLS.filter(tool => !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name)),
+        _meta: { "trelio/catalogStatus": "unavailable", "trelio/catalogCode": "LOCAL_MCP_CATALOG_UNAVAILABLE" },
+      } };
+    }
   }
   if (message.method === "resources/list") {
     return {
