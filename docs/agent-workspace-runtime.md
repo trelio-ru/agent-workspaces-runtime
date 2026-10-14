@@ -601,6 +601,18 @@ native title tool. Автоматическое переименование и 
 контекста или смены сценария. История правил запрашивается отдельно через
 `get_agent_instructions(includeHistory=true)`.
 
+Standalone `get_agent_instructions` после encrypted onboarding поддерживается
+и через native `route=action`, и через `route=context` с exact
+`operation=native_read`. Dispatcher направляет только этот read в существующий
+native settings handler: snapshot mirror не заменяет editable revisions,
+историю и personal profile. Полные native arguments, включая `projectSlug`,
+`includeHistory`, `forEditing` и `responseDetail`, сохраняются; hook proof берётся
+только из верхнего поля envelope. Backend повторяет scope/ACL/admission, local
+handler гидратирует ciphertext, а dispatcher сохраняет native CallToolResult,
+отказы и обычную compact/full проекцию. Отсутствующая operation не угадывается;
+другие context reads и mutations этот переход не получают. Отказ не запускает
+mirror fallback, OAuth/pairing либо повтор исходного вызова.
+
 Encrypted local `fetch`, совместимый `get_task` и native exact reads применяют
 тот же schema-v3 envelope. Если ответ вернул `nextReadArguments`, следующий
 exact read той же области получает hints от runtime только при подтверждённых полных слоях;

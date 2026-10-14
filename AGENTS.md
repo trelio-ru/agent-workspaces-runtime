@@ -265,6 +265,10 @@ publication tooling также остаются вне этого публичн
   `render_trelio_local_proposal` сохраняется только из-за MCP App metadata, а
   typed `continue_trelio_workspace_action` – как bridge ABI. Старые отдельные
   local aliases и прямой pre-envelope ABI не публикуются в MCP catalog.
+- Standalone encrypted rules read через `context/native_read` использует native
+  settings handler и верхний hook proof, сохраняя history/editing и native
+  envelope. Этот exact переход не допускает context mutations или guessed
+  operation; [контракт](docs/agent-workspace-runtime.md#выбор-scope).
 - Имена полей action и native preparation tools не становятся executable
   aliases. Unsupported operation возвращает безопасный recovery к exact
   `action.arguments` до registry/process access; произвольный вход не отражается.

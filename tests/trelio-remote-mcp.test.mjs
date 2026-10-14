@@ -58,7 +58,7 @@ import { CodexRoutingConfigError, planCodexTrelioHookRouting } from "../host-run
 import {
   resolveSelectedLocalProposalRouteMarkerPaths,
 } from "../host-runtime/scripts/trelio-proposal-route-guard.mjs";
-import { handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { handleNativeLocalContextRead, handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
 
 test("local MCP delivers action-argument recovery without a diagnostic detour", async () => {
@@ -3335,6 +3335,111 @@ test("one local dispatcher preserves exact native inputs across route families",
     operation: "get_revision_diff",
     runtimeSessionId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   }]);
+});
+
+test("encrypted onboarding instruction reads use the native settings handler from either local route", async () => {
+  for (const route of ["context", "action"]) {
+    for (const projectSlug of [undefined, "historical-project"]) {
+      const hookProof = { schemaVersion: 1, nonce: "hook-issued" };
+      const argumentsObject = {
+        companySlug: "protected-company", ...(projectSlug ? { projectSlug } : {}),
+        includeHistory: true, forEditing: true, responseDetail: "full",
+      };
+      const nativeResult = {
+        content: [{ type: "text", text: "Current effective rules and profile are in structuredContent." }],
+        structuredContent: {
+          company: { slug: "protected-company" }, project: projectSlug ? { slug: projectSlug } : null,
+          effective: { compiledMarkdown: "Current synthetic working rules", company: { revisionId: "current" } },
+          history: [{ id: "previous", instructionsMarkdown: "Previous synthetic rules" }],
+          personalProfile: { effective: { compiledMarkdown: "Synthetic personal profile" }, history: [] },
+          canManage: false,
+        },
+      };
+      const selectedProviders = [];
+      const signal = new AbortController().signal;
+      let actionCalls = 0;
+      const result = await handleToolCall("https://trelio.example", "continue_trelio_local_action", {
+        schemaVersion: 1, route, runtimeSessionProof: hookProof,
+        parameters: {
+          companySlug: "protected-company", nativeTool: "get_agent_instructions",
+          ...(route === "context" ? { operation: "native_read" } : {}),
+          arguments: argumentsObject, runtimeSessionProof: { nonce: "untrusted-nested" },
+        },
+      }, {
+        signal,
+        // The production mirror intentionally has no editorial settings/history
+        // read. Keep its real rejection here so the reported onboarding failure
+        // is reproduced if this exact read ever returns to the mirror route.
+        localContextOperation: async (_origin, input) => handleNativeLocalContextRead({}, input.nativeTool, input.arguments),
+        localActionOperation: async (origin, input, options) => {
+          actionCalls += 1;
+          assert.equal(origin, "https://trelio.example");
+          assert.deepEqual(input, {
+            companySlug: "protected-company", nativeTool: "get_agent_instructions",
+            arguments: argumentsObject, runtimeSessionProof: hookProof,
+          });
+          assert.equal(options.signal, signal);
+          await options.onProviderSelected("local_company_context");
+          return nativeResult;
+        },
+        proposalProviderSelectionRecorder: async input => selectedProviders.push(input),
+      });
+      assert.equal(actionCalls, 1);
+      assert.deepEqual(result, nativeResult, "Preserve the native envelope and hydrated settings/history without another JSON wrapper.");
+      assert.deepEqual(selectedProviders, [{
+        origin: "https://trelio.example", companySlug: "protected-company", target: null,
+        provider: "local_company_context",
+      }]);
+    }
+  }
+});
+
+test("context instruction reads preserve native scope/proof refusals and plain-provider recovery without replay", async () => {
+  for (const nativeResult of [
+    { isError: true, content: [{ type: "text", text: "Denied" }], structuredContent: { code: "MCP_REAUTHORIZATION_REQUIRED" } },
+    { isError: true, content: [{ type: "text", text: "Denied" }], structuredContent: { code: "TRELIO_RUNTIME_HOOK_REQUIRED", reason: "missing" } },
+    { content: [{ type: "text", text: JSON.stringify({ provider: "native_trelio" }) }] },
+  ]) {
+    let calls = 0;
+    const result = await handleToolCall("https://trelio.example", "continue_trelio_local_action", {
+      schemaVersion: 1, route: "context",
+      parameters: {
+        operation: "native_read", companySlug: "example", nativeTool: "get_agent_instructions",
+        arguments: { companySlug: "example" }, runtimeSessionProof: { nonce: "untrusted-nested" },
+      },
+    }, {
+      localContextOperation: async () => assert.fail("Do not fall back to mirror rules after a native refusal."),
+      localActionOperation: async (_origin, input) => {
+        calls += 1;
+        assert.equal(input.runtimeSessionProof, undefined, "Never promote the nested model field into hook authority.");
+        return nativeResult;
+      },
+    });
+    assert.deepEqual(result, nativeResult);
+    assert.equal(calls, 1);
+  }
+});
+
+test("context instruction routing cannot execute writes or guess a missing native_read operation", async () => {
+  for (const [nativeTool, operation] of [
+    ["publish_agent_instructions", "native_read"],
+    ["get_agent_instructions", undefined],
+    ["get_agent_instructions", "search"],
+  ]) {
+    let contextCalls = 0;
+    await assert.rejects(handleToolCall("https://trelio.example", "continue_trelio_local_action", {
+      schemaVersion: 1, route: "context",
+      parameters: { companySlug: "example", nativeTool, operation, arguments: { companySlug: "example" } },
+    }, {
+      localContextOperation: async (_origin, input) => {
+        contextCalls += 1;
+        assert.equal(input.operation, operation);
+        return handleNativeLocalContextRead({}, input.nativeTool, input.arguments);
+      },
+      localActionOperation: async () => assert.fail("Only the exact get_agent_instructions read may use the settings handler."),
+    }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+    assert.equal(contextCalls, 1);
+  }
 });
 
 test("local action forwards only the top-level hook proof to the native bridge", async () => {

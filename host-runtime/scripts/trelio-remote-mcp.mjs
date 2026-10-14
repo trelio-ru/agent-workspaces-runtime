@@ -5635,7 +5635,18 @@ export const handleToolCall = async (
         "The server-selected local route requires the exact native arguments object.",
       );
     }
-    if (rawArguments.route === "context") {
+    // Company onboarding starts from the metadata-only context provider, so
+    // its standalone authority read can arrive as context/native_read rather
+    // than the native tool's action continuation. Settings are not a mirror
+    // document: editable revisions/history and the personal profile must come
+    // from the existing native handler with fresh scope/ACL/proof validation.
+    // Admit only this exact read. Missing/other operations and write tools keep
+    // the ordinary context rejection; no generic context-to-action fallback
+    // may turn a read-only request into a mutation.
+    const nativeInstructionRead = rawArguments.route === "context"
+      && parameters.operation === "native_read"
+      && parameters.nativeTool === "get_agent_instructions";
+    if (rawArguments.route === "context" && !nativeInstructionRead) {
       return runLocalContextRoute({
         companySlug: parameters.companySlug,
         nativeTool: parameters.nativeTool,
@@ -5643,7 +5654,7 @@ export const handleToolCall = async (
         arguments: nativeArguments,
       });
     }
-    if (rawArguments.route === "action") {
+    if (rawArguments.route === "action" || nativeInstructionRead) {
       return runLocalNativeActionRoute({
         companySlug: parameters.companySlug,
         nativeTool: parameters.nativeTool,
