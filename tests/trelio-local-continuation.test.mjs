@@ -13,6 +13,8 @@ import { buildTrelioWorkspaceActionInvocation, handleTrelioWorkspaceActionOperat
 import { Readable } from "node:stream";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
+import { protectAgentWorkspaceCheckpoint } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const now = Date.now();
 const timestamp = new Date(now - 1000).toISOString();
@@ -40,6 +42,40 @@ const nativeCheckpoint = { runId: "11111111-1111-4111-8111-111111111111",
   leaseId: "22222222-2222-4222-8222-222222222222", fencingToken: 2, checkpointType: "analysis",
   summary: "Checkpoint with structured evidence", evidence: [{ source: "test", checked: true }],
   filesChanged: ["artifacts/result.md"], openQuestions: [], nextAction: { instruction: "Review the result" } };
+
+test("encrypted checkpoint keeps JSON evidence and explicit empty nextAction without plaintext transport", async () => {
+  const scope = await createAgentEncryptionDevice();
+  const device = await createAgentEncryptionDevice();
+  const companyEncryption = { device, runtime: { company: { id: nativeCheckpoint.runId, slug: "demo" },
+    scope: { id: nativeCheckpoint.leaseId, epoch: 1, publicEncryptionJwk: scope.publicEncryptionJwk },
+    device: { id: "33333333-3333-4333-8333-333333333333" } } };
+  const originalFetch = globalThis.fetch;
+  let uploaded;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "https://checkpoint.example/api/agent-workspaces/encryption/payloads");
+    assert.equal(options.body.includes("PRIVATE-CHECKPOINT-CANARY"), false);
+    uploaded = JSON.parse(options.body).payloads[0];
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    for (const nextAction of [{}, { instruction: "" }, { instruction: "Review", taskOutcome: "no_status_change" }]) {
+      const protectedContent = await protectAgentWorkspaceCheckpoint({
+        metadata: { runId: nativeCheckpoint.runId }, origin: "https://checkpoint.example", token: "synthetic-token",
+        companyEncryption, summary: "PRIVATE-CHECKPOINT-CANARY", evidence: [{ checked: true, source: "PRIVATE-CHECKPOINT-CANARY" }],
+        filesChanged: [], openQuestions: [], nextActionInstruction: nextAction.instruction ?? "", taskOutcome: "",
+        nextActionTaskOutcome: nextAction.taskOutcome ?? null, nextActionProvided: true,
+        nextActionInstructionProvided: Object.hasOwn(nextAction, "instruction"),
+      });
+      const clear = await decryptCompanyPayload({ encryptedPayload: uploaded, scopePrivateKey: scope.privateKeys.encryptionPrivateKey,
+        scopePrivateJwk: scope.privateBundle.encryptionPrivateJwk });
+      assert.deepEqual(clear.values.evidence_json, [{ checked: true, source: "PRIVATE-CHECKPOINT-CANARY" }]);
+      assert.equal(clear.values.next_action_instruction, nextAction.instruction ?? "");
+      assert.equal(JSON.stringify(protectedContent).includes("PRIVATE-CHECKPOINT-CANARY"), false);
+      assert.deepEqual(Object.keys(protectedContent.nextAction), Object.keys(nextAction));
+      assert.equal(protectedContent.nextAction.taskOutcome, nextAction.taskOutcome);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
 
 test("native checkpoint continuation recovers all fields and enters the same Run-bound bridge", async () => {
   const runIdentity = { workspaceId: "33333333-3333-4333-8333-333333333333", runId: nativeCheckpoint.runId };
@@ -83,6 +119,12 @@ test("native checkpoint validates exact bounds, JSON evidence and caller lease b
   assert.equal(normalized.summary, "Result");
   assert.deepEqual(normalized.filesChanged, ["artifacts/result.md"]);
   assert.deepEqual(normalized.openQuestions, ["Question"]);
+  assert.deepEqual(validateNativeCheckpoint({ ...nativeCheckpoint,
+    nextAction: { instruction: "Review", taskOutcome: "no_status_change" } }).nextAction,
+  { instruction: "Review", taskOutcome: "no_status_change" });
+  for (const nextAction of [null, {}, { instruction: "" }]) {
+    assert.deepEqual(validateNativeCheckpoint({ ...nativeCheckpoint, nextAction }).nextAction, nextAction);
+  }
   assert.equal(validateNativeCheckpoint({ ...nativeCheckpoint, summary: " " + "x".repeat(20000) + " " }).summary.length, 20000);
   const metadata = { ...nativeCheckpoint, baseHead: "a".repeat(40) };
   assert.doesNotThrow(() => assertNativeCheckpointBinding(nativeCheckpoint, metadata));
@@ -107,7 +149,8 @@ test("real bridge native stdin rejects a stale lease before auth, writes or uplo
     await fs.writeFile(metadataPath, metadata, { mode: 0o600 });
     const pending = promisify(execFile)(process.execPath, [path.resolve("host-runtime/scripts/trelio-workspace.mjs"), "checkpoint", "--native-input"], {
       cwd, env: { ...process.env, HOME: dir, USERPROFILE: dir, CODEX_HOME: path.join(dir, "codex"),
-        TRELIO_WORKSPACE_CONFIG_DIRECTORY: path.join(dir, "config") },
+        LOCALAPPDATA: path.join(dir, "AppData", "Local"), TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
+        TRELIO_WORKSPACE_ORIGIN: "https://trelio.example", TRELIO_WORKSPACE_CONFIG_DIRECTORY: path.join(dir, "config") },
     });
     pending.child.stdin.end(JSON.stringify(nativeCheckpoint));
     await assert.rejects(pending, error => {

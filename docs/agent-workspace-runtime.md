@@ -1926,7 +1926,9 @@ Dispatcher создаёт обычный typed checkpoint с parameters.nativeIn
 и explicit draftHead с local metadata. Несовпадение возвращает
 TRELIO_WORKSPACE_CHECKPOINT_BINDING_CHANGED без takeover/replay. Draft/blocker
 продолжают обычный portable upload; encrypted nextAction сохраняет закрытый
-instruction/taskOutcome контракт. Evidence не преобразуется в строки в payload;
+instruction/taskOutcome контракт. Native trim выполняется до шифрования;
+пустой nextAction и вложенный outcome сохраняются независимо от top-level
+решения. Evidence не преобразуется в строки в payload;
 человекочитаемый worklog отображает объект canonical JSON. Старые typed поля,
 explicit cwd и native inputs сохраняются; runtime публикуется до нового backend.
 

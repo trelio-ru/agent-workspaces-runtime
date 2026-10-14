@@ -45,9 +45,8 @@ export const validateNativeCheckpoint = input => {
     || input.draftHead !== undefined && !/^[0-9a-f]{40,64}$/u.test(input.draftHead)) fail();
   if (input.nextAction !== undefined && input.nextAction !== null) {
     if (!record(input.nextAction) || Object.keys(input.nextAction).some(key => !["instruction", "taskOutcome"].includes(key))
-      || input.nextAction.instruction !== undefined && !string(input.nextAction.instruction, 20000)
-      || input.nextAction.taskOutcome !== undefined && !outcomes.has(input.nextAction.taskOutcome)
-      || input.nextAction.taskOutcome !== undefined && input.nextAction.taskOutcome !== input.taskOutcome) fail();
+      || input.nextAction.instruction !== undefined && (typeof input.nextAction.instruction !== "string" || input.nextAction.instruction.length > 20000)
+      || input.nextAction.taskOutcome !== undefined && !outcomes.has(input.nextAction.taskOutcome)) fail();
   }
   // JSON round-trip is the transport boundary. Reject oversized/non-JSON input
   // before registry/process access, rather than silently dropping object leaves.

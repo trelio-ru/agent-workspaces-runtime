@@ -13264,7 +13264,7 @@ export const buildAgentEncryptedPayloadSignatureRecord = (payload) => ({
   writerDeviceId: payload.writerDeviceId,
 });
 
-const protectAgentWorkspaceCheckpoint = async ({
+export const protectAgentWorkspaceCheckpoint = async ({
   metadata,
   origin,
   token,
@@ -13275,6 +13275,9 @@ const protectAgentWorkspaceCheckpoint = async ({
   openQuestions,
   nextActionInstruction,
   taskOutcome,
+  nextActionTaskOutcome = taskOutcome,
+  nextActionProvided = false,
+  nextActionInstructionProvided = false,
 }) => {
   const entityId = crypto.randomUUID();
   const values = {
@@ -13341,10 +13344,10 @@ const protectAgentWorkspaceCheckpoint = async ({
     ...(openQuestions.length > 0
       ? { openQuestions: buildCompanyEncryptedJsonMarker(entityId, "open_questions_json", "array") }
       : {}),
-    ...(nextActionInstruction || taskOutcome
+    ...(nextActionProvided || nextActionInstruction || nextActionTaskOutcome
       ? {
           nextAction: {
-            ...(nextActionInstruction
+            ...(nextActionInstructionProvided || nextActionInstruction
               ? {
                   instruction: buildCompanyEncryptedTextMarker(
                     entityId,
@@ -13352,7 +13355,7 @@ const protectAgentWorkspaceCheckpoint = async ({
                   ),
                 }
               : {}),
-            ...(taskOutcome ? { taskOutcome } : {}),
+            ...(nextActionTaskOutcome ? { taskOutcome: nextActionTaskOutcome } : {}),
           },
         }
       : {}),
@@ -13422,7 +13425,7 @@ const checkpoint = async (options, nativeInput = null) => withRun(async ({
       throw new Error("Для handoff укажите материал через --file или оставьте изменения в workspace.");
     }
 
-    if (!nextActionInstruction) {
+    if (!nextActionInstruction.trim()) {
       throw new Error("Для handoff явно укажите действие оператора через --next-action.");
     }
 
@@ -13461,7 +13464,7 @@ const checkpoint = async (options, nativeInput = null) => withRun(async ({
       throw new Error("Для blocker укажите конкретный вопрос человеку через --question.");
     }
 
-    if (!nextActionInstruction) {
+    if (!nextActionInstruction.trim()) {
       throw new Error("Для blocker явно укажите действие человека через --next-action.");
     }
   }
@@ -13496,13 +13499,21 @@ const checkpoint = async (options, nativeInput = null) => withRun(async ({
         openQuestions,
         nextActionInstruction,
         taskOutcome,
+        // Nested metadata is independent from the authoritative top-level
+        // outcome. Backend merges that top-level field after normal validation.
+        ...(nativeInput ? {
+          nextActionTaskOutcome: nativeInput.nextAction?.taskOutcome ?? null,
+          nextActionProvided: nativeInput.nextAction !== undefined && nativeInput.nextAction !== null,
+          nextActionInstructionProvided: Object.hasOwn(nativeInput.nextAction ?? {}, "instruction"),
+        } : {}),
       })
     : {
         summary,
         ...(evidence.length > 0 ? { evidence } : {}),
         ...(filesChanged.length > 0 ? { filesChanged } : {}),
         ...(openQuestions.length > 0 ? { openQuestions } : {}),
-        ...(nextActionInstruction ? { nextAction: { instruction: nextActionInstruction } } : {}),
+        ...(nativeInput?.nextAction !== undefined ? { nextAction: nativeInput.nextAction }
+          : nextActionInstruction ? { nextAction: { instruction: nextActionInstruction } } : {}),
       };
   const response = await requestWithRateLimitRetry({ origin: workspaceOrigin, token,
     pathname: `/api/agent-workspaces/runs/${metadata.runId}/checkpoints`, rejectedBeforeExecutionOnly: true,
