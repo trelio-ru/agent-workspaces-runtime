@@ -47,12 +47,16 @@ export const collectLocalContinuationArguments = ({ header, rows, hookInput, inp
       const original = calls.get(p.call_id);
       calls.delete(p.call_id);
       if (!original || p.success === false) continue;
-      const result = parseCodexMcpOutput(p.output, row.metadata, true);
+      const result = parseCodexMcpOutput(p.output, row.metadata, true, true);
       const selection = result?.providerSelection;
       const envelope = selection?.arguments;
       const age = now - Date.parse(row.timestamp);
-      if (result?.code !== "MCP_LOCAL_CONTEXT_REQUIRED" || selection?.automatic !== true
-        || selection.provider !== "local_company_context" || selection.server !== "trelio-remote-skills"
+      const checkpointRoute = result?.code === "MCP_LOCAL_BRIDGE_REQUIRED"
+        && input.route === "workspace" && input.parameters.operation === "checkpoint_native"
+        && input.parameters.nativeTool === "checkpoint_agent_workspace_run"
+        && selection?.provider === "local_agent_workspace_bridge";
+      if (!(checkpointRoute || result?.code === "MCP_LOCAL_CONTEXT_REQUIRED" && selection?.provider === "local_company_context")
+        || selection?.automatic !== true || selection.server !== "trelio-remote-skills"
         || selection.tool !== "continue_trelio_local_action" || selection.nativeTool !== input.parameters.nativeTool
         || selection.companySlug !== input.parameters.companySlug || envelope?.schemaVersion !== 1
         || envelope.route !== input.route || !Number.isFinite(age) || age < 0 || age > 15 * 60 * 1000
@@ -75,6 +79,7 @@ export const collectLocalContinuationArguments = ({ header, rows, hookInput, inp
       // the original optional content and letting native validation reapply
       // any remaining defaults. Never invent missing protected content.
       const recovered = { ...authored, ...seed };
+      if (checkpointRoute && recovered.runId !== route.runIdentity?.runId) return null;
       for (const [key, value] of Object.entries(seed)) {
         if (!Object.hasOwn(authored, key)) continue;
         const sourceValue = typeof authored[key] === "string" ? authored[key].trim() : authored[key];

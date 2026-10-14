@@ -1119,10 +1119,16 @@ context. Срок 15 минут абсолютный, process-local store bounde
 
 Local company search и Workspace-file search получают один top-level
 `nextCall`. Он фиксирует exact local continuation и
-`copyFromSelectedResult` для `fetch` либо accepted-head file read, не повторяя
-route на каждом результате. Модель выбирает один hit и копирует только
-объявленные поля; внутреннее устройство mirror и provider fallback в plugin
-instructions не воспроизводятся.
+`copyFromSelectedResult` для selectionRef, не повторяя route на каждом
+результате. Модель выбирает hit и передаёт parameters.selectedResultRef. Host
+подставляет exact id либо workspaceId/head/filePath из bounded process RAM:
+256 entries, абсолютный TTL 600 секунд с cleanup timers. Title/query/snippet и
+credentials не сохраняются; cache не записывается на диск. Origin/company/tool,
+route и locator override проверяются до IO. Expiry/restart/eviction возвращают
+LOCAL_CONTEXT_SELECTION_STALE без auto-refresh. Ref не является capability:
+обычный read заново проверяет ACL/provider/head. Explicit locators остаются;
+fetch responseDetail и file delivery выбираются отдельно. Agent Secret требует
+своего exact read и не получает fetch ref.
 
 Для encrypted company exact task read дополнительно возвращает компактный
 `proposalProvider=local_company_context` с canonical task target и двумя exact
@@ -1902,3 +1908,26 @@ backend schema/ACL, OAuth, live provider state, CAS/idempotency и челове�
 
 Проверки: `trelio-local-continuation.test.mjs`, реальные PreToolUse subprocess
 regressions, dispatcher/input transport, immutable proof и instruction delivery.
+
+
+### Native checkpoint continuation
+
+Backend после object ACL связывает checkpoint с exact Workspace/Run и выдаёт
+hook-matched continue_trelio_local_action(route=workspace,
+operation=checkpoint_native). Корреляция восстанавливает native arguments,
+включая структурированные evidence; routing isError допустим только для этих
+exact codes, а instruction reuse по-прежнему не принимает error receipts.
+Dispatcher создаёт обычный typed checkpoint с parameters.nativeInput. Bridge
+принимает JSON до 256 KiB только stdin этого вызова; нет content argv/env/file.
+До credential IO, activity write и draft upload сверяются caller Run/lease/fence
+и explicit draftHead с local metadata. Несовпадение возвращает
+TRELIO_WORKSPACE_CHECKPOINT_BINDING_CHANGED без takeover/replay. Draft/blocker
+продолжают обычный portable upload; encrypted nextAction сохраняет закрытый
+instruction/taskOutcome контракт. Evidence не преобразуется в строки в payload;
+человекочитаемый worklog отображает объект canonical JSON. Старые typed поля,
+explicit cwd и native inputs сохраняются; runtime публикуется до нового backend.
+
+Import specification теперь выдаёт готовый случайный upload key. Local file
+остаётся обязательным выбором пользователя/агента; повтор передаёт тот же ключ
+и bytes, новая спецификация создаёт новый intent. Обычный upload reservation,
+authenticated read-back и отдельное подтверждение start не меняются.

@@ -1547,9 +1547,17 @@ test("first protected call observes the current model and supported host names i
     for (const [nativeTool, route, originalInput, seed] of [
       ["get_agent_skill", "action", { companySlug: "synthetic", skillId: "synthetic-skill" }, { companySlug: "synthetic" }],
       ["search", "context", { companySlugs: ["synthetic"], queries: ["PRIVATE-CONTINUATION-CANARY"] }, { companySlugs: ["synthetic"] }],
+      ["checkpoint_agent_workspace_run", "workspace", {
+        runId: "11111111-1111-4111-8111-111111111111", leaseId: "22222222-2222-4222-8222-222222222222",
+        fencingToken: 1, checkpointType: "analysis", summary: "PRIVATE-CONTINUATION-CANARY",
+        evidence: [{ checked: true }], nextAction: { instruction: "Review" },
+      }, { runId: "11111111-1111-4111-8111-111111111111", leaseId: "22222222-2222-4222-8222-222222222222",
+        fencingToken: 1, checkpointType: "analysis" }],
     ]) {
       const envelope = { schemaVersion: 1, route, parameters: { companySlug: "synthetic", nativeTool,
         ...(route === "context" ? { operation: "native_read" } : {}), arguments: seed,
+        ...(route === "workspace" ? { operation: "checkpoint_native",
+          runIdentity: { workspaceId: "33333333-3333-4333-8333-333333333333", runId: originalInput.runId } } : {}),
         nativeCallRef: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", nativeArgumentKeys: Object.keys(originalInput) } };
       const call = (id, namespace, name, args) => ({ timestamp: new Date().toISOString(), type: "response_item",
         payload: { type: "function_call", call_id: id, namespace, name, arguments: JSON.stringify(args) } });
@@ -1558,7 +1566,8 @@ test("first protected call observes the current model and supported host names i
         call("source", "mcp__trelio", nativeTool, originalInput),
         { timestamp: new Date().toISOString(), type: "response_item", metadata: { fallback_token_limit_override: 12000 },
           payload: { type: "function_call_output", call_id: "source", output: JSON.stringify({
-            code: "MCP_LOCAL_CONTEXT_REQUIRED", providerSelection: { automatic: true, provider: "local_company_context",
+            code: route === "workspace" ? "MCP_LOCAL_BRIDGE_REQUIRED" : "MCP_LOCAL_CONTEXT_REQUIRED",
+            providerSelection: { automatic: true, provider: route === "workspace" ? "local_agent_workspace_bridge" : "local_company_context",
               server: "trelio-remote-skills", tool: "continue_trelio_local_action", companySlug: "synthetic", nativeTool,
               arguments: envelope } }) } },
         call("current", "mcp__trelio_remote_skills", "continue_trelio_local_action", envelope),
@@ -1569,7 +1578,7 @@ test("first protected call observes the current model and supported host names i
       const next = JSON.parse(recovered.stdout).hookSpecificOutput.updatedInput;
       assert.deepEqual(next.parameters.arguments, originalInput);
       assert.equal(next.parameters.nativeCallRef, undefined);
-      if (route === "action") assert.equal(crypto.verify(null, Buffer.from([
+      if (route !== "context") assert.equal(crypto.verify(null, Buffer.from([
         "trelio-runtime-proof-v1", next.runtimeSessionProof.runtimeSessionId, nativeTool,
         next.runtimeSessionProof.issuedAt, next.runtimeSessionProof.nonce,
       ].join("\n")), publicKey, Buffer.from(next.runtimeSessionProof.signature, "base64url")), true);

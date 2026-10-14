@@ -3231,7 +3231,7 @@ test("local search results carry one exact provider continuation template", () =
         arguments: {},
       },
     },
-    copyFromSelectedResult: { "parameters.arguments.id": "id" },
+    copyFromSelectedResult: { "parameters.selectedResultRef": "selectionRef" },
   });
 
   const files = attachLocalContextNextCall(base, {
@@ -3239,10 +3239,9 @@ test("local search results carry one exact provider continuation template", () =
     companySlug: "company",
   });
   assert.deepEqual(files.nextCall.copyFromSelectedResult, {
-    "parameters.arguments.workspaceId": "workspaceId",
-    "parameters.arguments.workspaceHead": "workspaceHead",
-    "parameters.arguments.filePath": "filePath",
+    "parameters.selectedResultRef": "selectionRef",
   });
+  assert.match(search.results[0].selectionRef, /^[0-9a-f-]{36}$/u);
   assert.strictEqual(attachLocalContextNextCall({ provider: "native_trelio" }, {
     operation: "search",
     companySlug: "company",

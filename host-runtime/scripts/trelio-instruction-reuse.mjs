@@ -101,7 +101,7 @@ const callIdentity = (payload, args) => {
   return localReadArguments(args, identity) ? identity : null;
 };
 
-export const parseCodexMcpOutput = (output, metadata, local = false) => {
+export const parseCodexMcpOutput = (output, metadata, local = false, allowRouteError = false) => {
   // Codex 0.160.0 serializes unstructured MCP text as input_text items.
   // Accept exactly one item on the local route, never arbitrary quoted JSON
   // or mixed media. Budget the entire serialized array conservatively before
@@ -126,8 +126,13 @@ export const parseCodexMcpOutput = (output, metadata, local = false) => {
   const text = (textItem ? output[0].text : output).replace(prefix, "");
   try {
     const parsed = JSON.parse(text);
-    if (!record(parsed) || parsed.isError === true) return null;
-    return record(parsed.structuredContent) ? parsed.structuredContent : parsed;
+    if (!record(parsed)) return null;
+    const payload = record(parsed.structuredContent) ? parsed.structuredContent : parsed;
+    // Routing errors are valid continuation evidence, never delivered working
+    // rules. Only the correlation adapter opts in and validates the full route.
+    if (parsed.isError === true && !(allowRouteError
+      && ["MCP_LOCAL_CONTEXT_REQUIRED", "MCP_LOCAL_BRIDGE_REQUIRED"].includes(payload.code))) return null;
+    return payload;
   } catch { return null; }
 };
 

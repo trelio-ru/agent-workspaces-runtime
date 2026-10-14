@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
+import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 
 /**
  * Universal local host for declarative company Remote MCP skills.
@@ -4114,7 +4115,7 @@ const buildTextResult = buildLocalTaskReadToolResult;
  * five-result search pays for one compact continuation instead of five copies.
  * Field mappings name only values already returned by the trusted local host.
  */
-export const attachLocalContextNextCall = (providerResult, rawArguments) => {
+export const attachLocalContextNextCall = (providerResult, rawArguments, origin = "https://trelio.ru") => {
   if (
     !providerResult
     || typeof providerResult !== "object"
@@ -4122,9 +4123,17 @@ export const attachLocalContextNextCall = (providerResult, rawArguments) => {
   ) return providerResult;
   const operation = rawArguments?.operation;
   const nativeTool = rawArguments?.nativeTool;
+  const selectedResults = (targetTool) => Array.isArray(providerResult.results)
+    ? providerResult.results.map(result => {
+      const args = selectedSearchLocator(result, targetTool);
+      return args ? { ...result, selectionRef: localSearchSelections.add({
+        origin, companySlug: rawArguments.companySlug, nativeTool: targetTool, arguments: args,
+      }) } : result;
+    }) : providerResult.results;
   if (operation === "search" || (operation === "native_read" && nativeTool === "search")) {
     return {
       ...providerResult,
+      results: selectedResults("fetch"),
       nextCall: {
         when: "after_selecting_one_result",
         server: "trelio-remote-skills",
@@ -4139,7 +4148,7 @@ export const attachLocalContextNextCall = (providerResult, rawArguments) => {
             arguments: {},
           },
         },
-        copyFromSelectedResult: { "parameters.arguments.id": "id" },
+        copyFromSelectedResult: { "parameters.selectedResultRef": "selectionRef" },
       },
     };
   }
@@ -4149,6 +4158,7 @@ export const attachLocalContextNextCall = (providerResult, rawArguments) => {
   ) {
     return {
       ...providerResult,
+      results: selectedResults("get_agent_workspace_file"),
       nextCall: {
         when: "after_selecting_one_file",
         server: "trelio-remote-skills",
@@ -4163,11 +4173,7 @@ export const attachLocalContextNextCall = (providerResult, rawArguments) => {
             arguments: {},
           },
         },
-        copyFromSelectedResult: {
-          "parameters.arguments.workspaceId": "workspaceId",
-          "parameters.arguments.workspaceHead": "workspaceHead",
-          "parameters.arguments.filePath": "filePath",
-        },
+        copyFromSelectedResult: { "parameters.selectedResultRef": "selectionRef" },
       },
     };
   }
@@ -5531,7 +5537,7 @@ export const handleToolCall = async (
       origin,
       routeArguments,
       { signal },
-    ), routeArguments);
+    ), routeArguments, origin);
     // The first bridge-selected local company read is already authoritative
     // provider evidence. Persisting its opaque company selector protects even
     // a later model that skips the dedicated proposal context after compaction.
@@ -5612,6 +5618,7 @@ export const handleToolCall = async (
         "The local route requires schemaVersion=1 and an object parameters payload.",
       );
     }
+    rawArguments = localSearchSelections.resolve(origin, rawArguments);
     // Check completeness before provider sync, credential IO or native action
     // preparation. Clients without hooks may use the explicit original input.
     const { validateLocalContinuationArguments } = await import("./trelio-local-continuation.mjs");
@@ -5683,6 +5690,19 @@ export const handleToolCall = async (
       });
     }
     if (rawArguments.route === "workspace") {
+      if (parameters.operation === "checkpoint_native") {
+        if (parameters.nativeTool !== "checkpoint_agent_workspace_run") {
+          throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Native checkpoint route has a mismatched method.");
+        }
+        // The generic facade is hook-matched. Forward the recovered native
+        // payload to the same typed bridge checkpoint, bound to the server's
+        // exact Run; the bridge checks lease/head before any local write.
+        return buildTextResult(await workspaceActionOperation(origin, {
+          schemaVersion: 1, operation: "checkpoint",
+          runIdentity: parameters.runIdentity,
+          parameters: { nativeInput: nativeArguments },
+        }, { signal }));
+      }
       return buildTextResult(await localWorkspaceOperation(
         origin,
         {

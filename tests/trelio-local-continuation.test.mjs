@@ -6,6 +6,13 @@ import test from "node:test";
 import { collectLocalContinuationArguments, recoverLocalContinuationArguments,
   validateLocalContinuationArguments } from "../host-runtime/scripts/trelio-local-continuation.mjs";
 import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { attachLocalContextNextCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { createLocalSearchSelections } from "../host-runtime/scripts/trelio-search-selection.mjs";
+import { validateNativeCheckpoint, assertNativeCheckpointBinding, readNativeCheckpointInput } from "../host-runtime/scripts/trelio-native-checkpoint.mjs";
+import { buildTrelioWorkspaceActionInvocation, handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { Readable } from "node:stream";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
 const now = Date.now();
 const timestamp = new Date(now - 1000).toISOString();
@@ -28,6 +35,125 @@ const output = { timestamp, type: "response_item", metadata: { fallback_token_li
 const rows = [call("source", "mcp__trelio", "create_task", original), output,
   call("current", "mcp__trelio_remote_skills", "continue_trelio_local_action", input)];
 const collect = (changes = {}) => collectLocalContinuationArguments({ header, rows, hookInput, input, now, ...changes });
+
+const nativeCheckpoint = { runId: "11111111-1111-4111-8111-111111111111",
+  leaseId: "22222222-2222-4222-8222-222222222222", fencingToken: 2, checkpointType: "analysis",
+  summary: "Checkpoint with structured evidence", evidence: [{ source: "test", checked: true }],
+  filesChanged: ["artifacts/result.md"], openQuestions: [], nextAction: { instruction: "Review the result" } };
+
+test("native checkpoint continuation recovers all fields and enters the same Run-bound bridge", async () => {
+  const runIdentity = { workspaceId: "33333333-3333-4333-8333-333333333333", runId: nativeCheckpoint.runId };
+  const args = { schemaVersion: 1, route: "workspace", parameters: {
+    companySlug: "demo", nativeTool: "checkpoint_agent_workspace_run", operation: "checkpoint_native", runIdentity,
+    arguments: { runId: nativeCheckpoint.runId, leaseId: nativeCheckpoint.leaseId, fencingToken: 2, checkpointType: "analysis" },
+    nativeCallRef: input.parameters.nativeCallRef, nativeArgumentKeys: Object.keys(nativeCheckpoint),
+  } };
+  const selection = { code: "MCP_LOCAL_BRIDGE_REQUIRED", providerSelection: {
+    automatic: true, provider: "local_agent_workspace_bridge", companySlug: "demo",
+    nativeTool: "checkpoint_agent_workspace_run", server: "trelio-remote-skills", tool: "continue_trelio_local_action", arguments: args,
+  } };
+  const checkpointRows = [call("source", "mcp__trelio", "checkpoint_agent_workspace_run", nativeCheckpoint),
+    { ...output, payload: { ...output.payload, output: JSON.stringify({ isError: true, structuredContent: selection }) } },
+    call("current", "mcp__trelio_remote_skills", "continue_trelio_local_action", args)];
+  const recovered = await recoverLocalContinuationArguments({ hookInput, input: args,
+    readTranscript: () => ({ header, rows: checkpointRows }) });
+  assert.deepEqual(recovered.parameters.arguments, nativeCheckpoint);
+  let passed;
+  await handleToolCall("https://trelio.example", "continue_trelio_local_action", recovered, {
+    workspaceActionOperation: async (_origin, invocation) => { passed = invocation; return {}; },
+  });
+  assert.deepEqual(passed, { schemaVersion: 1, operation: "checkpoint", runIdentity, parameters: { nativeInput: nativeCheckpoint } });
+  assert.deepEqual(buildTrelioWorkspaceActionInvocation(passed).argumentsList, ["checkpoint", "--native-input"]);
+  let processInput;
+  await handleTrelioWorkspaceActionOperation("https://trelio.example", passed, {
+    resolveRunRootDirectory: async () => "/synthetic/run",
+    runBridge: async (_origin, argv, options) => {
+      assert.deepEqual(argv, ["checkpoint", "--native-input"]); processInput = options.input; return { stdout: "saved" };
+    },
+  });
+  assert.deepEqual(JSON.parse(processInput), nativeCheckpoint);
+  assert.equal(collectLocalContinuationArguments({ header, hookInput, rows: checkpointRows,
+    input: { ...args, parameters: { ...args.parameters, runIdentity: { ...runIdentity, runId: nativeCheckpoint.leaseId } } }, now }), null);
+});
+
+test("native checkpoint validates exact bounds, JSON evidence and caller lease before IO", async () => {
+  assert.deepEqual(await readNativeCheckpointInput(Readable.from([JSON.stringify(nativeCheckpoint)])), nativeCheckpoint);
+  const metadata = { ...nativeCheckpoint, baseHead: "a".repeat(40) };
+  assert.doesNotThrow(() => assertNativeCheckpointBinding(nativeCheckpoint, metadata));
+  for (const patch of [{ leaseId: nativeCheckpoint.runId }, { runId: nativeCheckpoint.leaseId }, { fencingToken: 3 }, { draftHead: "b".repeat(40) }]) {
+    assert.throws(() => assertNativeCheckpointBinding({ ...nativeCheckpoint, ...patch }, metadata), { code: "TRELIO_WORKSPACE_CHECKPOINT_BINDING_CHANGED" });
+  }
+  for (const patch of [{ checkpointType: "unknown" }, { evidence: Array(101).fill({}) },
+    { summary: "" }, { nextAction: { privateField: "secret" } }, { runtimeSessionProof: {} },
+    { evidence: ["x".repeat(256 * 1024)] }, { evidence: [NaN] }, { evidence: [{ field: undefined }] },
+    { openQuestions: Array(101).fill("question") }]) {
+    assert.throws(() => validateNativeCheckpoint({ ...nativeCheckpoint, ...patch }), { code: "TRELIO_WORKSPACE_ACTION_INVALID_INPUT" });
+  }
+});
+
+test("real bridge native stdin rejects a stale lease before auth, writes or upload", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-native-checkpoint-"));
+  try {
+    const cwd = path.join(dir, "workspace"); await fs.mkdir(cwd);
+    const metadataPath = path.join(dir, ".trelio-run.json");
+    const metadata = JSON.stringify({ schemaVersion: 3, ...nativeCheckpoint, leaseId: nativeCheckpoint.runId,
+      workspaceDirectory: cwd, origin: "https://trelio.example" });
+    await fs.writeFile(metadataPath, metadata, { mode: 0o600 });
+    const pending = promisify(execFile)(process.execPath, [path.resolve("host-runtime/scripts/trelio-workspace.mjs"), "checkpoint", "--native-input"], {
+      cwd, env: { ...process.env, HOME: dir, USERPROFILE: dir, CODEX_HOME: path.join(dir, "codex"),
+        TRELIO_WORKSPACE_CONFIG_DIRECTORY: path.join(dir, "config") },
+    });
+    pending.child.stdin.end(JSON.stringify(nativeCheckpoint));
+    await assert.rejects(pending, error => {
+      assert.match(error.stderr, /TRELIO_WORKSPACE_CHECKPOINT_BINDING_CHANGED/u); return true;
+    });
+    assert.equal(await fs.readFile(metadataPath, "utf8"), metadata);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test("selected search result transfers exact coordinates while normal live read remains in charge", async () => {
+  for (const [operation, result, expected] of [
+    ["search", { id: "task:demo/project/12", type: "task" }, { id: "task:demo/project/12" }],
+    ["search_workspace_files", { workspaceId: nativeCheckpoint.runId, workspaceHead: "a".repeat(40), filePath: "notes/результат.md" },
+      { workspaceId: nativeCheckpoint.runId, workspaceHead: "a".repeat(40), filePath: "notes/результат.md" }],
+  ]) {
+    const search = attachLocalContextNextCall({ provider: "local_company_context", results: [result] }, { operation, companySlug: "demo" }, "https://trelio.example");
+    const next = structuredClone(search.nextCall.arguments);
+    next.parameters.selectedResultRef = search.results[0].selectionRef;
+    let read;
+    await handleToolCall("https://trelio.example", "continue_trelio_local_action", next, {
+      localContextOperation: async (_origin, request) => { read = request; return { provider: "local_company_context" }; },
+    });
+    assert.deepEqual(read.arguments, expected);
+    let calls = 0;
+    await assert.rejects(handleToolCall("https://trelio.example", "continue_trelio_local_action",
+      { ...next, parameters: { ...next.parameters, companySlug: "foreign" } }, {
+        localContextOperation: async () => { calls++; },
+      }), { code: "LOCAL_CONTEXT_SELECTION_STALE" });
+    assert.equal(calls, 0);
+  }
+});
+
+test("selection refs reject expiry, eviction, changed routes and locator overrides without refreshing", () => {
+  let time = 0;
+  const cache = createLocalSearchSelections({ now: () => time, maximumEntries: 1, ttlMs: 1000 });
+  const origin = "https://trelio.example";
+  const ref = cache.add({ origin, companySlug: "demo", nativeTool: "fetch", arguments: { id: "task:demo/p/1" } });
+  const input = { schemaVersion: 1, route: "context", parameters: {
+    companySlug: "demo", nativeTool: "fetch", operation: "native_read", selectedResultRef: ref, arguments: {},
+  } };
+  assert.deepEqual(cache.resolve(origin, input).parameters.arguments, { id: "task:demo/p/1" });
+  assert.equal(cache.resolve(origin, { ...input, parameters: { ...input.parameters, arguments: { responseDetail: "full" } } }).parameters.arguments.responseDetail, "full");
+  for (const changed of [{ ...input, route: "action" }, { ...input, parameters: { ...input.parameters, nativeTool: "get_task" } },
+    { ...input, parameters: { ...input.parameters, arguments: { id: "task:demo/p/2" } } }]) {
+    assert.throws(() => cache.resolve(origin, changed), { code: "LOCAL_CONTEXT_SELECTION_STALE" });
+  }
+  assert.throws(() => cache.resolve("https://foreign.example", input), { code: "LOCAL_CONTEXT_SELECTION_STALE" });
+  time = 1000; assert.throws(() => cache.resolve(origin, input), { code: "LOCAL_CONTEXT_SELECTION_STALE" });
+  time = 0; const evicted = cache.add({ origin, companySlug: "demo", nativeTool: "fetch", arguments: { id: "task:demo/p/1" } });
+  cache.add({ origin, companySlug: "demo", nativeTool: "fetch", arguments: { id: "task:demo/p/2" } });
+  assert.throws(() => cache.resolve(origin, { ...input, parameters: { ...input.parameters, selectedResultRef: evicted } }), { code: "LOCAL_CONTEXT_SELECTION_STALE" });
+});
 
 test("exact server continuation recovers original content and preserves idempotency without old proof", async () => {
   assert.deepEqual(collect(), { companySlug: "demo", projectSlug: "project", title: original.title, clientRequestId: original.clientRequestId });

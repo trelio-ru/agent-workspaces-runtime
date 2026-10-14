@@ -10,6 +10,7 @@ import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInp
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { LOCAL_PROPOSAL_FILES, prepareLocalProposalFiles, bindLocalProposalFilePreviews } from "./trelio-proposal-local-files.mjs";
 import { downloadAcceptedWorkspaceFile, validateWorkspaceFileLocator } from "./trelio-workspace-files.mjs";
+import { validateNativeCheckpoint, parseNativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import {
   WorkspaceActiveRunRequiredError,
   WorkspaceDirectoryRequiredError,
@@ -9050,14 +9051,21 @@ const normalizeGitHead = (value, fieldName) => {
   return head;
 };
 
-const runLocalProcess = async (executable, argumentsList, { cwd, signal } = {}) => {
-  return execFileAsync(executable, argumentsList, {
+const runLocalProcess = async (executable, argumentsList, { cwd, signal, input } = {}) => {
+  const pending = execFileAsync(executable, argumentsList, {
     ...(cwd ? { cwd } : {}),
     ...(signal ? { signal } : {}),
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
   });
+  // Checkpoint content crosses only this invocation's stdin pipe. Never put
+  // native JSON in argv, environment, a temporary file or the process output.
+  if (input !== undefined) {
+    pending.child.stdin.on("error", () => {}); // Early child exit is reported by the process result.
+    pending.child.stdin.end(input);
+  }
+  return pending;
 };
 
 /**
@@ -9603,7 +9611,14 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
     argumentsList = ["clean"];
     appendWorkspaceActionOption(argumentsList, "dry-run", parameters.dryRun);
   } else if (["checkpoint", "pause", "finish"].includes(operation)) {
-    argumentsList = buildWorkspaceCheckpointActionArguments(operation, parameters);
+    if (operation === "checkpoint" && Object.hasOwn(parameters, "nativeInput")) {
+      assertWorkspaceActionKeys(parameters, new Set(["nativeInput"]));
+      validateNativeCheckpoint(parameters.nativeInput);
+      if (!runIdentity || parameters.nativeInput.runId !== runIdentity.runId) {
+        throw workspaceInputError("Native checkpoint requires its exact Run identity.", "runIdentity");
+      }
+      argumentsList = ["checkpoint", "--native-input"];
+    } else argumentsList = buildWorkspaceCheckpointActionArguments(operation, parameters);
   } else if (operation === "submit") {
     assertWorkspaceActionKeys(parameters, new Set(["message"]));
     argumentsList = ["submit"];
@@ -10129,7 +10144,7 @@ export const createWorkspaceRunHeartbeatManager = ({
       operation === "finish"
       || operation === "submit"
       || operation === "pause"
-      || (operation === "checkpoint" && parameters.type === "blocker")
+      || (operation === "checkpoint" && (parameters.type ?? parameters.nativeInput?.checkpointType) === "blocker")
     ) {
       stopEntry(entry);
       return;
@@ -10193,7 +10208,7 @@ export const handleTrelioWorkspaceActionOperation = async (
       invocation,
       resolveRunRootDirectory,
     );
-    if (heartbeatManager && workingDirectory) {
+    if (heartbeatManager && workingDirectory && !invocation.parameters.nativeInput) {
       activeHeartbeatEntry = await heartbeatManager.beginAction(
         workingDirectory,
         invocation.operation,
@@ -10202,6 +10217,7 @@ export const handleTrelioWorkspaceActionOperation = async (
     const result = await runBridge(origin, invocation.argumentsList, {
       ...(workingDirectory ? { cwd: workingDirectory } : {}),
       signal,
+      ...(invocation.parameters.nativeInput ? { input: JSON.stringify(invocation.parameters.nativeInput) } : {}),
     });
     if (heartbeatManager && invocation.operation === "open") {
       const workspaceDirectory = await resolveOpenedWorkspaceDirectory(result.stdout);
@@ -10323,6 +10339,8 @@ export const handleTrelioWorkspaceActionOperation = async (
     }
     const stderr = truncateWorkspaceActionOutput(error?.stderr).trim();
     const stdout = truncateWorkspaceActionOutput(error?.stdout).trim();
+    const checkpointError = invocation.parameters.nativeInput ? parseNativeCheckpointError(stderr) : null;
+    if (checkpointError) throw new TrelioLocalContextError(checkpointError.code, checkpointError.message);
     const runtimeRecovery = parseHostRuntimeRecoveryError(error?.stderr);
     if (runtimeRecovery) throw new TrelioLocalContextError(
       runtimeRecovery.code, runtimeRecovery.message, runtimeRecovery.details,

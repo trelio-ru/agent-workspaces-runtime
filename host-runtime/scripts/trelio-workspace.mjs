@@ -10,6 +10,7 @@
  * Run.
  */
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
+import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError } from "./trelio-skill-accounts.mjs";
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
@@ -1433,6 +1434,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
+  if (error instanceof NativeCheckpointError) return JSON.stringify(error);
   if (error instanceof ProcessDiagnosticError) return JSON.stringify(error);
   if (error instanceof BridgeTransportError || error instanceof HostRuntimeRecoveryError) return JSON.stringify(error);
   if (
@@ -12525,8 +12527,11 @@ const findRunMetadata = async (startDirectory = process.cwd()) => {
   }
 };
 
-const withRun = async (handler) => {
+const withRun = async (handler, { validateMetadata } = {}) => {
   const { metadata, metadataPath } = await findRunMetadata();
+  // Native checkpoints pin the caller's lease/head. Validate before token,
+  // encryption preparation, local activity writes or draft upload.
+  validateMetadata?.(metadata);
   if (!UUID_PATTERN.test(String(metadata?.runId || ""))) {
     throw new WorkspaceActiveRunRequiredError("RUN_ID_MISSING");
   }
@@ -13354,7 +13359,7 @@ const protectAgentWorkspaceCheckpoint = async ({
   };
 };
 
-const checkpoint = async (options) => withRun(async ({
+const checkpoint = async (options, nativeInput = null) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -13362,8 +13367,8 @@ const checkpoint = async (options) => withRun(async ({
   token,
   companyEncryption,
 }) => {
-  const checkpointType = String(options.type || "draft");
-  const summary = String(options.summary || "").trim();
+  const checkpointType = nativeInput?.checkpointType ?? String(options.type || "draft");
+  const summary = (nativeInput?.summary ?? String(options.summary || "")).trim();
 
   if (!summary) {
     throw new Error("Для checkpoint требуется --summary.");
@@ -13375,8 +13380,8 @@ const checkpoint = async (options) => withRun(async ({
     throw new Error("Неизвестный --type checkpoint.");
   }
 
-  const evidence = getOptionValues(options, "evidence");
-  const explicitlyNamedFiles = getOptionValues(options, "file");
+  const evidence = nativeInput ? nativeInput.evidence ?? [] : getOptionValues(options, "evidence");
+  const explicitlyNamedFiles = nativeInput ? nativeInput.filesChanged ?? [] : getOptionValues(options, "file");
   const candidatePaths = checkpointType === "handoff"
     ? await getCandidateChangedPaths(metadata)
     : [];
@@ -13386,16 +13391,16 @@ const checkpoint = async (options) => withRun(async ({
       && !isGeneratedWorkspaceContractPath(filePath, metadata.automaticWorklogPath)
     ),
   );
-  const filesChanged = explicitlyNamedFiles.length > 0
+  const filesChanged = nativeInput?.filesChanged !== undefined ? nativeInput.filesChanged : explicitlyNamedFiles.length > 0
     ? explicitlyNamedFiles
     : checkpointType === "handoff"
       ? candidateMaterialPaths
       : checkpointType === "blocker" || checkpointType === "draft"
         ? await getChangedPaths(metadata.workspaceDirectory, metadata.objects || [])
         : [];
-  const openQuestions = getOptionValues(options, "question");
-  const nextActionInstruction = getOptionValues(options, "next-action")[0] || "";
-  const taskOutcome = String(options["task-outcome"] || "").trim();
+  const openQuestions = nativeInput ? nativeInput.openQuestions ?? [] : getOptionValues(options, "question");
+  const nextActionInstruction = nativeInput ? nativeInput.nextAction?.instruction ?? "" : getOptionValues(options, "next-action")[0] || "";
+  const taskOutcome = nativeInput?.taskOutcome ?? String(options["task-outcome"] || "").trim();
 
   if (checkpointType === "handoff") {
     if (summary.length < 20) {
@@ -13444,7 +13449,7 @@ const checkpoint = async (options) => withRun(async ({
       metadata: worklogMetadata,
       metadataPath,
       summary,
-      evidence,
+      evidence: nativeInput ? evidence.map(item => typeof item === "string" ? item : canonicalJson(item)) : evidence,
       candidatePaths,
       openQuestions,
       nextActionInstruction,
@@ -13510,7 +13515,7 @@ const checkpoint = async (options) => withRun(async ({
         checkpointType,
         ...protectedContent,
         ...(taskOutcome ? { taskOutcome } : {}),
-        ...(draftSnapshot ? { draftHead: draftSnapshot.draftHead } : {}),
+        ...(draftSnapshot ? { draftHead: draftSnapshot.draftHead } : nativeInput?.draftHead ? { draftHead: nativeInput.draftHead } : {}),
       }),
     }),
   });
@@ -13534,7 +13539,7 @@ const checkpoint = async (options) => withRun(async ({
   }
   process.stdout.write(`Checkpoint сохранён: ${checkpointPayload.id}.\n`);
   await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
-});
+}, nativeInput ? { validateMetadata: metadata => assertNativeCheckpointBinding(nativeInput, metadata) } : {});
 
 const inspectBenignWorkspaceMetadataFile = async (workspaceDirectory, filePath) => {
   if (!BENIGN_WORKSPACE_FILE_NAMES.has(path.basename(filePath))) {
@@ -17354,7 +17359,7 @@ const main = async () => {
       dryRun: options["dry-run"] === true,
     });
   } else if (command === "checkpoint") {
-    await checkpoint(options);
+    await checkpoint(options, options["native-input"] === true ? await readNativeCheckpointInput(process.stdin) : null);
   } else if (command === "pause") {
     await pause(options);
   } else if (command === "finish") {

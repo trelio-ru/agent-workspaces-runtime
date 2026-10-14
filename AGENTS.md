@@ -251,7 +251,7 @@ publication tooling также остаются вне этого публичн
 - `host-runtime/scripts/report-context-budget.mjs` – maintainer-only report и не
   входит в package. Он принимает exact plugin checkout через `--plugin-root` либо
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; plugin source не vendored.
-- Исходные аргументы server continuation восстанавливаются по
+- Исходные args, checkpoint binding и search selection исполняются по
   [контракту](docs/agent-workspace-runtime.md#исходные-аргументы-local-continuation).
 - Все non-UI local-company continuations используют один model-visible
   `continue_trelio_local_action` envelope (`route` + exact native
