@@ -24,6 +24,7 @@ publication tooling также остаются вне этого публичн
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
   Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.
   Новые plugin hooks и перехват final response для этого не добавляются.
+  Entry-policy генерируется из backend; polling/proposal DTO не расширяются.
 
 - Перед новой функцией или инструкцией модели применяй
   [приоритет алгоритмического исполнения](docs/agent-workspace-runtime.md#algorithmic-execution).

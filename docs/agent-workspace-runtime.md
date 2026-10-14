@@ -91,6 +91,8 @@ count, URL/expiry/timeZone и `responseContext` с server instruction. Нет ti
 операции и возвращает unavailable, без ложного count=0.
 
 Контекст живёт отдельно от pinned authority и не кешируется в decrypted mirror.
+Entry points задаёт generated `trelio-unfiled-response-policy.mjs` из backend:
+poll deltas, отдельные proposal contexts/cards и прочие receipts сохраняют ABI.
 При непустой очереди он требует перед каждым ответом штатный exact refresh
 только этой компании, count, одну exact ссылку/expiry и выбор проекта/удаления.
 При смене компании прежнее напоминание приостанавливается; однословный ответ

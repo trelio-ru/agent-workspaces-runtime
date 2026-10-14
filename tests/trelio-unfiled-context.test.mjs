@@ -1,3 +1,4 @@
+import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "../host-runtime/scripts/trelio-unfiled-response-policy.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -111,4 +112,14 @@ test("the real existing status command refreshes the queue without changing pinn
     assert.equal(await readFile(pinned, "utf8"), "UNCHANGED_PINNED_RULES");
     assert.equal(await readFile(profile, "utf8"), "UNCHANGED_PINNED_PROFILE");
   } finally { await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); }
+});
+
+
+test("shared backend delivery policy excludes poll/proposal DTOs and retains exact entry reads", () => {
+  for (const name of ["get_task_changes", "get_task_status_proposal_context", "get_task_comment_proposal_context", "render_task_proposals", "get_registry", "create_comment"]) {
+    assert.equal(MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(name), false, name);
+  }
+  for (const name of ["get_task", "get_tasks", "get_task_instruction_page", "get_agent_instructions", "get_workspace", "get_agent_workspace", "fetch", "list_workspaces"]) {
+    assert.equal(MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(name), true, name);
+  }
 });

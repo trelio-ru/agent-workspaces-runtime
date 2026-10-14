@@ -1,3 +1,4 @@
+import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
@@ -8198,13 +8199,13 @@ export const handleTrelioLocalContextOperation = async (
           "Trelio returned a Workspace overview for another encrypted company.",
         );
       }
-      return hydrateAgentCompanyEncryptedJson({
-        value: rawOverview,
-        origin,
-        token: provider.token,
-        companyEncryption: provider.companyEncryption,
-        signal,
+      const overview = await hydrateAgentCompanyEncryptedJson({
+        value: rawOverview, origin, token: provider.token, companyEncryption: provider.companyEncryption, signal,
       });
+      const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
+        ? await readUnfiledResponseContext(origin, companySlug,
+            { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
+      return unfiledQueue ? { ...overview, unfiledQueue } : overview;
     }
   }
 
@@ -8215,8 +8216,14 @@ export const handleTrelioLocalContextOperation = async (
   });
   if (ready.nativeProvider) return ready.result;
 
-  const unfiledQueue = await readUnfiledResponseContext(origin, companySlug,
-    { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) });
+  // The backend owns which response DTOs may carry live context. Polls,
+  // proposal snapshots and unrelated receipts must keep their existing ABI.
+  const responseTool = operation === "native_read" ? String(rawInput?.nativeTool || "").trim()
+    : operation === "get_task" ? "get_task" : operation === "fetch" ? "fetch"
+      : operation === "list" && rawInput?.resource === "workspaces" ? "list_workspaces" : null;
+  const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(responseTool)
+    ? await readUnfiledResponseContext(origin, companySlug,
+        { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
   const liveMirror = mirror => unfiledQueue ? { ...mirror, unfiledQueue } : mirror;
   const liveResult = result => unfiledQueue && result && typeof result === "object"
     ? { ...result, unfiledQueue } : result;
@@ -8291,13 +8298,9 @@ export const handleTrelioLocalContextOperation = async (
           signal,
         })
       : ready.mirror;
-    return listCompanyContextMirror(
-      listMirror,
-      rawInput?.resource,
-      rawInput?.offset,
-      rawInput?.limit,
-      rawInput?.projectSlug,
-    );
+    return liveResult(listCompanyContextMirror(
+      listMirror, rawInput?.resource, rawInput?.offset, rawInput?.limit, rawInput?.projectSlug,
+    ));
   }
   if (operation === "get_task") {
     const projectSlug = normalizeBoundedString(rawInput?.projectSlug, "projectSlug", 120);
