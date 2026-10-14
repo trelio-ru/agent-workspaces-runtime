@@ -5164,7 +5164,35 @@ const LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE = 4;
 // generated policy; neither assumes that a raw Markdown byte is a wire byte.
 const fitsLocalTaskReadResult = (payload) => fitsMcpTaskReadResult(buildLocalTaskReadToolResult(payload));
 
-const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
+/**
+ * Local exact reads own their decrypted result, so the native backend cannot
+ * append its title reminder to this envelope. Apply the same delivery contract
+ * to inline reads and the final verified page without duplicating a task title
+ * or moving decrypted content back to the server. All other pages remain silent.
+ *
+ * This is a reminder, not an automatic rename: only the model/host knows the
+ * selected subject and whether the user named, forked or delegated the chat.
+ * The page branch is reached only after live scope/catalog checks below; the
+ * model still has to assemble and verify every authority layer before acting.
+ */
+const withLocalTaskTitleReminder = (payload, taskReads) => {
+  const finalPage = ["instruction_page", "instruction_page_batch"].includes(payload.responseKind)
+    && payload.nextPageIndex === null;
+  if ((!finalPage && payload.effectiveInstructions?.status !== "loaded")
+    || taskReads.length !== 1
+    || typeof taskReads[0]?.task.title !== "string"
+    || !taskReads[0].task.title.trim()) return payload;
+  const prefix = finalPage
+    ? "Codex only: after assembling and verifying every instruction page, "
+    : "Codex only: ";
+  return {
+    ...payload,
+    codexThreadTitleReminder: prefix
+      + "if this task is the selected subject of a new top-level chat not named by the user, call codex_app__set_thread_title once with tasks[0].task.title (omit Trelio and identifiers). Skip existing, forked or delegated chats and unavailable tools.",
+  };
+};
+
+const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1, finalizePage = (page) => page) => {
   if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > LOCAL_TASK_INSTRUCTION_MAX_PAGE_SIZE) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "pageSize must be an integer from 1 to 4.");
   }
@@ -5172,23 +5200,26 @@ const selectLocalTaskInstructionPage = (pages, pageIndex, pageSize = 1) => {
   // Index/revision/ACL уже проверены вызывающим exact read. Legacy формат
   // сохраняется, чтобы старый клиент продолжал собирать те же 4-КиБ части.
   if (pageSize === 1) {
-    if (!fitsLocalTaskReadResult(first)) {
+    const result = finalizePage(first);
+    if (!fitsLocalTaskReadResult(result)) {
       throw new TrelioLocalContextError("LOCAL_CONTEXT_RESULT_TOO_LARGE",
         "Instruction part exceeds the safe result size; narrow the exact task batch or reduce the instruction size.");
     }
-    return first;
+    return result;
   }
   let batch;
   for (const page of pages.slice(pageIndex, pageIndex + pageSize)) {
     const { part, ...metadata } = page;
-    const candidate = {
+    const candidate = finalizePage({
       ...metadata,
       responseKind: "instruction_page_batch",
       pageIndex,
       parts: [...(batch?.parts ?? []), part],
-    };
+    });
     // The last INCLUDED part owns the cursor and final cache keys. Test its
-    // complete transport envelope before advancing, including pageSize=1 above.
+    // complete transport envelope before advancing, including the final-page
+    // reminder and pageSize=1 above. Appending it after selection could make a
+    // previously fitting final batch exceed the model's delivery budget.
     if (!fitsLocalTaskReadResult(candidate)) break;
     batch = candidate;
   }
@@ -5342,9 +5373,15 @@ const buildLocalExactTaskRead = (
     connections: record.payload?.connections ?? {},
     relatedWorkspaces: record.payload?.relatedWorkspaces ?? [],
   }));
+  // Budget the actual returned envelope. The loaded-title reminder can itself
+  // move a borderline inline result into paged delivery; a manifest never has it.
+  const buildResult = (catalog) => withLocalTaskTitleReminder({
+    effectiveInstructions: catalog,
+    tasks: taskReads,
+  }, taskReads);
   const delivery = instructionsLoaded
     ? buildLocalTaskInstructionDelivery(effectiveInstructions,
-        (catalog) => fitsLocalTaskReadResult({ effectiveInstructions: catalog, tasks: taskReads }))
+        (catalog) => fitsLocalTaskReadResult(buildResult(catalog)))
     : { catalog: effectiveInstructions, pages: [] };
   if (pageRequest) {
     if (!instructionsLoaded || delivery.pages.length === 0) {
@@ -5364,12 +5401,10 @@ const buildLocalExactTaskRead = (
         "The instruction catalog or page index changed. Restart the exact task read.",
       );
     }
-    return selectLocalTaskInstructionPage(delivery.pages, pageRequest.pageIndex, pageRequest.pageSize);
+    return selectLocalTaskInstructionPage(delivery.pages, pageRequest.pageIndex, pageRequest.pageSize,
+      (selectedPage) => withLocalTaskTitleReminder(selectedPage, taskReads));
   }
-  const result = {
-    effectiveInstructions: delivery.catalog,
-    tasks: taskReads,
-  };
+  const result = buildResult(delivery.catalog);
   if (!fitsLocalTaskReadResult(result)) {
     throw new TrelioLocalContextError(
       "LOCAL_CONTEXT_RESULT_TOO_LARGE",

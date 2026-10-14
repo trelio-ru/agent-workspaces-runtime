@@ -202,6 +202,11 @@ publication tooling также остаются вне этого публичн
   backend `shared/task-read-budget.ts`; его копию вручную не менять.
   Native/local bounds и continuation проверять
   по [контракту exact read](docs/agent-workspace-runtime.md).
+- Exact task read сохраняет native `codexThreadTitleReminder` только после
+  полной authority для одной задачи с человеческим названием; при пагинации –
+  на последней реально включённой странице. Подсказка входит в envelope budget
+  до выбора inline/batch и не запускает rename из runtime. Границы и роль модели –
+  [контракт exact read](docs/agent-workspace-runtime.md#выбор-scope).
 - Файловый поиск использует generated `trelio-workspace-text-chunks.mjs` из backend
   pure module. Проверяй native/local parity, большие файлы, границы UTF-8/слов,
   crypto binding и очистку staging по [контракту](docs/agent-workspace-runtime.md).
