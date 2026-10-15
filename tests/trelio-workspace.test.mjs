@@ -4258,13 +4258,22 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
   }
 });
 
-test("bridge finish accepts a clean non-empty candidate saved by draft checkpoint", {
-  timeout: 15_000,
+for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accepted_dirty", "accepted_identity_changed", "lost_checkpoint", "changed_input", "changed_draft", "read_denied"]) test(
+  `bridge finish recovers saved handoff: ${recovery}`, {
+  timeout: 30_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-finish-saved-draft-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
   const runDirectory = path.join(temporaryDirectory, "run");
   const workspaceDirectory = path.join(runDirectory, "workspace");
+  const fixtureEnv = { ...process.env, HOME: homeDirectory, USERPROFILE: homeDirectory,
+    XDG_CONFIG_HOME: path.join(homeDirectory, ".config"), LOCALAPPDATA: path.join(homeDirectory, "AppData", "Local"),
+    CODEX_HOME: path.join(homeDirectory, ".codex"), TRELIO_CONFIG_HOME: path.join(homeDirectory, "trelio"),
+    TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" };
+  let baseHead, draftHead, latestCheckpoint = null;
+  const interrupted = recovery !== "clean";
+  let serverAccepted = false, serverCandidateHead = null, denyRecoveryRead = recovery === "read_denied";
+  let handoffAttempts = 0;
   let handoffPayload = null;
   let candidateAttempts = 0;
   let heartbeatAttempts = 0;
@@ -4283,22 +4292,64 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
         return;
       }
 
+      if (request.method === "GET" && request.url?.endsWith(`/runs/${runId}`)) {
+        if (denyRecoveryRead) {
+          response.writeHead(403, { "content-type": "application/json" });
+          response.end(JSON.stringify({ code: "ACCESS_DENIED", message: "Synthetic denied recovery read" }));
+          return;
+        }
+        if (recovery === "accepted_identity_changed") {
+          // Simulate another open replacing this local binding while the old
+          // Run's exact read is in flight. Its receipt must not erase the new
+          // identity or a fresh metadata field written by that other process.
+          const metadataPath = path.join(runDirectory, ".trelio-run.json");
+          const fresh = JSON.parse(await readFile(metadataPath, "utf8"));
+          await writeFile(metadataPath, JSON.stringify({ ...fresh,
+            runId: "77777777-7777-4777-8777-777777777777", replacementCanary: true }), "utf8");
+        }
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ run: { id: runId, workspaceId: "44444444-4444-4444-8444-444444444444",
+          status: serverAccepted ? "accepted" : "running", baseHead, draftHead,
+          candidateHead: serverCandidateHead, acceptedAt: serverAccepted ? new Date().toISOString() : null,
+          leaseId: "55555555-5555-4555-8555-555555555555", fencingToken: 7 }, latestCheckpoint }));
+        return;
+      }
+
       if (request.url?.endsWith("/checkpoints")) {
+        handoffAttempts += 1;
         handoffPayload = JSON.parse(body.toString("utf8"));
         assert.equal(handoffPayload.checkpointType, "handoff");
         assert.deepEqual(handoffPayload.filesChanged, ["artifacts/result.md"]);
+        latestCheckpoint = { id: "99999999-9999-4999-8999-999999999999", runId,
+          checkpointType: "handoff", candidateHead: draftHead, summary: handoffPayload.summary,
+          evidenceJson: handoffPayload.evidence ?? [], filesChangedJson: handoffPayload.filesChanged ?? [],
+          openQuestionsJson: handoffPayload.openQuestions ?? [], nextActionJson: handoffPayload.nextAction ?? null,
+          createdAt: new Date().toISOString() };
+        if (recovery === "lost_checkpoint" && handoffAttempts === 1) {
+          // The record exists, but its response never reaches this process.
+          request.socket.destroy();
+          return;
+        }
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify({
-          id: "99999999-9999-4999-8999-999999999999",
-          checkpointType: "handoff",
-          createdAt: new Date().toISOString(),
-        }));
+        response.end(JSON.stringify(latestCheckpoint));
         return;
       }
 
       if (request.url?.endsWith("/candidate")) {
         candidateAttempts += 1;
         assert.ok(body.byteLength > 0, "saved draft candidate bundle must reach the server");
+        if (interrupted && recovery !== "lost_checkpoint" && candidateAttempts === 1) {
+          // The handoff was committed already. A later connection loss must
+          // not make a new bridge process append the same immutable record.
+          if (["after_acceptance", "accepted_dirty", "accepted_identity_changed"].includes(recovery)) {
+            serverAccepted = true;
+            serverCandidateHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+          }
+          request.socket.destroy();
+          return;
+        }
+        serverAccepted = true;
+        serverCandidateHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({
           run: { status: "accepted" },
@@ -4327,7 +4378,7 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
     await writeFile(path.join(workspaceDirectory, "README.md"), "# Base\n", "utf8");
     await runGit(workspaceDirectory, ["add", "README.md"]);
     await runGit(workspaceDirectory, ["commit", "-m", "Base"]);
-    const baseHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+    baseHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
 
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -4376,7 +4427,7 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
           cwd: workspaceDirectory,
           encoding: "utf8",
           timeout: 8_000,
-          env: { ...process.env, HOME: homeDirectory },
+          env: fixtureEnv,
         },
       ),
       /В workspace нет изменений для finish/u,
@@ -4391,7 +4442,7 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
     );
     await runGit(workspaceDirectory, ["add", "artifacts/result.md"]);
     await runGit(workspaceDirectory, ["commit", "-m", "Сохранить draft checkpoint"]);
-    const draftHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+    draftHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
     assert.notEqual(draftHead, baseHead);
     assert.equal(
       (await runGit(workspaceDirectory, ["status", "--short"])).stdout,
@@ -4409,32 +4460,74 @@ test("bridge finish accepts a clean non-empty candidate saved by draft checkpoin
       "utf8",
     );
 
-    const finished = await execFileAsync(
-      process.execPath,
-      [
-        bridgePath,
-        "finish",
-        "--summary",
-        "Завершён уже сохранённый переносимый draft без искусственной правки.",
-        "--evidence",
-        "Проверен полный candidate delta относительно pinned base.",
-        "--next-action",
-        "Используйте принятый итоговый материал.",
-      ],
-      {
-        cwd: workspaceDirectory,
-        encoding: "utf8",
-        timeout: 8_000,
-        env: { ...process.env, HOME: homeDirectory },
-      },
-    );
+    const finishArguments = [bridgePath, "finish", "--summary",
+      "Завершён уже сохранённый переносимый draft без искусственной правки.", "--evidence",
+      "Проверен полный candidate delta относительно pinned base.", "--next-action",
+      "Используйте принятый итоговый материал."];
+    const finishOptions = { cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: fixtureEnv };
+    if (interrupted) {
+      await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), (error) => {
+        assert.match(error.stderr, /TRELIO_BRIDGE_TRANSPORT_FAILED/u);
+        return true;
+      });
+      assert.equal(handoffAttempts, 1);
+      if (recovery === "accepted_identity_changed") {
+        await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), /Agent Run изменился во время восстановления finish/u);
+        const replacement = JSON.parse(await readFile(metadataPath, "utf8"));
+        assert.equal(replacement.runId, "77777777-7777-4777-8777-777777777777");
+        assert.equal(replacement.replacementCanary, true);
+        assert.notEqual(replacement.terminalStatus, "accepted");
+        assert.equal(handoffAttempts, 1);
+        assert.equal(candidateAttempts, 1);
+        assert.equal(heartbeatAttempts, 3);
+        assert.ifError(serverError);
+        return;
+      }
+      if (recovery === "accepted_dirty") {
+        await writeFile(path.join(workspaceDirectory, "artifacts", "result.md"), "User edit after the lost acceptance response\n", "utf8");
+        await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), /локальные файлы отличаются/u);
+        assert.equal(candidateAttempts, 1);
+        assert.equal(handoffAttempts, 1);
+        assert.equal(heartbeatAttempts, 3);
+        const pending = JSON.parse(await readFile(metadataPath, "utf8"));
+        assert.notEqual(pending.terminalStatus, "accepted");
+        assert.ok(pending.finishRecovery, "dirty recovery stays pending and preserves the user edit");
+        assert.match(await readFile(path.join(workspaceDirectory, "artifacts", "result.md"), "utf8"), /User edit/u);
+        assert.ifError(serverError);
+        return;
+      }
+      if (recovery === "changed_input") {
+        finishArguments[3] = "Уточнённый итог требует нового handoff после предыдущей попытки.";
+      }
+      if (recovery === "changed_draft") {
+        draftHead = (await runGit(workspaceDirectory, ["rev-parse", "HEAD"])).stdout.trim();
+        const persisted = JSON.parse(await readFile(metadataPath, "utf8"));
+        await writeFile(metadataPath, JSON.stringify({ ...persisted, draftHead }), "utf8");
+      }
+      if (recovery === "read_denied") {
+        await assert.rejects(execFileAsync(process.execPath, finishArguments, finishOptions), /403/u);
+        assert.equal(handoffAttempts, 1, "a denied read must not authorize another checkpoint");
+        assert.equal(candidateAttempts, 1, "a denied read must not replay candidate upload");
+        denyRecoveryRead = false;
+      }
+    }
+    const finished = await execFileAsync(process.execPath, finishArguments, finishOptions);
 
-    assert.match(finished.stdout, /Проверены изменённые пути \(1\):/u);
-    assert.match(finished.stdout, /- artifacts\/result\.md/u);
-    assert.match(finished.stdout, /Статус: принят автоматически/u);
+    if (recovery === "after_acceptance") {
+      assert.match(finished.stdout, /Run уже принят; повторная загрузка не требуется/u);
+    } else {
+      assert.match(finished.stdout, /Проверены изменённые пути \(1\):/u);
+      assert.match(finished.stdout, /- artifacts\/result\.md/u);
+      assert.match(finished.stdout, /Статус: принят автоматически/u);
+    }
     assert.deepEqual(handoffPayload?.filesChanged, ["artifacts/result.md"]);
-    assert.equal(candidateAttempts, 1);
-    assert.equal(heartbeatAttempts, 3);
+    assert.equal(handoffAttempts, ["changed_input", "changed_draft"].includes(recovery) ? 2 : 1,
+      "reuse only the exact live handoff, preserving changed semantic input/draft");
+    assert.equal(candidateAttempts, ["before_acceptance", "changed_input", "changed_draft", "read_denied"].includes(recovery) ? 2 : 1);
+    assert.equal(heartbeatAttempts, recovery === "clean" || recovery === "after_acceptance" ? 3 : recovery === "lost_checkpoint" ? 4 : 6);
+    const receipt = JSON.parse(await readFile(metadataPath, "utf8"));
+    assert.equal(receipt.terminalStatus, "accepted");
+    assert.equal(receipt.finishRecovery, undefined, "confirmed acceptance retires the local recovery marker");
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));

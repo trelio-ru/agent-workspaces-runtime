@@ -27,6 +27,7 @@ import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./tre
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError } from "./trelio-skill-accounts.mjs";
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
+import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -13394,7 +13395,7 @@ export const protectAgentWorkspaceCheckpoint = async ({
   };
 };
 
-const checkpoint = async (options, nativeInput = null) => withRun(async ({
+const checkpoint = async (options, nativeInput = null, { finishSnapshot = null, finishing = false } = {}) => withRun(async ({
   metadata,
   metadataPath,
   origin,
@@ -13470,6 +13471,24 @@ const checkpoint = async (options, nativeInput = null) => withRun(async ({
     openQuestions,
   });
 
+  if (finishing && checkpointType === "handoff") {
+    const requested = {
+      summary, evidence, filesChanged, openQuestions,
+      nextAction: nativeInput?.nextAction || nextActionInstruction || taskOutcome
+        ? { ...(nativeInput ? nativeInput.nextAction ?? {} : nextActionInstruction ? { instruction: nextActionInstruction } : {}),
+          ...(taskOutcome ? { taskOutcome } : {}) }
+        : null,
+    };
+    const retained = reusableFinishHandoff({ metadata, snapshot: finishSnapshot, requested });
+    if (retained) {
+      // The fresh exact read proved this immutable record already exists.
+      // Do not encrypt/upload a second payload or append another handoff;
+      // submission below still performs its normal validation and head CAS.
+      process.stdout.write(`Handoff уже сохранён: ${retained.id}.\n`);
+      return;
+    }
+  }
+
   if (checkpointType === "handoff") {
     const runAuthor = await resolveAgentWorkspaceRunAuthor({
       metadata,
@@ -13519,6 +13538,15 @@ const checkpoint = async (options, nativeInput = null) => withRun(async ({
         )),
       })
     : null;
+  if (finishing && checkpointType === "handoff") {
+    // Worklog preparation may have updated metadata. Merge into that exact
+    // file rather than restoring the stale pre-worklog automatic path.
+    const current = await readOptionalRunMetadata(path.dirname(metadataPath));
+    if (!current || current.runId !== metadata.runId || current.workspaceId !== metadata.workspaceId) {
+      throw new Error("Локальный Agent Run изменился перед сохранением handoff.");
+    }
+    await writeRunMetadata(metadataPath, { ...current, finishRecovery: createFinishRecoveryMarker(metadata) });
+  }
   const protectedContent = companyEncryption
     ? await protectAgentWorkspaceCheckpoint({
         metadata,
@@ -13787,6 +13815,19 @@ const finish = async (options) => {
   // reconciles the retained immutable cache before the next mutation.
   return withWorkspaceFinishLock(runId, async () => {
     const current = (await findRunMetadata()).metadata;
+    if (current.runId !== runId) {
+      throw new Error("Локальный Agent Run изменился перед восстановлением finish.");
+    }
+    // An open/recovery in another process can replace the selected folder's
+    // metadata while the exact network read is pending. Never turn the old
+    // Run's acceptance into a terminal receipt for that replacement Run.
+    const assertFinishRunIdentity = (actual) => {
+      if (!actual || actual.runId !== current.runId || actual.workspaceId !== current.workspaceId
+        || actual.baseHead !== current.baseHead || actual.leaseId !== current.leaseId
+        || actual.fencingToken !== current.fencingToken) {
+        throw new Error("Локальный Agent Run изменился во время восстановления finish.");
+      }
+    };
     if (current.terminalStatus === "accepted") {
       // A receipt is valid for the accepted tree only. Edits made afterwards
       // need a new Run; never present them as saved by this idempotent shortcut.
@@ -13798,6 +13839,38 @@ const finish = async (options) => {
       process.stdout.write("Run уже принят; повторная загрузка не требуется.\n");
       return;
     }
+    let finishSnapshot = null;
+    if (hasFinishRecoveryMarker(current)) {
+      // A prior finish may have stored its handoff or even accepted a candidate
+      // before its response disappeared. Read, hydrate and bind the exact Run;
+      // a transport failure here stops recovery without replaying any write.
+      finishSnapshot = await withRun(async (context) => {
+        assertFinishRunIdentity(context.metadata);
+        const snapshot = await loadExactWorkspaceRun({
+          origin: context.workspaceOrigin, token: context.token,
+          workspaceId: current.workspaceId, runId: current.runId,
+          companyEncryption: context.companyEncryption,
+        });
+        if (snapshot.run.status === "accepted") {
+          const head = await runGit(["rev-parse", "HEAD"], { cwd: current.workspaceDirectory });
+          if (snapshot.run.baseHead !== current.baseHead || !snapshot.run.candidateHead
+            || head.stdout.trim() !== snapshot.run.candidateHead
+            || await getGitStatus(current.workspaceDirectory, current.objects || [])) {
+            throw new Error("Run уже принят, но локальные файлы отличаются от принятой revision. Проверьте результат перед новым сохранением.");
+          }
+          const freshMetadata = await readOptionalRunMetadata(path.dirname(context.metadataPath));
+          assertFinishRunIdentity(freshMetadata);
+          await writeRunMetadata(context.metadataPath, { ...freshMetadata,
+            candidateHead: snapshot.run.candidateHead, terminalStatus: "accepted",
+            terminalAt: snapshot.run.acceptedAt || new Date().toISOString(), finishRecovery: undefined });
+        }
+        return snapshot;
+      });
+      if (finishSnapshot.run.status === "accepted") {
+        process.stdout.write("Run уже принят; повторная загрузка не требуется.\n");
+        return;
+      }
+    }
     finishProgressStage = "validating";
     try {
       reportFinishProgress("validating");
@@ -13805,7 +13878,7 @@ const finish = async (options) => {
       reportFinishProgress("heartbeat");
       await heartbeat();
       reportFinishProgress("checkpoint");
-      await checkpoint({ ...options, type: "handoff" });
+      await checkpoint({ ...options, type: "handoff" }, null, { finishing: true, finishSnapshot });
       reportFinishProgress("preparing");
       await submit(options);
       reportFinishProgress("cleanup");
@@ -15101,6 +15174,7 @@ const submit = async (options) => withRun(async ({
       schemaVersion: 3,
       candidateHead: head,
       terminalStatus: "accepted",
+      finishRecovery: undefined,
       terminalAt: result.run.acceptedAt || new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
       cleanupEligibleAfterDays: (await readLocalSettings()).workspaceRetentionDays,
@@ -15161,6 +15235,7 @@ const submit = async (options) => withRun(async ({
         schemaVersion: 3,
         candidateHead: head,
         terminalStatus: "accepted",
+        finishRecovery: undefined,
         terminalAt: result.run.acceptedAt || new Date().toISOString(),
         lastUsedAt: new Date().toISOString(),
         cleanupEligibleAfterDays: (await readLocalSettings()).workspaceRetentionDays,

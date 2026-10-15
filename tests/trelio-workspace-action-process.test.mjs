@@ -78,6 +78,7 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
   }) + "\\n");
   process.exitCode = 7;
 } else if (process.env.TRELIO_TEST_TRANSPORT_FAILURE === "1") {
+  if (process.env.TRELIO_TEST_TRANSPORT_STYLE === "prefix") process.stderr.write("PRIVATE_CANARY warning before bridge failure\\n");
   process.stderr.write("Ошибка: " + JSON.stringify({
     code: "TRELIO_BRIDGE_TRANSPORT_FAILED",
     message: "Trelio bridge transport failed before an HTTP response.",
@@ -87,6 +88,7 @@ if (process.env.TRELIO_TEST_LAYOUT_FAILURE === "1") {
       privateExtra: "private-proxy.example/secret-token",
     },
   }) + "\\n");
+  if (process.env.TRELIO_TEST_TRANSPORT_STYLE === "suffix") process.stderr.write("Legacy failure after a frame\\n");
   process.exitCode = 7;
 } else if (process.env.TRELIO_TEST_HTTP_STATUS) {
   process.stderr.write("PRIVATE_CANARY provider stderr\\n");
@@ -186,7 +188,7 @@ const createFixture = async (t) => {
   const hostPath = path.join(root, "host.mjs");
   const executionsPath = path.join(root, "executions.log");
   await fs.writeFile(hostPath, hostProbe);
-  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", httpStatus = "", httpCode = "", ...options } = {}) => {
+  const run = async ({ childFailure = false, layoutFailure = false, activeRunFailure = false, transportFailure = false, transportStyle = "", runtimeRecoveryFailure = false, providerFailure = "", innerExit = "", httpStatus = "", httpCode = "", ...options } = {}) => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       hostPath,
       JSON.stringify({ pluginDirectory, origin, action: skillAction, ...options }),
@@ -203,6 +205,7 @@ const createFixture = async (t) => {
         TRELIO_TEST_LAYOUT_FAILURE: layoutFailure ? "1" : "0",
         TRELIO_TEST_ACTIVE_RUN_FAILURE: activeRunFailure ? "1" : "0",
         TRELIO_TEST_TRANSPORT_FAILURE: transportFailure ? "1" : "0",
+        TRELIO_TEST_TRANSPORT_STYLE: transportStyle,
         TRELIO_TEST_RUNTIME_RECOVERY_FAILURE: runtimeRecoveryFailure ? "1" : "0",
         TRELIO_TEST_LAYOUT_ROOT: workspaceDirectory,
         TRELIO_TEST_WORKSPACE_ID: workspaceId,
@@ -370,6 +373,22 @@ test("Workspace bridge forwards only sanitized transport diagnostics without rep
     causeCode: "UND_ERR_CONNECT_TIMEOUT",
   });
   assert.doesNotMatch(JSON.stringify(outcome.error), /private-proxy|secret-token/u);
+  assert.equal(outcome.executions, "started\n");
+});
+
+test("Workspace bridge preserves the final transport frame after earlier stderr", async (t) => {
+  const fixture = await createFixture(t);
+  const outcome = await fixture.run({ transportFailure: true, transportStyle: "prefix" });
+  assert.equal(outcome.error?.code, "TRELIO_BRIDGE_TRANSPORT_FAILED");
+  assert.equal(outcome.error.details.causeCode, "UND_ERR_CONNECT_TIMEOUT");
+  assert.doesNotMatch(JSON.stringify(outcome.error), /PRIVATE_CANARY|private-proxy|secret-token/u);
+  assert.equal(outcome.executions, "started\n");
+});
+
+test("Workspace bridge rejects an earlier transport frame followed by a different failure", async (t) => {
+  const fixture = await createFixture(t);
+  const outcome = await fixture.run({ transportFailure: true, transportStyle: "suffix" });
+  assert.equal(outcome.error?.code, "TRELIO_WORKSPACE_ACTION_FAILED");
   assert.equal(outcome.executions, "started\n");
 });
 

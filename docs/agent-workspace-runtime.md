@@ -1084,6 +1084,23 @@ Local MCP ждёт `finish` не более 10 секунд за вызов. Е�
 immutable encrypted cache и upload/publication read-back сохраняют прежние
 UUID/подписи и пропускают готовые части.
 
+Перед handoff bridge сохраняет в owner-only Run metadata structural
+`finishRecovery={schemaVersion:1,workspaceId,runId}` без текста, plaintext hash,
+ключей либо нового server state. Следующий явный `finish` читает exact Run
+и latest checkpoint через прежний ACL-checked endpoint. Совпадение Run/base,
+lease/fence, current draft/checkpoint head и всего decrypted handoff payload
+разрешает использовать существующий immutable handoff без новой записи и
+повторного encryption upload. Changed intent, files, outcome или draft получают
+обычную новую запись; этот механизм не меняет явные checkpoint-команды.
+В encrypted-компании сравнение выполняется только после локальной hydration.
+Ошибка read-back прекращает recovery без mutation replay.
+
+Если сервер уже принял candidate, bridge восстанавливает local receipt только
+при exact совпадении base, candidate head и чистого локального дерева. Изменения
+после acceptance сохраняются и блокируют такой shortcut. Подтверждённая
+acceptance удаляет structural marker. Backend schema, CAS, lease, storage
+protocol и запрет автоматического повтора неоднозначной mutation сохраняются.
+
 Child передаёт allowlisted progress frames сразу: validation, heartbeat,
 checkpoint, preparation, derived/projection/revision/publication, retry wait и
 acceptance. В progress нет paths, имён, текста файлов, credentials или raw
@@ -1487,6 +1504,9 @@ Local MCP не заменяет типизированный отказ общи
 code-shaped поле нетипизированной внешней ошибки не принимается как authority.
 Сериализация не повторяет ни чтение, ни mutation и не сбрасывает credentials.
 Telemetry использует уже опубликованный закрытый код, без details.
+Child parser читает только последний complete `Ошибка: {...}` frame до 8 KiB
+при stderr до 64 KiB UTF-8. Предшествующие warnings не скрывают transport code;
+посторонний текст после frame, malformed и oversized frame его не подтверждают.
 
 ### HTTP-отказ через дочерний bridge
 

@@ -127,6 +127,8 @@ publication tooling также остаются вне этого публичн
 - Долгий `finish` возвращает bounded operation/poll по [контракту](docs/agent-workspace-runtime.md#finish-progress).
   Повтор не создаёт второго writer; прогресс содержит только стадии/счётчики,
   а timeout ожидания не означает принятия candidate или отмены сохранения.
+  После прерванного finish exact read-back переиспользует только совпавший
+  handoff; lost acceptance восстанавливается лишь при совпадении clean tree/head.
 - Сохранение после 429, immutable upload streams и совместимость старого backend
   проверяй по [transport-контракту](docs/agent-workspace-runtime.md#saving-rate-limit-retry).
 - Универсальный импорт использует [локальный transport](docs/agent-workspace-runtime.md#универсальный-импорт-данных):

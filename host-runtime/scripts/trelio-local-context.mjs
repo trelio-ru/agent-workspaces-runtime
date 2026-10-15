@@ -9922,9 +9922,12 @@ export const workspaceActionFailureCode = (error, operation) => {
 };
 
 const parseBridgeTransportError = (stderr, operation) => {
-  if (typeof stderr !== "string" || stderr.length > 64 * 1024) return null;
-  const text = stderr.trim();
-  if (!text.startsWith("Ошибка: {")) return null;
+  if (typeof stderr !== "string" || Buffer.byteLength(stderr, "utf8") > 64 * 1024) return null;
+  // Node or an earlier preparation step may have written stderr already. Only
+  // the final bounded bridge frame is authoritative; an earlier lookalike
+  // followed by another failure cannot manufacture a transport diagnosis.
+  const text = stderr.trimEnd().split("\n").at(-1);
+  if (!text.startsWith("Ошибка: {") || Buffer.byteLength(text, "utf8") > 8 * 1024) return null;
   let payload;
   try { payload = JSON.parse(text.slice("Ошибка: ".length)); }
   catch { return null; }

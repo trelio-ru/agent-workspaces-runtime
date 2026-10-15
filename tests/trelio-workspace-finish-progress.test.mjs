@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createFinishProgressParser, createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "../host-runtime/scripts/trelio-workspace-finish-progress.mjs";
 import { handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "../host-runtime/scripts/trelio-workspace-finish-recovery.mjs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -150,4 +151,44 @@ test("a new Run in the same directory cannot receive a previous Run's receipt", 
   const second = await manager.start({ ...input, scope: "run-b" });
   assert.notEqual(first.operationId, second.operationId);
   assert.equal(second.stdout, "receipt-2");
+});
+
+
+test("handoff recovery compares the exact decrypted intent, Run, lease and draft", () => {
+  const metadata = { workspaceId: "11111111-1111-4111-8111-111111111111", runId: "22222222-2222-4222-8222-222222222222",
+    baseHead: "a".repeat(40), draftHead: "b".repeat(40), leaseId: "33333333-3333-4333-8333-333333333333", fencingToken: 7 };
+  metadata.finishRecovery = createFinishRecoveryMarker(metadata);
+  const requested = { summary: "Prepared result", evidence: [{ check: "passed", count: 2 }],
+    filesChanged: ["result.md"], openQuestions: [], nextAction: { instruction: "Review", taskOutcome: "no_status_change" } };
+  const checkpoint = { id: "44444444-4444-4444-8444-444444444444", runId: metadata.runId,
+    checkpointType: "handoff", candidateHead: metadata.draftHead, summary: requested.summary,
+    evidenceJson: [{ count: 2, check: "passed" }], filesChangedJson: [...requested.filesChanged],
+    openQuestionsJson: [], nextActionJson: { taskOutcome: "no_status_change", instruction: "Review" } };
+  const snapshot = { run: { ...metadata, id: metadata.runId, status: "running" }, latestCheckpoint: checkpoint };
+  assert.equal(reusableFinishHandoff({ metadata, snapshot, requested }), checkpoint, "object key order is not semantic");
+  for (const mutate of [
+    (x) => { delete x.metadata.finishRecovery; },
+    (x) => { x.metadata.finishRecovery.runId = "55555555-5555-4555-8555-555555555555"; },
+    (x) => { x.snapshot.run.workspaceId = "55555555-5555-4555-8555-555555555555"; },
+    (x) => { x.snapshot.run.baseHead = "c".repeat(40); },
+    (x) => { x.snapshot.run.draftHead = "c".repeat(40); },
+    (x) => { x.snapshot.run.fencingToken += 1; },
+    (x) => { x.snapshot.run.leaseId = "55555555-5555-4555-8555-555555555555"; },
+    (x) => { x.snapshot.run.status = "accepted"; },
+    (x) => { x.snapshot.latestCheckpoint = null; },
+    (x) => { x.snapshot.latestCheckpoint.runId = "55555555-5555-4555-8555-555555555555"; },
+    (x) => { x.snapshot.latestCheckpoint.candidateHead = "c".repeat(40); },
+    (x) => { x.snapshot.latestCheckpoint.checkpointType = "draft"; },
+    (x) => { x.snapshot.latestCheckpoint.summary = "TRELIOE1:opaque-marker"; },
+    (x) => { x.requested.summary = "Changed result"; },
+    (x) => { x.requested.evidence.push("New check"); },
+    (x) => { x.requested.filesChanged.push("another.md"); },
+    (x) => { x.requested.openQuestions.push("Unresolved"); },
+    (x) => { x.requested.nextAction.taskOutcome = "work_completed"; },
+  ]) {
+    const input = structuredClone({ metadata, snapshot, requested });
+    mutate(input);
+    assert.equal(reusableFinishHandoff(input), null);
+  }
+  assert.equal(hasFinishRecoveryMarker({ ...metadata, runId: "55555555-5555-4555-8555-555555555555" }), false);
 });
