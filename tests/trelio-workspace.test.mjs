@@ -4387,7 +4387,15 @@ for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accep
     const serverAddress = server.address();
     assert.ok(serverAddress && typeof serverAddress === "object");
     const origin = `http://127.0.0.1:${serverAddress.port}`;
-    await writeTestCredential(homeDirectory, origin);
+    // Use the same native config resolver/private writer as the bridge. A
+    // legacy HOME/.config credential on Windows would start auth migration
+    // instead of exercising the intended saving and recovery boundaries.
+    const credentialDirectory = resolveWorkspaceBridgeConfigDirectory({
+      environment: fixtureEnv, homeDirectory,
+    });
+    await writePrivateJsonFile(path.join(credentialDirectory, "credentials.json"), {
+      [origin]: { accessToken: "integration-token" },
+    });
     const metadataPath = path.join(runDirectory, ".trelio-run.json");
     const baseMetadata = {
       schemaVersion: 3,
