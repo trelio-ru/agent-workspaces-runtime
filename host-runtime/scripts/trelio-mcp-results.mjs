@@ -1,3 +1,4 @@
+import { enforceAgentSkillMcpBudget } from "./trelio-agent-skill-budget.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { projectMcpAgentPayload, deliverMcpStructuredText } from "./trelio-agent-response-projection.mjs";
 import fs from "node:fs/promises";
@@ -19,8 +20,9 @@ export const resolveLocalMcpTextCompatibility = async (environment = process.env
   }
 };
 
-export const deliverLocalMcpResult = (result, textCompatibility = false) =>
-  deliverMcpStructuredText(compactLocalMcpResult(result), textCompatibility);
+export const deliverLocalMcpResult = (result, textCompatibility = false, nativeTool = "") =>
+  enforceAgentSkillMcpBudget(nativeTool,
+    deliverMcpStructuredText(compactLocalMcpResult(result), textCompatibility));
 
 /**
  * Keep one model-visible copy of a structured result. The App still receives
@@ -69,7 +71,7 @@ export const compactLocalNativeMcpResult = (toolName, result, args = {}) => {
       && Object.keys(content[0]).every((key) => ["type", "text"].includes(key))) {
       content = [{ type: "text", text: "Текст файла и coverage находятся в structuredContent." }];
     }
-    return { ...compact, content, structuredContent: projectMcpAgentPayload(toolName, payload, args) };
+    return enforceAgentSkillMcpBudget(toolName, { ...compact, content, structuredContent: projectMcpAgentPayload(toolName, payload, args) });
   }
   // Read/search helpers исторически возвращают единственный JSON text block.
   // Сохраняем этот ABI, не создавая второй structuredContent и не разбирая
@@ -79,9 +81,9 @@ export const compactLocalNativeMcpResult = (toolName, result, args = {}) => {
   let payload;
   try { payload = JSON.parse(compact.content[0].text); } catch { return compact; }
   const projected = projectMcpAgentPayload(toolName, payload, args);
-  return projected === payload ? compact : {
+  return enforceAgentSkillMcpBudget(toolName, projected === payload ? compact : {
     ...compact, content: [{ type: "text", text: JSON.stringify(projected) }],
-  };
+  });
 };
 
 /** Каталог сохраняет выбор и policy; JSON schema читается для exact tool. */

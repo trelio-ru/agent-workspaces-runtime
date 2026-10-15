@@ -5453,3 +5453,12 @@ test("headless proposal continuation copies the reviewed preparation reference w
   assert.match(result.structuredContent.nextCall.instruction, /omit expected\*/);
   assert.equal(result._meta, undefined);
 });
+
+
+test("private skill planning rejects UTF-8 overflow before credentials or provider IO", async () => {
+  await assert.rejects(handleToolCall("https://example.invalid", "plan_company_private_agent_skill_create", {
+    companySlug: "sample", skillSlug: "synthetic", title: "Synthetic", description: "Synthetic",
+    instructionsMarkdown: "я".repeat(8193), searchTerms: ["synthetic"], summary: "First",
+    changeReason: "Test", executionKind: "markdown",
+  }), error => error.code === "AGENT_SKILL_INSTRUCTIONS_TOO_LARGE");
+});

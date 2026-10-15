@@ -299,6 +299,10 @@ publication tooling также остаются вне этого публичн
 - Default selection context/worklog вложений, прямой пользовательский exception
   и E2EE local selection – [контракт proposals](docs/agent-workspace-runtime.md).
   Pure policy генерируется из backend, вручную не дублируется.
+- Основная инструкция новой публикации ограничена 16 КиБ UTF-8 до encryption.
+  Полный `get_agent_skill` после hydration/projection и final text delivery
+  ограничен 40 000 байтами; превышение возвращает typed error без action и
+  без обрезки. Shared guard генерируется из backend, а не поддерживается копией.
 - Личный слой навыка в model projection сохраняется отдельно от signed base;
   lazy/reuse semantics проверяются в `tests/trelio-mcp-results.test.mjs`.
 

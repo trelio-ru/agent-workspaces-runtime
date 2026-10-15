@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload, resolveLocalMcpTextCompatibility } from "../host-runtime/scripts/trelio-mcp-results.mjs";
+import { compactLocalMcpResult, compactLocalNativeMcpResult, compactRemoteDoctorPayload, resolveLocalMcpTextCompatibility, deliverLocalMcpResult } from "../host-runtime/scripts/trelio-mcp-results.mjs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -560,4 +560,20 @@ test("provider doctor omits only unselected schemas, and exact read restores req
   assert.equal(exact.schemaSelection.found, true);
   assert.equal(compactRemoteDoctorPayload(payload, { ...args, schemaToolName: "unknown" }).schemaSelection.found, false);
   assert.equal(payload.tools[0].inputSchema.required[0], "sourceId", "Original doctor/credential validation result stays intact");
+});
+
+
+test("local skill guard measures complete hydrated and final text-compatible envelopes", () => {
+  const skill = { companySlug: "sample", skill: { id: "synthetic", version: "1.0.0", instructionsMarkdown: "a".repeat(23000) } };
+  const original = { structuredContent: skill, content: [{ type: "text", text: JSON.stringify(skill) }] };
+  const projected = compactLocalNativeMcpResult("get_agent_skill", original, { sections: ["instructions"] });
+  assert.equal(projected.isError, undefined);
+  assert.equal(deliverLocalMcpResult(projected, true, "get_agent_skill").structuredContent.code, "AGENT_SKILL_RESPONSE_TOO_LARGE");
+  const oversized = structuredClone(original);
+  oversized.structuredContent.skill.instructionsMarkdown = "я".repeat(28000);
+  oversized.content[0].text = JSON.stringify(oversized.structuredContent);
+  const result = compactLocalNativeMcpResult("get_agent_skill", oversized, { sections: ["instructions"] });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.code, "AGENT_SKILL_RESPONSE_TOO_LARGE");
+  assert.doesNotMatch(JSON.stringify(result), /instructionsMarkdown|localAction/);
 });

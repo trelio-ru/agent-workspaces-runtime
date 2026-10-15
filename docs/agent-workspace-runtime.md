@@ -2055,3 +2055,23 @@ Import specification теперь выдаёт готовый случайный
 остаётся обязательным выбором пользователя/агента; повтор передаёт тот же ключ
 и bytes, новая спецификация создаёт новый intent. Обычный upload reservation,
 authenticated read-back и отдельное подтверждение start не меняются.
+
+
+## Бюджет инструкций Agent Skill
+
+Canonical portable `agent-skill-budget.js` принадлежит backend. Его точная
+host-копия создаётся `scripts/build-agent-skill-budget.mjs --runtime-root ...`
+в product checkout. Private publication plan проверяет plaintext `trim` по
+16 384 байтам UTF-8 до token/credential IO и шифрования. Character ceiling
+в schema не заменяет проверку Cyrillic/emoji по bytes.
+
+`compactLocalNativeMcpResult` проверяет `get_agent_skill` после hydration и
+projection. Финальный `deliverLocalMcpResult` повторяет проверку после реальной
+JSON TextContent compatibility delivery; native tool берётся только из exact
+local continuation, а не из содержимого provider. Полный visible envelope,
+личный слой, future fields и JSON escaping входят в предел 40 000 байт.
+Hidden `_meta` не сериализуется. При overflow возвращается
+`AGENT_SKILL_RESPONSE_TOO_LARGE`, без текста инструкции и runtime action;
+исходный объект не меняется, auth/config не сбрасываются и действие не повторяется.
+Исторические releases не переписываются; новый publication limit не является
+основанием считать большой старый read успешно загруженной authority.

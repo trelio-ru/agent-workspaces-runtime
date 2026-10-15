@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { normalizeAgentSkillInstructions, AgentSkillInstructionBudgetError } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 
@@ -3048,11 +3049,9 @@ const readCompanyPrivateSkillAuthoringContract = async (
 const normalizeCommonPublicationInput = (rawInput) => ({
   companySlug: requireBoundedText(rawInput?.companySlug, "companySlug", 120),
   skillSlug: requireSkillSlug(rawInput?.skillSlug),
-  instructionsMarkdown: requireBoundedText(
-    rawInput?.instructionsMarkdown,
-    "instructionsMarkdown",
-    200_000,
-  ),
+  instructionsMarkdown: normalizeAgentSkillInstructions(requireBoundedText(
+    rawInput?.instructionsMarkdown, "instructionsMarkdown", 16_384,
+  )),
   searchTerms: normalizeSearchTerms(rawInput?.searchTerms),
   summary: requireBoundedText(rawInput?.summary, "summary", 2_000),
   changeReason: requireBoundedText(rawInput?.changeReason, "changeReason", 2_000),
@@ -3600,7 +3599,7 @@ const companySkillPlanCommonProperties = {
     maxLength: 60,
     pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$",
   },
-  instructionsMarkdown: { type: "string", minLength: 1, maxLength: 200000 },
+  instructionsMarkdown: { type: "string", minLength: 1, maxLength: 16384 },
   searchTerms: {
     type: "array",
     minItems: 1,
@@ -6336,6 +6335,7 @@ const safeErrorPayload = (error) => {
   if (error instanceof RuntimeProofPreparationError) return error.toJSON();
   return {
     code: error instanceof RemoteMcpHostError
+      || error instanceof AgentSkillInstructionBudgetError
       || error instanceof RemoteMcpOAuthError
       || error instanceof TrelioLocalContextError
       || error instanceof ProcessDiagnosticError
@@ -6464,7 +6464,9 @@ export const handleLocalMcpMessage = async (
       const result = deliverLocalMcpResult(await callTool(
           origin, String(message.params?.name || ""), message.params?.arguments,
           { signal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, requestClient, codexLegacyMcpMigration },
-      ), textCompatibility);
+      ), textCompatibility, message.params?.name === "continue_trelio_local_action"
+        ? message.params?.arguments?.parameters?.nativeTool ?? ""
+        : String(message.params?.name || ""));
       // Only the MCP envelope boolean is read, never provider text/details.
       try { recordDiagnostic?.(message.params?.name, message.params?.arguments, result?.isError === true ? "REMOTE_MCP_PROVIDER_ERROR" : "OK"); }
       catch { /* Keep original result. */ }
