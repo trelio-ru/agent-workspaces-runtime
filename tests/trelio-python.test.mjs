@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import {
   buildIsolatedPythonRuntimeArguments,
   buildPythonInvocationCandidates,
+  buildAgentSkillRuntimeEnvironment,
   resolveTrustedPythonInvocation,
   sanitizeAgentSkillInheritedEnvironment,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -147,6 +148,45 @@ test("Windows host runs a per-user Python in isolation and rejects forbidden or 
     }), { cwd: runtimeDirectory, env: sanitizeAgentSkillInheritedEnvironment(inheritedEnvironment), encoding: "utf8", timeout: 5_000 });
     assert.deepEqual(JSON.parse(stdout.trim()), ["signed-sibling-import", 1, 1]);
     assert.equal(await fs.stat(markerPath).catch(() => null), null);
+
+    // Use the actual public provider as a read-only cross-repository contract.
+    // A trivial Python version probe does not load the stdlib modules, inspect
+    // the legacy namespace or encode Russian labels used before Telegram login.
+    // All identities and roots here are disposable; no app identity, session,
+    // credentials, dependency installation or Telegram request is involved.
+    const providerRoot = process.env.TRELIO_AGENT_SKILLS_ROOT;
+    if (process.env.CI) assert.ok(providerRoot, "CI must provide the public provider contract");
+    if (providerRoot) {
+      const providerDirectory = path.join(providerRoot, "platform-skills", "telegram-mtproto", "scripts");
+      const configRoot = path.join(temporaryDirectory, "provider-config");
+      const companyId = "11111111-1111-4111-8111-111111111111";
+      const memberId = "22222222-2222-4222-8222-222222222222";
+      const connectionId = "33333333-3333-4333-8333-333333333333";
+      const environment = buildAgentSkillRuntimeEnvironment({
+        artifact: { skillId: "telegram-mtproto", runtimeVersion: "2.6.2", parsedPackage: { capabilities: ["local-session", "local-accounts-v1"] } },
+        runtimeDirectory: providerDirectory,
+        executionContext: { companyId, localIdentity: { memberId, connectionId }, companyConnection: { config: {} } },
+        inheritedEnvironment: { ...process.env, TRELIO_CONFIG_HOME: configRoot },
+      });
+      const importAccounts = async () => {
+        const result = await execFileAsync(invocation.executable, buildIsolatedPythonRuntimeArguments({
+          runtimeDirectory: providerDirectory,
+          entrypointPath: path.join(providerDirectory, "trelio-telegram.py"),
+          runtimeArguments: ["__trelio_accounts_import"],
+        }), { cwd: providerDirectory, env: environment, encoding: "utf8", timeout: 20_000 });
+        assert.equal(result.stderr, "");
+        return JSON.parse(result.stdout);
+      };
+      assert.deepEqual(await importAccounts(), { schemaVersion: 1, accounts: [] });
+      const legacyRoot = path.join(configRoot, "integrations", "telegram-mtproto", companyId, memberId, connectionId);
+      await fs.mkdir(legacyRoot, { recursive: true });
+      const imported = await importAccounts();
+      assert.equal(imported.accounts.length, 1);
+      assert.equal(imported.accounts[0].name, "Основной аккаунт");
+      assert.deepEqual(JSON.parse(imported.accounts[0].providerRef), {
+        company_id: companyId, member_id: memberId, connection_id: connectionId,
+      });
+    }
 
     // The same executable cannot become trusted just because its path matches
     // an installer layout while that directory is the active skill workspace.

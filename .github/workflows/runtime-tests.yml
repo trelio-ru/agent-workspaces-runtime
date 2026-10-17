@@ -14,6 +14,7 @@ permissions:
 
 env:
   TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT: ${{ github.workspace }}/_contracts/agent-workspaces/plugins/trelio-agent-workspaces
+  TRELIO_AGENT_SKILLS_ROOT: ${{ github.workspace }}/_contracts/agent-skills
 
 jobs:
   windows-private-build:
@@ -200,6 +201,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      # Pin the real public Telegram importer; it is test input only and never
+      # enters the generic host package or receives private provider credentials.
+      - name: Check out public account-import contract
+        uses: actions/checkout@v4
+        with:
+          repository: trelio-ru/agent-skills
+          ref: 620044d67eb3a74fafdc11a00bb023240c3e2259
+          path: _contracts/agent-skills
 
       - name: Run Windows encrypted mirror retention regressions
         run: node tests/trelio-mirror-retention.test.mjs
