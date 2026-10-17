@@ -2010,6 +2010,18 @@ device-wide email deduplicates across companies, но автоматически
 его в реестре импорта. Повторное чтение общего provider storage из другой
 компании не создаёт копию нового аккаунта и не включает его автоматически.
 
+`ACCOUNT_IMPORT_FAILED` сохраняет закрытую причину: `process_start`,
+`process_exit`, `process_signal`, `process_timeout`, `output_limit`,
+`invalid_json` либо `invalid_envelope`. CLI возвращает JSON с operation
+`account_import`, исходным numeric exit code (включая Windows NTSTATUS),
+allowlisted signal/causeCode. Native exit сам по себе не определяет причину
+падения, logout или состояние Telegram. Raw stdout/stderr, exception/command,
+private paths и provider metadata в диагностике отсутствуют. Отказ не запускает
+login, не пропускает миграцию и не создаёт marker пустого каталога.
+Windows Python gate запускает настоящий pinned public importer с новым и
+существующим синтетическим профилем, без credentials, application identity,
+SQLite, dependency bootstrap или запросов провайдера.
+
 После шести месяцев production доступности разработчик может удалить importer
 следующим release; исполняемого календарного переключателя нет. Постоянный
 отдельный конвертер не требуется: поздний пользователь настраивается заново.

@@ -25,7 +25,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
-import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError } from "./trelio-skill-accounts.mjs";
+import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
@@ -1455,6 +1455,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
+  if (error instanceof SkillAccountImportError) return JSON.stringify(error);
   if (error instanceof NativeCheckpointError) return JSON.stringify(error);
   if (error instanceof ProcessDiagnosticError) return JSON.stringify(error);
   if (error instanceof BridgeTransportError || error instanceof HostRuntimeRecoveryError) return JSON.stringify(error);
@@ -8180,18 +8181,28 @@ const discoverSkillAccounts = async ({ artifact, runtimeDirectory, executionCont
     args = buildIsolatedPythonRuntimeArguments({ argsPrefix: python.argsPrefix, runtimeDirectory,
       entrypointPath: entrypoint, runtimeArguments: args });
   }
+  let result;
   try {
-    const result = await execFileAsync(executable, args, { cwd: runtimeDirectory, shell: false,
+    result = await execFileAsync(executable, args, { cwd: runtimeDirectory, shell: false,
       env: buildAgentSkillRuntimeEnvironment({ artifact, runtimeDirectory, executionContext }),
       // Match the catalogue's byte bound: 64 valid Unicode comments plus names
       // can exceed 512 KiB even though every field meets its character limit.
       timeout: 20_000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024, encoding: 'utf8', windowsHide: true });
-    const value = JSON.parse(result.stdout);
-    if (value?.schemaVersion !== 1 || !Array.isArray(value.accounts)) throw new Error();
-    return value.accounts;
-  } catch {
-    throw new SkillAccountError('ACCOUNT_IMPORT_FAILED');
+  } catch (error) {
+    // maxBuffer also kills the child, so classify it before a deadline kill.
+    // Never include Error.message, command, stdout/stderr or a cause object:
+    // the importer is a separate provider trust boundary even when signed.
+    if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw new SkillAccountImportError('output_limit');
+    if (error.killed && error.signal === 'SIGKILL') throw new SkillAccountImportError('process_timeout');
+    if (Number.isInteger(error.code)) throw new SkillAccountImportError('process_exit', { exitCode: error.code });
+    if (error.signal) throw new SkillAccountImportError('process_signal', { signal: error.signal });
+    throw new SkillAccountImportError('process_start', { causeCode: processDiagnosticCauseCode(error) });
   }
+  let value;
+  try { value = JSON.parse(result.stdout); }
+  catch { throw new SkillAccountImportError('invalid_json'); }
+  if (value?.schemaVersion !== 1 || !Array.isArray(value.accounts)) throw new SkillAccountImportError('invalid_envelope');
+  return value.accounts;
 };
 
 export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, executionContext,

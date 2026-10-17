@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { accountScope, accountText, createAccountCatalogue, splitAccountArguments } from '../host-runtime/scripts/trelio-skill-accounts.mjs';
-import { prepareSkillAccount, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { accountScope, accountText, createAccountCatalogue, splitAccountArguments, SkillAccountImportError } from '../host-runtime/scripts/trelio-skill-accounts.mjs';
+import { prepareSkillAccount, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment, formatBridgeCommandError } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 
 const company = crypto.randomUUID(), member = crypto.randomUUID(), connection = crypto.randomUUID();
@@ -245,4 +245,62 @@ test('the real migration subprocess supports bounded Unicode metadata without a 
     runtimeArguments: ['account', 'list'], output: value => outputs.push(value) });
   assert.equal(outputs[0].accounts.length, 64);
   assert.equal([...outputs[0].accounts[0].comment].length, 2000);
+});
+
+for (const [reason, source, extra] of [
+  ['process_exit', "process.stderr.write('PRIVATE_CANARY'); process.exit(0xc0000005);",
+    { exitCode: process.platform === 'win32' ? 0xc0000005 : 5 }],
+  ['invalid_json', "process.stdout.write('PRIVATE_CANARY');", {}],
+  ['invalid_envelope', "console.log(JSON.stringify({ schemaVersion: 999, accounts: [], private: 'PRIVATE_CANARY' }));", {}],
+  ['output_limit', "process.stdout.write('PRIVATE_CANARY'.repeat(100000));", {}],
+  ['process_timeout', "setTimeout(() => {}, 30000);", {}],
+  ...(process.platform === 'win32' ? [] : [['process_signal', "process.kill(process.pid, 'SIGTERM');", { signal: 'SIGTERM' }]]),
+]) {
+  test(`real account import ${reason} stays private and cannot mark migration complete`, async t => {
+    const { directory } = await fixture(t), outputs = [];
+    const entrypoint = path.join(directory, 'probe.mjs');
+    await fs.writeFile(entrypoint, source);
+    const options = { origin: identity.origin, catalogueDirectory: directory, runtimeDirectory: directory,
+      artifact: { skillId: identity.skillId, runtimeVersion: '1.0.0', parsedPackage: {
+        capabilities: ['local-session', 'local-accounts-v1'], entrypoint: { path: 'probe.mjs', interpreter: 'node' },
+      } }, executionContext: { companyId: company, localIdentity: { memberId: member, connectionId: connection } },
+      runtimeArguments: ['account', 'list'], output: value => outputs.push(value) };
+    await assert.rejects(prepareSkillAccount(options), error => {
+      const payload = JSON.parse(formatBridgeCommandError(error));
+      assert.equal(payload.code, 'ACCOUNT_IMPORT_FAILED');
+      assert.deepEqual(payload.details, { operation: 'account_import', reason, ...extra });
+      assert.equal(JSON.stringify(payload).includes('PRIVATE_CANARY'), false);
+      assert.equal(JSON.stringify(payload).includes(directory), false);
+      return true;
+    });
+    assert.equal(outputs.length, 0);
+    // A later successful probe must still run. Neither failure nor diagnostics
+    // may turn an unreadable old profile into a durable successful empty import.
+    await fs.writeFile(entrypoint, "console.log(JSON.stringify({ schemaVersion: 1, accounts: [] }));");
+    await prepareSkillAccount(options);
+    assert.deepEqual(outputs[0].accounts, []);
+  });
+}
+
+test('account import diagnostics reject open categories and project only closed fields', () => {
+  assert.throws(() => new SkillAccountImportError('PRIVATE_CANARY'), TypeError);
+  const payload = JSON.parse(formatBridgeCommandError(new SkillAccountImportError('process_start', {
+    causeCode: 'PRIVATE_CANARY', signal: 'PRIVATE_CANARY', exitCode: -1, stderr: 'PRIVATE_CANARY',
+  })));
+  assert.deepEqual(payload.details, { operation: 'account_import', reason: 'process_start' });
+});
+
+test('missing import executable preserves a safe startup cause and no catalogue output', async t => {
+  const { directory } = await fixture(t);
+  await assert.rejects(prepareSkillAccount({ origin: identity.origin,
+    catalogueDirectory: directory, runtimeDirectory: directory,
+    artifact: { skillId: identity.skillId, runtimeVersion: '1.0.0', parsedPackage: {
+      capabilities: ['local-session', 'local-accounts-v1'], entrypoint: { path: 'missing-executable', interpreter: 'executable' },
+    } }, executionContext: { companyId: company, localIdentity: { memberId: member, connectionId: connection } },
+    runtimeArguments: ['account', 'list'], output: () => assert.fail('failed import cannot return a catalogue'),
+  }), error => {
+    assert.deepEqual(JSON.parse(formatBridgeCommandError(error)).details,
+      { operation: 'account_import', reason: 'process_start', causeCode: 'ENOENT' });
+    return true;
+  });
 });

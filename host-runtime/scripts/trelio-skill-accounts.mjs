@@ -22,6 +22,26 @@ export class SkillAccountError extends Error {
   constructor(code) { super(code); this.name = 'SkillAccountError'; this.code = code; }
 }
 
+/** Preserve the pre-login failure without reflecting provider output. A child
+ * can put private paths, credentials or arbitrary text in any Error property;
+ * only closed host-observed categories and a numeric OS exit may cross this
+ * boundary. In particular, a native Windows exit is evidence of process failure,
+ * never evidence of logout or permission to discard/import an empty catalogue. */
+export class SkillAccountImportError extends SkillAccountError {
+  constructor(reason, { exitCode, signal, causeCode } = {}) {
+    super('ACCOUNT_IMPORT_FAILED');
+    const reasons = ['process_start', 'process_exit', 'process_signal', 'process_timeout',
+      'output_limit', 'invalid_json', 'invalid_envelope'];
+    if (!reasons.includes(reason)) throw new TypeError('Unknown account import failure.');
+    this.details = { operation: 'account_import', reason,
+      ...(Number.isSafeInteger(exitCode) && exitCode >= 0 && exitCode <= 0xffffffff ? { exitCode } : {}),
+      ...(['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGPIPE', 'SIGHUP', 'SIGBUS'].includes(signal) ? { signal } : {}),
+      ...(['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EIO', 'EINVAL', 'ENOMEM', 'EMFILE', 'ENFILE', 'UNKNOWN'].includes(causeCode) ? { causeCode } : {}),
+    };
+  }
+  toJSON() { return { code: this.code, message: this.message, details: this.details }; }
+}
+
 export function accountText(value, maximum, { empty = false } = {}) {
   requireThat(typeof value === 'string', 'ACCOUNT_TEXT_INVALID');
   const result = value.replace(/\r\n?/gu, '\n').trim();
