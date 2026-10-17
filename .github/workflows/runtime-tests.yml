@@ -351,6 +351,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-windows-native-private.test.mjs
 
+      # Desktop clients may carry Node 24 independently of the supported backend
+      # Node 22. Exercise the reported Python/execFile boundary on that host too.
+      - name: Run Windows account import on Node.js 24
+        run: |
+          node tests/trelio-python.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-skill-accounts.test.mjs
+
       - name: Run Windows ACL regression as a standard user
         shell: pwsh
         run: ./.github/scripts/run-windows-acl-standard-user.ps1
