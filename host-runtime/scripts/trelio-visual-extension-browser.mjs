@@ -58,10 +58,11 @@ export class ExtensionVisualBrowser {
   #cookies; #sessionCookies = []; #authHandshake = false; #authSnapshotReady = false;
   #replaceSessionCookies = false;
   #windowsClosed = false;
-  constructor({ dependencies, store, policy, origins, domains = [], lease, testHeadless = false, testWindowController, testDiagnostics }) {
+  constructor({ dependencies, store, policy, origins, domains = [], lease, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
     Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics });
+    this.testNativeLogging = Boolean(testDiagnostics) && testNativeLogging;
     this.sessionId = crypto.randomUUID();
     this.#deadline = setTimeout(() => { void this.close().catch(() => this.abort()); }, lease.deadlineAt - Date.now());
     this.#deadline.unref();
@@ -150,9 +151,9 @@ export class ExtensionVisualBrowser {
     // private transport token never enter the process command line. Startup
     // may focus this owned window once, as agreed for visible workflows.
     // The extension privately navigates the internal new-tab surface after
-    // policy. Fresh profile preferences above preserve session cookies even
+    // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
-    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
+    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testNativeLogging ? 'pipe' : 'ignore'], windowsHide: true });
     // Fixture-only classification deliberately discards raw stderr. Even CI
     // must never print a worker resource, private path or loopback credential.
     let diagnosticTail = '', sandboxUnavailable = false, displayUnavailable = false, extensionUnavailable = false;
@@ -189,7 +190,7 @@ export class ExtensionVisualBrowser {
     });
   }
   async #nativeDiagnostics() {
-    if (!this.testDiagnostics || !this.#directory) return;
+    if (!this.testNativeLogging || !this.#directory) return;
     let file;
     try {
       // GUI Chromium on Windows does not reliably write to stderr. Read only

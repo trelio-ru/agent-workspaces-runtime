@@ -35,7 +35,7 @@ test('detached worker keeps its original lease and encrypted storage across shor
       if (status.state !== 'preparing') break;
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-    assert.equal(status.state, 'manual_input_required', status.reason);
+    assert.equal(status.state, 'manual_input_required', JSON.stringify({ reason: status.reason, diagnostic: await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '') }));
     assert.equal((await call('screenshot')).reason, 'manual_control_active');
     assert.equal((await call('ready')).state, 'saved_unverified');
     const frame = await call('navigate', { url: origin });

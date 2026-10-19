@@ -46,6 +46,8 @@ Transport имеет отдельный loopback host permission, а CSP раз�
 только к exact private порту. Это не добавляет localhost в navigation policy
 или content-script matches. Fixture native logs сворачиваются в закрытые
 счётчики компонентов; raw text и содержимое auth stores не выводятся.
+Та же закрытая диагностика доступна synthetic detached fixture, чтобы его
+startup не оставался скрытым за общим `bootstrap_failed`.
 
 Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
 Запуск без начального окна остаётся только на macOS с её app lifecycle.

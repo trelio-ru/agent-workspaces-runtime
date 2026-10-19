@@ -192,7 +192,8 @@ publication tooling также остаются вне этого публичн
   readiness подтверждается отдельным hello. Fixture diagnostics возвращают
   только закрытый stage/exit и категории sandbox/display, никогда raw stderr.
   Loopback transport permission отделён от origins/content matches; CSP connect
-  ограничен exact private портом. Fixture log tails дают только закрытые счётчики.
+  ограничен exact private портом. Fixture log tails дают только закрытые счётчики;
+  detached fixture сохраняет те же bounded stages в частный diagnostic-файл.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.

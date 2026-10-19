@@ -16,6 +16,24 @@ const file = process.argv[2];
 let engine, server, timer, owner, current = visualStatus('preparing'), stopping = false;
 const startupAbort = new AbortController();
 let startup;
+let fixtureOnly = false, fixtureWrites = Promise.resolve();
+const fixtureEvidence = [];
+function fixtureDiagnostic(value) {
+  if (!fixtureOnly) return;
+  // Only a synthetic localhost owner can enable this file. Never persist a
+  // native exception, browser output, URLs, tokens or cookie values. Preserve
+  // a short chronological tail so a detached startup has the same closed
+  // evidence as the in-process native fixture, including early browser exit.
+  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed'];
+  if (!stages.includes(value.stage)) return;
+  const record = { stage: value.stage };
+  for (const key of ['sandboxUnavailable', 'displayUnavailable', 'extensionUnavailable']) if (typeof value[key] === 'boolean') record[key] = value[key];
+  for (const key of ['exitCode', 'osCryptErrors', 'cookieErrors', 'sqliteErrors', 'networkSandboxErrors']) if (Number.isSafeInteger(value[key])) record[key] = value[key];
+  if (['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV', null].includes(value.signal)) record.signal = value.signal;
+  fixtureEvidence.push(record); if (fixtureEvidence.length > 32) fixtureEvidence.shift();
+  const snapshot = fixtureEvidence.slice();
+  fixtureWrites = fixtureWrites.then(() => writePrivateJsonFile(path.join(owner.directory, 'fixture-diagnostic.json'), { evidence: snapshot })).catch(() => {});
+}
 async function stop() {
   if (stopping) return; stopping = true; clearTimeout(timer);
   startupAbort.abort();
@@ -34,6 +52,8 @@ async function stop() {
 try {
   owner = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
   if (owner.schemaVersion !== 1 || !/^[0-9a-f]{64}$/u.test(owner.token) || !Number.isSafeInteger(owner.deadlineAt) || owner.deadlineAt <= Date.now()) throw new Error('invalid_input');
+  const policy = createVisualOriginPolicy(owner);
+  fixtureOnly = policy.fixtureOnly === true;
   timer = setTimeout(() => { void stop(); }, owner.deadlineAt - Date.now());
   async function dispatch(operation, args) {
     if (operation === 'close') { setTimeout(() => { void stop(); }, 50); return visualStatus('closed'); }
@@ -56,14 +76,18 @@ try {
   server.requestTimeout = 40_000; server.headersTimeout = 5000;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   await writePrivateJsonFile(file, { ...owner, pid: process.pid, port: server.address().port });
+  fixtureDiagnostic({ stage: 'startup_dependencies' });
   startup = loadVisualDependencies({ signal: startupAbort.signal });
   const dependencies = await startup;
   if (stopping || Date.now() >= owner.deadlineAt) throw new Error('VISUAL_START_CANCELLED');
   const store = new ProtectedVisualStore({ directory: owner.directory, scope: owner.scope, AsyncEntry: dependencies.AsyncEntry });
-  const policy = createVisualOriginPolicy(owner);
-  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true });
+  fixtureDiagnostic({ stage: 'startup_browser' });
+  // Keep the detached fixture's Chromium flags identical to production. Its
+  // closed process/extension events do not require native log-file switches.
+  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   current = await engine.call(owner.operation, owner.args);
 } catch (error) {
+  fixtureDiagnostic({ stage: 'startup_failed' });
   current = visualStatus('error', /^VISUAL_(?:BOOTSTRAP|DEPENDENCIES)/u.test(error.code || '') ? 'bootstrap_failed' : 'operation_failed');
   // Preserve a failed startup for an explicit close/status decision. Do not
   // retry installation, login or the initial action from another invocation.
