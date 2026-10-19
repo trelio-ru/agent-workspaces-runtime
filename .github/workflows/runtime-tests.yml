@@ -214,6 +214,7 @@ jobs:
           node tests/trelio-folder-onboarding.test.mjs
           node tests/trelio-git.test.mjs
           node tests/trelio-skill-accounts.test.mjs
+          node tests/trelio-assistant-inbox.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
           node tests/trelio-hook-signed-chain.test.mjs
           node tests/trelio-host-runtime-recovery.test.mjs
@@ -325,6 +326,9 @@ jobs:
 
       - name: Run Windows personal account catalogue regressions
         run: node tests/trelio-skill-accounts.test.mjs
+
+      - name: Run Windows durable assistant inbox regressions
+        run: node tests/trelio-assistant-inbox.test.mjs
 
       - name: Run Windows ACL regressions
         run: >-

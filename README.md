@@ -428,6 +428,12 @@ Runtime не выбирает другую версию plugin cache и не м�
 
 ## Локальная разработка
 
+Механика inbox цифрового ассистента находится в
+[`trelio-assistant-inbox.mjs`](host-runtime/scripts/trelio-assistant-inbox.mjs).
+Это библиотека SQLite без модели, сетевых запросов или daemon entrypoint.
+[Контракт](docs/assistant-inbox.md) описывает cursor/queue/ack, отказ от blind
+replay и границы ещё не подключённых provider/Codex adapters.
+
 Требуются Node.js 22+ и standalone Git 2.28+.
 
 ```bash

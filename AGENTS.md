@@ -21,6 +21,10 @@ publication tooling также остаются вне этого публичн
 
 ## Общие правила
 
+- Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
+  SQLite хранит только bounded structural refs. Provider/domain authority,
+  private storage и native Codex adapters не заменяются состоянием очереди.
+
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
   Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.
   Новые plugin hooks и перехват final response для этого не добавляются.
