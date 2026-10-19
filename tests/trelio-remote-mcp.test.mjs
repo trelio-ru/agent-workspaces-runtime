@@ -4920,12 +4920,12 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
   for (const invariant of [
     /Exact reads\/Run без поиска/u,
     /local route – server providerSelection/u,
-    /Codex: Trelio MCP – direct/u,
+    /Codex: direct mcp__trelio\.get_task/u,
     /вне functions\.exec/u,
     /ALL_TOOLS ≠ direct inventory/u,
     /ready\/CLI ≠ tools модели/u,
     /Нет direct schema – сразу read-only trelio-diagnostics/u,
-    /Code Mode – nested/u,
+    /mcp__trelio\.get_task/u,
     /Единый search возвращает guidance и контекст/u,
     /list_agent_skills – inventory/u,
     /kind=procedure → exact get_agent_procedure/u,
@@ -5240,7 +5240,7 @@ test("platform routing is purpose-based and works for an unknown future skill", 
     skillId: "future-orbital-inventory",
   });
   assert.match(instructions, /search_agent_guidance/u);
-  assert.match(instructions, /Code Mode – nested/u);
+  assert.match(instructions, /mcp__trelio\.get_task/u);
   assert.doesNotMatch(
     instructions,
     /signed-inventory-runtime|remote-knowledge|future-orbital-inventory/iu,
