@@ -145,7 +145,12 @@ Explicit empty overlay очищает stale native session rows при след�
 Старые schema-v2 snapshots без overlay сначала сохраняют native session state;
 переход не создаёт гостевую замену и не требует сбрасывать авторизацию.
 
-Native vault preflight выполняется до ручного окна. В фазе manual закрыты
+Native vault preflight выполняется до ручного окна. Его общий deadline
+15 секунд проверяется также на
+JS-границе: native OS dialog может не отменить pending N-API promise. Поздние
+bytes обнуляются и не продолжают создание ключа; неизвестный set не повторяется.
+Timeout сохраняет прежний snapshot и возвращает `storage_unavailable`.
+В фазе manual закрыты
 снимки и агентский input. `show-login` показывает exact существующее окно.
 Закрытие последнего окна либо `ready` сохраняет остановленный профиль до снятия
 image gate и возвращает `saved_unverified`. После этого новый browser process

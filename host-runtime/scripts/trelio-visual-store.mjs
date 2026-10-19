@@ -7,6 +7,36 @@ const FORMAT = 'trelio.protected-browser-state/v1';
 const MAX_STATE = 16 * 1024 * 1024;
 const invalid = code => Object.assign(new Error(code), { code });
 
+/** Native Keychain calls can remain inside an OS dialog after a N-API abort.
+ * Enforce the same original deadline at the JS boundary instead of assuming
+ * the native promise will reject promptly. A late response is discarded and
+ * zeroed; it never resumes key creation or turns a timed-out preflight ready.
+ * No operation is retried here, including a set with an unknown late outcome.
+ */
+export function awaitVisualVault(operation, signal) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const abort = () => {
+      if (settled) return;
+      settled = true; signal.removeEventListener('abort', abort);
+      reject(invalid('VISUAL_STORAGE_UNAVAILABLE'));
+    };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve().then(() => {
+      if (settled) return undefined;
+      return operation();
+    }).then(value => {
+      if (settled) { if (value instanceof Uint8Array) value.fill(0); return; }
+      settled = true; signal.removeEventListener('abort', abort); resolve(value);
+    }, () => {
+      if (settled) return;
+      settled = true; signal.removeEventListener('abort', abort);
+      reject(invalid('VISUAL_STORAGE_UNAVAILABLE'));
+    });
+  });
+}
+
 export function visualStorageScope({ origin, skillId, accountId }) {
   const parsed = new URL(origin);
   if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skillId) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(accountId)) throw invalid('VISUAL_IDENTITY_INVALID');
@@ -57,12 +87,12 @@ export class ProtectedVisualStore {
     if (this.#key) return this.#key;
     try {
       const signal = AbortSignal.timeout(15_000);
-      let bytes = await this.#entry.getSecret(signal);
+      let bytes = await awaitVisualVault(() => this.#entry.getSecret(signal), signal);
       if (bytes === null && create) {
         const candidate = crypto.randomBytes(32);
         try {
-          await this.#entry.setSecret(candidate, signal);
-          bytes = await this.#entry.getSecret(signal);
+          await awaitVisualVault(() => this.#entry.setSecret(candidate, signal), signal);
+          bytes = await awaitVisualVault(() => this.#entry.getSecret(signal), signal);
           if (!bytes || bytes.length !== 32 || !crypto.timingSafeEqual(candidate, Buffer.from(bytes))) throw invalid('VISUAL_STORAGE_UNAVAILABLE');
         } finally { candidate.fill(0); }
       }

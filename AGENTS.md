@@ -206,6 +206,8 @@ publication tooling также остаются вне этого публичн
   embedded Node выбирается проверенный standalone Node >=22 той же архитектуры
   из fixed host roots под общим deadline; signatures/OS policy не меняются.
   Нет plaintext vault fallback, model executable override или запуска shell.
+  Native vault deadline подтверждается JS-границей, а не только N-API signal:
+  late result обнуляется и не продолжает preflight; неизвестный set не повторяется.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
   Debugger adapter имеет только fixed Page/Input команды. Cookie API отдельно
   обслуживает private session-auth: signed domain scope, bounded schema, CHIPS
