@@ -11,6 +11,7 @@ import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
+import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -147,6 +148,9 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     }
   }
   if (!['setup', 'navigate'].includes(operation)) return visualStatus('error', 'session_closed');
+  let workerExecutable;
+  try { workerExecutable = resolveVisualWorkerNode(); }
+  catch { return visualStatus('error', 'bootstrap_failed'); }
   // mkdir is the account-wide exclusive claim, including concurrent commands
   // from different company contexts. An incomplete or abandoned claim is never
   // silently stolen: recovery needs evidence rather than killing a guessed PID.
@@ -160,7 +164,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
   };
   await writePrivateJsonFile(file, owner);
-  const child = spawn(process.execPath, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
+  const child = spawn(workerExecutable, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
     detached: true, shell: false, windowsHide: true, stdio: 'ignore', env: visualChildEnvironment(),
   });
   let spawnError;

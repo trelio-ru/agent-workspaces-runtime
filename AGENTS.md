@@ -202,6 +202,10 @@ publication tooling также остаются вне этого публичн
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
   crash не доказывает save/login. Native OS tests обязательны.
+  macOS worker проверяет library-validation policy своего Node. При несовместимом
+  embedded Node выбирается проверенный standalone Node >=22 той же архитектуры
+  из fixed host roots под общим deadline; signatures/OS policy не меняются.
+  Нет plaintext vault fallback, model executable override или запуска shell.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
   Debugger adapter имеет только fixed Page/Input команды. Cookie API отдельно
   обслуживает private session-auth: signed domain scope, bounded schema, CHIPS

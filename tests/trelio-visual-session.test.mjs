@@ -8,6 +8,69 @@ import { randomUUID } from 'node:crypto';
 import { runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
+import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-node.mjs';
+
+const signingPolicy = compatible => ({ status: 0, stdout: compatible
+  ? '<key>com.apple.security.cs.disable-library-validation</key>\n<true/>' : '',
+stderr: 'flags=0x10000(runtime)' });
+const nodeFixture = overrides => ({ platform: 'darwin', executable: '/app/node',
+  home: '/user', arch: 'arm64', uid: 501, now: () => 0,
+  realpath: value => value, stat: () => ({ isFile: () => true, mode: 0o100755, uid: 501 }),
+  ...overrides });
+
+test('visual worker keeps the current binary outside macOS without probing executable candidates', () => {
+  for (const platform of ['win32', 'linux']) assert.equal(resolveVisualWorkerNode(nodeFixture({ platform,
+    run() { throw new Error('unexpected native probe'); } })), '/app/node');
+});
+
+test('compatible current macOS Node needs no replacement or signing mutation', () => {
+  for (const response of [signingPolicy(true), { status: 0, stderr: 'flags=0x2(adhoc)' },
+    { status: 1, stderr: 'code object is not signed at all' }]) {
+    const calls = [];
+    assert.equal(resolveVisualWorkerNode(nodeFixture({ run: (file, args, options) => {
+      calls.push([file, args]); assert.equal(options.shell, false); return response;
+    } })), '/app/node');
+    assert.deepEqual(calls, [['/usr/bin/codesign', ['-dvv', '--entitlements', ':-', '/app/node']]]);
+  }
+});
+
+test('restricted embedded Node selects an owner-checked compatible standalone with matching architecture', () => {
+  const selected = '/user/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node';
+  const calls = [];
+  assert.equal(resolveVisualWorkerNode(nodeFixture({ run: (file, args, options) => {
+    calls.push([file, args]); assert.equal(options.shell, false);
+    assert.deepEqual(options.env, { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+    assert.ok(options.timeout > 0 && options.timeout <= 1500);
+    if (file === '/usr/bin/codesign') return signingPolicy(args.at(-1) !== '/app/node');
+    assert.equal(file, selected);
+    return { status: 0, stdout: JSON.stringify({ major: 26, platform: 'darwin', arch: 'arm64' }) };
+  } })), selected);
+  assert.equal(calls.length, 3);
+});
+
+for (const refusal of ['writable', 'foreign-owner', 'not-file', 'old-node', 'wrong-arch', 'wrong-platform', 'unknown-signature', 'failed-probe']) {
+  test(`unsafe/incompatible standalone Node is not selected: ${refusal}`, () => {
+    assert.throws(() => resolveVisualWorkerNode(nodeFixture({
+      stat: () => ({ isFile: () => refusal !== 'not-file', mode: refusal === 'writable' ? 0o100777 : 0o100755,
+        uid: refusal === 'foreign-owner' ? 502 : 501 }),
+      run: (file, args) => {
+        if (file === '/usr/bin/codesign') return args.at(-1) === '/app/node' ? signingPolicy(false)
+          : refusal === 'unknown-signature' ? { status: 1, stderr: 'unverified signing state' } : signingPolicy(true);
+        return refusal === 'failed-probe' ? { status: 1 } : { status: 0, stdout: JSON.stringify({
+          major: refusal === 'old-node' ? 21 : 26, platform: refusal === 'wrong-platform' ? 'linux' : 'darwin',
+          arch: refusal === 'wrong-arch' ? 'x64' : 'arm64' }) };
+      },
+    })), { code: 'VISUAL_BOOTSTRAP_NODE_REQUIRED' });
+  });
+}
+
+test('all signing and version discovery shares one non-sliding deadline', () => {
+  let clock = 0, probes = 0;
+  assert.throws(() => resolveVisualWorkerNode(nodeFixture({ now: () => clock,
+    run: () => { probes++; clock = 5001; return signingPolicy(false); },
+  })), { code: 'VISUAL_BOOTSTRAP_NODE_REQUIRED' });
+  assert.equal(probes, 1);
+});
 
 test('detached worker keeps its original lease and encrypted storage across short calls', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-worker-test-')));

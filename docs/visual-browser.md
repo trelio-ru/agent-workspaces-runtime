@@ -115,6 +115,15 @@ symlink в том числе у промежуточного предка отк
 
 Ключ находится в Keychain / Windows Credential Manager / desktop Linux Secret
 Service. AAD привязывает snapshot к Trelio origin, skill и personal account UUID.
+На macOS встроенный в приложение Node может запрещать сторонние native addons
+через hardened library validation. Host читает его signing policy и при такой
+несовместимости выбирает установленный standalone Node >=22 той же архитектуры
+из fixed Codex cache/Homebrew/local roots. Binary должен быть обычным executable
+файлом текущего пользователя/root без group/world write; version/platform/arch
+и signing policy проверяются под общим пятисекундным deadline. Нет изменения
+подписи приложения, OS policy, shell или caller-selected executable. При
+отсутствии совместимого Node запуск закрывается как `bootstrap_failed`, до
+создания worker claim и доступа к vault; нужен standalone Node.js 22+.
 Неверный формат старого экспериментального snapshot, повреждение и потеря ключа
 не создают гостевой замены. Нет plaintext fallback. Active OS user/admin и
 компрометация устройства остаются вне этой модели защиты; API не является
