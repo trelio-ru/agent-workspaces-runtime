@@ -24,7 +24,7 @@ function fixtureDiagnostic(value) {
   // native exception, browser output, URLs, tokens or cookie values. Preserve
   // a short chronological tail so a detached startup has the same closed
   // evidence as the in-process native fixture, including early browser exit.
-  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed'];
+  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed'];
   if (!stages.includes(value.stage)) return;
   const record = { stage: value.stage };
   for (const key of ['sandboxUnavailable', 'displayUnavailable', 'extensionUnavailable']) if (typeof value[key] === 'boolean') record[key] = value[key];

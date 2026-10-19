@@ -111,7 +111,7 @@ export class ExtensionVisualBrowser {
           if (value.kind === 'hello' && value.version === 1) { if (this.#authSnapshotReady) this.#extensionReady = true; else this.#terminal = 'bootstrap_failed'; return; }
           // Only fixed bootstrap stages can leave the extension on failure.
           // Never include native messages, paths, URLs or its transport token.
-          if (value.kind === 'bootstrap_failed' && ['policy', 'auth', 'window'].includes(value.stage)) {
+          if (value.kind === 'bootstrap_failed' && ['policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window'].includes(value.stage)) {
             this.testDiagnostics?.({ stage: value.stage }); this.#terminal = 'bootstrap_failed'; return;
           }
           if (value.kind === 'windows_closed') { this.testDiagnostics?.({ stage: 'windows_closed' }); this.#windowsClosed = true; if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }

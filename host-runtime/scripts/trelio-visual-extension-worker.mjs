@@ -312,7 +312,15 @@ export function visualExtensionWorker(config, cookieState) {
       let ruleId = 4;
       for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
-      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: (await chrome.declarativeNetRequest.getDynamicRules()).map(rule => rule.id), addRules: rules });
+      // This profile and its signed navigation policy live for one browser
+      // process only. Session rules have that exact lifetime and avoid an
+      // unnecessary persistent ruleset write before the first provider URL.
+      // A service-worker reconnect never drops the browser's session rules.
+      bootstrapStage = 'policy_read';
+      const previous = await chrome.declarativeNetRequest.getSessionRules();
+      bootstrapStage = 'policy_write';
+      await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: previous.map(rule => rule.id), addRules: rules });
+      bootstrapStage = 'window_inventory';
       for (const window of await chrome.windows.getAll({ windowTypes: ['normal', 'popup'] })) ownedWindows.add(window.id);
       for (const change of windowChanges.splice(0)) { if (change.removed) ownedWindows.delete(change.id); else ownedWindows.add(change.id); }
       windowInventoryReady = true;

@@ -15,7 +15,7 @@ test('extension installs literal origin guards before bootstrap and never naviga
       windows: { onCreated: events, onRemoved: events, async getAll() { assert.ok(rules, 'navigation policy precedes window discovery'); return [{ id: 1 }]; } },
       tabs: { onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'about:blank' }]; }, async update(_id, value) { assert.equal(value.url, 'https://www.example.test/'); } },
       cookies: { onChanged: events, async getAll() { return []; }, async set() { throw Error('unexpected_cookie_restore'); } },
-      declarativeNetRequest: { async getDynamicRules() { return []; }, async updateDynamicRules(value) { rules = value.addRules; } },
+      declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules(value) { rules = value.addRules; } },
     },
     WebSocket: class {
       static OPEN = 1;
@@ -45,11 +45,11 @@ test('bootstrap reports only a closed policy failure before accepting input', as
     runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events }, windows: { onCreated: events, onRemoved: events },
     tabs: { onRemoved: events }, cookies: { onChanged: events },
-    declarativeNetRequest: { async getDynamicRules() { throw Error('PRIVATE native detail'); } },
+    declarativeNetRequest: { async getSessionRules() { throw Error('PRIVATE native detail'); } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
   startWorker({ endpoint: 'ws://127.0.0.1/', token: 'synthetic', matches: [], origins: [], domains: [], deadlineAt: Date.now() + 10_000 }, context);
   await new Promise(resolve => setImmediate(resolve)); socket.onopen();
-  assert.deepEqual(sent.at(-1), { kind: 'bootstrap_failed', stage: 'policy' });
+  assert.deepEqual(sent.at(-1), { kind: 'bootstrap_failed', stage: 'policy_read' });
   socket.onmessage({ data: JSON.stringify({ id: 'ignored', operation: 'screenshot' }) });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sent.length, 2, 'failed bootstrap sends only its repeated closed readiness, never input output');
@@ -63,7 +63,7 @@ test('private auth observes logout but freezes before last-window cleanup and ne
   const context = { URL, Date, TextEncoder, setTimeout, clearTimeout, chrome: {
     runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events },
-    declarativeNetRequest: { async getDynamicRules() { return []; }, async updateDynamicRules() {} },
+    declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
     windows: { onCreated: { addListener(fn) { windowCreated = fn; } }, onRemoved: { addListener(fn) { windowRemoved = fn; } }, async getAll() { assert.ok(windows.length, 'no async window API after final profile close'); return windows; } },
     tabs: { onRemoved: { addListener(fn) { tabRemoved = fn; } }, async query() { return [{ id: 1, url: 'about:blank' }]; }, async update() { return { id: 1, status: 'complete' }; } },
     cookies: { onChanged: { addListener(fn) { cookieChanged = fn; } }, async getAll() { return live; }, async set() { throw Error('unexpected_restore'); } },
@@ -106,7 +106,7 @@ test('lease expiry during private cookie restore cannot open a late provider win
   const context = { URL, Date: class extends Date { static now() { return now; } }, TextEncoder, setTimeout, clearTimeout, chrome: {
     runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events },
-    declarativeNetRequest: { async getDynamicRules() { return []; }, async updateDynamicRules() {} },
+    declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
     windows: { onCreated: events, onRemoved: events, async getAll() { return []; }, async create() { navigations++; } },
     tabs: { onRemoved: events, async query() { return []; }, async create() { navigations++; } },
     cookies: { onChanged: events, async getAll() { return []; }, set() { return new Promise(resolve => { finishSet = resolve; }); } },

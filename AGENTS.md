@@ -202,8 +202,12 @@ publication tooling также остаются вне этого публичн
   Debugger adapter имеет только fixed Page/Input команды. Cookie API отдельно
   обслуживает private session-auth: signed domain scope, bounded schema, CHIPS
   identity и AEAD snapshot, без cookie-valued полей в MCP. Restore идёт до
-  provider navigation и не повторяется при reconnect. Last-window cleanup не
-  считается logout; explicit logout при открытом окне очищает overlay.
+  provider navigation и не повторяется при reconnect.
+  Navigation DNR rules живут в browser session, ставятся до provider URL и
+  не требуют persistent ruleset в auth archive. Read/write/inventory failures
+  сохраняют отдельные закрытые startup stages.
+  Last-window cleanup не считается logout; explicit logout при открытом окне
+  очищает overlay.
   Last-window handoff отправляется синхронно по tracked native window events:
   async windows query после закрытия может не получить callback при teardown.
   Legacy snapshots сохраняют native cookies, explicit empty overlay удаляет stale

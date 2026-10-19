@@ -73,6 +73,9 @@ policy и не добавляет `--no-sandbox`; это отдельная ло
 Для X11 child сохраняет также путь XAUTHORITY: без него DISPLAY недостаточно.
 
 Main-frame HTTP(S) navigation ограничена signed origins/domains через DNR.
+Правила принадлежат browser session: устанавливаются до первой provider
+navigation и не сохраняются как persistent extension ruleset. Их lifetime
+совпадает с owned browser process; reconnect не снимает действующие правила.
 Source/resource URLs и специальные схемы отклоняются. Browser downloads
 запрещены отдельно: suffix URL не доказывает тип ответа.
 
