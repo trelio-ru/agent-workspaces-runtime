@@ -184,7 +184,8 @@ publication tooling также остаются вне этого публичн
   непродлеваемая lease. Late bootstrap отменяется до browser launch; main-frame
   navigation отзывает старый frame token; browser load metadata ожидается bounded
   без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
-  Windows startup использует внутреннюю new-tab вкладку без URL в argv.
+  Windows/Linux startup использует внутреннюю new-tab вкладку без URL в argv;
+  background-only lifetime без окна применяется только к macOS.
   Новый owned профиль заранее получает обычный continue-session preference;
   одного --restore-last-session недостаточно до первого закрытия Windows/Linux.
   Existing Preferences не перезаписываются; policy ставится до provider URL,

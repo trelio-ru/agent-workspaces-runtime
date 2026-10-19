@@ -16,9 +16,11 @@ import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-
 // values, ciphertext, paths and profile contents never enter the log.
 async function fixtureCookieEvidence(snapshot, directory, name) {
   const files = JSON.parse(gunzipSync(Buffer.from(snapshot.profile, 'base64')));
-  const cookie = files.find(file => /(?:^|\/)Cookies$/u.test(file.path));
+  const cookie = files.find(file => file.path === 'Default/Network/Cookies') || files.find(file => file.path === 'Default/Cookies');
   const local = JSON.parse(Buffer.from(files.find(file => file.path === 'Local State')?.data || 'e30=', 'base64').toString());
-  const result = { cookieFile: Boolean(cookie), encryptedKey: Boolean(local.os_crypt?.encrypted_key), appBoundKey: Boolean(local.os_crypt?.app_bound_encrypted_key) };
+  const prefs = JSON.parse(Buffer.from(files.find(file => file.path === 'Default/Preferences')?.data || 'e30=', 'base64').toString());
+  const secure = JSON.parse(Buffer.from(files.find(file => file.path === 'Default/Secure Preferences')?.data || 'e30=', 'base64').toString());
+  const result = { cookieFile: Boolean(cookie), networkStore: cookie?.path === 'Default/Network/Cookies', encryptedKey: Boolean(local.os_crypt?.encrypted_key), appBoundKey: Boolean(local.os_crypt?.app_bound_encrypted_key), startupPref: Number.isInteger(prefs.session?.restore_on_startup) ? prefs.session.restore_on_startup : null, secureStartupPref: Number.isInteger(secure.session?.restore_on_startup) ? secure.session.restore_on_startup : null };
   if (!cookie) return result;
   const file = path.join(directory, 'synthetic-cookie-evidence.sqlite');
   await fs.writeFile(file, Buffer.from(cookie.data, 'base64'), { mode: 0o600 });

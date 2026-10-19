@@ -97,7 +97,7 @@ export class ExtensionVisualBrowser {
     // foreground. These scheduling switches neither activate the window nor
     // alter navigator.webdriver; mouse-wheel acknowledgements otherwise stall
     // in an occluded headed renderer on macOS.
-    // Windows starts an ordinary internal new-tab window instead of relying on the
+    // Windows/Linux start an ordinary internal new-tab window instead of relying on the
     // background-only lifetime of an application without an initial window.
     // The extension installs policy before navigating it; the provider URL and
     // private transport token never enter the process command line. Startup
@@ -105,7 +105,7 @@ export class ExtensionVisualBrowser {
     // The extension privately navigates the internal new-tab surface after
     // policy. Fresh profile preferences above preserve session cookies even
     // on platforms where closing the last window ends the browser session.
-    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'win32' ? [] : ['--no-startup-window']), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging=stderr'] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
+    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging=stderr'] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
     // Fixture-only classification deliberately discards raw stderr. Even CI
     // must never print a worker resource, private path or loopback credential.
     let diagnosticTail = '', sandboxUnavailable = false, displayUnavailable = false, extensionUnavailable = false;

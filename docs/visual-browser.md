@@ -41,7 +41,8 @@ Token не передаётся в argv, Chromium environment, MCP или logs. 
 не является DevTools endpoint. Heartbeat и cleanup не стоят за зависшим input;
 переподключение не переигрывает предыдущую команду.
 
-Windows startup открывает внутреннюю new-tab вкладку без URL в argv.
+Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
+Запуск без начального окна остаётся только на macOS с её app lifecycle.
 Для нового owned профиля host заранее устанавливает обычный continue-session
 preference: Chromium игнорирует restore switch у нового Profile, и закрытие
 последнего окна Windows/Linux иначе удаляет session cookies ещё до snapshot.
