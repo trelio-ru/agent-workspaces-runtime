@@ -2666,8 +2666,15 @@ export const buildLocalTaskAttachmentStreamRequest = async ({
   staging,
   companyEncryption = null,
 }) => {
-  if (!["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package"].includes(nativeTool)) {
+  if (!["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package", "upload_public_product_feedback_image"].includes(nativeTool)) {
     throw new TrelioLocalContextError("LOCAL_ACTION_INVALID_UPLOAD_TARGET", "Unsupported attachment owner.");
+  }
+  const isPublicImage = nativeTool === "upload_public_product_feedback_image";
+  // Public screenshots intentionally have no encrypted-company adapter. Do
+  // not decrypt a company image into the global public draft storage.
+  if (isPublicImage && (companyEncryption || staging.sizeBytes > 10 * 1024 * 1024
+    || rawArguments?.publicContentSafetyConfirmed !== true)) {
+    throw new TrelioLocalContextError("PUBLIC_FEEDBACK_IMAGE_NOT_ALLOWED", "Public screenshots require a plain source company, inspected public-safe content and at most 10 MiB.");
   }
   const isImport = nativeTool === "upload_import_package";
   if (isImport && (companyEncryption || staging.sizeBytes > 16 * 1024 * 1024)) {
@@ -2693,16 +2700,20 @@ export const buildLocalTaskAttachmentStreamRequest = async ({
   const mimeType = String(
     rawArguments?.contentType || inferLocalActionUploadContentType(originalName),
   ).trim().toLowerCase().slice(0, 255) || "application/octet-stream";
+  if (isPublicImage && !["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mimeType)) {
+    throw new TrelioLocalContextError("PUBLIC_FEEDBACK_IMAGE_TYPE_UNSUPPORTED", "Only JPEG, PNG, GIF and WebP screenshots are supported.");
+  }
   // Forward only the exact native locator/idempotency fields. `arguments` is
   // intentionally provider-neutral and therefore cannot enforce an upload-
   // specific JSON schema at the local MCP boundary; an allowlist guarantees
   // that a misplaced path, base64 body or future local-only field never leaks.
   const baseArguments = {
     companySlug: argumentCompanySlug,
-    ...(isImport ? {} : isKnowledgeBase
+    ...(isImport || isPublicImage ? {} : isKnowledgeBase
       ? { pageSlug: normalizeBoundedString(rawArguments?.pageSlug, "pageSlug", 120) }
       : { projectSlug: rawArguments?.projectSlug, taskNumber: rawArguments?.taskNumber }),
     clientRequestId: stableRequestId,
+    ...(isPublicImage ? { publicContentSafetyConfirmed: true } : {}),
   };
 
   if (!companyEncryption) {
@@ -2944,7 +2955,7 @@ export const resolveLocalTaskAttachmentUploadSession = async ({
     "clientRequestId",
     255,
   );
-  if (!["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package"].includes(nativeTool)) {
+  if (!["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package", "upload_public_product_feedback_image"].includes(nativeTool)) {
     throw new TrelioLocalContextError("LOCAL_ACTION_INVALID_UPLOAD_TARGET", "Unsupported attachment owner.");
   }
   const query = new URLSearchParams({ clientRequestId: normalizedRequestId });
@@ -3402,18 +3413,24 @@ const resolveLocalCompanyProvider = async ({
   companySlug,
   signal,
   allowCached = false,
+  requirePlain = false,
 }) => {
   const cacheKey = `${origin}\n${companySlug}`;
-  if (allowCached && localCompanyProviderCache.has(cacheKey)) {
+  if (allowCached && !requirePlain && localCompanyProviderCache.has(cacheKey)) {
     return localCompanyProviderCache.get(cacheKey);
   }
   const token = await requireToken(origin, { onStatus: () => undefined, signal });
   const compatibility = await ensureBridgeCompatibility(origin, token, { signal });
-  const routing = compatibility?.encryptedDataPlane?.enabled === true
-    && compatibility.encryptedDataPlane.routingVersion === 1
+  const routing = requirePlain || (compatibility?.encryptedDataPlane?.enabled === true
+    && compatibility.encryptedDataPlane.routingVersion === 1)
     ? await resolveBridgeDataPlaneRouting({ origin, token, companySlug, signal })
     : { requestOrigin: origin };
-  const companyEncryption = await ensureCompanyEncryptionContext({
+  if (requirePlain && routing.encryptionState !== "plain") {
+    // Public screenshot ingress must fail before any crypto key lookup, unlock
+    // prompt or decrypted mirror is opened. A cached provider cannot bypass it.
+    throw new TrelioLocalContextError("PUBLIC_FEEDBACK_IMAGE_NOT_ALLOWED", "Public screenshots require a plain source company.");
+  }
+  const companyEncryption = requirePlain ? null : await ensureCompanyEncryptionContext({
     origin,
     requestOrigin: routing.requestOrigin,
     token,
@@ -8979,7 +8996,8 @@ const executeTrelioLocalActionOperation = async (
     return handleGeneratedAgentSecretSave(origin, rawInput, { signal,
       proofForSubmission: () => proofPreparation.forSubmission() });
   }
-  const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal });
+  const provider = await resolveLocalCompanyProvider({ origin, companySlug, signal,
+    requirePlain: nativeTool === "upload_public_product_feedback_image" });
   // Legacy native reads can arrive through route=action. Record the bridge's
   // authoritative provider choice before returning their native-shaped result:
   // that result has no provider field, but the next proposal render must be
@@ -8988,13 +9006,13 @@ const executeTrelioLocalActionOperation = async (
     ? "native_trelio"
     : "local_company_context");
   const hasLocalFilePath = rawInput.localFilePath !== undefined;
-  if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package", "add_meeting_source", "create_meeting"].includes(nativeTool)) {
+  if (hasLocalFilePath && !["upload_attachment", "upload_knowledge_base_attachment", "upload_import_package", "upload_public_product_feedback_image", "add_meeting_source", "create_meeting"].includes(nativeTool)) {
     throw new TrelioLocalContextError(
       "LOCAL_ACTION_INVALID_UPLOAD_PATH",
-      "localFilePath supports attachments, import packages and meeting transcripts only.",
+      "localFilePath supports attachments, public feedback screenshots, import packages and meeting transcripts only.",
     );
   }
-  if (["upload_attachment", "upload_import_package"].includes(nativeTool) && !hasLocalFilePath) {
+  if (["upload_attachment", "upload_import_package", "upload_public_product_feedback_image"].includes(nativeTool) && !hasLocalFilePath) {
     throw new TrelioLocalContextError(
       "LOCAL_ACTION_UPLOAD_PATH_REQUIRED",
       "Task attachment uploads require localFilePath and the streaming transport.",

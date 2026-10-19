@@ -139,6 +139,8 @@ publication tooling также остаются вне этого публичн
   handoff; lost acceptance восстанавливается лишь при совпадении clean tree/head.
 - Сохранение после 429, immutable upload streams и совместимость старого backend
   проверяй по [transport-контракту](docs/agent-workspace-runtime.md#saving-rate-limit-retry).
+- Агентские public-feedback screenshots используют plain-only local binary
+  transport по [контракту локальных вложений](docs/agent-workspace-runtime.md#локальные-вложения), без новых plugin hooks.
 - Универсальный импорт использует [локальный transport](docs/agent-workspace-runtime.md#универсальный-импорт-данных):
   bounded immutable streams, paths только внутри выбранного пакета и compact
   receipts без файловых bytes/sessions; encrypted v1 fail-closed.

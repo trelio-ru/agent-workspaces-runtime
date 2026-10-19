@@ -4763,3 +4763,26 @@ test("fresh action reads bypass the company mirror only for known structural rou
   assert.equal(localReadActionNeedsMirror("get_project_meta", { projectSlug: "historical-alias" }), true);
   assert.equal(localReadActionNeedsMirror("apply_task_patch", {}), true);
 });
+
+
+test("public screenshot staging preserves bytes and forwards only inspected plain metadata", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-public-screenshot-"));
+  const sourcePath = path.join(root, "Скриншот.png");
+  const bytes = Buffer.from("screenshot bytes validated by the server", "utf8");
+  await fs.writeFile(sourcePath, bytes, { mode: 0o600 });
+  const staging = await stageLocalTaskAttachmentUpload(sourcePath);
+  try {
+    const request = { nativeTool: "upload_public_product_feedback_image", staging,
+      rawArguments: { companySlug: "acme", clientRequestId: "screenshot", publicContentSafetyConfirmed: true,
+        projectSlug: "must-not-leak", localFilePath: sourcePath, dataBase64: "must-not-leak" } };
+    const prepared = await buildLocalTaskAttachmentStreamRequest(request);
+    assert.deepEqual(prepared.value, { companySlug: "acme", clientRequestId: "screenshot", publicContentSafetyConfirmed: true,
+      fileName: "Скриншот.png", contentType: "image/png", sizeBytes: bytes.length, sha256: staging.sha256, delivery: "local-stream" });
+    assert.deepEqual(await fs.readFile(prepared.uploadFilePath), bytes);
+    assert.equal(JSON.stringify(prepared.value).includes(sourcePath), false);
+    await assert.rejects(() => buildLocalTaskAttachmentStreamRequest({ ...request, companyEncryption: {} }), /plain source company/u);
+    await assert.rejects(() => buildLocalTaskAttachmentStreamRequest({ ...request, staging: { ...staging, sizeBytes: 10 * 1024 * 1024 + 1 } }), /10 MiB/u);
+    await assert.rejects(() => buildLocalTaskAttachmentStreamRequest({ ...request, rawArguments: { ...request.rawArguments, publicContentSafetyConfirmed: false } }), /inspected/u);
+    await assert.rejects(() => buildLocalTaskAttachmentStreamRequest({ ...request, rawArguments: { ...request.rawArguments, contentType: "image/svg+xml" } }), /JPEG/u);
+  } finally { await fs.rm(staging.temporaryDirectory, { recursive: true, force: true }); await fs.rm(root, { recursive: true, force: true }); }
+});

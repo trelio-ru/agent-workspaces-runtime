@@ -794,6 +794,16 @@ owner-private snapshot, вычисляет размер/SHA-256, получае�
 reserved attachment ID, поэтому не создаёт дубликат. Inline-image transport
 остаётся отдельным bounded compatibility flow.
 
+`upload_public_product_feedback_image` использует тот же immutable local-file
+snapshot, binary PUT и authenticated idempotency recovery. В native arguments
+передаются только company, стабильный clientRequestId, безопасное имя/MIME,
+size/SHA-256, delivery и literal `publicContentSafetyConfirmed=true`; путь,
+base64 и task/page locators не пересекают границу. Поддерживаются JPEG/PNG/GIF/WebP
+до 10 MiB. Любая encrypted source company блокируется до plaintext upload:
+здесь нет decrypt/marker adapter. Completed response содержит private
+`imageUploadId` для native proposal; человеческий preview/subset и public commit
+принадлежат backend/MCP App. Stable shell/hooks и версии minimum не меняются.
+
 В общем local-action envelope метод находится в `parameters.nativeTool`.
 `PreToolUse` подписывает proof для этого метода и добавляет его только в
 top-level `runtimeSessionProof`; local MCP передаёт этот proof bridge отдельно
