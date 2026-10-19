@@ -25,10 +25,13 @@ const authorized = async () => true;
 
 test('real SQLite persists cursor and events atomically; replays never deliver twice', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'assistant-inbox-test-'));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  let db;
+  // after hooks run in registration order. Unlike POSIX, Windows cannot
+  // unlink an open SQLite file, so close and removal share one ordered hook.
+  t.after(async () => { db?.close(); await fs.rm(directory, { recursive: true, force: true }); });
   const file = path.join(directory, 'inbox.sqlite');
   let timestamp = 1_000_000;
-  let db = new DatabaseSync(file);
+  db = new DatabaseSync(file);
   let inbox = createAssistantInbox({ database: db, now: () => timestamp });
   const source = scope(), task = randomUUID(), incoming = event(task);
   inbox.register(source); accept(inbox, source, task);
@@ -37,8 +40,8 @@ test('real SQLite persists cursor and events atomically; replays never deliver t
   inbox.startDelivery(lease.deliveryId);
   inbox.completeDelivery(lease.deliveryId, 'native-turn-1');
   db.close();
+  db = null;
   db = new DatabaseSync(file);
-  t.after(() => db.close());
   inbox = createAssistantInbox({ database: db, now: () => timestamp });
   assert.equal(inbox.status(source).cursorRevision, 1);
   timestamp += 300_000;
@@ -102,10 +105,14 @@ test('same provider IDs and task IDs remain isolated by company, account and bin
 
 test('two connections serialize poll leases and cursor CAS; an invalid page cannot advance', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'assistant-concurrent-test-'));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const connections = [];
+  t.after(async () => {
+    for (const connection of connections) connection.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
   const file = path.join(directory, 'queue.sqlite');
-  const a = new DatabaseSync(file), b = new DatabaseSync(file);
-  t.after(() => { a.close(); b.close(); });
+  const a = new DatabaseSync(file); connections.push(a);
+  const b = new DatabaseSync(file); connections.push(b);
   const first = createAssistantInbox({ database: a }), second = createAssistantInbox({ database: b });
   const source = scope(), task = randomUUID(), incoming = event(task);
   first.register(source);
