@@ -8,7 +8,7 @@ test('extension installs literal origin guards before bootstrap and never naviga
   const context = {
     URL, Date, setTimeout, clearTimeout,
     chrome: {
-      runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events },
+      runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
       webRequest: { onBeforeRequest: events, onHeadersReceived: events },
       windows: { onRemoved: events, async getAll() { assert.ok(rules, 'navigation policy precedes window discovery'); return [{ id: 1 }]; } },
       declarativeNetRequest: { async getDynamicRules() { return []; }, async updateDynamicRules(value) { rules = value.addRules; } },

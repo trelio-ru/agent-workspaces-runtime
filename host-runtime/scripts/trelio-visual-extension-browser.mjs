@@ -27,6 +27,7 @@ export class ExtensionVisualBrowser {
   #child; #server; #wss; #socket; #directory; #profile; #pending = new Map();
   #state = 'not_configured'; #manual = false; #saved = false; #closed = false;
   #tail = Promise.resolve(); #deadline; #heartbeat; #terminal; #starting; #finishing;
+  #launchAbort = new AbortController();
   constructor({ dependencies, store, policy, origins, domains = [], lease, testHeadless = false, testWindowController }) {
     if ((testHeadless || testWindowController) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
@@ -40,6 +41,7 @@ export class ExtensionVisualBrowser {
     if (this.#child) return;
     this.#state = 'preparing'; this.#manual = manual;
     const snapshot = await this.store.read(); await this.store.prepare?.(); this.#saved = Boolean(snapshot);
+    if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     this.#directory = await fs.mkdtemp(path.join(this.store.directory, 'extension-session-'));
     await prepareVisualPrivateDirectory(this.#directory);
     this.#profile = path.join(this.#directory, 'profile');
@@ -58,7 +60,7 @@ export class ExtensionVisualBrowser {
         ws.on('message', data => {
           let value; try { value = JSON.parse(data.toString()); } catch { ws.close(); return; }
           if (value.kind === 'hello' && value.version === 1) return;
-          if (value.kind === 'windows_closed') { if (this.#manual) void this.#finishManual().catch(() => { this.#terminal = 'storage_unavailable'; }); return; }
+          if (value.kind === 'windows_closed') { if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
           const pending = this.#pending.get(value.id); if (!pending) return;
           this.#pending.delete(value.id); clearTimeout(pending.timer); pending.resolve(value.result);
@@ -79,7 +81,10 @@ export class ExtensionVisualBrowser {
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)});`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
-    const executable = await ensureVisualChromium(this.dependencies);
+    const executable = await ensureVisualChromium(this.dependencies, { signal: this.#launchAbort.signal });
+    // A download/native vault wait does not grant a fresh launch budget. Do
+    // not open a late window after close or the original signed deadline.
+    if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     // Ordinary startup: do not use Puppeteer.launch, remote-debugging switches,
     // enable-automation, or AutomationControlled feature overrides.
     // Keep the owned renderer responsive while another application is in the
@@ -91,11 +96,12 @@ export class ExtensionVisualBrowser {
     this.#child.once('exit', (code, signal) => {
       // A normal human window close may finish auth; a crash/kill must retain
       // the previous durable snapshot and report loss instead of claiming save.
-      if (!this.#closed && this.#manual && code === 0 && !signal) void this.#finishManual().catch(() => { this.#terminal = 'storage_unavailable'; });
+      if (!this.#closed && this.#manual && code === 0 && !signal) void this.#finishManual().catch(() => {});
       else if (!this.#closed && !this.#starting) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     });
     const until = Math.min(Date.now() + 25_000, this.lease.deadlineAt);
-    while (!this.#socket && !this.#terminal && Date.now() < until) await sleep(100);
+    while (!this.#socket && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
+    if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     if (!this.#socket) throw fault('bootstrap_failed');
     this.testWindowController?.({ close: () => this.#send('close-windows'), crash: () => this.#child?.kill('SIGKILL') });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
@@ -123,12 +129,14 @@ export class ExtensionVisualBrowser {
     const until = Date.now() + 10_000;
     while (child.exitCode === null && child.signalCode === null && Date.now() < until) await sleep(100);
     if (child.exitCode === null && child.signalCode === null) throw fault('operation_failed');
+    if (child.exitCode !== 0 || child.signalCode) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     this.#child = undefined;
     this.#socket?.close(); this.#socket = undefined;
     this.#wss?.close(); this.#server?.close(); this.#server = undefined;
   }
   async #saveStopped() {
     if (!this.#profile) return;
+    if (this.#terminal === 'browser_process_lost') throw fault('browser_process_lost');
     const snapshot = await snapshotVisualProfile(this.#profile); await this.store.write(snapshot); this.#saved = true;
     await fs.rm(this.#directory, { recursive: true, force: true }); this.#directory = undefined; this.#profile = undefined;
   }
@@ -138,6 +146,7 @@ export class ExtensionVisualBrowser {
     this.#finishing = (async () => {
       this.#starting = true;
       try { await this.#stopBrowser(); await this.#saveStopped(); this.#manual = false; this.#state = 'saved_unverified'; return this.#status(); }
+      catch (error) { this.#state = 'error'; this.#terminal = error.code === 'browser_process_lost' ? error.code : 'storage_unavailable'; throw error; }
       finally { this.#starting = false; this.#finishing = undefined; }
     })();
     return this.#finishing;
@@ -182,13 +191,18 @@ export class ExtensionVisualBrowser {
   }
   async close() {
     if (this.#closed) return; this.#closed = true; clearTimeout(this.#deadline);
+    this.#launchAbort.abort();
     await this.#tail;
+    // A window-close completion can have started outside the command queue.
+    // Join it before cleanup so expiry/close cannot race a second save/remove.
+    await this.#finishing?.catch(() => {});
     this.#starting = true;
     try { await this.#stopBrowser(); if (this.#terminal !== 'browser_process_lost') await this.#saveStopped(); }
     finally { clearInterval(this.#heartbeat); this.store.close(); this.#state = 'closed'; }
   }
   abort() {
     this.#closed = true; clearTimeout(this.#deadline); clearInterval(this.#heartbeat);
+    this.#launchAbort.abort();
     const child = this.#child; if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     this.#socket?.terminate(); this.#wss?.close(); this.#server?.close(); this.store.close();
   }

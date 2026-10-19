@@ -36,6 +36,12 @@ export function visualExtensionWorker(config) {
   });
   const command = (tabId, method, args = {}) => chrome.debugger.sendCommand({ tabId }, method, args);
   chrome.debugger.onDetach.addListener(source => { attached.delete(source.tabId); if (frame?.tabId === source.tabId) frame = undefined; });
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    // An allowed navigation still replaces the pictured document. Retire its
+    // token without reading/forwarding event URLs, frame trees or page data.
+    if (source.tabId === frame?.tabId && ((method === 'Page.frameNavigated' && !params.frame?.parentId)
+      || (method === 'Page.navigatedWithinDocument' && params.frameId === frame.mainFrameId))) frame = undefined;
+  });
   async function attach(tabId) {
     if (attached.has(tabId)) return;
     await chrome.debugger.attach({ tabId }, '1.3');
@@ -72,7 +78,7 @@ export function visualExtensionWorker(config) {
       const width = view.getUint32(16), height = view.getUint32(20);
       if (width <= 1920 && height <= 1440) {
         const frameId = crypto.randomUUID();
-        frame = { frameId, tabId: tab.id, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
+        frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
         return { state: 'ready', frameId, width, height, scroll: { up: viewport.pageY > 1, down: viewport.pageY + viewport.clientHeight < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + viewport.clientWidth < content.x + content.width - 1 }, image: { mimeType: 'image/png', data: result.data } };
       }
       scale *= Math.min(1440 / width, 1000 / height);

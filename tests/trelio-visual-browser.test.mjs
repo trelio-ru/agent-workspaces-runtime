@@ -33,3 +33,15 @@ test('public visual API rejects private transport commands and extra fields befo
     assert.equal(reads, 0);
   } finally { await browser.close(); }
 });
+
+test('lease expiry during native preparation prevents a late browser launch', { timeout: 2000 }, async () => {
+  let resume, closed = false;
+  const browser = new ExtensionVisualBrowser({ origins: ['https://example.test'], dependencies: {},
+    store: { async read() { await new Promise(resolve => { resume = resolve; }); return null; }, close() { closed = true; } },
+    policy: createVisualOriginPolicy({ origins: ['https://example.test'] }), lease: { deadlineAt: Date.now() + 40 } });
+  const starting = browser.call('setup', { url: 'https://example.test' });
+  await new Promise(resolve => setTimeout(resolve, 80)); resume();
+  assert.equal((await starting).reason, 'lease_expired');
+  for (let i = 0; i < 10 && !closed; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(closed, true);
+});
