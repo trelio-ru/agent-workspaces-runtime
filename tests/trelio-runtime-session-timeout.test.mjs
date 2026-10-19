@@ -14,6 +14,9 @@ import {
   RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
   RUNTIME_STATE_LOCK_STALE_MILLISECONDS,
   RUNTIME_STATE_LOCK_WAIT_MILLISECONDS,
+  RUNTIME_HOOK_START_TIME_ENV,
+  resolveRuntimeHookStartedAt,
+  runtimeHookRemainingMilliseconds,
 } from "../host-runtime/scripts/trelio-runtime-session-limits.mjs";
 import {
   ensurePrivateDirectory,
@@ -199,6 +202,25 @@ const assertProof = (fixture, result) => {
   ), true);
 };
 
+test("hook startup and inherited clocks only consume the original event allowance", () => {
+  const nowMilliseconds = 1_800_000_000_000;
+  const own = { nowMilliseconds, uptimeMilliseconds: 20_000 };
+  const startedAt = resolveRuntimeHookStartedAt({ ...own, environment: {} });
+  assert.equal(runtimeHookRemainingMilliseconds("PreToolUse", { startedAt, nowMilliseconds }), 2_000);
+  assert.equal(runtimeHookRemainingMilliseconds("SessionStart", { startedAt, nowMilliseconds }), 0);
+  for (const inherited of ["invalid", "0", String(nowMilliseconds + 10_000)]) {
+    assert.equal(resolveRuntimeHookStartedAt({ ...own,
+      environment: { [RUNTIME_HOOK_START_TIME_ENV]: inherited } }), startedAt);
+  }
+  const earlier = resolveRuntimeHookStartedAt({ ...own,
+    environment: { [RUNTIME_HOOK_START_TIME_ENV]: String(nowMilliseconds - 21_000) } });
+  assert.equal(runtimeHookRemainingMilliseconds("PreToolUse", { startedAt: earlier, nowMilliseconds }), 1_000);
+  // A backward wall-clock adjustment cannot grant more than one full allowance.
+  assert.equal(runtimeHookRemainingMilliseconds("PreToolUse", {
+    startedAt, nowMilliseconds: startedAt - 1_000,
+  }), 22_000);
+});
+
 test("hook definition and doctor budget cover cold startup, registration and lock cleanup", async () => {
   assert.equal(outerTimeoutMilliseconds, PRE_TOOL_USE_TIMEOUT_SECONDS * 1_000);
   // Seven seconds observed before lock creation, plus a contended lock and
@@ -286,6 +308,22 @@ for (const stallPath of [compatibilityPath, registrationPath]) {
     assertProof(fixture, await fixture.run());
   });
 }
+
+test("twenty-second Node bootstrap cannot restart the hook budget before stalled HTTP", async (t) => {
+  const fixture = await createFixture(t, { stallPath: compatibilityPath });
+  // This used to hit the real 30-second outer kill with empty stdout/stderr:
+  // the 20 seconds before import were followed by a fresh 11-second HTTP wait.
+  // Run the actual hook and its private/network cleanup, not a mocked timer.
+  const result = await fixture.run(20_000);
+  const reason = assertDeniedHook(result);
+  assert.match(reason, /TRELIO_RUNTIME_HOOK_FAILED|TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED/u);
+  assert.doesNotMatch(reason, /TRELIO_RUNTIME_HOOK_REQUIRED|включите Hooks/iu);
+  assert.ok(result.elapsedMilliseconds < outerTimeoutMilliseconds - 2_000);
+  assert.equal(fixture.state.registrationCount, 0);
+  await assert.rejects(stat(`${fixture.statePath}.lock`), { code: "ENOENT" });
+  fixture.state.stallPath = null;
+  assertProof(fixture, await fixture.run());
+});
 
 test("a lock inside the host budget stays live; an expired lock is recovered automatically", async (t) => {
   const fixture = await createFixture(t);

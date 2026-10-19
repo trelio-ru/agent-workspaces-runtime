@@ -51,11 +51,13 @@ import {
   resolveRuntimeClientSessionId,
 } from "./trelio-runtime-attestation.mjs";
 import {
-  RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS,
   RUNTIME_PENDING_STATE_MAX_AGE_MILLISECONDS,
   RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS,
   RUNTIME_STATE_LOCK_STALE_MILLISECONDS,
   RUNTIME_STATE_LOCK_WAIT_MILLISECONDS,
+  RUNTIME_HOOK_START_TIME_ENV,
+  resolveRuntimeHookStartedAt,
+  runtimeHookRemainingMilliseconds,
 } from "./trelio-runtime-session-limits.mjs";
 import {
   LOCAL_PROPOSAL_ROUTE_MARKER_MAX_BYTES,
@@ -1033,10 +1035,13 @@ const runHook = async () => {
   ) {
     throw new Error("Hook event is missing or unsupported.");
   }
-  // The approved shell's outer timer includes Windows launcher startup. Keep
-  // room for startup, lock cleanup and the explicit JSON decision. Local ACL,
-  // DPAPI and network work share this signal; no result is cached across hooks.
-  const timeout = RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS[hookInput.hook_event_name];
+  // Slow Node/import/stdin startup has already consumed the client's clock.
+  // Giving runHook a fresh 22 seconds let the outer 30-second timer kill the
+  // process without its JSON denial. Carry the original start through a signed
+  // upgrade too; a successor must not receive another full hook allowance.
+  const startedAt = resolveRuntimeHookStartedAt();
+  process.env[RUNTIME_HOOK_START_TIME_ENV] = String(startedAt);
+  const timeout = runtimeHookRemainingMilliseconds(hookInput.hook_event_name, { startedAt });
   let diagnosticCode = "OK";
   const observed = hookInput.hook_event_name !== "PreToolUse"
     || resolveTrelioHookToolIdentity(hookInput).status !== "unrelated";

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { requireTrelioComponentVersions } from "./trelio-component-versions.mjs";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
+import { RUNTIME_HOOK_START_TIME_ENV, resolveRuntimeHookStartedAt } from "./trelio-runtime-session-limits.mjs";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const MODE_ENTRYPOINTS = Object.freeze({
@@ -67,6 +68,18 @@ export const runHostRuntime = async ({
   }
   const childEnvironment = { ...environment };
   delete childEnvironment.TRELIO_HOST_RUNTIME_BRIDGE_CWD;
+  if (invocation.mode === "hook") {
+    // This process also spends time importing runtime modules before spawning
+    // the hook. Start at its Node bootstrap, rather than granting the child a
+    // new budget. An exact upgrade replay may only retain an earlier clock.
+    childEnvironment[RUNTIME_HOOK_START_TIME_ENV] = String(resolveRuntimeHookStartedAt({
+      environment: environment.TRELIO_HOST_RUNTIME_UPDATE_REEXEC === "1" ? environment : {},
+    }));
+  } else {
+    // Long-lived MCP/bridge processes must not carry an unrelated hook clock
+    // into future commands or provider runtimes.
+    delete childEnvironment[RUNTIME_HOOK_START_TIME_ENV];
+  }
 
   return await new Promise((resolve, reject) => {
     // Запускаем exact Node, которым stable shell уже был запущен. Это не

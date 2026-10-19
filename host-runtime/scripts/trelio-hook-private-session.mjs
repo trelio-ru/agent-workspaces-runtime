@@ -59,7 +59,15 @@ export const withRuntimeHookStage = (stage, operation) => {
   if (!HOOK_STAGES.has(stage)) throw new Error("Unknown runtime hook stage.");
   return stageScope.run(stage, async () => {
     assertRuntimeHookBudget();
-    const result = await operation();
+    let result;
+    try { result = await operation(); }
+    catch (error) {
+      // HTTP aborts otherwise lose the stage and look like a generic hook
+      // failure. Preserve the helper's already closed phase diagnostic, while
+      // an untyped rejection after the global deadline reports that deadline.
+      if (!(error instanceof ProcessDiagnosticError)) assertRuntimeHookBudget();
+      throw error;
+    }
     // In particular, retain the attestation/read stage when an OS operation
     // returns only after the signal expired. Never report the later caller.
     assertRuntimeHookBudget();
@@ -356,4 +364,7 @@ export const withPrivateProcessSession = async (operation, signal) => {
 };
 
 export const withRuntimeHookPrivateSession = (timeoutMilliseconds, operation) =>
-  withPrivateProcessSession(operation, AbortSignal.timeout(timeoutMilliseconds));
+  // AbortSignal.timeout(0) aborts on a later event-loop turn. An invocation
+  // whose startup exhausted its budget must fail before the first private read.
+  withPrivateProcessSession(operation, timeoutMilliseconds <= 0
+    ? AbortSignal.abort() : AbortSignal.timeout(timeoutMilliseconds));

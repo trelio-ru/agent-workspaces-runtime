@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createMcpStartupTrace } from "../host-runtime/scripts/trelio-mcp-startup-trace.mjs";
+import { RUNTIME_HOOK_START_TIME_ENV } from "../host-runtime/scripts/trelio-runtime-session-limits.mjs";
 
 import {
   resolveHostRuntimeInvocation,
@@ -86,6 +87,33 @@ test("MCP startup trace is opt-in, closed and content-free even on stderr failur
     pid: process.pid, parentPid: process.ppid, timestampMs: 123, elapsedMs: 250 }]);
   assert.doesNotThrow(() => createMcpStartupTrace({ environment: { TRELIO_MCP_STARTUP_TRACE: "1" },
     write: () => { throw new Error("closed stderr"); } })("stdio_start"));
+});
+
+test("only an exact hook upgrade retains its earlier startup clock", async () => {
+  for (const mode of ["hook", "bridge", "mcp"]) {
+    for (const recovery of [false, true]) {
+      let childEnvironment;
+      const before = Date.now();
+      await runHostRuntime({ rawArguments: [mode],
+        environment: { TRELIO_PLUGIN_VERSION: "3.2.3", TRELIO_HOST_RUNTIME_VERSION: "3.8.12",
+          [RUNTIME_HOOK_START_TIME_ENV]: "1000",
+          ...(recovery ? { TRELIO_HOST_RUNTIME_UPDATE_REEXEC: "1" } : {}) },
+        spawnProcess: (_command, _args, options) => {
+          childEnvironment = options.env;
+          const child = new EventEmitter();
+          queueMicrotask(() => child.emit("exit", 0));
+          return child;
+        },
+      });
+      if (mode !== "hook") assert.equal(childEnvironment[RUNTIME_HOOK_START_TIME_ENV], undefined);
+      else if (recovery) assert.equal(childEnvironment[RUNTIME_HOOK_START_TIME_ENV], "1000");
+      else {
+        const startedAt = Number(childEnvironment[RUNTIME_HOOK_START_TIME_ENV]);
+        assert.ok(startedAt > 1000 && startedAt <= before);
+        assert.ok(startedAt <= Date.now() - process.uptime() * 1_000 + 10);
+      }
+    }
+  }
 });
 
 

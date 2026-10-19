@@ -75,7 +75,11 @@ publication tooling также остаются вне этого публичн
   Проверяй actual runtime через launcher в `cmd.exe`, Windows PowerShell и
   `pwsh.exe`; одного ненулевого exit code недостаточно для проверки блокировки.
 - Hook выполняет ACL/DPAPI и сеть под общим непродлеваемым внутренним deadline
-  до тайм-аута клиента. Windows private transport живёт только в одном hook/bridge invocation и
+  до тайм-аута клиента. Он включает Node bootstrap/imports/stdin signed runtime;
+  entrypoint и exact upgrade replay сохраняют исходные часы, не выдавая новый
+  бюджет дочернему hook. Истёкший при запуске срок блокирует первый private read.
+  Stable shell до загрузки runtime остаётся отдельной границей времени.
+  Windows private transport живёт только в одном hook/bridge invocation и
   повторно проверяет каждый путь; результат проверки прав не кешируется.
   Зависший private subprocess отменяется, lock очищается, следующий hook
   продолжает ту же client session без ручного удаления состояния.

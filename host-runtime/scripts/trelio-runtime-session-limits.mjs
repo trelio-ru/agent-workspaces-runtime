@@ -8,11 +8,40 @@
  * definition.
  */
 export const PRE_TOOL_USE_TIMEOUT_SECONDS = 30;
-// Unlike the network timer, these include local ACL/credential work. Leave
-// eight seconds for the Windows launcher, Node startup and final teardown.
+// These limits include bootstrap/imports of the signed runtime as well as
+// ACL/credentials/network. The immutable shell/launcher still needs its own
+// reserve before the runtime can observe any clock; do not restart this budget
+// at runHook or when a signed-runtime upgrade launches a successor process.
 export const RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS = Object.freeze({
   PreToolUse: 22_000, SessionStart: 8_000, SessionEnd: 2_000,
 });
+export const RUNTIME_HOOK_START_TIME_ENV = "TRELIO_RUNTIME_HOOK_STARTED_AT";
+
+/**
+ * Process uptime includes Node bootstrap, static imports and stdin delivery.
+ * A parent signed entrypoint/recovery may supply an earlier start, but never a
+ * later one. This is only a local execution bound, not model/session authority.
+ * Ordinary entrypoint launches discard inherited stamps from unrelated work;
+ * only an exact hook recovery keeps the original invocation's earlier clock.
+ */
+export const resolveRuntimeHookStartedAt = ({
+  environment = process.env, nowMilliseconds = Date.now(),
+  uptimeMilliseconds = process.uptime() * 1_000,
+} = {}) => {
+  const ownStartedAt = Math.floor(nowMilliseconds - Math.max(0, uptimeMilliseconds));
+  const inherited = environment[RUNTIME_HOOK_START_TIME_ENV];
+  const stamp = typeof inherited === "string" && /^\d{1,16}$/u.test(inherited)
+    ? Number(inherited) : NaN;
+  return Number.isSafeInteger(stamp) && stamp > 0
+    ? Math.min(ownStartedAt, stamp) : ownStartedAt;
+};
+
+export const runtimeHookRemainingMilliseconds = (event, {
+  startedAt, nowMilliseconds = Date.now(),
+}) => Math.max(0, Math.floor(Math.min(
+  RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS[event],
+  startedAt + RUNTIME_HOOK_EXECUTION_TIMEOUT_MILLISECONDS[event] - nowMilliseconds,
+)));
 export const RUNTIME_REGISTRATION_TIMEOUT_MILLISECONDS = 11_000;
 export const RUNTIME_STATE_LOCK_WAIT_MILLISECONDS = 5_000;
 

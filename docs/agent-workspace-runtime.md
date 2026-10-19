@@ -385,6 +385,21 @@ Callback/state/PKCE и очистка дополнительно проверя�
 
 ### Восстановление подписанного рантайма
 
+Lifecycle hook сохраняет один внутренний бюджет на весь signed-runtime startup:
+22 секунды для PreToolUse, 8 для SessionStart, 2 для SessionEnd. Node uptime
+включает bootstrap/imports и получение stdin до входа в обработчик. Signed
+entrypoint передаёт дочернему hook раннюю отметку `TRELIO_RUNTIME_HOOK_STARTED_AT`;
+exact one-shot upgrade сохраняет её, обычный новый запуск создаёт собственную.
+Bridge/MCP удаляют эту отметку из child environment. Она может только сократить
+срок и не является admission/session authority. При исчерпанном сроке AbortSignal
+уже aborted до первой private operation. Исходный срок не возобновляется новым
+процессом; отмена HTTP/private helper и cleanup оставляют резерв внешнему timeout.
+Stable shell до materialization/runtime entry и зависшие системные вызовы до
+доступного JS остаются отдельной границей: runtime не обещает их прерывать.
+`trelio-runtime-session-timeout.test.mjs` воспроизводит 20 секунд до import и
+зависший HTTP под настоящим внешним 30-секундным kill: должен прийти JSON deny,
+lock должен сняться, следующий hook той же client session должен пройти.
+
 Долгоживущий local MCP не требует restart задачи после публикации нового
 подписанного runtime. Если backend вернул точный
 `AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED` либо

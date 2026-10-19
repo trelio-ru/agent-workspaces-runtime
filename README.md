@@ -340,8 +340,15 @@ protect по-прежнему проверяется обратным unprotect 
 после readiness каждый ACL/DPAPI запрос имеет отдельный лимит 10 секунд. DPAPI
 вызывает CryptProtectData/CryptUnprotectData с UI_FORBIDDEN и без LOCAL_MACHINE. ACL, credentials и сеть дополнительно разделяют непродлеваемый
 внутренний срок (22 секунды для PreToolUse, 8 для SessionStart, 2 для SessionEnd).
+Он отсчитывается от начала Node-процесса signed runtime, включая bootstrap,
+static imports и получение stdin. Entry point передаёт исходное время hook,
+а повторный запуск после signed upgrade сохраняет только более ранний срок.
+Обычный новый hook получает собственные часы; bridge/MCP не наследуют чужой срок.
+Если startup уже исчерпал бюджет, первая private operation не начинается.
 Тайм-аут отменяет subprocess и HTTP, освобождает registration lock и возвращает
 JSON deny до внешнего лимита 30 секунд, оставляя время для Windows launcher.
+Предшествующий stable loader/launcher и зависший системный вызов до входа
+в runtime этим таймером не прерываются; внешний deadline клиента сохраняется.
 Повторный вызов может продолжить ту же client session; отсутствие повторного
 client dispatch нельзя исправлять сбросом OAuth или переустановкой plugin.
 

@@ -102,6 +102,30 @@ test("hook-wide deadline cancels a stalled ACL child and leaves the next hook us
   await assertStopped(state);
 });
 
+test("an exhausted startup budget rejects private work before any helper starts", async () => {
+  const state = { starts: 0, children: [] };
+  await withRuntimeHookPrivateSession(0, async () => {
+    assert.throws(() => scopedPrivateAclWorker(fixtureOptions(state)),
+      { code: "TRELIO_RUNTIME_HOOK_FAILED", diagnosticCode: "TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED" });
+  });
+  assert.equal(state.starts, 0);
+});
+
+test("an aborted HTTP-like rejection retains the deadline and active stage", async () => {
+  await withRuntimeHookPrivateSession(20, async () => {
+    await assert.rejects(withRuntimeHookStage("runtime_registration", () => new Promise((_resolve, reject) => {
+      runtimeHookSignal().addEventListener("abort", () => reject(new Error("synthetic transport abort")), { once: true });
+      // AbortSignal.timeout is unref-ed; this fixture keeps the loop alive.
+      setTimeout(() => reject(new Error("fixture did not abort")), 50);
+    })), error => {
+      assert.equal(error.diagnosticCode, "TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED");
+      assert.equal(error.details.hookStage, "runtime_registration");
+      assert.doesNotMatch(error.message, /synthetic transport/u);
+      return true;
+    });
+  });
+});
+
 test("a single ACL request has its own bound and cannot silently respawn after failure", async () => {
   const state = { starts: 0, children: [] };
   const worker = createPrivateAclWorker({ ...fixtureOptions(state), requestTimeoutMilliseconds: 100 });
