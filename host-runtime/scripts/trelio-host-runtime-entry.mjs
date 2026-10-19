@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireTrelioComponentVersions } from "./trelio-component-versions.mjs";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
+import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 
 const SCRIPT_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const MODE_ENTRYPOINTS = Object.freeze({
@@ -41,12 +42,14 @@ export const runHostRuntime = async ({
   rawArguments = process.argv.slice(2),
   spawnProcess = spawn,
   environment = process.env,
+  startupTrace = createMcpStartupTrace({ environment }),
 } = {}) => {
   const invocation = resolveHostRuntimeInvocation(rawArguments);
   // A downloaded runtime is meaningful only together with the exact shell and
   // runtime releases selected by the signed loader. Rejecting an incomplete
   // launch here keeps every child mode from inventing a stale fallback version.
   requireTrelioComponentVersions(environment);
+  if (invocation.mode === "mcp") startupTrace("runtime_entry");
 
   return await new Promise((resolve, reject) => {
     // Запускаем exact Node, которым stable shell уже был запущен. Это не
@@ -62,6 +65,8 @@ export const runHostRuntime = async ({
         windowsHide: true,
       },
     );
+    // Marks spawn returning, not child readiness or successful initialize.
+    if (invocation.mode === "mcp") startupTrace("mcp_spawn");
 
     child.once("error", reject);
     child.once("exit", (code, signal) => {

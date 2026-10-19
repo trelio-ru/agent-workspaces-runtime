@@ -334,8 +334,11 @@ jobs:
       - name: Run Windows Remote MCP handshake regression
         run: >-
           node --test
-          --test-name-pattern="stdio initialize is not blocked by Codex plugin retention"
+          --test-name-pattern="stdio initialize is not blocked by Codex plugin retention|stdio startup trace"
           tests/trelio-remote-mcp.test.mjs
+
+      - name: Run Windows MCP entrypoint trace regressions
+        run: node tests/trelio-host-runtime-entry.test.mjs
 
       - name: Run Windows Remote MCP OAuth storage regressions
         run: node tests/trelio-remote-mcp-oauth.test.mjs

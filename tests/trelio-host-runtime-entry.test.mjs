@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import test from "node:test";
+import { createMcpStartupTrace } from "../host-runtime/scripts/trelio-mcp-startup-trace.mjs";
 
 import {
   resolveHostRuntimeInvocation,
@@ -47,10 +48,12 @@ test("host runtime passes exact plugin and runtime versions to every child mode"
     TRELIO_HOST_RUNTIME_VERSION: "2.4.1",
   };
   let observed = null;
+  const phases = [];
 
   const exitCode = await runHostRuntime({
     rawArguments: ["mcp"],
     environment,
+    startupTrace: (stage) => phases.push(stage),
     spawnProcess: (command, argumentsList, options) => {
       observed = { command, argumentsList, options };
       const child = new EventEmitter();
@@ -63,4 +66,19 @@ test("host runtime passes exact plugin and runtime versions to every child mode"
   assert.equal(observed.command, process.execPath);
   assert.equal(path.basename(observed.argumentsList[0]), "trelio-remote-mcp.mjs");
   assert.equal(observed.options.env, environment);
+  assert.deepEqual(phases, ["runtime_entry", "mcp_spawn"]);
+});
+
+test("MCP startup trace is opt-in, closed and content-free even on stderr failure", () => {
+  const lines = [];
+  const options = { write: line => lines.push(line), now: () => 123, uptime: () => 0.25 };
+  createMcpStartupTrace({ ...options, environment: {} })("stdio_start");
+  assert.deepEqual(lines, []);
+  const trace = createMcpStartupTrace({ ...options, environment: { TRELIO_MCP_STARTUP_TRACE: "1" } });
+  trace("private-path-or-message");
+  trace("stdio_start");
+  assert.deepEqual(lines.map(JSON.parse), [{ type: "trelio_mcp_startup", stage: "stdio_start",
+    pid: process.pid, parentPid: process.ppid, timestampMs: 123, elapsedMs: 250 }]);
+  assert.doesNotThrow(() => createMcpStartupTrace({ environment: { TRELIO_MCP_STARTUP_TRACE: "1" },
+    write: () => { throw new Error("closed stderr"); } })("stdio_start"));
 });

@@ -483,6 +483,18 @@ OS-protected read-back, без передачи token через argv, environme
 
 ## Статистика ошибок local MCP
 
+Для контролируемой локальной трассы запуска `TRELIO_MCP_STARTUP_TRACE=1`
+включает stderr JSON `trelio_mcp_startup`: `runtime_entry`, `mcp_spawn`,
+`stdio_start`, `stdio_ready`, `initialize_received`, `initialize_response`.
+Пишутся только этап, PID/parentPID, wall-clock `timestampMs` и Node uptime
+`elapsedMs` данного процесса. Последний этап означает запись ответа в stdout,
+а не подтверждение получения клиентом. Стабильный loader может дополнять эту
+трассу своими этапами; общего жёсткого таймера runtime эти записи не создают.
+До выполнения JS импортов отметки нет. Корреляция с конкретным чатом требует
+process-start evidence, совпадение времени само по себе её не доказывает.
+Нет argv, JSON-RPC id/params, private paths или сетевой отправки. По умолчанию
+трасса выключена; ошибка stderr не меняет исходную операцию.
+
 Content-free v2 объединяет success/error в immutable sample с UUID, boundary,
 OS/architecture, tool/operation, versions, закрытыми code/field и loss counters.
 Нет company/user/session/run/skill IDs, message/stack/details, аргументов, paths,

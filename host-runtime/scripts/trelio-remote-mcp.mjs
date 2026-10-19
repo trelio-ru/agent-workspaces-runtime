@@ -2,6 +2,7 @@
 import { normalizeAgentSkillInstructions, AgentSkillInstructionBudgetError } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
+import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 
 /**
  * Universal local host for declarative company Remote MCP skills.
@@ -6546,7 +6547,9 @@ export const runStdioHost = async ({
   spawnProcess = spawn,
   statFile = fs.lstat,
   diagnosticReporter = createAgentDiagnosticReporter({ origin, environment }),
+  startupTrace = createMcpStartupTrace({ environment }),
 } = {}) => {
+  startupTrace("stdio_start");
   // Antigravity's exact native shell selects text delivery. No client/model
   // self-report changes admission, and Codex/Claude/Cursor keep their bytes.
   const textCompatibility = await resolveLocalMcpTextCompatibility(environment);
@@ -6554,6 +6557,7 @@ export const runStdioHost = async ({
     environment,
     migrate: legacyMcpMigration,
   });
+  startupTrace("stdio_ready");
   const input = readline.createInterface({
     input: inputStream,
     crlfDelay: Infinity,
@@ -6569,7 +6573,7 @@ export const runStdioHost = async ({
   let runtimeDelegate = null;
   let runtimeDelegatePromise = null;
 
-  const enqueueResponse = (response) => {
+  const enqueueResponse = (response, isInitialize = false) => {
     if (!response) {
       return outputQueue;
     }
@@ -6578,6 +6582,8 @@ export const runStdioHost = async ({
     // legitimate out-of-order response semantics.
     outputQueue = outputQueue.then(() => {
       outputStream.write(`${JSON.stringify(response)}\n`);
+      // Only the write boundary is known here, not receipt by the MCP client.
+      if (isInitialize) startupTrace("initialize_response");
     });
     return outputQueue;
   };
@@ -6732,6 +6738,7 @@ export const runStdioHost = async ({
       activeToolCalls.set(message.id, controller);
     }
     if (message?.jsonrpc === "2.0" && message.method === "initialize") {
+      startupTrace("initialize_received");
       clientCapabilities = message.params?.capabilities || {};
       clientInitializeParams = message.params || {};
     }
@@ -6762,7 +6769,7 @@ export const runStdioHost = async ({
             { respondOnFailure: false, signal: controller?.signal },
           );
         },
-      }));
+      }), message?.jsonrpc === "2.0" && message.method === "initialize");
     } finally {
       if (controller && activeToolCalls.get(message.id) === controller) {
         activeToolCalls.delete(message.id);

@@ -946,6 +946,21 @@ const createStdioHarness = (callTool, options = {}) => {
   };
 };
 
+test("stdio startup trace preserves initialize frames and excludes request content", async () => {
+  const phases = [];
+  const harness = createStdioHarness(async () => { throw new Error("unexpected tool call"); }, {
+    startupTrace: stage => phases.push(stage),
+  });
+  try {
+    harness.send({ jsonrpc: "2.0", id: "private-request-id", method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "private-client", version: "1" } } });
+    const result = await harness.waitForFrame(frame => frame.id === "private-request-id");
+    assert.ok(result.result.serverInfo);
+    assert.deepEqual(phases, ["stdio_start", "stdio_ready", "initialize_received", "initialize_response"]);
+    assert.equal(JSON.stringify(phases).includes("private"), false);
+  } finally { await harness.close(); }
+});
+
 test("runtime handoff is limited to the two pre-operation compatibility gates", () => {
   for (const code of [
     "AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED",

@@ -225,6 +225,8 @@ publication tooling также остаются вне этого публичн
   Chunk/batch bounds не являются лимитом полного индексируемого текста.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
+  opt-in startup trace пишет только закрытые этапы и process clocks в stderr,
+  не request content; запись initialize не доказывает получение клиентом.
   только закрытые технические dimensions, без input/message/paths и без
   auth recovery. Сбой сборщика не меняет ответ исходной операции.
   Failed child допускает только closed failure category; classification не
