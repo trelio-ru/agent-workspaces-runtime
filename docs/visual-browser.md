@@ -41,6 +41,12 @@ Token не передаётся в argv, Chromium environment, MCP или logs. 
 не является DevTools endpoint. Heartbeat и cleanup не стоят за зависшим input;
 переподключение не переигрывает предыдущую команду.
 
+Windows startup открывает `about:blank`, затем extension ставит navigation policy
+и переводит owned вкладку на начальный адрес. Readiness означает отдельный hello
+после обоих этапов, а не только открытый socket. В synthetic native tests
+диагностика ограничена stage/exit и категориями sandbox/display; raw stderr,
+native сообщения, пути и token никогда не печатаются.
+
 Main-frame HTTP(S) navigation ограничена signed origins/domains через DNR.
 Source/resource URLs и специальные схемы отклоняются. Browser downloads
 запрещены отдельно: suffix URL не доказывает тип ответа.

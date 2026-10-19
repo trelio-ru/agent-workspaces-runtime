@@ -6,6 +6,7 @@
  */
 export function visualExtensionWorker(config) {
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
+  let bootstrapState = 'pending', bootstrapStage = 'policy';
   const attached = new Set();
   const httpFailures = new Map();
   const allowed = raw => {
@@ -168,11 +169,14 @@ export function visualExtensionWorker(config) {
   function connect() {
     if (Date.now() >= config.deadlineAt) return;
     socket = new WebSocket(config.endpoint, ['trelio-visual-v1', config.token]);
-    socket.onopen = () => send({ kind: 'hello', version: 1 });
+    socket.onopen = () => {
+      if (bootstrapState === 'ready') send({ kind: 'hello', version: 1 });
+      else if (bootstrapState === 'failed') send({ kind: 'bootstrap_failed', stage: bootstrapStage });
+    };
     socket.onmessage = event => {
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
-      if (!message || typeof message.id !== 'string' || typeof message.operation !== 'string') return;
+      if (!message || typeof message.id !== 'string' || typeof message.operation !== 'string' || (bootstrapState !== 'ready' && message.operation !== 'close-windows')) return;
       const run = async () => {
         try { send({ kind: 'result', id: message.id, result: await execute(message.operation, message.args || {}) }); }
         catch (error) {
@@ -192,24 +196,44 @@ export function visualExtensionWorker(config) {
   chrome.windows.onRemoved.addListener(async () => {
     if (!(await chrome.windows.getAll({ windowTypes: ['normal'] })).length) send({ kind: 'windows_closed', manual });
   });
-  // Bootstrap an inactive ordinary window from the extension rather than a
-  // foreground startup URL. This does not require a debugging pipe/port and
-  // avoids activating the OS app for each restored worker session.
+  // Connect before policy/window preparation so a native startup failure can
+  // report one closed stage rather than disappear into a socket timeout.
+  // Reconnection only repeats readiness, never the initial navigation.
+  connect();
   (async () => {
-    const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // Response-stage guards deny a document download before its body reaches
-    // a file. They outrank origin allow rules, including a hidden attachment
-    // behind a normal URL. No headers/body are exposed through the API.
-    const rules = [
-      { id: 1, priority: 1, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'] } },
-      { id: 2, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
-      { id: 3, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
-    ];
-    let ruleId = 4;
-    for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
-    for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
-    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: (await chrome.declarativeNetRequest.getDynamicRules()).map(rule => rule.id), addRules: rules });
-    if (!(await chrome.windows.getAll({ windowTypes: ['normal'] })).length) await chrome.windows.create({ url: config.initialUrl, focused: manual, width: 1440, height: 1000 });
-    connect();
+    try {
+      const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // Response-stage guards deny a document download before its body reaches
+      // a file. They outrank origin allow rules, including a hidden attachment
+      // behind a normal URL. No headers/body are exposed through the API.
+      const rules = [
+        { id: 1, priority: 1, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'] } },
+        { id: 2, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
+        { id: 3, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
+      ];
+      let ruleId = 4;
+      for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
+      for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
+      await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: (await chrome.declarativeNetRequest.getDynamicRules()).map(rule => rule.id), addRules: rules });
+      bootstrapStage = 'window';
+      // Windows host startup opens only about:blank; other desktops may let this
+      // extension create the initial inactive window. Navigate the owned blank
+      // tab after guards exist, without selecting/focusing a tab on every
+      // command. Private auth stores exclude Sessions, so no user tab is reused.
+      const tabs = await chrome.tabs.query({ windowType: 'normal' });
+      const blank = tabs.find(tab => tab.url === 'about:blank');
+      let initial;
+      if (blank) initial = await chrome.tabs.update(blank.id, { url: allowedNavigation(config.initialUrl) });
+      else if (!(await chrome.windows.getAll({ windowTypes: ['normal'] })).length) initial = (await chrome.windows.create({ url: allowedNavigation(config.initialUrl), focused: manual, width: 1440, height: 1000 })).tabs?.[0];
+      else initial = await chrome.tabs.create({ url: allowedNavigation(config.initialUrl), active: manual });
+      // Manual setup must not announce its window before the first document has
+      // loaded: a fast ready/close otherwise snapshots an unopened login page.
+      // Read only browser tab metadata, under the original absolute deadline.
+      const initialUntil = Math.min(Date.now() + 8000, config.deadlineAt);
+      while (initial?.status === 'loading' && Date.now() < initialUntil) { await pause(100); initial = await chrome.tabs.get(initial.id); }
+      bootstrapState = 'ready'; send({ kind: 'hello', version: 1 });
+    } catch {
+      bootstrapState = 'failed'; send({ kind: 'bootstrap_failed', stage: bootstrapStage });
+    }
   })();
 }

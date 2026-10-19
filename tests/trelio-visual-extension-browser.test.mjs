@@ -28,7 +28,8 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
   const origin = `http://127.0.0.1:${server.address().port}`;
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
-  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+  const diagnostics = [];
+  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
   let browser = create();
   const originalCall = ExtensionVisualBrowser.prototype.call;
   // A native headed Mac run independently samples the OS foreground identity.
@@ -43,7 +44,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     }
     return value;
   };
-  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason })); return value; };
+  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
   try {
     let f = ready(await browser.call('navigate', { url: `${origin}/login` }));
     // Chromium can finish its one permitted startup activation just after the
@@ -81,8 +82,12 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
   } finally {
     ExtensionVisualBrowser.prototype.call = originalCall;
     await browser.close().catch(() => browser.abort());
+    // Keep the primary startup evidence visible even when Windows is still
+    // releasing owned profile handles during fixture cleanup. Never print
+    // native stderr or snapshot bytes as a substitute for these closed fields.
+    console.log(JSON.stringify({ fixture: 'visual-input', diagnostics }));
     await new Promise(resolve => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
 
@@ -98,11 +103,12 @@ test('manual window close and ready save once before unlocking images; crash pre
   const origin = `http://127.0.0.1:${server.address().port}`;
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); writes++; }, close() {} };
-  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testWindowController: value => { window = value; } });
+  const diagnostics = [];
+  const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testWindowController: value => { window = value; }, testDiagnostics: value => diagnostics.push(value) });
   let browser = create();
   try {
     for (const completion of ['window_close', 'ready']) {
-      assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required');
+      assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required', JSON.stringify(diagnostics));
       assert.equal((await browser.call('show-login')).image, undefined);
       assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
       assert.equal((await browser.call('type-text', { frameId: 'invalid', text: 'blocked' })).reason, 'manual_control_active');
@@ -124,7 +130,8 @@ test('manual window close and ready save once before unlocking images; crash pre
     await browser.close(); assert.equal(writes, before); assert.deepEqual(snapshot, previous);
   } finally {
     await browser.close().catch(() => browser.abort());
+    console.log(JSON.stringify({ fixture: 'visual-manual', diagnostics }));
     await new Promise(resolve => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

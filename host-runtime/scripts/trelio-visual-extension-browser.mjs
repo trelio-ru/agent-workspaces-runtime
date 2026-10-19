@@ -27,11 +27,11 @@ export class ExtensionVisualBrowser {
   #child; #server; #wss; #socket; #directory; #profile; #pending = new Map();
   #state = 'not_configured'; #manual = false; #saved = false; #closed = false;
   #tail = Promise.resolve(); #deadline; #heartbeat; #terminal; #starting; #finishing;
-  #launchAbort = new AbortController();
-  constructor({ dependencies, store, policy, origins, domains = [], lease, testHeadless = false, testWindowController }) {
-    if ((testHeadless || testWindowController) && !policy.fixtureOnly) throw fault('invalid_input');
+  #launchAbort = new AbortController(); #extensionReady = false;
+  constructor({ dependencies, store, policy, origins, domains = [], lease, testHeadless = false, testWindowController, testDiagnostics }) {
+    if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController });
+    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics });
     this.sessionId = crypto.randomUUID();
     this.#deadline = setTimeout(() => { void this.close().catch(() => this.abort()); }, lease.deadlineAt - Date.now());
     this.#deadline.unref();
@@ -39,7 +39,7 @@ export class ExtensionVisualBrowser {
   #status(reason = 'none') { return visualStatus(this.#state, this.#terminal || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved }); }
   async #start(url, manual) {
     if (this.#child) return;
-    this.#state = 'preparing'; this.#manual = manual;
+    this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false;
     const snapshot = await this.store.read(); await this.store.prepare?.(); this.#saved = Boolean(snapshot);
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     this.#directory = await fs.mkdtemp(path.join(this.store.directory, 'extension-session-'));
@@ -59,7 +59,12 @@ export class ExtensionVisualBrowser {
         this.#socket = ws;
         ws.on('message', data => {
           let value; try { value = JSON.parse(data.toString()); } catch { ws.close(); return; }
-          if (value.kind === 'hello' && value.version === 1) return;
+          if (value.kind === 'hello' && value.version === 1) { this.#extensionReady = true; return; }
+          // Only fixed bootstrap stages can leave the extension on failure.
+          // Never include native messages, paths, URLs or its transport token.
+          if (value.kind === 'bootstrap_failed' && ['policy', 'window'].includes(value.stage)) {
+            this.testDiagnostics?.({ stage: value.stage }); this.#terminal = 'bootstrap_failed'; return;
+          }
           if (value.kind === 'windows_closed') { if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
           const pending = this.#pending.get(value.id); if (!pending) return;
@@ -91,18 +96,34 @@ export class ExtensionVisualBrowser {
     // foreground. These scheduling switches neither activate the window nor
     // alter navigator.webdriver; mouse-wheel acknowledgements otherwise stall
     // in an occluded headed renderer on macOS.
-    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--no-startup-window', '--window-size=1440,1000', ...(this.testHeadless ? ['--headless=new'] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
+    // Windows starts an ordinary blank window instead of relying on the
+    // background-only lifetime of an application without an initial window.
+    // The extension installs policy before navigating it; the provider URL and
+    // private transport token never enter the process command line. Startup
+    // may focus this owned window once, as agreed for visible workflows.
+    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'win32' ? ['about:blank'] : ['--no-startup-window']), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging=stderr'] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
+    // Fixture-only classification deliberately discards raw stderr. Even CI
+    // must never print a worker resource, private path or loopback credential.
+    let diagnosticTail = '', sandboxUnavailable = false, displayUnavailable = false, extensionUnavailable = false;
+    this.#child.stderr?.on('data', chunk => {
+      diagnosticTail = (diagnosticTail + chunk.toString()).slice(-8192);
+      sandboxUnavailable ||= /No usable sandbox|Failed to move to new namespace|Running as root without --no-sandbox|sandbox.*Operation not permitted/iu.test(diagnosticTail);
+      displayUnavailable ||= /Missing X server|cannot open display|failed to initialize.*platform/iu.test(diagnosticTail);
+      extensionUnavailable ||= /Failed to load extension|Could not load.*manifest|Service worker registration failed/iu.test(diagnosticTail);
+    });
     this.#child.once('error', () => { this.#terminal = 'bootstrap_failed'; this.#state = 'error'; });
     this.#child.once('exit', (code, signal) => {
+      this.testDiagnostics?.({ stage: 'browser_exit', exitCode: code, signal, sandboxUnavailable, displayUnavailable, extensionUnavailable });
+      if (this.#state === 'preparing') { this.#terminal = 'bootstrap_failed'; this.#state = 'error'; return; }
       // A normal human window close may finish auth; a crash/kill must retain
       // the previous durable snapshot and report loss instead of claiming save.
       if (!this.#closed && this.#manual && code === 0 && !signal) void this.#finishManual().catch(() => {});
       else if (!this.#closed && !this.#starting) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     });
     const until = Math.min(Date.now() + 25_000, this.lease.deadlineAt);
-    while (!this.#socket && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
+    while (!this.#extensionReady && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
-    if (!this.#socket) throw fault('bootstrap_failed');
+    if (!this.#extensionReady || this.#terminal) { this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', sandboxUnavailable, displayUnavailable, extensionUnavailable }); throw fault('bootstrap_failed'); }
     this.testWindowController?.({ close: () => this.#send('close-windows'), crash: () => this.#child?.kill('SIGKILL') });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';
