@@ -30,7 +30,10 @@ async function fixtureCookieEvidence(snapshot, directory, name) {
   }
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(file, { readOnly: true });
-  try { result.count = db.prepare('SELECT count(*) AS count FROM cookies WHERE name = ?').get(name).count; }
+  try {
+    result.count = db.prepare('SELECT count(*) AS count FROM cookies WHERE name = ?').get(name).count;
+    result.persistentCount = db.prepare('SELECT count(*) AS count FROM cookies WHERE name = ?').get('fixture_persistent').count;
+  }
   finally { db.close(); for (const suffix of ['', '-wal', '-shm']) await fs.rm(file + suffix, { force: true }); }
   return result;
 }
@@ -45,7 +48,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     if (u.pathname === '/storage') { if (u.searchParams.get('value') === 'SYNTHETIC_STORAGE') storageRestored = true; response.end(); return; }
     if (u.pathname === '/detail') detailSeen = true;
     if (request.headers.cookie?.includes('fixture_session=SYNTHETIC_COOKIE')) cookieRestored = true;
-    if (u.pathname === '/login') response.setHeader('Set-Cookie', 'fixture_session=SYNTHETIC_COOKIE; HttpOnly; SameSite=Strict; Path=/');
+    if (u.pathname === '/login') response.setHeader('Set-Cookie', ['fixture_session=SYNTHETIC_COOKIE; HttpOnly; SameSite=Strict; Path=/', 'fixture_persistent=SYNTHETIC_PERSISTENT; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600']);
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><body style="margin:0;background:#d6efde;font:24px sans-serif;${u.pathname === '/detail' ? '' : 'height:2400px'}"><input id="entry" style="position:absolute;left:40px;top:60px;width:360px;height:50px;font-size:24px"><button style="position:absolute;left:450px;top:60px;width:160px;height:55px" onclick="fetch('/typed?value='+encodeURIComponent(document.getElementById('entry').value)+'&webdriver='+navigator.webdriver)">Submit</button><a href="/detail" target="_blank" style="position:absolute;left:700px;top:60px">Detail</a><h1 style="position:absolute;top:180px">${u.pathname === '/detail' ? 'Detail fixture' : 'Input fixture'}</h1><script>${u.pathname === '/login' ? 'localStorage.setItem("fixture","SYNTHETIC_STORAGE");' : ''}fetch('/storage?value='+localStorage.getItem('fixture'))</script>`);
   });

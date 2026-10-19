@@ -1,7 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+
+test('extension transport has an exact loopback CSP without expanding page navigation or content injection', () => {
+  const matches = ['https://example.test/*'], manifest = visualExtensionManifest(matches, 23145);
+  assert.deepEqual(manifest.host_permissions, [...matches, 'http://127.0.0.1/*']);
+  assert.deepEqual(manifest.content_scripts[0].matches, matches);
+  assert.equal(manifest.content_security_policy.extension_pages, "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:23145");
+  assert.throws(() => visualExtensionManifest(matches, '23145'), { code: 'invalid_input' });
+  const counts = visualNativeLogEvidence('[1:ERROR:os_crypt_win.cc:3] PRIVATE_COOKIE\n[2:ERROR:sqlite.cc:5] PRIVATE_PATH\n[3:INFO:cookie.cc:1] PRIVATE_TOKEN');
+  assert.deepEqual(counts, { osCryptErrors: 1, cookieErrors: 0, sqliteErrors: 1, networkSandboxErrors: 0 });
+  assert.equal(JSON.stringify(counts).includes('PRIVATE'), false);
+});
 
 test('origin policy rejects source resources, credentials, schemes and sibling origins', () => {
   const policy = createVisualOriginPolicy({ origins: ['https://example.test'] });

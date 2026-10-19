@@ -191,6 +191,8 @@ publication tooling также остаются вне этого публичн
   Existing Preferences не перезаписываются; policy ставится до provider URL,
   readiness подтверждается отдельным hello. Fixture diagnostics возвращают
   только закрытый stage/exit и категории sandbox/display, никогда raw stderr.
+  Loopback transport permission отделён от origins/content matches; CSP connect
+  ограничен exact private портом. Fixture log tails дают только закрытые счётчики.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.

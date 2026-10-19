@@ -40,6 +40,10 @@ exact extension Origin и случайный 256-bit token в private worker res
 Token не передаётся в argv, Chromium environment, MCP или logs. WS transport
 не является DevTools endpoint. Heartbeat и cleanup не стоят за зависшим input;
 переподключение не переигрывает предыдущую команду.
+Transport имеет отдельный loopback host permission, а CSP разрешает connect
+только к exact private порту. Это не добавляет localhost в navigation policy
+или content-script matches. Fixture native logs сворачиваются в закрытые
+счётчики компонентов; raw text и содержимое auth stores не выводятся.
 
 Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
 Запуск без начального окна остаётся только на macOS с её app lifecycle.

@@ -17,6 +17,32 @@ import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartu
 const PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKPrbp7ylW5XVUNtVR2PDaIA2kv25iXiGrP/MmoU5T0j1+cg9wUHghUL9XFTe/XlADHXIQHovydsKcNrUvI2NzWfoQhdmfADfhRrBebR7vOsF551zdKLY5Kc8G9tjmJ5SqXNsiqZthvuoTD9WrjI9sypTG9bCiYPwZJ44PfJpKk7L7/ei4pQgkrO19+5/09ofA90Yn/fA1YAG8peUWcwFHqH5hE0q/U/ktWQJCAuahMXvGv2IloMoJ0zS9lqkfI01fn3lWkA48Hl/qcx6UKzUud5r6SHAUcR9XrCTXs5n/rY9b8SLCGOHz/ltKVhah9M4U1ALm17bvZRzRO8Cl+ESwIDAQAB';
 const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY, 'base64')).digest('hex').slice(0, 32)].map(c => String.fromCharCode(97 + parseInt(c, 16))).join('');
 const fault = code => Object.assign(new Error(code), { code });
+
+// Loopback belongs to the private transport, never the navigation/content
+// policy. Explicit permission also covers Chrome Local Network Access checks;
+// CSP restricts connections to the one random-port authenticated host server.
+export function visualExtensionManifest(matches, port) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw fault('invalid_input');
+  return { manifest_version: 3, name: 'Trelio Visual Browser', version: '0.1.0', key: PUBLIC_KEY,
+    permissions: ['debugger', 'tabs', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
+    content_security_policy: { extension_pages: `script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:${port}` },
+    background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js'], run_at: 'document_start', world: 'ISOLATED' }],
+  };
+}
+
+export function visualNativeLogEvidence(text) {
+  const counts = { osCryptErrors: 0, cookieErrors: 0, sqliteErrors: 0, networkSandboxErrors: 0 };
+  for (const line of String(text).slice(-65536).split('\n')) {
+    const end = line.indexOf(']'); if (end < 0) continue;
+    const header = line.slice(0, end);
+    if (!/\bERROR[:\]]/u.test(header)) continue;
+    if (/os_crypt/iu.test(header)) counts.osCryptErrors++;
+    if (/cookie/iu.test(header)) counts.cookieErrors++;
+    if (/sqlite/iu.test(header)) counts.sqliteErrors++;
+    if (/network.*sandbox|sandbox.*network/iu.test(header)) counts.networkSandboxErrors++;
+  }
+  return counts;
+}
 const fields = { status: [], ready: [], 'show-login': [], screenshot: [], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
 const validArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768;
 
@@ -81,9 +107,7 @@ export class ExtensionVisualBrowser {
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
     const matches = [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
     const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt };
-    const manifest = { manifest_version: 3, name: 'Trelio Visual Browser', version: '0.1.0', key: PUBLIC_KEY, permissions: ['debugger', 'tabs', 'declarativeNetRequest', 'webRequest'], host_permissions: matches, background: { service_worker: 'worker.js' },
-      content_scripts: [{ matches, js: ['link-router.js'], run_at: 'document_start', world: 'ISOLATED' }],
-    };
+    const manifest = visualExtensionManifest(matches, this.#server.address().port);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)});`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
@@ -105,7 +129,7 @@ export class ExtensionVisualBrowser {
     // The extension privately navigates the internal new-tab surface after
     // policy. Fresh profile preferences above preserve session cookies even
     // on platforms where closing the last window ends the browser session.
-    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging=stderr'] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
+    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
     // Fixture-only classification deliberately discards raw stderr. Even CI
     // must never print a worker resource, private path or loopback credential.
     let diagnosticTail = '', sandboxUnavailable = false, displayUnavailable = false, extensionUnavailable = false;
@@ -127,7 +151,7 @@ export class ExtensionVisualBrowser {
     const until = Math.min(Date.now() + 25_000, this.lease.deadlineAt);
     while (!this.#extensionReady && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
-    if (!this.#extensionReady || this.#terminal) { this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', sandboxUnavailable, displayUnavailable, extensionUnavailable }); throw fault('bootstrap_failed'); }
+    if (!this.#extensionReady || this.#terminal) { await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', sandboxUnavailable, displayUnavailable, extensionUnavailable }); throw fault('bootstrap_failed'); }
     this.testWindowController?.({ close: () => this.#send('close-windows'), crash: () => this.#child?.kill('SIGKILL') });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';
@@ -140,6 +164,20 @@ export class ExtensionVisualBrowser {
       this.#pending.set(id, { resolve, reject, timer });
       this.#socket.send(JSON.stringify({ id, operation, args }));
     });
+  }
+  async #nativeDiagnostics() {
+    if (!this.testDiagnostics || !this.#directory) return;
+    let file;
+    try {
+      // GUI Chromium on Windows does not reliably write to stderr. Read only
+      // a bounded tail of this synthetic fixture's private log, reduce it to
+      // closed counters and discard every native message/path/token byte.
+      file = await fs.open(path.join(this.#directory, 'native.log'), 'r');
+      const size = (await file.stat()).size, bytes = Buffer.alloc(Math.min(size, 65536));
+      try { await file.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length)); this.testDiagnostics({ stage: 'native_log', ...visualNativeLogEvidence(bytes.toString()) }); }
+      finally { bytes.fill(0); }
+    } catch { this.testDiagnostics({ stage: 'native_log_unavailable' }); }
+    finally { await file?.close().catch(() => {}); }
   }
   async #stopBrowser() {
     clearInterval(this.#heartbeat);
@@ -154,6 +192,7 @@ export class ExtensionVisualBrowser {
     const until = Date.now() + 10_000;
     while (child.exitCode === null && child.signalCode === null && Date.now() < until) await sleep(100);
     if (child.exitCode === null && child.signalCode === null) throw fault('operation_failed');
+    await this.#nativeDiagnostics();
     if (child.exitCode !== 0 || child.signalCode) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     this.#child = undefined;
     this.#socket?.close(); this.#socket = undefined;
