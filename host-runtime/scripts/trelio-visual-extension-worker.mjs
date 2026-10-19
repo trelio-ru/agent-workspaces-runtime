@@ -4,9 +4,13 @@
  * Its companion isolated adapter only routes a clicked anchor's destination.
  * Only the closed host command vocabulary below can reach chrome.debugger.
  */
-export function visualExtensionWorker(config) {
+export function visualExtensionWorker(config, cookieState) {
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
-  let bootstrapState = 'pending', bootstrapStage = 'policy';
+  let bootstrapState = 'pending', bootstrapStage = 'policy', stopping = false;
+  let authReady, authStarted = false, authRestored = false, authInitialising = false, authFrozen = false, authTimer;
+  const authJar = new Map(), authChanges = [];
+  const ownedWindows = new Set(), windowChanges = [];
+  let windowInventoryReady = false;
   const attached = new Set();
   const httpFailures = new Map();
   const allowed = raw => {
@@ -22,6 +26,67 @@ export function visualExtensionWorker(config) {
   };
   const send = value => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(value)); };
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const activeStartup = () => { if (stopping || Date.now() >= config.deadlineAt) throw Error('lease_expired'); };
+  const privateAuthSnapshot = () => cookieState.validate([...authJar.values()]);
+  const publishAuth = () => { clearTimeout(authTimer); send({ kind: 'session_auth', cookies: privateAuthSnapshot() }); };
+  const authFailure = () => { clearTimeout(authTimer); send({ kind: 'auth_state_failed' }); };
+  const applyAuthChange = change => { const id = cookieState.key(change.cookie); if (change.removed) authJar.delete(id); else authJar.set(id, change.cookie); };
+  const flushAuthChanges = () => { for (const change of authChanges.splice(0)) applyAuthChange(change); };
+  async function allSessionCookies() {
+    // An omitted partitionKey selects only ordinary cookies. An empty key in
+    // getAll selects all CHIPS partitions; merge by the full private identity.
+    const batches = await Promise.all([chrome.cookies.getAll({ session: true, storeId: '0' }), chrome.cookies.getAll({ session: true, storeId: '0', partitionKey: {} })]);
+    const values = new Map();
+    for (const batch of batches) for (const value of batch) { const cookie = cookieState.fromChrome(value); if (cookie) values.set(cookieState.key(cookie), cookie); }
+    return cookieState.validate([...values.values()]);
+  }
+  async function refreshAuth() {
+    if (authFrozen) return privateAuthSnapshot();
+    authInitialising = true;
+    try {
+      const values = await allSessionCookies();
+      if (authFrozen) { authInitialising = false; authChanges.length = 0; publishAuth(); return privateAuthSnapshot(); }
+      authJar.clear();
+      for (const cookie of values) authJar.set(cookieState.key(cookie), cookie);
+      authInitialising = false;
+      flushAuthChanges();
+      publishAuth(); return privateAuthSnapshot();
+    } catch (error) { authInitialising = false; authFailure(); throw error; }
+  }
+  chrome.cookies.onChanged.addListener(change => {
+    if (!authRestored || authFrozen) return;
+    try {
+      const cookie = cookieState.fromChrome(change.cookie); if (!cookie) return;
+      if (authInitialising) {
+        if (authChanges.length >= 1024) throw Error('storage_unavailable');
+        authChanges.push({ removed: change.removed === true, cookie }); return;
+      }
+      applyAuthChange({ removed: change.removed === true, cookie }); privateAuthSnapshot();
+      // Changes are applied immediately; only private transport publication is
+      // coalesced. Startup/window-close/cleanup explicitly flush the final jar.
+      clearTimeout(authTimer); authTimer = setTimeout(() => { try { publishAuth(); } catch { authFailure(); } }, 50);
+    } catch { authFailure(); }
+  });
+  function windowClosing(windowId, earlyTabEvent = false) {
+    if (!authRestored || authFrozen) return;
+    // Cookie changes already delivered before the tab-close event belong to
+    // the user session (including logout). Later profile-cleanup removals do
+    // not. The later window-removed notification must not flush those again.
+    if (earlyTabEvent) { try { flushAuthChanges(); privateAuthSnapshot(); } catch { authFailure(); } }
+    if (windowInventoryReady && ![...ownedWindows].some(id => id !== windowId)) {
+      // Do not await a windows.getAll() after the final close: Chromium can
+      // tear down the profile before that API callback is dispatched. Track
+      // native create/remove events instead, and synchronously freeze/send
+      // before session cleanup. Popups count as owned windows too.
+      authFrozen = true; authChanges.length = 0;
+      try { publishAuth(); } catch { authFailure(); }
+    }
+  }
+  chrome.windows.onCreated.addListener(window => {
+    if (!['normal', 'popup'].includes(window.type)) return;
+    if (windowInventoryReady) ownedWindows.add(window.id); else windowChanges.push({ id: window.id, removed: false });
+  });
+  chrome.tabs.onRemoved.addListener((_tabId, info) => { if (info.isWindowClosing) windowClosing(info.windowId, true); });
   // Numeric main-document evidence only: no request/response headers or body,
   // and no URL path/query leaves this adapter. Transport errors have no status.
   chrome.webRequest.onBeforeRequest.addListener(details => { httpFailures.delete(details.tabId); }, { urls: config.matches, types: ['main_frame'] });
@@ -96,22 +161,51 @@ export function visualExtensionWorker(config) {
   async function execute(op, args) {
     // Cleanup remains available after the lease; it can only close this owned
     // profile's windows, never send new input or navigate an external page.
-    if (Date.now() >= config.deadlineAt && op !== 'close-windows') throw Error('lease_expired');
+    if (Date.now() >= config.deadlineAt && !['close-windows', 'snapshot-session-auth'].includes(op)) throw Error('lease_expired');
+    if (op === 'restore-session-auth') {
+      if (!authReady || authStarted || bootstrapStage !== 'auth' || typeof args.replace !== 'boolean') throw Error('invalid_input');
+      authStarted = true;
+      try {
+        activeStartup();
+        if (args.replace) {
+          // An explicitly empty saved jar represents logout. Remove stale
+          // native session rows before restoring it, without touching persistent
+          // cookies or visiting a provider URL. Legacy snapshots have no overlay
+          // and retain their native session data during the first migration.
+          for (const cookie of await allSessionCookies()) {
+            activeStartup();
+            const details = cookieState.forChrome(cookie);
+            await chrome.cookies.remove({ url: details.url, name: details.name, storeId: '0', ...(details.partitionKey ? { partitionKey: details.partitionKey } : {}) });
+          }
+        }
+        for (const cookie of cookieState.validate(args.cookies)) { activeStartup(); if (!await chrome.cookies.set(cookieState.forChrome(cookie))) throw Error('storage_unavailable'); }
+        activeStartup(); authRestored = true; await refreshAuth(); activeStartup(); authReady.resolve(); return { state: 'saved_unverified' };
+      } catch (error) { authReady.reject(error); throw error; }
+    }
+    if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
     if (op === 'manual') {
       manual = true; frame = undefined;
       for (const tabId of attached) await chrome.debugger.detach({ tabId }).catch(() => {});
       attached.clear();
-      const tab = await selected();
+      // Human authentication may use an owned popup. Counting/showing these
+      // surfaces does not enable model-facing popup/DOM extraction.
+      const tab = (await chrome.tabs.query({})).filter(tab => allowed(tab.url)).at(-1);
+      if (!tab) throw Error('session_closed');
       await chrome.tabs.update(tab.id, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
       return { state: 'manual_input_required' };
     }
     if (op === 'ready') { manual = false; frame = undefined; return { state: 'saved_unverified' }; }
-    if (op === 'close-windows') {
+    if (op === 'close-windows' || (op === 'fixture-close-windows' && config.fixtureOnly)) {
+      stopping = true;
+      if (bootstrapState === 'pending') authReady?.reject(Error('lease_expired'));
+      // The fixture command reproduces a human window-close without taking a
+      // proactive host snapshot. It is unavailable to a production provider.
+      if (op === 'close-windows' && authRestored) { try { await refreshAuth(); authFrozen = true; publishAuth(); } catch { authFailure(); } }
       manual = true; frame = undefined;
       for (const tabId of attached) await chrome.debugger.detach({ tabId }).catch(() => {});
-      for (const w of await chrome.windows.getAll({ windowTypes: ['normal'] })) await chrome.windows.remove(w.id);
+      for (const id of [...ownedWindows]) await chrome.windows.remove(id);
       return { state: 'closed' };
     }
     if (manual) throw Error('manual_control_active');
@@ -172,11 +266,12 @@ export function visualExtensionWorker(config) {
     socket.onopen = () => {
       if (bootstrapState === 'ready') send({ kind: 'hello', version: 1 });
       else if (bootstrapState === 'failed') send({ kind: 'bootstrap_failed', stage: bootstrapStage });
+      else if (bootstrapStage === 'auth' && authReady && !authStarted) send({ kind: 'auth_required' });
     };
     socket.onmessage = event => {
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
-      if (!message || typeof message.id !== 'string' || typeof message.operation !== 'string' || (bootstrapState !== 'ready' && message.operation !== 'close-windows')) return;
+      if (!message || typeof message.id !== 'string' || typeof message.operation !== 'string' || (bootstrapState !== 'ready' && !['close-windows', 'restore-session-auth'].includes(message.operation))) return;
       const run = async () => {
         try { send({ kind: 'result', id: message.id, result: await execute(message.operation, message.args || {}) }); }
         catch (error) {
@@ -193,9 +288,12 @@ export function visualExtensionWorker(config) {
     // its outcome from a missing reply after worker/browser disconnect.
     socket.onclose = () => { frame = undefined; setTimeout(connect, 1000); };
   }
-  chrome.windows.onRemoved.addListener(async () => {
-    if (!(await chrome.windows.getAll({ windowTypes: ['normal'] })).length) send({ kind: 'windows_closed', manual });
-  });
+  chrome.windows.onRemoved.addListener(windowId => {
+    if (!windowInventoryReady) { windowChanges.push({ id: windowId, removed: true }); return; }
+    ownedWindows.delete(windowId);
+    windowClosing(windowId);
+    if (!ownedWindows.size) send({ kind: 'windows_closed', manual });
+  }, { windowTypes: ['normal', 'popup'] });
   // Connect before policy/window preparation so a native startup failure can
   // report one closed stage rather than disappear into a socket timeout.
   // Reconnection only repeats readiness, never the initial navigation.
@@ -215,6 +313,13 @@ export function visualExtensionWorker(config) {
       for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
       await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: (await chrome.declarativeNetRequest.getDynamicRules()).map(rule => rule.id), addRules: rules });
+      for (const window of await chrome.windows.getAll({ windowTypes: ['normal', 'popup'] })) ownedWindows.add(window.id);
+      for (const change of windowChanges.splice(0)) { if (change.removed) ownedWindows.delete(change.id); else ownedWindows.add(change.id); }
+      windowInventoryReady = true;
+      activeStartup();
+      bootstrapStage = 'auth';
+      await new Promise((resolve, reject) => { authReady = { resolve, reject }; send({ kind: 'auth_required' }); });
+      activeStartup();
       bootstrapStage = 'window';
       // Windows host startup opens an internal new tab; other desktops let this
       // extension create the initial inactive window. Navigate the owned blank
@@ -222,15 +327,19 @@ export function visualExtensionWorker(config) {
       // command. Private auth stores exclude Sessions, so no user tab is reused.
       const tabs = await chrome.tabs.query({ windowType: 'normal' });
       const blank = tabs.find(tab => ['about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'].includes(tab.url));
+      const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      activeStartup();
       let initial;
       if (blank) initial = await chrome.tabs.update(blank.id, { url: allowedNavigation(config.initialUrl) });
-      else if (!(await chrome.windows.getAll({ windowTypes: ['normal'] })).length) initial = (await chrome.windows.create({ url: allowedNavigation(config.initialUrl), focused: manual, width: 1440, height: 1000 })).tabs?.[0];
+      else if (!windows.length) initial = (await chrome.windows.create({ url: allowedNavigation(config.initialUrl), focused: manual, width: 1440, height: 1000 })).tabs?.[0];
       else initial = await chrome.tabs.create({ url: allowedNavigation(config.initialUrl), active: manual });
       // Manual setup must not announce its window before the first document has
       // loaded: a fast ready/close otherwise snapshots an unopened login page.
       // Read only browser tab metadata, under the original absolute deadline.
       const initialUntil = Math.min(Date.now() + 8000, config.deadlineAt);
       while (initial?.status === 'loading' && Date.now() < initialUntil) { await pause(100); initial = await chrome.tabs.get(initial.id); }
+      await refreshAuth();
+      activeStartup();
       bootstrapState = 'ready'; send({ kind: 'hello', version: 1 });
     } catch {
       bootstrapState = 'failed'; send({ kind: 'bootstrap_failed', stage: bootstrapStage });

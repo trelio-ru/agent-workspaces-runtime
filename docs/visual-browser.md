@@ -32,7 +32,9 @@ Chromium запускается как обычный headed browser с собс
 Нет Puppeteer launch, remote-debugging port/pipe, `--enable-automation`,
 AutomationControlled override или fingerprint spoof. MV3 extension использует
 внутренний `chrome.debugger`: только фиксированные Page raster/layout/MIME
-и Input события. Downloads ограничивает response-stage DNR guard. Это всё ещё debugger API; отсутствие startup
+и Input события. Отдельный закрытый Cookie API обслуживает локальное сохранение
+авторизации, без model-facing read/write методов. Downloads ограничивает
+response-stage DNR guard. Это всё ещё debugger API; отсутствие startup
 DevTools mode само по себе не гарантирует принятие внешним сайтом.
 
 Extension подключается к одному host-owned loopback WebSocket: exact path,
@@ -48,8 +50,9 @@ Transport имеет отдельный loopback host permission, а CSP раз�
 Windows/Linux startup открывает внутреннюю new-tab вкладку без URL в argv.
 Запуск без начального окна остаётся только на macOS с её app lifecycle.
 Для нового owned профиля host заранее устанавливает обычный continue-session
-preference: Chromium игнорирует restore switch у нового Profile, и закрытие
-последнего окна Windows/Linux иначе удаляет session cookies ещё до snapshot.
+preference: Chromium игнорирует restore switch у нового Profile. Эта настройка
+сама по себе не гарантирует сохранение session cookies на Windows; для них
+предусмотрен описанный ниже private overlay.
 У восстановленного профиля существующие Preferences не перезаписываются.
 Это настройка lifecycle профиля, без чтения/перезаписи website cookies.
 Затем extension ставит navigation policy
@@ -99,7 +102,7 @@ Top-frame anchor routing не доказывает отсутствие акти
 owner/ACL guards. Это обычный профиль Chromium, а не in-memory incognito.
 После нормальной остановки выбранные auth stores упаковываются в bounded
 schema-v2 archive, шифруются AES-256-GCM и plaintext каталог удаляется.
-Сохраняются Local State/preferences, cookies, localStorage, IndexedDB,
+Сохраняются Local State/preferences, cookies и network-migration checkpoint, localStorage, IndexedDB,
 sessionStorage/WebStorage; History, Login Data, browser sessions, обычные cache
 и downloads не включаются. Наличие storage не доказывает вход на конкретный сайт.
 Пути, duplicates, типы, file/byte counts и распакованный размер проверяются;
@@ -111,6 +114,22 @@ Service. AAD привязывает snapshot к Trelio origin, skill и personal
 не создают гостевой замены. Нет plaintext fallback. Active OS user/admin и
 компрометация устройства остаются вне этой модели защиты; API не является
 sandbox против произвольного локального кода того же пользователя.
+
+Session-only cookies дополнительно сохраняются через локальный Chrome Cookie
+API: Windows может удалить их из Cookie DB при закрытии последнего окна.
+Значения живут в RAM host/extension и в том же AEAD snapshot; их нет в worker.js,
+argv, environment, MCP metadata/images или production logs. Private transport
+отделён от публичного pixels/input API. Cookie schema ограничивает поля, bytes,
+количество, signed domain scope и CHIPS identity; transport-only localhost
+permission не расширяет auth scope. До первой provider navigation host один раз
+восстанавливает overlay. Переподключение не импортирует старое состояние поверх
+ручной сессии. Cookie changes в открытом окне учитываются, включая logout;
+после последнего tab/window close состояние фиксируется до browser cleanup.
+Последнее окно определяется по native create/remove events без async browser
+query после закрытия: в этот момент Chromium уже может останавливать профиль.
+Explicit empty overlay очищает stale native session rows при следующем запуске.
+Старые schema-v2 snapshots без overlay сначала сохраняют native session state;
+переход не создаёт гостевую замену и не требует сбрасывать авторизацию.
 
 Native vault preflight выполняется до ручного окна. В фазе manual закрыты
 снимки и агентский input. `show-login` показывает exact существующее окно.
@@ -141,7 +160,7 @@ Watchdog может завершить только созданный теку�
 Pure tests: result/MCP projection, loopback auth, AEAD, profile traversal и bounds.
 Extension E2E использует synthetic localhost: clicks, русский input, select-all,
 scroll, same-tab target-blank routing, cookies/localStorage restore, window-close,
-ready и crash сохранение предыдущего snapshot. Headed Mac test независимо
+ready, explicit logout без восстановления входа и crash сохранение предыдущего snapshot. Headed Mac test независимо
 сравнивает OS foreground до/после каждого действия, без activate/restore tricks.
 Native OS vault и detached worker проходят отдельно. CI обязателен на macOS,
 Windows x64/ARM64 и desktop Linux; local VM не заменяет hosted gate.

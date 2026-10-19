@@ -41,13 +41,14 @@ async function fixtureCookieEvidence(snapshot, directory, name) {
 test('ordinary Chromium extension clicks, types, scrolls and restores auth without a page-code reader', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-fixture-')));
   const received = [], webdriverAtInput = [];
-  let cookieRestored = false, storageRestored = false, detailSeen = false, snapshot;
+  let cookieRestored = false, persistentRestored = false, storageRestored = false, detailSeen = false, snapshot;
   const server = http.createServer((request, response) => {
     const u = new URL(request.url, 'http://127.0.0.1');
     if (u.pathname === '/typed') { received.push(u.searchParams.get('value')); webdriverAtInput.push(u.searchParams.get('webdriver')); response.end(); return; }
     if (u.pathname === '/storage') { if (u.searchParams.get('value') === 'SYNTHETIC_STORAGE') storageRestored = true; response.end(); return; }
     if (u.pathname === '/detail') detailSeen = true;
     if (request.headers.cookie?.includes('fixture_session=SYNTHETIC_COOKIE')) cookieRestored = true;
+    if (request.headers.cookie?.includes('fixture_persistent=SYNTHETIC_PERSISTENT')) persistentRestored = true;
     if (u.pathname === '/login') response.setHeader('Set-Cookie', ['fixture_session=SYNTHETIC_COOKIE; HttpOnly; SameSite=Strict; Path=/', 'fixture_persistent=SYNTHETIC_PERSISTENT; HttpOnly; SameSite=Strict; Path=/; Max-Age=3600']);
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><body style="margin:0;background:#d6efde;font:24px sans-serif;${u.pathname === '/detail' ? '' : 'height:2400px'}"><input id="entry" style="position:absolute;left:40px;top:60px;width:360px;height:50px;font-size:24px"><button style="position:absolute;left:450px;top:60px;width:160px;height:55px" onclick="fetch('/typed?value='+encodeURIComponent(document.getElementById('entry').value)+'&webdriver='+navigator.webdriver)">Submit</button><a href="/detail" target="_blank" style="position:absolute;left:700px;top:60px">Detail</a><h1 style="position:absolute;top:180px">${u.pathname === '/detail' ? 'Detail fixture' : 'Input fixture'}</h1><script>${u.pathname === '/login' ? 'localStorage.setItem("fixture","SYNTHETIC_STORAGE");' : ''}fetch('/storage?value='+localStorage.getItem('fixture'))</script>`);
@@ -102,11 +103,12 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     assert.equal(detailSeen, true); assert.equal(f.scroll.down, false);
     await browser.close();
     assert.equal(snapshot.schemaVersion, 2);
-    console.log(JSON.stringify({ fixture: 'visual-cookie-snapshot', ...await fixtureCookieEvidence(snapshot, directory, 'fixture_session') }));
-    cookieRestored = false; storageRestored = false;
+    console.log(JSON.stringify({ fixture: 'visual-cookie-snapshot', sessionAuthCount: snapshot.sessionCookies.length, ...await fixtureCookieEvidence(snapshot, directory, 'fixture_session') }));
+    cookieRestored = false; persistentRestored = false; storageRestored = false;
     browser = create();
     ready(await browser.call('navigate', { url: origin }));
     assert.equal(cookieRestored, true, 'session cookie survives stopped-profile restore');
+    assert.equal(persistentRestored, true, 'persistent cookie survives native Cookie database restore');
     assert.equal(storageRestored, true, 'local storage survives stopped-profile restore');
     if (focus()) assert.ok(focusChecks >= 10, 'native foreground checks covered the input sequence');
   } finally {
@@ -124,11 +126,15 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
 
 test('manual window close and ready save once before unlocking images; crash preserves the previous snapshot', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-manual-')));
-  let snapshot, writes = 0, window, restored = false;
+  let snapshot, writes = 0, window, restored = false, logout = false, logoutObserved = false;
   const server = http.createServer((request, response) => {
     if (request.url === '/login') response.setHeader('Set-Cookie', 'manual_fixture=SYNTHETIC; HttpOnly; SameSite=Strict; Path=/');
+    if (request.url === '/keep' && logout) {
+      if (!request.headers.cookie?.includes('manual_fixture=SYNTHETIC')) logoutObserved = true;
+      response.setHeader('Set-Cookie', 'manual_fixture=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+    }
     if (request.url === '/restore' && request.headers.cookie?.includes('manual_fixture=SYNTHETIC')) restored = true;
-    response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body style="background:#def;height:1400px">Synthetic manual fixture</body>');
+    response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body style="background:#def;height:1400px">Synthetic manual fixture<script>setInterval(()=>fetch("/keep"),100)</script></body>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -138,19 +144,26 @@ test('manual window close and ready save once before unlocking images; crash pre
   const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testWindowController: value => { window = value; }, testDiagnostics: value => diagnostics.push(value) });
   let browser = create();
   try {
-    for (const completion of ['window_close', 'ready']) {
+    for (const completion of ['window_close', 'ready', 'logout_window_close']) {
+      diagnostics.push({ stage: completion });
       assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required', JSON.stringify(diagnostics));
       assert.equal((await browser.call('show-login')).image, undefined);
       assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
       assert.equal((await browser.call('type-text', { frameId: 'invalid', text: 'blocked' })).reason, 'manual_control_active');
       const before = writes;
+      if (completion === 'logout_window_close') {
+        logout = true;
+        for (let i = 0; i < 50 && !logoutObserved; i++) await new Promise(resolve => setTimeout(resolve, 100));
+        assert.equal(logoutObserved, true, 'the fixture browser completed explicit logout before the user closed its window');
+      }
       if (completion === 'ready') assert.equal((await browser.call('ready')).state, 'saved_unverified');
-      else await window.close().catch(() => {}); // UI close can race its socket's graceful shutdown.
+      else await window.close().then(value => diagnostics.push({ stage: 'fixture_close_reply', state: value.state, reason: value.reason })).catch(() => diagnostics.push({ stage: 'fixture_close_disconnected' })); // UI close can race its socket's graceful shutdown.
       for (let i = 0; i < 200 && (await browser.call('status')).state !== 'saved_unverified'; i++) await new Promise(resolve => setTimeout(resolve, 100));
       assert.equal((await browser.call('status')).state, 'saved_unverified');
       assert.equal(writes, before + 1, 'the final manual snapshot is saved once');
+      restored = false;
       assert.equal((await browser.call('navigate', { url: `${origin}/restore` })).state, 'ready');
-      assert.equal(restored, true, 'the closed manual window retained its session cookie');
+      assert.equal(restored, completion !== 'logout_window_close', 'window-close retains login but never resurrects an explicit logout');
       await browser.close(); browser = create();
     }
     assert.equal((await browser.call('navigate', { url: `${origin}/restore` })).state, 'ready');

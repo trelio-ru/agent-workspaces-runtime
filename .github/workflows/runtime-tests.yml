@@ -79,6 +79,7 @@ jobs:
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
           node tests/trelio-visual-profile.test.mjs
+          node tests/trelio-visual-cookie-state.test.mjs
           node tests/trelio-visual-link-router.test.mjs
           node tests/trelio-visual-extension-worker.test.mjs
           node tests/trelio-visual-extension-browser.test.mjs
@@ -89,7 +90,7 @@ jobs:
         run: |
           dbus-run-session -- bash -euo pipefail -c '
             printf "\n" | gnome-keyring-daemon --unlock --components=secrets
-            for file in native-store store transport profile browser extension-browser session; do
+            for file in native-store store transport profile cookie-state browser link-router extension-worker extension-browser session; do
               xvfb-run -a node "tests/trelio-visual-${file}.test.mjs"
             done
           '
@@ -198,6 +199,7 @@ jobs:
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
           node tests/trelio-visual-profile.test.mjs
+          node tests/trelio-visual-cookie-state.test.mjs
           node tests/trelio-visual-link-router.test.mjs
           node tests/trelio-visual-extension-worker.test.mjs
           node tests/trelio-visual-extension-browser.test.mjs

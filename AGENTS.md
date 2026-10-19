@@ -198,8 +198,17 @@ publication tooling также остаются вне этого публичн
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
   crash не доказывает save/login. Native OS tests обязательны.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
-  Закрытый extension adapter имеет только fixed Page/Input команды; локальный
-  isolated link router читает href exact trusted click для same-tab navigation,
+  Debugger adapter имеет только fixed Page/Input команды. Cookie API отдельно
+  обслуживает private session-auth: signed domain scope, bounded schema, CHIPS
+  identity и AEAD snapshot, без cookie-valued полей в MCP. Restore идёт до
+  provider navigation и не повторяется при reconnect. Last-window cleanup не
+  считается logout; explicit logout при открытом окне очищает overlay.
+  Last-window handoff отправляется синхронно по tracked native window events:
+  async windows query после закрытия может не получить callback при teardown.
+  Legacy snapshots сохраняют native cookies, explicit empty overlay удаляет stale
+  session rows. NetworkDataMigrated сохраняется вместе с native Cookie DB.
+  Никакие auth values не входят в worker.js. Локальный isolated link router
+  читает href exact trusted click для same-tab navigation,
   не выдаёт модели DOM/код и не принимает произвольные scripts/selectors.
   Capture/input не активируют app; native foreground test проверяет это без
   возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site

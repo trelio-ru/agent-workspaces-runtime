@@ -34,11 +34,24 @@ test('native storage failure precedes browser I/O and remains visible in status'
   } finally { await browser.close(); }
 });
 
+test('invalid private auth state cannot launch Chromium, echo credentials or overwrite the previous encrypted state', async () => {
+  let writes = 0;
+  const browser = new ExtensionVisualBrowser({ origins: ['https://example.test'], dependencies: {}, store: {
+    async read() { return { schemaVersion: 2, profile: 'unused', sessionCookies: [{ value: 'SYNTHETIC_PRIVATE_AUTH', domain: '.other.test' }] }; },
+    async write() { writes++; }, close() {},
+  }, policy: createVisualOriginPolicy({ origins: ['https://example.test'] }), lease: { deadlineAt: Date.now() + 60_000 } });
+  try {
+    const status = await browser.call('setup', { url: 'https://example.test' });
+    assert.equal(status.state, 'error'); assert.equal(status.reason, 'storage_unavailable');
+    assert.equal(JSON.stringify(status).includes('SYNTHETIC_PRIVATE_AUTH'), false); assert.equal(writes, 0);
+  } finally { await browser.close(); }
+});
+
 test('public visual API rejects private transport commands and extra fields before storage or browser I/O', async () => {
   let reads = 0;
   const browser = new ExtensionVisualBrowser({ origins: ['https://example.test'], dependencies: {}, store: { async read() { reads++; }, close() {} }, policy: createVisualOriginPolicy({ origins: ['https://example.test'] }), lease: { deadlineAt: Date.now() + 60_000 } });
   try {
-    for (const operation of ['evaluate', 'manual', 'heartbeat', 'close-windows', 'Runtime.evaluate']) assert.equal((await browser.call(operation)).reason, 'invalid_input');
+    for (const operation of ['evaluate', 'manual', 'heartbeat', 'close-windows', 'fixture-close-windows', 'restore-session-auth', 'snapshot-session-auth', 'Runtime.evaluate']) assert.equal((await browser.call(operation)).reason, 'invalid_input');
     assert.equal((await browser.call('status', { script: 'not-executed' })).reason, 'invalid_input');
     assert.equal((await browser.call('click', { frameId: 'x', x: 1, y: 1, selector: '#unsafe' })).reason, 'invalid_input');
     assert.equal(reads, 0);

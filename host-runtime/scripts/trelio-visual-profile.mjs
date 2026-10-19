@@ -8,7 +8,9 @@ const MAX_FILES = 4096;
 const invalid = () => Object.assign(new Error('VISUAL_STORAGE_CORRUPT'), { code: 'VISUAL_STORAGE_CORRUPT' });
 // Chromium 156 uses LocalStorage/SessionStorage; older profiles used spaces.
 // Keep the bounded auth-store allowlist compatible with both layouts.
-const roots = ['Local State', 'Default/Preferences', 'Default/Secure Preferences', 'Default/Cookies', 'Default/Cookies-journal', 'Default/Cookies-wal', 'Default/Cookies-shm', 'Default/Network/Cookies', 'Default/Network/Cookies-journal', 'Default/Network/Cookies-wal', 'Default/Network/Cookies-shm', 'Default/Local Storage', 'Default/LocalStorage', 'Default/IndexedDB', 'Default/Session Storage', 'Default/SessionStorage', 'Default/WebStorage'];
+// NetworkDataMigrated selects the authoritative Cookie database on Windows.
+// Omitting it can re-run migration over restored data at the next startup.
+const roots = ['Local State', 'Default/Preferences', 'Default/Secure Preferences', 'Default/Cookies', 'Default/Cookies-journal', 'Default/Cookies-wal', 'Default/Cookies-shm', 'Default/Network/Cookies', 'Default/Network/Cookies-journal', 'Default/Network/Cookies-wal', 'Default/Network/Cookies-shm', 'Default/Network/NetworkDataMigrated', 'Default/Local Storage', 'Default/LocalStorage', 'Default/IndexedDB', 'Default/Session Storage', 'Default/SessionStorage', 'Default/WebStorage'];
 const directories = new Set(['Default/Local Storage', 'Default/LocalStorage', 'Default/IndexedDB', 'Default/Session Storage', 'Default/SessionStorage', 'Default/WebStorage']);
 
 /** Configure the lifecycle of a newly owned browser profile, not website data.

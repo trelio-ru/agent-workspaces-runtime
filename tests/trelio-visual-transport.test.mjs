@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { visualFrame, parseVisualSkillOutput } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { visualFrame, parseVisualSkillOutput, visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { visualSessionBinding, createVisualControlServer, runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { prepareVisualPrivateDirectory, runVisualChild, visualChildEnvironment } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
@@ -40,6 +40,7 @@ test('full visual payload crosses the real typed action handler as an image, not
   assert.equal(result.content[1].type, 'image');
   assert.equal(result.content[1].data, bytes.toString('base64'));
   assert.doesNotMatch(result.content[0].text, /image|data|stdout|SYNTHETIC_SECRET/);
+  assert.throws(() => visualStatus('saved_unverified', 'none', { sessionCookies: [{ value: 'SYNTHETIC_PRIVATE_AUTH' }] }), /VISUAL_RESULT_INVALID/);
   assert.throws(() => parseVisualSkillOutput(JSON.stringify({ ...visual, html: '<script>SYNTHETIC_SECRET</script>' })), /VISUAL_RESULT_INVALID/);
   assert.equal(parseVisualSkillOutput(JSON.stringify({ text: 'Documentation mentions trelio.visual-browser/v1' })), null);
   for (const png of [Buffer.concat([bytes, Buffer.from('SYNTHETIC_SOURCE_CODE')]), bytes.subarray(0, bytes.length - 1), Buffer.concat([bytes.subarray(0, bytes.length - 12), chunk('tEXt', Buffer.from('SYNTHETIC_SOURCE_CODE')), chunk('IEND', Buffer.alloc(0))])]) {

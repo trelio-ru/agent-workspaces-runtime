@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { visualExtensionWorker } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter } from './trelio-visual-link-router.mjs';
+import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
 import { visualStatus, validateVisualResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
@@ -24,7 +25,7 @@ const fault = code => Object.assign(new Error(code), { code });
 export function visualExtensionManifest(matches, port) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw fault('invalid_input');
   return { manifest_version: 3, name: 'Trelio Visual Browser', version: '0.1.0', key: PUBLIC_KEY,
-    permissions: ['debugger', 'tabs', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
+    permissions: ['debugger', 'tabs', 'cookies', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
     content_security_policy: { extension_pages: `script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:${port}` },
     background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js'], run_at: 'document_start', world: 'ISOLATED' }],
   };
@@ -54,6 +55,9 @@ export class ExtensionVisualBrowser {
   #state = 'not_configured'; #manual = false; #saved = false; #closed = false;
   #tail = Promise.resolve(); #deadline; #heartbeat; #terminal; #starting; #finishing;
   #launchAbort = new AbortController(); #extensionReady = false;
+  #cookies; #sessionCookies = []; #authHandshake = false; #authSnapshotReady = false;
+  #replaceSessionCookies = false;
+  #windowsClosed = false;
   constructor({ dependencies, store, policy, origins, domains = [], lease, testHeadless = false, testWindowController, testDiagnostics }) {
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
@@ -65,8 +69,11 @@ export class ExtensionVisualBrowser {
   #status(reason = 'none') { return visualStatus(this.#state, this.#terminal || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved }); }
   async #start(url, manual) {
     if (this.#child) return;
-    this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false;
+    this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false; this.#authHandshake = false; this.#authSnapshotReady = false; this.#windowsClosed = false;
     const snapshot = await this.store.read(); await this.store.prepare?.(); this.#saved = Boolean(snapshot);
+    this.#cookies = visualCookieState({ origins: this.origins, domains: this.domains });
+    this.#sessionCookies = this.#cookies.validate(snapshot?.sessionCookies ?? []);
+    this.#replaceSessionCookies = Object.hasOwn(snapshot || {}, 'sessionCookies');
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     this.#directory = await fs.mkdtemp(path.join(this.store.directory, 'extension-session-'));
     await prepareVisualPrivateDirectory(this.#directory);
@@ -86,13 +93,27 @@ export class ExtensionVisualBrowser {
         this.#socket = ws;
         ws.on('message', data => {
           let value; try { value = JSON.parse(data.toString()); } catch { ws.close(); return; }
-          if (value.kind === 'hello' && value.version === 1) { this.#extensionReady = true; return; }
+          if (value.kind === 'auth_required' && !this.#authHandshake) {
+            this.#authHandshake = true;
+            // This local-only initialization never passes through call(), the
+            // visual result validator or MCP. A reconnect cannot restore stale
+            // auth over a live human session: each worker asks exactly once.
+            void this.#send('restore-session-auth', { cookies: this.#sessionCookies, replace: this.#replaceSessionCookies }).catch(() => { this.#terminal ||= 'storage_unavailable'; this.#state = 'error'; });
+            return;
+          }
+          if (value.kind === 'session_auth') {
+            try { this.#sessionCookies = this.#cookies.validate(value.cookies); this.#authSnapshotReady = true; }
+            catch { this.#terminal = 'storage_unavailable'; this.#state = 'error'; }
+            return;
+          }
+          if (value.kind === 'auth_state_failed') { this.#terminal = 'storage_unavailable'; this.#state = 'error'; return; }
+          if (value.kind === 'hello' && value.version === 1) { if (this.#authSnapshotReady) this.#extensionReady = true; else this.#terminal = 'bootstrap_failed'; return; }
           // Only fixed bootstrap stages can leave the extension on failure.
           // Never include native messages, paths, URLs or its transport token.
-          if (value.kind === 'bootstrap_failed' && ['policy', 'window'].includes(value.stage)) {
+          if (value.kind === 'bootstrap_failed' && ['policy', 'auth', 'window'].includes(value.stage)) {
             this.testDiagnostics?.({ stage: value.stage }); this.#terminal = 'bootstrap_failed'; return;
           }
-          if (value.kind === 'windows_closed') { if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
+          if (value.kind === 'windows_closed') { this.testDiagnostics?.({ stage: 'windows_closed' }); this.#windowsClosed = true; if (this.#manual && !this.#closed) void this.#finishManual().catch(() => {}); return; }
           if (value.kind !== 'result' || typeof value.id !== 'string') return;
           const pending = this.#pending.get(value.id); if (!pending) return;
           this.#pending.delete(value.id); clearTimeout(pending.timer); pending.resolve(value.result);
@@ -106,10 +127,12 @@ export class ExtensionVisualBrowser {
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
     const matches = [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
-    await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)});`, { mode: 0o600 });
+    // Only the ephemeral transport token is materialized here. Cookie values
+    // stay in host/extension RAM and the AEAD snapshot, never in worker source.
+    await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains })}));`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
     const executable = await ensureVisualChromium(this.dependencies, { signal: this.#launchAbort.signal });
     // A download/native vault wait does not grant a fresh launch budget. Do
@@ -152,7 +175,7 @@ export class ExtensionVisualBrowser {
     while (!this.#extensionReady && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
     if (!this.#extensionReady || this.#terminal) { await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', sandboxUnavailable, displayUnavailable, extensionUnavailable }); throw fault('bootstrap_failed'); }
-    this.testWindowController?.({ close: () => this.#send('close-windows'), crash: () => this.#child?.kill('SIGKILL') });
+    this.testWindowController?.({ close: () => this.#send('fixture-close-windows'), crash: () => this.#child?.kill('SIGKILL') });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';
   }
@@ -182,7 +205,18 @@ export class ExtensionVisualBrowser {
   async #stopBrowser() {
     clearInterval(this.#heartbeat);
     const child = this.#child; if (!child) return;
-    await this.#send('close-windows').catch(() => {});
+    if (this.#socket && this.#extensionReady && !this.#terminal && !this.#windowsClosed && child.exitCode === null) {
+      try {
+        const auth = await this.#send('snapshot-session-auth');
+        if (auth.state !== 'saved_unverified') throw fault('storage_unavailable');
+        this.#sessionCookies = this.#cookies.validate(auth.cookies);
+      } catch (error) {
+        // A human close may end the socket before this cleanup read. Its
+        // already-streamed, frozen jar is authoritative; a crash is not.
+        if (!this.#windowsClosed && child.exitCode !== 0) throw error;
+      }
+    }
+    if (!this.#windowsClosed) await this.#send('close-windows').catch(() => {});
     // On macOS closing the last window may leave the ordinary app alive. Ask
     // this exact launched PID to quit through AppKit, without activation.
     if (process.platform === 'darwin' && child.exitCode === null && child.signalCode === null) {
@@ -200,8 +234,13 @@ export class ExtensionVisualBrowser {
   }
   async #saveStopped() {
     if (!this.#profile) return;
-    if (this.#terminal === 'browser_process_lost') throw fault('browser_process_lost');
-    const snapshot = await snapshotVisualProfile(this.#profile); await this.store.write(snapshot); this.#saved = true;
+    // A failed bootstrap, rejected auth state or crash cannot overwrite the
+    // last durable session with an incomplete/guest replacement.
+    if (this.#terminal) throw fault(this.#terminal);
+    if (!this.#authSnapshotReady) throw fault('storage_unavailable');
+    const snapshot = await snapshotVisualProfile(this.#profile);
+    snapshot.sessionCookies = this.#cookies.validate(this.#sessionCookies);
+    await this.store.write(snapshot); this.#saved = true;
     await fs.rm(this.#directory, { recursive: true, force: true }); this.#directory = undefined; this.#profile = undefined;
   }
   #finishManual() {
@@ -262,12 +301,12 @@ export class ExtensionVisualBrowser {
     await this.#finishing?.catch(() => {});
     this.#starting = true;
     try { await this.#stopBrowser(); if (this.#terminal !== 'browser_process_lost') await this.#saveStopped(); }
-    finally { clearInterval(this.#heartbeat); this.store.close(); this.#state = 'closed'; }
+    finally { clearInterval(this.#heartbeat); this.#sessionCookies = []; this.store.close(); this.#state = 'closed'; }
   }
   abort() {
     this.#closed = true; clearTimeout(this.#deadline); clearInterval(this.#heartbeat);
     this.#launchAbort.abort();
     const child = this.#child; if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    this.#socket?.terminate(); this.#wss?.close(); this.#server?.close(); this.store.close();
+    this.#socket?.terminate(); this.#wss?.close(); this.#server?.close(); this.#sessionCookies = []; this.store.close();
   }
 }

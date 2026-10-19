@@ -10,7 +10,7 @@ import { prepareVisualPrivateDirectory } from '../host-runtime/scripts/trelio-vi
 const archive = files => ({ schemaVersion: 2, profile: gzipSync(JSON.stringify(files)).toString('base64') });
 const file = (name, value = 'SYNTHETIC_AUTH') => ({ path: name, data: Buffer.from(value).toString('base64') });
 
-test('fresh owned profile preserves session cookies through ordinary startup preferences without overwriting an accepted profile', async () => {
+test('fresh owned profile seeds ordinary startup preferences without overwriting an accepted profile', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-startup-')));
   try {
     await prepareVisualProfileStartup(root);
@@ -50,6 +50,20 @@ test('invalid archive paths, duplicates and payloads fail before creating any pr
     await assert.rejects(restoreVisualProfile(archive([file('Local State'), file('Local State')]), root), { code: 'VISUAL_STORAGE_CORRUPT' });
     await assert.rejects(restoreVisualProfile({ schemaVersion: 1, profile: '' }, root), { code: 'VISUAL_STORAGE_CORRUPT' });
     assert.deepEqual(await fs.readdir(root), []);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test('network Cookie migration checkpoint survives alongside its exact database without admitting sibling network data', async () => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-network-')));
+  try {
+    const input = path.join(root, 'input'), output = path.join(root, 'output');
+    await prepareVisualPrivateDirectory(path.join(input, 'Default', 'Network'));
+    await fs.writeFile(path.join(input, 'Default/Network/Cookies'), 'SYNTHETIC_COOKIE_DATABASE');
+    await fs.writeFile(path.join(input, 'Default/Network/NetworkDataMigrated'), '');
+    await fs.writeFile(path.join(input, 'Default/Network/Network Persistent State'), 'DO_NOT_COPY');
+    await restoreVisualProfile(await snapshotVisualProfile(input), output);
+    assert.deepEqual((await fs.readdir(path.join(output, 'Default/Network'))).sort(), ['Cookies', 'NetworkDataMigrated']);
+    assert.equal(await fs.readFile(path.join(output, 'Default/Network/NetworkDataMigrated'), 'utf8'), '');
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
