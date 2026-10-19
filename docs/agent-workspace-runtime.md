@@ -418,6 +418,13 @@ Hook, bridge и local MCP разделяют `trelio-host-runtime-recovery.mjs`:
 replay сохраняется. При потере shell после запуска bridge ошибка содержит
 `operationOutcome=unknown` и требует сначала проверить результат.
 Hook/bridge имеют one-shot reexec guard; MCP проверяет строго более новую версию.
+Bridge recovery сохраняет исходный cwd в process-only
+`TRELIO_HOST_RUNTIME_BRIDGE_CWD`. Только bridge с one-shot reexec guard
+использует этот absolute path; runtime entrypoint удаляет поле из child env.
+Это не metadata/credential transport и не разрешение на Run: origin, ACL,
+lease и fencing проверяются штатно. Hook/MCP не меняют package cwd.
+Regression проходит actual entrypoint с Run metadata при package cwd
+загрузчика, который запускает payload из собственного runtime directory.
 
 Updater запускается текущим Node с `shell:false`, ждёт не более 180 секунд и
 подчиняется общему deadline hook. Завершение pipe stderr входит в этот предел.

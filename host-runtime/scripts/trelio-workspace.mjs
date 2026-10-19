@@ -17304,6 +17304,11 @@ export const recoverBridgeHostRuntimeUpgrade = async (
         environmentOverrides: {
           TRELIO_HOST_RUNTIME_UPDATE_REEXEC: "1",
           TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
+          // Stable shell intentionally starts payloads in its verified runtime
+          // tree. Preserve this invocation's Run cwd across that boundary;
+          // otherwise checkpoint/finish search the package for .trelio-run.json.
+          // This is a local path only, never Run metadata, proof or credentials.
+          TRELIO_HOST_RUNTIME_BRIDGE_CWD: process.cwd(),
         },
         allowNonzeroExit: true,
         spawnProcess,

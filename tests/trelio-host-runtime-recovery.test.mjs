@@ -214,9 +214,12 @@ test("bridge failure after replay checks shell loss but preserves an unknown ope
     const modes = [];
     const recovery = await recoverBridgeHostRuntimeUpgrade(gate(), {
       environment: f.environment, rawArguments: ["finish"],
-      spawnProcess: (_command, args) => {
+      spawnProcess: (_command, args, options) => {
         const child = new EventEmitter();
         modes.push(args[1]);
+        if (args[1] === "bridge") {
+          assert.equal(options.env.TRELIO_HOST_RUNTIME_BRIDGE_CWD, process.cwd());
+        }
         if (args[1] === "__update") queueMicrotask(() => child.emit("close", 0));
         else void (async () => {
           await Promise.resolve();

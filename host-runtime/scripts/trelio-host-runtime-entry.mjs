@@ -51,6 +51,23 @@ export const runHostRuntime = async ({
   requireTrelioComponentVersions(environment);
   if (invocation.mode === "mcp") startupTrace("runtime_entry");
 
+  // The signed loader selects/verifies the runtime from its own immutable
+  // directory. A bridge hard-gate replay must still run inside the original
+  // Workspace: cwd is part of that invocation, not the downloaded package.
+  // Consume the host-only handoff exactly once and only for bridge recovery;
+  // hook/MCP and ordinary startup retain the established package cwd. Run ACL,
+  // origin, metadata and fencing remain validated by the bridge itself.
+  const handoffDirectory = environment.TRELIO_HOST_RUNTIME_BRIDGE_CWD;
+  const bridgeHandoff = invocation.mode === "bridge"
+    && environment.TRELIO_HOST_RUNTIME_UPDATE_REEXEC === "1"
+    && handoffDirectory !== undefined;
+  if (bridgeHandoff && (typeof handoffDirectory !== "string"
+    || !path.isAbsolute(handoffDirectory) || handoffDirectory.includes("\0"))) {
+    throw new Error("TRELIO_HOST_RUNTIME_BRIDGE_CWD must be an absolute local directory.");
+  }
+  const childEnvironment = { ...environment };
+  delete childEnvironment.TRELIO_HOST_RUNTIME_BRIDGE_CWD;
+
   return await new Promise((resolve, reject) => {
     // Запускаем exact Node, которым stable shell уже был запущен. Это не
     // зависит от PATH и не допускает смены runtime между loader и payload.
@@ -58,8 +75,8 @@ export const runHostRuntime = async ({
       process.execPath,
       [invocation.entrypointPath, ...invocation.arguments],
       {
-        cwd: path.resolve(SCRIPT_DIRECTORY, ".."),
-        env: environment,
+        cwd: bridgeHandoff ? handoffDirectory : path.resolve(SCRIPT_DIRECTORY, ".."),
+        env: childEnvironment,
         shell: false,
         stdio: "inherit",
         windowsHide: true,

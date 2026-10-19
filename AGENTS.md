@@ -149,6 +149,9 @@ publication tooling также остаются вне этого публичн
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
 - Hook/bridge/MCP используют общий recovery exact stable loader по
   [контракту](docs/agent-workspace-runtime.md#восстановление-подписанного-рантайма).
+  Bridge handoff сохраняет cwd текущего Run через одноразовый process-only
+  path; проверяй actual entrypoint после смены cwd загрузчиком. Метаданные,
+  credentials и proof через этот путь не передаются.
   Только подтверждённый missing shell требует restart; ACL, I/O и update failure
   сохраняются отдельно. Никакого второго verifier, cache scan или blind replay.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
