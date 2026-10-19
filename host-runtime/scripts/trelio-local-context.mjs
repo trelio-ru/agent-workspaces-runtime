@@ -8177,7 +8177,7 @@ export const usesFreshExactTaskRead = (nativeTool, input) => {
 /** A scoped, ephemeral projection is intentionally never published as a search
  * generation. Live task ACL and instruction revisions are checked on every
  * page; another task's comments cannot invalidate this task's authority. */
-export const readFreshExactTaskContext = async ({ origin, companySlug, nativeTool, input, provider, signal,
+export const readFreshExactTaskContext = async ({ origin, companySlug, nativeTool, input, provider, signal, unfiledQueue,
   requestJson = async (pathname, body) => readJson(await request(provider.requestOrigin, provider.token, pathname, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
   })),
@@ -8195,7 +8195,9 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
     throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact task context belongs to another company.");
   }
   const mirror = await hydrate(raw);
-  return handleNativeLocalContextRead(mirror, nativeTool, input);
+  // Include live context before choosing inline/pages. Appending it after the
+  // schema-v3 budget check could overflow a borderline instruction page.
+  return handleNativeLocalContextRead(unfiledQueue ? { ...mirror, unfiledQueue } : mirror, nativeTool, input);
 };
 
 export const handleTrelioLocalContextOperation = async (
@@ -8220,11 +8222,10 @@ export const handleTrelioLocalContextOperation = async (
           companyEncryption: provider.companyEncryption, mirror: { company: { slug: companySlug } },
           rawInput: input, fresh: true, signal });
       }
-      const result = await readFreshExactTaskContext({ origin, companySlug, nativeTool, input, provider, signal });
       const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
         ? await readUnfiledResponseContext(origin, companySlug,
           { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
-      return unfiledQueue ? { ...result, unfiledQueue } : result;
+      return readFreshExactTaskContext({ origin, companySlug, nativeTool, input, provider, signal, unfiledQueue });
     }
     if (nativeTool === "get_agent_workspace" || nativeTool === "get_agent_workspace_by_scope") {
       const argumentsObject = rawInput?.arguments;

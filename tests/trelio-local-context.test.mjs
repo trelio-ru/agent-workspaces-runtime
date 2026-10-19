@@ -4724,6 +4724,7 @@ test("fresh task core and instruction pages never depend on a company search gen
   let requests = 0;
   const read = (nativeTool, input) => readFreshExactTaskContext({
     origin: "https://trelio.example", companySlug: "acme", nativeTool, input,
+    unfiledQueue: { companySlug: "acme", count: 1, reminder: { instruction: "Choose a project or delete. ".repeat(100) } },
     provider: { companyEncryption: { runtime: { company: fixture.company } } },
     requestJson: async (pathname, body) => {
       requests++;
@@ -4740,11 +4741,15 @@ test("fresh task core and instruction pages never depend on a company search gen
   const core = await read("get_task", target);
   assert.equal(core.tasks[0].task.title, fixture.tasks[0].payload.task.title);
   assert.equal(core.effectiveInstructions.status, "incomplete");
+  assert.equal(core.unfiledQueue.count, 1);
+  assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(core)));
   let pageIndex = 0;
   do {
     const page = await read("get_task_instruction_page", { tasks: [target],
       expectedCatalogRevisionKey: core.effectiveInstructions.delivery.catalogRevisionKey, pageIndex, pageSize: 4 });
     assert.equal(page.tasks, undefined);
+    assert.equal(page.unfiledQueue.count, 1);
+    assert.ok(fitsMcpTaskReadResult(buildLocalTaskReadToolResult(page)));
     pageIndex = page.nextPageIndex;
   } while (pageIndex !== null);
   assert.ok(requests > 1);
