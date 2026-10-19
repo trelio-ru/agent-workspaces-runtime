@@ -59,7 +59,14 @@ export function visualExtensionWorker(config) {
   }
   async function capture() {
     frame = undefined;
-    const tab = await selected();
+    let tab = await selected();
+    // Window creation is not document readiness, especially on a cold native
+    // Windows launch. Wait only for browser navigation metadata, never page
+    // JS/DOM or a site-specific selector. SPA loading can still be visible in
+    // the resulting picture and requires ordinary visual review.
+    const until = Math.min(Date.now() + 8000, config.deadlineAt);
+    while (tab.status === 'loading' && Date.now() < until) { await pause(100); tab = await chrome.tabs.get(tab.id); }
+    allowedNavigation(tab.url);
     // Capture the selected renderer without selecting its browser tab: on
     // macOS even tabs.update({active:true}) can activate the containing app.
     await attach(tab.id);

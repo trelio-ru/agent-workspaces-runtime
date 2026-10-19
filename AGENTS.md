@@ -182,7 +182,8 @@ publication tooling также остаются вне этого публичн
   image-only MCP, managed Chromium с private live profile и AEAD snapshot
   после нормальной остановки, native OS keyring, company/member claim и
   непродлеваемая lease. Late bootstrap отменяется до browser launch; main-frame
-  navigation отзывает старый frame token. Window close/ready сохраняют попытку до снятия gate;
+  navigation отзывает старый frame token; browser load metadata ожидается bounded
+  без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
   crash не доказывает save/login. Native OS tests обязательны.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
   Закрытый extension adapter имеет только fixed Page/Input команды; локальный

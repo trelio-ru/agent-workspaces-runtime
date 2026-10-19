@@ -184,7 +184,7 @@ export class ExtensionVisualBrowser {
     });
     this.#tail = result.catch(() => {});
     return result.catch(error => {
-      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired'].includes(error.code) ? error.code : error.code?.startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
+      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
       if (this.#state === 'preparing') { this.#state = 'error'; this.#terminal = reason; }
       return visualStatus('error', reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
     });
