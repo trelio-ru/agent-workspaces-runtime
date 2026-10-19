@@ -216,12 +216,12 @@ export function visualExtensionWorker(config) {
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
       await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: (await chrome.declarativeNetRequest.getDynamicRules()).map(rule => rule.id), addRules: rules });
       bootstrapStage = 'window';
-      // Windows host startup opens only about:blank; other desktops may let this
+      // Windows host startup opens an internal new tab; other desktops let this
       // extension create the initial inactive window. Navigate the owned blank
       // tab after guards exist, without selecting/focusing a tab on every
       // command. Private auth stores exclude Sessions, so no user tab is reused.
       const tabs = await chrome.tabs.query({ windowType: 'normal' });
-      const blank = tabs.find(tab => tab.url === 'about:blank');
+      const blank = tabs.find(tab => ['about:blank', 'chrome://newtab/', 'chrome://new-tab-page/'].includes(tab.url));
       let initial;
       if (blank) initial = await chrome.tabs.update(blank.id, { url: allowedNavigation(config.initialUrl) });
       else if (!(await chrome.windows.getAll({ windowTypes: ['normal'] })).length) initial = (await chrome.windows.create({ url: allowedNavigation(config.initialUrl), focused: manual, width: 1440, height: 1000 })).tabs?.[0];

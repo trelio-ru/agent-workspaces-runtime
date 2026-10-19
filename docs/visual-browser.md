@@ -41,11 +41,20 @@ Token не передаётся в argv, Chromium environment, MCP или logs. 
 не является DevTools endpoint. Heartbeat и cleanup не стоят за зависшим input;
 переподключение не переигрывает предыдущую команду.
 
-Windows startup открывает `about:blank`, затем extension ставит navigation policy
+Windows startup открывает внутреннюю new-tab вкладку без URL в argv,
+сохраняя session-cookie restore. Затем extension ставит navigation policy
 и переводит owned вкладку на начальный адрес. Readiness означает отдельный hello
 после обоих этапов, а не только открытый socket. В synthetic native tests
 диагностика ограничена stage/exit и категориями sandbox/display; raw stderr,
 native сообщения, пути и token никогда не печатаются.
+
+Desktop Linux требует доступный sandbox/user namespaces и Secret Service.
+Ubuntu 23.10+ может запрещать namespace для downloaded binary: нужен OS-owned
+AppArmor profile с `userns` для managed Chromium, как в
+[инструкции Chromium](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md).
+CI загружает профиль только для exact fixture binary. Runtime не меняет OS
+policy и не добавляет `--no-sandbox`; это отдельная локальная prerequisite,
+а не обслуживание со стороны администратора компании Trelio.
 
 Main-frame HTTP(S) navigation ограничена signed origins/domains через DNR.
 Source/resource URLs и специальные схемы отклоняются. Browser downloads

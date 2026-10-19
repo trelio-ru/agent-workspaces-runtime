@@ -184,9 +184,12 @@ publication tooling также остаются вне этого публичн
   непродлеваемая lease. Late bootstrap отменяется до browser launch; main-frame
   navigation отзывает старый frame token; browser load metadata ожидается bounded
   без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
-  Windows startup использует обычное about:blank окно; policy ставится до provider URL,
+  Windows startup использует внутреннюю new-tab вкладку без URL в argv,
+  сохраняя restore session cookies; policy ставится до provider URL,
   readiness подтверждается отдельным hello. Fixture diagnostics возвращают
   только закрытый stage/exit и категории sandbox/display, никогда raw stderr.
+  Ubuntu namespace restriction решается exact AppArmor profile в CI, без
+  --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   crash не доказывает save/login. Native OS tests обязательны.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
   Закрытый extension adapter имеет только fixed Page/Input команды; локальный

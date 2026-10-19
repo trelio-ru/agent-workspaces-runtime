@@ -49,11 +49,27 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb
+          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb apparmor
           sudo node host-runtime/scripts/visual-browser-dependencies/node_modules/playwright-core/cli.js install-deps chromium
       - name: Cold managed Chromium bootstrap
         shell: bash
         run: node --input-type=module -e 'import {loadVisualDependencies,ensureVisualChromium} from "./host-runtime/scripts/trelio-visual-bootstrap.mjs"; await ensureVisualChromium(await loadVisualDependencies());'
+      # Ubuntu blocks user namespaces for downloaded Chromium paths. Grant
+      # userns to this exact CI binary only; keep Chromium's sandbox enabled
+      # and do not weaken the runner's global kernel/AppArmor policy.
+      - name: Allow sandbox namespaces for exact Linux fixture browser
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises';
+          import path from 'node:path';
+          import { loadVisualDependencies, ensureVisualChromium } from './host-runtime/scripts/trelio-visual-bootstrap.mjs';
+          const binary = await ensureVisualChromium(await loadVisualDependencies());
+          const quoted = binary.replace(/["\\]/g, '\\$&');
+          await fs.writeFile(path.join(process.env.RUNNER_TEMP, 'trelio-visual.apparmor'), `abi <abi/4.0>,\ninclude <tunables/global>\nprofile trelio-visual-ci "${quoted}" flags=(unconfined) {\n  userns,\n}\n`);
+          NODE
+          sudo apparmor_parser -r "$RUNNER_TEMP/trelio-visual.apparmor"
       - name: Run native Windows or macOS fixtures
         if: runner.os != 'Linux'
         shell: bash

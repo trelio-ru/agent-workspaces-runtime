@@ -86,6 +86,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     // releasing owned profile handles during fixture cleanup. Never print
     // native stderr or snapshot bytes as a substitute for these closed fields.
     console.log(JSON.stringify({ fixture: 'visual-input', diagnostics }));
+    server.closeAllConnections(); // Fixture keep-alive cannot conceal a failed owned browser shutdown.
     await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
@@ -131,6 +132,7 @@ test('manual window close and ready save once before unlocking images; crash pre
   } finally {
     await browser.close().catch(() => browser.abort());
     console.log(JSON.stringify({ fixture: 'visual-manual', diagnostics }));
+    server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
