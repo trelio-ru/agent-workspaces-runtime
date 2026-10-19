@@ -774,9 +774,12 @@ export const createEncryptedSearchFileCache = async ({
 // Only optimistic read conflicts restart assembly. Permission, crypto, transport
 // and caller cancellation errors keep their exact original identity.
 export const buildStableCompanyMirror = async ({ previous, readManifest, buildCandidate, publish }) => {
+  let failureStage = "starting_manifest";
+  let failureReason = "revision_conflict";
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let candidate;
     try {
+      failureStage = "starting_manifest";
       // The backend assembles each manifest from revision-fenced task search
       // projections, so either manifest read can itself conflict before a
       // generation is returned. All three read stages share the same bounded
@@ -785,9 +788,12 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
       if (previous?.serverGeneration === startingManifest.generation) {
         return { mirror: previous, changed: false };
       }
+      failureStage = "candidate";
       candidate = await buildCandidate(startingManifest, previous);
+      failureStage = "finishing_manifest";
       const finishingManifest = await readManifest();
       if (finishingManifest.generation !== startingManifest.generation) {
+        failureReason = "generation_mismatch";
         // This private candidate is not published. The next build selects only
         // records still present in its fresh manifest with matching revision/head.
         // Mark it ineligible for the no-change shortcut until validated afresh.
@@ -797,6 +803,7 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
     } catch (error) {
       if (!["LOCAL_CONTEXT_GENERATION_CHANGED", "WORKSPACE_OUTDATED"].includes(error?.code)
         || (error instanceof TrelioApiError && error.statusCode !== 409)) throw error;
+      failureReason = "revision_conflict";
       // A conflict in the final manifest leaves a complete but unverified
       // candidate. Reuse its exact records without ever treating it as a
       // readable generation, just as when the final generation differs.
@@ -809,7 +816,8 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
   }
   throw new TrelioLocalContextError(
     "LOCAL_CONTEXT_GENERATION_CHANGED",
-    "Company context kept changing during three bounded snapshot attempts.",
+    "A consistent company search snapshot could not be assembled after three bounded attempts. This does not establish a task access denial or a business content change.",
+    { stage: failureStage, reason: failureReason, attempts: 3 },
   );
 };
 
@@ -5499,8 +5507,10 @@ const getTaskSectionsFromProvider = async ({
   mirror,
   rawInput,
   signal,
+  fresh = false,
 }) => {
-  const record = getTaskRecordFromMirror(mirror, rawInput);
+  const record = fresh ? { projectSlug: rawInput.projectSlug, number: Number(rawInput.taskNumber) }
+    : getTaskRecordFromMirror(mirror, rawInput);
   const sections = Array.isArray(rawInput?.sections) ? rawInput.sections : [];
   if (
     sections.length === 0
@@ -5534,7 +5544,7 @@ const getTaskSectionsFromProvider = async ({
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        expectedRevision: record.revisionToken,
+        ...(fresh ? {} : { expectedRevision: record.revisionToken }),
         sections,
         ...(commentsPage ? { commentsPage } : {}),
       }),
@@ -5556,7 +5566,7 @@ const getTaskSectionsFromProvider = async ({
       projectSlug: record.projectSlug,
       taskNumber: record.number,
     },
-    taskRevision: {
+    taskRevision: projection.taskRevision ?? {
       id: record.id,
       updatedAt: record.payload?.task?.updatedAt ?? null,
     },
@@ -8156,6 +8166,38 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }
   return { ...synced, token, companyEncryption, requestOrigin };
 };
 
+export const usesFreshExactTaskRead = (nativeTool, input) => {
+  if (!["get_task", "get_tasks", "get_task_instruction_page", "get_task_sections"].includes(nativeTool)) return false;
+  const locators = ["get_tasks", "get_task_instruction_page"].includes(nativeTool) ? input?.tasks : [input];
+  return Array.isArray(locators) && locators.length > 0 && locators.length <= 20
+    && locators.every(locator => /^e-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(locator?.projectSlug)
+      && Number.isSafeInteger(Number(locator?.taskNumber)) && Number(locator.taskNumber) > 0);
+};
+
+/** A scoped, ephemeral projection is intentionally never published as a search
+ * generation. Live task ACL and instruction revisions are checked on every
+ * page; another task's comments cannot invalidate this task's authority. */
+export const readFreshExactTaskContext = async ({ origin, companySlug, nativeTool, input, provider, signal,
+  requestJson = async (pathname, body) => readJson(await request(provider.requestOrigin, provider.token, pathname, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
+  })),
+  hydrate = value => hydrateAgentCompanyEncryptedJson({ value, origin: provider.requestOrigin,
+    token: provider.token, companyEncryption: provider.companyEncryption, signal }),
+}) => {
+  const locators = ["get_tasks", "get_task_instruction_page"].includes(nativeTool) ? input.tasks : [input];
+  if (locators.some(locator => locator.companySlug !== companySlug)) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact tasks must belong to the selected company.");
+  }
+  const raw = await requestJson(`/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/tasks/read`, {
+    tasks: locators.map(locator => ({ projectSlug: locator.projectSlug, taskNumber: Number(locator.taskNumber) })),
+  });
+  if (raw.company?.id !== provider.companyEncryption.runtime.company.id || raw.company?.slug !== companySlug) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact task context belongs to another company.");
+  }
+  const mirror = await hydrate(raw);
+  return handleNativeLocalContextRead(mirror, nativeTool, input);
+};
+
 export const handleTrelioLocalContextOperation = async (
   origin,
   rawInput,
@@ -8168,6 +8210,22 @@ export const handleTrelioLocalContextOperation = async (
 
   if (operation === "native_read") {
     const nativeTool = String(rawInput?.nativeTool || "").trim();
+    const input = rawInput?.arguments;
+    if (usesFreshExactTaskRead(nativeTool, input)) {
+      if (input?.companySlug && input.companySlug !== companySlug) {
+        throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact read belongs to another company.");
+      }
+      if (nativeTool === "get_task_sections") {
+        return getTaskSectionsFromProvider({ origin: provider.requestOrigin, token: provider.token,
+          companyEncryption: provider.companyEncryption, mirror: { company: { slug: companySlug } },
+          rawInput: input, fresh: true, signal });
+      }
+      const result = await readFreshExactTaskContext({ origin, companySlug, nativeTool, input, provider, signal });
+      const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
+        ? await readUnfiledResponseContext(origin, companySlug,
+          { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
+      return unfiledQueue ? { ...result, unfiledQueue } : result;
+    }
     if (nativeTool === "get_agent_workspace" || nativeTool === "get_agent_workspace_by_scope") {
       const argumentsObject = rawInput?.arguments;
       if (!argumentsObject || typeof argumentsObject !== "object" || Array.isArray(argumentsObject)) {
@@ -8857,6 +8915,11 @@ export const uploadLocalImportFiles = async ({ rawResult, manifestPath, origin, 
   return { structuredContent: receipt, content: [{ type: "text", text: "Import package staged and validated. Review the receipt and plan before start_import." }] };
 };
 
+export const localReadActionNeedsMirror = (nativeTool, input) => {
+  if (!["get_agent_instructions", "get_task_create_meta", "get_project_meta", "list_my_tasks", "list_projects"].includes(nativeTool)) return true;
+  return Boolean(input?.projectSlug && !/^e-[0-9a-f-]{36}$/u.test(input.projectSlug));
+};
+
 export const handleTrelioLocalActionOperation = async (
   origin,
   rawInput,
@@ -8964,7 +9027,9 @@ const executeTrelioLocalActionOperation = async (
 
   // Historical/pre-encryption project links remain valid. Canonicalization is
   // local because the clear alias itself must not be sent back to Trelio.
-  const ready = await getReadyMirror({ origin, companySlug, signal });
+  const ready = localReadActionNeedsMirror(nativeTool, rawInput.arguments)
+    ? await getReadyMirror({ origin, companySlug, signal })
+    : { mirror: { company: provider.companyEncryption.runtime.company, projects: [], tasks: [] } };
   if (ready.nativeProvider) return {
     content: [{ type: "text", text: JSON.stringify(ready.result) }],
   };

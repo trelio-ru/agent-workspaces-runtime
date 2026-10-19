@@ -11,6 +11,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 
 import {
+  usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
   buildStableCompanyMirror,
   createEncryptedSearchFileCache,
   assertLocalAgentInstructionPublicationWithinLimit,
@@ -4708,4 +4709,52 @@ test("live unfiled contract is company-scoped, outside pinned authority and insi
   assert.deepEqual(fixture.instructions, originalInstructions);
   fixture.unfiledQueue.companySlug = "another";
   assert.throws(() => handleNativeLocalContextRead(fixture, "get_task", target), error => error.code === "LOCAL_CONTEXT_COMPANY_MISMATCH");
+});
+
+
+test("fresh task core and instruction pages never depend on a company search generation", async () => {
+  const fixture = structuredClone(mirror);
+  const projectSlug = `e-${fixture.projects[0].id}`;
+  fixture.projects[0].slug = projectSlug;
+  fixture.tasks[0].projectSlug = projectSlug;
+  fixture.tasks[0].payload.project.slug = projectSlug;
+  fixture.instructions.company = { compiledMarkdown: "Правила\n".repeat(6000) };
+  fixture.instructions.projects = [];
+  const target = { companySlug: "acme", projectSlug, taskNumber: 17 };
+  let requests = 0;
+  const read = (nativeTool, input) => readFreshExactTaskContext({
+    origin: "https://trelio.example", companySlug: "acme", nativeTool, input,
+    provider: { companyEncryption: { runtime: { company: fixture.company } } },
+    requestJson: async (pathname, body) => {
+      requests++;
+      assert.equal(pathname, "/api/agent-workspaces/company-context/acme/tasks/read");
+      assert.deepEqual(body, { tasks: [{ projectSlug, taskNumber: 17 }] });
+      // No manifest, search corpus or accepted-file cache exists. Even when
+      // unrelated work changes, only this task and its live rules are read.
+      return { ...fixture, generation: undefined, serverGeneration: undefined };
+    }, hydrate: async value => value,
+  });
+  assert.equal(usesFreshExactTaskRead("get_task", target), true);
+  assert.equal(usesFreshExactTaskRead("get_task", { ...target, projectSlug: "protected-alias" }), false);
+  assert.equal(usesFreshExactTaskRead("create_task", target), false);
+  const core = await read("get_task", target);
+  assert.equal(core.tasks[0].task.title, fixture.tasks[0].payload.task.title);
+  assert.equal(core.effectiveInstructions.status, "incomplete");
+  let pageIndex = 0;
+  do {
+    const page = await read("get_task_instruction_page", { tasks: [target],
+      expectedCatalogRevisionKey: core.effectiveInstructions.delivery.catalogRevisionKey, pageIndex, pageSize: 4 });
+    assert.equal(page.tasks, undefined);
+    pageIndex = page.nextPageIndex;
+  } while (pageIndex !== null);
+  assert.ok(requests > 1);
+  await assert.rejects(read("get_task", { ...target, companySlug: "other" }), { code: "LOCAL_CONTEXT_COMPANY_MISMATCH" });
+});
+
+test("fresh action reads bypass the company mirror only for known structural routing", () => {
+  assert.equal(localReadActionNeedsMirror("get_agent_instructions", { companySlug: "acme" }), false);
+  assert.equal(localReadActionNeedsMirror("list_my_tasks", {}), false);
+  assert.equal(localReadActionNeedsMirror("get_task_create_meta", { projectSlug: `e-${mirror.projects[0].id}` }), false);
+  assert.equal(localReadActionNeedsMirror("get_project_meta", { projectSlug: "historical-alias" }), true);
+  assert.equal(localReadActionNeedsMirror("apply_task_patch", {}), true);
 });

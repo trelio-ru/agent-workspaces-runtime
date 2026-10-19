@@ -221,20 +221,21 @@ test("Cursor diagnostics require a real binding and preserve service Git isolati
   assert.equal(isolated.scope, undefined);
 });
 
-test("diagnostics and refresh leave unrelated root materials untouched", async () => {
+test("an existing exact binding can refresh beside unrelated root materials without opening them", async () => {
   const root = await configuredRoot();
   await makeTemplateOutdated(root);
-  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
   const filePath = path.join(root, "user-material.txt");
   const material = "PRIVATE-MATERIAL-CANARY";
   await fs.writeFile(filePath, material);
-  const agentsBefore = await fs.readFile(path.join(root, "AGENTS.md"));
-  for (const action of [
-    () => prepareTrelioFolderDiagnostic({ folderPath: root }, "codex"),
-    () => applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters),
-  ]) await assert.rejects(action(), { code: "TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED" });
+  const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+  assert.equal(diagnostic.status, "refresh_available");
+  await applyTrelioFolderOnboarding(diagnostic.refresh.action.arguments.parameters);
   assert.equal(await fs.readFile(filePath, "utf8"), material);
-  assert.deepEqual(await fs.readFile(path.join(root, "AGENTS.md")), agentsBefore);
+  assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
+  const unbound = await makeRoot();
+  await fs.writeFile(path.join(unbound, "user-material.txt"), material);
+  await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: unbound }, "codex"),
+    { code: "TRELIO_FOLDER_DIAGNOSTIC_DEDICATED_FOLDER_REQUIRED" });
 });
 
 test.after(async () => {

@@ -2107,3 +2107,19 @@ Hidden `_meta` не сериализуется. При overflow возвраща
 исходный объект не меняется, auth/config не сбрасываются и действие не повторяется.
 Исторические releases не переписываются; новый publication limit не является
 основанием считать большой старый read успешно загруженной authority.
+
+
+### Точечное чтение зашифрованной задачи
+
+`get_task`, `get_tasks`, `get_task_instruction_page` и `get_task_sections`
+с текущими структурными project slug получают свежую task-scoped проекцию
+без company mirror. Backend проверяет source grant/module/task ACL в новой
+read-only repeatable-read транзакции; host гидратирует ciphertext и применяет
+прежний schema-v3 budget/hash. Каждая страница заново проверяет revision rules.
+Проекция не публикуется как search generation. Исторические защищённые aliases
+по-прежнему разрешаются локально. Read-only rules/project/create-meta и личный
+список задач с текущими locators не требуют mirror для canonicalization.
+
+Refresh уже существующей exact managed-привязки допускает соседние материалы
+в root: меняется только managed block с прежним scope, safe-file/CAS/read-back
+и Git isolation. Для папки без привязки dedicated-folder gate сохраняется.

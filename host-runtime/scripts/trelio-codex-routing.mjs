@@ -18,7 +18,7 @@ export const CODEX_TRELIO_DIRECT_TOOL_NAMESPACES = Object.freeze([
 // not a terminal refusal or an inferred config/credential mutation. Recovery
 // mechanics and confirmation stay in the existing diagnostic skill/plan.
 export const CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS =
-  "Codex: Trelio MCP – direct, вне functions.exec. ALL_TOOLS ≠ direct inventory; ready/CLI ≠ tools модели. Нет direct schema – сразу read-only trelio-diagnostics. Code Mode – nested.";
+  "Codex: Trelio MCP – direct, вне functions.exec. ALL_TOOLS ≠ direct inventory; ready/CLI ≠ tools модели. Пример: direct mcp__trelio.get_task; не tools.*. Нет direct schema – сразу read-only trelio-diagnostics.";
 export const CODEX_LEGACY_TRELIO_MCP_SERVER_NAME = "trelio-mcp";
 
 export const CODEX_ROUTING_PLAN_TOOL_NAME = "plan_codex_trelio_hook_routing";

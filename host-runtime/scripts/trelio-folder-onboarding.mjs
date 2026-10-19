@@ -901,7 +901,10 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
   );
   const refreshOnly = rawInput.userExplicitlyRequestedInstructionRefresh === true;
   if (refreshOnly) {
-    await assertDedicatedDiagnosticFolder(filesystem, rootPath);
+    // A verified existing binding authorizes replacing only its managed block.
+    // Unrelated root materials do not change that scope and are never read,
+    // moved or deleted. Git isolation, safe files, same-scope and CAS guards
+    // below remain mandatory; an unbound folder still needs dedicated setup.
     if (instructionSnapshot.exists && sha256(Buffer.from(instructionSnapshot.text, "utf8")) !== instructionSnapshot.sha256) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE", "Managed refresh requires a valid UTF-8 instruction file.");
     }
@@ -1021,7 +1024,6 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
   }
   const filesystem = dependencies.filesystem ?? fs;
   const inspection = await inspectFolder({ folderPath: rawInput.folderPath, ...dependencies });
-  await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path);
   // Git isolation is a folder invariant shared by every supported client.
   if (inspection.folder.serviceGitPreserved) {
     const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
@@ -1034,10 +1036,11 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
     ? "AGENTS.override.md" : inspection.instructionTarget;
   const snapshot = await inspectOptionalRegularFile(filesystem, path.join(inspection.folder.path, instructionTarget));
   const binding = readManagedBinding(snapshot.text);
-  if (!binding) return {
-    status: "setup_required", folder: inspection.folder, instructionTarget,
-    reasonCode: "TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED",
-  };
+  if (!binding) {
+    await assertDedicatedDiagnosticFolder(filesystem, inspection.folder.path);
+    return { status: "setup_required", folder: inspection.folder, instructionTarget,
+      reasonCode: "TRELIO_FOLDER_ONBOARDING_BINDING_REQUIRED" };
+  }
   const state = await buildPlanState({
     folderPath: inspection.folder.path, instructionTarget, ...binding,
     userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind,
