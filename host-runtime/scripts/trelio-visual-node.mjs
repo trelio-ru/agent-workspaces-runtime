@@ -9,7 +9,8 @@ const unavailable = () => Object.assign(new Error('VISUAL_BOOTSTRAP_NODE_REQUIRE
  * third-party native addons. --version succeeds, but dyld rejects the keyring
  * binding before any vault operation. Do not re-sign the application, alter
  * OS validation or replace the vault with plaintext. Select an installed
- * standalone Node with its own compatible policy for this host-owned worker.
+ * standalone Node with its own compatible policy for protected-session CLI
+ * execution and its host-owned browser worker (including stopped-state vault IO).
  * The MCP process, browser transport and signed worker source stay unchanged.
  *
  * Paths are fixed host discovery roots, never provider/model arguments. Every

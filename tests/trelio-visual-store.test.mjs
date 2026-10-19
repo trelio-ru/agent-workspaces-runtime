@@ -4,7 +4,24 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ProtectedVisualStore, visualStorageScope, awaitVisualVault } from '../host-runtime/scripts/trelio-visual-store.mjs';
+import { ProtectedVisualStore, visualStorageScope, awaitVisualVault, writeVisualVaultSecret } from '../host-runtime/scripts/trelio-visual-store.mjs';
+
+test('unknown late set keeps its own bytes until native completion without retry or readiness', async () => {
+  const controller = new AbortController();
+  const candidate = Buffer.alloc(32, 85);
+  let nativeBytes, finishNative, calls = 0;
+  const pending = writeVisualVaultSecret({ setSecret(bytes) {
+    calls++; nativeBytes = bytes; return new Promise(resolve => { finishNative = resolve; });
+  } }, candidate, controller.signal);
+  await Promise.resolve(); controller.abort();
+  await assert.rejects(pending, { code: 'VISUAL_STORAGE_UNAVAILABLE' });
+  candidate.fill(0);
+  assert.deepEqual(nativeBytes, Buffer.alloc(32, 85), 'caller cleanup must not corrupt an in-flight OS set');
+  finishNative();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(nativeBytes, Buffer.alloc(32));
+  assert.equal(calls, 1);
+});
 
 test('native vault cancellation rejects without waiting for the OS and zeroes a late secret', async () => {
   const controller = new AbortController();

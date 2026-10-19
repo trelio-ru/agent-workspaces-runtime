@@ -37,6 +37,19 @@ export function awaitVisualVault(operation, signal) {
   });
 }
 
+/** Retain a private input copy until the native set actually settles, even if
+ * its JS deadline expires first. The caller zeroes its own candidate on error;
+ * that must not change the bytes of an OS write still in flight. No late set
+ * is retried or treated as a verified key, and its input is cleared on settle.
+ */
+export function writeVisualVaultSecret(entry, bytes, signal) {
+  return awaitVisualVault(() => {
+    const nativeBytes = Buffer.from(bytes);
+    try { return Promise.resolve(entry.setSecret(nativeBytes, signal)).finally(() => nativeBytes.fill(0)); }
+    catch (error) { nativeBytes.fill(0); throw error; }
+  }, signal);
+}
+
 export function visualStorageScope({ origin, skillId, accountId }) {
   const parsed = new URL(origin);
   if (parsed.origin !== origin || !['http:', 'https:'].includes(parsed.protocol) || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skillId) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(accountId)) throw invalid('VISUAL_IDENTITY_INVALID');
@@ -91,7 +104,7 @@ export class ProtectedVisualStore {
       if (bytes === null && create) {
         const candidate = crypto.randomBytes(32);
         try {
-          await awaitVisualVault(() => this.#entry.setSecret(candidate, signal), signal);
+          await writeVisualVaultSecret(this.#entry, candidate, signal);
           bytes = await awaitVisualVault(() => this.#entry.getSecret(signal), signal);
           if (!bytes || bytes.length !== 32 || !crypto.timingSafeEqual(candidate, Buffer.from(bytes))) throw invalid('VISUAL_STORAGE_UNAVAILABLE');
         } finally { candidate.fill(0); }

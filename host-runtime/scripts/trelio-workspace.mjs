@@ -26,6 +26,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
+import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
@@ -7615,7 +7616,12 @@ const runMaterializedAgentSkill = async ({
   let args = runtimeArguments;
 
   if (interpreter === "node") {
-    executable = process.execPath;
+    // Native protected-session work also includes stopped-state disconnect.
+    // Select the compatible interpreter before provider execution or secret
+    // delivery, rather than fixing only detached browser startup and leaving
+    // a short vault-only command on an incompatible embedded Node.
+    executable = artifact.parsedPackage.browserSession?.sessionClass === 'protected-snapshot'
+      ? resolveVisualWorkerNode() : process.execPath;
     args = [entrypointPath, ...runtimeArguments];
   } else if (interpreter === "python") {
     const python = await resolveTrustedPythonInvocation({ runtimeDirectory });

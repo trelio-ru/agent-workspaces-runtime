@@ -118,7 +118,8 @@ Service. AAD привязывает snapshot к Trelio origin, skill и personal
 На macOS встроенный в приложение Node может запрещать сторонние native addons
 через hardened library validation. Host читает его signing policy и при такой
 несовместимости выбирает установленный standalone Node >=22 той же архитектуры
-из fixed Codex cache/Homebrew/local roots. Binary должен быть обычным executable
+из fixed Codex cache/Homebrew/local roots для signed protected-session CLI и
+worker, включая vault-only команды без открытого браузера. Binary должен быть обычным executable
 файлом текущего пользователя/root без group/world write; version/platform/arch
 и signing policy проверяются под общим пятисекундным deadline. Нет изменения
 подписи приложения, OS policy, shell или caller-selected executable. При
@@ -149,6 +150,8 @@ Native vault preflight выполняется до ручного окна. Ег
 15 секунд проверяется также на
 JS-границе: native OS dialog может не отменить pending N-API promise. Поздние
 bytes обнуляются и не продолжают создание ключа; неизвестный set не повторяется.
+Отдельная копия input живёт до фактического native settle, чтобы очистка candidate
+после timeout не меняла байты ещё выполняющейся записи OS.
 Timeout сохраняет прежний snapshot и возвращает `storage_unavailable`.
 В фазе manual закрыты
 снимки и агентский input. `show-login` показывает exact существующее окно.
