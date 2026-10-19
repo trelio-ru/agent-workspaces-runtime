@@ -5396,7 +5396,7 @@ test("runtime CI pins Node 22 and avoids the parent test-runner IPC", async () =
   // and avoids the parent runner's intermittent serialized IPC corruption.
   // Generic tests, Windows tests, native build and tagged packaging all pin
   // the same baseline. ARM64 additionally exercises the current Node release.
-  assert.equal([...workflowSource.matchAll(/node-version: 22\.23\.2/gu)].length, 4);
+  assert.equal([...workflowSource.matchAll(/node-version: 22\.23\.2/gu)].length, 5);
   assert.doesNotMatch(workflowSource, /node-version: 22(?:\s|$)/u);
   const genericJobSource = workflowSource.slice(
     workflowSource.indexOf("node-tests:"),
@@ -9091,6 +9091,7 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
   // In a real run downloadAndMaterializeAgentSkillRuntime sets this only after
   // digest, signature and package-schema verification.
   resolution.artifact.parsedPackage = {
+    capabilities: ["browser"],
     browserSession: payload.artifact.manifest.browserSession,
   };
   const environment = buildAgentSkillRuntimeEnvironment({
@@ -9099,6 +9100,7 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
     executionContext,
     inheritedEnvironment: {
       TRELIO_BROWSER_SESSION_MODULE_URL: "file:///forged.mjs",
+      TRELIO_VISUAL_SESSION_MODULE_URL: "file:///forged-visual.mjs",
       TRELIO_BROWSER_SESSION_POLICY_JSON: '{"manualAssist":true}',
       TRELIO_BROWSER_SESSION_STARTED_AT: "1",
       TRELIO_BROWSER_SESSION_DEADLINE_AT: "2",
@@ -9107,6 +9109,7 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
   });
 
   assert.match(environment.TRELIO_BROWSER_SESSION_MODULE_URL, /trelio-browser-session\.mjs$/u);
+  assert.match(environment.TRELIO_VISUAL_SESSION_MODULE_URL, /trelio-visual-session\.mjs$/u);
   assert.deepEqual(JSON.parse(environment.TRELIO_BROWSER_SESSION_POLICY_JSON), {
     apiVersion: 1,
     sessionClass: "protected-snapshot",
@@ -9127,6 +9130,9 @@ test("browser skill receives a host-bound module, policy and absolute deadline",
   assert.equal(buildAgentSkillRuntimeEnvironment({ artifact: resolution.artifact,
     runtimeDirectory: "/verified/runtime", executionContext,
     inheritedEnvironment: { TRELIO_BROWSER_SESSION_MODULE_URL: "file:///forged.mjs" } }).TRELIO_BROWSER_SESSION_MODULE_URL, undefined);
+  assert.equal(buildAgentSkillRuntimeEnvironment({ artifact: resolution.artifact,
+    runtimeDirectory: "/verified/runtime", executionContext,
+    inheritedEnvironment: { TRELIO_VISUAL_SESSION_MODULE_URL: "file:///forged-visual.mjs" } }).TRELIO_VISUAL_SESSION_MODULE_URL, undefined);
 
 });
 

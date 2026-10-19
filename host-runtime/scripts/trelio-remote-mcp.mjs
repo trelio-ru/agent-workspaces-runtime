@@ -17,6 +17,7 @@ import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION } from "./trelio-skill-accounts.mjs";
 import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
 import { LOCAL_PROPOSAL_FILES } from "./trelio-proposal-local-files.mjs";
+import { visualMcpResult } from './trelio-visual-result.mjs';
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
   prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
@@ -4109,6 +4110,8 @@ const LOCAL_TOOLS = [
 
 // Exact task delivery budgets use this same envelope before pagination.
 const buildTextResult = buildLocalTaskReadToolResult;
+const buildWorkspaceActionResult = value => value?.operation === 'skill_run' && value.visual
+  ? visualMcpResult(value.visual) : buildTextResult(value);
 
 /**
  * Put provider-selected follow-up routing beside encrypted search results.
@@ -5778,7 +5781,7 @@ export const handleToolCall = async (
     );
   }
   if (name === TRELIO_WORKSPACE_ACTION_TOOL.name) {
-    return buildTextResult(await workspaceActionOperation(
+    return buildWorkspaceActionResult(await workspaceActionOperation(
       origin,
       rawArguments,
       { signal },

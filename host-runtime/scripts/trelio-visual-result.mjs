@@ -1,0 +1,83 @@
+import { randomUUID } from 'node:crypto';
+import { crc32 } from 'node:zlib';
+
+// A browser picture is a binary MCP block, never a base64 string in an ordinary
+// text result. This boundary is provider-neutral and accepts no page prose,
+// paths, HTML, URLs, headers, selectors or arbitrary structured payloads.
+export const VISUAL_RESULT_KIND = 'trelio.visual-browser/v1';
+export const MAX_VISUAL_PNG_BYTES = 2 * 1024 * 1024;
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const states = new Set(['not_configured', 'preparing', 'manual_input_required', 'saved_unverified', 'ready', 'closed', 'error']);
+const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'navigation_blocked', 'document_blocked', 'lease_expired', 'operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'session_busy', 'session_closed', 'browser_process_lost', 'invalid_input', 'http_document_failure']);
+const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
+const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
+
+function validatePng(bytes) {
+  // Accept the raster/color chunks Chromium emits, not arbitrary PNG text,
+  // EXIF, embedded files or appended bytes. The MCP boundary never treats a
+  // header plus arbitrary source text as an image. CRCs also reject truncation.
+  let offset = 8, data = false, ended = false, chunks = 0;
+  while (offset < bytes.length && ++chunks <= 4096) {
+    if (offset + 12 > bytes.length) fail();
+    const length = bytes.readUInt32BE(offset), type = bytes.toString('ascii', offset + 4, offset + 8);
+    if (length > bytes.length - offset - 12 || !['IHDR', 'IDAT', 'IEND', 'sRGB', 'gAMA', 'cHRM', 'pHYs', 'PLTE', 'tRNS'].includes(type)) fail();
+    if (crc32(bytes.subarray(offset + 4, offset + 8 + length)) !== bytes.readUInt32BE(offset + 8 + length)) fail();
+    if (chunks === 1 ? type !== 'IHDR' || length !== 13 : type === 'IHDR') fail();
+    if (type === 'IDAT') data = true;
+    if (type === 'IEND') { if (length || !data) fail(); ended = true; }
+    offset += 12 + length;
+    if (ended) break;
+  }
+  if (!ended || offset !== bytes.length) fail();
+}
+
+export function validateVisualResult(value) {
+  if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (value.reason === 'http_document_failure') {
+    let url;
+    try { url = new URL(value.origin); } catch { fail(); }
+    if (value.state !== 'error' || !Number.isInteger(value.httpStatus) || value.httpStatus < 400 || value.httpStatus > 599 || url.protocol !== 'https:' || url.origin !== value.origin || url.username || url.password || url.port) fail();
+  } else if (value.httpStatus !== undefined || value.origin !== undefined) fail();
+  if (value.sessionId !== undefined && !uuid.test(value.sessionId)) fail();
+  if (value.hasStoredSession !== undefined && typeof value.hasStoredSession !== 'boolean') fail();
+  const hasImage = value.image !== undefined;
+  if (hasImage) {
+    if (value.state !== 'ready' || value.reason !== 'none' || !uuid.test(value.frameId) || !Number.isInteger(value.width) || !Number.isInteger(value.height) || value.width < 320 || value.width > 1920 || value.height < 240 || value.height > 1440) fail();
+    if (!exact(value.scroll, ['up', 'down', 'left', 'right']) || ['up', 'down', 'left', 'right'].some(key => typeof value.scroll[key] !== 'boolean')) fail();
+    if (!exact(value.image, ['mimeType', 'data']) || value.image.mimeType !== 'image/png' || typeof value.image.data !== 'string' || value.image.data.length > Math.ceil(MAX_VISUAL_PNG_BYTES / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value.image.data)) fail();
+    const bytes = Buffer.from(value.image.data, 'base64');
+    if (bytes.length < 33 || bytes.length > MAX_VISUAL_PNG_BYTES || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || bytes.toString('ascii', 12, 16) !== 'IHDR' || bytes.readUInt32BE(16) !== value.width || bytes.readUInt32BE(20) !== value.height) fail();
+    validatePng(bytes);
+  } else if (['frameId', 'width', 'height', 'scroll'].some(key => value[key] !== undefined)) fail();
+  return value;
+}
+
+export function visualStatus(state, reason = 'none', extra = {}) {
+  return validateVisualResult({ kind: VISUAL_RESULT_KIND, state, reason, ...extra });
+}
+
+export function visualFrame({ sessionId, width, height, scroll, png }) {
+  return validateVisualResult({ kind: VISUAL_RESULT_KIND, state: 'ready', reason: 'none', sessionId, frameId: randomUUID(), width, height, scroll, image: { mimeType: 'image/png', data: Buffer.from(png).toString('base64') } });
+}
+
+export function visualMcpResult(value) {
+  validateVisualResult(value);
+  const { image, kind, ...metadata } = value;
+  return { ...(value.state === 'error' ? { isError: true } : {}), content: [
+    { type: 'text', text: JSON.stringify(metadata) },
+    ...(image ? [{ type: 'image', mimeType: image.mimeType, data: image.data }] : []),
+  ] };
+}
+
+// Only the skill-run transport may interpret this marker. A malformed visual
+// attempt fails closed instead of falling back to echoing its original stdout.
+export function parseVisualSkillOutput(stdout) {
+  if (typeof stdout !== 'string' || !stdout.includes(VISUAL_RESULT_KIND)) return null;
+  if (Buffer.byteLength(stdout) > 3 * 1024 * 1024) fail();
+  let value;
+  try { value = JSON.parse(stdout); } catch { fail(); }
+  // Ordinary provider data may mention the protocol in prose. Only its exact
+  // top-level marker opts into image projection; legacy JSON stays unchanged.
+  if (value?.kind !== VISUAL_RESULT_KIND) return null;
+  return validateVisualResult(value);
+}

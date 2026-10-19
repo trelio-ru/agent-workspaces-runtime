@@ -178,6 +178,18 @@ publication tooling также остаются вне этого публичн
   lifecycle и profile lock. Provider-specific navigation, selectors, read
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
+- Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
+  image-only MCP, managed Chromium с private live profile и AEAD snapshot
+  после нормальной остановки, native OS keyring, company/member claim и
+  непродлеваемая lease. Window close/ready сохраняют попытку до снятия gate;
+  crash не доказывает save/login. Native OS tests обязательны.
+  Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
+  Закрытый extension adapter имеет только fixed Page/Input команды; локальный
+  isolated link router читает href exact trusted click для same-tab navigation,
+  не выдаёт модели DOM/код и не принимает произвольные scripts/selectors.
+  Capture/input не активируют app; native foreground test проверяет это без
+  возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
+  popups/iframes. Source probes не входят в package и не являются fallback.
 - HTTP-ошибки browser document сохраняют только numeric status и approved
   origin через общий observer; transport failure не получает выдуманного кода.
   Provider interpretation и отсутствие credential reset/replay сохраняются по

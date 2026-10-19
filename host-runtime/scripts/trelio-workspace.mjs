@@ -131,6 +131,7 @@ const BRIDGE_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
 const BROWSER_SESSION_MODULE_URL = pathToFileURL(
   path.join(path.dirname(BRIDGE_ENTRYPOINT_PATH), "trelio-browser-session.mjs"),
 ).href;
+const VISUAL_SESSION_MODULE_URL = new URL('./trelio-visual-session.mjs', import.meta.url).href;
 const LOADED_CODEX_PLUGIN_DIRECTORY = process.env.TRELIO_PLUGIN_ROOT
   ? path.resolve(process.env.TRELIO_PLUGIN_ROOT)
   // Direct source-tree tests do not pass loader environment. The packaged
@@ -7465,6 +7466,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_BROWSER_SESSION_POLICY_JSON: _staleBrowserSessionPolicy,
     TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
     TRELIO_BROWSER_SESSION_DEADLINE_AT: _staleBrowserSessionDeadlineAt,
+    TRELIO_VISUAL_SESSION_MODULE_URL: _staleVisualSessionModuleUrl,
     ...cleanEnvironment
   } = sanitizeAgentSkillInheritedEnvironment(inheritedEnvironment);
   const connectionConfigJson = executionContext.companyConnection
@@ -7565,7 +7567,12 @@ export const buildAgentSkillRuntimeEnvironment = ({
     // without a generic lifecycle descriptor. This grants no lease or policy;
     // inherited module URLs were stripped above and cannot select executable code.
     ...(artifact.parsedPackage?.capabilities?.includes("browser")
-      ? { TRELIO_BROWSER_SESSION_MODULE_URL: BROWSER_SESSION_MODULE_URL }
+      ? {
+          TRELIO_BROWSER_SESSION_MODULE_URL: BROWSER_SESSION_MODULE_URL,
+          // This path is from the verified host, never inherited environment.
+          // The module rechecks protected-snapshot policy and account identity.
+          TRELIO_VISUAL_SESSION_MODULE_URL: VISUAL_SESSION_MODULE_URL,
+        }
       : {}),
     ...(browserSession
       ? {

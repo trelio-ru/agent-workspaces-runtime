@@ -54,6 +54,13 @@ const copyRuntimeSource = async (stagingDirectory) => {
     await fs.copyFile(path.join(nativeRoot, relative), target);
   }
   const entries = await fs.readdir(SCRIPT_SOURCE, { withFileTypes: true });
+  // The visual browser installs exact dependencies from these reviewed lock
+  // files into its own managed cache. Never package developer node_modules.
+  const visualDependencies = path.join(targetScripts, 'visual-browser-dependencies');
+  await fs.mkdir(visualDependencies, { recursive: true });
+  for (const name of ['package.json', 'package-lock.json']) {
+    await fs.copyFile(path.join(SCRIPT_SOURCE, 'visual-browser-dependencies', name), path.join(visualDependencies, name));
+  }
 
   for (const entry of entries) {
     if (entry.isFile()

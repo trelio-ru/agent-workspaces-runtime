@@ -17,6 +17,67 @@ env:
   TRELIO_AGENT_SKILLS_ROOT: ${{ github.workspace }}/_contracts/agent-skills
 
 jobs:
+  visual-browser:
+    if: github.event_name == 'pull_request'
+    name: Native visual browser (${{ matrix.os }})
+    needs: windows-private-build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, windows-11-arm, ubuntu-latest]
+    env:
+      TRELIO_VISUAL_NATIVE_TEST: '1'
+      TRELIO_VISUAL_EXTENSION_TEST: '1'
+      TRELIO_VISUAL_EXTENSION_HEADED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-private-worker
+          path: host-runtime/scripts/native-private-process/bin
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Install exact test dependencies
+        shell: bash
+        run: |
+          npm run worktree:bootstrap
+          npm ci --prefix host-runtime/scripts/visual-browser-dependencies --ignore-scripts --no-audit --no-fund
+      - name: Install Linux desktop and native credential service
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb
+          sudo node host-runtime/scripts/visual-browser-dependencies/node_modules/playwright-core/cli.js install-deps chromium
+      - name: Cold managed Chromium bootstrap
+        shell: bash
+        run: node --input-type=module -e 'import {loadVisualDependencies,ensureVisualChromium} from "./host-runtime/scripts/trelio-visual-bootstrap.mjs"; await ensureVisualChromium(await loadVisualDependencies());'
+      - name: Run native Windows or macOS fixtures
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          node tests/trelio-visual-native-store.test.mjs
+          node tests/trelio-visual-store.test.mjs
+          node tests/trelio-visual-transport.test.mjs
+          node tests/trelio-visual-browser.test.mjs
+          node tests/trelio-visual-profile.test.mjs
+          node tests/trelio-visual-link-router.test.mjs
+          node tests/trelio-visual-extension-worker.test.mjs
+          node tests/trelio-visual-extension-browser.test.mjs
+          node tests/trelio-visual-session.test.mjs
+      - name: Run Linux desktop fixtures with real Secret Service
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            for file in native-store store transport profile browser extension-browser session; do
+              xvfb-run -a node "tests/trelio-visual-${file}.test.mjs"
+            done
+          '
+
   windows-private-build:
     if: github.event_name == 'pull_request'
     name: Build native Windows private worker
@@ -117,6 +178,15 @@ jobs:
           node tests/trelio-browser-open.test.mjs
           node tests/trelio-browser-session.test.mjs
           node tests/trelio-browser-http.test.mjs
+          node tests/trelio-visual-store.test.mjs
+          node tests/trelio-visual-transport.test.mjs
+          node tests/trelio-visual-browser.test.mjs
+          node tests/trelio-visual-profile.test.mjs
+          node tests/trelio-visual-link-router.test.mjs
+          node tests/trelio-visual-extension-worker.test.mjs
+          node tests/trelio-visual-extension-browser.test.mjs
+          node tests/trelio-visual-native-store.test.mjs
+          node tests/trelio-visual-session.test.mjs
           node tests/trelio-codex-routing.test.mjs
           node tests/trelio-codex-conversation.test.mjs
           node tests/trelio-company-encryption.test.mjs
@@ -408,6 +478,6 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=pull_request&status=success" > "$RUNNER_TEMP/runs.json"
           node -e 'const fs=require("fs");const runs=JSON.parse(fs.readFileSync(process.argv[1])).workflow_runs.filter(r=>r.head_sha===process.env.GITHUB_SHA&&r.event==="pull_request"&&r.conclusion==="success");if(!runs.length)throw Error("Exact successful PR gate is required");fs.writeFileSync(process.argv[2],String(runs[0].id))' "$RUNNER_TEMP/runs.json" "$RUNNER_TEMP/run-id"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$(cat "$RUNNER_TEMP/run-id")/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
-          node -e 'const fs=require("fs");const jobs=JSON.parse(fs.readFileSync(process.argv[1])).jobs;for(const name of ["Canonical main Git guard","Runtime tests (ubuntu-latest)","Runtime tests (macos-latest)","Windows runtime and private ACL","Build native Windows private worker","Native Windows private worker (arm64)"])if(!jobs.some(j=>j.name===name&&j.conclusion==="success"))throw Error("Incomplete exact OS gate: "+name)' "$RUNNER_TEMP/jobs.json"
+          node -e 'const fs=require("fs");const jobs=JSON.parse(fs.readFileSync(process.argv[1])).jobs;for(const name of ["Canonical main Git guard","Runtime tests (ubuntu-latest)","Runtime tests (macos-latest)","Windows runtime and private ACL","Build native Windows private worker","Native Windows private worker (arm64)","Native visual browser (macos-latest)","Native visual browser (windows-latest)","Native visual browser (windows-11-arm)","Native visual browser (ubuntu-latest)"])if(!jobs.some(j=>j.name===name&&j.conclusion==="success"))throw Error("Incomplete exact OS gate: "+name)' "$RUNNER_TEMP/jobs.json"
 
           echo "run-id=$(cat "$RUNNER_TEMP/run-id")" >> "$GITHUB_OUTPUT"

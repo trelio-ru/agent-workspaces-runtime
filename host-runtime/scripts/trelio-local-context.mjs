@@ -9,6 +9,7 @@ import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mj
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
 import { parseProcessDiagnostic } from "./trelio-process-diagnostics.mjs";
 import { parseBridgeHttpDiagnostic } from "./trelio-bridge-http-diagnostics.mjs";
+import { parseVisualSkillOutput } from "./trelio-visual-result.mjs";
 import { rankAgentSkillSearchDocuments, compactSearchGuidance, guidanceSearchInput } from "./trelio-agent-guidance-search.mjs";
 import { CommentAttachmentPolicyError, resolveCommentContextAttachmentPolicy } from "./trelio-comment-attachment-policy.mjs";
 import { LOCAL_PROPOSAL_FILES, prepareLocalProposalFiles, bindLocalProposalFilePreviews } from "./trelio-proposal-local-files.mjs";
@@ -10440,11 +10441,14 @@ const executeTrelioWorkspaceActionOperation = async (
         invocation.actionParameters ?? rawInput.parameters,
       );
     }
+    const visual = invocation.operation === "skill_run" ? parseVisualSkillOutput(result.stdout) : null;
     return {
       schemaVersion: TRELIO_WORKSPACE_ACTION_SCHEMA_VERSION,
       operation: invocation.operation,
-      stdout: truncateWorkspaceActionOutput(result.stdout),
-      ...(result.stderr ? { stderr: truncateWorkspaceActionOutput(result.stderr) } : {}),
+      ...(visual ? { visual } : {
+        stdout: truncateWorkspaceActionOutput(result.stdout),
+        ...(result.stderr ? { stderr: truncateWorkspaceActionOutput(result.stderr) } : {}),
+      }),
     };
   } catch (error) {
     if (signal?.aborted) throw error;
