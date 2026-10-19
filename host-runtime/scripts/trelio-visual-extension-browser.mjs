@@ -9,7 +9,7 @@ import { visualExtensionWorker } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter } from './trelio-visual-link-router.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
 import { visualStatus, validateVisualResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
-import { snapshotVisualProfile, restoreVisualProfile } from './trelio-visual-profile.mjs';
+import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 
 // A public manifest identity fixes the extension Origin across private
 // profiles. This is not a credential/signing secret; the independent random
@@ -46,6 +46,7 @@ export class ExtensionVisualBrowser {
     await prepareVisualPrivateDirectory(this.#directory);
     this.#profile = path.join(this.#directory, 'profile');
     await restoreVisualProfile(snapshot, this.#profile);
+    await prepareVisualProfileStartup(this.#profile);
     const extension = path.join(this.#directory, 'extension'); await prepareVisualPrivateDirectory(extension);
     const token = crypto.randomBytes(32).toString('hex');
     this.#server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
@@ -101,10 +102,9 @@ export class ExtensionVisualBrowser {
     // The extension installs policy before navigating it; the provider URL and
     // private transport token never enter the process command line. Startup
     // may focus this owned window once, as agreed for visible workflows.
-    // Do not add an explicit startup URL, including about:blank: Chromium then
-    // treats startup as a new navigation and clears session-only cookies even
-    // with --restore-last-session. The extension privately navigates the
-    // internal new-tab surface after policy, preserving ordinary restoration.
+    // The extension privately navigates the internal new-tab surface after
+    // policy. Fresh profile preferences above preserve session cookies even
+    // on platforms where closing the last window ends the browser session.
     this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'win32' ? [] : ['--no-startup-window']), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testDiagnostics ? ['--enable-logging=stderr'] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testDiagnostics ? 'pipe' : 'ignore'], windowsHide: true });
     // Fixture-only classification deliberately discards raw stderr. Even CI
     // must never print a worker resource, private path or loopback credential.

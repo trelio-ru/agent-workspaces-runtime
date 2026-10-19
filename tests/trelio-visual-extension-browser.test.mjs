@@ -6,9 +6,32 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { gunzipSync } from 'node:zlib';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
+
+// Inspect only this file's synthetic fixture snapshot, never a real account.
+// Closed counts distinguish persistence from browser startup loss; cookie
+// values, ciphertext, paths and profile contents never enter the log.
+async function fixtureCookieEvidence(snapshot, directory, name) {
+  const files = JSON.parse(gunzipSync(Buffer.from(snapshot.profile, 'base64')));
+  const cookie = files.find(file => /(?:^|\/)Cookies$/u.test(file.path));
+  const local = JSON.parse(Buffer.from(files.find(file => file.path === 'Local State')?.data || 'e30=', 'base64').toString());
+  const result = { cookieFile: Boolean(cookie), encryptedKey: Boolean(local.os_crypt?.encrypted_key), appBoundKey: Boolean(local.os_crypt?.app_bound_encrypted_key) };
+  if (!cookie) return result;
+  const file = path.join(directory, 'synthetic-cookie-evidence.sqlite');
+  await fs.writeFile(file, Buffer.from(cookie.data, 'base64'), { mode: 0o600 });
+  for (const suffix of ['-wal', '-shm']) {
+    const extra = files.find(candidate => candidate.path === cookie.path + suffix);
+    if (extra) await fs.writeFile(file + suffix, Buffer.from(extra.data, 'base64'), { mode: 0o600 });
+  }
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(file, { readOnly: true });
+  try { result.count = db.prepare('SELECT count(*) AS count FROM cookies WHERE name = ?').get(name).count; }
+  finally { db.close(); for (const suffix of ['', '-wal', '-shm']) await fs.rm(file + suffix, { force: true }); }
+  return result;
+}
 
 test('ordinary Chromium extension clicks, types, scrolls and restores auth without a page-code reader', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-fixture-')));
@@ -47,6 +70,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
   const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
   try {
     let f = ready(await browser.call('navigate', { url: `${origin}/login` }));
+    assert.equal(cookieRestored, true, 'the first document accepted its synthetic cookie before shutdown');
     // Chromium can finish its one permitted startup activation just after the
     // first picture. Sample input focus only after the app has settled.
     if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
@@ -73,6 +97,7 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
     assert.equal(detailSeen, true); assert.equal(f.scroll.down, false);
     await browser.close();
     assert.equal(snapshot.schemaVersion, 2);
+    console.log(JSON.stringify({ fixture: 'visual-cookie-snapshot', ...await fixtureCookieEvidence(snapshot, directory, 'fixture_session') }));
     cookieRestored = false; storageRestored = false;
     browser = create();
     ready(await browser.call('navigate', { url: origin }));

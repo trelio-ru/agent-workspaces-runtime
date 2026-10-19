@@ -41,8 +41,13 @@ Token не передаётся в argv, Chromium environment, MCP или logs. 
 не является DevTools endpoint. Heartbeat и cleanup не стоят за зависшим input;
 переподключение не переигрывает предыдущую команду.
 
-Windows startup открывает внутреннюю new-tab вкладку без URL в argv,
-сохраняя session-cookie restore. Затем extension ставит navigation policy
+Windows startup открывает внутреннюю new-tab вкладку без URL в argv.
+Для нового owned профиля host заранее устанавливает обычный continue-session
+preference: Chromium игнорирует restore switch у нового Profile, и закрытие
+последнего окна Windows/Linux иначе удаляет session cookies ещё до snapshot.
+У восстановленного профиля существующие Preferences не перезаписываются.
+Это настройка lifecycle профиля, без чтения/перезаписи website cookies.
+Затем extension ставит navigation policy
 и переводит owned вкладку на начальный адрес. Readiness означает отдельный hello
 после обоих этапов, а не только открытый socket. В synthetic native tests
 диагностика ограничена stage/exit и категориями sandbox/display; raw stderr,
@@ -55,6 +60,7 @@ AppArmor profile с `userns` для managed Chromium, как в
 CI загружает профиль только для exact fixture binary. Runtime не меняет OS
 policy и не добавляет `--no-sandbox`; это отдельная локальная prerequisite,
 а не обслуживание со стороны администратора компании Trelio.
+Для X11 child сохраняет также путь XAUTHORITY: без него DISPLAY недостаточно.
 
 Main-frame HTTP(S) navigation ограничена signed origins/domains через DNR.
 Source/resource URLs и специальные схемы отклоняются. Browser downloads

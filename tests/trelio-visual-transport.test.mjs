@@ -9,10 +9,19 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { visualFrame, parseVisualSkillOutput } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { visualSessionBinding, createVisualControlServer, runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
-import { prepareVisualPrivateDirectory, runVisualChild } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
+import { prepareVisualPrivateDirectory, runVisualChild, visualChildEnvironment } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { handleToolCall } from '../host-runtime/scripts/trelio-remote-mcp.mjs';
 import { handleTrelioWorkspaceActionOperation } from '../host-runtime/scripts/trelio-local-context.mjs';
+
+test('headed child retains the X11 authorization-file path while dropping loader and private token environment', () => {
+  const previous = Object.fromEntries(['XAUTHORITY', 'NODE_OPTIONS', 'TRELIO_SYNTHETIC_TOKEN'].map(name => [name, process.env[name]]));
+  try {
+    Object.assign(process.env, { XAUTHORITY: '/synthetic/Xauthority', NODE_OPTIONS: '--synthetic-loader', TRELIO_SYNTHETIC_TOKEN: 'PRIVATE_FIXTURE' });
+    const env = visualChildEnvironment();
+    assert.equal(env.XAUTHORITY, '/synthetic/Xauthority'); assert.equal(env.NODE_OPTIONS, undefined); assert.equal(env.TRELIO_SYNTHETIC_TOKEN, undefined);
+  } finally { for (const [name, value] of Object.entries(previous)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } }
+});
 
 test('full visual payload crosses the real typed action handler as an image, not truncated stdout', async () => {
   // A valid synthetic noisy PNG is larger than the legacy text limit. No

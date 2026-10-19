@@ -10,6 +10,23 @@ const invalid = () => Object.assign(new Error('VISUAL_STORAGE_CORRUPT'), { code:
 // Keep the bounded auth-store allowlist compatible with both layouts.
 const roots = ['Local State', 'Default/Preferences', 'Default/Secure Preferences', 'Default/Cookies', 'Default/Cookies-journal', 'Default/Cookies-wal', 'Default/Cookies-shm', 'Default/Network/Cookies', 'Default/Network/Cookies-journal', 'Default/Network/Cookies-wal', 'Default/Network/Cookies-shm', 'Default/Local Storage', 'Default/LocalStorage', 'Default/IndexedDB', 'Default/Session Storage', 'Default/SessionStorage', 'Default/WebStorage'];
 const directories = new Set(['Default/Local Storage', 'Default/LocalStorage', 'Default/IndexedDB', 'Default/Session Storage', 'Default/SessionStorage', 'Default/WebStorage']);
+
+/** Configure the lifecycle of a newly owned browser profile, not website data.
+ * Chromium ignores --restore-last-session for a new Profile and Windows/Linux
+ * delete its session cookies when the last window closes. Set the ordinary
+ * "continue where you left off" preference before first profile construction.
+ * Existing accepted preferences remain byte-for-byte unchanged. */
+export async function prepareVisualProfileStartup(directory) {
+  const target = path.join(directory, 'Default');
+  await prepareVisualPrivateDirectory(target);
+  try { await fs.writeFile(path.join(target, 'Preferences'), JSON.stringify({ session: { restore_on_startup: 1 } }), { flag: 'wx', mode: 0o600 }); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    const previous = await fs.lstat(path.join(target, 'Preferences'));
+    if (!previous.isFile() || previous.isSymbolicLink()) throw invalid();
+  }
+}
+
 function permitted(name) {
   return typeof name === 'string' && name.length <= 1024 && !name.includes('\\') && !name.includes(':') && name.split('/').every(part => part && part !== '.' && part !== '..')
     && roots.some(root => name === root || (directories.has(root) && name.startsWith(root + '/')));

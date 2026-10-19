@@ -4,11 +4,25 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { snapshotVisualProfile, restoreVisualProfile } from '../host-runtime/scripts/trelio-visual-profile.mjs';
+import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from '../host-runtime/scripts/trelio-visual-profile.mjs';
 import { prepareVisualPrivateDirectory } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 
 const archive = files => ({ schemaVersion: 2, profile: gzipSync(JSON.stringify(files)).toString('base64') });
 const file = (name, value = 'SYNTHETIC_AUTH') => ({ path: name, data: Buffer.from(value).toString('base64') });
+
+test('fresh owned profile preserves session cookies through ordinary startup preferences without overwriting an accepted profile', async () => {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-startup-')));
+  try {
+    await prepareVisualProfileStartup(root);
+    const prefs = path.join(root, 'Default', 'Preferences');
+    assert.deepEqual(JSON.parse(await fs.readFile(prefs, 'utf8')), { session: { restore_on_startup: 1 } });
+    const existing = '{ "profile": { "name": "SYNTHETIC" }, "session": { "restore_on_startup": 5 } }';
+    await fs.writeFile(prefs, existing); await prepareVisualProfileStartup(root);
+    assert.equal(await fs.readFile(prefs, 'utf8'), existing);
+    await fs.rm(prefs); await fs.mkdir(prefs);
+    await assert.rejects(prepareVisualProfileStartup(root), { code: 'VISUAL_STORAGE_CORRUPT' });
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test('stopped profile preserves selected auth stores and excludes history, cache and passwords', async () => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-profile-')));

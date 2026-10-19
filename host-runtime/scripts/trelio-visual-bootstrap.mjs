@@ -15,7 +15,10 @@ const source = fileURLToPath(new URL('./visual-browser-dependencies/', import.me
 export function visualChildEnvironment(extra = {}) {
   // Do not inherit loader hooks, tokens, workspace configuration or arbitrary
   // command search paths into package manager, browser or native OS bindings.
-  const names = ['HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'SystemRoot', 'SYSTEMROOT', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
+  // XAUTHORITY is the desktop's cookie-file path, not the cookie value. Xvfb
+  // and X11 desktops require it alongside DISPLAY; dropping it makes an
+  // otherwise sandboxed headed Chromium fail before extension bootstrap.
+  const names = ['HOME', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'SystemRoot', 'SYSTEMROOT', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'];
   const env = Object.fromEntries(names.filter(name => process.env[name]).map(name => [name, process.env[name]]));
   env.PATH = [path.dirname(process.execPath), ...(process.platform === 'win32' ? [path.join(env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows', 'System32')] : ['/usr/bin', '/bin', '/usr/sbin', '/sbin'])].join(path.delimiter);
   return { ...env, ...extra };
