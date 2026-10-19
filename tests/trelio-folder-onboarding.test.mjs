@@ -299,7 +299,7 @@ test("an active AGENTS.override.md requires an explicit target decision", async 
   });
   assert.equal(prepared.plan.instructionTarget, "AGENTS.override.md");
   assert.match(prepared.plan.preview.managedBlock, /Тестовая компания/u);
-  assert.match(prepared.plan.preview.managedBlock, /Trelio MCP – direct/u);
+  assert.match(prepared.plan.preview.managedBlock, /direct mcp__trelio\.get_task/u);
   assert.match(prepared.plan.preview.managedBlock, /ALL_TOOLS ≠ direct inventory/u);
   assert.match(prepared.plan.preview.managedBlock, /ready\/CLI ≠ tools модели/u);
   assert.match(prepared.plan.preview.managedBlock, /Нет direct schema – сразу read-only trelio-diagnostics/u);
