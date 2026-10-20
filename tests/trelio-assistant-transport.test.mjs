@@ -183,13 +183,13 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'create_comment',description:'Current assistant backend write',inputSchema:shape,annotations:{idempotentHint:true}},
       {name:'continue_assistant_workspace_action',description:'Current local action',inputSchema:shape,annotations:{idempotentHint:false}},
       {name:'request_assistant_action',description:'Live sealed owner action',inputSchema:{...shape,properties:{...shape.properties,operation:{type:'string'},fields:{type:'object'}}}},
-      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field'].map(name=>({name,description:'Live native task operation',inputSchema:shape})),
+      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist'].map(name=>({name,description:'Live native task operation',inputSchema:shape})),
       {name:'delete_attachment',description:'Unsupported; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field']);
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist']);
   assert.deepEqual(tools[1].inputSchema,{type:'object',properties:{},additionalProperties:false});
   assert.deepEqual(Object.keys(shape.properties),['taskPass','runtimeSessionProof']);
   assert.equal(tools[2].annotations.idempotentHint,true);assert.equal(tools[3].annotations.idempotentHint,false);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
@@ -212,7 +212,7 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   await client.callTool('request_assistant_action',intent);assert.deepEqual(receivedArgs,intent);
   const apply={...intent.fields,clientRequestId:intent.clientRequestId,expectedTaskUpdatedAt:intent.expectedTaskUpdatedAt,ownerDecisionId:randomUUID()};
   await client.callTool('clear_task_control',apply);assert.deepEqual(receivedArgs,apply,'no generated human assertion or replacement intent');
-  for(const name of ['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field']) {
+  for(const name of ['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist']) {
     assert.equal(tools.find(tool=>tool.name===name).annotations.readOnlyHint,false);
     const before=calls.filter(method=>method==='tools/call').length;
     await client.callTool(name,apply);assert.deepEqual(receivedArgs,apply);
@@ -224,6 +224,53 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   assert.throws(()=>validateRemoteMcpPublicationConfig({schemaVersion:1,endpoint:origin+'/mcp/assistant',transport:'streamable_http',
     protocolVersion:'2025-03-26',authentication:{type:'assistant_device'},headers:{},allowedTools:['get_task']}),
     error=>error.code==='REMOTE_MCP_UNSUPPORTED_AUTH', 'public Remote MCP declarations cannot request the trusted device profile');
+});
+
+// New domain fields come from the exact live catalogue. The generic host must
+// preserve nested references/options and immutable arguments, rather than copy
+// a second schema, synthesize approval flags, or replay a failed business write.
+test('assistant MCP preserves live accepted-file and question-choice schemas and forwards each intent once',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});
+  const fields={
+    create_comment:{acceptedFiles:{type:'array',items:{type:'object',properties:{runId:{type:'string'},filePath:{type:'string'}},additionalProperties:false},minItems:1,maxItems:10}},
+    ask_assistant_owner:{answerOptions:{type:'array',items:{type:'string'},minItems:2,maxItems:8}},
+    create_task_relation:{targetTaskId:{type:'string'},relationType:{type:'string'}},
+    delete_task_relation:{relationId:{type:'string'}},
+  };
+  const calls=[];let failed=false;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest:async(input)=>{
+    const response=result=>({sessionId:'fixture-session',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE')return response({});
+    if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='notifications/initialized')return response({});
+    if(input.payload.method==='tools/list')return response({tools:[
+      {name:'get_assistant_status',description:'Live status',inputSchema:{type:'object'}},
+      ...Object.entries(fields).map(([name,properties])=>({name,description:'Current backend contract',
+        inputSchema:{type:'object',properties:{...properties,taskPass:{},runtimeSessionProof:{}},required:[...Object.keys(properties),'taskPass','runtimeSessionProof'],additionalProperties:false}})),
+    ]});
+    assert.equal(input.payload.method,'tools/call');calls.push(structuredClone(input.payload.params));
+    if(failed)throw new Error('uncertain private upstream result');
+    return response({content:[{type:'text',text:'committed'}]});
+  }});
+  const tools=await client.listTools();
+  for(const [name,properties]of Object.entries(fields)){
+    const tool=tools.find(value=>value.name===name);assert.ok(tool);assert.equal(tool.annotations.readOnlyHint,false);
+    assert.deepEqual(tool.inputSchema,{type:'object',properties,required:Object.keys(properties),additionalProperties:false});
+  }
+  const proof={taskPass:{passId:randomUUID()},runtimeSessionProof:{signature:'hook-owned'}};
+  const fileBody={...proof,clientRequestId:randomUUID(),bodyMarkdown:'Accepted deliverable',acceptedFiles:[{runId:randomUUID(),filePath:'deliverables/result.pdf'}]};
+  const expected=structuredClone(fileBody),pending=client.callTool('create_comment',fileBody);
+  fileBody.acceptedFiles[0].filePath='changed-after-invocation.pdf';await pending;
+  assert.deepEqual(calls.at(-1),{name:'create_comment',arguments:expected});
+  const question={...proof,clientRequestId:randomUUID(),questionText:'Choose the next step',answerOptions:['Prepare a draft','Wait for the supplier']};
+  await client.callTool('ask_assistant_owner',question);assert.deepEqual(calls.at(-1),{name:'ask_assistant_owner',arguments:question});
+  const relation={...proof,clientRequestId:randomUUID(),targetTaskId:randomUUID(),relationType:'Needs coordination'};
+  await client.callTool('create_task_relation',relation);assert.deepEqual(calls.at(-1),{name:'create_task_relation',arguments:relation});
+  const removal={...proof,clientRequestId:randomUUID(),relationId:randomUUID()};failed=true;
+  const before=calls.length;await assert.rejects(client.callTool('delete_task_relation',removal),/MCP_UNAVAILABLE/);
+  assert.equal(calls.length,before+1,'uncertain mutation must never be repeated by the host');
+  assert.deepEqual(calls.at(-1),{name:'delete_task_relation',arguments:removal});
 });
 
 test('assistant MCP shares one absolute network deadline and never retries a timed-out call',async()=>{
