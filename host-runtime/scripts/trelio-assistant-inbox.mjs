@@ -294,8 +294,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * task-start approval. Local rows and this callback's return grant no rights.
      * No DB lock is held during I/O; revisions are rechecked after the callback.
      */
-    async claimDelivery({ authorize, scheduledTask = null, provisionTask = null }) {
+    async claimDelivery({ authorize, scheduledTask = null, provisionTask = null, excludeCompanyIds = [] }) {
       if (typeof authorize !== 'function') inputError();
+      if (!Array.isArray(excludeCompanyIds) || excludeCompanyIds.length > 256) inputError();
+      const excluded = [...new Set(excludeCompanyIds.map(uuid))];
+      // Skip a blocked company without changing source/task state or reading
+      // events. Remaining candidates still require their own live authority.
+      const exclusion = excluded.length ? ` AND json_extract(s.scope_json,'$.companyId') NOT IN (${excluded.map(()=>'?').join(',')})` : '';
       // A real cyclic adapter may request the next pass for an exact task. It
       // does not turn context-only events into an unsolicited event wake-up.
       let scheduled = null;
@@ -312,11 +317,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if (get("SELECT 1 FROM assistant_inbox_deliveries WHERE state IN ('leased','started','uncertain')")) return null;
         if (scheduled) return get(`SELECT t.source_key,t.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_tasks t
           JOIN assistant_inbox_sources s ON s.source_key=t.source_key
-          WHERE t.source_key=? AND t.task_id=? AND t.state='accepted' AND s.state='active'`, scheduled.scope.key, scheduled.taskId);
+          WHERE t.source_key=? AND t.task_id=? AND t.state='accepted' AND s.state='active'${exclusion}`, scheduled.scope.key, scheduled.taskId,...excluded);
         return get(`SELECT e.source_key,e.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_events e
           JOIN assistant_inbox_sources s ON s.source_key=e.source_key
           JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
-          WHERE e.processed=0 AND e.wake=1 AND s.state='active' AND t.state='accepted' ORDER BY e.rowid LIMIT 1`);
+          WHERE e.processed=0 AND e.wake=1 AND s.state='active' AND t.state='accepted'${exclusion} ORDER BY e.rowid LIMIT 1`,...excluded);
       });
       if (!candidate) return null;
       const scope = JSON.parse(candidate.scope_json);

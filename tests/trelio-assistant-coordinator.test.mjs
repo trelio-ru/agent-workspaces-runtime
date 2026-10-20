@@ -9,12 +9,13 @@ const fixture = t => {
   let clock=Date.parse('2026-01-01T09:00:00Z'),cursor=0,starts=0,provisions=0,runs=0,acks=0;
   const assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID();
   const authority={id:bindingId,taskId,state:'accepted',revision:0};
+  const execution={state:'ready',configuration:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
   const events=[],deliveries=new Map(),notifications=[]; let nativeFailure=false,inventoryFailure=false;
   const businessReceipts=new Map();
   const identity={origin:'https://assistant.test',assistantId,deviceId};
   const client={identity,heartbeat:async()=>({assistantId,deviceId}),
     companies:async()=>{if(inventoryFailure)throw Object.assign(new Error('transport'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});return[{companyId,memberId}];},
-    tasks:async()=>({bindings:[{...authority}],nextCursor:null}),task:async()=>({...authority}),
+    tasks:async()=>({bindings:[{...authority}],nextCursor:null}),task:async()=>({...authority,execution}),
     poll:async(_company,position)=>{
       const start=position===null?0:Number(position); const page=events.slice(start);
       cursor=events.length;return{events:page.map(event=>({...event,bindingId,bindingRevision:authority.revision,taskState:authority.state})),nextCursor:String(cursor),hasMore:false};
@@ -28,11 +29,13 @@ const fixture = t => {
     },
   };
   const native={ready:async()=>true,readDelivery:async(_thread,deliveryId)=>deliveries.get(deliveryId)??{state:'uncertain'},
-    provision:async({deliveryId},options)=>{
+    provision:async({deliveryId,execution:choice},options)=>{
+      assert.deepEqual(choice,execution.configuration);
       provisions++;options.startInvocation();starts++;const threadId=randomUUID();options.onThreadStarted(threadId);
       const result={state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};deliveries.set(deliveryId,result);return result;
     },
-    run:async({threadId,deliveryId,taskContext},options)=>{
+    run:async({threadId,deliveryId,taskContext,execution:choice},options)=>{
+      assert.deepEqual(choice,execution.configuration);
       assert.deepEqual(taskContext,{assistantId,companyId,taskId});
       runs++;options.startInvocation();starts++;
       const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};deliveries.set(deliveryId,result);
@@ -42,7 +45,7 @@ const fixture = t => {
   };
   const options={database,client,native,workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,notify:value=>notifications.push(value)};
   const coordinator=createAssistantCoordinator(options);
-  return {database,coordinator,options,identity,companyId,taskId,bindingId,authority,events,deliveries,notifications,
+  return {database,coordinator,options,identity,companyId,memberId,taskId,bindingId,authority,execution,events,deliveries,notifications,
     counts:()=>({starts,provisions,runs,acks}),advance:ms=>{clock+=ms;},failNative:value=>{nativeFailure=value;},failInventory:value=>{inventoryFailure=value;}};
 };
 
@@ -61,6 +64,61 @@ test('real SQLite coordinator provisions one chat and wakes only on a mention or
   f.advance(30*60000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
   assert.ok(f.coordinator.status()[0].lastCycleAt);assert.equal(f.counts().provisions,1);assert.equal(f.counts().runs,2);
   assert.equal(await f.coordinator.workOnce(),null);
+});
+
+test('the next wake uses the company owner choice in the same permanent chat', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const threadId=f.coordinator.status()[0].threadId;
+  f.execution.configuration={...f.execution.configuration,effortLevel:'max',revision:2};
+  const observed=[];const run=f.options.native.run;
+  f.options.native.run=async(input,options)=>{observed.push(input);return run(input,options);};
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  assert.equal(observed.length,1);assert.equal(observed[0].threadId,threadId);
+  assert.deepEqual(observed[0].execution,f.execution.configuration);
+  assert.equal(f.counts().provisions,1);
+});
+
+test('a company policy block preserves its queued mention while another company provisions and works', async t=>{
+  const f=fixture(t), companyB=randomUUID(),memberB=randomUUID(),taskB=randomUUID(),bindingB=randomUUID();
+  const second={id:bindingB,taskId:taskB,state:'accepted',revision:0};
+  const executionB={state:'ready',configuration:{...f.execution.configuration}};
+  const eventsB=[];
+  f.options.client.companies=async()=>[{companyId:f.companyId,memberId:f.memberId},{companyId:companyB,memberId:memberB}];
+  f.options.client.tasks=async companyId=>({bindings:[companyId===companyB?second:f.authority],nextCursor:null});
+  f.options.client.task=async companyId=>({...(companyId===companyB?second:f.authority),
+    execution:companyId===companyB?executionB:f.execution});
+  f.options.client.poll=async(companyId,position)=>{
+    const events=companyId===companyB?eventsB:f.events, authority=companyId===companyB?second:f.authority;
+    return {events:events.slice(Number(position??0)).map(event=>({...event,bindingId:authority.id,bindingRevision:0,taskState:'accepted'})),
+      nextCursor:String(events.length),hasMore:false};
+  };
+  f.execution.state='policy_blocked';
+  await f.coordinator.pollOnce();assert.equal((await f.coordinator.workOnce()).kind,'provision');
+  assert.equal(f.coordinator.status().length,1);assert.equal(f.coordinator.status()[0].companyId,companyB);
+  assert.equal(f.counts().provisions,1);
+  f.execution.state='ready';await f.coordinator.workOnce();
+  assert.equal(f.counts().provisions,2);
+  f.execution.state='policy_blocked';
+  // Commit A first so its oldest queued mention really is the head candidate.
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  eventsB.push({id:randomUUID(),revision:'1',taskId:taskB,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  let runs=0;
+  f.options.native.run=async(input,options)=>{
+    assert.equal(input.taskContext.companyId,companyB);assert.equal(input.taskContext.taskId,taskB);
+    assert.deepEqual(input.execution,executionB.configuration);runs++;options.startInvocation();
+    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
+  };
+  assert.equal((await f.coordinator.workOnce()).state,'completed');assert.equal(runs,1);
+  const events=f.database.prepare('select task_id,processed from assistant_inbox_events').all();
+  assert.equal(events.find(row=>row.task_id===f.taskId).processed,0);
+  assert.equal(events.find(row=>row.task_id===taskB).processed,1);
+  assert.equal(f.coordinator.status().find(row=>row.companyId===f.companyId).lastCompletedAt,null);
+  const unchanged=f.coordinator.status().find(row=>row.companyId===f.companyId).nextRunAt;
+  f.advance(30*60000);
+  assert.equal((await f.coordinator.workOnce()).state,'completed');assert.equal(runs,2);
+  assert.equal(f.coordinator.status().find(row=>row.companyId===f.companyId).nextRunAt,unchanged);
+  assert.ok(f.coordinator.status().find(row=>row.companyId===companyB).lastCycleAt);
 });
 
 test('a completed native turn cannot acknowledge work without an exact durable business outcome', async t=>{

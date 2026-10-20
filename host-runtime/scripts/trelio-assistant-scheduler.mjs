@@ -165,8 +165,12 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
         return output(rowOf(exact));
       });
     },
-    nextDue() {
-      return output(get("SELECT * FROM assistant_schedule_tasks WHERE state='active' AND next_run_at<=? ORDER BY next_run_at,task_key LIMIT 1", timestamp(now())));
+    nextDue(excludeCompanyIds = []) {
+      if (!Array.isArray(excludeCompanyIds) || excludeCompanyIds.length > 256) invalid();
+      const excluded = [...new Set(excludeCompanyIds.map(id))];
+      // Keep due timestamps/cycles intact while other companies continue.
+      const exclusion = excluded.length ? ` AND json_extract(scope_json,'$.companyId') NOT IN (${excluded.map(()=>'?').join(',')})` : '';
+      return output(get(`SELECT * FROM assistant_schedule_tasks WHERE state='active' AND next_run_at<=?${exclusion} ORDER BY next_run_at,task_key LIMIT 1`, timestamp(now()),...excluded));
     },
     setState(scope, { state, expectedRevision }) {
       if (!['active','paused','done','revoked'].includes(state) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) invalid();

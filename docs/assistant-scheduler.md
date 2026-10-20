@@ -75,8 +75,9 @@ passed a marker-based positive read-back on that host. This does not establish
 Windows readiness, GUI availability, provider access or a running cyclic daemon.
 
 `trelio-assistant-codex.mjs` resumes the exact UUID/cwd, using existing local Codex
-configuration/authentication. It never copies human OAuth, changes model/effort,
-overrides sandbox/approval/rules, automates hook trust or selects another thread.
+authentication. The owner-selected company model/effort is passed explicitly
+for both create and resume. It never copies human OAuth, overrides sandbox/
+approval/rules, automates hook trust or selects another thread.
 Only the structural delivery marker and platform instruction go through stdin;
 no prompt/content/credential is placed in argv. Stderr and raw JSON diagnostics
 are suppressed; native content is parsed in bounded memory, never cached/logged.
@@ -106,6 +107,40 @@ host before activation; mocked child tests only verify the adapter boundary.
 Tests: `trelio-assistant-scheduler.test.mjs` (real SQLite and timezone boundaries),
 `trelio-assistant-codex.test.mjs` (exact transport/fencing/read-back), plus the inbox
 suite. Native workflow runs them on Linux/macOS and Windows.
+
+## Company model selection
+
+There is one owner-selected model/effort pair per assistant/company and no
+per-task override. Fresh `/runtime/task` state is checked before each native
+invocation; missing configuration and `policy_blocked` refuse launch. The host
+projects only canonical model ID, closed effort and positive config revision,
+then freezes that structural request before async I/O. It does not persist
+model preferences in SQLite or mistake the selection for actual attestation.
+Backend task-pass admission pins an immutable launch snapshot and the shared
+hook still proves the observed model/effort against the company's live policy.
+
+Both new READY provisioning and exact `exec resume` receive explicit `--model`
+and TOML-quoted `model_reasoning_effort` flags. No sandbox, approval, trust,
+account or rule override is added. Before crossing the durable native-start
+fence, a bounded read-only App Server `model/list` checks the signed-in account's
+actual model/effort availability. Pagination shares one deadline; missing,
+malformed or looping results never select a fallback or launch model work.
+The returned account catalogue/labels are not logged, cached or stored in SQLite.
+See [official model/list](https://learn.chatgpt.com/docs/app-server#list-models-modellist).
+
+A blocked company is skipped in provisioning, event and due-cycle selection;
+other companies retain fresh independent authorization. Skipping does not pause
+or rewrite source/task state, consume queued mentions, advance dates, erase goals
+or replace permanent chats. Positive already-completed receipts may be reconciled
+without launching new work even while model selection is blocked. An uncertain
+native outcome still retains the existing global desktop fence until read-back;
+a policy change is not permission to replay that operation elsewhere.
+
+The backend publishes the authoritative owner notice through ordinary account
+notifications and messenger copies. Model save clears only this company-policy
+block; lifecycle/revocation/owner task approval and uncertain delivery remain
+independent. These source tests and a read-only macOS native model/list probe do
+not establish an activated service or Windows end-to-end business readiness.
 
 ## Host coordinator and enrollment
 

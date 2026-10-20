@@ -8,6 +8,24 @@ const at = text => Date.parse(text);
 const next = (cadence, anchor, after, timeZone='Europe/Moscow') => new Date(nextAssistantRun({ cadence,
   anchorAt: at(anchor), after: at(after), timeZone })).toISOString();
 
+test('a blocked company can be excluded without rolling forward its due cycle', t=>{
+  const database=new DatabaseSync(':memory:');t.after(()=>database.close());
+  let clock=at('2026-10-20T09:00:00Z');
+  const scheduler=createAssistantScheduler({database,now:()=>clock});
+  const assistantId=randomUUID(),companyA=randomUUID(),companyB=randomUUID();
+  const register=companyId=>{
+    const scope={origin:'https://example.test',assistantId,companyId,taskId:randomUUID()};
+    const source={origin:scope.origin,assistantId,companyId,provider:'trelio',accountId:randomUUID(),bindingId:randomUUID()};
+    return scheduler.register({scope,source,threadId:randomUUID(),cadence:'every_30_minutes',timeZone:'Europe/Moscow'});
+  };
+  const first=register(companyA);clock+=60000;register(companyB);clock+=1800000;
+  assert.equal(scheduler.nextDue().companyId,companyA);
+  assert.equal(scheduler.nextDue([companyA]).companyId,companyB);
+  assert.equal(scheduler.get({origin:first.origin,assistantId:first.assistantId,companyId:first.companyId,taskId:first.taskId}).nextRunAt,first.nextRunAt);
+  assert.equal(scheduler.nextDue([companyA,companyB]),null);
+  assert.throws(()=>scheduler.nextDue(['invalid']),/INVALID_INPUT/);
+});
+
 test('calendar monthly preserves original day and skips missed cycles without a catch-up burst', () => {
   assert.equal(next('monthly','2026-01-31T09:00:00Z','2026-01-31T09:00:00Z'), '2026-02-28T09:00:00.000Z');
   assert.equal(next('monthly','2026-01-31T09:00:00Z','2026-02-28T09:00:00Z'), '2026-03-31T09:00:00.000Z');

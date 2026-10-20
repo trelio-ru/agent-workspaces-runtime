@@ -28,6 +28,11 @@ publication tooling также остаются вне этого публичн
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
 
+- Модель ассистента: один owner choice/company, fresh execution state перед
+  create/resume; native model/list и explicit flags, без fallback. Policy block
+  пропускается без ack/roll-forward, не останавливает другие компании и не
+  снимает unknown-outcome fence. [Контракт](docs/assistant-scheduler.md#company-model-selection).
+
 - Продление device authorization проверяется сервером на каждом fixed endpoint;
   локальная дата pairing не запрещает контакт после owner renewal. Отказ не
   удаляет credential и не разрешает blind retry mutation.

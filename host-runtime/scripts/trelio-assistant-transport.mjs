@@ -1,6 +1,7 @@
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES } from './trelio-assistant-scheduler.mjs';
+import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -27,6 +28,22 @@ const binding = value => {
   if (!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return { id: id(value.id), taskId: id(value.taskId), state: state(value.state), revision: revision(value.revision) };
 };
+const executionConfiguration = value => {
+  if (!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if (value.id !== undefined) id(value.id);
+  try { return assistantExecutionConfiguration({ modelId:value.modelId,effortLevel:value.effortLevel,revision:value.revision }); }
+  catch { fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); }
+};
+const executionState = value => {
+  // An older backend never authorizes fallback to local Codex defaults.
+  if (value === undefined) return {state:'unconfigured',configuration:null,policyRevisionId:null};
+  if (!object(value) || !['ready','unconfigured','policy_blocked'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if (value.state==='unconfigured' && value.configuration!==null) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {state:value.state,configuration:value.state==='unconfigured'?null:executionConfiguration(value.configuration),
+    policyRevisionId:value.policyRevisionId===null?null:id(value.policyRevisionId)};
+};
+const passExecution = value => value.state==='leased' ? executionConfiguration(value.execution)
+  : value.execution == null ? null : executionConfiguration(value.execution);
 const originOf = origin => {
   let url; try { url = new URL(origin); } catch { fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); }
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
@@ -126,7 +143,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value = await call('companies', undefined, signal);
       if (value.assistantUserId !== assistantId || value.bindingId !== deviceId || !Array.isArray(value.companies) || value.companies.length > 256) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return value.companies.map(company => ({ companyId: id(company.id), memberId: id(company.memberId),
-        encryptionState: company.encryptionState === null ? null : text(company.encryptionState, 64) }));
+        encryptionState: company.encryptionState === null ? null : text(company.encryptionState, 64), execution:executionState(company.execution) }));
     },
     async tasks(companyId, after = null, signal) {
       companyId = id(companyId); if (after !== null) after = id(after);
@@ -140,7 +157,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const result = binding(value.binding);
       if (result.taskId !== taskId) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       if(!['unclaimed','this_device','other_device','stopped'].includes(value.hostState)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {...result,hostState:value.hostState};
+      return {...result,hostState:value.hostState,execution:executionState(value.execution)};
     },
     async poll(companyId, cursor = null, signal) {
       companyId = id(companyId); if (cursor !== null) text(cursor);
@@ -172,20 +189,21 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         || value.bindingRevision!==input.bindingRevision || !['leased','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
     },
     async readTaskPass(input,signal) {
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId)},signal);
       if(value.passId!==input.passId || !['leased','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
     },
     async renewTaskPass(input,signal) {
       const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId)},signal);
       if(value.passId!==input.passId || value.leaseRevision!==input.expectedLeaseRevision+1 || value.state!=='leased') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt)};
+      return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
+        execution:executionConfiguration(value.execution)};
     },
     async registerRuntime(input,signal) {
       if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'

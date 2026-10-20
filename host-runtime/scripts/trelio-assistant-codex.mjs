@@ -15,6 +15,18 @@ const id = value => {
 };
 export const assistantDeliveryMarker = deliveryId => `TRELIO_ASSISTANT_DELIVERY ${id(deliveryId)}`;
 
+/** The trusted host supplies the server-selected company pair. This validates
+ * transport/argv shape only: shared backend policy and actual hook observation
+ * remain independent authority. No source text can add CLI flags or defaults. */
+export const assistantExecutionConfiguration = value => {
+  if (!value || Object.getPrototypeOf(value) !== Object.prototype
+    || Object.keys(value).sort().join(',') !== 'effortLevel,modelId,revision'
+    || typeof value.modelId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,119}$/u.test(value.modelId)
+    || !['low','medium','high','xhigh','max','ultra'].includes(value.effortLevel)
+    || !Number.isSafeInteger(value.revision) || value.revision < 1) fail('ASSISTANT_CODEX_INVALID_EXECUTION');
+  return Object.freeze({ modelId: value.modelId, effortLevel: value.effortLevel, revision: value.revision });
+};
+
 /** Stable state is task Workspace data, never a hidden local transcript or
  * instruction file. All fields are closed structural host locators; a display
  * name, source message or restored queue text cannot choose another path. The
@@ -37,7 +49,7 @@ const context = async options => {
  * bounded memory stream. No arbitrary method, remote server, shell, raw error,
  * stderr, title or company content is returned by this boundary. */
 const readNative = async (threadId, project, options = {}) => {
-  threadId = id(threadId);
+  if (threadId !== null) threadId = id(threadId);
   const { executable, env, spawnProcess } = await context(options);
   return new Promise((resolve, reject) => {
     let child, timer, done = false, pending = '', bytes = 0, requestId = 1;
@@ -78,6 +90,11 @@ const readNative = async (threadId, project, options = {}) => {
         await request('initialize', { clientInfo: { name: 'trelio_assistant', version: '0.1.0' } });
         if (done) return;
         child.stdin.write(`${JSON.stringify({ method: 'initialized' })}\n`);
+        if (threadId === null) {
+          const value = await project(null, request);
+          if (!done) finish(null, value);
+          return;
+        }
         const { thread } = await request('thread/read', { threadId, includeTurns: false });
         if (thread?.id !== threadId || typeof thread.cwd !== 'string' || !path.isAbsolute(thread.cwd)) return abort();
         const value = await project(thread, request);
@@ -87,12 +104,40 @@ const readNative = async (threadId, project, options = {}) => {
   });
 };
 
-export const readAssistantCodexMetadata = (threadId, options) => readNative(threadId, thread => ({ threadId: thread.id, cwd: thread.cwd }), options);
+export const readAssistantCodexMetadata = (threadId, options) => readNative(id(threadId), thread => ({ threadId: thread.id, cwd: thread.cwd }), options);
+
+/** Account-visible native capabilities are authoritative for availability.
+ * Read only model/list, with bounded pagination under the original RPC deadline.
+ * Do not cache account data, return labels, inspect credentials or pick a model
+ * which merely resembles the exact owner choice. */
+export const readAssistantCodexExecutionAvailability = async (configuration, options = {}) => {
+  const execution = assistantExecutionConfiguration(configuration);
+  return readNative(null, async (_thread, request) => {
+    let cursor = null;
+    const seen = new Set();
+    for (let page = 0; page < 10; page++) {
+      const value = await request('model/list', { limit: 100, includeHidden: false, ...(cursor === null ? {} : { cursor }) });
+      if (!Array.isArray(value?.data) || value.data.length > 100) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+      const matches = value.data.filter(model => model?.model === execution.modelId && model.hidden !== true);
+      if (matches.length > 1) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+      if (matches.length === 1) {
+        const efforts = matches[0].supportedReasoningEfforts;
+        if (!Array.isArray(efforts) || efforts.length > 16) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+        return efforts.some(item => item?.reasoningEffort === execution.effortLevel);
+      }
+      if (value.nextCursor === null) return false;
+      if (typeof value.nextCursor !== 'string' || !value.nextCursor.length || value.nextCursor.length > 1024 || seen.has(value.nextCursor)) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+      cursor = value.nextCursor; seen.add(cursor);
+    }
+    fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+  }, options);
+};
 
 /** Exact marker search stays in memory. Missing history is uncertainty, never
  * proof of rejection/retry. Summary pages contain user messages without reading
  * arbitrary local rollout files or loading full tool output/transcript bodies. */
 export const readAssistantCodexDelivery = (threadId, deliveryId, options) => {
+  threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
     const response = await request('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc', itemsView: 'summary' });
@@ -110,14 +155,16 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options) => {
 
 /**
  * `queue` alone did not start an idle fixture; the runtime owns cyclic launches
- * through documented exec/resume. It does not override model, approvals, hooks,
+ * through documented exec/resume. It passes the owner company pair, not task
+ * defaults. It does not override approvals, hooks,
  * sandbox, OAuth or saved rules. The structural delivery marker uses stdin, not
  * argv. Native positive read-back is mandatory after CLI exit; a timeout or an
  * accepted queue entry can never mark the inbox event processed.
  */
-export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskContext }, options = {}) => {
+export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskContext, execution }, options = {}) => {
   threadId = id(threadId); deliveryId = id(deliveryId);
   const workStateContext = assistantWorkStateContext(taskContext);
+  execution = assistantExecutionConfiguration(execution);
   if (typeof options.startInvocation !== 'function') fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   const readMetadata = options.readMetadata ?? readAssistantCodexMetadata;
@@ -132,7 +179,7 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   let expected, actual;
   try { [expected,actual] = await Promise.all([fs.realpath(cwd),fs.realpath(metadata.cwd)]); } catch { fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE'); }
   if (metadata.threadId !== threadId || actual !== expected) fail('ASSISTANT_CODEX_WORKSPACE_MISMATCH');
-  await executeNativePass({ threadId, deliveryId, cwd: actual, workStateContext }, options);
+  await executeNativePass({ threadId, deliveryId, cwd: actual, workStateContext, execution }, options);
   const result = await readDelivery(threadId, deliveryId, options);
   if (!['completed','failed'].includes(result.state)) fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
   return result;
@@ -142,20 +189,22 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
  * turn is a tool-free readiness check: it cannot consume pending task events.
  * Persist thread.started synchronously before any next frame. A lost ID/response
  * leaves an uncertain lease, never permission to create a replacement chat. */
-export const provisionAssistantCodexChat = async ({ deliveryId, cwd }, options = {}) => {
+export const provisionAssistantCodexChat = async ({ deliveryId, cwd, execution }, options = {}) => {
   deliveryId = id(deliveryId);
+  execution = assistantExecutionConfiguration(execution);
   if (typeof options.onThreadStarted !== 'function' || typeof cwd !== 'string' || !path.isAbsolute(cwd)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   let actual; try { actual = await fs.realpath(cwd); } catch { fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE'); }
-  const threadId = await executeNativePass({ threadId: null, deliveryId, cwd: actual }, { ...options, readinessProbe: true });
+  const threadId = await executeNativePass({ threadId: null, deliveryId, cwd: actual, execution }, { ...options, readinessProbe: true });
   const result = await (options.readDelivery ?? readAssistantCodexDelivery)(threadId, deliveryId, options);
   if (result.state !== 'completed') fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
   return { ...result, threadId };
 };
 
-const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext }, options) => {
+const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, execution }, options) => {
   if (typeof options.startInvocation !== 'function') fail('ASSISTANT_CODEX_INVALID_INPUT');
   const passTimeoutMs = options.passTimeoutMs ?? 15*60_000;
   if (!Number.isSafeInteger(passTimeoutMs) || passTimeoutMs < 100 || passTimeoutMs > 30*60_000) fail('ASSISTANT_CODEX_INVALID_INPUT');
+  if (await (options.readExecutionAvailability ?? readAssistantCodexExecutionAvailability)(execution, options) !== true) fail('ASSISTANT_CODEX_MODEL_UNAVAILABLE');
   const { executable, env, spawnProcess } = await context(options);
   // The durable inbox performs its one-use leased -> started CAS only once all
   // local preparation succeeds. Read-back/reconciliation never invokes it.
@@ -172,7 +221,8 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext }
     };
     const abort = () => finish('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     try {
-      child = spawnProcess(executable, ['exec',...(threadId ? ['resume',threadId] : []),'--json','--skip-git-repo-check','-'], {
+      child = spawnProcess(executable, ['exec',...(threadId ? ['resume',threadId] : []),'--model',execution.modelId,
+        '--config',`model_reasoning_effort=${JSON.stringify(execution.effortLevel)}`,'--json','--skip-git-repo-check','-'], {
         cwd, env, shell: false, windowsHide: true, stdio: ['pipe','pipe','ignore'],
       });
       timer = setTimeout(abort, passTimeoutMs);

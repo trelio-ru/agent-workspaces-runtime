@@ -32,7 +32,7 @@ test('device client loads only its exact private slot and projects server conten
     calls++; assert.equal(operation,'companies'); assert.match(credential,/^tda_/u);
     return {assistantUserId:assistantId,bindingId:deviceId,companies:[{id:companyId,memberId,encryptionState:null,secret:'PRIVATE',slug:'PRIVATE'}]};
   }});
-  assert.deepEqual(await client.companies(),[{companyId,memberId,encryptionState:null}]);
+  assert.deepEqual(await client.companies(),[{companyId,memberId,encryptionState:null,execution:{state:'unconfigured',configuration:null,policyRevisionId:null}}]);
   const other=createAssistantDeviceClient({origin,assistantId,deviceId:randomUUID(),store,http:async()=>{calls++;},now:()=>100});
   await assert.rejects(other.companies(),/DEVICE_REQUIRED/); assert.equal(calls,1);
 });
@@ -97,8 +97,8 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,input)=>{
     operations.push(operation);
     if(operation==='passBegin'||operation==='passRead')return {passId,bindingId,bindingRevision:3,deliveryId,threadId,state:'leased',leaseRevision:0,
-      leaseExpiresAt:new Date(Date.now()+60000).toISOString(),secret:'PRIVATE'};
-    if(operation==='passRenew')return {passId,leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:new Date(Date.now()+60000).toISOString(),state:'leased'};
+      leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},secret:'PRIVATE'};
+    if(operation==='passRenew')return {passId,leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:new Date(Date.now()+60000).toISOString(),state:'leased',execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
     if(operation==='endRuntime')return {ended:true,secret:'PRIVATE'};
     assert.equal(operation,'registerRuntime');
     return {schemaVersion:1,passId:input.passId,runtimeSessionId:sessionId,conversation:{provider:'codex',conversationId:mismatch?randomUUID():threadId,
@@ -106,6 +106,7 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   }});
   const begin=await client.beginTaskPass({companyId,taskId,bindingId,bindingRevision:3,deliveryId,threadId});
   assert.equal(begin.passId,passId);assert.ok(!JSON.stringify(begin).includes('PRIVATE'));
+  assert.deepEqual(begin.execution,{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1});
   const locator={companyId,taskId,passId};assert.equal((await client.readTaskPass(locator)).threadId,threadId);
   assert.equal((await client.renewTaskPass({...locator,expectedLeaseRevision:0,clientRequestId:randomUUID()})).leaseRevision,1);
   const request={...locator,clientSessionId:threadId,observation,publicKeySpki:'a'.repeat(59)};
@@ -115,6 +116,23 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   await assert.rejects(client.registerRuntime({...request,observation:{...observation,source:'agent_request'}}),/INVALID_INPUT/);
   assert.deepEqual(await client.endRuntime({...locator,runtimeSessionId:sessionId}),{ended:true});
   assert.deepEqual(operations,['passBegin','passRead','passRenew','registerRuntime','registerRuntime','endRuntime']);
+});
+
+test('fresh company execution state is projected without accepting local defaults or private metadata',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),taskId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'v'.repeat(43)}`,expiresAt:1});
+  const selected={id:randomUUID(),modelId:'gpt-6.1-sol',effortLevel:'high',revision:3,secret:'PRIVATE'};
+  let execution={state:'ready',configuration:selected,policyRevisionId:randomUUID(),content:'PRIVATE'};
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async()=>({
+    binding:{id:randomUUID(),taskId,state:'accepted',revision:2},hostState:'this_device',execution,
+  })});
+  const projected=await client.task(companyId,taskId);
+  assert.deepEqual(projected.execution.configuration,{modelId:selected.modelId,effortLevel:'high',revision:3});
+  assert.ok(!JSON.stringify(projected).includes('PRIVATE'));
+  execution={...execution,state:'policy_blocked'};
+  assert.equal((await client.task(companyId,taskId)).execution.state,'policy_blocked');
+  execution={...execution,configuration:{...selected,effortLevel:'high\n--flag'}};
+  await assert.rejects(client.task(companyId,taskId),/INVALID_RESPONSE/);
 });
 
 

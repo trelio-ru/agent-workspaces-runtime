@@ -6,8 +6,10 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, assistantWorkStateContext, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
+const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+const modelArgs = ['--model',execution.modelId,'--config','model_reasoning_effort="high"'];
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
 
 test('work-state locators use immutable assistant identity and refuse paths or source text', async()=>{
@@ -45,10 +47,50 @@ const nativeRpc = handler => (_executable, args, options) => {
   return child;
 };
 
+test('company execution is an immutable closed pair; missing/argv-like choices never reach native I/O', async()=>{
+  const original={...execution};
+  const frozen=assistantExecutionConfiguration(original);
+  original.modelId='another-model';
+  assert.equal(frozen.modelId,execution.modelId);assert.ok(Object.isFrozen(frozen));
+  for(const invalid of [undefined,{}, {...execution,revision:0}, {...execution,modelId:'--dangerously-bypass'},
+    {...execution,modelId:'gpt\n--flag'}, {...execution,effortLevel:'high" --flag'}, {...execution,taskId:randomUUID()}]) {
+    assert.throws(()=>assistantExecutionConfiguration(invalid),/INVALID_EXECUTION/);
+    await assert.rejects(runAssistantCodexPass({threadId:randomUUID(),deliveryId:randomUUID(),cwd:process.cwd(),taskContext,execution:invalid},
+      {readDelivery:()=>assert.fail('invalid model reached native history')}),/INVALID_EXECUTION/);
+  }
+});
+
+test('native model/list discovers account effort support with bounded pagination and no fallback', async()=>{
+  let calls=0;
+  const options={executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+    assert.equal(request.method,'model/list');assert.equal(request.params.includeHidden,false);calls++;
+    if(!request.params.cursor) return {result:{data:[{model:'other-model'}],nextCursor:'next-page'}};
+    assert.equal(request.params.cursor,'next-page');
+    return {result:{data:[{model:execution.modelId,hidden:false,displayName:'PRIVATE ACCOUNT LABEL',
+      supportedReasoningEfforts:[{reasoningEffort:'high',description:'PRIVATE'}]}],nextCursor:null}};
+  })};
+  assert.equal(await readAssistantCodexExecutionAvailability(execution,options),true);assert.equal(calls,2);
+  assert.equal(await readAssistantCodexExecutionAvailability({...execution,effortLevel:'max'},options),false);
+  const unavailable={...options,spawnProcess:nativeRpc(()=>({result:{data:[],nextCursor:null}}))};
+  assert.equal(await readAssistantCodexExecutionAvailability(execution,unavailable),false);
+  const loop={...options,spawnProcess:nativeRpc(()=>({result:{data:[],nextCursor:'same-cursor'}}))};
+  await assert.rejects(readAssistantCodexExecutionAvailability(execution,loop),/READ_UNAVAILABLE/);
+});
+
+test('an unavailable native model never crosses the durable invocation fence', async()=>{
+  let starts=0,spawns=0;
+  await assert.rejects(runAssistantCodexPass({threadId:randomUUID(),deliveryId:randomUUID(),cwd:process.cwd(),taskContext,execution}, {
+    readDelivery:async()=>({state:'uncertain'}),readMetadata:async threadId=>({threadId,cwd:process.cwd()}),
+    readExecutionAvailability:async choice=>{assert.deepEqual(choice,execution);return false;},
+    startInvocation:()=>{starts++;},spawnProcess:()=>{spawns++;assert.fail('unavailable model launched native work');},
+  }),/MODEL_UNAVAILABLE/);
+  assert.equal(starts,0);assert.equal(spawns,0);
+});
+
 test('exact native marker read-back exposes receipt only; quoted/tool text is not acceptance', async () => {
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const text=assistantDeliveryMarker(deliveryId)+'\nprivate instruction';
-  const options = { executable:process.execPath, environment:{}, spawnProcess:nativeRpc(request => {
+  const options = { readExecutionAvailability:async()=>true,executable:process.execPath, environment:{}, spawnProcess:nativeRpc(request => {
     if (request.method==='thread/read') return { result:{ thread:{ id:threadId,cwd:process.cwd(),name:'PRIVATE TITLE' } } };
     assert.equal(request.method,'thread/turns/list'); assert.equal(request.params.itemsView,'summary');
     return { result:{ data:[{ id:turnId,status:'completed',items:[
@@ -66,13 +108,13 @@ test('exact native marker read-back exposes receipt only; quoted/tool text is no
 
 test('native read failure stays closed and never copies diagnostic content into the error', async () => {
   const threadId=randomUUID(),deliveryId=randomUUID();
-  await assert.rejects(readAssistantCodexDelivery(threadId,deliveryId,{ executable:process.execPath,environment:{},
+  await assert.rejects(readAssistantCodexDelivery(threadId,deliveryId,{ readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
     spawnProcess:nativeRpc(() => ({ error:{ code:-32600,message:'PRIVATE SECRET DIAGNOSTIC' } })) }),
     error => error.code==='ASSISTANT_CODEX_READ_UNAVAILABLE' && !/PRIVATE/.test(error.message));
 });
 
 test('malformed native JSON frames fail closed instead of crashing the coordinator process', async()=>{
-  const options={executable:process.execPath,environment:{},spawnProcess:()=>{
+  const options={readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},spawnProcess:()=>{
     const child=fakeChild();queueMicrotask(()=>child.stdout.write('null\n'));return child;
   }};
   await assert.rejects(readAssistantCodexDelivery(randomUUID(),randomUUID(),options),/READ_UNAVAILABLE/);
@@ -81,11 +123,11 @@ test('malformed native JSON frames fail closed instead of crashing the coordinat
 test('initial native chat persists its ID synchronously and consumes no business instruction', async t=>{
   const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-provision-test-'));t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
   const threadId=randomUUID(),deliveryId=randomUUID();let started=false,saved=null,input='';
-  const options={executable:process.execPath,environment:{},
+  const options={readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
     startInvocation:()=>{started=true;},onThreadStarted:value=>{assert.equal(started,true);saved=value;},
     readDelivery:async value=>{assert.equal(saved,threadId);assert.equal(value,threadId);return{state:'completed',receipt:'fixture:ready'};},
     spawnProcess:(_executable,args)=>{
-      assert.deepEqual(args,['exec','--json','--skip-git-repo-check','-']);
+      assert.deepEqual(args,['exec',...modelArgs,'--json','--skip-git-repo-check','-']);
       const child=fakeChild();child.stdin.on('data',chunk=>{input+=chunk.toString();});
       child.stdin.on('end',()=>queueMicrotask(()=>{
         child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);
@@ -93,11 +135,11 @@ test('initial native chat persists its ID synchronously and consumes no business
       }));return child;
     },
   };
-  const result=await provisionAssistantCodexChat({deliveryId,cwd},options);
+  const result=await provisionAssistantCodexChat({deliveryId,cwd,execution},options);
   assert.equal(result.threadId,threadId);assert.match(input,/Do not use tools/u);
   assert.doesNotMatch(input,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
-  await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd},{...options,onThreadStarted:()=>{throw new Error('private disk failure');}}),/DELIVERY_UNCERTAIN/);
+  await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd,execution},{...options,onThreadStarted:()=>{throw new Error('private disk failure');}}),/DELIVERY_UNCERTAIN/);
 });
 
 test('native execution uses the exact chat/cwd, stdin marker, one-use start and positive live read-back', async t => {
@@ -106,12 +148,12 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const expectedCwd = await fs.realpath(cwd);
   let starts=0,reads=0,launches=0,input='';
-  const options = { executable:process.execPath,environment:{ PATH:process.env.PATH,SHOULD_NOT_PASS:'private' },
+  const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,SHOULD_NOT_PASS:'private' },
     startInvocation:() => { if (starts++) throw new Error('private state error'); },
     readMetadata:async () => ({ threadId,cwd }), readDelivery:async () => ++reads===1 ? { state:'uncertain' }
       : { state:'completed',turnId,receipt:`codex:${threadId}:${turnId}` },
     spawnProcess:(_executable,args,spawnOptions) => {
-      launches++; assert.deepEqual(args,['exec','resume',threadId,'--json','--skip-git-repo-check','-']);
+      launches++; assert.deepEqual(args,['exec','resume',threadId,...modelArgs,'--json','--skip-git-repo-check','-']);
       assert.equal(spawnOptions.shell,false); assert.equal(spawnOptions.cwd,expectedCwd);
       assert.equal(spawnOptions.env.SHOULD_NOT_PASS,undefined);
       assert.ok(!args.some(arg => /bypass|ignore-rules|ignore-user-config|approval|sandbox/u.test(arg)));
@@ -122,14 +164,14 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
       })); return child;
     },
   };
-  const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext },options);
+  const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },options);
   assert.equal(result.state,'completed'); assert.equal(launches,1); assert.equal(starts,1);
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   const scopeLine=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_SCOPE '));
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(taskContext));
   // A lost/empty history lookup cannot bypass the durable first-attempt fence.
   reads=0;
-  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext },options), /DELIVERY_NOT_STARTED/);
+  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },options), /DELIVERY_NOT_STARTED/);
   assert.equal(launches,1);
 });
 
@@ -137,8 +179,8 @@ test('a successful CLI exit/queue claim without exact completed-turn read-back r
   const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-codex-test-'));
   t.after(()=>fs.rm(cwd,{ recursive:true,force:true }));
   const threadId=randomUUID(),deliveryId=randomUUID();
-  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext },{
-    executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
+  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },{
+    readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
     readDelivery:async()=>({ state:'uncertain' }),spawnProcess:()=>{
       const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{
         child.stdout.write(`${JSON.stringify({ type:'thread.started',thread_id:threadId })}\n${JSON.stringify({ type:'turn.completed' })}\n`);

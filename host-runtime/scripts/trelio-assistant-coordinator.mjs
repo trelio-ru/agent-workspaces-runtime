@@ -2,6 +2,7 @@
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
 import { createAssistantInbox } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
+import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { randomUUID } from 'node:crypto';
 
 export class AssistantCoordinatorError extends Error {
@@ -45,6 +46,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   let active = null, polling = false, nextDiscoveryAt = 0;
   const reports = new Map();
   const notices = new Set();
+  let blockedCompanies = new Set();
   const emit = code => {
     // An unchanged blocked state must not notify the owner on every 30s tick.
     // Reset only after a completed native pass, not a successful HTTP poll.
@@ -67,12 +69,23 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const state=binding.state==='accepted'?'active':binding.state==='done'?'done':binding.state==='revoked'?'revoked':'paused';
     if (plan.state!==state) schedule.setState(scopeFor(source,binding.taskId),{state,expectedRevision:plan.revision});
   };
-  const authorize = async ({scope,taskId},signal) => {
+  const authorize = async ({scope,taskId},signal,{captureExecution=null,requireModel=true}={}) => {
     lease();
     const value=await client.task(scope.companyId,taskId,signal);
     lease(); apply(scope,value);
     if(value.hostState==='other_device') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
-    return value.state==='accepted';
+    if(value.state!=='accepted') return false;
+    // A completed native/business receipt may still be reconciled while new
+    // launches are blocked. This never performs another native invocation.
+    if(!requireModel) return true;
+    if(value.execution?.state!=='ready') {
+      blockedCompanies.add(scope.companyId);
+      emit(value.execution?.state==='policy_blocked'?'ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED':'ASSISTANT_COORDINATOR_MODEL_SELECTION_REQUIRED');
+      return false;
+    }
+    const execution=assistantExecutionConfiguration(value.execution.configuration);
+    if(captureExecution) captureExecution(execution);
+    return true;
   };
   const syncTasks = async (source,signal) => {
     let after=null;
@@ -205,11 +218,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const result=await native.readDelivery(threadId,job.deliveryId,{signal}); lease();
     if(result.state==='completed') {
       if(job.kind==='provision') registerChat(job,threadId);
-      if(!await authorize({scope:job.scope,taskId:job.taskId},signal)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{requireModel:false})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const receipt=await completedReceipt(job,threadId,result.receipt,signal);
       // The outcome lookup itself crossed I/O. Do not retain an authorization
       // that was revoked while reading it, even after a positive native turn.
-      if(!await authorize({scope:job.scope,taskId:job.taskId},signal)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{requireModel:false})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       inbox.completeDelivery(job.deliveryId,receipt);
       notices.clear();
       return false;
@@ -229,8 +242,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       })().catch(()=>controller.abort()).finally(()=>{checking=false;});
     },watchIntervalMs);
     try {
+      let execution;
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const options={signal:combined,startInvocation:()=>{lease();inbox.startDelivery(job.deliveryId);started=true;}};
       let result;
       if(job.kind==='provision') {
@@ -246,7 +261,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           options.startInvocation();inbox.bindProvisionedThread(job.deliveryId,claim.threadId);
           result={...result,threadId:claim.threadId};
         } else {
-        result=await native.provision({deliveryId:job.deliveryId,cwd},{...options,
+        result=await native.provision({deliveryId:job.deliveryId,cwd,execution},{...options,
           onThreadStarted:threadId=>inbox.bindProvisionedThread(job.deliveryId,threadId)});
         }
         registerChat(job,result.threadId);
@@ -254,14 +269,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(typeof client.readBusinessOutcome!=='function') fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
         const plan=findSchedule(job.scope,job.taskId);
         if(!plan) fail('ASSISTANT_COORDINATOR_THREAD_REQUIRED');
-        result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,
+        result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId}},options);
       }
       if(result.state!=='completed') fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{requireModel:false})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const threadId=job.kind==='provision'?result.threadId:findSchedule(job.scope,job.taskId)?.threadId;
       const receipt=await completedReceipt(job,threadId,result.receipt,combined);
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{requireModel:false})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       inbox.completeDelivery(job.deliveryId,receipt);
       return {state:'completed',kind:job.kind};
     } catch(error) {
@@ -277,23 +292,41 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // Set the in-process fence before the first await as well as the cross-host
     // SQLite lease, so a tick and manual kick cannot both provision the task.
     active=(async()=>{
+      blockedCompanies=new Set();
       lease(); if(await reconcile(signal)) return {state:'blocked'};
       // Readiness includes the dedicated assistant MCP/plugin admission. A
       // working executable or human OAuth alone cannot enable business work.
       if(await native.ready(identity,signal)!==true) fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
-      for(const {scope,state} of inbox.listSources()) if(state==='active') {
-        const task=inbox.listTasks(scope).find(task=>task.state==='accepted' && !findSchedule(scope,task.taskId));
-        if(task) {
-          const job=await inbox.claimDelivery({authorize:input=>authorize(input,signal),provisionTask:{scope,taskId:task.taskId}});
-          return job?perform(job,signal):null;
+      const claim = async input => {
+        const before=blockedCompanies.size;
+        try { return await inbox.claimDelivery({...input,excludeCompanyIds:[...blockedCompanies],authorize:value=>authorize(value,signal)}); }
+        catch(error) {
+          // A policy-blocked first candidate must not starve another company.
+          // No delivery was allocated, events acknowledged or schedule changed.
+          if(error.code==='ASSISTANT_INBOX_ACCESS_DENIED' && blockedCompanies.size>before) return undefined;
+          throw error;
+        }
+      };
+      for(const {scope,state} of inbox.listSources()) if(state==='active' && !blockedCompanies.has(scope.companyId)) {
+        for(const task of inbox.listTasks(scope).filter(task=>task.state==='accepted' && !findSchedule(scope,task.taskId))) {
+          const job=await claim({provisionTask:{scope,taskId:task.taskId}});
+          if(job) return perform(job,signal);
+          if(blockedCompanies.has(scope.companyId)) break;
         }
       }
-      let job=await inbox.claimDelivery({authorize:input=>authorize(input,signal)});
-      if(!job) {
-        const due=schedule.nextDue();
-        if(due) job=await inbox.claimDelivery({authorize:input=>authorize(input,signal),scheduledTask:{scope:due.source,taskId:due.taskId}});
+      for(let attempt=0;attempt<=256;attempt++) {
+        const job=await claim({});
+        if(job) return perform(job,signal);
+        if(job===null) break;
       }
-      return job?perform(job,signal):null;
+      for(let attempt=0;attempt<=256;attempt++) {
+        const due=schedule.nextDue([...blockedCompanies]);
+        if(!due) break;
+        const job=await claim({scheduledTask:{scope:due.source,taskId:due.taskId}});
+        if(job) return perform(job,signal);
+        if(job===null) break;
+      }
+      return null;
     })();
     try { return await active; } catch(error) { throw safeError(error); } finally { active=null; }
   };
