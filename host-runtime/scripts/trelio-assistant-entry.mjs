@@ -82,6 +82,29 @@ export const createProductionAssistantHook = async () => {
     lockDirectory: path.join(directory, 'runtime-locks') });
 };
 
+/** Invoke the shared Workspace engine under this device/pass only. The
+ * protected native worker is scoped to one action; no human OAuth slot or
+ * process-global auth state is selected. This helper is not a model tool and
+ * does not itself open the businessReady gate. */
+export const withProductionAssistantWorkspace = async (action, {signal}={}) => {
+  if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+  const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
+    {withPrivateProcessSession}]=await Promise.all([
+    import('./trelio-workspace.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),
+    import('./trelio-assistant-transport.mjs'),import('./trelio-hook-private-session.mjs'),
+  ]);
+  return withPrivateProcessSession(async()=>{
+    const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
+    const store=createAssistantPrivateStore({directory:path.join(directory,'credentials')});
+    const host=createAssistantHostState({directory,store});
+    const identity=await host.readIdentity();
+    if(!identity || identity.origin!=='https://trelio.ru')throw Object.assign(new Error(),{code:'ASSISTANT_HOST_STATE_INVALID'});
+    const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,lockDirectory:path.join(directory,'runtime-locks')});
+    return common.withWorkspaceExecutionProfile(profile,action);
+  },signal);
+};
+
 /** Schema discovery before enrollment needs no credential/private worker.
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */

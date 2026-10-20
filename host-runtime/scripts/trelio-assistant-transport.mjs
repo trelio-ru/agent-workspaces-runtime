@@ -1,4 +1,7 @@
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
+import path from 'node:path';
+import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
+import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
@@ -144,6 +147,73 @@ const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, st
   // touching the assistant computer after an otherwise valid server renewal.
   // A denial preserves the private slot and never retries a mutation here.
   return secret.credential;
+};
+
+/** Internal composition of native Workspace transport. Device credentials
+ * are resolved from the existing private slot through a callback, never a
+ * model-visible getter or a human-token fallback. */
+export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
+  lock=withRuntimeStateLock,now=Date.now}) => {
+  const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
+  const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
+  const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
+  if(!identity || !uuid.test(identity.assistantId??'') || !uuid.test(identity.deviceId??'')
+    || !path.isAbsolute(lockDirectory??'') || !host || !client || !store) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  let origin;try{origin=new URL(identity.origin);}catch{fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');}
+  if(origin.protocol!=='https:' || origin.origin!==identity.origin || origin.username || origin.password) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const expectedIdentity=Object.freeze({schemaVersion:1,origin:identity.origin,assistantId:identity.assistantId,deviceId:identity.deviceId});
+  const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+  const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+  const assertIdentity=async()=>{
+    const current=await host.readIdentity();
+    if(!same(current,expectedIdentity) || !same(validateAssistantActivePass(await host.readActivePass(),identity),pass)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  };
+  await assertIdentity();
+  // This opaque handle cannot reveal a credential through native metadata or
+  // an accidental caller serialization. Only prepareRequest resolves auth.
+  const handle=Object.freeze(Object.create(null));
+  return Object.freeze({
+    async requireToken(requestOrigin){
+      if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      await assertIdentity();return handle;
+    },
+    async prepareRequest({origin:requestOrigin,token,pathname,options,buildHeaders}){
+      // Validate destination/method before touching private state or observing
+      // the live pass. No redirect, encoded separator or native secret/admin
+      // path can turn this profile into a bearer-forwarding primitive.
+      if(requestOrigin!==identity.origin || token!==handle || typeof pathname!=='string' || pathname.length>16_384
+        || !pathname.startsWith(nativePrefix+'/') || typeof buildHeaders!=='function') fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      let url;try{url=new URL(pathname,identity.origin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+      if(url.origin!==identity.origin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      const method=String(options.method??'GET').toUpperCase();
+      const rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);
+      const route=assistantWorkspaceConcreteRequest(method,rewritten);
+      return lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
+        await assertIdentity();
+        const live=await client.readTaskPass(locator,options.signal);
+        if(live.state!=='leased' || ['passId','threadId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
+          || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+        const state=record?.state;
+        if(record?.schemaVersion!==1 || record.ended || record.passId!==pass.passId || record.threadId!==pass.threadId
+          || !uuid.test(state?.runtimeSessionId??'') || !Number.isFinite(Date.parse(state.expiresAt)) || Date.parse(state.expiresAt)<=now()
+          || typeof state.privateKeyPkcs8!=='string' || state.privateKeyPkcs8.length>256) fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+        let proof;try{proof=buildRuntimeSessionProof({state,toolName:route.proofTool,now:new Date(now())});}
+        catch{fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');}
+        // Keys use the ordinary observed-hook serializer; no model-authored
+        // proof/session or human vault lookup is accepted. Scope/proof headers
+        // overwrite any untrusted values from an initial header collection.
+        const headers=buildHeaders(null,options.headers??{});
+        headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
+        headers.set('x-trelio-assistant-pass',JSON.stringify(locator));
+        headers.set('x-trelio-assistant-proof',JSON.stringify(proof));
+        await withCredential(credential=>{headers.set('authorization',`Bearer ${credential}`);});
+        await assertIdentity();
+        url.pathname=rewritten;
+        return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store'}};
+      });
+    },
+  });
 };
 
 /** Host-private client. Model tools receive only projections from these named
@@ -426,3 +496,66 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
     },
   };
 };
+
+// BEGIN GENERATED ASSISTANT WORKSPACE POLICY
+// Generated portable assistant Workspace route/proof policy. Do not edit by hand.
+/** Portable closed route/proof policy. Backend and host generate one copy of
+ * this pure algorithm; it contains no credential, DB or network capability. */
+export class AssistantWorkspacePolicyError extends Error {
+    code = "ASSISTANT_WORKSPACE_SCOPE_DENIED";
+    constructor() { super("Assistant Workspace route is unavailable."); }
+}
+export const ASSISTANT_WORKSPACE_PREFIX = "/api/digital-assistants/runtime/workspace";
+export const ASSISTANT_WORKSPACE_PROOF_TOOL = "assistant_workspace_data_plane";
+const assistantWorkspacePolicyDenied = () => new AssistantWorkspacePolicyError();
+// Mount the existing native handlers, but admit only this reviewed data plane.
+// New routes added to the human plugin do not silently become assistant tools,
+// especially restore/cancel, secrets, company context, grants and proposals.
+const assistantWorkspaceReadPaths = new Set([
+    "/bridge-compatibility", "/bridge-routing",
+    "/scopes/:scopeType/:scopeId", "/workspaces/:workspaceId", "/workspaces/:workspaceId/runs/:runId",
+    "/workspaces/:workspaceId/read-snapshot", "/workspaces/:workspaceId/bundle", "/workspaces/:workspaceId/file",
+    "/runs/:runId/bundle", "/runs/:runId/file", "/runs/:runId/objects/:sha256", "/runs/:runId/codex-conversation",
+    "/runs/:runId/context/:dependencyKind/bundle", "/runs/:runId/context-objects/:dependencyWorkspaceId",
+    "/runs/:runId/context/related/:relatedWorkspaceId/bundle",
+]);
+const assistantWorkspaceWritePaths = new Map([
+    ["POST /scopes/:scopeType/:scopeId", "ensure"], ["POST /workspaces/:workspaceId/runs", "start"],
+    ["POST /runs/:runId/heartbeat", "heartbeat"], ["POST /runs/:runId/claim", "claim"],
+    ["POST /runs/:runId/checkpoints", "checkpoint"], ["POST /runs/:runId/draft", "draft"],
+    ["POST /runs/:runId/candidate", "candidate"], ["POST /runs/:runId/objects/register", "register_object"],
+    ["PUT /runs/:runId/objects/:sha256/content", "upload_object"], ["PUT /runs/:runId/codex-conversation", "sync_title"],
+]);
+export const assistantWorkspaceOperation = (method, route) => {
+    if (!route.startsWith(ASSISTANT_WORKSPACE_PREFIX + "/"))
+        throw assistantWorkspacePolicyDenied();
+    const nativePath = route.slice(ASSISTANT_WORKSPACE_PREFIX.length);
+    if ((method === "GET" || method === "HEAD") && assistantWorkspaceReadPaths.has(nativePath))
+        return "read";
+    if (assistantWorkspaceWritePaths.has(`${method} ${nativePath}`))
+        return "write";
+    throw assistantWorkspacePolicyDenied();
+};
+/** Bind a read proof to reads and each mutation proof to its own reviewed
+ * native operation. The nonce store contains only a platform code, never a
+ * filename, URL/query/body digest or company content. */
+export const assistantWorkspaceProofTool = (method, route) => {
+    const operation = assistantWorkspaceOperation(method, route);
+    return `${ASSISTANT_WORKSPACE_PROOF_TOOL}_${operation === "read" ? "read" : assistantWorkspaceWritePaths.get(`${method} ${route.slice(ASSISTANT_WORKSPACE_PREFIX.length)}`)}`;
+};
+/** Resolve concrete host URLs from the same reviewed templates. Path values
+ * remain locators; the backend still resolves canonical task/Run ACL. Encoded
+ * separators, traversal and unknown routes cannot become a signed request. */
+export const assistantWorkspaceConcreteRequest = (method, pathname) => {
+    const templates = method === "GET" || method === "HEAD"
+        ? [...assistantWorkspaceReadPaths] : [...assistantWorkspaceWritePaths.keys()].filter(key => key.startsWith(method + " ")).map(key => key.slice(method.length + 1));
+    for (const template of templates) {
+        const pattern = ASSISTANT_WORKSPACE_PREFIX + template;
+        const matcher = new RegExp("^" + pattern.split("/").map(part => part.startsWith(":") ? "[A-Za-z0-9_-]{1,128}" : part).join("/") + "$");
+        if (matcher.test(pathname))
+            return { routePattern: pattern,
+                operation: assistantWorkspaceOperation(method, pattern), proofTool: assistantWorkspaceProofTool(method, pattern) };
+    }
+    throw assistantWorkspacePolicyDenied();
+};
+// END GENERATED ASSISTANT WORKSPACE POLICY

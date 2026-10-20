@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 
 /**
@@ -126,6 +127,30 @@ import {
 import {
   assertRuntimeHookBudget, scopedPrivateAclWorker, createPrivateAclWorker, withPrivateProcessSession, windowsPrivateWorkerOptions,
 } from "./trelio-hook-private-session.mjs";
+
+/** Internal HTTP/auth composition, never a role or permission flag from the
+ * model. A profile can only replace transport inside its own async call. The
+ * native Workspace algorithms and backend admission remain authoritative. */
+const workspaceExecutionProfileStorage = new AsyncLocalStorage();
+const denyWorkspaceExecutionProfile = () => { throw Object.assign(new Error('Workspace execution profile is unavailable.'), { code:'ASSISTANT_WORKSPACE_PROFILE_DENIED' }); };
+export const currentWorkspaceExecutionProfile = () => {
+  const current=workspaceExecutionProfileStorage.getStore();
+  // A timer/child async resource surviving its action may not fall back to the
+  // human vault after this profile expires. Keep a closed tombstone instead.
+  if(current && !current.active)denyWorkspaceExecutionProfile();
+  return current?.profile ?? null;
+};
+export const withWorkspaceExecutionProfile = (profile, action) => {
+  if (!profile || typeof profile.requireToken !== 'function' || typeof profile.prepareRequest !== 'function'
+    || typeof action !== 'function') denyWorkspaceExecutionProfile();
+  const current = workspaceExecutionProfileStorage.getStore();
+  // A nested caller cannot switch to a different device, human OAuth, or a
+  // weaker fake adapter. Parallel ordinary requests inherit no profile.
+  if (current && (!current.active || current.profile !== profile)) denyWorkspaceExecutionProfile();
+  if(current)return action();
+  const context={profile,active:true};
+  return workspaceExecutionProfileStorage.run(context,async()=>{try{return await action();}finally{context.active=false;}});
+};
 
 const execFileAsync = promisify(execFile);
 const BRIDGE_ENTRYPOINT_PATH = fileURLToPath(import.meta.url);
@@ -1522,11 +1547,14 @@ export const formatBridgeCommandError = (error, command = "") => {
 
 export const request = async (origin, token, pathname, options = {}) => {
   const { diagnosticPhase = "api_request", maximumErrorResponseBytes, ...fetchOptions } = options;
-  const headers = buildBridgeRequestHeaders(token, fetchOptions.headers || {});
+  const profile = currentWorkspaceExecutionProfile();
+  const prepared = profile
+    ? await profile.prepareRequest({ origin, token, pathname, options: fetchOptions, buildHeaders: buildBridgeRequestHeaders })
+    : { url: new URL(pathname, `${origin}/`), headers: buildBridgeRequestHeaders(token, fetchOptions.headers || {}), options: {} };
 
   let response;
   try {
-    response = await fetch(new URL(pathname, `${origin}/`), { ...fetchOptions, headers });
+    response = await fetch(prepared.url, { ...fetchOptions, ...prepared.options, headers: prepared.headers });
   } catch (error) {
     // Cancellation belongs to the caller and must not be misreported as a
     // network failure or put an encrypted Workspace into transport cooldown.
@@ -5858,6 +5886,8 @@ const createPkce = () => {
 };
 
 export const requireToken = async (origin, options = {}) => {
+  const profile = currentWorkspaceExecutionProfile();
+  if (profile) return profile.requireToken(origin, options);
   const token = await loadToken(origin, options);
 
   if (token) {

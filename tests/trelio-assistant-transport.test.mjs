@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, generateKeyPairSync, verify } from 'node:crypto';
 import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 
 const memoryStore = () => {
@@ -218,4 +218,119 @@ test('assistant MCP shares one absolute network deadline and never retries a tim
   const keepAlive=setTimeout(()=>{},1000);
   try{await assert.rejects(client.callTool('get_task',{}),/MCP_UNAVAILABLE/);assert.equal(calls,1);}
   finally{clearTimeout(keepAlive);}
+});
+
+
+import { AsyncResource } from 'node:async_hooks';
+import path from 'node:path';
+import os from 'node:os';
+import { request as nativeWorkspaceRequest, requireToken as nativeWorkspaceToken } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { createAssistantWorkspaceProfile } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile } from '../host-runtime/scripts/trelio-workspace.mjs';
+
+const workspaceProfileFixture = async () => {
+  const identity={schemaVersion:1,origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+  const keys=generateKeyPairSync('ed25519'), store=memoryStore(), credential='tda_'+randomBytes(32).toString('base64url');
+  const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
+    expiresAt:new Date(Date.now()+300_000).toISOString(),privateKeyPkcs8:keys.privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
+    observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}}};
+  await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{assistantId:identity.assistantId,deviceId:identity.deviceId,credential,expiresAt:1});
+  await store.put({origin:identity.origin,kind:'runtime',id:pass.passId},runtime);
+  let active=pass, currentIdentity=identity, live=true, contacts=0;
+  const host={readIdentity:async()=>currentIdentity,readActivePass:async()=>active};
+  const client={readTaskPass:async()=>{contacts++;return {...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};}};
+  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
+  return {identity,pass,keys,store,credential,runtime,profile,contacts:()=>contacts,
+    changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
+};
+
+test('assistant profile reuses the native HTTP engine with private auth and one-use operation proofs',async()=>{
+  const f=await workspaceProfileFixture(), originalFetch=globalThis.fetch, seen=[];
+  globalThis.fetch=async(url,options)=>{
+    seen.push({url,options});return new Response('{}',{headers:{'content-type':'application/json'}});
+  };
+  try {
+    await withWorkspaceExecutionProfile(f.profile,async()=>{
+      const token=await nativeWorkspaceToken(f.identity.origin);
+      assert.equal(typeof token,'object');assert.ok(!JSON.stringify(token).includes(f.credential));
+      const route='/api/agent-workspaces/runs/'+randomUUID()+'/candidate';
+      await nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST',body:'immutable bundle',
+        headers:{authorization:'Bearer UNTRUSTED',cookie:'UNTRUSTED','x-trelio-assistant-pass':'UNTRUSTED','x-trelio-assistant-proof':'UNTRUSTED'}});
+      await nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST',body:'immutable bundle'});
+      const nonces=new Set();
+      for(const {url,options} of seen){
+        assert.equal(url.origin,f.identity.origin);assert.ok(url.pathname.startsWith('/api/digital-assistants/runtime/workspace/'));
+        assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');assert.equal(options.body,'immutable bundle');
+        assert.equal(options.headers.get('cookie'),null);
+        assert.equal(options.headers.get('authorization'),'Bearer '+f.credential);
+        assert.deepEqual(JSON.parse(options.headers.get('x-trelio-assistant-pass')),{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId});
+        const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));
+        assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,'assistant_workspace_data_plane_candidate',proof.issuedAt,proof.nonce].join('\n')),
+          f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);
+        assert.ok(!JSON.stringify(proof).includes('privateKeyPkcs8'));nonces.add(proof.nonce);
+      }
+      assert.equal(nonces.size,2);assert.equal(f.contacts(),2);
+      // Unknown routes/origins are refused before private access and HTTP.
+      await assert.rejects(nativeWorkspaceRequest('https://other.test',token,route),/ORIGIN_DENIED/);
+      for(const bad of ['/api/agent-workspaces/runs/id/cancel','/api/agent-workspaces/bridge-pairings','/api/agent-workspaces/runs/../candidate']){
+        await assert.rejects(nativeWorkspaceRequest(f.identity.origin,token,bad));
+      }
+      assert.equal(seen.length,2);assert.equal(f.contacts(),2);
+      assert.throws(()=>withWorkspaceExecutionProfile({...f.profile},async()=>{}),/profile is unavailable/);
+    });
+    assert.equal(currentWorkspaceExecutionProfile(),null);
+    // A parallel/sequential ordinary call retains its original native path
+    // and synthetic human auth, rather than inheriting this device's profile.
+    await nativeWorkspaceRequest(f.identity.origin,'synthetic-human','/api/agent-workspaces/bridge-compatibility');
+    assert.equal(seen.at(-1).url.pathname,'/api/agent-workspaces/bridge-compatibility');
+    assert.equal(seen.at(-1).options.headers.get('authorization'),'Bearer synthetic-human');
+  } finally {globalThis.fetch=originalFetch;}
+});
+
+test('assistant Workspace request refuses ended sessions, rebind and closed passes before mutation; no retry',async()=>{
+  const f=await workspaceProfileFixture(), originalFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async()=>{calls++;throw new Error('synthetic network failure');};
+  const slot={origin:f.identity.origin,kind:'runtime',id:f.pass.passId};
+  try {
+    await withWorkspaceExecutionProfile(f.profile,async()=>{
+      const token=await nativeWorkspaceToken(f.identity.origin), route='/api/agent-workspaces/runs/'+randomUUID()+'/heartbeat';
+      await assert.rejects(nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST'}));
+      assert.equal(calls,1,'an uncertain native mutation is not repeated');
+      await f.store.put(slot,{...f.runtime,ended:true});
+      await assert.rejects(nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST'}),/SESSION_REQUIRED/);
+      assert.equal(calls,1);
+      await f.store.put(slot,f.runtime);
+      f.changeIdentity({...f.identity,deviceId:randomUUID()});
+      await assert.rejects(nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST'}),/BINDING_CHANGED/);
+      f.changeIdentity(f.identity);f.changePass({...f.pass,passId:randomUUID()});
+      await assert.rejects(nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST'}),/BINDING_CHANGED/);
+      f.changePass(f.pass);f.close();
+      await assert.rejects(nativeWorkspaceRequest(f.identity.origin,token,route,{method:'POST'}),/REVIEW_REQUIRED/);
+      assert.equal(calls,1);
+    });
+  }finally{globalThis.fetch=originalFetch;}
+});
+
+
+test('parallel human requests are isolated and expired child async resources cannot fall back to human auth',async()=>{
+  const f=await workspaceProfileFixture(), originalFetch=globalThis.fetch,seen=[];let child;
+  globalThis.fetch=async(url,options)=>{seen.push({url,authorization:options.headers.get('authorization')});return new Response('{}');};
+  let release,entered;const barrier=new Promise(resolve=>{release=resolve;}), ready=new Promise(resolve=>{entered=resolve;});
+  try{
+    const pending=withWorkspaceExecutionProfile(f.profile,async()=>{
+      child=new AsyncResource('assistant-workspace-fixture');entered();await barrier;
+      const token=await nativeWorkspaceToken(f.identity.origin);
+      await nativeWorkspaceRequest(f.identity.origin,token,'/api/agent-workspaces/bridge-compatibility');
+    });
+    await ready;
+    await nativeWorkspaceRequest(f.identity.origin,'synthetic-human','/api/agent-workspaces/bridge-compatibility');
+    release();await pending;
+    assert.equal(seen[0].url.pathname,'/api/agent-workspaces/bridge-compatibility');
+    assert.equal(seen[0].authorization,'Bearer synthetic-human');
+    assert.ok(seen[1].url.pathname.startsWith('/api/digital-assistants/runtime/workspace/'));
+    assert.throws(()=>child.runInAsyncScope(()=>currentWorkspaceExecutionProfile()),/profile is unavailable/);
+    assert.equal(currentWorkspaceExecutionProfile(),null);
+  }finally{release();child?.emitDestroy();globalThis.fetch=originalFetch;}
 });

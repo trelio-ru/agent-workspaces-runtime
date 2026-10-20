@@ -453,3 +453,39 @@ positive tools/list and emits MCP `notifications/tools/list_changed` only on a
 change. Codex can reload new runtime/backend capabilities without restarting the
 facade. Unchanged or failed probes do not emit repeated notices or erase the
 known catalogue; this control message does not wake a model.
+
+
+<a id="shared-workspace-http-profile"></a>
+
+## Shared Workspace HTTP profile
+
+Assistant Workspace execution is an internal async profile of the common
+`trelio-workspace.mjs` HTTP/auth primitives, not another Run/Git/storage engine.
+The production wrapper resolves the actual protected host identity, active pass,
+device credential and the ordinary observed-hook runtime signing slot under one
+native private-process invocation. `requireToken` returns an opaque handle;
+only the exact outgoing request resolves the credential. It never probes a human
+OAuth/bridge slot, pairs on failure or returns an auth value to model/metadata.
+
+Before each request the profile repeats host/pass binding and live backend lease
+checks. It uses the common runtime proof serializer with a fresh nonce and the
+operation-specific tool name; ended/expired/missing sessions and changed devices
+fail before HTTP. The route/proof algorithm is generated from backend
+`digital-assistants/workspace-transport-policy.ts` through
+`build-assistant-workspace-policy.mjs --runtime-root`; maintainers never maintain a
+second permission map. Its generated section stays in the existing transport
+module to preserve the stable loader file budget. Only the canonical origin and reviewed native Workspace
+paths are rewritten to the dedicated profile. Traversal/unknown routes, redirects
+and caller auth/cookies are rejected or overwritten before sending.
+
+Native Workspace ACL, encryption routing, lease/fencing/CAS, saved snapshots,
+validation and commit receipts are unchanged. The backend still checks every
+request and rechecks mutation authority on commit. This transport does not
+advertise encrypted support or alter the dedicated business readiness gate.
+
+An async profile cannot replace another nested profile. Parallel human calls do
+not inherit it. Its lifetime ends when the action settles: surviving child async
+resources retain a closed tombstone, never fall back to the human vault. The
+production helper is not a model tool; dedicated preparation/continuation and
+role-aware pinned workflow must be connected and tested before activation.
+There is no automatic retry of a business action or restart of Codex here.
