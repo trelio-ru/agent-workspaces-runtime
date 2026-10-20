@@ -175,8 +175,8 @@ export const LEGACY_WORKSPACE_CONTEXT_FILE_NAME = "PROJECT_CONTEXT.md";
 // procedures belong to the worker skill references and are loaded only when
 // their route is actually needed; this file carries only immutable Run safety.
 export const buildAgentWorkspaceRuntimeAgentsMarkdown = (
-  workspaceContextFileName = WORKSPACE_CONTEXT_FILE_NAME,
-) => [
+  workspaceContextFileName = WORKSPACE_CONTEXT_FILE_NAME, { assistant = false } = {},
+) => { const lines = [
   "# Инструкции Trelio Agent Workspace",
   "",
   "Этот защищённый файл создан bridge для текущего Run и не входит в принятую Git-историю workspace.",
@@ -214,7 +214,23 @@ export const buildAgentWorkspaceRuntimeAgentsMarkdown = (
   "- Заверши Run action `finish` из exact папки с результатом, evidence, файлами, вопросами и `nextAction`. Для task scope оцени всю задачу и передай returned `taskOutcome`; он только рекомендует status proposal.",
   "- Сначала сообщай человеку итог и требуемое решение, не SHA/UUID/Run status. Candidate отправляй только через bridge. Если Trelio отклонил устаревший base head, начни новый Run и перенеси изменения осознанно; не переписывай protected refs и не обходи conflict guard.",
   "",
-].join("\n");
+];
+  if (!assistant) return lines.join("\n");
+  // These human-only instructions are replaced only for the trusted
+  // assistant execution profile. Immutable actorRole in pinned instructions
+  // owns authority; this protected local bootstrap adds no permissions.
+  const humanPrefixes = ["- Для изменения личного профиля", "- Native Trelio MCP", "- Выполняй returned",
+    "- До финального ответа", "- Комментарий, статус", "- Заверши Run action"];
+  return [...lines.filter(line => !humanPrefixes.some(prefix => line.startsWith(prefix))),
+    "## Digital assistant execution",
+    "",
+    "- Read the complete pinned ../context/agent-instructions.md and ../context/user-profile.md after open and every compaction. The versioned actor role specializes human-only clauses; it never expands company/task ACL, model policy or owner authority.",
+    "- Use only the dedicated trelio-assistant MCP and returned continue_assistant_workspace_action. Never substitute human OAuth, approval flags or the human proposal App. Follow assistant-task-worker for your own accepted WORK.md and recurring pass lifecycle.",
+    "- Profile/company-rule changes, sensitive actions and missing capabilities require the owner decision channel. If it is unavailable, preserve the blocker; do not fall back to a human flow on this computer.",
+    "- Finish through the returned shared Workspace action with evidence and no_status_change. Accepted files do not publish a comment, change task state or close a pass. Use the dedicated task policy for task actions, then complete_assistant_pass with the accepted evidence.",
+    "",
+  ].join("\n");
+};
 export const AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN =
   buildAgentWorkspaceRuntimeAgentsMarkdown();
 export const AGENT_WORKSPACE_RUNTIME_CLAUDE_MARKDOWN = "@AGENTS.md\n";
@@ -9591,7 +9607,9 @@ export const materializeRuntimeControlFiles = async (workspaceDirectory) => {
     writeRuntimeControlFile(
       workspaceDirectory,
       "AGENTS.md",
-      buildAgentWorkspaceRuntimeAgentsMarkdown(workspaceContextFileName),
+      buildAgentWorkspaceRuntimeAgentsMarkdown(workspaceContextFileName, {
+        assistant: currentWorkspaceExecutionProfile()?.kind === 'digital_assistant',
+      }),
     ),
     writeRuntimeControlFile(
       workspaceDirectory,
@@ -17536,8 +17554,8 @@ export const recoverBridgePluginUpgrade = async (
   }
 };
 
-const main = async () => {
-  const { command, options, positional } = parseArguments(process.argv.slice(2));
+export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2)) => {
+  const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
   if (command === "doctor") {
@@ -17603,7 +17621,7 @@ const main = async () => {
 
 const runEntrypoint = async () => {
   try {
-    await withPrivateProcessSession(main);
+    await withPrivateProcessSession(() => runWorkspaceCommand());
   } catch (error) {
     const runtimeRecovery = await recoverBridgeHostRuntimeUpgrade(error);
 

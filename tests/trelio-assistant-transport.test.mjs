@@ -180,14 +180,17 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'get_assistant_status',description:'Live status',inputSchema:shape,_meta:{private:'DO_NOT_PROXY_METADATA'}},
       {name:'get_task',description:'Live backend schema',inputSchema:shape},
       {name:'human_login',description:'Never delegate this',inputSchema:shape},
-      {name:'create_comment',description:'Current assistant backend write',inputSchema:shape},
+      {name:'create_comment',description:'Current assistant backend write',inputSchema:shape,annotations:{idempotentHint:true}},
+      {name:'continue_assistant_workspace_action',description:'Current local action',inputSchema:shape,annotations:{idempotentHint:false}},
       {name:'update_task_due_date',description:'Sensitive; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment']);
-  assert.deepEqual(tools[1].inputSchema,shape);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action']);
+  assert.deepEqual(tools[1].inputSchema,{type:'object',properties:{},additionalProperties:false});
+  assert.deepEqual(Object.keys(shape.properties),['taskPass','runtimeSessionProof']);
+  assert.equal(tools[2].annotations.idempotentHint,true);assert.equal(tools[3].annotations.idempotentHint,false);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
   const args={taskPass:{passId:randomUUID()},runtimeSessionProof:{signature:'original'}};
   const resultPromise=client.callTool('get_task',args);args.runtimeSessionProof.signature='changed';
   const result=await resultPromise;assert.equal(receivedArgs.runtimeSessionProof.signature,'original');
@@ -333,4 +336,35 @@ test('parallel human requests are isolated and expired child async resources can
     assert.throws(()=>child.runInAsyncScope(()=>currentWorkspaceExecutionProfile()),/profile is unavailable/);
     assert.equal(currentWorkspaceExecutionProfile(),null);
   }finally{release();child?.emitDestroy();globalThis.fetch=originalFetch;}
+});
+
+
+test('assistant protected bootstrap specializes human-only clauses and never reads the human unfiled vault',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {readUnfiledResponseContext}=await import('../host-runtime/scripts/trelio-unfiled-context.mjs');
+  const human=common.buildAgentWorkspaceRuntimeAgentsMarkdown();
+  assert.equal(human,common.AGENT_WORKSPACE_RUNTIME_AGENTS_MARKDOWN);
+  const assistant=common.buildAgentWorkspaceRuntimeAgentsMarkdown('WORKSPACE_CONTEXT.md',{assistant:true});
+  assert.ok(assistant.includes('continue_assistant_workspace_action'));assert.ok(assistant.includes('complete_assistant_pass'));
+  assert.ok(!assistant.includes('through `continue_trelio_workspace_action`'));
+  assert.ok(!assistant.includes('`get_task_review_context`'));assert.ok(assistant.includes('pinned ../context/agent-instructions.md'));
+  const profile={kind:'digital_assistant',requireToken:async()=>({}),prepareRequest:async()=>assert.fail('queue attempted HTTP')};
+  const result=await common.withWorkspaceExecutionProfile(profile,()=>readUnfiledResponseContext('https://trelio.ru','fixture',{bridge:{
+    currentWorkspaceExecutionProfile:common.currentWorkspaceExecutionProfile,
+    readExistingBridgeSessionToken:async()=>assert.fail('assistant attempted human vault'),
+  }}));
+  assert.equal(result,undefined);
+});
+
+
+test('live assistant schema projection hides hook-owned required fields without copying domain validators',async()=>{
+  const {assistantModelInputSchema}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const wire={type:'object',additionalProperties:false,required:['clientRequestId','taskPass'],properties:{
+    clientRequestId:{type:'string',format:'uuid'},taskPass:{type:'object',required:['passId'],properties:{passId:{type:'string'}}},
+    runtimeSessionProof:{type:'object'},parameters:{type:'object',properties:{summary:{type:'string',maxLength:16000}}},
+  }};
+  const snapshot=structuredClone(wire),model=assistantModelInputSchema(wire);
+  assert.deepEqual(model.required,['clientRequestId']);assert.deepEqual(Object.keys(model.properties),['clientRequestId','parameters']);
+  assert.deepEqual(model.properties.parameters,wire.properties.parameters);assert.equal(model.additionalProperties,false);
+  assert.deepEqual(wire,snapshot,'the current backend schema remains the exact validation authority');
 });

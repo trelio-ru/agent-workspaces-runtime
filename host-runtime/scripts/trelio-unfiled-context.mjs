@@ -47,6 +47,10 @@ export const readUnfiledResponseContext = async (origin, companySlug, {
     if (readQueue) queue = await readQueue(companySlug, readSignal);
     else {
       const runtime = bridge ?? await import("./trelio-workspace.mjs");
+      // An assistant has no human unfiled queue or human OAuth fallback. The
+      // active trusted transport profile selects this algorithmic omission;
+      // a failed queue read must never trigger a human vault lookup.
+      if (runtime.currentWorkspaceExecutionProfile?.()?.kind === 'digital_assistant') return undefined;
       const token = await runtime.readExistingBridgeSessionToken(origin, { signal: readSignal });
       if (!token) return undefined; // Never start pairing or repair from an advisory read.
       const response = await runtime.request(origin, token,

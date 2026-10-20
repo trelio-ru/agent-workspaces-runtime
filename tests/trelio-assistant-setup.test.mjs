@@ -256,3 +256,107 @@ test('a source failure during native work is retained after settlement without r
   },close:async()=>{closes++;}}),wait:async()=>{if(++waits===2)finishWork({state:'completed'});}}),error=>error===failure);
   assert.equal(works,1);assert.equal(closes,1);
 });
+
+const workspacePlan=()=>({prepared:true,scope:{assistantUserId:randomUUID(),deviceId:randomUUID(),companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},
+  localAction:{schemaVersion:1,operation:'open',parameters:{workspaceId:randomUUID(),runId:randomUUID(),runtimeSessionId:randomUUID()}}});
+
+test('assistant Workspace plan rejects unreviewed paths/operations before private or child access',async()=>{
+  const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const raw=workspacePlan(),valid=await validateAssistantWorkspacePlan(raw);
+  assert.equal(valid.runIdentity.runId,raw.localAction.parameters.runId);
+  for(const invalid of [{...raw,credential:'PRIVATE'}, {...raw,scope:{...raw.scope,companyId:'../escape'}},
+    {...raw,localAction:{...raw.localAction,parameters:{...raw.localAction.parameters,directory:'/other/user'}}},
+    ...['login','secret_exec','restore','skill_run','clean'].map(operation=>({...raw,localAction:{...raw.localAction,operation}}))]) {
+    await assert.rejects(executeAssistantWorkspacePlan(invalid,{withProfile:async()=>assert.fail('invalid action touched private storage')}));
+  }
+  raw.localAction.parameters.runId=randomUUID();
+  assert.notEqual(valid.runIdentity.runId,raw.localAction.parameters.runId,'plan is snapshotted before async I/O');
+});
+
+test('assistant Workspace continuation uses fixed signed child and stdin; unknown outcome never retries',async()=>{
+  const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const plan=workspacePlan();let launches=0;
+  const result=await runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess:async(executable,args,options)=>{
+    launches++;assert.equal(executable,process.execPath);assert.deepEqual(args,['/verified/loader.mjs','bridge','assistant','workspace']);
+    assert.deepEqual(JSON.parse(options.input),plan);assert.ok(!args.includes(JSON.stringify(plan)));
+    return {stdout:JSON.stringify({schemaVersion:1,operation:'open',stdout:'opened native Workspace'}),stderr:''};
+  }});
+  assert.equal(result.stdout,'opened native Workspace');assert.equal(launches,1);
+  await assert.rejects(runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess:async()=>{
+    launches++;throw {stderr:'PRIVATE CREDENTIAL AND STACK'};
+  }}),error=>error.code==='ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED' && !error.message.includes('PRIVATE'));
+  assert.equal(launches,2);
+  await assert.rejects(runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess:async()=>{
+    throw {stderr:JSON.stringify({code:'__proto__'})};
+  }}),error=>error.code==='ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED');
+  await assert.rejects(runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess:async()=>{
+    throw {stderr:JSON.stringify({code:'AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED'})};
+  }}),error=>error.code==='AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED');
+  await assert.rejects(runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess:async()=>{
+    throw {stderr:JSON.stringify({code:'TRELIO_RUNTIME_HOOK_REQUIRED',reason:'expired'})};
+  }}),error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
+});
+
+test('assistant finish has one writer, own poll route and no previous-pass receipt',async()=>{
+  const {createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const plan=workspacePlan(),identity={workspaceId:plan.localAction.parameters.workspaceId,runId:plan.localAction.parameters.runId};
+  plan.localAction={schemaVersion:1,operation:'finish',runIdentity:identity,parameters:{summary:'Сохранён материал',evidence:['Проверено'],nextAction:'Ждать ответа',taskOutcome:'no_status_change'}};
+  let resolve,launches=0;const child=new Promise(done=>{resolve=done;});
+  const executor=await createAssistantWorkspaceExecutor({configDirectory:path.join(os.tmpdir(),'assistant-plan-fixture'),
+    finishOptions:{waitMs:2},runPlan:async(raw,options)=>{launches++;assert.deepEqual(raw.scope,plan.scope);assert.equal(options.signal,undefined);
+      options.onProgress({stage:'checkpoint'});return child;}});
+  try {
+    const first=await executor.execute(plan);assert.equal(first.state,'running');assert.equal(first.nextCall.tool,'continue_assistant_workspace_action');
+    assert.equal(first.nextCall.arguments.workingDirectory,undefined);
+    const second=await executor.execute(plan);assert.equal(second.operationId,first.operationId);assert.equal(launches,1);
+    const poll={prepared:true,scope:plan.scope,localAction:first.nextCall.arguments};
+    const cancelled=new AbortController();const wait=executor.execute(poll,{signal:cancelled.signal});cancelled.abort();await assert.rejects(wait);
+    const foreign={...poll,scope:{...plan.scope,passId:randomUUID()}};
+    await assert.rejects(executor.execute(foreign),error=>error.code==='ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+    resolve({schemaVersion:1,operation:'finish',stdout:'native accepted head'});
+    const final=await executor.execute(poll);assert.equal(final.state,'completed');assert.equal(final.stdout,'native accepted head');assert.equal(launches,1);
+    await assert.rejects(executor.execute(foreign),error=>error.code==='TRELIO_WORKSPACE_FINISH_UNKNOWN');
+  } finally {executor.stop();}
+});
+
+test('actual assistant workspace entry preserves bounded result and drops raw errors',async()=>{
+  const plan=workspacePlan();const output=new PassThrough();let text='';output.on('data',part=>text+=part);
+  await runAssistantEntry(['workspace'],{input:Readable.from([JSON.stringify(plan)]),output,
+    executePlan:async input=>{assert.deepEqual(input,plan);return {schemaVersion:1,operation:'open',stdout:'native result'};}});
+  assert.equal(JSON.parse(text).stdout,'native result');
+  await assert.rejects(runAssistantEntry(['workspace','--human']),/COMMAND_UNSUPPORTED/);
+  await assert.rejects(runAssistantEntry(['workspace'],{input:Readable.from(['x'.repeat(131073)]),output,
+    executePlan:async()=>assert.fail('oversize action executed')}),/PLAN_INVALID/);
+});
+
+test('assistant Workspace preflight binds own protected pass and server Run before local materialization',async t=>{
+  const fs=await import('node:fs/promises');
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const config=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-workspace-plan-'));t.after(()=>fs.rm(config,{recursive:true,force:true}));
+  const plan=workspacePlan(),p=plan.localAction.parameters,scope=plan.scope;
+  const active={schemaVersion:1,assistantId:scope.assistantUserId,deviceId:scope.deviceId,
+    companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  const calls=[];let allowed=true,files=0;
+  const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),request:async(_origin,_token,url)=>{
+    calls.push(url);if(!allowed)throw Object.assign(new Error(),{code:'ASSISTANT_ACCESS_DENIED'});
+    return {run:{id:p.runId,workspaceId:p.workspaceId}};
+  },readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async directory=>{files++;await fs.mkdir(directory,{recursive:true});},
+    runWorkspaceCommand:async args=>{calls.push(args);process.stdout.write('native CLI output\n');}};
+  const withProfile=async action=>action({identity:{origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId},
+    client:{},host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
+  const result=await executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common});
+  assert.equal(result.stdout,'native CLI output\n');assert.equal(files,1);
+  const argv=calls.find(Array.isArray),root=path.join(config,'digital-assistants','runtime',scope.assistantUserId,scope.deviceId,'tasks',scope.companyId,scope.taskId,'workspaces',p.workspaceId);
+  assert.equal(argv[argv.indexOf('--dir')+1],root);assert.deepEqual(argv.slice(-2),['--origin','https://trelio.ru']);
+  const native=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  common.formatBridgeCommandError=native.formatBridgeCommandError;
+  common.runWorkspaceCommand=async()=>{throw new native.TrelioApiError(409,'untrusted response prose',null,'TRELIO_RUNTIME_HOOK_REQUIRED',{reason:'expired'});};
+  await assert.rejects(executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common}),
+    error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
+  const filesBeforeDenied=files;
+  allowed=false;
+  await assert.rejects(executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common}));
+  assert.equal(files,filesBeforeDenied,'server refusal precedes local filesystem writes');
+  await assert.rejects(executeAssistantWorkspacePlan({...plan,scope:{...scope,passId:randomUUID()}},{withProfile,loadCommon:async()=>common}),error=>error.code==='ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  assert.equal(files,filesBeforeDenied);
+});

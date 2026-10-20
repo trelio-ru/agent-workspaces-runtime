@@ -22,7 +22,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
     inputSchema: schema({ enrollmentId: enrollment }), annotations: { readOnlyHint: true, idempotentHint: true } },
 ]);
 const codes = new Set(['begin_assistant_setup', 'finish_assistant_setup', 'get_assistant_setup_status']);
-const safeError = error => /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
+const safeError = error => assistantHealthFailure(error) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
 export const callAssistantSetupTool = async (setup, name, args) => {
@@ -101,7 +101,7 @@ export const withProductionAssistantWorkspace = async (action, {signal}={}) => {
     if(!identity || identity.origin!=='https://trelio.ru')throw Object.assign(new Error(),{code:'ASSISTANT_HOST_STATE_INVALID'});
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,lockDirectory:path.join(directory,'runtime-locks')});
-    return common.withWorkspaceExecutionProfile(profile,action);
+    return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host}));
   },signal);
 };
 
@@ -131,8 +131,16 @@ export const createForwardingAssistantMcp = async () => {
   const common=await import('./trelio-workspace.mjs');
   try {await fs.lstat(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
   catch(error){if(error.code==='ENOENT')return null;throw error;}
+  const workspace = await createAssistantWorkspaceExecutor();
   return {listTools:signal=>requestCurrentAssistantRuntime({operation:'list'},{signal}),
-    callTool:(name,args,signal)=>requestCurrentAssistantRuntime({operation:'call',name,arguments:args},{signal})};
+    async callTool(name,args,signal) {
+      const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:args},{signal});
+      if(name!=='continue_assistant_workspace_action' || result?.isError)return result;
+      let executed;
+      try {executed=await workspace.execute(result.structuredContent,{signal});}
+      catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}
+      return {content:[{type:'text',text:'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
+    }};
 };
 
 /** Bounded JSON-lines MCP facade for setup and declared read capabilities. No raw incoming body, transport
@@ -221,7 +229,8 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
         }
         return;
       } catch (error) {
-        const result = { code: safeError(error) };
+        const result = { code: safeError(error),
+          ...(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(error.reason)?{reason:error.reason}:{}) };
         return respond({ isError: true, content: [{ type: 'text', text: result.code }], structuredContent: result });
       }
     }
@@ -256,7 +265,8 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
 };
 
 export const runAssistantEntry = async (args, options = {}) => {
-  if (args.length !== 1 || !['mcp', 'hook', 'request', 'background'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
+  if (args.length !== 1 || !['mcp', 'hook', 'request', 'background', 'workspace'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
+  if (args[0] === 'workspace') return runAssistantWorkspaceWorker(options);
   if (args[0] === 'mcp') return runAssistantSetupMcp(options);
   if (args[0] === 'background') return (options.runBackground ?? runAssistantBackground)(options);
   if (args[0] === 'request') {
@@ -327,7 +337,7 @@ export const assistantCatalogRevision = tools => {
   return createHash('sha256').update(text).digest('hex');
 };
 const reasons = new Set(['ready','not_checked','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','connection_lost']);
-export const assistantHealthFailure = error => ({
+const assistantHealthCodes = Object.freeze({
   AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:'plugin_update_required',
   TRELIO_PLUGIN_RESTART_REQUIRED:'plugin_restart_required',
   ASSISTANT_PLUGIN_UPDATE_REQUIRED:'plugin_update_required',
@@ -336,7 +346,8 @@ export const assistantHealthFailure = error => ({
   ASSISTANT_MCP_RECONNECT_REQUIRED:'mcp_reconnect_required',
   ASSISTANT_CODEX_AUTH_REQUIRED:'codex_auth_required',
   ASSISTANT_HOOK_REVIEW_REQUIRED:'hook_review_required',
-}[error?.code] ?? null);
+});
+export const assistantHealthFailure = error => Object.hasOwn(assistantHealthCodes,error?.code??'') ? assistantHealthCodes[error.code] : null;
 const version = value => typeof value === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/u.test(value);
 const atLeast = (actual, minimum) => {
   if (!version(actual) || !version(minimum)) fail('ASSISTANT_HEALTH_INVALID_RESPONSE');
@@ -664,6 +675,203 @@ export const executeAssistantRuntimeRequest = async request => {
       throw error; // Never repeat the original business invocation.
     }
   }).then(result=>result ?? (request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED')));
+};
+
+/** Internal server plan, never an arbitrary command/directory selected by a
+ * model. Parse it before private I/O; the child repeats live pass/Run admission
+ * before accessing local files, including the nominally local status action. */
+export const validateAssistantWorkspacePlan = async raw => {
+  if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope'].includes(key))
+    || raw.prepared!==true || !raw.scope || Object.keys(raw.scope).sort().join(',')!=='assistantUserId,companyId,deviceId,passId,taskId'
+    || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  const snapshot=JSON.parse(JSON.stringify(raw));
+  const action=snapshot.localAction;
+  if(!action || !['open','status','heartbeat','checkpoint','finish','pause'].includes(action.operation)
+    || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
+    || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
+    || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
+    || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
+  const invocation=buildTrelioWorkspaceActionInvocation(action);
+  const runIdentity=action.operation==='open'?{workspaceId:action.parameters.workspaceId,runId:action.parameters.runId}:action.runIdentity;
+  if(!runIdentity || Object.values(runIdentity).some(value=>!new RegExp(UUID,'u').test(value??''))
+    || action.operation==='open' && !new RegExp(UUID,'u').test(action.parameters.runtimeSessionId??''))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  if(Buffer.byteLength(JSON.stringify(snapshot))>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return {...snapshot,runIdentity,invocation};
+};
+const assistantWorkspaceRoot=(config,plan)=>path.join(config,'digital-assistants','runtime',plan.scope.assistantUserId.toLowerCase(),
+  plan.scope.deviceId.toLowerCase(),'tasks',plan.scope.companyId.toLowerCase(),plan.scope.taskId.toLowerCase(),'workspaces',plan.runIdentity.workspaceId.toLowerCase());
+
+/** The stable facade owns only bounded progress/heartbeat coordination. Actual
+ * private storage, native ACL checks, transport and Git execute in a fresh
+ * signed child. It cannot keep an expired async auth profile or a human token.
+ * Finishing survives cancellation of a short MCP wait, as in the human host. */
+export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWorkspaceProcess,configDirectory,
+  finishOptions={},heartbeatOptions={}}={}) => {
+  const common=await import('./trelio-workspace.mjs');
+  const {createWorkspaceFinishOperations}=await import('./trelio-workspace-finish-progress.mjs');
+  const {createWorkspaceRunHeartbeatManager}=await import('./trelio-local-context.mjs');
+  const config=configDirectory??common.resolveWorkspaceBridgeConfigDirectory();
+  if(!path.isAbsolute(config))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  const plans=new Map();
+  const finishes=createWorkspaceFinishOperations({...finishOptions,toolName:'continue_assistant_workspace_action'});
+  const heartbeat=createWorkspaceRunHeartbeatManager({...heartbeatOptions,resolveOpenedDirectory:async()=>fail('ASSISTANT_WORKSPACE_REVIEW_REQUIRED'),
+    runBridge:async (_origin,args,options)=>{
+      const plan=plans.get(path.resolve(options.cwd??''));
+      if(!plan || args.length!==1 || args[0]!=='heartbeat')fail('ASSISTANT_WORKSPACE_REVIEW_REQUIRED');
+      const value=await runPlan({prepared:true,scope:plan.scope,localAction:{schemaVersion:1,operation:'heartbeat',
+        parameters:{},runIdentity:plan.runIdentity}},options);
+      return {stdout:value.stdout??'',stderr:value.stderr??''};
+    }});
+  return {async execute(raw,{signal}={}) {
+    const plan=await validateAssistantWorkspacePlan(raw);
+    const root=assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
+    const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
+    const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
+    const previous=plans.get(directory);
+    if(previous && (previous.scope.passId!==plan.scope.passId || previous.runIdentity.runId!==plan.runIdentity.runId)) {
+      if(finishes.active(key))fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+      heartbeat.stop(directory);
+    }
+    if(!plans.has(directory) && plans.size>=64) {
+      for(const [oldDirectory,oldPlan] of plans) {
+        if(!heartbeat.inspect(oldDirectory) && !finishes.active(oldPlan.key))plans.delete(oldDirectory);
+      }
+      if(plans.size>=64)fail('ASSISTANT_WORKSPACE_CAPACITY');
+    }
+    // Keep only structural renewal locators. Handoff text stays in the common
+    // bounded finish registry for its ordinary retention, not a second cache.
+    plans.set(directory,{scope:plan.scope,runIdentity:plan.runIdentity,key});
+    const execute=async(onProgress,actionSignal)=>{
+      const entry=await heartbeat.beginAction(directory,plan.localAction.operation);
+      try {
+        const result=await runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal:actionSignal,onProgress});
+        if(plan.localAction.operation==='open')heartbeat.start({origin:'https://trelio.ru',...plan.runIdentity,workspaceDirectory:directory});
+        else heartbeat.markActionSuccess(entry,plan.localAction.operation,plan.localAction.parameters);
+        return result;
+      } finally {heartbeat.endAction(entry);}
+    };
+    if(plan.localAction.operation==='status' && plan.localAction.parameters.finishOperationId)
+      return finishes.poll(key,plan.localAction.parameters.finishOperationId,signal,scope);
+    if(plan.localAction.operation==='finish')return finishes.start({key,scope,signal,
+      fingerprint:JSON.stringify(plan.localAction.parameters),
+      pollAction:{schemaVersion:1,operation:'status',parameters:{},runIdentity:plan.runIdentity},
+      execute:onProgress=>execute(onProgress,undefined)});
+    const active=finishes.active(key);
+    if(active && plan.localAction.operation!=='heartbeat') {
+      if(plan.localAction.operation==='status')return active;
+      fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+    }
+    return execute(undefined,signal);
+  },stop(){for(const directory of plans.keys())heartbeat.stop(directory);}};
+};
+
+/** This runner selects the installed verifier, not an arbitrary source path or
+ * executable. Payload is bounded stdin; stdout is the common action result,
+ * and only ordinary fixed progress frames are observed before completion. */
+export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolveLoader=resolveHostRuntimeLoader,
+  runProcess,environment=process.env}={}) => {
+  const plan=await validateAssistantWorkspacePlan(raw);
+  const input=JSON.stringify({prepared:true,scope:plan.scope,localAction:plan.localAction});
+  const loader=await resolveLoader({environment});
+  const {runWorkspaceFinishProcess}=await import('./trelio-workspace-finish-progress.mjs');
+  let result;
+  try {result=await (runProcess??runWorkspaceFinishProcess)(process.execPath,[loader,'bridge','assistant','workspace'],{signal,onProgress,input});}
+  catch(error) {
+    // The isolated worker emits one closed error frame; never classify raw
+    // child prose/cause or retry the command. A killed/ambiguous writer remains
+    // an explicit review condition, not proof that acceptance did not happen.
+    let frame;try{if(typeof error?.stderr==='string' && error.stderr.length<1024)frame=JSON.parse(error.stderr);}catch{}
+    const code=assistantHealthFailure(frame) || /^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(frame?.code??'')?frame.code:'ASSISTANT_WORKSPACE_OUTCOME_REVIEW_REQUIRED';
+    throw Object.assign(new Error(code),{code,
+      ...(code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(frame?.reason)?{reason:frame.reason}:{})});
+  }
+  let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
+  if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation || typeof value.stdout!=='string'
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr'].includes(key))
+    || Buffer.byteLength(JSON.stringify(value))>768*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
+  return value;
+};
+
+/** Exactly one command runs in this isolated process. chdir/stdout capture are
+ * confined here, never a long-lived MCP/background host. All native Workspace
+ * algorithms (safe materialization, dirty state, recovery, checkpoint and
+ * acceptance) remain the common engine. No module is copied into this adapter. */
+export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProductionAssistantWorkspace,
+  loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs')}={}) => {
+  const plan=await validateAssistantWorkspacePlan(raw);
+  return withProfile(async({identity,client,store,host})=>{
+    const common=await loadCommon(),context=await loadContext();
+    const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+    const active=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(identity.origin!=='https://trelio.ru' || identity.assistantId!==plan.scope.assistantUserId || identity.deviceId!==plan.scope.deviceId
+      || ['companyId','taskId','passId'].some(key=>active[key]!==plan.scope[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    // A profile HTTP read consumes its own observed one-use proof and native
+    // canonical target/own-Run checks, even for local status or heartbeat.
+    const token=await common.requireToken(identity.origin);
+    const response=await common.request(identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/runs/${plan.runIdentity.runId}`);
+    const snapshot=JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant Run')).toString('utf8'));
+    if(snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    if(plan.localAction.operation==='open') {
+      const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
+      if(runtime?.ended || runtime?.state?.runtimeSessionId!==plan.localAction.parameters.runtimeSessionId)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+    }
+    const root=assistantWorkspaceRoot(common.resolveWorkspaceBridgeConfigDirectory(),plan),directory=path.join(root,'workspace');
+    await common.ensurePrivateDirectory(root);
+    if(plan.localAction.operation!=='open') {
+      const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
+      if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    }
+    const action={...plan.localAction,parameters:{...plan.localAction.parameters,
+      ...(plan.localAction.operation==='open'?{directory:root}:{}),
+      ...(['checkpoint','finish','pause'].includes(plan.localAction.operation)?{taskOutcome:'no_status_change'}:{}),
+    }};
+    let nativeReason,nativeHealthCause;
+    try {return await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{
+      resolveRunRootDirectory:async()=>root,
+      runBridge:async(_origin,args,options)=>{
+        if(options.cwd && path.resolve(options.cwd)!==directory)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        let stdout='',bytes=0;const write=process.stdout.write;
+        const previousDirectory=process.cwd();
+        process.stdout.write=function(chunk,encoding,callback){
+          const part=Buffer.isBuffer(chunk)?chunk.toString('utf8'):String(chunk);bytes+=Buffer.byteLength(part);
+          if(bytes>1024*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');stdout+=part;
+          const done=typeof encoding==='function'?encoding:callback;done?.();return true;
+        };
+        try {process.chdir(options.cwd??root);await common.runWorkspaceCommand([...args,'--origin',identity.origin]);return {stdout,stderr:''};}
+        catch(error) {
+          // Reuse the ordinary in-process -> CLI error projection so common
+          // lease/recovery and bounded HTTP classification remain identical.
+          if(assistantHealthFailure(error))nativeHealthCause=error.code;
+          if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(error.payload?.reason))nativeReason=error.payload.reason;
+          throw Object.assign(error,{stderr:'Ошибка: '+common.formatBridgeCommandError(error,args[0])});
+        }
+        finally {process.stdout.write=write;process.chdir(previousDirectory);}
+      },
+    });} catch(error) {
+      const diagnostic=error?.details?.http?.failureCode;
+      if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;
+      if(nativeHealthCause)error.code=nativeHealthCause;
+      if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && nativeReason)error.reason=nativeReason;
+      throw error;
+    }
+  });
+};
+
+export const runAssistantWorkspaceWorker = async ({input=process.stdin,output=process.stdout,executePlan=executeAssistantWorkspacePlan}={}) => {
+  let bytes=0;const chunks=[];
+  for await(const chunk of input){const part=Buffer.from(chunk);bytes+=part.length;if(bytes>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');chunks.push(part);}
+  try {output.write(JSON.stringify(await executePlan(JSON.parse(Buffer.concat(chunks).toString('utf8'))))+'\n');}
+  catch(error) {
+    // The ordinary dispatcher has already projected typed HTTP/recovery errors.
+    // Never return a native exception/cause/stack, arbitrary stderr or a private
+    // store failure. Preserve just its closed code for explicit recovery.
+    const {bridgeHttpDiagnosticCode}=await import('./trelio-bridge-http-diagnostics.mjs');
+    const code=assistantHealthFailure(error)?error.code:Number.isInteger(error?.statusCode)?bridgeHttpDiagnosticCode(error.statusCode,error.code)
+      : /^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code??'')?error.code:'ASSISTANT_WORKSPACE_EXECUTION_FAILED';
+    const reason=error?.reason??error?.payload?.reason;
+    process.stderr.write(JSON.stringify({code,...(code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(reason)?{reason}:{})})+'\n');process.exitCode=1;
+  }
 };
 
 if (isDirectModuleInvocation(import.meta.url)) {

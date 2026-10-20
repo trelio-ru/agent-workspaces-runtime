@@ -489,3 +489,47 @@ resources retain a closed tombstone, never fall back to the human vault. The
 production helper is not a model tool; dedicated preparation/continuation and
 role-aware pinned workflow must be connected and tested before activation.
 There is no automatic retry of a business action or restart of Codex here.
+
+
+### Dedicated typed Workspace continuation
+
+The live backend catalog supplies `prepare_assistant_workspace_run` and
+`continue_assistant_workspace_action`; the host adds only reviewed names, never
+copies their domain schemas. Only root `taskPass`/`runtimeSessionProof` and their
+required entries are omitted from model discovery: the hook injects them into
+the raw call and the unchanged backend validator/admission still requires them.
+Live idempotent annotations are preserved, including the non-idempotent local
+continuation boundary. The stable MCP facade forwards the real hook proof once,
+then executes only the resulting bounded local plan. Company/task/pass/device/
+assistant and own Run are rechecked before local files, including status.
+Open's runtime session is server-selected and must match the protected journal.
+The canonical root is computed under the exact assistant/device/task directory;
+model input cannot supply cwd, directory, shell, executable or native checkpoint.
+
+A fresh signed `bridge assistant workspace` worker runs the common typed action
+validator and common native Workspace command engine. stdin carries only the
+bounded plan; credentials/proofs/keys remain in the existing protected slots.
+`chdir` and stdout capture occur only in that isolated one-command child, never
+in the long-lived MCP host. Every HTTP call repeats the shared profile proof,
+live pass/model/grant/target checks. Shared local metadata validates the exact
+Run before non-open actions. Unknown/aborted execution is an outcome-review
+condition, never an automatic business retry or human OAuth fallback.
+
+The facade reuses the common finish progress registry and heartbeat manager.
+One Run has one finish writer; repeated exact requests/polls join that writer,
+short-wait cancellation does not cancel saving, and another pass cannot receive
+its receipt. Heartbeat workers create fresh protected invocations; they do not
+retain the old AsyncLocalStorage auth profile. No automatic claim is attempted
+from an old proof; expiry requires exact preparation/open recovery. Finish and
+pause stop renewal. The poll route names the dedicated continuation tool.
+A facade restart loses its in-memory operation handle, so native exact status,
+accepted-head/clean-tree and shared recovery guards must establish the outcome
+before a new finish. Files/accepted receipts are not replaced with process exit.
+
+Protected local AGENTS keeps common security/dirty-state/pinned-rule invariants
+and specializes human-only proposal/bootstrap clauses for the trusted assistant
+profile. It directs task actions and pass completion to the dedicated policy.
+It does not create authority or rewrite the Run pin. The ordinary human template
+is byte-identical. An assistant status action omits the human unfiled-queue lookup
+before any human session-vault access. No public plugin or file-count limit is
+changed; no capability/readiness claim is enabled by this transport alone.

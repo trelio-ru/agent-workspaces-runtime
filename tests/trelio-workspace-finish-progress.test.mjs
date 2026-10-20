@@ -192,3 +192,10 @@ test("handoff recovery compares the exact decrypted intent, Run, lease and draft
   }
   assert.equal(hasFinishRecoveryMarker({ ...metadata, runId: "55555555-5555-4555-8555-555555555555" }), false);
 });
+
+
+test('shared finish process accepts a bounded assistant envelope on stdin with unchanged human argv ABI',async()=>{
+  const source=`let text='';for await(const chunk of process.stdin)text+=chunk;process.stdout.write(JSON.parse(text).note);`;
+  const result=await runWorkspaceFinishProcess(process.execPath,['--input-type=module','-e',source],{input:JSON.stringify({note:'Только stdin'})});
+  assert.equal(result.stdout,'Только stdin');
+});

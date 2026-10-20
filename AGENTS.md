@@ -363,7 +363,7 @@ publication tooling также остаются вне этого публичн
   stdout/stderr или private paths; отказ не превращается в пустой импорт.
   Windows gate проверяет настоящий публичный Python provider как read-only input.
 
-- Assistant Workspace: generated route/proof policy, one-action async profile, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+- Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared engine, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
 
 - Assistant task writes forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 

@@ -26,6 +26,7 @@ test('optional releases do not block; real shared minimum is checked without rel
   assert.equal(assistantHealthCompatibility({...snapshot(),compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:'5.0.1'}},versions),'runtime_update_failed');
   assert.throws(()=>assistantHealthCompatibility({...snapshot(),compatibility:{minimumPluginVersion:'garbage'}},versions),/INVALID_RESPONSE/);
   assert.equal(assistantHealthFailure(new Error('Please reinstall plugin PRIVATE')),null,'never infer a cause from prose');
+  for(const code of ['__proto__','constructor','toString'])assert.equal(assistantHealthFailure({code}),null,'health identity is a closed own-key map');
 });
 
 test('maintenance has no model turn, retries only signed update and cannot clear an unrelated auth/trust failure',async()=>{

@@ -173,6 +173,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   // an accidental caller serialization. Only prepareRequest resolves auth.
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
+    kind:'digital_assistant',
     async requireToken(requestOrigin){
       if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       await assertIdentity();return handle;
@@ -426,11 +427,25 @@ export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
-  'complete_assistant_pass',
+  'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",
   "complete_checklist_item", "create_subtask",
 ]);
+/** Hook-owned admission fields never belong to the model's tool arguments.
+ * Keep the live backend validators as the wire authority, while removing only
+ * those two root fields from model discovery. PreToolUse still injects them
+ * into the raw call before the backend's mandatory validation/admission.
+ * No domain schema, scope or permission is inferred/copied by this projection.
+ */
+export const assistantModelInputSchema = source => {
+  const schema=structuredClone(source);
+  for(const key of ['taskPass','runtimeSessionProof']) {
+    if(schema.properties)delete schema.properties[key];
+    if(Array.isArray(schema.required))schema.required=schema.required.filter(value=>value!==key);
+  }
+  return schema;
+};
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, timeoutMs = 30_000 }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
@@ -466,9 +481,9 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             || !object(tool.inputSchema) || tool.inputSchema.type !== "object") fail("ASSISTANT_MCP_INVALID_RESPONSE");
           seen.add(tool.name);
           // Do not proxy remote App metadata, URLs or OAuth security schemes.
-          return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
+          return { name: tool.name, description: tool.description, inputSchema: assistantModelInputSchema(tool.inputSchema),
             annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: false,
-              idempotentHint: tool.name!=='complete_assistant_pass', openWorldHint: false } };
+              idempotentHint: tool.annotations?.idempotentHint===true, openWorldHint: false } };
         });
         if (!seen.has("get_assistant_status") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         return selected;

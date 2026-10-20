@@ -11261,7 +11261,7 @@ const resolveOpenedWorkspaceDirectory = async (stdout) => {
   );
 };
 
-const readOpenedWorkspaceRunIdentity = async (workspaceDirectory, expectedOrigin) => {
+export const readOpenedWorkspaceRunIdentity = async (workspaceDirectory, expectedOrigin) => {
   const metadata = await readPrivateJsonFile(
     path.join(path.dirname(workspaceDirectory), ".trelio-run.json"),
   );

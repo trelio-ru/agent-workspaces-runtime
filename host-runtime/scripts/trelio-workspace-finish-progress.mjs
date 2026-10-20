@@ -61,7 +61,7 @@ const operationError = (code, message, details) => Object.assign(new Error(messa
  * CLI Run lock; losing/restarting this host does not authorize a second writer.
  * This is a host-lifetime registry, not a promise of a restartable job service.
  */
-export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs = 30 * 60_000, errorFactory = operationError } = {}) => {
+export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs = 30 * 60_000, errorFactory = operationError, toolName = "continue_trelio_workspace_action" } = {}) => {
   const entries = new Map();
   const prune = () => {
     for (const [key, entry] of entries) {
@@ -75,7 +75,7 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
     operationId: entry.id,
     elapsedMs: Date.now() - entry.startedAt,
     progress: entry.progress,
-    nextCall: { tool: "continue_trelio_workspace_action", arguments: entry.pollAction },
+    nextCall: { tool: toolName, arguments: entry.pollAction },
     instruction: "Сохранение продолжается. Через 10 секунд вызовите nextCall для этой операции; не запускайте новый finish и не меняйте файлы до завершения.",
   });
   const wait = async (entry, signal) => {
@@ -153,10 +153,11 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
 /** Keep the latest bounded terminal output while reading progress immediately.
  * execFile's maxBuffer kills a long-lived child when logs fill the buffer;
  * progress must never turn a healthy save into an interrupted mutation.
- * This runner is used only for finish (no native checkpoint stdin payload).
+ * The optional stdin is a bounded typed assistant envelope, never a native
+ * credential or checkpoint secret transport. Ordinary human finish is unchanged.
  */
-export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onProgress }) => new Promise((resolve, reject) => {
-  const child = spawn(executable, args, { cwd, signal, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onProgress, input }) => new Promise((resolve, reject) => {
+  const child = spawn(executable, args, { cwd, signal, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
   const maximumCharacters = 1024 * 1024;
   let stdout = "", stderr = "", failure = null;
   const parse = createFinishProgressParser(onProgress, (text) => { stderr = (stderr + text).slice(-maximumCharacters); });
@@ -166,6 +167,9 @@ export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onPro
   child.stderr.on("data", (chunk) => {
     parse(chunk);
   });
+  // Assistant actions carry their bounded typed envelope over stdin, never
+  // credentials/content in argv. Human finish retains its existing ignore ABI.
+  if (child.stdin) { child.stdin.on("error", error => { failure ??= error; }); child.stdin.end(input); }
   child.on("error", (error) => { failure = error; });
   child.on("close", (code, terminationSignal) => {
     parse.flush();

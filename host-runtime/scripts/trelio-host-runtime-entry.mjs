@@ -36,7 +36,7 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
   // explicit bridge subprofile; neither an unknown assistant command nor a
   // missing capability may fall through to human bridge/MCP authentication.
   if (mode === "bridge" && argumentsAfterMode[0] === "assistant") {
-    if (argumentsAfterMode.length !== 2 || !["mcp", "hook", "request", "background"].includes(argumentsAfterMode[1])) {
+    if (argumentsAfterMode.length !== 2 || !["mcp", "hook", "request", "background", "workspace"].includes(argumentsAfterMode[1])) {
       throw new Error("ASSISTANT_COMMAND_UNSUPPORTED");
     }
     return { mode, profile: "assistant", entrypointPath: path.join(SCRIPT_DIRECTORY, "trelio-assistant-entry.mjs"),
