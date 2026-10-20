@@ -56,8 +56,12 @@ test('native fixed text reader: labels, Unicode input, links, paging, secrets, s
     frame = ready(await browser.call('click', control(frame, 'Поиск')));
     frame = ready(await browser.call('key', { frameId: frame.frameId, key: process.platform === 'darwin' ? 'Meta+A' : 'Control+A' }));
     frame = ready(await browser.call('type-text', { frameId: frame.frameId, text: 'Русский ввод 123' }));
-    frame = ready(await browser.call('key', { frameId: frame.frameId, key: 'Enter' }));
+    frame = ready(await browser.call('submit', { action: 'key', frameId: frame.frameId, key: 'Enter' }));
     assert.equal(received, 'Русский ввод 123');
+    assert.equal((await browser.call('submit', { action: 'navigate', url: `${origin}/detail` })).reason, 'request_not_reviewed');
+    assert.equal((await browser.call('request-ready', { frameId: stale })).reason, 'stale_frame');
+    frame = ready(await browser.call('request-ready', { frameId: frame.frameId }));
+    frame = ready(await browser.call('submit', { action: 'navigate', url: `${origin}/detail` }));
     assert.equal((await browser.call('click', { frameId: stale, x: 10, y: 10 })).reason, 'stale_frame');
     frame = ready(await browser.call('read-text', { query: 'Редкая фраза' }));
     assert.match(frame.text, /Редкая фраза: проверка фильтра/);
