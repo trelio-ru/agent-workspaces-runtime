@@ -153,6 +153,8 @@ test('production host composes real SQLite, fresh private calls and the native a
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const companyId=randomUUID(),memberId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID();
   const execution={state:'ready',configuration:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const taskConfig=path.join(os.tmpdir(),'synthetic-assistant-host-'+randomUUID());
   let businessReady=false,starts=0,contextCalls=0,databaseClosed=0,reported=0;
   let currentIdentity=identity;
   const client={identity,heartbeat:async()=>({}),companies:async()=>[{companyId,memberId}],
@@ -164,15 +166,14 @@ test('production host composes real SQLite, fresh private calls and the native a
   };
   const native={provision:async(input,options)=>{
     starts++;assert.deepEqual(input.execution,execution.configuration);
-    assert.equal(path.basename(input.cwd),taskId);
-    assert.equal(path.basename(path.dirname(input.cwd)),companyId);
+    assert.equal(input.cwd,path.join(assistantTaskStorageDirectory(taskConfig,{...identity,companyId,taskId}),'chat'));
     options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
     return {state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};
   },run:async()=>assert.fail('no business pass in this fixture'),readDelivery:async()=>({state:'uncertain'})};
   const database=new DatabaseSync(':memory:');
   const host=await createAssistantRuntimeHost({context:async action=>{
     contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null});
-  },dependencies:{directory:path.join(os.tmpdir(),'synthetic-assistant-host-'+randomUUID()),
+  },dependencies:{directory:taskConfig,
     ensureDirectory:async()=>{},openDatabase:async directory=>{
       assert.equal(path.basename(directory),identity.deviceId);
       return {database,close:async()=>{databaseClosed++;database.close();}};
@@ -337,7 +338,7 @@ test('assistant Workspace preflight binds own protected pass and server Run befo
   const active={schemaVersion:1,assistantId:scope.assistantUserId,deviceId:scope.deviceId,
     companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
   const calls=[];let allowed=true,files=0;
-  const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),request:async(_origin,_token,url)=>{
+  const common={formatBridgeCommandError:error=>String(error.code??'UNKNOWN'),resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),request:async(_origin,_token,url)=>{
     calls.push(url);if(!allowed)throw Object.assign(new Error(),{code:'ASSISTANT_ACCESS_DENIED'});
     return {run:{id:p.runId,workspaceId:p.workspaceId}};
   },readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async directory=>{files++;await fs.mkdir(directory,{recursive:true});},
@@ -346,7 +347,10 @@ test('assistant Workspace preflight binds own protected pass and server Run befo
     client:{},host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
   const result=await executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common});
   assert.equal(result.stdout,'native CLI output\n');assert.equal(files,1);
-  const argv=calls.find(Array.isArray),root=path.join(config,'digital-assistants','runtime',scope.assistantUserId,scope.deviceId,'tasks',scope.companyId,scope.taskId,'workspaces',p.workspaceId);
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const argv=calls.find(Array.isArray),root=path.join(assistantTaskStorageDirectory(config,{origin:'https://trelio.ru',assistantId:scope.assistantUserId,
+    deviceId:scope.deviceId,companyId:scope.companyId,taskId:scope.taskId}),'workspaces',p.workspaceId);
+  if(process.platform==='win32')assert.ok(root.length<240,'native cwd remains below the Windows process limit');
   assert.equal(argv[argv.indexOf('--dir')+1],root);assert.deepEqual(argv.slice(-2),['--origin','https://trelio.ru']);
   const native=await import('../host-runtime/scripts/trelio-workspace.mjs');
   common.formatBridgeCommandError=native.formatBridgeCommandError;
@@ -391,4 +395,22 @@ test('accepted inspection uses no Run identity, local writable root, renewal or 
     allowed=false;await assert.rejects(executor.execute(plan),error=>error.code==='ASSISTANT_ACCESS_DENIED');
     assert.equal(calls,2);assert.equal(localRoots,0);
   }finally{executor.stop();}
+});
+
+
+test('prototype writable task roots stop new materialization without moving or hiding old work',async t=>{
+  const fs=await import('node:fs/promises'),{executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const config=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-old-task-'));t.after(()=>fs.rm(config,{recursive:true,force:true}));
+  const plan=workspacePlan(),scope=plan.scope,p=plan.localAction.parameters;
+  const active={schemaVersion:1,assistantId:scope.assistantUserId,deviceId:scope.deviceId,companyId:scope.companyId,taskId:scope.taskId,
+    passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  const legacy=path.join(config,'digital-assistants','runtime',scope.assistantUserId,scope.deviceId,'tasks',scope.companyId,scope.taskId);
+  await fs.mkdir(legacy,{recursive:true});await fs.writeFile(path.join(legacy,'pending.txt'),'synthetic pending work');
+  let writes=0;
+  const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),request:async()=>({run:{id:p.runId,workspaceId:p.workspaceId}}),
+    readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async()=>{writes++;},runWorkspaceCommand:async()=>{writes++;}};
+  const withProfile=async action=>action({identity:{origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId},
+    host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
+  await assert.rejects(executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common}),error=>error.code==='ASSISTANT_TASK_STORAGE_REVIEW_REQUIRED');
+  assert.equal(writes,0);assert.equal(await fs.readFile(path.join(legacy,'pending.txt'),'utf8'),'synthetic pending work');
 });

@@ -159,7 +159,11 @@ internal static class Harness {
         });
         thread.SetApartmentState(ApartmentState.STA); thread.IsBackground = true; thread.Start();
         try {
-            Check(ready.WaitOne(10000), "fixture window timeout");
+            // Cold hosted Windows may spend more than ten seconds loading
+            // WPF/composition before the synthetic window is created. This
+            // bounded wait precedes all field preparation/fill; production
+            // helper deadlines and every UIA assertion remain unchanged.
+            Check(ready.WaitOne(25000), "fixture window timeout");
             if (uiError != null) throw uiError;
             sessionType = typeof(Step).Assembly.GetType("Session");
             root = AutomationElement.FromHandle(handle);

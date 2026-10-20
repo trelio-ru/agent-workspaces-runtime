@@ -245,9 +245,9 @@ no cookie/redirect, response redaction and lost pairing exchange.
 ## Protected background host composition
 
 `createAssistantRuntimeHost` composes the real private SQLite opener, fixed device
-client, protected pass journal and existing native Codex adapter. Its directory
-is separated by assistant/device; task working folders use only canonical
-company/task UUIDs. They are chat roots, not accepted material or instruction
+client, protected pass journal and existing native Codex adapter. Its database directory
+is separated by assistant/device; task working folders use a domain-separated
+SHA-256 of canonical origin/assistant/device/company/task IDs to bound Windows cwd length. They are chat roots, not accepted material or instruction
 files. Every device/journal call re-enters the bounded private invocation and
 compares the original identity. Re-pairing cannot reuse the old queue silently;
 credentials/private worker handles are not retained by the coordinator.
@@ -568,3 +568,18 @@ bodies. The task worker reads each answer live under its current pass and saves
 pending IDs in its own accepted WORK.md. Replies resume the permanent chat; they
 do not provision another chat or authorize sensitive actions. Missing/newer
 backend capabilities remain closed and do not enable business readiness.
+
+
+### Windows task-path bound
+
+Chat, accepted inspection and writable Workspace folders share one compact task
+root. Five concatenated UUID levels can exceed the Windows current-directory
+limit before native materialization. The locator hashes the full structural
+identity including origin; live pass/Run binding and ordinary private-path ACL
+checks still authorize each access. No display name, user path or model input
+chooses the directory. Existing device database/credentials remain in place.
+A detected prototype writable task root is an explicit storage-review condition,
+never silently migrated, ignored or reset. Read-only inspection caches may be
+rebuilt under their current exact identity. The actual Windows preflight test
+uses the same native chdir and asserts a bounded cwd; no OS registry, long-path
+policy, ACL or shell setting is changed.

@@ -374,8 +374,8 @@ test('accepted cache resolver isolates actual assistant/device/task identity and
   const {resolveWorkspaceInspectionDirectory}=await import('../host-runtime/scripts/trelio-workspace.mjs');
   const f=await workspaceProfileFixture(),g=await workspaceProfileFixture(),config=path.join(os.tmpdir(),'synthetic-config');
   const first=await f.profile.resolveInspectionDirectory(config);
-  assert.equal(first,path.join(config,'digital-assistants','runtime',f.identity.assistantId,f.identity.deviceId,
-    'tasks',f.pass.companyId,f.pass.taskId,'inspections'));
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  assert.equal(first,path.join(assistantTaskStorageDirectory(config,{...f.identity,companyId:f.pass.companyId,taskId:f.pass.taskId}),'inspections'));
   assert.notEqual(first,await g.profile.resolveInspectionDirectory(config));
   const human=await resolveWorkspaceInspectionDirectory();
   await withWorkspaceExecutionProfile(f.profile,async()=>assert.notEqual(await resolveWorkspaceInspectionDirectory(),human));
@@ -403,4 +403,15 @@ test('owner dialogue tools use live backend schemas and poll projection keeps on
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,now:()=>100,http:async()=>({events:[{...event,answerText:'PRIVATE ANSWER'}],nextCursor:'1',hasMore:false})});
   assert.deepEqual((await client.poll(companyId)).events,[event]);
   event.ownerQuestionId='PRIVATE QUESTION';await assert.rejects(client.poll(companyId));
+});
+
+
+test('compact task storage binds every identity without a long concatenated cwd',async()=>{
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const config=path.join(os.tmpdir(),'synthetic-config'),scope={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID(),companyId:randomUUID(),taskId:randomUUID()};
+  const root=assistantTaskStorageDirectory(config,scope);
+  assert.equal(path.relative(config,root).split(path.sep).at(-1).length,64);
+  for(const key of ['assistantId','deviceId','companyId','taskId'])assert.notEqual(root,assistantTaskStorageDirectory(config,{...scope,[key]:randomUUID()}));
+  assert.notEqual(root,assistantTaskStorageDirectory(config,{...scope,origin:'https://other.example'}));
+  assert.equal(root,assistantTaskStorageDirectory(config,{...scope,assistantId:scope.assistantId.toUpperCase()}));
 });

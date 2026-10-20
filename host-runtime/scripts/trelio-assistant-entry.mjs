@@ -5,7 +5,7 @@ import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-ho
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS } from './trelio-assistant-transport.mjs';
+import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup } from './trelio-assistant-setup.mjs';
@@ -501,7 +501,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   };
   const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
-  const root=dependencies.directory??path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime');
+  const configDirectory=dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();
+  const root=dependencies.directory??path.join(configDirectory,'digital-assistants','runtime');
   if(!path.isAbsolute(root)) fail('ASSISTANT_HOST_STATE_INVALID');
   const ensureDirectory=dependencies.ensureDirectory??(directory=>privateInvocation(()=>common.ensurePrivateDirectory(directory)));
   await ensureDirectory(root);
@@ -526,7 +527,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
           || !new RegExp(UUID,'u').test(scope.companyId??'') || !new RegExp(UUID,'u').test(scope.taskId??'')) fail('ASSISTANT_HOST_STATE_INVALID');
         // This is a private chat working folder, not an accepted Workspace or
         // an instruction authority. The worker opens its native Run separately.
-        const directory=path.join(deviceRoot,'tasks',scope.companyId.toLowerCase(),scope.taskId.toLowerCase());
+        await rejectLegacyAssistantTaskStorage(configDirectory,{...stableIdentity,companyId:scope.companyId,taskId:scope.taskId});
+        const directory=path.join(assistantTaskStorageDirectory(configDirectory,{...stableIdentity,companyId:scope.companyId,taskId:scope.taskId}),'chat');
         await ensureDirectory(directory);return directory;
       },timeZone,
       ...(dependencies.now?{now:dependencies.now}:{}),...(dependencies.notify?{notify:dependencies.notify}:{}),
@@ -701,8 +703,19 @@ export const validateAssistantWorkspacePlan = async raw => {
   if(Buffer.byteLength(JSON.stringify(snapshot))>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   return {...snapshot,runIdentity,invocation};
 };
-const assistantWorkspaceRoot=(config,plan)=>path.join(config,'digital-assistants','runtime',plan.scope.assistantUserId.toLowerCase(),
-  plan.scope.deviceId.toLowerCase(),'tasks',plan.scope.companyId.toLowerCase(),plan.scope.taskId.toLowerCase(),'workspaces',plan.runIdentity.workspaceId.toLowerCase());
+const assistantPlanTaskScope=plan=>({origin:'https://trelio.ru',assistantId:plan.scope.assistantUserId,deviceId:plan.scope.deviceId,
+  companyId:plan.scope.companyId,taskId:plan.scope.taskId});
+const assistantWorkspaceRoot=(config,plan)=>path.join(assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan)),
+  'workspaces',plan.runIdentity.workspaceId.toLowerCase());
+/** No silent move/reset of prototype writable folders or permanent chat cwd.
+ * Presence requires explicit outcome recovery. This exact lstat reads no files;
+ * access errors are not mistaken for absence. Inspection caches are rebuildable. */
+const rejectLegacyAssistantTaskStorage=async(config,scope)=>{
+  const legacy=path.join(config,'digital-assistants','runtime',scope.assistantId.toLowerCase(),scope.deviceId.toLowerCase(),
+    'tasks',scope.companyId.toLowerCase(),scope.taskId.toLowerCase());
+  try{await fs.lstat(legacy);}catch(error){if(error.code==='ENOENT')return;throw error;}
+  fail('ASSISTANT_TASK_STORAGE_REVIEW_REQUIRED');
+};
 
 /** The stable facade owns only bounded progress/heartbeat coordination. Actual
  * private storage, native ACL checks, transport and Git execute in a fresh
@@ -824,7 +837,9 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
       if(runtime?.ended || runtime?.state?.runtimeSessionId!==plan.localAction.parameters.runtimeSessionId)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
     }
-    const root=assistantWorkspaceRoot(common.resolveWorkspaceBridgeConfigDirectory(),plan),directory=path.join(root,'workspace');
+    const config=common.resolveWorkspaceBridgeConfigDirectory();
+    if(!inspecting)await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan));
+    const root=assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
     if(!inspecting)await common.ensurePrivateDirectory(root);
     if(!inspecting && plan.localAction.operation!=='open') {
       const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);

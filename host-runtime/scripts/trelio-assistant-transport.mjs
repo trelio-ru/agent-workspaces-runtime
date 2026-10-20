@@ -12,6 +12,15 @@ export class AssistantTransportError extends Error {
 const fail = (code, status) => { throw new AssistantTransportError(code, status); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const id = value => { if (typeof value !== 'string' || !UUID.test(value)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); return value.toLowerCase(); };
+/** Compact identity-bound task roots avoid concatenating five UUIDs into a
+ * Windows cwd. The same digest isolates origin/assistant/device/company/task;
+ * it is a locator only, never permission or a substitute for private ACLs. */
+export const assistantTaskStorageDirectory = (configDirectory, scope) => {
+  if (!path.isAbsolute(configDirectory ?? '')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+  const origin = originOf(scope.origin);
+  const identity = ['trelio-assistant-task-v1', origin, ...['assistantId','deviceId','companyId','taskId'].map(key=>id(scope[key]))];
+  return path.join(configDirectory,'digital-assistants','tasks',createHash('sha256').update(JSON.stringify(identity)).digest('hex'));
+};
 const object = value => value && Object.getPrototypeOf(value) === Object.prototype;
 const revision = value => {
   if (!Number.isSafeInteger(value) || value < 0) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); return value;
@@ -180,8 +189,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       // overwrite the ordinary user's or another assistant's inspection cache.
       if(!path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertIdentity();
-      return path.join(configDirectory,'digital-assistants','runtime',identity.assistantId.toLowerCase(),
-        identity.deviceId.toLowerCase(),'tasks',pass.companyId.toLowerCase(),pass.taskId.toLowerCase(),'inspections');
+      return path.join(assistantTaskStorageDirectory(configDirectory,{...identity,companyId:pass.companyId,taskId:pass.taskId}),'inspections');
     },
     async requireToken(requestOrigin){
       if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');

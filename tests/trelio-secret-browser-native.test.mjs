@@ -724,7 +724,7 @@ test("native helper compiles locally, caches exact bytes and rejects an unprepar
 });
 
 test("Windows UIA core fills a real synthetic document without keyboard focus and rejects stale bindings", {
-  skip: process.platform !== "win32", timeout: 90_000,
+  skip: process.platform !== "win32", timeout: 120_000,
 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-native-uia-test-"));
   try {
@@ -744,7 +744,7 @@ test("Windows UIA core fills a real synthetic document without keyboard focus an
       // This compiler only sees a synthetic fixture, never a real secret.
       throw new Error("Windows fixture compiler: " + (error.stdout || error.stderr || error.message));
     });
-    const result = await exec(output, [], { timeout: 30_000 });
+    const result = await exec(output, [], { timeout: 60_000 });
     assert.match(result.stdout, /Windows UIA:.*passed/);
     assert.doesNotMatch(result.stdout + result.stderr, /synthetic-native-user|synthetic-native-password/);
   } finally {
