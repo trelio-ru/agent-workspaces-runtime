@@ -234,7 +234,12 @@ publication tooling также остаются вне этого публичн
   Его отдельная input copy живёт до native settle, чтобы caller cleanup не менял
   ещё выполняющуюся запись OS. Secret delivery идёт только после выбора Node.
   Обычный запуск не использует DevTools pipe/port или WebDriver spoof.
-  Debugger adapter имеет только fixed Page/Input команды. Cookie API отдельно
+  Debugger adapter имеет только fixed Page/Input и response-only Fetch guard,
+  без чтения body/headers в MCP. Headerless HTTP redirects разрешаются по status;
+  конечный main document требует HTML и не может стать download. MIME exception
+  DNR даётся exact tab только после включения Fetch; новые popups и subframes
+  сохраняют строгий DNR default. Detach отзывает exception и блокирует input
+  до завершения policy write. Cookie API отдельно
   обслуживает private session-auth: signed domain scope, bounded schema, CHIPS
   identity и AEAD snapshot, без cookie-valued полей в MCP. Restore идёт до
   provider navigation и не повторяется при reconnect.
