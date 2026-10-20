@@ -198,7 +198,7 @@ publication tooling также остаются вне этого публичн
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
-  image-only MCP, managed Chromium с private live profile и AEAD snapshot
+  image-only MCP по умолчанию с явным text opt-in, managed Chromium с private live profile и AEAD snapshot
   после нормальной остановки, native OS keyring, company/member claim и
   непродлеваемая lease. Собственный capture удаляет bounded ancillary iCCP без
   распаковки/выдачи профиля; CRC и весь PNG проверяются, обычный MCP validator

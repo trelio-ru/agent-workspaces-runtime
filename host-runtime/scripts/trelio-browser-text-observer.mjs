@@ -22,7 +22,7 @@ export function installTextObserver() {
     let text = '', visited = 0;
     for (let node; (node = walker.nextNode()) && ++visited <= 64 && text.length < 160;) {
       const parent = node.parentElement;
-      if (!parent || parent.closest('textarea,select,option,script,style,[contenteditable="true"]') || hidden(parent)) continue;
+      if (!parent || parent.closest('textarea,select,option,script,style,[contenteditable],[role="textbox"]') || hidden(parent)) continue;
       text += ' ' + node.textContent;
     }
     return clean(text, 160);
@@ -41,7 +41,7 @@ export function installTextObserver() {
     for (let node; (node = walker.nextNode());) {
       if (++visited > 20_000 || characters >= 100_000) { scanLimited = true; break; }
       const parent = node.parentElement;
-      if (!parent || parent.closest('script,style,noscript,template,textarea,select,option,[contenteditable="true"]') || hidden(parent)) continue;
+      if (!parent || parent.closest('script,style,noscript,template,textarea,select,option,[contenteditable],[role="textbox"]') || hidden(parent)) continue;
       // Keep long rendered nodes pageable; cap only the total scan, not an
       // arbitrary per-node prefix that would silently lose an ad description.
       const remaining = 100_000 - characters;
@@ -68,9 +68,11 @@ export function installTextObserver() {
       if (r.width < 2 || r.height < 2 || r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) continue;
       const hit = document.elementFromPoint(x, y);
       if (!hit || (hit !== element && !element.contains(hit))) continue;
-      const field = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName);
+      // ARIA textboxes and plaintext-only editables are field values too.
+      // Never use their innerText as a label or leak a saved message draft.
+      const field = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName) || element.isContentEditable || element.getAttribute('role') === 'textbox';
       const label = clean(element.getAttribute('aria-label') || fieldLabel(element) || element.getAttribute('placeholder') || (!field && element.innerText) || element.getAttribute('title'), 120);
-      const role = element.tagName === 'A' ? 'link' : ['INPUT', 'TEXTAREA'].includes(element.tagName) ? 'textbox' : element.tagName === 'SELECT' ? 'select' : 'button';
+      const role = element.tagName === 'A' ? 'link' : ['INPUT', 'TEXTAREA'].includes(element.tagName) || element.isContentEditable || element.getAttribute('role') === 'textbox' ? 'textbox' : element.tagName === 'SELECT' ? 'select' : 'button';
       if (!label) continue;
       if (!controls.some(c => c.role === role && c.label === label && c.x === x && c.y === y)) controls.push({ role, label, x, y });
     }
