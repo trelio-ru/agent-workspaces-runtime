@@ -84,7 +84,7 @@ test('malformed, ambiguous or unavailable owner bindings never become an empty i
     {...valid,ownerUserId:assistantId},{...valid,ownerUserId:'broken'}, {...valid,bindingRevision:'not-a-hash'},
     {...valid,identities:null},{...valid,identities:[row,{...row,bindingId:randomUUID()}]},
     {...valid,identities:[row,{...row,provider:'max'}]},
-    ...['email','Telegram','@ivaschenko'].map(provider=>({...valid,identities:[{...row,provider}]})),
+    ...['email','Telegram','@owner_alias'].map(provider=>({...valid,identities:[{...row,provider}]})),
     ...['',' 321','321\n','x'.repeat(257),321].map(externalUserId=>({...valid,identities:[{...row,externalUserId}]})),
     {...valid,identities:[{...row,bindingId:'bad'}]},
   ];
