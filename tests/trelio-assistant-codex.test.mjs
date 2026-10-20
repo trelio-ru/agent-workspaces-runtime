@@ -177,6 +177,10 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
   assert.ok(input.includes('get_assistant_owner_question'));
   assert.ok(input.includes('never sensitive-action approval'));
+  for(const invariant of ['request_assistant_action','original clientRequestId and fields','only approved','ownerDecisionId',
+    'Denied, expired, stopped or changed data','server rechecks current access and target state']) {
+    assert.ok(input.includes(invariant),`worker receives exact owner-action invariant: ${invariant}`);
+  }
   // A lost/empty history lookup cannot bypass the durable first-attempt fence.
   reads=0;
   await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },options), /DELIVERY_NOT_STARTED/);

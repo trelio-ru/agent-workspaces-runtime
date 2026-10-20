@@ -182,12 +182,13 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'human_login',description:'Never delegate this',inputSchema:shape},
       {name:'create_comment',description:'Current assistant backend write',inputSchema:shape,annotations:{idempotentHint:true}},
       {name:'continue_assistant_workspace_action',description:'Current local action',inputSchema:shape,annotations:{idempotentHint:false}},
+      {name:'request_assistant_action',description:'Live sealed owner action',inputSchema:{...shape,properties:{...shape.properties,operation:{type:'string'},fields:{type:'object'}}}},
       {name:'update_task_due_date',description:'Sensitive; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action']);
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action']);
   assert.deepEqual(tools[1].inputSchema,{type:'object',properties:{},additionalProperties:false});
   assert.deepEqual(Object.keys(shape.properties),['taskPass','runtimeSessionProof']);
   assert.equal(tools[2].annotations.idempotentHint,true);assert.equal(tools[3].annotations.idempotentHint,false);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
@@ -203,6 +204,13 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   await client.callTool('create_comment',body);
   assert.deepEqual(receivedArgs,body,'the current backend owns validation; the host adds no human approval flags');
   assert.equal(calls.slice(beforeWrite).filter(name=>name==='tools/call').length,1,'one write is never replayed');
+  assert.equal(tools[4].annotations.readOnlyHint,false);
+  assert.deepEqual(Object.keys(tools[4].inputSchema.properties).sort(),['fields','operation']);
+  const intent={operation:'clear_task_control',fields:{controlId:randomUUID()},reason:'Confirmed outcome',
+    clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  await client.callTool('request_assistant_action',intent);assert.deepEqual(receivedArgs,intent);
+  const apply={...intent.fields,clientRequestId:intent.clientRequestId,expectedTaskUpdatedAt:intent.expectedTaskUpdatedAt,ownerDecisionId:randomUUID()};
+  await client.callTool('clear_task_control',apply);assert.deepEqual(receivedArgs,apply,'no generated human assertion or replacement intent');
   echoed=true;await assert.rejects(client.callTool('get_task',{}),/INVALID_RESPONSE/);
   broken=true;await assert.rejects(client.callTool('get_task',{}),error=>error.code==='ASSISTANT_MCP_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
   assert.equal((await store.get({origin,kind:'device',id:assistantId})).credential,credential,'failure preserves the exact pairing');
@@ -397,6 +405,8 @@ test('owner dialogue tools use live backend schemas and poll projection keeps on
   assert.ok(ASSISTANT_MCP_READ_TOOLS.includes('get_assistant_owner_question'));
   assert.ok(ASSISTANT_MCP_TOOLS.includes('ask_assistant_owner'));
   assert.ok(!ASSISTANT_MCP_READ_TOOLS.includes('ask_assistant_owner'));
+  assert.ok(ASSISTANT_MCP_TOOLS.includes('request_assistant_action'));
+  assert.ok(!ASSISTANT_MCP_READ_TOOLS.includes('request_assistant_action'));
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),questionId=randomUUID();
   const store=memoryStore();await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'a'.repeat(43)}`,expiresAt:10000});
   const event={id:randomUUID(),revision:'1',taskId:randomUUID(),wake:true,bindingId:randomUUID(),bindingRevision:0,taskState:'accepted',ownerQuestionId:questionId};

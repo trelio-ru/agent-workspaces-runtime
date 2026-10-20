@@ -583,3 +583,18 @@ never silently migrated, ignored or reset. Read-only inspection caches may be
 rebuilt under their current exact identity. The actual Windows preflight test
 uses the same native chdir and asserts a bounded cwd; no OS registry, long-path
 policy, ACL or shell setting is changed.
+
+### Exact owner action client
+
+`request_assistant_action` is a guarded write in the live backend catalog, never
+a copied local validator or human-MCP alias. The host strips only managed
+pass/proof root fields from discovery and forwards the chosen native business
+fields unchanged. The backend remains responsible for sealing target state,
+current ACL and one-use decisions. General answers do not grant actions.
+The task prompt requires the worker to save the original request UUID/fields and
+question in its own accepted WORK.md, finish independent work, then wait. A reply
+wake reads that exact persisted question. Only an approved action can be sent to
+the original native operation with ownerDecisionId, original UUID/fields and
+fresh task context. Denied/expired/changed intent never permits replay or a
+human-proposal fallback. No additional source text is put into queue events,
+argv or the native chat start context. The permanent chat and cycle are reused.
