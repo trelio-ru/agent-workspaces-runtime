@@ -314,6 +314,8 @@ publication tooling также остаются вне этого публичн
 - Для личных аккаунтов, их миграции и гонок блокировок читай
   [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков);
   provider credential code остаётся вне host.
+  Справка и синтаксический отказ обрабатываются до account I/O/import;
+  неизвестная операция не требует ревизии и не запускает provider.
   Ошибка importer сохраняет закрытую причину и numeric exit, без provider
   stdout/stderr или private paths; отказ не превращается в пустой импорт.
   Windows gate проверяет настоящий публичный Python provider как read-only input.

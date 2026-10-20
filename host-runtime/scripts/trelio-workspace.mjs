@@ -25,7 +25,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
-import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, splitAccountArguments, SkillAccountError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
+import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
@@ -1457,7 +1457,7 @@ const RUN_STORAGE_CONTINUATION_COMMANDS = new Set([
 ]);
 
 export const formatBridgeCommandError = (error, command = "") => {
-  if (error instanceof SkillAccountImportError) return JSON.stringify(error);
+  if (error instanceof SkillAccountImportError || error instanceof SkillAccountCommandError) return JSON.stringify(error);
   if (error instanceof NativeCheckpointError) return JSON.stringify(error);
   if (error instanceof ProcessDiagnosticError) return JSON.stringify(error);
   if (error instanceof BridgeTransportError || error instanceof HostRuntimeRecoveryError) return JSON.stringify(error);
@@ -8221,6 +8221,14 @@ const discoverSkillAccounts = async ({ artifact, runtimeDirectory, executionCont
 export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, executionContext,
   runtimeArguments, catalogueDirectory = CONFIG_DIRECTORY,
   discover = discoverSkillAccounts, output = value => process.stdout.write(`${JSON.stringify(value)}\n`) }) => {
+  // Admission/signature checks belong to skillCommand above. This local syntax
+  // pass must precede account I/O: even an empty legacy import writes a durable
+  // marker and may spawn the provider. Help and malformed input need neither.
+  const command = parseAccountCommand(runtimeArguments);
+  if (command?.help) {
+    output({ ok: true, help: command.help }); return { handled: true };
+  }
+  const parsed = command ? null : splitAccountArguments(runtimeArguments);
   const scope = accountScope({ origin, skillId: artifact.skillId, companyId: executionContext.companyId,
     memberId: executionContext.localIdentity?.memberId,
     connectionId: executionContext.localIdentity?.connectionId ?? null });
@@ -8229,27 +8237,13 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     checkDirectory: directory => assertPrivatePathKind(directory, "directory"),
   } });
   await catalogue.importOnce(() => discover({ artifact, runtimeDirectory, executionContext }));
-  if (runtimeArguments.length === 1 && runtimeArguments[0] === 'accounts') {
+  if (command?.operation === 'list') {
     output({ ok: true, ...await catalogue.list() }); return { handled: true };
   }
-  if (runtimeArguments[0] === 'account') {
-    const operation = runtimeArguments[1];
-    if (operation === 'list' && runtimeArguments.length === 2) {
-      output({ ok: true, ...await catalogue.list() }); return { handled: true };
-    }
-    const options = {};
-    for (let index = 2; index < runtimeArguments.length; index += 2) {
-      const key = runtimeArguments[index], value = runtimeArguments[index + 1];
-      if (!['--id', '--name', '--comment', '--expected-revision'].includes(key) ||
-          Object.hasOwn(options, key) || value === undefined) throw new SkillAccountError('ACCOUNT_ARGUMENTS_INVALID');
-      options[key] = value;
-    }
-    if (!/^\d+$/u.test(options['--expected-revision'] || '')) throw new SkillAccountError('ACCOUNT_REVISION_REQUIRED');
-    const result = await catalogue.change({ operation, id: options['--id'] || (operation === 'create' ? crypto.randomUUID() : null),
-      name: options['--name'], comment: options['--comment'], expectedRevision: Number(options['--expected-revision']) });
+  if (command) {
+    const result = await catalogue.change({ ...command, id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });
     output({ ok: true, ...result, ...await catalogue.list() }); return { handled: true };
   }
-  const parsed = splitAccountArguments(runtimeArguments);
   const account = await catalogue.select(parsed.accountId);
   return { handled: false, account, runtimeArguments: parsed.providerArguments };
 };

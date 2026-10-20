@@ -22,6 +22,94 @@ export class SkillAccountError extends Error {
   constructor(code) { super(code); this.name = 'SkillAccountError'; this.code = code; }
 }
 
+const ACCOUNT_COMMANDS = {
+  list: 'account list',
+  create: 'account create --name NAME [--id UUID] [--comment TEXT] --expected-revision N',
+  update: 'account update --id UUID [--name NAME] [--comment TEXT] --expected-revision N',
+  bind: 'account bind --id UUID --expected-revision N',
+  unbind: 'account unbind --id UUID --expected-revision N',
+  default: 'account default --id UUID --expected-revision N',
+};
+const isAccountOperation = operation => Object.hasOwn(ACCOUNT_COMMANDS, operation);
+const isHelpFlag = value => value === '--help' || value === '-h';
+const accountCommandHelp = operation => ({
+  usage: operation ? [ACCOUNT_COMMANDS[operation]] : Object.values(ACCOUNT_COMMANDS),
+  help: 'account help [OPERATION] | account [OPERATION] --help',
+  notes: [
+    'Перед изменением выполните account list (alias accounts) и возьмите revision для --expected-revision.',
+    'update требует хотя бы один из --name/--comment; unbind сохраняет сессию, default действует в текущей компании.',
+  ],
+});
+
+/** Syntax recovery is static: neither argv nor catalogue/provider state may be
+ * reflected into diagnostics. Keep the stable error code and a usable command
+ * together so callers do not mistake help/typos for a request to retry a write. */
+export class SkillAccountCommandError extends SkillAccountError {
+  constructor(code, operation) {
+    super(code);
+    this.details = { operation: 'account_command', ...accountCommandHelp(isAccountOperation(operation) ? operation : null) };
+  }
+  toJSON() { return { code: this.code, message: this.message, details: this.details }; }
+}
+
+/** Parse the host-owned command before creating a catalogue or probing a signed
+ * provider. Help is accepted only as an exact command shape, never by searching
+ * all tokens: a metadata value of "--help" must stay data, and trailing garbage
+ * must not hide an invalid write. Provider argv retains its own syntax. */
+export function parseAccountCommand(args) {
+  const check = (condition, code = 'ACCOUNT_ARGUMENTS_INVALID', operation) => {
+    if (!condition) throw new SkillAccountCommandError(code, operation);
+  };
+  check(Array.isArray(args) && args.every(value => typeof value === 'string'));
+  if (args[0] === 'accounts') {
+    check(args.length === 1);
+    return { operation: 'list' };
+  }
+  if (args[0] !== 'account') return null;
+  const operation = args[1];
+  if (args.length === 1 || args.length === 2 && (operation === 'help' || isHelpFlag(operation))) {
+    return { help: accountCommandHelp() };
+  }
+  if (operation === 'help') {
+    check(isAccountOperation(args[2]), 'ACCOUNT_OPERATION_INVALID');
+    check(args.length === 3);
+    return { help: accountCommandHelp(args[2]) };
+  }
+  // Reject unknown operations before looking for mutation-only arguments. This
+  // prevents `account --help` or a typo from asking for a catalogue revision.
+  check(isAccountOperation(operation), 'ACCOUNT_OPERATION_INVALID');
+  if (args.length === 3 && isHelpFlag(args[2])) return { help: accountCommandHelp(operation) };
+  if (operation === 'list') {
+    check(args.length === 2, 'ACCOUNT_ARGUMENTS_INVALID', operation);
+    return { operation };
+  }
+  const options = {};
+  const allowed = ['--id', '--expected-revision', ...(['create', 'update'].includes(operation) ? ['--name', '--comment'] : [])];
+  for (let index = 2; index < args.length; index += 2) {
+    const key = args[index], value = args[index + 1];
+    check(allowed.includes(key) && !Object.hasOwn(options, key) && value !== undefined,
+      'ACCOUNT_ARGUMENTS_INVALID', operation);
+    options[key] = value;
+  }
+  const revision = options['--expected-revision'];
+  check(/^\d+$/u.test(revision || '') && Number.isSafeInteger(Number(revision)), 'ACCOUNT_REVISION_REQUIRED', operation);
+  const id = options['--id'];
+  check(operation === 'create' && id === undefined || UUID.test(id || ''), 'ACCOUNT_ARGUMENTS_INVALID', operation);
+  check(operation !== 'create' || options['--name'] !== undefined, 'ACCOUNT_ARGUMENTS_INVALID', operation);
+  check(operation !== 'update' || options['--name'] !== undefined || options['--comment'] !== undefined,
+    'ACCOUNT_ARGUMENTS_INVALID', operation);
+  // Validate metadata before import as well. The catalogue repeats these guards
+  // inside its transaction for direct callers; parsing does not weaken CAS.
+  try {
+    if (options['--name'] !== undefined) accountText(options['--name'], 120);
+    if (options['--comment'] !== undefined) accountText(options['--comment'], 2000, { empty: true });
+  } catch (error) {
+    if (!(error instanceof SkillAccountError)) throw error;
+    throw new SkillAccountCommandError(error.code, operation);
+  }
+  return { operation, id, name: options['--name'], comment: options['--comment'], expectedRevision: Number(revision) };
+}
+
 /** Preserve the pre-login failure without reflecting provider output. A child
  * can put private paths, credentials or arbitrary text in any Error property;
  * only closed host-observed categories and a numeric OS exit may cross this

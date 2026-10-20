@@ -204,6 +204,111 @@ test('host dispatch lists before setup, binds explicitly and removes only its ac
   await assert.rejects(prepareSkillAccount({ ...other, runtimeArguments: ['doctor', '--local-account', id] }), { code: 'ACCOUNT_NOT_BOUND' });
 });
 
+test('account help is static and never imports, creates a catalogue or reads an existing path', async t => {
+  const { directory } = await fixture(t), outputs = [];
+  const operations = ['list', 'create', 'update', 'bind', 'unbind', 'default'];
+  const commands = [['account'], ['account', '--help'], ['account', '-h'], ['account', 'help'],
+    ...operations.flatMap(operation => [['account', operation, '--help'], ['account', operation, '-h'], ['account', 'help', operation]])];
+  const base = { origin: identity.origin, artifact: { skillId: identity.skillId }, runtimeDirectory: directory,
+    executionContext: { companyId: company, localIdentity: { memberId: member, connectionId: connection } },
+    discover: () => assert.fail('help must not spawn the importer'), output: value => outputs.push(value) };
+  // A non-directory root would refuse protected catalogue access. Help must
+  // still work without inspecting or repairing that path or its private data.
+  const occupied = path.join(directory, 'occupied');
+  await fs.writeFile(occupied, 'PRIVATE_CANARY');
+  for (const catalogueDirectory of [path.join(directory, 'absent'), occupied]) {
+    for (const runtimeArguments of commands) {
+      assert.deepEqual(await prepareSkillAccount({ ...base, catalogueDirectory, runtimeArguments }), { handled: true });
+      const result = outputs.at(-1);
+      assert.equal(result.ok, true);
+      const operation = runtimeArguments[1] === 'help' ? runtimeArguments[2]
+        : operations.includes(runtimeArguments[1]) ? runtimeArguments[1] : null;
+      assert.equal(result.help.usage.length, operation ? 1 : operations.length);
+      assert.ok(result.help.usage.every(usage => usage.startsWith(`account ${operation || ''}`)));
+      assert.ok(result.help.notes.some(note => note.includes('account list') && note.includes('--expected-revision')));
+      assert.equal(JSON.stringify(result).includes('PRIVATE_CANARY'), false);
+    }
+  }
+  assert.deepEqual(await fs.readdir(directory), ['occupied']);
+  assert.equal(await fs.readFile(occupied, 'utf8'), 'PRIVATE_CANARY');
+});
+
+test('invalid account commands fail before import with precise codes and static syntax recovery', async t => {
+  const { directory } = await fixture(t), id = crypto.randomUUID();
+  const revision = ['--expected-revision', '0'];
+  const invalid = [
+    [['account', 'PRIVATE_CANARY'], 'ACCOUNT_OPERATION_INVALID'],
+    [['account', 'PRIVATE_CANARY', ...revision], 'ACCOUNT_OPERATION_INVALID'],
+    [['account', '--unknown'], 'ACCOUNT_OPERATION_INVALID'],
+    [['account', 'help', 'PRIVATE_CANARY'], 'ACCOUNT_OPERATION_INVALID'],
+    [['account', 'help', 'list', 'PRIVATE_CANARY'], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'list', ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'list', '--help', 'PRIVATE_CANARY'], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['accounts', 'PRIVATE_CANARY'], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'create', '--unknown', 'PRIVATE_CANARY'], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'create', '--name'], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'create', '--name', 'A', '--name', 'PRIVATE_CANARY', ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'create', '--name', 'A'], 'ACCOUNT_REVISION_REQUIRED'],
+    ...['-1', '1.5', 'PRIVATE_CANARY', '9007199254740992'].map(value =>
+      [['account', 'create', '--name', 'A', '--expected-revision', value], 'ACCOUNT_REVISION_REQUIRED']),
+    [['account', 'create', ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'create', '--name', ' ', ...revision], 'ACCOUNT_TEXT_INVALID'],
+    [['account', 'create', '--name', 'A', '--id', 'PRIVATE_CANARY', ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'update', '--id', id, ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    [['account', 'update', '--name', 'A', ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    ...['bind', 'unbind', 'default'].flatMap(operation => [
+      [['account', operation, ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+      [['account', operation, '--id', id, '--name', 'PRIVATE_CANARY', ...revision], 'ACCOUNT_ARGUMENTS_INVALID'],
+    ]),
+    [['doctor', '--local-account', id, '--local-account', id], 'ACCOUNT_SELECTOR_INVALID'],
+  ];
+  for (const [runtimeArguments, code] of invalid) {
+    await assert.rejects(prepareSkillAccount({ origin: identity.origin, artifact: { skillId: identity.skillId },
+      runtimeDirectory: directory, catalogueDirectory: directory,
+      executionContext: { companyId: company, localIdentity: { memberId: member, connectionId: connection } },
+      runtimeArguments, discover: () => assert.fail('invalid input must not spawn the importer'),
+      output: () => assert.fail('invalid input must not return success'),
+    }), error => {
+      assert.equal(error.code, code);
+      const formatted = formatBridgeCommandError(error);
+      assert.equal(formatted.includes('PRIVATE_CANARY'), false);
+      if (code !== 'ACCOUNT_SELECTOR_INVALID') {
+        const payload = JSON.parse(formatted);
+        assert.equal(payload.code, code);
+        assert.equal(payload.details.operation, 'account_command');
+        assert.ok(payload.details.help.includes('--help'));
+        assert.ok(payload.details.usage.length > 0);
+      }
+      return true;
+    });
+    assert.deepEqual(await fs.readdir(directory), []);
+  }
+});
+
+test('valid account commands retain metadata values, catalogue revision guards and company bindings', async t => {
+  const { directory, make } = await fixture(t), outputs = [];
+  let imports = 0;
+  const run = runtimeArguments => prepareSkillAccount({ origin: identity.origin, artifact: { skillId: identity.skillId },
+    runtimeDirectory: directory, catalogueDirectory: directory,
+    executionContext: { companyId: company, localIdentity: { memberId: member, connectionId: connection } },
+    runtimeArguments, discover: async () => { imports++; return []; }, output: value => outputs.push(value) });
+  await run(['accounts']);
+  const initial = outputs.at(-1), id = crypto.randomUUID();
+  await run(['account', 'create', '--id', id, '--name', '--help', '--expected-revision', String(initial.revision)]);
+  assert.equal(outputs.at(-1).accounts[0].name, '--help');
+  const revision = outputs.at(-1).revision;
+  await assert.rejects(run(['account', 'update', '--id', id, '--name', 'Stale', '--expected-revision', String(initial.revision)]),
+    { code: 'ACCOUNT_CATALOGUE_CONFLICT' });
+  assert.equal((await make().list()).revision, revision);
+  await run(['account', 'update', '--id', id, '--comment', '', '--expected-revision', String(revision)]);
+  for (const operation of ['unbind', 'bind', 'default']) {
+    await run(['account', operation, '--id', id, '--expected-revision', String(outputs.at(-1).revision)]);
+    assert.equal(outputs.at(-1).accounts[0].bound, operation !== 'unbind');
+  }
+  assert.equal(outputs.at(-1).accounts[0].default, true);
+  assert.equal(imports, 1);
+});
+
 test('a confirmed dead writer is recovered without resetting imported accounts', async t => {
   const { directory, make } = await fixture(t), catalogue = make();
   const id = crypto.randomUUID();

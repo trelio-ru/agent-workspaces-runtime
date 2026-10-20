@@ -2014,6 +2014,19 @@ deadline и не повторяет изменение каталога. При 
 `account list` (alias `accounts`) возвращает только id/name/comment/bound/default
 и revision. Общий каталог доступен локальному OS user; между устройствами не
 синхронизируется. Назначения Trelio и личные правила остаются company-scoped.
+`account`, `account --help`/`-h` и `account help` возвращают статическую JSON-справку;
+`account OPERATION --help`/`-h` и `account help OPERATION` – синтаксис одной
+из операций list/create/update/bind/unbind/default. Host разбирает команды,
+аргументы и provider selector до создания каталога и legacy import: справка и
+некорректный ввод не читают аккаунты, не создают каталоги/markers и не запускают
+provider. Live admission, scope и signature перед host dispatch сохраняются.
+Неизвестная операция возвращает `ACCOUNT_OPERATION_INVALID`, неверные аргументы –
+`ACCOUNT_ARGUMENTS_INVALID`; только распознанная mutation требует
+`ACCOUNT_REVISION_REQUIRED` при отсутствующей/некорректной ревизии. Синтаксические
+ошибки содержат JSON с исходным code и статическими usage/help, без argv и
+private metadata. `list` не принимает mutation flags, а имя/комментарий `--help`
+остаются данными. Ревизия – неотрицательный safe integer; CAS проверяется заново
+внутри транзакции. Корректная команда впервые запускает обычный legacy import.
 Create принимает name/comment и optional UUID; update – exact UUID и новые
 метаданные. Bind/unbind/default меняют только текущую компанию. Все изменения
 требуют `--expected-revision`. Unbind не удаляет сессию. Между компаниями аккаунт
