@@ -1,4 +1,4 @@
-import { validateTextResult, TEXT_KIND } from './trelio-browser-text-result.mjs';
+import { validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 

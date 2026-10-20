@@ -1,7 +1,5 @@
-import { installTextObserver } from './trelio-browser-text-observer.mjs';
-import { createBrowserRequestPacing } from './trelio-browser-request-pacing.mjs';
-import { createBrowserTabBudget } from './trelio-browser-tab-budget.mjs';
-import { validateTextResult, TEXT_KIND } from './trelio-browser-text-result.mjs';
+import { createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
+import { installTextObserver, validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';

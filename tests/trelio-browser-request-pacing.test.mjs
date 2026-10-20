@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
-import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-request-pacing.mjs';
+import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 
 function harness(factory, { random = () => 0, early = false, deferred = false } = {}) {
   let time = 100;

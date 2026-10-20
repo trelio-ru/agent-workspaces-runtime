@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
-import { TEXT_KIND, validateTextResult } from '../host-runtime/scripts/trelio-browser-text-result.mjs';
+import { TEXT_KIND, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
 const sample = () => ({ kind: TEXT_KIND, state: 'ready', reason: 'none', sessionId: '12345678-1234-4234-8234-123456789012', frameId: '12345678-1234-4234-8234-123456789013', width: 1440, height: 1000, scroll: { up: false, down: true, left: false, right: false }, title: 'Fixture', text: 'Объявление', controls: [{ role: 'button', label: 'Найти', x: 200, y: 100 }], nextOffset: null, scanLimited: false });
 test('text projection rejects extra data, excessive content and invalid coordinates', () => {
   assert.equal(validateTextResult(sample()).kind, TEXT_KIND);

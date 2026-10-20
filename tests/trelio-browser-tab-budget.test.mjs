@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-tab-budget.mjs';
-import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-request-pacing.mjs';
+import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
+import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
 import { visualExtensionWorker } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 

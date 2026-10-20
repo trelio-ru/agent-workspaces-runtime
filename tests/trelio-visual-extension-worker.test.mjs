@@ -1,5 +1,5 @@
-import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-request-pacing.mjs';
-import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-tab-budget.mjs';
+import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-policy.mjs';
+import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
