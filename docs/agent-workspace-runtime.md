@@ -2120,6 +2120,41 @@ SQLite, dependency bootstrap или запросов провайдера.
 `tests/trelio-skill-accounts.test.mjs`; provider storage/approval tests принадлежат
 `trelio-ru/agent-skills`.
 
+### Внутренний consumer фонового чтения
+
+`runMaterializedAgentSkill` сохраняет обычный interactive stdout/exit ABI.
+Host-only `captureOutput` вызывает тот же выбор signed entrypoint, проверенный
+Node/Python interpreter, isolated Python startup и построение current
+company/member/connection/account/browser environment. Другого verifier,
+credential store, OAuth path, shell или provider implementation здесь нет.
+До вызова по-прежнему обязательны live admission, scope, проверка signature/
+bytes/file inventory и выбор bound account. Сам executor их не выдаёт.
+
+Private capture допускает только reviewed `monitor` command, до 64 string args,
+каждый до 16 384 символов, без setup callback, checkout env или stdin grant.
+Это внутренняя опция, не model-facing flag/command. Строка `monitor` сама по себе
+не доказывает read-only semantics непроверенного package: source registration
+должна разрешать exact reviewed provider/release/protocol. Источник и его
+следующий poll этой функцией не создаются и не активируются.
+
+Capture закрывает stdin, не наследует terminal, не выводит stdout/stderr
+пользователю и удаляет inherited `CODEX_THREAD_ID`: у model-free чтения нет
+наблюдённого task conversation. Выбор существующего account и current company
+bindings сохраняется. Бюджет по monotonic clock 1–180 секунд (60 по умолчанию)
+включает подготовку interpreter; signed browser lease может лишь сократить его.
+Abort, timeout, native exit и output overflow не повторяют subprocess или login.
+Оба pipe ограничены 1 MiB каждый; это private process budget, не повышение
+MCP envelope limit. Only complete strict UTF-8 stdout возвращается доверенному
+in-process consumer; он обязан разобрать source DTO и проецировать structural
+refs до SQLite/model boundary. Raw stderr и exec exception никогда не становятся
+диагностикой; byte copies обнуляются после decode/failure.
+
+Actual child-process tests проверяют stdin EOF, literal argv, current identity,
+изоляцию account/company, отсутствие inherited chat, разрезанные UTF-8 chars,
+invalid UTF-8, bounded stdout/stderr, numeric exit, cancellation/timeout и
+отсутствие replay. Source tests не подтверждают live source admission, новый
+provider deployment либо Windows desktop readiness.
+
 ## Исходные аргументы local continuation
 
 Backend возвращает готовый `providerSelection.arguments`: ограниченные

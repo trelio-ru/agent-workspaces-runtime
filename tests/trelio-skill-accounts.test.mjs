@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { accountScope, accountText, createAccountCatalogue, splitAccountArguments, SkillAccountImportError } from '../host-runtime/scripts/trelio-skill-accounts.mjs';
-import { prepareSkillAccount, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment, formatBridgeCommandError } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { prepareSkillAccount, runMaterializedAgentSkill, assertPrivatePathKind, ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, buildAgentSkillRuntimeEnvironment, formatBridgeCommandError } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 
 const company = crypto.randomUUID(), member = crypto.randomUUID(), connection = crypto.randomUUID();
@@ -408,4 +408,113 @@ test('missing import executable preserves a safe startup cause and no catalogue 
       { operation: 'account_import', reason: 'process_start', causeCode: 'ENOENT' });
     return true;
   });
+});
+
+// The model-free reader reuses the actual materialized-provider executor. These
+// fixtures are real child processes in a temporary package, with no catalogue,
+// session, OAuth, network or credential access. A fake spawn cannot verify EOF,
+// multibyte pipes, cancellation, code-page handling or native process exits.
+async function monitorFixture(t, source, interpreter = 'node') {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-monitor-process-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const entry = interpreter === 'python' ? 'main.py' : 'main.mjs';
+  await fs.writeFile(path.join(directory, entry), source);
+  const account = { id: crypto.randomUUID(), companyBinding: 'a'.repeat(64), providerRef: null };
+  const input = { artifact: { skillId: 'synthetic-monitor', runtimeVersion: '1.0.0',
+    parsedPackage: { entrypoint: { path: entry, interpreter }, capabilities: ['local-session','local-accounts-v1'] } },
+    runtimeDirectory: directory, runtimeArguments: ['monitor'], captureOutput: true,
+    executionContext: { companyId: company, projectId: null, releaseId: crypto.randomUUID(), account,
+      localIdentity: { memberId: member, connectionId: connection },
+      companyConnection: { id: connection, config: {} } } };
+  return { input, run: overrides => runMaterializedAgentSkill({ ...input, ...overrides }) };
+}
+
+test('private monitor uses ordinary bound identity, literal argv and EOF without inheriting a Codex chat', async t => {
+  const previous = process.env.CODEX_THREAD_ID;
+  process.env.CODEX_THREAD_ID = 'synthetic-stale-thread';
+  t.after(() => { if (previous === undefined) delete process.env.CODEX_THREAD_ID; else process.env.CODEX_THREAD_ID = previous; });
+  const f = await monitorFixture(t, `let input='';
+    for await (const chunk of process.stdin) input+=chunk;
+    const value={input,args:process.argv.slice(2),company:process.env.TRELIO_SKILL_COMPANY_ID,
+      member:process.env.TRELIO_SKILL_MEMBER_ID,account:JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON),
+      chat:process.env.CODEX_THREAD_ID??null};
+    process.stderr.write('PRIVATE_DIAGNOSTIC');process.stdout.write(JSON.stringify(value));`);
+  const literal = '$(echo SHOULD_NOT_EXECUTE) & literal';
+  const value = JSON.parse((await f.run({ runtimeArguments: ['monitor','--cursor',literal] })).stdout);
+  assert.equal(value.input, '');
+  assert.deepEqual(value.args, ['monitor','--cursor',literal]);
+  assert.equal(value.company, company); assert.equal(value.member, member);
+  assert.deepEqual(value.account, f.input.executionContext.account);
+  assert.equal(value.chat, null);
+  assert.doesNotMatch(JSON.stringify(value), /PRIVATE_DIAGNOSTIC/u);
+});
+
+test('private monitor preserves split UTF-8 and actual isolated Python execution', async t => {
+  const f = await monitorFixture(t, `const bytes=Buffer.from('Ирина ✓');
+    for (let i=0;i<bytes.length;i++) {process.stdout.write(bytes.subarray(i,i+1));await new Promise(r=>setTimeout(r,1));}`);
+  assert.deepEqual(await f.run(), { stdout: 'Ирина ✓' });
+  const python = await monitorFixture(t, 'import json, sys\nprint(json.dumps({"args":sys.argv[1:],"input":sys.stdin.read(),"isolated":sys.flags.isolated}))\n', 'python');
+  const value = JSON.parse((await python.run()).stdout);
+  assert.deepEqual(value, { args: ['monitor'], input: '', isolated: 1 });
+});
+
+test('private monitor rejects invalid UTF-8 and bounded stdout or stderr without copying private bytes', async t => {
+  for (const [source, code] of [
+    ["process.stdout.write(Buffer.from([255]));", 'TRELIO_SKILL_RUNTIME_OUTPUT_INVALID'],
+    ["process.stdout.write('PRIVATE'.repeat(200000));", 'TRELIO_SKILL_RUNTIME_OUTPUT_LIMIT'],
+    ["process.stderr.write('PRIVATE'.repeat(200000));", 'TRELIO_SKILL_RUNTIME_OUTPUT_LIMIT'],
+  ]) {
+    const f = await monitorFixture(t, source);
+    await assert.rejects(f.run(), error => {
+      assert.equal(error.code, code);
+      assert.doesNotMatch(JSON.stringify(error), /PRIVATE|stdout|stderr|main\.mjs|trelio-monitor-process/u);
+      return true;
+    });
+  }
+});
+
+test('private monitor preserves numeric provider exit and never retries a failed subprocess', async t => {
+  const f = await monitorFixture(t, `import fs from 'node:fs';
+    fs.appendFileSync('attempts','1');process.stdout.write('PRIVATE_STDOUT');
+    process.stderr.write('PRIVATE_STDERR');process.exit(3);`);
+  await assert.rejects(f.run(), error => {
+    assert.equal(error.code, 'TRELIO_SKILL_RUNTIME_EXIT_3');assert.equal(error.details.exitCode, 3);
+    assert.doesNotMatch(JSON.stringify(error), /PRIVATE_|attempts|main\.mjs/u);return true;
+  });
+  assert.equal(await fs.readFile(path.join(f.input.runtimeDirectory, 'attempts'), 'utf8'), '1');
+});
+
+test('private monitor has a bounded deadline and cancellation without replay or inherited terminal prompts', async t => {
+  const f = await monitorFixture(t, 'setInterval(()=>{},1000);');
+  let started = performance.now();
+  await assert.rejects(f.run({ timeoutMs: 1000 }), { code: 'TRELIO_SKILL_RUNTIME_LEASE_EXPIRED' });
+  assert.ok(performance.now() - started < 10_000);
+  const controller = new AbortController();
+  const pending = f.run({ signal: controller.signal });
+  setTimeout(() => controller.abort(), 100);
+  await assert.rejects(pending, error => error.code === 'TRELIO_SKILL_RUNTIME_TERMINATED' && error.details.causeCode === 'ABORT_ERR');
+  controller.abort();
+  await assert.rejects(f.run({ signal: controller.signal }), { code: 'TRELIO_SKILL_RUNTIME_TERMINATED' });
+});
+
+test('private monitor rejects setup, grants, arbitrary commands and invalid budgets before interpreter IO', async t => {
+  const f = await monitorFixture(t, "throw Error('Should never run');");
+  // Use a missing runtime root to make accidentally early interpreter/file IO
+  // observable. Every invalid call must fail at the fixed profile boundary.
+  for (const override of [{ runtimeArguments: ['send'] }, { runtimeArguments: ['account','create'] },
+    { runtimeArguments: ['monitor',123] }, { grantedEnvironment: { SECRET: 'synthetic' } },
+    { grantedStdin: 'synthetic' }, { prepareSetupEnvironment: async () => assert.fail('setup executed') },
+    { timeoutMs: 999 }, { timeoutMs: 180001 }, { signal: {} }]) {
+    await assert.rejects(f.run({ runtimeDirectory: path.join(f.input.runtimeDirectory,'missing'), ...override }),
+      { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
+  }
+});
+
+test('ordinary materialized execution retains its interactive input and exit contract', async t => {
+  const f = await monitorFixture(t, `import fs from 'node:fs';let input='';
+    for await(const chunk of process.stdin) input+=chunk;
+    fs.writeFileSync('ordinary-result',JSON.stringify({args:process.argv.slice(2),input}));`);
+  assert.equal(await f.run({ captureOutput: false, runtimeArguments: ['read'], grantedStdin: 'synthetic-input' }), undefined);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.input.runtimeDirectory,'ordinary-result'),'utf8')),
+    { args: ['read'], input: 'synthetic-input' });
 });

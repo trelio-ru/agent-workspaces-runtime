@@ -357,6 +357,8 @@ publication tooling также остаются вне этого публичн
 - Для личных аккаунтов, их миграции и гонок блокировок читай
   [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков);
   provider credential code остаётся вне host.
+  Private `monitor` capture использует тот же materialized executor: bounded
+  pipes/deadline, EOF, без inherited chat, setup/grants или нового admission.
   Справка и синтаксический отказ обрабатываются до account I/O/import;
   неизвестная операция не требует ревизии и не запускает provider.
   Ошибка importer сохраняет закрытую причину и numeric exit, без provider

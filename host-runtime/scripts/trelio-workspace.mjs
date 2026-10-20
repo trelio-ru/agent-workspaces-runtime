@@ -7640,7 +7640,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
   };
 };
 
-const runMaterializedAgentSkill = async ({
+export const runMaterializedAgentSkill = async ({
   artifact,
   runtimeDirectory,
   runtimeArguments,
@@ -7648,11 +7648,33 @@ const runMaterializedAgentSkill = async ({
   grantedEnvironment = {},
   grantedStdin = null,
   prepareSetupEnvironment = null,
+  captureOutput = false,
+  timeoutMs = 60_000,
+  signal = null,
 }) => {
   // The absolute browser lease covers setup/credential preparation too. A
   // slow owner handoff must consume the same signed budget instead of starting
   // a fresh window only after the setup step returns.
   const runtimeStartedAt = Date.now();
+  const runtimeStartedClock = performance.now();
+  // This is an internal consumer of the ordinary verified execution engine,
+  // not a tool/argv option or a new admission path. A background caller must
+  // first obtain live source authority, verify/materialize the signed package
+  // and select a bound account with the same catalogue used by human calls.
+  // Monitor cannot borrow a secret checkout, run a setup step or wait for a
+  // human prompt on inherited stdin. A provider's command semantics still
+  // belong to its reviewed signed implementation, not this string check.
+  if (captureOutput && (!Array.isArray(runtimeArguments) || runtimeArguments[0] !== 'monitor'
+    || runtimeArguments.length > 64 || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
+    || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 180_000
+    || signal !== null && !(signal instanceof AbortSignal))) {
+    throw Object.assign(new Error('Invalid private monitor invocation.'), { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
+  }
+  if (captureOutput && signal?.aborted) {
+    throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Чтение навыка отменено.',
+      { operation: 'skill_run', causeCode: 'ABORT_ERR' });
+  }
   const entrypointPath = path.join(
     runtimeDirectory,
     ...artifact.parsedPackage.entrypoint.path.split("/"),
@@ -7693,6 +7715,70 @@ const runMaterializedAgentSkill = async ({
   const browserSessionDeadlineAt = Number(
     runtimeEnvironment.TRELIO_BROWSER_SESSION_DEADLINE_AT || 0,
   );
+  if (captureOutput) {
+    // A model-free poll has no active Codex conversation. Never leak a stale
+    // persistent MCP process's inherited chat ID into a provider prompt/route.
+    delete runtimeEnvironment.CODEX_THREAD_ID;
+    // A single monotonic budget includes interpreter/bootstrap preparation.
+    // The signed browser lease can shorten it, never extend it. execFile owns
+    // bounded pipes and destroys them when timeout/overflow kills the child;
+    // neither inherited stdio nor a provider-created prompt can stall the host.
+    const budget = Math.min(timeoutMs,
+      browserSessionDeadlineAt > 0 ? browserSessionDeadlineAt - runtimeStartedAt : Infinity);
+    const remaining = budget - (performance.now() - runtimeStartedClock);
+    if (signal?.aborted) {
+      throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Чтение навыка отменено.',
+        { operation: 'skill_run', causeCode: 'ABORT_ERR' });
+    }
+    if (remaining <= 0) {
+      throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED', 'Истёк срок фонового чтения навыка.', { operation: 'skill_run' });
+    }
+    let result;
+    try {
+      const pending = execFileAsync(executable, args, {
+        cwd: runtimeDirectory, env: runtimeEnvironment, shell: false, windowsHide: true,
+        encoding: 'buffer', maxBuffer: 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
+        killSignal: 'SIGKILL', ...(signal ? { signal } : {}),
+      });
+      // No input values are supplied. Close immediately so a misconfigured
+      // provider fails rather than consuming the user's terminal/session.
+      pending.child.stdin.on('error', () => {});
+      pending.child.stdin.end();
+      result = await pending;
+      // Decode only after the pipe is complete. Chunk-level toString() can
+      // corrupt a multibyte character; replacement decoding could turn an
+      // invalid native ID/checkpoint into a different valid JSON reference.
+      return { stdout: new TextDecoder('utf-8', { fatal: true }).decode(result.stdout) };
+    } catch (error) {
+      // Never copy an execFile error/cause/command or provider stdout/stderr.
+      // Raw output is private host memory, not model input or diagnostics.
+      if (Buffer.isBuffer(error.stdout)) error.stdout.fill(0);
+      if (Buffer.isBuffer(error.stderr)) error.stderr.fill(0);
+      if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+        throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_OUTPUT_LIMIT', 'Превышен объём результата фонового чтения.', { operation: 'skill_run' });
+      }
+      if (error.code === 'ABORT_ERR') {
+        throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Чтение навыка отменено.', { operation: 'skill_run', causeCode: 'ABORT_ERR' });
+      }
+      if (error.killed && error.signal === 'SIGKILL') {
+        throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED', 'Истёк срок фонового чтения навыка.', { operation: 'skill_run' });
+      }
+      if (Number.isInteger(error.code)) throw skillRuntimeExitError(error.code);
+      if (error.signal) {
+        throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Runtime чтения завершён сигналом.', { operation: 'skill_run', signal: error.signal });
+      }
+      if (error.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') {
+        throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_OUTPUT_INVALID', 'Некорректная кодировка результата фонового чтения.', { operation: 'skill_run' });
+      }
+      throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_START_FAILED', 'Не удалось запустить фоновое чтение навыка.',
+        { operation: 'skill_run', causeCode: processDiagnosticCauseCode(error) });
+    } finally {
+      // The returned string belongs only to the trusted in-process consumer.
+      // Do not retain the extra byte copies after successful decode or failure.
+      result?.stdout?.fill(0);
+      result?.stderr?.fill(0);
+    }
+  }
   const exitCode = await new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: runtimeDirectory,
