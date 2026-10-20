@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import fs from "node:fs/promises";
 import os from "node:os";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -29,6 +29,57 @@ test("host runtime keeps one stable three-mode entrypoint", () => {
   assert.deepEqual(mcp.arguments, []);
 
   assert.throws(() => resolveHostRuntimeInvocation(["unknown"]), /bridge, hook/u);
+});
+
+test("assistant bridge profile selects its own entrypoint and rejects unknown commands before spawn", () => {
+  for (const command of ["mcp", "hook"]) {
+    const invocation = resolveHostRuntimeInvocation(["bridge", "assistant", command]);
+    assert.equal(invocation.profile, "assistant");
+    assert.equal(path.basename(invocation.entrypointPath), "trelio-assistant-entry.mjs");
+    assert.deepEqual(invocation.arguments, [command]);
+  }
+  for (const args of [["bridge", "assistant"], ["bridge", "assistant", "login"],
+    ["bridge", "assistant", "mcp", "--human"]]) {
+    assert.throws(() => resolveHostRuntimeInvocation(args), /ASSISTANT_COMMAND_UNSUPPORTED/);
+  }
+});
+
+test("assistant hook retains the hook clock and never consumes a human Run cwd handoff", async () => {
+  let observed;
+  await runHostRuntime({ rawArguments: ["bridge", "assistant", "hook"],
+    environment: { TRELIO_PLUGIN_VERSION: "3.2.3", TRELIO_HOST_RUNTIME_VERSION: "3.8.12",
+      TRELIO_HOST_RUNTIME_UPDATE_REEXEC: "1", TRELIO_HOST_RUNTIME_BRIDGE_CWD: path.resolve("human-run"),
+      [RUNTIME_HOOK_START_TIME_ENV]: "1000" },
+    spawnProcess: (_command, args, options) => {
+      observed = { args, options };
+      const child = new EventEmitter(); queueMicrotask(() => child.emit("exit", 0)); return child;
+    },
+  });
+  assert.equal(observed.options.env[RUNTIME_HOOK_START_TIME_ENV], "1000");
+  assert.equal(observed.options.env.TRELIO_HOST_RUNTIME_BRIDGE_CWD, undefined);
+  assert.notEqual(observed.options.cwd, path.resolve("human-run"));
+  assert.deepEqual(observed.args.slice(1), ["hook"]);
+});
+
+test("actual runtime assistant MCP discovers setup and broken hooks deny without human auth", async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-assistant-entry-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const entry = fileURLToPath(new URL("../host-runtime/scripts/trelio-host-runtime-entry.mjs", import.meta.url));
+  const env = { ...process.env, HOME: directory, USERPROFILE: directory,
+    LOCALAPPDATA: path.join(directory, "local"), XDG_CACHE_HOME: path.join(directory, "cache"),
+    CODEX_HOME: path.join(directory, "codex"), TRELIO_PLUGIN_VERSION: "3.2.3", TRELIO_HOST_RUNTIME_VERSION: "3.8.12" };
+  const input = [{ jsonrpc: "2.0", id: 1, method: "initialize" },
+    { jsonrpc: "2.0", id: 2, method: "tools/list" }].map(JSON.stringify).join("\n") + "\n";
+  const mcp = spawnSync(process.execPath, [entry, "bridge", "assistant", "mcp"], { env, input, encoding: "utf8", timeout: 20_000 });
+  assert.equal(mcp.status, 0, mcp.stderr);
+  const messages = mcp.stdout.trim().split("\n").map(JSON.parse);
+  assert.equal(messages[0].result.serverInfo.name, "trelio-assistant");
+  assert.deepEqual(messages[1].result.tools.map(tool => tool.name),
+    ["begin_assistant_setup", "finish_assistant_setup", "get_assistant_setup_status"]);
+  const hook = spawnSync(process.execPath, [entry, "bridge", "assistant", "hook"], { env, input: "invalid", encoding: "utf8", timeout: 20_000 });
+  assert.equal(hook.status, 0, hook.stderr);
+  assert.equal(JSON.parse(hook.stdout).hookSpecificOutput.permissionDecision, "deny");
+  assert.deepEqual(await fs.readdir(directory), [], "discovery/denial must not create private state or mutate human configuration");
 });
 
 test("host runtime rejects a production launch without exact component versions", async () => {

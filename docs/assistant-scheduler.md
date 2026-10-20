@@ -134,6 +134,33 @@ concurrent hosts, crash recovery and unknown ID/host claims. Private/transport
 tests cover binding isolation, no plaintext fallback, symlink/ACL refusal,
 no cookie/redirect, response redaction and lost pairing exchange.
 
+## Dedicated plugin entry and setup
+
+The separate assistant plugin selects the existing signed-loader ABI as
+`bridge assistant mcp` or `bridge assistant hook`. The generic entry selects
+`trelio-assistant-entry.mjs` explicitly; unknown subcommands fail before any
+human bridge, config migration, credential access or cache maintenance. Hook
+startup retains the common non-sliding clock and never consumes a human Run cwd.
+
+The setup-only stdio surface exposes begin/finish/status with a non-authorizing
+enrollment UUID. It composes the existing protected S256 journal, OS private store
+and fixed HTTPS client, under one invocation-local Windows native worker. No
+human OAuth/client configuration, owner browser login or credential-valued MCP
+arguments exist. Discovery does not load private storage. Input frames are bounded
+at 128 KiB; unknown tools/fields and raw failures cannot expose the private journal.
+
+An already completed pairing is read back privately and checked by live heartbeat;
+retrying the setup tool never repeats the one-use exchange. An uncertain exchange
+survives restart as recovery_required. Setup output distinguishes paired/contact
+from business readiness. Task-pass admission and the installed background service
+remain required; the current setup profile does not claim or start them. Until
+proof/admission is wired, hooks allow setup only and deny business calls with a
+closed reason and JSON-deny/exit-0, including malformed input on Windows shells.
+
+`trelio-assistant-setup.test.mjs` checks projection, restart fences, real stdio
+frames and denial; the actual generic-entry child test confirms that discovery
+creates no human/private state. These tests do not establish real Windows pairing.
+
 
 ## Authorization renewal
 

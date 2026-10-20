@@ -31,6 +31,12 @@ publication tooling также остаются вне этого публичн
 - Продление device authorization проверяется сервером на каждом fixed endpoint;
   локальная дата pairing не запрещает контакт после owner renewal. Отказ не
   удаляет credential и не разрешает blind retry mutation.
+- Dedicated plugin использует явный `bridge assistant mcp|hook` profile общего
+  signed entry; unknown command не переходит к human bridge/OAuth. Setup-only MCP
+  композирует protected S256/private storage/fixed HTTPS без model credential и
+  не объявляет businessReady. До task-pass admission hooks разрешают только setup,
+  остальные assistant calls получают JSON deny с exit 0. Контракт –
+  [assistant setup](docs/assistant-scheduler.md#dedicated-plugin-entry-and-setup).
 
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
   Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.

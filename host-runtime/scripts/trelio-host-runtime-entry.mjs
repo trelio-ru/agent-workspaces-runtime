@@ -32,6 +32,17 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
     throw new Error("Trelio host runtime ожидает mode bridge, hook или mcp.");
   }
 
+  // Keep the stable three-mode shell ABI. The dedicated plugin selects an
+  // explicit bridge subprofile; neither an unknown assistant command nor a
+  // missing capability may fall through to human bridge/MCP authentication.
+  if (mode === "bridge" && argumentsAfterMode[0] === "assistant") {
+    if (argumentsAfterMode.length !== 2 || !["mcp", "hook"].includes(argumentsAfterMode[1])) {
+      throw new Error("ASSISTANT_COMMAND_UNSUPPORTED");
+    }
+    return { mode, profile: "assistant", entrypointPath: path.join(SCRIPT_DIRECTORY, "trelio-assistant-entry.mjs"),
+      arguments: argumentsAfterMode.slice(1) };
+  }
+
   return {
     mode,
     entrypointPath: path.join(SCRIPT_DIRECTORY, entrypointName),
@@ -46,11 +57,13 @@ export const runHostRuntime = async ({
   startupTrace = createMcpStartupTrace({ environment }),
 } = {}) => {
   const invocation = resolveHostRuntimeInvocation(rawArguments);
+  const isHook = invocation.mode === "hook" || invocation.profile === "assistant" && invocation.arguments[0] === "hook";
+  const isMcp = invocation.mode === "mcp" || invocation.profile === "assistant" && invocation.arguments[0] === "mcp";
   // A downloaded runtime is meaningful only together with the exact shell and
   // runtime releases selected by the signed loader. Rejecting an incomplete
   // launch here keeps every child mode from inventing a stale fallback version.
   requireTrelioComponentVersions(environment);
-  if (invocation.mode === "mcp") startupTrace("runtime_entry");
+  if (isMcp) startupTrace("runtime_entry");
 
   // The signed loader selects/verifies the runtime from its own immutable
   // directory. A bridge hard-gate replay must still run inside the original
@@ -60,6 +73,7 @@ export const runHostRuntime = async ({
   // origin, metadata and fencing remain validated by the bridge itself.
   const handoffDirectory = environment.TRELIO_HOST_RUNTIME_BRIDGE_CWD;
   const bridgeHandoff = invocation.mode === "bridge"
+    && invocation.profile !== "assistant"
     && environment.TRELIO_HOST_RUNTIME_UPDATE_REEXEC === "1"
     && handoffDirectory !== undefined;
   if (bridgeHandoff && (typeof handoffDirectory !== "string"
@@ -68,7 +82,7 @@ export const runHostRuntime = async ({
   }
   const childEnvironment = { ...environment };
   delete childEnvironment.TRELIO_HOST_RUNTIME_BRIDGE_CWD;
-  if (invocation.mode === "hook") {
+  if (isHook) {
     // This process also spends time importing runtime modules before spawning
     // the hook. Start at its Node bootstrap, rather than granting the child a
     // new budget. An exact upgrade replay may only retain an earlier clock.
@@ -96,7 +110,7 @@ export const runHostRuntime = async ({
       },
     );
     // Marks spawn returning, not child readiness or successful initialize.
-    if (invocation.mode === "mcp") startupTrace("mcp_spawn");
+    if (isMcp) startupTrace("mcp_spawn");
 
     child.once("error", reject);
     child.once("exit", (code, signal) => {
@@ -112,9 +126,9 @@ export const runHostRuntime = async ({
 if (isDirectModuleInvocation(import.meta.url)) {
   Promise.resolve().then(() => {
     // Reject invalid modes/versions before even optional cache maintenance.
-    resolveHostRuntimeInvocation(process.argv.slice(2));
+    const invocation = resolveHostRuntimeInvocation(process.argv.slice(2));
     requireTrelioComponentVersions(process.env);
-    startMirrorCacheMaintenance();
+    if (invocation.profile !== "assistant") startMirrorCacheMaintenance();
     return runHostRuntime();
   })
     .then((exitCode) => {
