@@ -360,3 +360,35 @@ test('assistant Workspace preflight binds own protected pass and server Run befo
   await assert.rejects(executeAssistantWorkspacePlan({...plan,scope:{...scope,passId:randomUUID()}},{withProfile,loadCommon:async()=>common}),error=>error.code==='ASSISTANT_WORKSPACE_BINDING_CHANGED');
   assert.equal(files,filesBeforeDenied);
 });
+
+
+test('accepted inspection uses no Run identity, local writable root, renewal or finish registry',async()=>{
+  const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan,createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const plan=workspacePlan(),workspaceId=plan.localAction.parameters.workspaceId;
+  plan.localAction={schemaVersion:1,operation:'inspect',parameters:{workspaceId}};
+  assert.deepEqual((await validateAssistantWorkspacePlan(plan)).runIdentity,{workspaceId});
+  for(const bad of [{...plan.localAction,runIdentity:{workspaceId,runId:randomUUID()}},
+    {...plan.localAction,parameters:{workspaceId,runId:randomUUID()}},
+    {...plan.localAction,parameters:{workspaceId,runtimeSessionId:randomUUID()}}])
+    await assert.rejects(validateAssistantWorkspacePlan({...plan,localAction:bad}));
+  const active={schemaVersion:1,assistantId:plan.scope.assistantUserId,deviceId:plan.scope.deviceId,
+    ...Object.fromEntries(['companyId','taskId','passId'].map(key=>[key,plan.scope[key]])),
+    threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  let allowed=true,calls=0,localRoots=0;
+  const common={resolveWorkspaceBridgeConfigDirectory:()=>os.tmpdir(),requireToken:async()=>({}),request:async(_origin,_token,url)=>{
+    calls++;assert.equal(url,`/api/agent-workspaces/workspaces/${workspaceId}/read-snapshot`);
+    if(!allowed)throw Object.assign(new Error(),{code:'ASSISTANT_ACCESS_DENIED'});
+    return {workspace:{id:workspaceId,scopeType:'task',scopeKey:`task:${plan.scope.taskId}`}};
+  },readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async()=>{localRoots++;},
+    runWorkspaceCommand:async args=>{assert.deepEqual(args,['inspect','--workspace',workspaceId,'--origin','https://trelio.ru']);process.stdout.write('accepted snapshot path');}};
+  const withProfile=async action=>action({identity:{origin:'https://trelio.ru',assistantId:plan.scope.assistantUserId,deviceId:plan.scope.deviceId},
+    host:{readActivePass:async()=>active}});
+  const executor=await createAssistantWorkspaceExecutor({configDirectory:os.tmpdir(),
+    runPlan:raw=>executeAssistantWorkspacePlan(raw,{withProfile,loadCommon:async()=>common})});
+  try{
+    assert.equal((await executor.execute(plan)).stdout,'accepted snapshot path');
+    assert.equal(localRoots,0,'shared reader, not the writable Run adapter, owns its cache');
+    allowed=false;await assert.rejects(executor.execute(plan),error=>error.code==='ASSISTANT_ACCESS_DENIED');
+    assert.equal(calls,2);assert.equal(localRoots,0);
+  }finally{executor.stop();}
+});

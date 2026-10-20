@@ -686,14 +686,16 @@ export const validateAssistantWorkspacePlan = async raw => {
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
-  if(!action || !['open','status','heartbeat','checkpoint','finish','pause'].includes(action.operation)
+  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause'].includes(action.operation)
     || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
     || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
     || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
     || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
   const invocation=buildTrelioWorkspaceActionInvocation(action);
-  const runIdentity=action.operation==='open'?{workspaceId:action.parameters.workspaceId,runId:action.parameters.runId}:action.runIdentity;
+  const runIdentity=action.operation==='inspect'?{workspaceId:action.parameters.workspaceId}
+    :action.operation==='open'?{workspaceId:action.parameters.workspaceId,runId:action.parameters.runId}:action.runIdentity;
+  if(action.operation==='inspect' && action.runIdentity!==undefined)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(!runIdentity || Object.values(runIdentity).some(value=>!new RegExp(UUID,'u').test(value??''))
     || action.operation==='open' && !new RegExp(UUID,'u').test(action.parameters.runtimeSessionId??''))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(Buffer.byteLength(JSON.stringify(snapshot))>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
@@ -725,6 +727,9 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     }});
   return {async execute(raw,{signal}={}) {
     const plan=await validateAssistantWorkspacePlan(raw);
+    // Accepted inspection has no Run, renewal, progress registry or writable
+    // task directory. The common reader selects its isolated cache in the child.
+    if(plan.localAction.operation==='inspect')return runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal});
     const root=assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
     const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
     const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
@@ -809,16 +814,19 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     // A profile HTTP read consumes its own observed one-use proof and native
     // canonical target/own-Run checks, even for local status or heartbeat.
     const token=await common.requireToken(identity.origin);
-    const response=await common.request(identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/runs/${plan.runIdentity.runId}`);
-    const snapshot=JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant Run')).toString('utf8'));
-    if(snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const inspecting=plan.localAction.operation==='inspect';
+    const response=await common.request(identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
+    const snapshot=JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,inspecting?'Assistant accepted Workspace':'Assistant Run')).toString('utf8'));
+    if(inspecting ? snapshot.workspace?.id!==plan.runIdentity.workspaceId || snapshot.workspace.scopeType!=='task'
+      || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
+      : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     if(plan.localAction.operation==='open') {
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
       if(runtime?.ended || runtime?.state?.runtimeSessionId!==plan.localAction.parameters.runtimeSessionId)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
     }
     const root=assistantWorkspaceRoot(common.resolveWorkspaceBridgeConfigDirectory(),plan),directory=path.join(root,'workspace');
-    await common.ensurePrivateDirectory(root);
-    if(plan.localAction.operation!=='open') {
+    if(!inspecting)await common.ensurePrivateDirectory(root);
+    if(!inspecting && plan.localAction.operation!=='open') {
       const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     }
@@ -838,7 +846,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           if(bytes>1024*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');stdout+=part;
           const done=typeof encoding==='function'?encoding:callback;done?.();return true;
         };
-        try {process.chdir(options.cwd??root);await common.runWorkspaceCommand([...args,'--origin',identity.origin]);return {stdout,stderr:''};}
+        try {process.chdir(options.cwd??(inspecting?previousDirectory:root));await common.runWorkspaceCommand([...args,'--origin',identity.origin]);return {stdout,stderr:''};}
         catch(error) {
           // Reuse the ordinary in-process -> CLI error projection so common
           // lease/recovery and bounded HTTP classification remain identical.

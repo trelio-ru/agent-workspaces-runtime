@@ -228,7 +228,7 @@ import { AsyncResource } from 'node:async_hooks';
 import path from 'node:path';
 import os from 'node:os';
 import { request as nativeWorkspaceRequest, requireToken as nativeWorkspaceToken } from '../host-runtime/scripts/trelio-workspace.mjs';
-import { createAssistantWorkspaceProfile } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile } from '../host-runtime/scripts/trelio-workspace.mjs';
 
 const workspaceProfileFixture = async () => {
@@ -367,4 +367,26 @@ test('live assistant schema projection hides hook-owned required fields without 
   assert.deepEqual(model.required,['clientRequestId']);assert.deepEqual(Object.keys(model.properties),['clientRequestId','parameters']);
   assert.deepEqual(model.properties.parameters,wire.properties.parameters);assert.equal(model.additionalProperties,false);
   assert.deepEqual(wire,snapshot,'the current backend schema remains the exact validation authority');
+});
+
+
+test('accepted cache resolver isolates actual assistant/device/task identity and refuses changed binding',async()=>{
+  const {resolveWorkspaceInspectionDirectory}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const f=await workspaceProfileFixture(),g=await workspaceProfileFixture(),config=path.join(os.tmpdir(),'synthetic-config');
+  const first=await f.profile.resolveInspectionDirectory(config);
+  assert.equal(first,path.join(config,'digital-assistants','runtime',f.identity.assistantId,f.identity.deviceId,
+    'tasks',f.pass.companyId,f.pass.taskId,'inspections'));
+  assert.notEqual(first,await g.profile.resolveInspectionDirectory(config));
+  const human=await resolveWorkspaceInspectionDirectory();
+  await withWorkspaceExecutionProfile(f.profile,async()=>assert.notEqual(await resolveWorkspaceInspectionDirectory(),human));
+  await assert.rejects(withWorkspaceExecutionProfile({kind:'digital_assistant',requireToken:async()=>{},prepareRequest:async()=>{}},
+    resolveWorkspaceInspectionDirectory),error=>error.code==='ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  f.changeIdentity({...f.identity,deviceId:randomUUID()});
+  await assert.rejects(f.profile.resolveInspectionDirectory(config),error=>error.code==='ASSISTANT_WORKSPACE_BINDING_CHANGED');
+});
+
+
+test('accepted read is exposed as read-only while continuation remains a guarded write boundary',()=>{
+  assert.ok(ASSISTANT_MCP_READ_TOOLS.includes('prepare_assistant_workspace_read'));
+  assert.ok(!ASSISTANT_MCP_READ_TOOLS.includes('continue_assistant_workspace_action'));
 });

@@ -12214,6 +12214,18 @@ export const fingerprintWorkspaceInspection = async (directory) => {
   return digest.digest("hex");
 };
 
+/** Resolve from trusted invocation state only, never a model path. The human
+ * cache remains byte/path compatible. A missing assistant resolver must deny
+ * before filesystem access instead of leaking its personal profile there. */
+export const resolveWorkspaceInspectionDirectory = async () => {
+  const profile = currentWorkspaceExecutionProfile();
+  if (profile?.kind !== 'digital_assistant') return WORKSPACE_INSPECTION_DIRECTORY;
+  if (typeof profile.resolveInspectionDirectory !== 'function') denyWorkspaceExecutionProfile();
+  const directory = await profile.resolveInspectionDirectory(resolveWorkspaceBridgeConfigDirectory());
+  if (typeof directory !== 'string' || !path.isAbsolute(directory)) denyWorkspaceExecutionProfile();
+  return directory;
+};
+
 const materializeWorkspaceInspection = async ({
   origin,
   token,
@@ -12229,8 +12241,9 @@ const materializeWorkspaceInspection = async ({
     companyEncryption,
   });
   validateWorkspaceReadSnapshot(snapshot, workspaceId);
-  await ensurePrivateDirectory(WORKSPACE_INSPECTION_DIRECTORY);
-  const targetRoot = path.join(WORKSPACE_INSPECTION_DIRECTORY, workspaceId);
+  const inspectionDirectory = await resolveWorkspaceInspectionDirectory();
+  await ensurePrivateDirectory(inspectionDirectory);
+  const targetRoot = path.join(inspectionDirectory, workspaceId);
   // The caller obtained a fresh authenticated read-snapshot and encryption
   // context before this check. A local head alone is never an ACL capability.
   let cached = null;
@@ -12258,7 +12271,7 @@ const materializeWorkspaceInspection = async ({
   }
   if (cached) {
     const contextDirectory = path.join(targetRoot, "context");
-    const freshContextRoot = await fs.mkdtemp(path.join(WORKSPACE_INSPECTION_DIRECTORY, `.${workspaceId}.context-`));
+    const freshContextRoot = await fs.mkdtemp(path.join(inspectionDirectory, `.${workspaceId}.context-`));
     try {
       await writeWorkspaceInspectionContext({ rootDirectory: freshContextRoot, publishedRootDirectory: targetRoot,
         workspace: snapshot.workspace, company: snapshot.company, acceptedHead,
@@ -12279,7 +12292,7 @@ const materializeWorkspaceInspection = async ({
     }
   }
   const stagingRoot = await fs.mkdtemp(path.join(
-    WORKSPACE_INSPECTION_DIRECTORY,
+    inspectionDirectory,
     `.${workspaceId}.staging-`,
   ));
   const temporaryDirectory = await fs.mkdtemp(path.join(

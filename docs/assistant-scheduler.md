@@ -493,7 +493,8 @@ There is no automatic retry of a business action or restart of Codex here.
 
 ### Dedicated typed Workspace continuation
 
-The live backend catalog supplies `prepare_assistant_workspace_run` and
+The live backend catalog supplies `prepare_assistant_workspace_read`,
+`prepare_assistant_workspace_run` and
 `continue_assistant_workspace_action`; the host adds only reviewed names, never
 copies their domain schemas. Only root `taskPass`/`runtimeSessionProof` and their
 required entries are omitted from model discovery: the hook injects them into
@@ -533,3 +534,18 @@ It does not create authority or rewrite the Run pin. The ordinary human template
 is byte-identical. An assistant status action omits the human unfiled-queue lookup
 before any human session-vault access. No public plugin or file-count limit is
 changed; no capability/readiness claim is enabled by this transport alone.
+
+Accepted inspection uses the common `inspect` reader without ensure/start/claim,
+lease or writable Run metadata. A confirmed `workspace_not_initialized` response
+is initial absence, not a failed/denied read. The dedicated continuation accepts
+only workspace UUID, no Run, directory or runtime-session override. The worker
+checks its protected identity/pass and fresh native task snapshot before local
+materialization; the shared reader repeats actual accepted-head/ACL and bounded
+read-conflict handling. Preparation's head is a hint; returned context/index.json
+and both full authority/profile files describe the actual materialized revision.
+
+The trusted execution profile computes a private inspection root per assistant,
+device, company and task. It cannot overwrite another assistant's personal
+profile or the human inspection cache. Missing resolver denies before filesystem
+access. This read has no finish registry, Run heartbeat or fake timestamp-only
+checkpoint; human default paths and the shared integrity/cache guards are unchanged.

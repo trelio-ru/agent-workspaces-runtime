@@ -10858,7 +10858,7 @@ test("bridge resumes external object registration from durable per-file progress
   }
 });
 
-test("bridge inspects an accepted Workspace read-only without creating an Agent Run", async () => {
+for (const inspectionProfile of ["human", "assistant"]) test(`bridge inspects accepted Workspace through ${inspectionProfile} profile without a Run`, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-workspace-inspect-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
   const workspaceId = "44444444-4444-4444-8444-444444444444";
@@ -10983,22 +10983,27 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
     const origin = `http://127.0.0.1:${address.port}`;
     await writeTestCredential(homeDirectory, origin);
 
-    const inspected = await execFileAsync(
-      process.execPath,
-      [bridgePath, "inspect", "--origin", origin, "--workspace", workspaceId],
-      {
-        cwd: temporaryDirectory,
-        encoding: "utf8",
-        timeout: 15_000,
-        env: { ...process.env, HOME: homeDirectory },
-      },
-    );
+    // Exercise the actual shared Git/integrity/cache reader in an isolated
+    // process. Production device/proof and resolver identity are covered in the
+    // transport suite; this fixture replaces only HTTP auth to use loopback.
+    const args = ["inspect", "--origin", origin, "--workspace", workspaceId];
+    const moduleUrl = pathToFileURL(bridgePath).href;
+    const profileScript = `import * as common from ${JSON.stringify(moduleUrl)};
+      await common.withWorkspaceExecutionProfile({kind:'digital_assistant',
+        requireToken:async()=> 'integration-token',
+        prepareRequest:async({origin,pathname,options,buildHeaders})=>({url:new URL(pathname,origin),headers:buildHeaders('integration-token',options.headers||{}),options:{}}),
+        resolveInspectionDirectory:async(config)=>config+'/assistant-inspections-fixture'},
+        ()=>common.runWorkspaceCommand(${JSON.stringify(args)}));`;
+    const inspectAgain = () => execFileAsync(process.execPath,
+      inspectionProfile === "human" ? [bridgePath, ...args] : ["--input-type=module", "-e", profileScript],
+      { cwd: temporaryDirectory, encoding: "utf8", timeout: 15_000, env: { ...process.env, HOME: homeDirectory } });
+    const inspected = await inspectAgain();
     const inspectionRoot = path.join(
       homeDirectory,
       ".config",
       "trelio",
       "workspace-bridge",
-      "workspace-inspections",
+      inspectionProfile === "human" ? "workspace-inspections" : "assistant-inspections-fixture",
       workspaceId,
     );
     const workspaceDirectory = path.join(inspectionRoot, "workspace");
@@ -11022,15 +11027,16 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
     assert.equal(index.workspace.acceptedHead, accepted.head);
     assert.equal(index.agentInstructions.path, path.join(contextDirectory, "agent-instructions.md"));
     assert.equal(await pathExists(path.join(inspectionRoot, ".trelio-run.json")), false);
+    if (inspectionProfile === "assistant") assert.equal(await pathExists(path.join(homeDirectory,
+      ".config", "trelio", "workspace-bridge", "workspace-inspections", workspaceId)), false,
+      "assistant personal profile never enters the human inspection cache");
     assert.equal(await pathExists(path.join(workspaceDirectory, ".trelio-run.json")), false);
     if (process.platform !== "win32") {
       assert.equal((await stat(workspaceDirectory)).mode & 0o222, 0);
       assert.equal((await stat(contextDirectory)).mode & 0o222, 0);
       assert.equal((await stat(path.join(workspaceDirectory, "artifacts", "result.md"))).mode & 0o222, 0);
     }
-    const inspectAgain = () => execFileAsync(process.execPath,
-      [bridgePath, "inspect", "--origin", origin, "--workspace", workspaceId],
-      { cwd: temporaryDirectory, encoding: "utf8", timeout: 15_000, env: { ...process.env, HOME: homeDirectory } });
+
     const bundleCount = () => requests.filter(({ url }) => String(url).includes("/bundle?")).length;
     rulesMarkdown = "# Новые правила\n\nИспользуй актуальные документы.\n";
     rulesSha256 = createHash("sha256").update(rulesMarkdown, "utf8").digest("hex");
@@ -11079,7 +11085,7 @@ test("bridge inspects an accepted Workspace read-only without creating an Agent 
       ".config",
       "trelio",
       "workspace-bridge",
-      "workspace-inspections",
+      inspectionProfile === "human" ? "workspace-inspections" : "assistant-inspections-fixture",
       workspaceId,
     );
     if (process.platform !== "win32") {

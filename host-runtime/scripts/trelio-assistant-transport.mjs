@@ -174,6 +174,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
     kind:'digital_assistant',
+    async resolveInspectionDirectory(configDirectory){
+      // Accepted files are shared company content, but the accompanying
+      // personal profile belongs to this exact assistant/device/task. Never
+      // overwrite the ordinary user's or another assistant's inspection cache.
+      if(!path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertIdentity();
+      return path.join(configDirectory,'digital-assistants','runtime',identity.assistantId.toLowerCase(),
+        identity.deviceId.toLowerCase(),'tasks',pass.companyId.toLowerCase(),pass.taskId.toLowerCase(),'inspections');
+    },
     async requireToken(requestOrigin){
       if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       await assertIdentity();return handle;
@@ -423,7 +432,7 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page"]);
+export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
