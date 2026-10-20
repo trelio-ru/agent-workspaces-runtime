@@ -598,3 +598,10 @@ the original native operation with ownerDecisionId, original UUID/fields and
 fresh task context. Denied/expired/changed intent never permits replay or a
 human-proposal fallback. No additional source text is put into queue events,
 argv or the native chat start context. The permanent chat and cycle are reused.
+
+The same closed live catalog selects update_task_due_date, update_task_assignee,
+set_task_participants and update_task_custom_field. Their current backend schema
+and action policy remain authoritative; the host never adds an absence
+acknowledgement or human-command flag. Older servers that do not advertise them
+do not gain a local alias or alternate transport. New provider/admin/destructive
+operations stay closed until separately implemented and reviewed.
