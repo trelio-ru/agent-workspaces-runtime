@@ -138,3 +138,6 @@ export const syncRunCodexConversationTitle = async ({
     return false;
   } finally { clearTimeout(timer); }
 };
+
+// Shared discovery/environment boundary for the assistant native adapter.
+export { resolveCodexExecutable, titleEnvironment as buildCodexEnvironment };

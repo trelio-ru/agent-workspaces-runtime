@@ -1,0 +1,135 @@
+# Runtime-owned assistant cycles and native Codex
+
+The product decision is to keep one permanent Codex chat for each accepted task,
+but own cyclic wake-ups in the assistant runtime. No built-in Codex automation,
+RRULE file or private desktop API is claimed. Backend/provider authority still
+owns company/task ACL, owner approval and the classification of incoming events.
+
+`trelio-assistant-scheduler.mjs` stores bounded structural task/thread references,
+cadence, timezone, next-run timestamps and positive native receipts in the same
+private SQLite handle as the inbox. It is a runtime service component, not an
+installed/activated daemon or a substitute for a signed assistant plugin. Private
+DB lifecycle, source polling and backend projection are wired by the host-only
+`trelio-assistant-coordinator.mjs` component. Dedicated plugin installation,
+business MCP admission and supported Windows readiness still gate unattended
+activation. No existing pilot or human-plugin session is silently migrated.
+
+## Cycles
+
+Cadences: 30 minutes; 1, 3, 6, 12 hours; daily, weekly, fortnightly, monthly.
+Short cycles use elapsed time. Day/week/month retain the original local wall time;
+month-end clamps per occurrence without drifting Jan31 -> Feb28 -> Mar28. DST
+chooses the earlier overlap occurrence and moves a missing local time forward.
+Missed periods coalesce to one pass and the next future slot, never a catch-up
+burst. A task may adjust its cadence after substantive assessment; the host
+validates the enum, current task scope/authority and CAS before recording it.
+No content/reason/instructions are stored in SQLite.
+
+Registration is idempotent for the same canonical origin/assistant/company/task,
+source binding and native thread. A thread cannot be reused for a different task;
+a repeated request cannot replace the permanent chat. `done`, pause and revocation
+stop the schedule. Local active state never permits execution without fresh
+backend authorization. Cross-company tasks retain separate keys and references.
+
+The trusted `completeInsideInboxTransaction` callback advances next-run and
+records completion in the inbox transaction. Callback failure leaves both event
+processing and due time unchanged. `lastCycleAt` is recorded only for a genuine
+scheduled pass, not a delayed mention or merely saving a schedule. These tests
+use an injected clock; they are not proof of a live Windows timer run.
+
+## Native adapter
+
+The official [CLI reference](https://learn.chatgpt.com/docs/developer-commands)
+documents `codex queue` and `codex exec resume`; the
+[App Server](https://learn.chatgpt.com/docs/app-server) documents exact thread
+metadata and paginated turn reads. An isolated local macOS probe confirmed that
+queue acceptance alone did not start the sleeping fixture. `exec resume` on that
+same permanent ID did start and complete a native turn. The actual adapter then
+passed a marker-based positive read-back on that host. This does not establish
+Windows readiness, GUI availability, provider access or a running cyclic daemon.
+
+`trelio-assistant-codex.mjs` resumes the exact UUID/cwd, using existing local Codex
+configuration/authentication. It never copies human OAuth, changes model/effort,
+overrides sandbox/approval/rules, automates hook trust or selects another thread.
+Only the structural delivery marker and platform instruction go through stdin;
+no prompt/content/credential is placed in argv. Stderr and raw JSON diagnostics
+are suppressed; native content is parsed in bounded memory, never cached/logged.
+
+The host passes a one-use synchronous `startInvocation` callback that performs the
+inbox's leased -> started CAS. Missing history cannot authorize a second attempt.
+After CLI exit, the adapter must find exactly one matching native user-message
+marker with a completed/failed turn. Quoted/tool/assistant text is not acceptance.
+Missing/oversized/unavailable history is uncertainty, not proof of rejection.
+Only the exact native turn receipt may complete the delivery. A timeout keeps the
+inbox blocked until read-back/review; no blind retry or alternate transport.
+
+A fixed internal readiness probe uses the same native path but asks only for
+READY, with no tools/accounts/integrations. It is not a task execution or timer
+proof. It is selected by trusted setup code, not exposed as an incoming-message
+permission. Native Windows acceptance must be checked on a supported installed
+host before activation; mocked child tests only verify the adapter boundary.
+
+Tests: `trelio-assistant-scheduler.test.mjs` (real SQLite and timezone boundaries),
+`trelio-assistant-codex.test.mjs` (exact transport/fencing/read-back), plus the inbox
+suite. Native workflow runs them on Linux/macOS and Windows.
+
+## Host coordinator and enrollment
+
+`trelio-assistant-coordinator.mjs` connects the private database, scheduler,
+fixed device HTTP client and native adapter. One short transactional host lease
+serializes service instances; the separate durable desktop delivery lease also
+blocks another worker after a crash or ambiguous native result. Discovery,
+notification polling and read acknowledgement are model-free, every five
+minutes. A notification's read flag is not its delivery position. Ordinary
+comments enter accepted context/read acknowledgement without waking the chat.
+
+Before business work, `native.ready` must confirm the dedicated assistant MCP
+admission for this identity. Having Codex installed or an ordinary human OAuth
+session is insufficient. This required host adapter is intentionally not given
+a permissive default. The coordinator is not automatically registered as an OS
+service by importing it. A trusted plugin installer supplies lifecycle, this
+admission check, workspace resolver and notification transport.
+
+The native provision uses the same global delivery fence but no task events.
+Its only initial instruction is READY without tools. The exact thread ID is
+journaled on `thread.started`, then verified by native completed-turn read-back.
+Only subsequent task passes may consume the event queue. A lost native ID blocks
+another chat; an ambiguous *server host claim* is different: the durable
+`native_started=0` bit permits retrying that same provision ID before the one-use
+native boundary. The backend keeps one device/provision claim per task; another
+valid device or new local DB cannot silently provision a replacement.
+
+Long passes recheck live exact task/device authority and renew the same delivery
+every 30s. Denial, transport loss or an expired/replaced lease aborts the child and
+keeps uncertainty for native reconciliation; it does not promise cancellation of
+an external action already accepted elsewhere. Every future business MCP call
+must still apply its own fresh domain ACL, policy and owner-decision checks.
+
+Actual timing projections use a monotonically increasing sequence in the same
+SQLite state. They report cadence, timezone, next-run, last completion/cycle and
+the permanent thread UUID through `/runtime/schedule`. Identical reports are
+idempotent; restored stale state or another thread/device conflicts. Transport
+failure does not undo a positive native completion or rerun its task. Reporting
+does not claim that a native desktop automation exists or is running.
+
+`trelio-assistant-private.mjs` reuses the common Windows native ACL/CurrentUser
+DPAPI and macOS stdin-only Keychain helpers under a separate service namespace
+and inner identity envelope. It does not pretend to be a company/skill, read
+human OAuth or use a plaintext Linux fallback. The SQLite opener validates its
+private parent, DB and existing sidecars, enables full synchronous writes and
+keeps unknown schemas intact. It stores references only, not message bodies or
+personal/enterprise secrets.
+
+`trelio-assistant-transport.mjs` is a host-only fixed HTTPS client. It disables
+cookies/redirects, bounds JSON/time, projects content away and hides raw errors.
+The S256 verifier is protected before enrollment I/O; exchange crosses a durable
+one-use fence before HTTP. Pending rejection may be polled, but a lost exchange
+response requires owner recovery/new enrollment. Credential save is verified
+before READY, and verifier removal follows the protected device save. Neither
+the credential nor verifier is returned by model-facing setup operations.
+
+Additional tests: `trelio-assistant-coordinator.test.mjs` exercises real SQLite
+poll -> owner decision -> provision -> mention/timer -> native receipt,
+concurrent hosts, crash recovery and unknown ID/host claims. Private/transport
+tests cover binding isolation, no plaintext fallback, symlink/ACL refusal,
+no cookie/redirect, response redaction and lost pairing exchange.

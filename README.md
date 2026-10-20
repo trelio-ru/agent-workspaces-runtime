@@ -589,3 +589,9 @@ Tag workflow загружает native artifact только из успешно
 Package builder требует metadata с SHA исходника, размером/SHA и PE machine
 каждого binary; missing/stale input блокирует сборку. Готовые helpers входят
 в общий подписанный runtime и проверяются stable loader вместе с его файлами.
+
+## Assistant runtime-owned cycles
+
+[Scheduler and native adapter contract](docs/assistant-scheduler.md) describes
+cyclic task scheduling, atomic inbox completion and exact native Codex read-back.
+These components do not install or activate an autonomous assistant by themselves.

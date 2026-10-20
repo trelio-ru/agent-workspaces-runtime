@@ -5,8 +5,9 @@
 `host-runtime/scripts/trelio-assistant-inbox.mjs` implements deterministic inbox
 mechanics, without a model, network calls, background service or new plugin hook.
 It is not an installed coordinator. Provider discovery/routing, assistant MCP,
-owner decisions, credentials, schedules and native Codex chat dispatch remain
-separate adapters. No existing human bridge/session is repurposed for a managed
+owner decisions and credentials remain
+separate adapters. Runtime-owned cyclic scheduling and the Codex adapter are in
+[`assistant-scheduler.md`](assistant-scheduler.md). No existing human bridge/session is repurposed for a managed
 assistant and no live pilot data is migrated.
 
 The host injects an already opened private SQLite handle, compatible with Node's
@@ -110,3 +111,25 @@ It covers restart, duplicate pages, task routing, source separation, cursor CAS,
 ordinary comments versus wake events, scheduled passes, owner-pending tasks,
 read acknowledgement, revocation and uncertain external dispatch. It does not
 claim a live Telegram/Trelio/Codex end-to-end run.
+
+## Coordinator projection and schema v2
+
+Schema v2 upgrades existing private SQLite atomically, retaining cursors, task
+states, acknowledgements and uncertain deliveries. Task state may include a
+server `authority {bindingId, revision}`. An identical snapshot is idempotent;
+older revisions, a changed binding ID or dropping recorded provenance fail.
+A newer revision may resume a revoked assignment after a real backend decision.
+This local revision check still requires fresh `authorize` before dispatch.
+Legacy callers without authority retain their terminal revocation behavior.
+`taskState`/`listSources` return bounded operational metadata only.
+
+`abandonPoll` releases a failed read-only poll into durable bounded backoff,
+retaining its cursor. The host never repeats an ambiguous external mutation by
+using this read-recovery primitive. Acknowledgement refs now include task UUID.
+
+A synchronous trusted `onDeliveryCompleted` callback runs in the same transaction
+as processing the delivery events. The scheduler uses it to advance the next run
+atomically. A thrown callback rolls back both sides; a Promise is rejected. No
+model callback, I/O or native action belongs inside this transaction. A persisted
+`scheduled` flag distinguishes a cyclic launch from an event wake: an event
+finishing after the deadline is not proof of the first timer run.
