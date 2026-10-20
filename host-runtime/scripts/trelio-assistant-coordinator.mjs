@@ -15,6 +15,7 @@ const sameSource = (a,b) => ['origin','assistantId','companyId','provider','acco
 const scopeFor = (source,taskId) => ({ origin:source.origin,assistantId:source.assistantId,companyId:source.companyId,taskId });
 const sourceFor = (identity,company) => ({ origin:identity.origin,assistantId:identity.assistantId,companyId:company.companyId,
   provider:'trelio',accountId:company.memberId,bindingId:identity.deviceId });
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
   now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
@@ -166,6 +167,29 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     return schedule.register({scope:scopeFor(job.scope,job.taskId),source:job.scope,threadId,cadence:'every_30_minutes',timeZone});
   };
+  const completedReceipt = async (job,threadId,nativeReceipt,signal) => {
+    if(job.kind==='provision') return nativeReceipt;
+    if(typeof client.readBusinessOutcome!=='function') fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    const authority=inbox.taskState(job.scope,job.taskId)?.authority;
+    if(!authority) fail('ASSISTANT_COORDINATOR_AUTHORITY_REQUIRED');
+    const expected={assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,
+      taskId:job.taskId,bindingId:authority.bindingId,bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId};
+    // A native turn can end while waiting for a reply, on a tool denial, or
+    // before any Workspace save. Only a trusted live backend outcome for this
+    // exact pass can acknowledge its source events. This adapter is supplied
+    // by the host, never a model-authored "success" boolean or file content.
+    const outcome=await client.readBusinessOutcome(expected,signal);lease();
+    const allowedKeys=['schemaVersion','state','receiptId',...Object.keys(expected)].sort();
+    const nativeParts=typeof nativeReceipt==='string'?nativeReceipt.split(':'):[];
+    if(!outcome || Object.getPrototypeOf(outcome)!==Object.prototype
+      || Object.keys(outcome).sort().join(',')!==allowedKeys.join(',') || outcome.schemaVersion!==1
+      || outcome.state!=='confirmed' || !uuid.test(outcome.receiptId??'')
+      || Object.keys(expected).some(key=>outcome[key]!==expected[key])
+      || nativeParts.length!==3 || nativeParts[0]!=='codex' || nativeParts[1]!==threadId || !uuid.test(nativeParts[2])) {
+      fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+    }
+    return `assistant:${outcome.receiptId}:${nativeReceipt}`;
+  };
   const reconcile = async signal => {
     const [job]=inbox.incompleteDeliveries(); if(!job) return false;
     if(job.state==='leased') return true;
@@ -181,8 +205,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const result=await native.readDelivery(threadId,job.deliveryId,{signal}); lease();
     if(result.state==='completed') {
       if(job.kind==='provision') registerChat(job,threadId);
-      await authorize({scope:job.scope,taskId:job.taskId},signal);
-      inbox.completeDelivery(job.deliveryId,result.receipt);
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      const receipt=await completedReceipt(job,threadId,result.receipt,signal);
+      // The outcome lookup itself crossed I/O. Do not retain an authorization
+      // that was revoked while reading it, even after a positive native turn.
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      inbox.completeDelivery(job.deliveryId,receipt);
       notices.clear();
       return false;
     }
@@ -223,13 +251,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }
         registerChat(job,result.threadId);
       } else {
+        if(typeof client.readBusinessOutcome!=='function') fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
         const plan=findSchedule(job.scope,job.taskId);
         if(!plan) fail('ASSISTANT_COORDINATOR_THREAD_REQUIRED');
-        result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd},options);
+        result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,
+          taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId}},options);
       }
       if(result.state!=='completed') fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
-      await authorize({scope:job.scope,taskId:job.taskId},combined);
-      inbox.completeDelivery(job.deliveryId,result.receipt);
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      const threadId=job.kind==='provision'?result.threadId:findSchedule(job.scope,job.taskId)?.threadId;
+      const receipt=await completedReceipt(job,threadId,result.receipt,combined);
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      inbox.completeDelivery(job.deliveryId,receipt);
       return {state:'completed',kind:job.kind};
     } catch(error) {
       if(started) inbox.markDeliveryUncertain(job.deliveryId);

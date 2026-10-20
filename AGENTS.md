@@ -346,6 +346,12 @@ publication tooling также остаются вне этого публичн
 
 ## Граница plugin/runtime
 
+- Долгие цели: host передаёт только проверенные UUID/path locators собственного
+  `assistants/<assistantUserId>/WORK.md` по stdin; формат/continuation – task-worker
+  нового плагина и [контракт](docs/assistant-scheduler.md#durable-human-goal).
+  Markdown не хранится в SQLite, не становится authority и не закрывает цель
+  по одному native completed turn. READY не создаёт task files.
+
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
 - Local tools/list скрывает owner/admin-only private-skill management по свежему

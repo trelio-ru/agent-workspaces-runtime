@@ -39,6 +39,32 @@ use an injected clock; they are not proof of a live Windows timer run.
 
 ## Native adapter
 
+### Durable human goal
+
+Every business pass receives a strict structural task context over stdin:
+assistant/company/task UUIDs and `assistants/<assistantUserId>/WORK.md`. The host
+computes the path from the immutable assistant ID, never a name or message/path
+supplied by a source. Missing or extra fields fail before native I/O. Separate
+tasks/companies use their canonical Workspace roots; several assistants in one
+Workspace keep different files. READY probes have no task-state instruction.
+
+The installed task-worker skill owns the Markdown format and continuation flow:
+read shared context and own state, preserve the human goal and completion criteria,
+record confirmed progress, pending replies/owner decisions, uncertain sends and
+the next justified action/wake. Save with the common Workspace Run/CAS; this is
+ordinary company task data, not AGENTS, a local transcript or new authority. The
+coordinator does not read/cache the Markdown or store goal text in SQLite.
+
+Waiting finishes a pass, not the goal. The task worker keeps a recurring check,
+returns to the same chat on permitted events, and verifies real send/read/schedule
+outcomes before progressing. Fulfilment or authorized cancellation stops only
+this assistant's cycle after server confirmation; it does not complete another
+assistant's part or the entire task. Shared task files retain normal ACL and E2EE;
+no private credential belongs in them. These prompt/path tests do not prove that
+the not-yet-connected business outcome/goal-stop backend is ready.
+
+### Native invocation
+
 The official [CLI reference](https://learn.chatgpt.com/docs/developer-commands)
 documents `codex queue` and `codex exec resume`; the
 [App Server](https://learn.chatgpt.com/docs/app-server) documents exact thread
@@ -60,8 +86,16 @@ inbox's leased -> started CAS. Missing history cannot authorize a second attempt
 After CLI exit, the adapter must find exactly one matching native user-message
 marker with a completed/failed turn. Quoted/tool/assistant text is not acceptance.
 Missing/oversized/unavailable history is uncertainty, not proof of rejection.
-Only the exact native turn receipt may complete the delivery. A timeout keeps the
-inbox blocked until read-back/review; no blind retry or alternate transport.
+Provisioning consumes no business events and needs only the exact READY receipt.
+Business delivery additionally requires the trusted host's `readBusinessOutcome`
+adapter: a durable confirmed receipt with exact assistant/device/company/task,
+assignment binding/revision, delivery and thread IDs. Missing, pending or
+mismatched outcomes cannot mark events processed or advance the schedule. Both
+receipts are stored as one content-free reference. Live authority is checked
+again after outcome I/O; a stopped task cannot be acknowledged accidentally.
+A timeout keeps the inbox blocked until read-back/review, without replay.
+The production backend outcome adapter remains a readiness blocker until wired;
+there is no permissive default or claim that native success proves business work.
 
 A fixed internal readiness probe uses the same native path but asks only for
 READY, with no tools/accounts/integrations. It is not a task execution or timer

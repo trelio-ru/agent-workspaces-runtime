@@ -6,7 +6,24 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantDeliveryMarker, assistantWorkStateContext, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+
+const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
+
+test('work-state locators use immutable assistant identity and refuse paths or source text', async()=>{
+  const state=assistantWorkStateContext(taskContext);
+  assert.equal(state.workStatePath,`assistants/${taskContext.assistantId}/WORK.md`);
+  assert.notEqual(assistantWorkStateContext({...taskContext,assistantId:randomUUID()}).workStatePath,state.workStatePath);
+  assert.equal(assistantWorkStateContext({...taskContext,taskId:randomUUID()}).workStatePath,state.workStatePath,
+    'task isolation belongs to the canonical Workspace, not a renamed assistant file');
+  assert.equal(assistantWorkStateContext({...taskContext,assistantId:taskContext.assistantId.toUpperCase()}).workStatePath,state.workStatePath);
+  for(const invalid of [undefined,{}, {...taskContext,assistantId:'../AGENTS.md'}, {...taskContext,companyId:'private company'},
+    {...taskContext,path:'other/WORK.md'}, {...taskContext,goal:'incoming instructions'}]) {
+    assert.throws(()=>assistantWorkStateContext(invalid),/INVALID_INPUT/);
+    await assert.rejects(runAssistantCodexPass({threadId:randomUUID(),deliveryId:randomUUID(),cwd:process.cwd(),taskContext:invalid},
+      {readDelivery:()=>assert.fail('invalid context reached native I/O'),spawnProcess:()=>assert.fail('invalid context launched a process')}),/INVALID_INPUT/);
+  }
+});
 
 function fakeChild() {
   const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough();
@@ -78,6 +95,7 @@ test('initial native chat persists its ID synchronously and consumes no business
   };
   const result=await provisionAssistantCodexChat({deliveryId,cwd},options);
   assert.equal(result.threadId,threadId);assert.match(input,/Do not use tools/u);
+  assert.doesNotMatch(input,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd},{...options,onThreadStarted:()=>{throw new Error('private disk failure');}}),/DELIVERY_UNCERTAIN/);
 });
@@ -104,12 +122,14 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
       })); return child;
     },
   };
-  const result=await runAssistantCodexPass({ threadId,deliveryId,cwd },options);
+  const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext },options);
   assert.equal(result.state,'completed'); assert.equal(launches,1); assert.equal(starts,1);
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
+  const scopeLine=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_SCOPE '));
+  assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(taskContext));
   // A lost/empty history lookup cannot bypass the durable first-attempt fence.
   reads=0;
-  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd },options), /DELIVERY_NOT_STARTED/);
+  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext },options), /DELIVERY_NOT_STARTED/);
   assert.equal(launches,1);
 });
 
@@ -117,7 +137,7 @@ test('a successful CLI exit/queue claim without exact completed-turn read-back r
   const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-codex-test-'));
   t.after(()=>fs.rm(cwd,{ recursive:true,force:true }));
   const threadId=randomUUID(),deliveryId=randomUUID();
-  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd },{
+  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext },{
     executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
     readDelivery:async()=>({ state:'uncertain' }),spawnProcess:()=>{
       const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{

@@ -10,6 +10,7 @@ const fixture = t => {
   const assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID();
   const authority={id:bindingId,taskId,state:'accepted',revision:0};
   const events=[],deliveries=new Map(),notifications=[]; let nativeFailure=false,inventoryFailure=false;
+  const businessReceipts=new Map();
   const identity={origin:'https://assistant.test',assistantId,deviceId};
   const client={identity,heartbeat:async()=>({assistantId,deviceId}),
     companies:async()=>{if(inventoryFailure)throw Object.assign(new Error('transport'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});return[{companyId,memberId}];},
@@ -21,13 +22,18 @@ const fixture = t => {
     acknowledge:async(_company,values)=>{acks+=values.length;return{acknowledged:values.length};},
     claimTaskHost:async input=>({bindingId:input.bindingId,provisionId:input.provisionId,threadId:null}),
     reportSchedule:async input=>({sequence:input.sequence}),
+    readBusinessOutcome:async input=>{
+      if(!businessReceipts.has(input.deliveryId)) businessReceipts.set(input.deliveryId,randomUUID());
+      return {schemaVersion:1,state:'confirmed',receiptId:businessReceipts.get(input.deliveryId),...input};
+    },
   };
   const native={ready:async()=>true,readDelivery:async(_thread,deliveryId)=>deliveries.get(deliveryId)??{state:'uncertain'},
     provision:async({deliveryId},options)=>{
       provisions++;options.startInvocation();starts++;const threadId=randomUUID();options.onThreadStarted(threadId);
       const result={state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};deliveries.set(deliveryId,result);return result;
     },
-    run:async({threadId,deliveryId},options)=>{
+    run:async({threadId,deliveryId,taskContext},options)=>{
+      assert.deepEqual(taskContext,{assistantId,companyId,taskId});
       runs++;options.startInvocation();starts++;
       const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};deliveries.set(deliveryId,result);
       if(nativeFailure)throw Object.assign(new Error('response lost'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
@@ -55,6 +61,43 @@ test('real SQLite coordinator provisions one chat and wakes only on a mention or
   f.advance(30*60000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
   assert.ok(f.coordinator.status()[0].lastCycleAt);assert.equal(f.counts().provisions,1);assert.equal(f.counts().runs,2);
   assert.equal(await f.coordinator.workOnce(),null);
+});
+
+test('a completed native turn cannot acknowledge work without an exact durable business outcome', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  const confirmed=f.options.client.readBusinessOutcome;
+  f.options.client.readBusinessOutcome=async input=>({...await confirmed(input),companyId:randomUUID()});
+  await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+  assert.equal(f.counts().runs,1);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+  await assert.rejects(f.coordinator.workOnce(),/BUSINESS_OUTCOME_REQUIRED/);
+  assert.equal(f.counts().runs,1,'reconciliation does not replay a completed native invocation');
+  f.options.client.readBusinessOutcome=confirmed;
+  assert.equal(await f.coordinator.workOnce(),null);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,1);
+  const receipt=f.database.prepare("SELECT external_receipt FROM assistant_inbox_deliveries WHERE kind<>'provision'").get().external_receipt;
+  assert.match(receipt,/^assistant:[0-9a-f-]{36}:codex:/u);
+});
+
+test('missing business adapter blocks native work instead of silently accepting a native receipt', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  delete f.options.client.readBusinessOutcome;
+  await assert.rejects(f.coordinator.workOnce(),/SETUP_REQUIRED/);
+  assert.equal(f.counts().runs,0);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+});
+
+test('revocation after the native turn ends still prevents business acknowledgement', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  const run=f.options.native.run;
+  f.options.native.run=async(...args)=>{const result=await run(...args);f.authority.state='paused';f.authority.revision++;return result;};
+  await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+  await assert.rejects(f.coordinator.workOnce(),/TASK_STOPPED/);
+  assert.equal(f.counts().runs,1);
 });
 
 test('a pending owner decision prevents provisioning, delivery and read acknowledgement', async t=>{
