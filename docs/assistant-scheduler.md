@@ -242,6 +242,24 @@ concurrent hosts, crash recovery and unknown ID/host claims. Private/transport
 tests cover binding isolation, no plaintext fallback, symlink/ACL refusal,
 no cookie/redirect, response redaction and lost pairing exchange.
 
+### Owner identity metadata for source routing
+
+The private device client reads `/runtime/owner-identities` afresh through the
+same fixed, bounded HTTPS transport. It projects only the current assistant,
+human owner, binding revision and at most one native Telegram/MAX binding each.
+Opaque provider IDs remain strings without trimming, numeric conversion or case
+folding. A malformed/ambiguous response or access/network failure is an error;
+only a successful empty list means that the owner has no verified binding.
+Returned snapshots are immutable and do not enter the model MCP catalogue,
+SQLite, the skill admission cache or a credential namespace.
+
+This is preparatory routing metadata, not authority to create a task, reply or
+disclose a company message. A future signed source adapter must prove the actual
+sender and matching provider ID namespace; username/forwarded-author inference
+is forbidden. Intake must re-read the native owner binding and independent
+company/task ACL at its own boundary. The client does not enable provider
+monitoring, synthesize a task pass or reuse a human OAuth session.
+
 ## Protected background host composition
 
 `createAssistantRuntimeHost` composes the real private SQLite opener, fixed device

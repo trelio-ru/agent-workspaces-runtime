@@ -56,6 +56,43 @@ const executionState = value => {
 };
 const passExecution = value => value.state==='leased' ? executionConfiguration(value.execution)
   : value.execution == null ? null : executionConfiguration(value.execution);
+
+/** Native auth bindings are routing metadata, not a grant to accept an owner
+ * command. A signed provider must still prove the real sender/namespace, and a
+ * later task intake must recheck live ownership and normal company/task ACL.
+ * Never derive a binding from a username, display name or a forwarded author.
+ * Keep this projection outside SQLite and the model-facing MCP catalogue. */
+export const projectAssistantOwnerIdentities = (value, assistantId) => {
+  assistantId = id(assistantId);
+  const invalid = () => fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if (!object(value) || value.schemaVersion !== 1 || value.assistantUserId !== assistantId
+    || typeof value.bindingRevision !== 'string' || !/^[0-9a-f]{64}$/u.test(value.bindingRevision)
+    || !Array.isArray(value.identities) || value.identities.length > 2) invalid();
+  // Report malformed response identifiers as response failures, never as an
+  // input mistake that could invite another enrollment or credential reset.
+  const responseId = candidate => {
+    if (typeof candidate !== 'string' || !UUID.test(candidate)) invalid();
+    return candidate.toLowerCase();
+  };
+  const ownerUserId = responseId(value.ownerUserId);
+  if (ownerUserId === assistantId) invalid();
+  const providers = new Set(), bindings = new Set();
+  const identities = value.identities.map(row => {
+    if (!object(row) || !['telegram','max'].includes(row.provider) || providers.has(row.provider)
+      || typeof row.externalUserId !== 'string' || row.externalUserId.length < 1
+      || row.externalUserId.length > 256 || /[\x00-\x20\x7f]/u.test(row.externalUserId)) invalid();
+    const bindingId = responseId(row.bindingId);
+    if (bindings.has(bindingId)) invalid();
+    providers.add(row.provider); bindings.add(bindingId);
+    // Preserve the provider's exact opaque id. Numeric coercion/trim/case
+    // normalization could merge distinct accounts or lose large integer bits.
+    return Object.freeze({ bindingId, provider:row.provider, externalUserId:row.externalUserId });
+  });
+  // Do not retain the wire object, provider payloads or notification settings.
+  // A confirmed empty list remains distinct from transport/ACL/unlink failures.
+  return Object.freeze({ schemaVersion:1, assistantUserId:assistantId, ownerUserId,
+    bindingRevision:value.bindingRevision, identities:Object.freeze(identities) });
+};
 export const validateAssistantPassOutcome = (value, expected) => {
   if(!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(value.state==='pending') {
@@ -94,6 +131,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['pair', ['POST','/pairings']], ['exchange',['POST','/pairings/exchange']],
     ['healthRead',['GET','/runtime/health']], ['healthReport',['POST','/runtime/health']],
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
+    ['ownerIdentities',['GET','/runtime/owner-identities']],
     ['tasks',['POST','/runtime/tasks']], ['task',['POST','/runtime/task']],
     ['claim',['POST','/runtime/task/claim']],
     ['poll',['POST','/runtime/notifications/poll']], ['ack',['POST','/runtime/notifications/ack']],
@@ -244,6 +282,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
 
   return {
     identity: Object.freeze({ origin, assistantId, deviceId }),
+    async ownerIdentities(signal) {
+      // One fresh native read per explicit call. Neither the twelve-hour skill
+      // admission cache nor a previously matched username authorizes routing.
+      // No task pass, current model, human cookie or owner OAuth is involved.
+      return projectAssistantOwnerIdentities(await call('ownerIdentities',undefined,signal),assistantId);
+    },
     async readHealth(signal) {
       const value=await call('healthRead',undefined,signal),current=healthState(value);
       const stable=v=>typeof v==='string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/u.test(v);

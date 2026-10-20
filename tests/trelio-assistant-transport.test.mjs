@@ -37,6 +37,69 @@ test('device client loads only its exact private slot and projects server conten
   await assert.rejects(other.companies(),/DEVICE_REQUIRED/); assert.equal(calls,1);
 });
 
+test('owner identity reads use the fixed device-only endpoint and preserve opaque provider ids', async () => {
+  const origin='https://assistant.test', assistantId=randomUUID(), deviceId=randomUUID(), ownerUserId=randomUUID();
+  const store=memoryStore(), credential=`tda_${'i'.repeat(43)}`;
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  let calls=0;
+  const bindingId=randomUUID(), externalUserId='900719925474099312345';
+  const raw={schemaVersion:1,assistantUserId:assistantId,ownerUserId,bindingRevision:'a'.repeat(64),identities:[
+    {bindingId,provider:'telegram',externalUserId,username:'PRIVATE_USERNAME',payload:{token:'PRIVATE_TOKEN'}},
+  ],notificationPreferences:{private:'PRIVATE_PREFS'}};
+  const signal=new AbortController().signal;
+  const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;
+    assert.equal(url,`${origin}/api/digital-assistants/runtime/owner-identities`);
+    assert.equal(options.method,'GET'); assert.equal(options.body,undefined);
+    assert.equal(options.headers.authorization,`Bearer ${credential}`);
+    assert.equal(options.credentials,'omit'); assert.equal(options.redirect,'error');
+    assert.equal(options.cache,'no-store'); assert.ok(options.signal);
+    return new Response(JSON.stringify(raw),{headers:{'content-type':'application/json'}});
+  }});
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
+  const result=await client.ownerIdentities(signal);
+  assert.deepEqual(result,{schemaVersion:1,assistantUserId:assistantId,ownerUserId,bindingRevision:'a'.repeat(64),
+    identities:[{bindingId,provider:'telegram',externalUserId}]});
+  assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+  assert.ok(Object.isFrozen(result)); assert.ok(Object.isFrozen(result.identities)); assert.ok(Object.isFrozen(result.identities[0]));
+  assert.throws(()=>{result.identities[0].externalUserId='another';},TypeError);
+  // Unlink/relink must be visible immediately. A previously returned result is
+  // independent of the next read and never functions as an admission cache.
+  raw.identities=[]; raw.bindingRevision='b'.repeat(64);
+  const absent=await client.ownerIdentities();
+  assert.deepEqual(absent.identities,[]); assert.equal(absent.bindingRevision,'b'.repeat(64));
+  assert.equal(result.identities[0].externalUserId,externalUserId); assert.equal(calls,2);
+});
+
+test('malformed, ambiguous or unavailable owner bindings never become an empty identity list', async () => {
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),ownerUserId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'j'.repeat(43)}`,expiresAt:1});
+  const row={bindingId:randomUUID(),provider:'telegram',externalUserId:'321'};
+  const valid={schemaVersion:1,assistantUserId:assistantId,ownerUserId,bindingRevision:'c'.repeat(64),identities:[row]};
+  let response=valid,calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async()=>{
+    calls++; if(response instanceof Error)throw response; return response;
+  }});
+  const malformed=[null,{}, {...valid,schemaVersion:2},{...valid,assistantUserId:randomUUID()},
+    {...valid,ownerUserId:assistantId},{...valid,ownerUserId:'broken'}, {...valid,bindingRevision:'not-a-hash'},
+    {...valid,identities:null},{...valid,identities:[row,{...row,bindingId:randomUUID()}]},
+    {...valid,identities:[row,{...row,provider:'max'}]},
+    ...['email','Telegram','@ivaschenko'].map(provider=>({...valid,identities:[{...row,provider}]})),
+    ...['',' 321','321\n','x'.repeat(257),321].map(externalUserId=>({...valid,identities:[{...row,externalUserId}]})),
+    {...valid,identities:[{...row,bindingId:'bad'}]},
+  ];
+  for(response of malformed)await assert.rejects(client.ownerIdentities(),error=>error.code==='ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  response=new AssistantTransportError('ASSISTANT_ACCESS_DENIED',403);
+  await assert.rejects(client.ownerIdentities(),error=>error.code==='ASSISTANT_ACCESS_DENIED'&&error.status===403);
+  assert.equal(calls,malformed.length+1,'no retries, identity guessing, cache fallback or human reauthentication');
+  const two={...valid,identities:[row,{bindingId:randomUUID(),provider:'max',externalUserId:'001-AbC'}]};
+  response=two;
+  assert.equal((await client.ownerIdentities()).identities[1].externalUserId,'001-AbC','opaque ids are not normalized');
+  const {ASSISTANT_MCP_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  assert.ok(!ASSISTANT_MCP_TOOLS.includes('ownerIdentities'));
+  assert.ok(!ASSISTANT_MCP_TOOLS.includes('get_assistant_owner_identities'));
+});
+
 test('pairing persists verifier before I/O, handles pending and erases it after protected device save', async () => {
   const origin='https://assistant.test',enrollmentId=randomUUID(),pairingId=randomUUID(),assistantUserId=randomUUID(),deviceId=randomUUID();
   const store=memoryStore(); let exchanges=0,seenVerifier;
