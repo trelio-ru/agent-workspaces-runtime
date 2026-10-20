@@ -456,6 +456,8 @@ test('private monitor preserves split UTF-8 and actual isolated Python execution
   const python = await monitorFixture(t, 'import json, sys\nprint(json.dumps({"args":sys.argv[1:],"input":sys.stdin.read(),"isolated":sys.flags.isolated}))\n', 'python');
   const value = JSON.parse((await python.run()).stdout);
   assert.deepEqual(value, { args: ['monitor'], input: '', isolated: 1 });
+  const encoding = await monitorFixture(t, 'import json, sys\nprint(json.dumps({"encoding":sys.stdout.encoding,"utf8":sys.flags.utf8_mode,"isolated":sys.flags.isolated}))\n', 'python');
+  assert.deepEqual(JSON.parse((await encoding.run()).stdout), { encoding: 'utf-8', utf8: 1, isolated: 1 });
 });
 
 test('private monitor rejects invalid UTF-8 and bounded stdout or stderr without copying private bytes', async t => {

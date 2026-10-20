@@ -7476,10 +7476,15 @@ export const buildIsolatedPythonRuntimeArguments = ({
   runtimeDirectory,
   entrypointPath,
   runtimeArguments = [],
+  utf8Pipes = false,
 }) => [
   ...argsPrefix,
   "-I",
   "-B",
+  // Windows console and redirected pipes use different encodings. Isolated
+  // mode ignores PYTHON* env, so a UTF-8 wire consumer must select this at
+  // interpreter startup. Ordinary interactive providers retain their ABI.
+  ...(utf8Pipes ? ["-X", "utf8"] : []),
   "-c",
   PYTHON_ISOLATED_RUNTIME_BOOTSTRAP,
   runtimeDirectory,
@@ -7702,6 +7707,7 @@ export const runMaterializedAgentSkill = async ({
       runtimeDirectory,
       entrypointPath,
       runtimeArguments,
+      utf8Pipes: captureOutput,
     });
   }
 

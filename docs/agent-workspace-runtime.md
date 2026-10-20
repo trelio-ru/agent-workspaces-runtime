@@ -2143,6 +2143,10 @@ Capture закрывает stdin, не наследует terminal, не выв�
 bindings сохраняется. Бюджет по monotonic clock 1–180 секунд (60 по умолчанию)
 включает подготовку interpreter; signed browser lease может лишь сократить его.
 Abort, timeout, native exit и output overflow не повторяют subprocess или login.
+Для private Python pipes явный `-X utf8` сохраняет isolated startup и задаёт
+UTF-8 до bootstrap: Windows pipe иначе использует ANSI code page, а `-I`
+игнорирует PYTHON* environment. Interactive path не меняет кодировку.
+Основание: [Python stdio](https://docs.python.org/3.13/library/sys.html#sys.stdout).
 Оба pipe ограничены 1 MiB каждый; это private process budget, не повышение
 MCP envelope limit. Only complete strict UTF-8 stdout возвращается доверенному
 in-process consumer; он обязан разобрать source DTO и проецировать structural
