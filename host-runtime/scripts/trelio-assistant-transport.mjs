@@ -333,6 +333,13 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
 export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page"]);
+// Names only: the backend supplies current schemas and exact task/action
+// authority. No human assertion, owner decision or company role is synthesized.
+export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
+  "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
+  "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",
+  "complete_checklist_item", "create_subtask",
+]);
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, timeoutMs = 30_000 }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
@@ -363,20 +370,20 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
         const tools = await protocol.listRemoteTools(config, credential, session, request, { signal });
         const seen = new Set();
-        const selected = tools.filter(tool => ASSISTANT_MCP_READ_TOOLS.includes(tool?.name)).map(tool => {
+        const selected = tools.filter(tool => ASSISTANT_MCP_TOOLS.includes(tool?.name)).map(tool => {
           if (seen.has(tool.name) || typeof tool.description !== "string" || tool.description.length > 4096
             || !object(tool.inputSchema) || tool.inputSchema.type !== "object") fail("ASSISTANT_MCP_INVALID_RESPONSE");
           seen.add(tool.name);
           // Do not proxy remote App metadata, URLs or OAuth security schemes.
           return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
-            annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } };
+            annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: false, idempotentHint: true, openWorldHint: false } };
         });
         if (!seen.has("get_assistant_status") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         return selected;
       }, signal);
     },
     async callTool(name, args, signal) {
-      if (!ASSISTANT_MCP_READ_TOOLS.includes(name) || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
+      if (!ASSISTANT_MCP_TOOLS.includes(name) || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
       // Snapshot once before asynchronous private/network I/O, as in the shared
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));

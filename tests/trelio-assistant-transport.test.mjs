@@ -156,18 +156,26 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'get_assistant_status',description:'Live status',inputSchema:shape,_meta:{private:'DO_NOT_PROXY_METADATA'}},
       {name:'get_task',description:'Live backend schema',inputSchema:shape},
       {name:'human_login',description:'Never delegate this',inputSchema:shape},
+      {name:'create_comment',description:'Current assistant backend write',inputSchema:shape},
+      {name:'update_task_due_date',description:'Sensitive; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task']);
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment']);
   assert.deepEqual(tools[1].inputSchema,shape);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
   const args={taskPass:{passId:randomUUID()},runtimeSessionProof:{signature:'original'}};
   const resultPromise=client.callTool('get_task',args);args.runtimeSessionProof.signature='changed';
   const result=await resultPromise;assert.equal(receivedArgs.runtimeSessionProof.signature,'original');
   assert.equal(result.content[0].text,'native content');assert.ok(!('_meta' in result));
   assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/call','DELETE']);
-  const count=calls.length;await assert.rejects(client.callTool('create_comment',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
+  const count=calls.length;await assert.rejects(client.callTool('update_task_due_date',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
+  assert.equal(tools[2].annotations.readOnlyHint,false);
+  const beforeWrite=calls.length;
+  const body={bodyMarkdown:'Scoped working update',clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  await client.callTool('create_comment',body);
+  assert.deepEqual(receivedArgs,body,'the current backend owns validation; the host adds no human approval flags');
+  assert.equal(calls.slice(beforeWrite).filter(name=>name==='tools/call').length,1,'one write is never replayed');
   echoed=true;await assert.rejects(client.callTool('get_task',{}),/INVALID_RESPONSE/);
   broken=true;await assert.rejects(client.callTool('get_task',{}),error=>error.code==='ASSISTANT_MCP_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
   assert.equal((await store.get({origin,kind:'device',id:assistantId})).credential,credential,'failure preserves the exact pairing');

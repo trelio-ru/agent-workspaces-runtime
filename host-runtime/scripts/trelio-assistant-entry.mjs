@@ -5,7 +5,7 @@ import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-ho
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_READ_TOOLS } from './trelio-assistant-transport.mjs';
+import { ASSISTANT_MCP_TOOLS } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup } from './trelio-assistant-setup.mjs';
@@ -159,7 +159,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
       try {
         // Validate before touching private storage. Unknown tools cannot cause
         // an auth read or be delegated to another MCP implementation.
-        if (ASSISTANT_MCP_READ_TOOLS.includes(message.params?.name)
+        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name)
           || createMcp===createForwardingAssistantMcp && !codes.has(message.params?.name)
             && /^[a-z][a-z0-9_]{0,99}$/u.test(message.params?.name ?? '')) {
           if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
@@ -429,8 +429,8 @@ export const executeAssistantRuntimeRequest = async request => {
   }
   if(!['list','call'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
   // Validate the exact tool before any credential read, as in ordinary MCP.
-  const {ASSISTANT_MCP_READ_TOOLS}=await import('./trelio-assistant-transport.mjs');
-  if(request.operation==='call' && !ASSISTANT_MCP_READ_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
+  if(request.operation==='call' && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return productionContext(async client=>{
     const current=await client.readHealth();
     const blocked=assistantHealthCompatibility(current,requireTrelioComponentVersions());

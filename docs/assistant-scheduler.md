@@ -350,3 +350,19 @@ Automatic external-supervisor restart of Codex is backlog, not implemented.
 This model-free MCP lifecycle is not proof of a registered Windows background
 service or businessReady. Source/CI tests do not replace the Windows update and
 notification E2E acceptance gate before product activation.
+
+
+## Task-local domain actions
+
+The current signed worker forwards the dedicated backend's task-local comment,
+content/status, checklist, own-control and subtask tools. Names are a closed
+transport list; input schemas are live backend data, not host copies. Read-only
+annotations remain true only for reads. A backend without these capabilities
+continues to expose its old read catalog; this is not a minimum-version bump.
+No owner-only/sensitive tool, human command flag or publication token is added.
+
+Each action still uses observed task-pass proof, native task permissions, snapshot
+CAS and a durable request UUID. The shared backend transaction commits effects
+and receipt together, then releases deferred messenger copies. A lost response
+is not retried by the facade, worker or transport. These actions do not enable
+businessReady until Workspace/outcome/service and Windows acceptance are wired.
