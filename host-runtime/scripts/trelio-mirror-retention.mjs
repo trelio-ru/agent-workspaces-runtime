@@ -51,12 +51,15 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
   const ownerPath = path.join(lock, `${process.pid}-${id}.json`);
   const deadline = Date.now() + waitMs;
   let attempted = false;
+  let claimSharingRetries = 0;
   for (;;) {
     if (attempted && Date.now() >= deadline) return { skipped: "busy" };
     attempted = true;
     let claimedIdentity;
+    let created = false;
     try {
       await fs.mkdir(lock, { mode: 0o700 });
+      created = true;
       claimedIdentity = await fs.lstat(lock);
       await assertPrivatePathKind(root, "directory").catch(error => {
         error.mirrorLockStage = "root_validation";
@@ -68,6 +71,17 @@ export const withMirrorRetentionLock = async (root, operation, { waitMs = 30_000
       });
       break;
     } catch (error) {
+      // Windows may keep a just-removed directory delete-pending while another
+      // process still closes its handle. mkdir then returns EPERM/EACCES rather
+      // than EEXIST. Retry only this unacquired claim, briefly and boundedly;
+      // never retry private validation, owner publication or the operation.
+      // Persistent permission refusal retains its original error. A successful
+      // claim must still pass the ordinary root/DACL validation below.
+      if (!created && process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)
+        && claimSharingRetries++ < 5 && Date.now() + 20 < deadline) {
+        await sleep(20);
+        continue;
+      }
       if (error.code !== "EEXIST") {
         // Failed initialization owns only its nonce and empty claim directory.
         // Never leave a known failed acquisition as an immortal reader lock.

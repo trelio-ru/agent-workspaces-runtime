@@ -1690,8 +1690,11 @@ reader без истечения по часам. Contender читает тол�
 исчезновение/замену exact каталога либо уникального nonce прежнего owner;
 новый owner проверяется заново. ENOENT самого первого lstat после contended
 mkdir тоже доказывает отсутствие: successor, успевший появиться до следующего
-lstat, не отменяет bounded retry лишь захвата. Permission/unknown ошибки
-сохраняют отказ; successor не удаляется и операция не повторяется. Cleanup после
+lstat, не отменяет bounded retry лишь захвата. Protected permission/unknown ошибки сохраняют отказ; successor не удаляется,
+операция не повторяется. Единственное исключение – Windows EPERM/EACCES самого
+неполученного mkdir claim: delete-pending handle допускает не более пяти коротких
+повторов под прежним deadline. Persistent отказ сохраняет исходную ошибку;
+успех всё равно требует обычной private/DACL проверки root и publication. Cleanup после
 публикации best-effort: ошибка не превращает уже заменённый pointer в failed
 mutation и не разрешает повтор публикации.
 

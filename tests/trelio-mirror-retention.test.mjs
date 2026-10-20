@@ -246,3 +246,37 @@ test('first lock inspection retains permission refusal while the lock still exis
     assert.equal((await originalLstat(lock)).isDirectory(), true);
   } finally { fs.lstat = originalLstat; }
 });
+
+test('Windows delete-pending mkdir retries only the unacquired claim and retains persistent refusal', async t => {
+  const f = await fixture(t); const root = await f.schema();
+  const lock = path.join(root, 'retention.lock');
+  const mkdir = fs.mkdir, platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  let claims = 0, operations = 0;
+  const denied = Object.assign(new Error('synthetic delete-pending claim'), { code: 'EPERM' });
+  fs.mkdir = async (target, ...args) => {
+    if (target === lock) {
+      claims++;
+      if (claims === 1) {
+        Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+        throw denied;
+      }
+      // Restore the actual OS before successful private/DACL operations. Only
+      // the injected kernel error is Windows-specific, not the fixture store.
+      Object.defineProperty(process, 'platform', platform);
+    }
+    return mkdir(target, ...args);
+  };
+  try {
+    assert.equal(await withMirrorRetentionLock(root, async () => { operations++; return true; }), true);
+    assert.equal(claims, 2); assert.equal(operations, 1);
+    claims = 0;
+    fs.mkdir = async (target, ...args) => {
+      if (target !== lock) return mkdir(target, ...args);
+      claims++; Object.defineProperty(process, 'platform', { ...platform, value: 'win32' }); throw denied;
+    };
+    await assert.rejects(withMirrorRetentionLock(root, async () => { operations++; }), error => error === denied);
+    assert.equal(claims, 6); assert.equal(operations, 1, 'failed acquisition never invokes the protected operation');
+  } finally {
+    fs.mkdir = mkdir; Object.defineProperty(process, 'platform', platform);
+  }
+});

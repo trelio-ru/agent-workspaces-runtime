@@ -458,3 +458,5 @@ publication tooling также остаются вне этого публичн
 - Cross-repository tests запускай с exact plugin root. Ошибка отсутствующего
   plugin checkout – setup failure, а не повод копировать plugin source.
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
+
+- Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
