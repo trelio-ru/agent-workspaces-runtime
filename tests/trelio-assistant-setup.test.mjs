@@ -76,11 +76,11 @@ test('oversized frames and unsupported entry commands fail before setup or priva
   assert.equal(created,0);
 });
 
-test('assistant hook permits setup only and blocks undeclared business tools without a human fallback', async () => {
+test('assistant hook permits setup and blocks task tools without an installed host profile', async () => {
   for(const tool of ['mcp__trelio_assistant__get_task','mcp__plugin_trelio-digital-assistant_trelio-assistant__clear_task_control',
     'mcp__trelio_assistant__begin_assistant_setup']){
     const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
-    await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output});
+    await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output,createHook:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});}});
     const result=JSON.parse(raw);
     assert.equal(result.hookSpecificOutput?.permissionDecision,tool.endsWith('begin_assistant_setup')?undefined:'deny');
   }

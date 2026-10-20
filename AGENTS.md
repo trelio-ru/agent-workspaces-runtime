@@ -34,8 +34,9 @@ publication tooling также остаются вне этого публичн
 - Dedicated plugin использует явный `bridge assistant mcp|hook` profile общего
   signed entry; unknown command не переходит к human bridge/OAuth. Setup-only MCP
   композирует protected S256/private storage/fixed HTTPS без model credential и
-  не объявляет businessReady. До task-pass admission hooks разрешают только setup,
-  остальные assistant calls получают JSON deny с exit 0. Контракт –
+  не объявляет businessReady. Assistant hook использует общий observer/proof/lock
+  и exact protected pass journal; без live task-pass registration даёт JSON deny
+  с exit 0. Ключ до HTTP сохраняется в OS-backed runtime slot, не human state. Контракт –
   [assistant setup](docs/assistant-scheduler.md#dedicated-plugin-entry-and-setup).
 
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).

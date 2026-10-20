@@ -163,7 +163,7 @@ const wait = (milliseconds) => new Promise((resolve) => {
  * its local key. Without it, the last writer would orphan the other session
  * and one of the already-created proofs could fail nondeterministically.
  */
-const withRuntimeStateLock = async (filePath, operation) => {
+export const withRuntimeStateLock = async (filePath, operation) => {
   const lockPath = `${filePath}.lock`;
   const { ensurePrivateDirectory } = await loadWorkspaceBridgeModule();
   await withRuntimeHookStage("state_lock", () => ensurePrivateDirectory(path.dirname(filePath)));

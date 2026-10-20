@@ -242,6 +242,7 @@ jobs:
           node tests/trelio-assistant-private.test.mjs
           node tests/trelio-assistant-transport.test.mjs
           node tests/trelio-assistant-setup.test.mjs
+          node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
           node tests/trelio-hook-signed-chain.test.mjs
@@ -363,6 +364,7 @@ jobs:
           node tests/trelio-assistant-private.test.mjs
           node tests/trelio-assistant-transport.test.mjs
           node tests/trelio-assistant-setup.test.mjs
+          node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
 
       - name: Run Windows ACL regressions

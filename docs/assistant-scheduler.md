@@ -187,9 +187,9 @@ An already completed pairing is read back privately and checked by live heartbea
 retrying the setup tool never repeats the one-use exchange. An uncertain exchange
 survives restart as recovery_required. Setup output distinguishes paired/contact
 from business readiness. Task-pass admission and the installed background service
-remain required; the current setup profile does not claim or start them. Until
-proof/admission is wired, hooks allow setup only and deny business calls with a
-closed reason and JSON-deny/exit-0, including malformed input on Windows shells.
+remain required; the current setup profile does not claim or start them. The assistant hook composes the ordinary observer, proof serializer, state lock
+and invocation-private deadline. Without a live exact pass it denies task calls
+with a closed reason and JSON-deny/exit-0, including malformed input on Windows shells.
 
 `trelio-assistant-setup.test.mjs` checks projection, restart fences, real stdio
 frames and denial; the actual generic-entry child test confirms that discovery
@@ -207,3 +207,36 @@ revocation. A server denial preserves the private credential and queue; it does
 not trigger re-pairing or automatically repeat a mutation. A later model-free
 pass can establish live recovery after the owner renews. Other local identity,
 S256 one-use exchange and secret-storage guards remain unchanged.
+
+
+## Task-pass hook and protected host journal
+
+`trelio-assistant-hook.mjs` binds the actual hook `session_id` to the permanent
+chat of the one active task pass. It never falls back to an inherited human
+conversation or accepts a model/effort/pass declaration from tool arguments.
+The ordinary observer reads native turn context; the ordinary v1 proof serializer
+issues a fresh nonce/signature for each tool. The hook overwrites pass/proof input.
+Backend registration/read/renew/end have fixed assistant-device HTTP routes and
+reuse the common server session/model-policy/nonce engine through genuine device
+provenance. This source addition does not expose business tools by itself.
+
+A completed pairing stores a private structural `identity.json`; another device
+or assistant cannot silently replace an existing host identity. Credentials,
+active-pass journal and Ed25519 private keys use separate OS-backed slots with
+origin/purpose/UUID binding. Keys are not in SQLite, Workspace, prompt or argv.
+The active journal may only be released by an exact positive backend outcome;
+SessionEnd, timeout and CLI exit are insufficient. The background coordinator's
+actual pass lifecycle and outcome adapter must wire this explicitly before
+activation. Missing configuration does not reuse human OAuth.
+
+The initial signing key and one pending refresh key are saved before registration
+I/O. A lost reply reuses the same key after restart; a model/effort change creates
+an immutable successor without extending the predecessor's TTL. SessionEnd saves
+a local end fence before HTTP; a lost end reply cannot authorize signing with a
+remotely ended key. Compaction reuses the common full pinned-authority reminder.
+All private I/O and network work use the original non-sliding hook deadline.
+
+Tests cover real Ed25519 verification, current native transcript observation,
+wrong chat/device/pass, concurrent registration, lost response/restart, model
+refresh, expired deadline before first read, exact journal release and stdio
+redaction. They are not a Windows end-to-end task or installed daemon proof.

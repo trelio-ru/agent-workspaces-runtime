@@ -18,7 +18,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SERVICE = 'ru.trelio.digital-assistant.v1';
 const slot = ({ origin, kind, id }) => {
   let url; try { url = new URL(origin); } catch { fail('ASSISTANT_PRIVATE_INVALID_INPUT'); }
-  if (url.origin !== origin || url.protocol !== 'https:' || !['device','pairing'].includes(kind) || !UUID.test(id ?? '')) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
+  if (url.origin !== origin || url.protocol !== 'https:' || !['device','pairing','pass','runtime'].includes(kind) || !UUID.test(id ?? '')) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
   const identity = { origin, kind, id: id.toLowerCase() };
   return { ...identity, key: createHash('sha256').update(JSON.stringify(identity)).digest('hex') };
 };

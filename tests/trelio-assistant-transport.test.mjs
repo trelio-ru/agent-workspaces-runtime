@@ -87,3 +87,32 @@ test('owner renewal recovers the same device after its cached pairing expiry wit
   assert.equal(calls,2,'no hidden retry; only the next explicit polling pass contacts the server');
   assert.deepEqual(await store.get(slot),original,'server renewal needs no private store rewrite or key rotation');
 });
+
+test('task-pass and observed-runtime transport retain exact bindings and project away private server fields',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1});
+  const companyId=randomUUID(),taskId=randomUUID(),passId=randomUUID(),bindingId=randomUUID(),deliveryId=randomUUID(),threadId=randomUUID();
+  const observation={schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook',observedAt:new Date().toISOString()};
+  const sessionId=randomUUID();let mismatch=false;const operations=[];
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,input)=>{
+    operations.push(operation);
+    if(operation==='passBegin'||operation==='passRead')return {passId,bindingId,bindingRevision:3,deliveryId,threadId,state:'leased',leaseRevision:0,
+      leaseExpiresAt:new Date(Date.now()+60000).toISOString(),secret:'PRIVATE'};
+    if(operation==='passRenew')return {passId,leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:new Date(Date.now()+60000).toISOString(),state:'leased'};
+    if(operation==='endRuntime')return {ended:true,secret:'PRIVATE'};
+    assert.equal(operation,'registerRuntime');
+    return {schemaVersion:1,passId:input.passId,runtimeSessionId:sessionId,conversation:{provider:'codex',conversationId:mismatch?randomUUID():threadId,
+      openProtocol:'codex-thread-v1'},expiresAt:new Date(Date.now()+300000).toISOString(),observation:input.observation,runtimeRefreshSupported:true,secret:'PRIVATE'};
+  }});
+  const begin=await client.beginTaskPass({companyId,taskId,bindingId,bindingRevision:3,deliveryId,threadId});
+  assert.equal(begin.passId,passId);assert.ok(!JSON.stringify(begin).includes('PRIVATE'));
+  const locator={companyId,taskId,passId};assert.equal((await client.readTaskPass(locator)).threadId,threadId);
+  assert.equal((await client.renewTaskPass({...locator,expectedLeaseRevision:0,clientRequestId:randomUUID()})).leaseRevision,1);
+  const request={...locator,clientSessionId:threadId,observation,publicKeySpki:'a'.repeat(59)};
+  const registered=await client.registerRuntime(request);assert.equal(registered.runtimeSessionId,sessionId);
+  assert.ok(!JSON.stringify(registered).includes('PRIVATE'));mismatch=true;
+  await assert.rejects(client.registerRuntime(request),/INVALID_RESPONSE/);
+  await assert.rejects(client.registerRuntime({...request,observation:{...observation,source:'agent_request'}}),/INVALID_INPUT/);
+  assert.deepEqual(await client.endRuntime({...locator,runtimeSessionId:sessionId}),{ended:true});
+  assert.deepEqual(operations,['passBegin','passRead','passRenew','registerRuntime','registerRuntime','endRuntime']);
+});

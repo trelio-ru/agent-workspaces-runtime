@@ -15,6 +15,11 @@ const revision = value => {
 const text = (value, limit = 2048) => {
   if (typeof value !== 'string' || !value.length || value.length > limit || /[\x00-\x20\x7f]/u.test(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); return value;
 };
+const isoTimestamp = value => {
+  text(value,64);
+  if(!/^\d{4}-\d{2}-\d{2}T/u.test(value) || !Number.isFinite(Date.parse(value))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return value;
+};
 const state = value => {
   if (!['accepted','waiting_owner','paused','done','revoked'].includes(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); return value;
 };
@@ -42,6 +47,9 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['claim',['POST','/runtime/task/claim']],
     ['poll',['POST','/runtime/notifications/poll']], ['ack',['POST','/runtime/notifications/ack']],
     ['report',['POST','/runtime/schedule']],
+    ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
+    ['passRenew',['POST','/runtime/task-pass/renew']], ['registerRuntime',['POST','/runtime/session/register']],
+    ['endRuntime',['POST','/runtime/session/end']],
   ]);
   return async (operation, body, credential = null, signal = null) => {
     const route = routes.get(operation);
@@ -152,6 +160,52 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         bindingRevision:revision(input.bindingRevision),provisionId:id(input.provisionId)},signal);
       if(value.bindingId!==input.bindingId || value.provisionId!==input.provisionId) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {bindingId:id(value.bindingId),provisionId:id(value.provisionId),threadId:value.threadId===null?null:id(value.threadId)};
+    },
+    async beginTaskPass(input,signal) {
+      const value=await call('passBegin',{companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
+        bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId)},signal);
+      if(value.bindingId!==input.bindingId || value.deliveryId!==input.deliveryId || value.threadId!==input.threadId
+        || value.bindingRevision!==input.bindingRevision || !['leased','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+        deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state};
+    },
+    async readTaskPass(input,signal) {
+      const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId)},signal);
+      if(value.passId!==input.passId || !['leased','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
+        deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state};
+    },
+    async renewTaskPass(input,signal) {
+      const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
+        expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId)},signal);
+      if(value.passId!==input.passId || value.leaseRevision!==input.expectedLeaseRevision+1 || value.state!=='leased') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt)};
+    },
+    async registerRuntime(input,signal) {
+      if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
+        || input.observation.source!=='codex_hook' || input.observation.evidenceLevel!=='local_observed'
+        || !/^[a-z0-9._:+/-]{1,255}$/iu.test(input.observation.modelId??'')
+        || ![null,'low','medium','high','xhigh','max','ultra'].includes(input.observation.effortLevel)
+        || !Number.isFinite(Date.parse(input.observation.observedAt)) || !/^[A-Za-z0-9_-]{40,256}$/u.test(input.publicKeySpki??'')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const value=await call('registerRuntime',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
+        clientSessionId:id(input.clientSessionId),observation:input.observation,publicKeySpki:input.publicKeySpki,
+        ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{})},signal);
+      if(value.schemaVersion!==1 || value.passId!==input.passId || value.conversation?.conversationId!==input.clientSessionId
+        || value.conversation?.provider!=='codex' || value.conversation?.openProtocol!=='codex-thread-v1'
+        || !Number.isFinite(Date.parse(value.expiresAt)) || value.runtimeRefreshSupported!==true
+        || !object(value.observation)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      for(const key of ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'])
+        if(value.observation[key]!==input.observation[key]) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {schemaVersion:1,passId:id(value.passId),runtimeSessionId:id(value.runtimeSessionId),expiresAt:isoTimestamp(value.expiresAt),
+        observation:Object.fromEntries(['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source','observedAt'].map(key=>[key,key==='observedAt'?isoTimestamp(value.observation[key]):value.observation[key]])),
+        runtimeRefreshSupported:true};
+    },
+    async endRuntime(input,signal) {
+      const value=await call('endRuntime',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
+        runtimeSessionId:id(input.runtimeSessionId)},signal);
+      if(value.ended!==true) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');return {ended:true};
     },
     async reportSchedule(input, signal) {
       // The server independently validates task authority and CAS. It receives

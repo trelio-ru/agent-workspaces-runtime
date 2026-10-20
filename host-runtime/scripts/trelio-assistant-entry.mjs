@@ -38,17 +38,42 @@ export const callAssistantSetupTool = async (setup, name, args) => {
  * migrates Codex configuration. Private primitives are loaded lazily on an
  * actual setup call, not for tools/list or an unsupported command. */
 export const createProductionAssistantSetup = async () => {
-  const [{ createAssistantPrivateStore }, { createAssistantHttp }, common, { withPrivateProcessSession }] = await Promise.all([
+  const [{ createAssistantPrivateStore }, { createAssistantHttp }, common, { withPrivateProcessSession }, { createAssistantHostState }] = await Promise.all([
     import('./trelio-assistant-private.mjs'), import('./trelio-assistant-transport.mjs'), import('./trelio-workspace.mjs'),
-    import('./trelio-hook-private-session.mjs'),
+    import('./trelio-hook-private-session.mjs'), import('./trelio-assistant-hook.mjs'),
   ]);
   const origin = 'https://trelio.ru';
   const store = createAssistantPrivateStore({ directory: path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants', 'credentials') });
+  const hostState = createAssistantHostState({ directory: path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants'), store });
   const setup = createAssistantSetup({ origin, store, http: createAssistantHttp({ origin }) });
   // As in the common bridge, share one native worker only inside this tool
   // invocation. A long-lived MCP must not retain its ACL results or pipes.
   return Object.fromEntries(Object.entries(setup).map(([name, action]) => [name,
-    (...args) => withPrivateProcessSession(() => action(...args))]));
+    (...args) => withPrivateProcessSession(async () => {
+      const result = await action(...args);
+      if (result.state === 'paired') await hostState.saveIdentity({ origin, assistantId: result.assistantId, deviceId: result.deviceId });
+      return result;
+    })]));
+};
+
+/** The host identity is selected by completed protected pairing, never tool
+ * arguments or an inherited human thread. Every invocation gets its own native
+ * ACL/DPAPI lifetime and the common non-sliding hook clock. */
+export const createProductionAssistantHook = async () => {
+  const [{ createAssistantPrivateStore }, { createAssistantHttp, createAssistantDeviceClient }, common,
+    { createAssistantHostState, createAssistantTaskHook }] = await Promise.all([
+    import('./trelio-assistant-private.mjs'), import('./trelio-assistant-transport.mjs'), import('./trelio-workspace.mjs'),
+    import('./trelio-assistant-hook.mjs'),
+  ]);
+  const directory = path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants');
+  const store = createAssistantPrivateStore({ directory: path.join(directory, 'credentials') });
+  const hostState = createAssistantHostState({ directory, store });
+  const identity = await hostState.readIdentity();
+  if (!identity) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
+  if (identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
+  const client = createAssistantDeviceClient({ ...identity, store, http: createAssistantHttp({ origin: identity.origin }) });
+  return createAssistantTaskHook({ identity, client, store, readActivePass: hostState.readActivePass,
+    lockDirectory: path.join(directory, 'runtime-locks') });
 };
 
 /** Bounded JSON-lines MCP facade for setup only. No raw incoming body, transport
@@ -116,9 +141,6 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
 export const runAssistantEntry = async (args, options = {}) => {
   if (args.length !== 1 || !['mcp', 'hook'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
   if (args[0] === 'mcp') return runAssistantSetupMcp(options);
-  // Until common task-pass proof/admission is wired, do not manufacture a
-  // session or reuse human hooks. Setup-only tools are deliberately unprotected;
-  // every other recognized assistant operation is blocked with a closed reason.
   let bytes = 0, text = '';
   for await (const chunk of options.input ?? process.stdin) {
     bytes += Buffer.byteLength(chunk);
@@ -129,9 +151,34 @@ export const runAssistantEntry = async (args, options = {}) => {
   const tool = String(event.tool_name ?? '');
   const name = tool.split(/__|[:./-]/u).at(-1);
   const assistantTool = /^(?:mcp__)?trelio[-_]assistant__|^mcp__plugin_trelio-digital-assistant_trelio-assistant__|^(?:mcp[:./-])?trelio-assistant[:./-]/u.test(tool);
-  const decision = event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name)
-    ? { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny',
-      permissionDecisionReason: 'ASSISTANT_TASK_PASS_ADMISSION_REQUIRED' } } : {};
+  let decision = {};
+  if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name) && name !== 'get_assistant_status') {
+    const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
+    const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
+    try {
+      decision = await withRuntimeHookPrivateSession(runtimeHookRemainingMilliseconds(event.hook_event_name,
+        { startedAt: resolveRuntimeHookStartedAt() }), async () => {
+        const hook = await (options.createHook ?? createProductionAssistantHook)();
+        return hook(event, name);
+      });
+    } catch (error) {
+      const suppliedCode = error?.diagnosticCode ?? error?.code;
+      const code = /^(?:ASSISTANT_|TRELIO_)[A-Z_]{1,100}$/u.test(suppliedCode ?? '')
+        ? suppliedCode : 'ASSISTANT_HOOK_UNAVAILABLE';
+      decision = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: code } };
+    }
+  } else if (event.hook_event_name === 'SessionStart' && event.source === 'compact') {
+    const { TRELIO_COMPACTION_RECOVERY_CONTEXT } = await import('./trelio-context-recovery.mjs');
+    decision = { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: TRELIO_COMPACTION_RECOVERY_CONTEXT } };
+  } else if (event.hook_event_name === 'SessionEnd') {
+    const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
+    const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
+    try { await withRuntimeHookPrivateSession(runtimeHookRemainingMilliseconds('SessionEnd',
+      { startedAt: resolveRuntimeHookStartedAt() }), async () => {
+      const hook = await (options.createHook ?? createProductionAssistantHook)(); await hook(event);
+    }); } catch { /* No grant or retry is issued by a failed end notification. */ }
+  }
+
   (options.output ?? process.stdout).write(JSON.stringify(decision) + '\n');
 };
 
