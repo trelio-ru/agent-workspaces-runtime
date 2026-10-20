@@ -30,8 +30,15 @@ jobs:
       TRELIO_VISUAL_NATIVE_TEST: '1'
       TRELIO_VISUAL_EXTENSION_TEST: '1'
       TRELIO_VISUAL_EXTENSION_HEADED: '1'
+      TRELIO_TEXT_NATIVE_TEST: '1'
+      TRELIO_TEXT_HEADED: '1'
     steps:
       - uses: actions/checkout@v4
+      - name: Read actual search pacing contract sources
+        uses: actions/checkout@v4
+        with:
+          repository: trelio-ru/agent-skills
+          path: _contracts/agent-skills
       - uses: actions/download-artifact@v4
         with:
           name: windows-private-worker
@@ -82,6 +89,9 @@ jobs:
           node tests/trelio-visual-cookie-state.test.mjs
           node tests/trelio-visual-link-router.test.mjs
           node tests/trelio-visual-extension-worker.test.mjs
+          node tests/trelio-browser-text.test.mjs
+          node tests/trelio-browser-request-pacing.test.mjs
+          node tests/trelio-browser-tab-budget.test.mjs
           node tests/trelio-visual-extension-browser.test.mjs
           node tests/trelio-visual-session.test.mjs
       - name: Run Linux desktop fixtures with real Secret Service
@@ -93,6 +103,9 @@ jobs:
             for file in native-store store transport profile cookie-state browser link-router extension-worker extension-browser session; do
               xvfb-run -a node "tests/trelio-visual-${file}.test.mjs"
             done
+            xvfb-run -a node tests/trelio-browser-text.test.mjs
+            node tests/trelio-browser-tab-budget.test.mjs
+            node tests/trelio-browser-request-pacing.test.mjs
           '
 
   windows-private-build:
@@ -170,6 +183,12 @@ jobs:
           name: windows-private-worker
           path: host-runtime/scripts/native-private-process/bin
 
+      - name: Read actual search pacing contract sources
+        uses: actions/checkout@v4
+        with:
+          repository: trelio-ru/agent-skills
+          path: _contracts/agent-skills
+
       - name: Check out plugin contract
         uses: actions/checkout@v4
         with:
@@ -202,6 +221,9 @@ jobs:
           node tests/trelio-visual-cookie-state.test.mjs
           node tests/trelio-visual-link-router.test.mjs
           node tests/trelio-visual-extension-worker.test.mjs
+          node tests/trelio-browser-text.test.mjs
+          node tests/trelio-browser-request-pacing.test.mjs
+          node tests/trelio-browser-tab-budget.test.mjs
           node tests/trelio-visual-extension-browser.test.mjs
           node tests/trelio-visual-native-store.test.mjs
           node tests/trelio-visual-session.test.mjs

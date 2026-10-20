@@ -1,3 +1,4 @@
+import { validateTextResult, TEXT_KIND } from './trelio-browser-text-result.mjs';
 import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 
@@ -8,7 +9,7 @@ export const VISUAL_RESULT_KIND = 'trelio.visual-browser/v1';
 export const MAX_VISUAL_PNG_BYTES = 2 * 1024 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const states = new Set(['not_configured', 'preparing', 'manual_input_required', 'saved_unverified', 'ready', 'closed', 'error']);
-const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'navigation_blocked', 'document_blocked', 'lease_expired', 'operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'session_busy', 'session_closed', 'browser_process_lost', 'invalid_input', 'http_document_failure']);
+const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'navigation_blocked', 'document_blocked', 'lease_expired', 'operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'session_busy', 'session_closed', 'browser_process_lost', 'invalid_input', 'http_document_failure', 'request_not_reviewed', 'request_not_ready', 'observation_mode_mismatch', 'tab_limit_reached']);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
 
@@ -74,7 +75,7 @@ function validateResult(value, discardBrowserColorProfile) {
   return value;
 }
 
-export function validateVisualResult(value) { return validateResult(value, false); }
+export function validateVisualResult(value) { return value?.kind === TEXT_KIND ? validateTextResult(value) : validateResult(value, false); }
 
 /** Normalize only a host-owned raster capture, before it enters the private
  * worker HTTP transport and ordinary strict MCP validation. No website code,
@@ -95,21 +96,26 @@ export function visualFrame({ sessionId, width, height, scroll, png }) {
 export function visualMcpResult(value) {
   validateVisualResult(value);
   const { image, kind, ...metadata } = value;
-  return { ...(value.state === 'error' ? { isError: true } : {}), content: [
+  const result = { ...(value.state === 'error' ? { isError: true } : {}), content: [
     { type: 'text', text: JSON.stringify(metadata) },
     ...(image ? [{ type: 'image', mimeType: image.mimeType, data: image.data }] : []),
   ] };
+  // MCP serializes the JSON text a second time. Quotes/backslashes can expand
+  // even a valid bounded observation beyond the envelope budget; reject it,
+  // never truncate or fall back to echoing the original provider stdout.
+  if (kind === TEXT_KIND && Buffer.byteLength(JSON.stringify(result)) > 40_000) fail();
+  return result;
 }
 
 // Only the skill-run transport may interpret this marker. A malformed visual
 // attempt fails closed instead of falling back to echoing its original stdout.
 export function parseVisualSkillOutput(stdout) {
-  if (typeof stdout !== 'string' || !stdout.includes(VISUAL_RESULT_KIND)) return null;
+  if (typeof stdout !== 'string' || (!stdout.includes(VISUAL_RESULT_KIND) && !stdout.includes(TEXT_KIND))) return null;
   if (Buffer.byteLength(stdout) > 3 * 1024 * 1024) fail();
   let value;
   try { value = JSON.parse(stdout); } catch { fail(); }
   // Ordinary provider data may mention the protocol in prose. Only its exact
-  // top-level marker opts into image projection; legacy JSON stays unchanged.
-  if (value?.kind !== VISUAL_RESULT_KIND) return null;
+  // top-level marker opts into closed browser projection; legacy JSON stays unchanged.
+  if (value?.kind !== VISUAL_RESULT_KIND && value?.kind !== TEXT_KIND) return null;
   return validateVisualResult(value);
 }

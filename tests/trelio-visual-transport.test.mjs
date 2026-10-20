@@ -148,6 +148,9 @@ test('concurrent dead-worker recovery preserves live bindings and unknown files'
     await prepareVisualPrivateDirectory(active);
     await writePrivateJsonFile(path.join(active, 'owner.json'), owner);
     assert.equal((await call()).reason, 'session_busy', 'another live company binding is never adopted');
+    await writePrivateJsonFile(path.join(active, 'owner.json'), { ...owner, bindingHash: binding.bindingHash });
+    assert.equal((await runVisualSession({ origins: ['http://127.0.0.1:32123'], operation: 'read-text', observationMode: 'text', env, fixture: { directory } })).reason, 'observation_mode_mismatch', 'legacy image worker cannot expose text after a provider upgrade');
+    await writePrivateJsonFile(path.join(active, 'owner.json'), owner);
     const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
     await once(child, 'exit'); owner.pid = child.pid;
     await writePrivateJsonFile(path.join(active, 'owner.json'), owner);

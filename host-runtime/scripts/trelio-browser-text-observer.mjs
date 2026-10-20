@@ -1,4 +1,4 @@
-/** Fixed isolated-world reader for a maintainer experiment, never page JS.
+/** Fixed isolated-world reader for a signed host opt-in, never page JS.
  * It reads rendered text nodes and viewport control labels, without reading
  * input values, attributes inventories, HTML, storage or network responses.
  * Requests contain a literal text filter and offset, never a selector/script.
@@ -28,7 +28,7 @@ export function installTextObserver() {
     return clean(text, 160);
   };
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
-    if (sender.id !== chrome.runtime.id || message?.kind !== 'experimental_read_text') return;
+    if (sender.id !== chrome.runtime.id || message?.kind !== 'read_rendered_text') return;
     const { query = '', offset = 0, includeControls = true } = message;
     if (typeof query !== 'string' || query.length > 120 || typeof includeControls !== 'boolean' || !Number.isInteger(offset) || offset < 0 || offset > 100_000) return respond({ error: 'invalid_input' });
     // Authentication must remain a human step even outside the host's manual
@@ -42,9 +42,12 @@ export function installTextObserver() {
       if (++visited > 20_000 || characters >= 100_000) { scanLimited = true; break; }
       const parent = node.parentElement;
       if (!parent || parent.closest('script,style,noscript,template,textarea,select,option,[contenteditable="true"]') || hidden(parent)) continue;
-      const rendered = clean(node.textContent, 100_001);
-      if (rendered.length > 2000) scanLimited = true;
-      const value = rendered.slice(0, 2000);
+      // Keep long rendered nodes pageable; cap only the total scan, not an
+      // arbitrary per-node prefix that would silently lose an ad description.
+      const remaining = 100_000 - characters;
+      const rendered = clean(node.textContent, remaining + 1);
+      if (rendered.length > remaining) scanLimited = true;
+      const value = rendered.slice(0, remaining);
       if (!value) continue;
       characters += value.length + 1;
       lines.push(value);
@@ -66,7 +69,7 @@ export function installTextObserver() {
       const hit = document.elementFromPoint(x, y);
       if (!hit || (hit !== element && !element.contains(hit))) continue;
       const field = ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName);
-      const label = clean(element.getAttribute('aria-label') || fieldLabel(element) || element.getAttribute('placeholder') || (!field && element.innerText) || element.getAttribute('title'), 160);
+      const label = clean(element.getAttribute('aria-label') || fieldLabel(element) || element.getAttribute('placeholder') || (!field && element.innerText) || element.getAttribute('title'), 120);
       const role = element.tagName === 'A' ? 'link' : ['INPUT', 'TEXTAREA'].includes(element.tagName) ? 'textbox' : element.tagName === 'SELECT' ? 'select' : 'button';
       if (!label) continue;
       if (!controls.some(c => c.role === role && c.label === label && c.x === x && c.y === y)) controls.push({ role, label, x, y });

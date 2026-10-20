@@ -1,10 +1,13 @@
 /**
  * This function is materialized as the owned MV3 service worker. It has no
- * scripting permission, arbitrary page evaluate or model-facing DOM reader.
- * Its companion isolated adapter only routes a clicked anchor's destination.
+ * scripting permission, arbitrary page evaluate or DOM-tree projection.
+ * Fixed isolated adapters route links and, only on signed opt-in, read rendered text.
  * Only the closed host command vocabulary below can reach chrome.debugger.
  */
-export function visualExtensionWorker(config, cookieState) {
+export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget) {
+  const requestPacing = createPacing();
+  const tabBudget = createTabBudget();
+  let observedFrameId, navigationGeneration = 0;
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
   let bootstrapState = 'pending', bootstrapStage = 'policy', stopping = false;
   let authReady, authStarted = false, authRestored = false, authInitialising = false, authFrozen = false, authTimer;
@@ -12,6 +15,15 @@ export function visualExtensionWorker(config, cookieState) {
   const ownedWindows = new Set(), windowChanges = [];
   let windowInventoryReady = false;
   const attached = new Set();
+  let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
+  const admitTab = tab => {
+    if (tabBudget.admit(tab.id)) return;
+    // Native tabs.onCreated is necessarily post-creation. Close overflow
+    // promptly; serialize removals and fail closed if Chrome refuses cleanup.
+    // We never activate or restore another app to disguise popup focus.
+    tabCleanup = tabCleanup.then(() => chrome.tabs.remove(tab.id)).catch(() => { tabCleanupFailed = true; });
+  };
+  chrome.tabs.onCreated.addListener(admitTab);
   const httpFailures = new Map();
   const allowed = raw => {
     try {
@@ -86,7 +98,7 @@ export function visualExtensionWorker(config, cookieState) {
     if (!['normal', 'popup'].includes(window.type)) return;
     if (windowInventoryReady) ownedWindows.add(window.id); else windowChanges.push({ id: window.id, removed: false });
   });
-  chrome.tabs.onRemoved.addListener((_tabId, info) => { if (info.isWindowClosing) windowClosing(info.windowId, true); });
+  chrome.tabs.onRemoved.addListener((_tabId, info) => { tabBudget.removed(_tabId); httpFailures.delete(_tabId); if (info.isWindowClosing) windowClosing(info.windowId, true); });
   // Numeric main-document evidence only: no request/response headers or body,
   // and no URL path/query leaves this adapter. Transport errors have no status.
   chrome.webRequest.onBeforeRequest.addListener(details => { httpFailures.delete(details.tabId); }, { urls: config.matches, types: ['main_frame'] });
@@ -105,6 +117,7 @@ export function visualExtensionWorker(config, cookieState) {
   chrome.debugger.onEvent.addListener((source, method, params) => {
     // An allowed navigation still replaces the pictured document. Retire its
     // token without reading/forwarding event URLs, frame trees or page data.
+    if ((method === 'Page.frameNavigated' && !params.frame?.parentId) || method === 'Page.navigatedWithinDocument') navigationGeneration++;
     if (source.tabId === frame?.tabId && ((method === 'Page.frameNavigated' && !params.frame?.parentId)
       || (method === 'Page.navigatedWithinDocument' && params.frameId === frame.mainFrameId))) frame = undefined;
   });
@@ -116,14 +129,20 @@ export function visualExtensionWorker(config, cookieState) {
     // only page reads are layout metrics, MIME type and raster screenshot.
     await command(tabId, 'Page.enable');
   }
+  // Input belongs to the browser's already-selected tab. Merely choosing the
+  // newest background popup can capture its pixels but lose keyboard input;
+  // choosing an existing active target needs no per-action focus activation.
+  const preferredTab = tabs => tabs.sort((a, b) => Number(Boolean(b.active)) - Number(Boolean(a.active)) || b.id - a.id)[0];
   async function selected() {
-    const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => allowed(t.url));
-    const tab = tabs.sort((a, b) => a.id - b.id).at(-1);
+    await tabCleanup;
+    if (tabCleanupFailed) throw Error('tab_limit_reached');
+    const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => tabBudget.contains(t.id) && allowed(t.url));
+    const tab = preferredTab(tabs);
     if (!tab) throw Error('session_closed');
     allowedNavigation(tab.url);
     return tab;
   }
-  async function capture() {
+  async function captureImageValue() {
     frame = undefined;
     let tab = await selected();
     // Window creation is not document readiness, especially on a cold native
@@ -158,6 +177,42 @@ export function visualExtensionWorker(config, cookieState) {
     }
     throw Error('operation_failed');
   }
+  async function captureDefault() { return config.observationMode === 'text' ? captureText() : capture(); }
+  async function captureText(args = {}) {
+    return observeFrame(() => captureTextValue(args));
+  }
+  async function capture() { return observeFrame(() => captureImageValue()); }
+  async function observeFrame(read) {
+    observedFrameId = undefined;
+    const value = await requestPacing.observe(read);
+    if (value.state === 'ready') observedFrameId = value.frameId;
+    return value;
+  }
+  async function captureTextValue(args = {}) {
+    frame = undefined;
+    let tab = await selected();
+    // Wait only for existing browser load metadata; no DOM/selector polling.
+    // SPA updates can still return a partial/empty observation, like an image.
+    const until = Math.min(Date.now() + 8000, config.deadlineAt);
+    while (tab.status === 'loading' && Date.now() < until) { await pause(100); tab = await chrome.tabs.get(tab.id); }
+    allowedNavigation(tab.url);
+    if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
+    await attach(tab.id);
+    const tree = await command(tab.id, 'Page.getFrameTree');
+    if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    const metrics = await command(tab.id, 'Page.getLayoutMetrics');
+    const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
+    const generation = navigationGeneration;
+    const observation = await chrome.tabs.sendMessage(tab.id, { kind: 'read_rendered_text', ...args }, { frameId: 0 });
+    if (observation?.error) throw Error(['invalid_input', 'manual_control_active'].includes(observation.error) ? observation.error : 'operation_failed');
+    // A navigation during extraction cannot mint a token for the old document.
+    const after = await command(tab.id, 'Page.getFrameTree');
+    if (generation !== navigationGeneration || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
+    const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
+    frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
+    return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
+      scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation };
+  }
   async function execute(op, args) {
     // Cleanup remains available after the lease; it can only close this owned
     // profile's windows, never send new input or navigate an external page.
@@ -181,6 +236,16 @@ export function visualExtensionWorker(config, cookieState) {
         for (const cookie of cookieState.validate(args.cookies)) { activeStartup(); if (!await chrome.cookies.set(cookieState.forChrome(cookie))) throw Error('storage_unavailable'); }
         activeStartup(); authRestored = true; await refreshAuth(); activeStartup(); authReady.resolve(); return { state: 'saved_unverified' };
       } catch (error) { authReady.reject(error); throw error; }
+    }
+    if (op === 'fixture-tab-budget' && config.fixtureOnly) {
+      // Only the localhost native fixture may deliberately bypass host creation
+      // preflight to exercise real Chromium onCreated overflow/cleanup events.
+      // No caller URL, tab IDs, site content or general browser command is used.
+      for (let i = 0; i < 8; i++) { activeStartup(); await chrome.tabs.create({ url: config.initialUrl, active: false }); }
+      const until = Math.min(Date.now() + 3000, config.deadlineAt);
+      let tabs;
+      do { await pause(50); await tabCleanup; tabs = await chrome.tabs.query({}); } while (tabs.length > 5 && Date.now() < until);
+      return { state: 'fixture', ...tabBudget.counts, actualOpen: tabs.length };
     }
     if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
@@ -212,14 +277,34 @@ export function visualExtensionWorker(config, cookieState) {
     if (op === 'navigate') {
       const url = allowedNavigation(args.url);
       frame = undefined;
-      const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => allowed(t.url));
-      if (tabs.length) await chrome.tabs.update(tabs.at(-1).id, { url });
+      await tabCleanup;
+      if (tabCleanupFailed) throw Error('tab_limit_reached');
+      const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => tabBudget.contains(t.id) && allowed(t.url));
+      if (tabs.length) await chrome.tabs.update(preferredTab(tabs).id, { url });
+      else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
       else if ((await chrome.windows.getAll({ windowTypes: ['normal'] })).length) await chrome.tabs.create({ url, active: false });
       else await chrome.windows.create({ url, focused: false, width: 1440, height: 1000 });
       await pause(1000);
-      return capture();
+      return captureDefault();
     }
     if (op === 'screenshot') return capture();
+    if (['read-text', 'submit', 'request-ready'].includes(op) && config.observationMode !== 'text') throw Error('invalid_input');
+    if (op === 'read-text') return captureText(args);
+    if (op === 'request-ready') {
+      // Semantic completion is acknowledged against the exact latest fresh
+      // observation, not an old result. Review itself dispatches no site input;
+      // the 60s input TTL is still enforced before the eventual next action.
+      if (!frame || args.frameId !== frame.frameId || args.frameId !== observedFrameId) throw Error('stale_frame');
+      requestPacing.resultsReady();
+      return captureText();
+    }
+    if (op === 'submit') {
+      const { action, ...input } = args;
+      if (!['navigate', 'click', 'key'].includes(action) || (action === 'key' && input.key !== 'Enter')) throw Error('invalid_input');
+      // Re-enter the normal input path AFTER the remaining wait. Its frame,
+      // manual gate, origin and original lease must still be valid then.
+      return requestPacing.submit(() => execute(action, input));
+    }
     const f = frame;
     if (!f || f.frameId !== args.frameId || Date.now() - f.at > 60_000) throw Error('stale_frame');
     const tab = await chrome.tabs.get(f.tabId); allowedNavigation(tab.url);
@@ -258,7 +343,7 @@ export function visualExtensionWorker(config, cookieState) {
       await command(f.tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: spec[0], key: spec[1], code: spec[2], modifiers: spec[3] || 0 });
     } else throw Error('invalid_input');
     await pause(500);
-    return capture();
+    return captureDefault();
   }
   function connect() {
     if (Date.now() >= config.deadlineAt) return;
@@ -275,7 +360,8 @@ export function visualExtensionWorker(config, cookieState) {
       const run = async () => {
         try { send({ kind: 'result', id: message.id, result: await execute(message.operation, message.args || {}) }); }
         catch (error) {
-          const reason = ['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired'].includes(error.message) ? error.message : 'operation_failed';
+          const pacingReason = { BROWSER_REQUEST_PREVIOUS_RESULT_NOT_REVIEWED: 'request_not_reviewed', BROWSER_REQUEST_NO_RESULT_TO_REVIEW: 'request_not_ready' }[error.message];
+          const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached'].includes(error.message) ? error.message : 'operation_failed');
           send({ kind: 'result', id: message.id, result: { state: 'error', reason } });
         }
       };
@@ -324,6 +410,9 @@ export function visualExtensionWorker(config, cookieState) {
       for (const window of await chrome.windows.getAll({ windowTypes: ['normal', 'popup'] })) ownedWindows.add(window.id);
       for (const change of windowChanges.splice(0)) { if (change.removed) ownedWindows.delete(change.id); else ownedWindows.add(change.id); }
       windowInventoryReady = true;
+      for (const tab of await chrome.tabs.query({})) admitTab(tab);
+      await tabCleanup;
+      if (tabCleanupFailed) throw Error('tab_limit_reached');
       activeStartup();
       bootstrapStage = 'auth';
       await new Promise((resolve, reject) => { authReady = { resolve, reject }; send({ kind: 'auth_required' }); });
@@ -339,6 +428,7 @@ export function visualExtensionWorker(config, cookieState) {
       activeStartup();
       let initial;
       if (blank) initial = await chrome.tabs.update(blank.id, { url: allowedNavigation(config.initialUrl) });
+      else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
       else if (!windows.length) initial = (await chrome.windows.create({ url: allowedNavigation(config.initialUrl), focused: manual, width: 1440, height: 1000 })).tabs?.[0];
       else initial = await chrome.tabs.create({ url: allowedNavigation(config.initialUrl), active: manual });
       // Manual setup must not announce its window before the first document has

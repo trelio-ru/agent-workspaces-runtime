@@ -37,9 +37,9 @@ function fixtureDiagnostic(value) {
 async function stop() {
   if (stopping) return; stopping = true; clearTimeout(timer);
   startupAbort.abort();
-  // One bounded in-flight input may take 20s to fail; allow its graceful
+  // One bounded in-flight input may take 40s to fail; allow its graceful
   // cleanup and profile flush before the exact-child crash watchdog fires.
-  const watchdog = setTimeout(() => { engine?.abort(); process.exit(1); }, 45_000);
+  const watchdog = setTimeout(() => { engine?.abort(); process.exit(1); }, 75_000);
   watchdog.unref();
   try { await startup?.catch(() => {}); await engine?.close(); }
   finally {
@@ -73,7 +73,7 @@ try {
     return engine.call(operation, args);
   }
   server = createVisualControlServer({ token: owner.token, dispatch });
-  server.requestTimeout = 40_000; server.headersTimeout = 5000;
+  server.requestTimeout = 55_000; server.headersTimeout = 5000;
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   await writePrivateJsonFile(file, { ...owner, pid: process.pid, port: server.address().port });
   fixtureDiagnostic({ stage: 'startup_dependencies' });
@@ -84,7 +84,7 @@ try {
   fixtureDiagnostic({ stage: 'startup_browser' });
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.
-  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
+  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, observationMode: owner.observationMode || 'image', lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   current = await engine.call(owner.operation, owner.args);
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed' });

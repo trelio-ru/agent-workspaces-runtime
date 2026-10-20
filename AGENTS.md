@@ -247,10 +247,15 @@ publication tooling также остаются вне этого публичн
   Capture/input не активируют app; native foreground test проверяет это без
   возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
   popups/iframes. Source probes не входят в package и не являются fallback.
-- Отдельный [text experiment](experiments/visual-text/README.md) – только
-  unsigned maintainer overlay вне package. Не включать его в подписанный API,
-  provider policy или release без отдельного решения; image-only default
-  сохраняется. Реальные результаты и session state не коммитятся.
+- Signed provider может явно выбрать bounded text observation по
+  [контракту](docs/visual-browser.md#текстовый-режим). Default image-only не
+  расширяется автоматически. Fixed isolated reader не выдаёт HTML/JS, input
+  values, cookies/storage или произвольный DOM; оба MCP variants проверяются.
+  Один completion-based pacing controller живёт в browser worker: те же 2–15с
+  от готового результата, что в поисковых навыках, с зачётом размышлений.
+  Учёт пяти вкладок включает blank/login popups, не сбрасывается tool calls
+  или закрытием вкладки; tabs.onCreated закрывает overflow. Нельзя обещать
+  предотвращение самого transient popup creation до browser event.
 - HTTP-ошибки browser document сохраняют только numeric status и approved
   origin через общий observer; transport failure не получает выдуманного кода.
   Provider interpretation и отсутствие credential reset/replay сохраняются по

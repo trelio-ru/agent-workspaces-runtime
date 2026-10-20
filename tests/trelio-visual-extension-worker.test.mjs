@@ -1,9 +1,11 @@
+import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-request-pacing.mjs';
+import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-tab-budget.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { visualExtensionWorker } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
-const startWorker = (config, context) => vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}));`, context);
+const startWorker = (config, context) => vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()});`, context);
 
 test('extension installs literal origin guards before bootstrap and never navigates an adversarial sibling', async () => {
   let rules, socket; const sent = [], events = { addListener() {} };
@@ -13,7 +15,7 @@ test('extension installs literal origin guards before bootstrap and never naviga
       runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
       webRequest: { onBeforeRequest: events, onHeadersReceived: events },
       windows: { onCreated: events, onRemoved: events, async getAll() { assert.ok(rules, 'navigation policy precedes window discovery'); return [{ id: 1 }]; } },
-      tabs: { onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'about:blank' }]; }, async update(_id, value) { assert.equal(value.url, 'https://www.example.test/'); } },
+      tabs: { onCreated: events, onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'about:blank' }]; }, async update(_id, value) { assert.equal(value.url, 'https://www.example.test/'); } },
       cookies: { onChanged: events, async getAll() { return []; }, async set() { throw Error('unexpected_cookie_restore'); } },
       declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules(value) { rules = value.addRules; } },
     },
@@ -44,7 +46,7 @@ test('bootstrap reports only a closed policy failure before accepting input', as
   const context = { URL, Date, TextEncoder, setTimeout, clearTimeout, chrome: {
     runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events }, windows: { onCreated: events, onRemoved: events },
-    tabs: { onRemoved: events }, cookies: { onChanged: events },
+    tabs: { onCreated: events, onRemoved: events }, cookies: { onChanged: events },
     declarativeNetRequest: { async getSessionRules() { throw Error('PRIVATE native detail'); } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
   startWorker({ endpoint: 'ws://127.0.0.1/', token: 'synthetic', matches: [], origins: [], domains: [], deadlineAt: Date.now() + 10_000 }, context);
@@ -65,7 +67,7 @@ test('private auth observes logout but freezes before last-window cleanup and ne
     webRequest: { onBeforeRequest: events, onHeadersReceived: events },
     declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
     windows: { onCreated: { addListener(fn) { windowCreated = fn; } }, onRemoved: { addListener(fn) { windowRemoved = fn; } }, async getAll() { assert.ok(windows.length, 'no async window API after final profile close'); return windows; } },
-    tabs: { onRemoved: { addListener(fn) { tabRemoved = fn; } }, async query() { return [{ id: 1, url: 'about:blank' }]; }, async update() { return { id: 1, status: 'complete' }; } },
+    tabs: { onCreated: events, onRemoved: { addListener(fn) { tabRemoved = fn; } }, async query() { return [{ id: 1, url: 'about:blank' }]; }, async update() { return { id: 1, status: 'complete' }; } },
     cookies: { onChanged: { addListener(fn) { cookieChanged = fn; } }, async getAll() { return live; }, async set() { throw Error('unexpected_restore'); } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', manual: true, endpoint: 'ws://127.0.0.1/', token: 'synthetic', deadlineAt: Date.now() + 10_000 }, context);
@@ -108,7 +110,7 @@ test('lease expiry during private cookie restore cannot open a late provider win
     webRequest: { onBeforeRequest: events, onHeadersReceived: events },
     declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
     windows: { onCreated: events, onRemoved: events, async getAll() { return []; }, async create() { navigations++; } },
-    tabs: { onRemoved: events, async query() { return []; }, async create() { navigations++; } },
+    tabs: { onCreated: events, onRemoved: events, async query() { return []; }, async create() { navigations++; } },
     cookies: { onChanged: events, async getAll() { return []; }, set() { return new Promise(resolve => { finishSet = resolve; }); } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
   startWorker({ origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', deadlineAt: 2000 }, context);

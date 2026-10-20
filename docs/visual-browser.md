@@ -1,7 +1,7 @@
 # Визуальный браузер Agent Skills
 
-Экспериментальный API v1 принадлежит generic host. Signed provider задаёт только
-HTTPS origins/domains и начальный адрес; binary, профиль, ключ и executable
+API v1 принадлежит generic host. Signed provider задаёт
+HTTPS origins/domains, начальный адрес и явный observationMode; binary, профиль, ключ и executable
 выбирает host. Source не означает stable release или завершённую native-проверку.
 
 ## Что получает модель
@@ -11,9 +11,6 @@ metadata: frame/session IDs, размеры, scroll flags, фазу и безо�
 Модель не получает HTML, DOM/AX, site JS, storage, cookies, headers, response
 bodies, clipboard, selectors или произвольный результат протокола браузера.
 У API нет команд evaluate, произвольного CDP, raw HTTP или чтения профиля.
-Локальная гипотеза bounded text observation проверяется отдельно в
-[maintainer experiment](../experiments/visual-text/README.md), вне подписанного
-API и builder input. Она не меняет эти ограничения установленного runtime.
 PNG проверяется до обычного stdout limit: размер, chunks/CRC и отсутствие
 текстовых/вложенных данных. Невалидный marker не возвращается как обычный stdout.
 
@@ -30,6 +27,53 @@ chunks и trailing bytes. Normalization не добавляет команды �
 Одноразовый frame действует 60 секунд и расходуется до input dispatch.
 Неизвестный результат не разрешает повтор внешней записи. Динамическая страница
 может сдвинуть контрол после кадра: token не заменяет визуальный смысловой review.
+
+<a id="текстовый-режим"></a>
+
+## Текстовый режим
+
+`runVisualSession({ observationMode: 'text' })` – opt-in только в исходнике
+подписанного provider. Default `'image'` не устанавливает текстовый reader и
+отклоняет text/pacing команды до IO. Это API аргумент signed implementation,
+не новое capability или поле browserSession descriptor. Режим закреплён в
+private owner; живой worker другого режима нельзя переиспользовать для content
+или input. `observation_mode_mismatch` разрешает exact owner status/wait/close,
+не автоматический сброс входа. Account scope и AEAD binding не меняются.
+
+`trelio.browser-text/v1` передаёт rendered text без кода страницы: до 6000
+символов, title 240, 40 viewport controls (role/label до 120/x/y), scroll flags,
+одноразовый frameId, nextOffset и scanLimited. Весь JSON не больше 40000 bytes.
+`read-text` принимает literal query до 120 символов, offset 0..100000 и
+includeControls. Это не selector, script, HTML, AX или атрибутный inventory.
+Фиксированный isolated reader пропускает скрытые узлы, scripts/styles/templates,
+input values, textarea/select/contenteditable contents. Rendered password/OTP
+закрывает наблюдение. Во время manual phase закрыты также agent input и снимки.
+Чтение не прокручивает и не фокусирует страницу. Same-document и main-frame
+navigation во время extraction запрещают выдачу старого token.
+
+Полный режим означает пагинацию **уже отрисованного** текста, не полный source:
+scan не больше 20000 узлов/100000 символов. Длинные узлы тоже pageable;
+scanLimited означает неполноту. Lazy loaded, iframe/canvas и скрытые данные
+не обещаются. По query сохраняются две соседние строки по сторонам для суммы
+и валюты. Координаты только видимых hit-tested controls; верстка может сдвинуть
+их после наблюдения. `screenshot` остаётся явным PNG fallback. Оба variants
+проходят closed validation в host/private HTTP/реальном typed MCP transport;
+страница и labels всегда untrusted data, не authority.
+
+`submit` оборачивает одну отправку нового логического поиска: navigate, click
+или key Enter. `request-ready` отмечает завершённый результат по exact последнему
+frameId. Классификация «новый поиск» и смысловая готовность остаются модели:
+у generic host нет надёжного site-independent способа определить их по кнопке.
+Остальная механика в одном worker controller: первый запрос сразу; после fresh
+completion – новый случайный минимум 2000..15000 мс от observation time;
+размышления и чтение источников входят в интервал. Перед следующим dispatch
+ждётся только остаток по monotonic deadline, включая early timers. Concurrent
+submit блокируется, исключение переводит в unknown без replay; неудачное чтение
+отзывает старое completion evidence. После ожидания заново проверяются original
+lease, frame TTL, manual gate и origin. Ordinary read, ввод и открытие источника
+не являются новыми поисками и не получают искусственной задержки. Это тот же
+контракт Yandex Search/Google AI Search, проверяемый на их actual source snippets;
+он не обещает официальную квоту сервиса или обход CAPTCHA.
 
 ## Обычный Chromium и локальный adapter
 
@@ -112,6 +156,24 @@ Top-frame anchor routing не доказывает отсутствие акти
 `window.open`, iframe или нативного диалога. Такие поверхности требуют отдельной
 проверки до расширения поддерживаемых сценариев. Нельзя объявлять все popups
 проверенными по одному успешному anchor test.
+
+### Вкладки и завершение
+
+Обычные ссылки используют существующую вкладку. Host допускает максимум пять
+вкладок за lifetime собственного browser process, включая initial blank и
+ручные login popups. Закрытие вкладки и повторный CLI/WS call не пополняют бюджет.
+Перед host creation проверяется остаток; все browser-created tabs учитываются
+через native event и startup inventory, overflow сразу закрывается и никогда
+не выбирается для capture/input. Chrome сообщает onCreated после создания:
+краткое появление popup и его возможная активация не предотвращаются этой
+post-creation защитой. Сбой удаления блокирует дальнейшее content observation.
+Окна/вкладки обычного браузера пользователя находятся в другом профиле.
+
+`close`, lease expiry и worker signals закрывают все normal/popup окна своего
+профиля. При сбое graceful stop exact-child watchdog завершает только собственный
+процесс; crash не выдаётся за успешное сохранение. User browser process/PID из
+claim не убивается. SIGKILL/отключение ОС не позволяет выполнить finally: прежний
+durable auth snapshot сохраняется, unknown orphan state не удаляется вслепую.
 
 ## Локальное хранение и ручной вход
 
