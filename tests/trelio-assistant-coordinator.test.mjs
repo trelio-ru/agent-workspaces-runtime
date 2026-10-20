@@ -12,6 +12,8 @@ const fixture = t => {
   const execution={state:'ready',configuration:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
   const events=[],deliveries=new Map(),notifications=[]; let nativeFailure=false,inventoryFailure=false;
   const businessReceipts=new Map();
+  const passes=new Map();let activePass=null;
+  const continuation={goalState:'active',cadence:'every_30_minutes',timeZone:'Europe/Moscow'};
   const identity={origin:'https://assistant.test',assistantId,deviceId};
   const client={identity,heartbeat:async()=>({assistantId,deviceId}),
     companies:async()=>{if(inventoryFailure)throw Object.assign(new Error('transport'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});return[{companyId,memberId}];},
@@ -23,11 +25,28 @@ const fixture = t => {
     acknowledge:async(_company,values)=>{acks+=values.length;return{acknowledged:values.length};},
     claimTaskHost:async input=>({bindingId:input.bindingId,provisionId:input.provisionId,threadId:null}),
     reportSchedule:async input=>({sequence:input.sequence}),
+    beginTaskPass:async input=>{
+      if(!passes.has(input.deliveryId)) passes.set(input.deliveryId,{...input,passId:randomUUID(),leaseRevision:0,
+        leaseExpiresAt:new Date(clock+1200000).toISOString(),state:'leased',execution:execution.configuration});
+      return passes.get(input.deliveryId);
+    },
+    readTaskPass:async input=>[...passes.values()].find(pass=>pass.passId===input.passId),
+    renewTaskPass:async input=>{
+      const pass=[...passes.values()].find(pass=>pass.passId===input.passId);
+      assert.equal(pass.leaseRevision,input.expectedLeaseRevision);
+      Object.assign(pass,{leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(clock+1200000).toISOString()});return pass;
+    },
     readBusinessOutcome:async input=>{
       if(!businessReceipts.has(input.deliveryId)) businessReceipts.set(input.deliveryId,randomUUID());
-      return {schemaVersion:1,state:'confirmed',receiptId:businessReceipts.get(input.deliveryId),...input};
+      if(passes.has(input.deliveryId)) passes.get(input.deliveryId).state='closed';
+      return {schemaVersion:1,state:'confirmed',receiptId:businessReceipts.get(input.deliveryId),...input,continuation:{...continuation}};
     },
   };
+  const passHost={readActivePass:async()=>activePass,activatePass:async pass=>{
+    if(activePass) assert.deepEqual(pass,activePass);activePass=pass;
+  },releasePass:async outcome=>{
+    assert.equal(outcome.deliveryId,activePass.deliveryId);assert.equal(outcome.threadId,activePass.threadId);activePass=null;
+  }};
   const native={ready:async()=>true,readDelivery:async(_thread,deliveryId)=>deliveries.get(deliveryId)??{state:'uncertain'},
     provision:async({deliveryId,execution:choice},options)=>{
       assert.deepEqual(choice,execution.configuration);
@@ -43,9 +62,10 @@ const fixture = t => {
       return result;
     },
   };
-  const options={database,client,native,workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,notify:value=>notifications.push(value)};
+  const options={database,client,native,passHost,workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,notify:value=>notifications.push(value)};
   const coordinator=createAssistantCoordinator(options);
-  return {database,coordinator,options,identity,companyId,memberId,taskId,bindingId,authority,execution,events,deliveries,notifications,
+  return {database,coordinator,options,identity,companyId,memberId,taskId,bindingId,authority,execution,events,deliveries,notifications,continuation,passes,
+    activePass:()=>activePass,
     counts:()=>({starts,provisions,runs,acks}),advance:ms=>{clock+=ms;},failNative:value=>{nativeFailure=value;},failInventory:value=>{inventoryFailure=value;}};
 };
 
@@ -145,6 +165,95 @@ test('missing business adapter blocks native work instead of silently accepting 
   await assert.rejects(f.coordinator.workOnce(),/SETUP_REQUIRED/);
   assert.equal(f.counts().runs,0);
   assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+});
+
+test('accepted continuation changes the recurring cadence and a completed goal stays stopped through rediscovery', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const thread=f.coordinator.status()[0].threadId;
+  f.continuation.cadence='daily';f.continuation.goalState='waiting_external';
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  let plan=f.coordinator.status()[0];assert.equal(plan.cadence,'daily');
+  assert.equal(plan.nextRunAt-plan.lastCompletedAt,86400000);
+  f.continuation.goalState='completed';
+  f.events.push({id:randomUUID(),revision:'2',taskId:f.taskId,wake:true});f.advance(300000);
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  assert.equal(f.coordinator.status()[0].state,'done');assert.equal(f.coordinator.status()[0].nextRunAt,null);
+  f.advance(40*86400000);await f.coordinator.pollOnce();assert.equal(await f.coordinator.workOnce(),null);
+  assert.equal(f.coordinator.status()[0].state,'done','accepted task inventory alone cannot revive a completed personal goal');
+  f.continuation.goalState='active';
+  f.events.push({id:randomUUID(),revision:'3',taskId:f.taskId,wake:true});f.advance(300000);
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  plan=f.coordinator.status()[0];assert.equal(plan.state,'active');assert.equal(plan.threadId,thread);assert.equal(f.counts().provisions,1);
+});
+
+test('crash after SQLite completion but before protected journal release recovers without another launch', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const release=f.options.passHost.releasePass;let crash=true;
+  f.options.passHost.releasePass=async receipt=>{if(crash){crash=false;throw new Error('synthetic journal release lost');}return release(receipt);};
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+  assert.equal(f.database.prepare('select processed from assistant_inbox_events').get().processed,1);
+  assert.ok(f.activePass());assert.equal(f.counts().runs,1);
+  await f.coordinator.close();
+  const next=createAssistantCoordinator(f.options);
+  assert.equal(await next.workOnce(),null);assert.equal(f.activePass(),null);assert.equal(f.counts().runs,1);await next.close();
+});
+
+test('lost server pass-claim response repeats only that exact claim before the durable native-start boundary', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const begin=f.options.client.beginTaskPass;let lost=true;
+  f.options.client.beginTaskPass=async input=>{const result=await begin(input);if(lost){lost=false;throw new Error('synthetic lost response');}return result;};
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+  assert.equal(f.counts().runs,0);assert.equal(f.passes.size,1);
+  const passId=[...f.passes.values()][0].passId;
+  assert.equal(await f.coordinator.workOnce(),null);
+  assert.equal(f.counts().runs,1);assert.equal(f.passes.size,1);assert.equal([...f.passes.values()][0].passId,passId);
+});
+
+test('a SQLite failure rolls back accepted continuation and inbox processing together; recovery does not rerun Codex', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  f.continuation.cadence='weekly';
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  const before=f.coordinator.status()[0];
+  f.database.exec("CREATE TRIGGER synthetic_completion_failure BEFORE UPDATE OF processed ON assistant_inbox_events WHEN NEW.processed=1 BEGIN SELECT RAISE(ABORT,'synthetic crash'); END");
+  await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+  assert.deepEqual(f.coordinator.status()[0],before);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);assert.ok(f.activePass());
+  f.database.exec('DROP TRIGGER synthetic_completion_failure');
+  assert.equal(await f.coordinator.workOnce(),null);
+  assert.equal(f.counts().runs,1);assert.equal(f.coordinator.status()[0].cadence,'weekly');assert.equal(f.activePass(),null);
+});
+
+test('a task completed by its own pass can reconcile the original receipt but cannot launch another pass', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  const run=f.options.native.run;
+  f.options.native.run=async(...args)=>{const result=await run(...args);f.authority.state='done';f.authority.revision++;return result;};
+  f.continuation.goalState='completed';
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
+  assert.equal((await f.coordinator.workOnce()).state,'completed');assert.equal(f.activePass(),null);
+  assert.equal(f.coordinator.status()[0].state,'done');assert.equal(f.counts().runs,1);
+  f.advance(86400000);await f.coordinator.pollOnce();assert.equal(await f.coordinator.workOnce(),null);
+});
+
+test('long native work renews the same backend pass by CAS while retaining the protected hook identity', async t=>{
+  const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();await f.coordinator.close();
+  const begin=f.options.client.beginTaskPass;
+  f.options.client.beginTaskPass=async input=>{
+    const pass=await begin(input);pass.leaseExpiresAt=new Date(Date.parse(pass.leaseExpiresAt)-1140000).toISOString();return pass;
+  };
+  const run=f.options.native.run;
+  f.options.native.run=async(input,options)=>{
+    const active=f.activePass();assert.equal(active.deliveryId,input.deliveryId);assert.equal(active.threadId,input.threadId);
+    const result=await run(input,options);
+    await new Promise(resolve=>setTimeout(resolve,280));return result;
+  };
+  const next=createAssistantCoordinator({...f.options,watchIntervalMs:100});
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await next.pollOnce();
+  assert.equal((await next.workOnce()).state,'completed');
+  assert.equal([...f.passes.values()][0].leaseRevision,1);assert.equal(f.counts().runs,1);assert.equal(f.activePass(),null);
+  await next.close();
 });
 
 test('revocation after the native turn ends still prevents business acknowledgement', async t=>{

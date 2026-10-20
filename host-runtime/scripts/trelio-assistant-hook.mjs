@@ -40,9 +40,10 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       const active=validateAssistantActivePass(await readActivePass(),identity);
       if(JSON.stringify(active)!==JSON.stringify(pass)) fail('ASSISTANT_HOOK_TASK_MISMATCH');
       const live=await client.readTaskPass(locator,runtimeHookSignal());
-      if(live.state!=='leased' || live.threadId!==pass.threadId || live.deliveryId!==pass.deliveryId
+      const ending=event.hook_event_name==='SessionEnd';
+      if((live.state!=='leased' && !(ending && live.state==='closed')) || live.threadId!==pass.threadId || live.deliveryId!==pass.deliveryId
         || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision
-        || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || live.state!=='closed' && Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       let record=await store.get(slot);
       if(record && (record.schemaVersion!==1 || record.passId!==pass.passId || record.threadId!==pass.threadId)) fail('ASSISTANT_HOOK_STATE_INVALID');
       if(event.hook_event_name==='SessionEnd') {
@@ -149,6 +150,10 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const pass=validateAssistantActivePass(old,identity);
       if(outcome?.schemaVersion!==1 || outcome.state!=='confirmed' || !uuid.test(outcome.receiptId??'')
         || ['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>outcome[key]!==pass[key])) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      // The backend already ended these signing sessions. Remove their local
+      // private key before freeing the active journal; a crash between removals
+      // leaves a recoverable closed pass rather than a retained signing key.
+      await store.remove({origin:identity.origin,kind:'runtime',id:pass.passId});
       await store.remove(slot);
     },
   };

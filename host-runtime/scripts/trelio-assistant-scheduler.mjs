@@ -11,6 +11,7 @@ const id = value => { if (typeof value !== 'string' || !UUID.test(value)) invali
 const timestamp = value => { if (!Number.isSafeInteger(value) || value < 0 || value > 8_000_000_000_000_000) invalid(); return value; };
 const cadenceValues = ['every_30_minutes','hourly','every_3_hours','every_6_hours','every_12_hours','daily','weekly','fortnightly','monthly'];
 export const ASSISTANT_CADENCES = Object.freeze(cadenceValues);
+export const ASSISTANT_GOAL_STATES = Object.freeze(['active','waiting_external','waiting_owner','blocked','completed','cancelled']);
 const cadenceOf = value => { if (!cadenceValues.includes(value)) invalid(); return value; };
 const closed = (value, keys) => {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype || Object.keys(value).some(key => !keys.includes(key))) invalid();
@@ -19,6 +20,14 @@ const formatter = zone => {
   if (typeof zone !== 'string' || zone.length > 100) invalid();
   try { return new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }); } catch { invalid(); }
+};
+/** Only the trusted exact backend receipt supplies continuation. Event text,
+ * native completed turns and local files cannot author schedule changes. */
+export const assistantPassContinuation = value => {
+  closed(value, ['goalState','cadence','timeZone']);
+  if (Object.keys(value).length !== 3 || !ASSISTANT_GOAL_STATES.includes(value.goalState)) invalid();
+  cadenceOf(value.cadence); formatter(value.timeZone);
+  return Object.freeze({ goalState:value.goalState,cadence:value.cadence,timeZone:value.timeZone });
 };
 const parts = (format, at) => Object.fromEntries(format.formatToParts(at).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]));
 const localEpoch = p => Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
@@ -204,7 +213,7 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
     },
     /** Used only by createAssistantInbox.onDeliveryCompleted, not directly by a
      * model or after the inbox COMMIT. No network/native work happens here. */
-    completeInsideInboxTransaction({ scope: source, taskId, deliveryId, receipt, completedAt, scheduled }) {
+    completeInsideInboxTransaction({ scope: source, taskId, deliveryId, receipt, completedAt, scheduled, completion = null }) {
       const row = rowOf({ origin: source.origin, assistantId: source.assistantId, companyId: source.companyId, taskId });
       id(deliveryId); timestamp(completedAt);
       if (typeof scheduled !== 'boolean') invalid();
@@ -213,9 +222,19 @@ export const createAssistantScheduler = ({ database: db, now = Date.now }) => {
         if (row.last_receipt !== receipt) fail('ASSISTANT_SCHEDULE_CONFLICT');
         return;
       }
-      const next = row.state === 'active' ? nextAssistantRun({ cadence: row.cadence, anchorAt: row.anchor_at, after: completedAt, timeZone: row.time_zone }) : row.next_run_at;
-      run('UPDATE assistant_schedule_tasks SET next_run_at=?,last_completed_at=?,last_cycle_at=?,last_delivery_id=?,last_receipt=?,report_sequence=report_sequence+1 WHERE task_key=?',
-        next, completedAt, scheduled && completedAt >= row.next_run_at ? completedAt : row.last_cycle_at, deliveryId, receipt, row.task_key);
+      let cadence=row.cadence,timeZone=row.time_zone,state=row.state,anchor=row.anchor_at;
+      if(completion!==null) {
+        closed(completion,['continuation','bindingState']);
+        if(Object.keys(completion).length!==2 || !['accepted','done'].includes(completion.bindingState)) invalid();
+        const continuation=assistantPassContinuation(completion.continuation);
+        cadence=continuation.cadence;timeZone=continuation.timeZone;
+        state=completion.bindingState==='done' || ['completed','cancelled'].includes(continuation.goalState)?'done':'active';
+        if(cadence!==row.cadence || timeZone!==row.time_zone) anchor=completedAt;
+      }
+      const next = state === 'active' ? nextAssistantRun({ cadence, anchorAt: anchor, after: completedAt, timeZone }) : row.next_run_at;
+      const configurationChanged=Number(cadence!==row.cadence || timeZone!==row.time_zone || state!==row.state);
+      run('UPDATE assistant_schedule_tasks SET cadence=?,time_zone=?,state=?,anchor_at=?,next_run_at=?,last_completed_at=?,last_cycle_at=?,last_delivery_id=?,last_receipt=?,revision=revision+?,report_sequence=report_sequence+1 WHERE task_key=?',
+        cadence,timeZone,state,anchor,next,completedAt,scheduled && completedAt >= row.next_run_at ? completedAt : row.last_cycle_at,deliveryId,receipt,configurationChanged,row.task_key);
     },
   };
 };

@@ -60,8 +60,8 @@ returns to the same chat on permitted events, and verifies real send/read/schedu
 outcomes before progressing. Fulfilment or authorized cancellation stops only
 this assistant's cycle after server confirmation; it does not complete another
 assistant's part or the entire task. Shared task files retain normal ACL and E2EE;
-no private credential belongs in them. These prompt/path tests do not prove that
-the not-yet-connected business outcome/goal-stop backend is ready.
+no private credential belongs in them. The backend-confirmed outcome below owns
+goal-stop; native prompt/path tests alone do not prove activation readiness.
 
 ### Native invocation
 
@@ -95,8 +95,9 @@ mismatched outcomes cannot mark events processed or advance the schedule. Both
 receipts are stored as one content-free reference. Live authority is checked
 again after outcome I/O; a stopped task cannot be acknowledged accidentally.
 A timeout keeps the inbox blocked until read-back/review, without replay.
-The production backend outcome adapter remains a readiness blocker until wired;
-there is no permissive default or claim that native success proves business work.
+The fixed device client reads the exact committed backend outcome. Production
+Workspace execution, owner decisions and OS service still gate activation; native
+success alone never proves business work.
 
 A fixed internal readiness probe uses the same native path but asks only for
 READY, with no tools/accounts/integrations. It is not a task execution or timer
@@ -107,6 +108,44 @@ host before activation; mocked child tests only verify the adapter boundary.
 Tests: `trelio-assistant-scheduler.test.mjs` (real SQLite and timezone boundaries),
 `trelio-assistant-codex.test.mjs` (exact transport/fencing/read-back), plus the inbox
 suite. Native workflow runs them on Linux/macOS and Windows.
+
+## Durable pass completion and recovery
+
+Before business resume, the coordinator persists a prepared delivery with
+`native_started=0`, reserves the backend pass with that exact delivery/thread,
+and activates its structural identity in the protected host journal. The hook
+uses only that identity. The native launch receives the immutable model/effort
+snapshot returned by admission. Lost pass-claim responses may repeat only the
+same idempotent claim while the durable native bit proves no launch crossed its
+boundary. A started native invocation is reconciled, never repeated.
+
+`complete_assistant_pass` stays a backend-validated model action with a fresh
+observed proof and accepted evidence. The host's fixed
+`/runtime/task-pass/outcome` read validates a strict committed receipt and
+`continuation={goalState,cadence,timeZone}`; pending or any wrong/extra field is
+uncertainty. Receipt lookup does not retry the model/action and exposes no
+arbitrary HTTP. A closed pass accepts SessionEnd cleanup only, no new signature.
+
+Positive native read-back and the exact backend receipt must both exist.
+Continuation, inbox processing, completion timestamps and next-run are committed
+inside the same SQLite transaction. Changed cadence resets its anchor to this
+completion; unchanged cadence preserves its calendar anchor. A completed goal
+stops only this assistant's cycle, and ordinary accepted-task rediscovery cannot
+restart it. A new permitted mention may resume the same chat and commit a new
+active goal. Native task `done` permits reconciliation of the original pass,
+never a new launch, even if its binding revision advanced during completion.
+
+The protected host journal and local signing key are released only after SQLite
+commit. If the host crashes between that commit and release, it verifies the
+same completed local delivery, native turn and backend receipt and then releases
+without another launch. If SQLite rolls back, the same receipt is applied again
+atomically with no model replay. Missing/revoked/unverifiable evidence retains
+the existing fence and requires review. Timeout does not free a server pass.
+
+Long work renews the same live backend lease by CAS near expiry, independently
+from the local delivery heartbeat. Closed receipts do not renew or acquire new
+signing authority. These tests use real SQLite plus synthetic trusted adapters;
+they do not substitute for a supported Windows end-to-end activation test.
 
 ## Company model selection
 

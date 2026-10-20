@@ -135,6 +135,30 @@ test('fresh company execution state is projected without accepting local default
   await assert.rejects(client.task(companyId,taskId),/INVALID_RESPONSE/);
 });
 
+test('business outcome read is fixed, exact and strict; pending never implies failure or permits a retry',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});
+  const expected={assistantId,deviceId,companyId:randomUUID(),taskId:randomUUID(),bindingId:randomUUID(),
+    bindingRevision:2,deliveryId:randomUUID(),threadId:randomUUID()};
+  let value={schemaVersion:1,state:'pending'},calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/outcome');assert.equal(options.method,'POST');
+    assert.deepEqual(JSON.parse(options.body),Object.fromEntries(Object.entries(expected).filter(([key])=>!['assistantId','deviceId'].includes(key))));
+    return Response.json(value);
+  }})});
+  assert.deepEqual(await client.readBusinessOutcome(expected),value);assert.equal(calls,1);
+  value={schemaVersion:1,state:'confirmed',receiptId:randomUUID(),...expected,
+    continuation:{goalState:'waiting_external',cadence:'weekly',timeZone:'Europe/Moscow'}};
+  assert.deepEqual(await client.readBusinessOutcome(expected),value);assert.equal(calls,2);
+  const good=value;
+  for(const bad of [{...good,taskId:randomUUID()},{...good,body:'PRIVATE'},
+    {...good,continuation:{...good.continuation,cadence:'every_second'}},{schemaVersion:1,state:'pending',receiptId:randomUUID()}]) {
+    value=bad;await assert.rejects(client.readBusinessOutcome(expected),/INVALID_RESPONSE/);
+  }
+  assert.equal(calls,6,'one request per explicit read; malformed outcomes do not cause a hidden retry');
+  await assert.rejects(client.readBusinessOutcome({...expected,assistantId:randomUUID()}),/INVALID_INPUT/);assert.equal(calls,6);
+});
+
 
 test('assistant MCP reuses the bounded protocol with its real device profile and no schema copies or hidden retry', async () => {
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();

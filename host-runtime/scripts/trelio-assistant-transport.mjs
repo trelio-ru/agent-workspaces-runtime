@@ -1,6 +1,6 @@
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import { createHash, randomBytes } from 'node:crypto';
-import { ASSISTANT_CADENCES } from './trelio-assistant-scheduler.mjs';
+import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 
 export class AssistantTransportError extends Error {
@@ -44,6 +44,18 @@ const executionState = value => {
 };
 const passExecution = value => value.state==='leased' ? executionConfiguration(value.execution)
   : value.execution == null ? null : executionConfiguration(value.execution);
+export const validateAssistantPassOutcome = (value, expected) => {
+  if(!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if(value.state==='pending') {
+    if(value.schemaVersion!==1 || Object.keys(value).sort().join(',')!=='schemaVersion,state') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    return {schemaVersion:1,state:'pending'};
+  }
+  const keys=['schemaVersion','state','receiptId','continuation',...Object.keys(expected)].sort();
+  if(value.schemaVersion!==1 || value.state!=='confirmed' || Object.keys(value).sort().join(',')!==keys.join(',')
+    || Object.keys(expected).some(key=>value[key]!==expected[key])) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  let continuation;try{continuation=assistantPassContinuation(value.continuation);}catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+  return {schemaVersion:1,state:'confirmed',receiptId:id(value.receiptId),...expected,continuation};
+};
 // These latches describe diagnostic obligations only, never task authority.
 // An unrelated plugin/network recovery must not forget login or hook review.
 const healthState = value => {
@@ -75,7 +87,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['poll',['POST','/runtime/notifications/poll']], ['ack',['POST','/runtime/notifications/ack']],
     ['report',['POST','/runtime/schedule']],
     ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
-    ['passRenew',['POST','/runtime/task-pass/renew']], ['registerRuntime',['POST','/runtime/session/register']],
+    ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']], ['registerRuntime',['POST','/runtime/session/register']],
     ['endRuntime',['POST','/runtime/session/end']],
   ]);
   return async (operation, body, credential = null, signal = null) => {
@@ -213,14 +225,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call('passBegin',{companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
         bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId)},signal);
       if(value.bindingId!==input.bindingId || value.deliveryId!==input.deliveryId || value.threadId!==input.threadId
-        || value.bindingRevision!==input.bindingRevision || !['leased','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        || value.bindingRevision!==input.bindingRevision || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
     },
     async readTaskPass(input,signal) {
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId)},signal);
-      if(value.passId!==input.passId || !['leased','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      if(value.passId!==input.passId || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
@@ -231,6 +243,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if(value.passId!==input.passId || value.leaseRevision!==input.expectedLeaseRevision+1 || value.state!=='leased') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
         execution:executionConfiguration(value.execution)};
+    },
+    async readBusinessOutcome(input,signal) {
+      const fields=['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'];
+      if(!object(input) || Object.keys(input).sort().join(',')!==fields.sort().join(',')
+        || input.assistantId!==assistantId || input.deviceId!==deviceId) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={companyId:id(input.companyId),taskId:id(input.taskId),bindingId:id(input.bindingId),
+        bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
+      return validateAssistantPassOutcome(await call('passOutcome',body,signal),{assistantId,deviceId,...body});
     },
     async registerRuntime(input,signal) {
       if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
@@ -336,6 +356,7 @@ export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
+  'complete_assistant_pass',
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",
   "complete_checklist_item", "create_subtask",
@@ -376,7 +397,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           seen.add(tool.name);
           // Do not proxy remote App metadata, URLs or OAuth security schemes.
           return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
-            annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: false, idempotentHint: true, openWorldHint: false } };
+            annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: false,
+              idempotentHint: tool.name!=='complete_assistant_pass', openWorldHint: false } };
         });
         if (!seen.has("get_assistant_status") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         return selected;

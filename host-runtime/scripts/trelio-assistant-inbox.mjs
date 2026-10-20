@@ -347,7 +347,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const scope = JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?', row.source_key).scope_json);
         activeSource(scope);
         const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
-        const eligible = row.state === 'leased' || (row.state === 'started' && row.kind === 'provision' && !row.native_started);
+        const eligible = row.state === 'leased' || (row.state === 'started' && !row.native_started);
         if (!eligible || row.native_started || row.expires_at <= time() || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
         run("UPDATE assistant_inbox_deliveries SET state='started',native_started=1 WHERE delivery_id=?", id);
       });
@@ -362,6 +362,20 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         activeSource(scope);
         const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
         if (row.kind !== 'provision' || row.native_started || !['leased','started','uncertain'].includes(row.state)
+          || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?", time()+LEASE_MS, id);
+      });
+    },
+    /** Persist the exact delivery before the server pass claim. This journal
+     * can safely repeat only that idempotent claim if its response was lost;
+     * native_started remains the irreversible native launch boundary. */
+    prepareTaskPass(id) {
+      return transaction(() => {
+        const row = delivery(id);
+        const scope = JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?', row.source_key).scope_json);
+        activeSource(scope);
+        const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
+        if (row.kind !== 'task' || row.native_started || !['leased','started','uncertain'].includes(row.state)
           || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
         run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?", time()+LEASE_MS, id);
       });
@@ -411,7 +425,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
             state: row.state, kind: row.kind, threadId: row.native_thread_id, nativeStarted: Boolean(row.native_started) }));
       });
     },
-    completeDelivery(id, receipt) {
+    readDelivery(id) {
+      const row=delivery(uuid(id));
+      const source=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
+      return {deliveryId:row.delivery_id,taskId:row.task_id,scope:scopeInputWithoutKey(source),state:row.state,
+        kind:row.kind,threadId:row.native_thread_id,nativeStarted:Boolean(row.native_started),receipt:row.external_receipt};
+    },
+    completeDelivery(id, receipt, completion = null) {
       opaque(receipt);
       return transaction(() => {
         const row = delivery(id);
@@ -421,7 +441,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // timeout or "chat exists" is insufficient evidence for this receipt.
         if (onDeliveryCompleted && row.kind !== 'provision') {
           const scope = scopeInputWithoutKey(JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?', row.source_key).scope_json));
-          const result = onDeliveryCompleted({ scope, taskId: row.task_id, deliveryId: id, receipt, completedAt: time(), scheduled: Boolean(row.scheduled) });
+          const result = onDeliveryCompleted({ scope, taskId: row.task_id, deliveryId: id, receipt, completedAt: time(), scheduled: Boolean(row.scheduled), completion });
           if (result && typeof result.then === 'function') fail('ASSISTANT_INBOX_ASYNC_COMPLETION');
         }
         run("UPDATE assistant_inbox_deliveries SET state='complete',external_receipt=? WHERE delivery_id=?", receipt, id);

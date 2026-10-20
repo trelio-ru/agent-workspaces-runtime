@@ -81,6 +81,14 @@ test('native SessionEnd does not clear a pass or claim business completion',asyn
   assert.equal(await f.options.readActivePass(),f.pass);
   const next=await f.hook(f.event(),'get_assistant_task');verifyProof(f,next,'get_assistant_task');assert.equal(f.records.size,2);
 });
+test('a closed pass accepts only SessionEnd cleanup and cannot produce another signed call',async()=>{
+  const f=fixture();await f.hook(f.event(),'complete_assistant_pass');
+  let endings=0;f.client.endRuntime=async()=>{endings++;return {ended:true};};
+  f.client.readTaskPass=async()=>({...f.pass,state:'closed',leaseExpiresAt:new Date(1).toISOString()});
+  await assert.rejects(f.hook(f.event(),'get_task'),/REVIEW_REQUIRED/);
+  await f.hook({hook_event_name:'SessionEnd',session_id:f.pass.threadId});
+  assert.equal(endings,1);assert.equal(f.calls(),1);assert.equal(await f.options.readActivePass(),f.pass);
+});
 test('common observer reads the current native Codex turn instead of tool argument claims',async t=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-observation-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const transcript=path.join(root,'rollout.jsonl');
@@ -111,7 +119,10 @@ test('host journal cannot silently rebind identity, replace an unresolved pass o
   const outcome={schemaVersion:1,state:'confirmed',receiptId:crypto.randomUUID(),...Object.fromEntries(
     ['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].map(key=>[key,f.pass[key]]))};
   await assert.rejects(host.releasePass({...outcome,taskId:crypto.randomUUID()}),/REVIEW_REQUIRED/);
+  const signingSlot={origin:f.identity.origin,kind:'runtime',id:f.pass.passId};
+  await f.store.put(signingSlot,{state:{privateKeyPkcs8:'synthetic expired key'}});
   await host.releasePass(outcome);assert.equal(await host.readActivePass(),null);
+  assert.equal(await f.store.get(signingSlot),null,'verified closure erases the unused local signing key');
 });
 
 test('an exhausted common hook deadline blocks the first private read',async()=>{
