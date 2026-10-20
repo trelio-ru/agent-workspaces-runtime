@@ -5,6 +5,7 @@ import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime
 import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
+import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -656,3 +657,246 @@ export const assistantWorkspaceConcreteRequest = (method, pathname) => {
     throw assistantWorkspacePolicyDenied();
 };
 // END GENERATED ASSISTANT WORKSPACE POLICY
+
+// A source is a private, explicitly selected account/stream. These protocol
+// names only select reviewed wire formats; provider APIs, selectors, credentials
+// and passive-read guards stay in their signed packages.
+const ASSISTANT_SOURCE_PREFIX='/api/digital-assistants/runtime/source-skills';
+const SOURCE_PROTOCOLS=Object.freeze({
+  'telegram-mtproto':{provider:'telegram',protocol:'telegram-monitor/v1'},
+  'email-imap-smtp':{provider:'email',protocol:'email-monitor/v1'},
+  'max-web':{provider:'max',protocol:'max-monitor/v1'},
+});
+const sourceCursor = (value,skillId) => typeof value==='string' && value.length<=16_384
+  && (skillId==='telegram-mtproto' ? /^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/u : /^[A-Za-z0-9_-]+$/u).test(value);
+const sourceScope = input => {
+  if(!object(input) || Object.keys(input).some(key=>!['companyId','projectId','skillId'].includes(key))
+    || !Object.hasOwn(SOURCE_PROTOCOLS,input.skillId)) fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  return Object.freeze({companyId:id(input.companyId),projectId:input.projectId==null?null:id(input.projectId),skillId:input.skillId});
+};
+
+/** One poll's transport profile for the common package loader. It has no task
+ * pass/model observation, human vault or renewal cache. The server rechecks the
+ * live device, MCP grant, scope, assignment, current release and package on each
+ * fixed endpoint. A local format header and a callback are not authorization. */
+export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,
+  monotonic=()=>performance.now(),startedAt=monotonic()}) => {
+  scope=sourceScope(scope);
+  const origin=originOf(identity?.origin),assistantId=id(identity?.assistantId),deviceId=id(identity?.deviceId);
+  if(!host || typeof host.readIdentity!=='function' || !store || typeof store.get!=='function'
+    || typeof monotonic!=='function' || !Number.isFinite(startedAt)) fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  const expected={schemaVersion:1,origin,assistantId,deviceId};
+  let active=true,resolveSent=false,packageSent=false,packagePath=null,budgetMs=120_000;
+  const handle=Object.freeze(Object.create(null));
+  const assertCurrent=async()=>{
+    // Monotonic time starts before resolve/private I/O. Neither a delayed
+    // response, local clock rollback nor download metadata can renew it.
+    const elapsed=monotonic()-startedAt;
+    if(!active || !Number.isFinite(elapsed) || elapsed<0 || elapsed>=budgetMs) fail('ASSISTANT_SOURCE_DEADLINE');
+    const current=await host.readIdentity();
+    if(!object(current) || Object.keys(current).sort().join(',')!==Object.keys(expected).sort().join(',')
+      || Object.keys(expected).some(key=>current[key]!==expected[key])) fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+    const after=monotonic()-startedAt;
+    if(!active || !Number.isFinite(after) || after<0 || after>=budgetMs) fail('ASSISTANT_SOURCE_DEADLINE');
+  };
+  await assertCurrent();
+  return Object.freeze({
+    kind:'digital_assistant_source',
+    async requireToken(requestOrigin){
+      if(requestOrigin!==origin)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+      await assertCurrent();return handle;
+    },
+    async prepareRequest({origin:requestOrigin,token,pathname,options,buildHeaders}){
+      if(requestOrigin!==origin || token!==handle || typeof pathname!=='string' || typeof buildHeaders!=='function') fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+      const method=String(options.method??'GET').toUpperCase();
+      if(pathname===`${ASSISTANT_SOURCE_PREFIX}/resolve` && method==='POST' && !resolveSent){
+        let body;try{body=JSON.parse(options.body);}catch{fail('ASSISTANT_SOURCE_ORIGIN_DENIED');}
+        if(!object(body) || JSON.stringify(body)!==JSON.stringify({...scope,expectedReleaseId:null})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+        // Fence dispatch even when a local read/network response fails. Another
+        // poll needs a fresh profile, not an implicit retry under this lease.
+        resolveSent=true;
+      }else if(pathname===packagePath && method==='GET' && !packageSent && options.body===undefined){
+        packageSent=true;
+      }else fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+      await assertCurrent();
+      const headers=buildHeaders(null,options.headers??{});
+      for(const key of ['cookie','cookie2','proxy-authorization','x-trelio-assistant-pass','x-trelio-assistant-proof'])headers.delete(key);
+      headers.set('x-trelio-assistant-source-protocol','1');
+      headers.set('authorization',`Bearer ${await loadAssistantDeviceCredential({origin,assistantId,deviceId,store})}`);
+      await assertCurrent();
+      return {url:new URL(pathname,origin),headers,options:{redirect:'error',credentials:'omit',cache:'no-store'}};
+    },
+    async bindResolution(resolution,admission){
+      await assertCurrent();
+      const protocol=SOURCE_PROTOCOLS[scope.skillId];
+      const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
+      if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
+        || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
+        || admission.provider!==protocol.provider || admission.protocol!==protocol.protocol || admission.command!=='monitor'
+        || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==60_000
+        || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
+        || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.expiresAt)
+        || !Number.isFinite(issued) || !Number.isFinite(expires) || expires-issued!==120_000
+        || resolution.localIdentity?.companyId!==scope.companyId || resolution.localIdentity?.projectId!==scope.projectId
+        || resolution.artifact.skillId!==scope.skillId || resolution.artifact.contentProtection!=='plain'
+        || resolution.trust.level!=='platform_verified' || resolution.trust.artifactLevel!=='platform_verified'
+        || resolution.trust.requiresDeviceConsent || resolution.companyConnection?.secretBindings.length
+        || resolution.companyConnection && !resolution.companyConnection.configured) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      const url=new URL(resolution.packageUrl,origin);
+      const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
+        expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id};
+      if(url.origin!==origin || url.pathname!==`${ASSISTANT_SOURCE_PREFIX}/package` || url.hash
+        || [...url.searchParams.keys()].length!==Object.keys(query).length
+        || Object.entries(query).some(([key,value])=>url.searchParams.get(key)!==value)) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      // The wire date pair bounds duration, not local wall time. Original
+      // monotonic start already charged transport latency before this response.
+      budgetMs=Math.min(budgetMs,expires-issued);packagePath=resolution.packageUrl;
+      await assertCurrent();
+    },
+    async remainingMs(){await assertCurrent();return Math.floor(budgetMs-(monotonic()-startedAt));},
+    close(){active=false;},
+  });
+};
+
+/** Strip native monitor output to a private structural page before queue I/O.
+ * Never return the provider envelope, Error/cause or optional content fields.
+ * An error/gap is not an empty page and never supplies a replacement cursor. */
+export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=null}) => {
+  const invalid=()=>fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  if(!object(result) || !Number.isSafeInteger(result.exitCode) || typeof result.stdout!=='string'
+    || Buffer.byteLength(result.stdout,'utf8')>1024*1024 || !Object.hasOwn(SOURCE_PROTOCOLS,skillId))invalid();
+  let raw;try{raw=JSON.parse(result.stdout);}catch{invalid();}
+  if(!object(raw))invalid();
+  if(result.exitCode!==0){
+    const prefix={ 'telegram-mtproto':'TELEGRAM','email-imap-smtp':'EMAIL','max-web':'MAX' }[skillId];
+    const suffixes=['INVALID_CURSOR','SCOPE_CHANGED','UIDVALIDITY_CHANGED','GAP','INVALID_RESPONSE','REFERENCE_UNAVAILABLE','UNAVAILABLE'];
+    const allowed=suffixes.map(suffix=>`${prefix}_MONITOR_${suffix}`);
+    fail(allowed.includes(raw.code)?raw.code:'ASSISTANT_SOURCE_PROVIDER_UNAVAILABLE');
+  }
+  const ref=value=>typeof value==='string' && value.length>0 && value.length<=512 && !/[\x00-\x20\x7f]/u.test(value);
+  const digest=value=>typeof value==='string' && /^[a-f0-9]{64}$/u.test(value);
+  const positive=value=>typeof value==='string' && /^[1-9]\d{0,18}$/u.test(value);
+  const peer=value=>typeof value==='string' && /^-?[1-9]\d{0,18}$/u.test(value);
+  const cursorRef=value=>sourceCursor(value,skillId);
+  if(raw.schemaVersion!==1 || typeof raw.baselineOnly!=='boolean' || raw.baselineOnly!==(cursor===null)
+    || !Array.isArray(raw.events) || raw.events.length>100 || raw.baselineOnly && raw.events.length
+    || typeof raw.hasMore!=='boolean' || !cursorRef(raw.nextCursor)
+    || raw.coverage?.historicalBackfill!==false || raw.readState?.readReceiptsSent!==false)invalid();
+  if(skillId==='email-imap-smtp' && raw.coverage.bodyContentRead!==false
+    || skillId==='max-web' && (raw.coverage.ownerIdentityAvailable!==false
+      || raw.coverage.earlierEditsIncluded!==false || raw.coverage.otherChatsIncluded!==false))invalid();
+  const seen=new Set();
+  const events=raw.events.map(row=>{
+    if(!object(row) || !ref(row.id) || !digest(row.revision) || !['new','edit','delete'].includes(row.kind))invalid();
+    const key=JSON.stringify([row.id,row.revision]);if(seen.has(key))invalid();seen.add(key);
+    if(skillId==='email-imap-smtp'){
+      if(row.kind!=='new' || !positive(row.uid) || !positive(row.uidValidity)
+        || row.id!==`uid:${row.uidValidity}:${row.uid}` || raw.coverage.bodyContentRead!==false)invalid();
+      return {id:row.id,revision:row.revision,kind:row.kind,uid:row.uid,uidValidity:row.uidValidity};
+    }
+    if(!ref(row.chatId) || !ref(row.messageId))invalid();
+    const event={id:row.id,revision:row.revision,kind:row.kind,chatId:row.chatId,messageId:row.messageId};
+    if(skillId==='telegram-mtproto'){
+      if(!peer(row.chatId) || !positive(row.messageId) || row.id!==`message:${row.chatId}:${row.messageId}`
+        || chat!==null && row.chatId!==chat)invalid();
+      if(row.kind!=='delete'){
+        if(row.topicId!==null && !positive(row.topicId) || row.senderUserId!==null && !positive(row.senderUserId)
+          || row.senderNamespace!==(row.senderUserId===null?null:'telegram_user_id')
+          || ['outgoing','forwarded','viaBot'].some(key=>typeof row[key]!=='boolean'))invalid();
+        Object.assign(event,{topicId:row.topicId,senderUserId:row.senderUserId,senderNamespace:row.senderNamespace,
+          outgoing:row.outgoing,forwarded:row.forwarded,viaBot:row.viaBot});
+      }
+    }else{
+      if(row.kind==='delete' || row.id!==`message:${row.messageId}` || row.senderUserId!==null
+        || row.senderNamespace!==null || raw.coverage.ownerIdentityAvailable!==false)invalid();
+      Object.assign(event,{senderUserId:null,senderNamespace:null});
+    }
+    return event;
+  });
+  const page={schemaVersion:1,baselineOnly:raw.baselineOnly,events,nextCursor:raw.nextCursor,hasMore:raw.hasMore};
+  if(skillId==='telegram-mtproto'){
+    const list=(value,validator)=>{
+      if(!Array.isArray(value) || value.length>100 || value.some(item=>!validator(item)) || new Set(value).size!==value.length)invalid();
+      return [...value];
+    };
+    if(raw.stream?.kind!==(chat===null?'account_cloud':'channel') || raw.stream.chatId!==chat
+      || raw.readState.viewsRegistered!==false || raw.coverage.secretChatsIncluded!==false
+      || raw.coverage.otherChannelStreamsIncluded!==false)invalid();
+    page.channelsToSync=list(raw.channelsToSync,positive);
+    page.unresolvedDeletionIds=list(raw.unresolvedDeletionIds,positive);
+  }
+  return page;
+};
+
+/** One bounded model-free read through the same verifier, local-account
+ * selector and materialized executor as a human skill invocation. This helper
+ * does not register a source, acknowledge a message, advance SQLite or create
+ * a task; the coordinator owns those independent durable transitions. */
+export const readAssistantSourceMonitor = async ({identity,host,store,source,signal}) => {
+  if(!object(source) || Object.keys(source).some(key=>!['companyId','projectId','skillId','accountId','chat','folder','cursor'].includes(key)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
+  const accountId=id(source.accountId),cursor=source.cursor??null,chat=source.chat??null,folder=source.folder??null;
+  if(cursor!==null && !sourceCursor(cursor,scope.skillId)
+    || scope.skillId==='telegram-mtproto' && (folder!==null || chat!==null && !/^-?[1-9]\d{0,18}$/u.test(chat))
+    || scope.skillId==='max-web' && (folder!==null || typeof chat!=='string' || !/^https:\/\/web\.max\.ru\/[A-Za-z0-9_-]{1,128}$/u.test(chat))
+    || scope.skillId==='email-imap-smtp' && (chat!==null || folder!==null && (typeof folder!=='string' || !folder.length || folder.length>256 || /[\x00-\x1f\x7f]/u.test(folder))))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  const startedAt=performance.now(),controller=new AbortController();
+  const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+  const timer=setTimeout(()=>controller.abort(),120_000);
+  let profile;
+  try{
+    // Import the existing engine lazily: discovery/pairing never initializes
+    // the human vault, account catalogue or package cache just by importing us.
+    const engine=await import('./trelio-workspace.mjs');
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,startedAt});
+    return await engine.withWorkspaceExecutionProfile(profile,async()=>{
+      if(combined.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
+      const token=await profile.requireToken(identity.origin);
+      const response=await engine.request(identity.origin,token,`${ASSISTANT_SOURCE_PREFIX}/resolve`,{
+        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null}),
+        headers:{'content-type':'application/json'},signal:combined,maximumErrorResponseBytes:16_384});
+      const bytes=await engine.readBoundedResponseBuffer(response,512*1024,'Source resolution');
+      let raw;try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}finally{bytes.fill(0);}
+      const resolution=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
+      await profile.bindResolution(resolution,raw.sourceAdmission);raw=null;
+      const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,
+        requestOptions:{signal:combined,maximumErrorResponseBytes:16_384}});
+      await profile.remainingMs();
+      const capabilities=materialized.artifact.parsedPackage.capabilities;
+      if(!['network','local-session','local-accounts-v1'].every(value=>capabilities.includes(value))
+        || capabilities.includes('secret-checkout'))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,
+        companyConnection:resolution.companyConnection};
+      const args=['monitor','--local-account',accountId,...(chat===null?[]:['--chat',chat]),
+        ...(folder===null?[]:['--folder',folder]),...(cursor===null?[]:['--cursor',cursor]),'--limit','100'];
+      const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
+        runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
+      if(selected.handled || selected.account?.id!==accountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
+      executionContext.account=selected.account;
+      const remaining=await profile.remainingMs();
+      if(combined.aborted || remaining<1000)fail('ASSISTANT_SOURCE_DEADLINE');
+      const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+        executionContext,runtimeArguments:selected.runtimeArguments,captureOutput:true,captureExitCode:true,
+        timeoutMs:Math.min(60_000,remaining),signal:combined});
+      await profile.remainingMs();
+      if(combined.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
+      return projectAssistantMonitorPage(result,{skillId:scope.skillId,cursor,chat});
+    });
+  }catch(error){
+    if(error instanceof AssistantTransportError)throw error;
+    // Only closed backend/process codes survive. Never attach cause/raw JSON,
+    // private account/config, argv, provider stderr or cache paths to a failure.
+    const code=error?.code;
+    const backendCodes=['ASSISTANT_SOURCE_AUTH_REQUIRED','ASSISTANT_SOURCE_ACCESS_DENIED','ASSISTANT_SOURCE_SCOPE_UNAVAILABLE',
+      'ASSISTANT_SOURCE_INPUT_INVALID','ASSISTANT_SOURCE_PROTOCOL_REQUIRED','ASSISTANT_SOURCE_PROTOCOL_UNAVAILABLE',
+      'ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_SOURCE_ENCRYPTED_UNAVAILABLE','ASSISTANT_SOURCE_SKILL_UNAVAILABLE',
+      'ASSISTANT_SOURCE_UNAVAILABLE','ASSISTANT_ACCESS_DENIED','ASSISTANT_COMPANY_REMOVED','ASSISTANT_DEVICE_REQUIRED',
+      'ASSISTANT_DEVICE_REVOKED','ASSISTANT_STATE_CHANGED','ASSISTANT_RUNTIME_ADMISSION_DENIED',
+      'AGENT_SKILL_RELEASE_CHANGED','AGENT_SKILL_RUNTIME_REVOKED','AGENT_SKILL_RUNTIME_HOST_UPGRADE_REQUIRED',
+      'AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED','AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED'];
+    if(backendCodes.includes(code) || PROCESS_DIAGNOSTIC_CODES.includes(code))fail(code);
+    if(['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ACCOUNT_SETUP_REQUIRED','ACCOUNT_SELECTION_REQUIRED'].includes(code))fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
+    fail(combined.aborted?'ASSISTANT_SOURCE_DEADLINE':'ASSISTANT_SOURCE_UNAVAILABLE');
+  }finally{clearTimeout(timer);profile?.close();}
+};

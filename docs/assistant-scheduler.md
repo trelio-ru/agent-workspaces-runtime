@@ -260,6 +260,51 @@ is forbidden. Intake must re-read the native owner binding and independent
 company/task ACL at its own boundary. The client does not enable provider
 monitoring, synthesize a task pass or reuse a human OAuth session.
 
+### Model-free source reader
+
+`readAssistantSourceMonitor` composes the same package resolution validator,
+Ed25519/digest/file-inventory verifier, executable cache, explicit bound local
+account selector and materialized Node/Python executor as ordinary skills. It
+accepts only the reviewed Telegram, IMAP email and MAX monitor protocols. The
+provider retains its APIs, credential/session storage, selectors and passive
+read guards. No provider implementation or credential is copied into the host.
+
+A separate internal async HTTP profile uses the existing protected device slot
+and common version headers. Each poll resolves the current package through the
+fixed `/api/digital-assistants/runtime/source-skills/resolve` endpoint, even on a
+verified cache hit. The server repeats live device/MCP/scope/assignment/release
+checks. Only its exact company/project/skill/release/artifact package query can
+be downloaded, once, through the same profile. No human OAuth, browser cookie,
+redirect, task pass/model observation, cached twelve-hour admission, secret
+checkout, setup, login or implicit retry is used. Plain platform-verified
+packages only; encrypted and company-unverified execution remain closed.
+
+The original monotonic 120-second budget begins before resolve/private I/O.
+Server issue/expiry dates bound that duration; local wall-clock skew cannot
+renew it. Package download, account preparation and capture share that budget,
+and the actual provider child receives at most 60 seconds. Cancellation and
+identity changes prevent delivery of a page. A fresh source profile is required
+for another poll. Cached envelopes are fd-read with exact size, no final symlink
+and a bounded allocation, then signature and every materialized file are checked.
+Neither a marker nor a prior successful invocation authorizes tampered bytes.
+
+Complete private provider JSON is projected immediately to bounded structural
+message/revision references, native sender metadata and opaque non-authorizing
+cursors. Content/config/account labels/provider errors never become SQLite,
+model output or diagnostic payloads. Telegram channel hints and unresolved
+account deletion IDs stay separate: neither invents a chat or sender. MAX cannot
+prove owner identity. An unknown response, gap, cursor/scope refusal, output
+limit or process failure is not an empty page and provides no replacement
+position. Baseline-only pages are explicitly marked, not historical backfill.
+
+This is a one-page reader, not source registration or delivery authority. Source
+onboarding/backfill, atomic SQLite positions/events, independent polling leases,
+task mapping, fresh owner-command intake, ACK after actual content processing and
+Windows end-to-end acceptance remain separate product gates. The helper does
+not enable `businessReady`, register a timer or touch a live provider account.
+Tests use real synthetic signed packages/native children plus strict wire DTO
+fixtures; they do not assert that production provider monitoring is enabled.
+
 ## Protected background host composition
 
 `createAssistantRuntimeHost` composes the real private SQLite opener, fixed device

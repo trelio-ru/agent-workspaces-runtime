@@ -8934,6 +8934,14 @@ const buildConnectionFreeRuntimeResolutionPayload = () => {
   };
 };
 
+test("assistant source package URLs require an explicit closed transport profile", () => {
+  const payload = buildConnectionFreeRuntimeResolutionPayload();
+  payload.packageUrl = payload.packageUrl.replace("/api/agent-skills/runtime/", "/api/digital-assistants/runtime/source-skills/");
+  assert.throws(() => normalizeResolvedSkillRuntimeArtifact(payload), /runtime resolution/u);
+  assert.equal(normalizeResolvedSkillRuntimeArtifact(payload, { transportProfile: "assistant_source" }).packageUrl, payload.packageUrl);
+  assert.throws(() => normalizeResolvedSkillRuntimeArtifact(payload, { transportProfile: "https://other.test" }), /transport profile/u);
+});
+
 test("connection-free skill runtime receives member identity without synthetic connection authority", () => {
   const payload = buildConnectionFreeRuntimeResolutionPayload();
   const { companyId, memberId, skillId } = payload.localIdentity;

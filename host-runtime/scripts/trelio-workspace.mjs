@@ -6597,6 +6597,63 @@ const readVerifiedSkillRuntimeCache = async (artifact) => {
   }
 };
 
+/** Verify cache bytes on every invocation. Never let a marker, symlink or
+ * large local file stand in for the signed package. The fixed-size fd read is
+ * bounded even if another process grows the file after fstat. Missing/corrupt
+ * cache is only a miss; it grants neither admission nor a retry of execution. */
+export const readCachedAgentSkillRuntime = async (artifact) => {
+  if (artifact.contentProtection === "company_e2ee_v1") return null;
+  if (!Number.isSafeInteger(artifact.packageSizeBytes) || artifact.packageSizeBytes < 1
+    || artifact.packageSizeBytes > AGENT_SKILL_MAX_PACKAGE_BYTES) return null;
+  const candidate = path.join(SKILL_RUNTIME_CACHE_DIRECTORY, artifact.skillId,
+    artifact.runtimeVersion, artifact.packageSha256, ".trelio-package.json");
+  let handle, bytes;
+  try {
+    const before = await fs.lstat(candidate);
+    if (!before.isFile() || before.isSymbolicLink() || before.size !== artifact.packageSizeBytes) return null;
+    handle = await fs.open(candidate, fsConstants.O_RDONLY
+      | (process.platform === "win32" ? 0 : (fsConstants.O_NOFOLLOW || 0)));
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size !== artifact.packageSizeBytes
+      || opened.dev !== before.dev || opened.ino !== before.ino) return null;
+    bytes = Buffer.alloc(artifact.packageSizeBytes);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!read.bytesRead) return null;
+      offset += read.bytesRead;
+    }
+    const tail = Buffer.alloc(1);
+    if ((await handle.read(tail, 0, 1, offset)).bytesRead
+      || crypto.createHash("sha256").update(bytes).digest("hex") !== artifact.packageSha256) return null;
+    verifyAgentSkillPackageSignature(bytes, artifact);
+    artifact.parsedPackage = parseAndValidateAgentSkillPackage(bytes, artifact.skillId);
+    if (artifact.parsedPackage.runtimeVersion !== artifact.runtimeVersion) return null;
+    return await readVerifiedSkillRuntimeCache(artifact);
+  } catch {
+    // The subsequent live download repeats all package and signature checks.
+    // No cache error message/private path crosses the source boundary.
+    return null;
+  } finally {
+    bytes?.fill(0);
+    await handle?.close();
+  }
+};
+
+/** Common materializer, not admission. Human callers refresh their cached
+ * admission before calling this on a miss; source callers resolve every poll.
+ * The request remains inside the current fixed HTTP profile, including its
+ * original deadline and exact package destination. */
+export const materializeResolvedAgentSkillRuntime = async ({ origin, token, resolution,
+  companyEncryption = null, requestOptions = {} }) => {
+  const artifact = { ...resolution.artifact };
+  const cachedDirectory = await readCachedAgentSkillRuntime(artifact);
+  if (cachedDirectory) return { runtimeDirectory: cachedDirectory, cacheHit: true, artifact };
+  const result = await downloadAndMaterializeAgentSkillRuntime({ origin, token,
+    packageUrl: resolution.packageUrl, artifact, companyEncryption, requestOptions });
+  return { ...result, artifact };
+};
+
 const verifyAgentSkillPackageSignature = (packageBytes, artifact) => {
   const publicKeyBytes = decodeCanonicalBase64(
     artifact.signingPublicKeySpki,
@@ -6755,8 +6812,9 @@ const downloadAndMaterializeAgentSkillRuntime = async ({
   packageUrl,
   artifact,
   companyEncryption = null,
+  requestOptions = {},
 }) => {
-  const response = await request(origin, token, packageUrl);
+  const response = await request(origin, token, packageUrl, requestOptions);
   let packageBytes = await readBoundedResponseBuffer(
     response,
     artifact.contentProtection === "company_e2ee_v1"
@@ -6903,8 +6961,17 @@ const downloadAndMaterializeAgentSkillRuntime = async ({
 
 export const normalizeResolvedSkillRuntimeArtifact = (
   payload,
-  { allowPendingEncryptedConsent = false } = {},
+  { allowPendingEncryptedConsent = false, transportProfile = "human" } = {},
 ) => {
+  // An internal closed transport selector reuses the exact artifact validator.
+  // It is never a caller-supplied origin/prefix or a permission grant. Source
+  // requests still pass the device-only HTTP profile at each actual download.
+  if (!["human", "assistant_source"].includes(transportProfile)) {
+    throw new Error("Unknown skill runtime transport profile.");
+  }
+  const packagePrefix = transportProfile === "assistant_source"
+    ? "/api/digital-assistants/runtime/source-skills/package?"
+    : "/api/agent-skills/runtime/package?";
   const artifact = payload?.artifact;
   const contentProtection = artifact?.contentProtection ?? "plain";
   const encryptedRuntime = contentProtection === "company_e2ee_v1";
@@ -6948,7 +7015,7 @@ export const normalizeResolvedSkillRuntimeArtifact = (
     || typeof artifact?.signingPublicKeySpki !== "string"
     || !STABLE_VERSION_PATTERN.test(String(artifact?.minimumHostVersion || ""))
     || typeof payload?.packageUrl !== "string"
-    || !payload.packageUrl.startsWith("/api/agent-skills/runtime/package?")
+    || !payload.packageUrl.startsWith(packagePrefix)
     || !["platform_verified", "company_unverified"].includes(trust?.level)
     || !["platform_verified", "company_unverified"].includes(trust?.artifactLevel)
     || (
@@ -8211,55 +8278,11 @@ const skillCommand = async (
     throw new Error("Trelio runtime resolution не совпадает с get_agent_skill.");
   }
 
-  // Every invocation still validates package signature, version and file hashes.
-  // Only server admission may be reused; cache bytes alone never grant execution.
-  const artifactForCache = {
-    ...resolution.artifact,
-  };
-  let cachedDirectory = null;
-
-  // Для проверки cache нужен signed package manifest. Маленький package
-  // скачивается только при miss; marker сам по себе не считается достаточным
-  // доказательством, поэтому cache metadata хранит content-free manifest.
-  const markerCandidate = path.join(
-    SKILL_RUNTIME_CACHE_DIRECTORY,
-    artifactForCache.skillId,
-    artifactForCache.runtimeVersion,
-    artifactForCache.packageSha256,
-    ".trelio-package.json",
-  );
-
-  try {
-    if (artifactForCache.contentProtection === "company_e2ee_v1") {
-      throw Object.assign(new Error("Encrypted runtime requires a fresh ciphertext check."), {
-        code: "ENOENT",
-      });
-    }
-    const cachedPackageBytes = await fs.readFile(markerCandidate);
-    if (
-      cachedPackageBytes.byteLength !== artifactForCache.packageSizeBytes
-      || crypto.createHash("sha256").update(cachedPackageBytes).digest("hex")
-        !== artifactForCache.packageSha256
-    ) {
-      throw new Error("Cached runtime package не совпадает с resolve metadata.");
-    }
-    verifyAgentSkillPackageSignature(cachedPackageBytes, artifactForCache);
-    artifactForCache.parsedPackage = parseAndValidateAgentSkillPackage(
-      cachedPackageBytes,
-      artifactForCache.skillId,
-    );
-    if (
-      artifactForCache.parsedPackage.runtimeVersion
-      !== artifactForCache.runtimeVersion
-    ) {
-      throw new Error("Cached runtime package version не совпадает с resolve metadata.");
-    }
-    cachedDirectory = await readVerifiedSkillRuntimeCache(artifactForCache);
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      cachedDirectory = null;
-    }
-  }
+  // Server admission and executable cache remain independent. The same
+  // verifier/cache reader serves the source device profile below; this human
+  // path alone retains its existing twelve-hour admission refresh policy.
+  const artifactForCache = { ...resolution.artifact };
+  const cachedDirectory = await readCachedAgentSkillRuntime(artifactForCache);
 
   // A cached admission is useful only with the already verified local package.
   // Missing/corrupted bytes force a complete live admission before downloading;
