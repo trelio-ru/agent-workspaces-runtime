@@ -11,6 +11,9 @@ metadata: frame/session IDs, размеры, scroll flags, фазу и безо�
 Модель не получает HTML, DOM/AX, site JS, storage, cookies, headers, response
 bodies, clipboard, selectors или произвольный результат протокола браузера.
 У API нет команд evaluate, произвольного CDP, raw HTTP или чтения профиля.
+Локальная гипотеза bounded text observation проверяется отдельно в
+[maintainer experiment](../experiments/visual-text/README.md), вне подписанного
+API и builder input. Она не меняет эти ограничения установленного runtime.
 PNG проверяется до обычного stdout limit: размер, chunks/CRC и отсутствие
 текстовых/вложенных данных. Невалидный marker не возвращается как обычный stdout.
 

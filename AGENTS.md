@@ -247,6 +247,10 @@ publication tooling также остаются вне этого публичн
   Capture/input не активируют app; native foreground test проверяет это без
   возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
   popups/iframes. Source probes не входят в package и не являются fallback.
+- Отдельный [text experiment](experiments/visual-text/README.md) – только
+  unsigned maintainer overlay вне package. Не включать его в подписанный API,
+  provider policy или release без отдельного решения; image-only default
+  сохраняется. Реальные результаты и session state не коммитятся.
 - HTTP-ошибки browser document сохраняют только numeric status и approved
   origin через общий observer; transport failure не получает выдуманного кода.
   Provider interpretation и отсутствие credential reset/replay сохраняются по
