@@ -12,26 +12,47 @@ const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'naviga
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
 
-function validatePng(bytes) {
+function validatePng(bytes, discardBrowserColorProfile = false) {
   // Accept the raster/color chunks Chromium emits, not arbitrary PNG text,
   // EXIF, embedded files or appended bytes. The MCP boundary never treats a
   // header plus arbitrary source text as an image. CRCs also reject truncation.
-  let offset = 8, data = false, ended = false, chunks = 0;
+  let offset = 8, data = false, ended = false, chunks = 0, palette = false, colorProfile = false;
+  const retained = discardBrowserColorProfile ? [bytes.subarray(0, 8)] : null;
   while (offset < bytes.length && ++chunks <= 4096) {
     if (offset + 12 > bytes.length) fail();
     const length = bytes.readUInt32BE(offset), type = bytes.toString('ascii', offset + 4, offset + 8);
-    if (length > bytes.length - offset - 12 || !['IHDR', 'IDAT', 'IEND', 'sRGB', 'gAMA', 'cHRM', 'pHYs', 'PLTE', 'tRNS'].includes(type)) fail();
+    const discard = discardBrowserColorProfile && type === 'iCCP';
+    if (length > bytes.length - offset - 12 || (!discard && !['IHDR', 'IDAT', 'IEND', 'sRGB', 'gAMA', 'cHRM', 'pHYs', 'PLTE', 'tRNS'].includes(type))) fail();
     if (crc32(bytes.subarray(offset + 4, offset + 8 + length)) !== bytes.readUInt32BE(offset + 8 + length)) fail();
     if (chunks === 1 ? type !== 'IHDR' || length !== 13 : type === 'IHDR') fail();
+    if (discard) {
+      // Chromium may tag its own screenshot with the display's ICC profile.
+      // It is ancillary metadata, not raster data. Discard the bounded chunk
+      // without decompressing, logging or exposing its name/profile bytes.
+      // Do not admit iCCP at ordinary MCP/provider validation boundaries:
+      // only the owned browser capture path may perform this normalization.
+      const profile = bytes.subarray(offset + 8, offset + 8 + length);
+      const nameEnd = profile.indexOf(0);
+      if (colorProfile || data || palette || length > 64 * 1024 || nameEnd < 1 || nameEnd > 79
+        || nameEnd + 2 >= profile.length || profile[nameEnd + 1] !== 0
+        || profile.subarray(0, nameEnd).some(value => value < 32 || (value > 126 && value < 161))) fail();
+      colorProfile = true;
+    }
+    if (type === 'PLTE') palette = true;
     if (type === 'IDAT') data = true;
     if (type === 'IEND') { if (length || !data) fail(); ended = true; }
+    if (retained && !discard) retained.push(bytes.subarray(offset, offset + 12 + length));
     offset += 12 + length;
     if (ended) break;
   }
   if (!ended || offset !== bytes.length) fail();
+  // Validate every chunk and the complete original container before returning
+  // any replacement. CRCs and raster bytes are preserved byte for byte; text,
+  // EXIF, unknown chunks, trailing bytes and malformed profile framing fail.
+  return colorProfile ? Buffer.concat(retained) : bytes;
 }
 
-export function validateVisualResult(value) {
+function validateResult(value, discardBrowserColorProfile) {
   if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
   if (value.reason === 'http_document_failure') {
     let url;
@@ -47,10 +68,21 @@ export function validateVisualResult(value) {
     if (!exact(value.image, ['mimeType', 'data']) || value.image.mimeType !== 'image/png' || typeof value.image.data !== 'string' || value.image.data.length > Math.ceil(MAX_VISUAL_PNG_BYTES / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value.image.data)) fail();
     const bytes = Buffer.from(value.image.data, 'base64');
     if (bytes.length < 33 || bytes.length > MAX_VISUAL_PNG_BYTES || bytes.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || bytes.toString('ascii', 12, 16) !== 'IHDR' || bytes.readUInt32BE(16) !== value.width || bytes.readUInt32BE(20) !== value.height) fail();
-    validatePng(bytes);
+    const normalized = validatePng(bytes, discardBrowserColorProfile);
+    if (normalized !== bytes) return { ...value, image: { ...value.image, data: normalized.toString('base64') } };
   } else if (['frameId', 'width', 'height', 'scroll'].some(key => value[key] !== undefined)) fail();
   return value;
 }
+
+export function validateVisualResult(value) { return validateResult(value, false); }
+
+/** Normalize only a host-owned raster capture, before it enters the private
+ * worker HTTP transport and ordinary strict MCP validation. No website code,
+ * metadata text or color-profile payload crosses the image-only boundary.
+ * Removing the ancillary ICC tag leaves raster samples unchanged; consumers
+ * render them in their default color space rather than receiving the profile.
+ */
+export function normalizeBrowserVisualResult(value) { return validateResult(value, true); }
 
 export function visualStatus(state, reason = 'none', extra = {}) {
   return validateVisualResult({ kind: VISUAL_RESULT_KIND, state, reason, ...extra });

@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { visualFrame, parseVisualSkillOutput, visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { visualFrame, parseVisualSkillOutput, visualStatus, validateVisualResult, normalizeBrowserVisualResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { visualSessionBinding, createVisualControlServer, runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { prepareVisualPrivateDirectory, runVisualChild, visualChildEnvironment } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
@@ -46,6 +46,70 @@ test('full visual payload crosses the real typed action handler as an image, not
   for (const png of [Buffer.concat([bytes, Buffer.from('SYNTHETIC_SOURCE_CODE')]), bytes.subarray(0, bytes.length - 1), Buffer.concat([bytes.subarray(0, bytes.length - 12), chunk('tEXt', Buffer.from('SYNTHETIC_SOURCE_CODE')), chunk('IEND', Buffer.alloc(0))])]) {
     assert.throws(() => visualFrame({ png, width: 320, height: 240, sessionId: randomUUID(), scroll: visual.scroll }), /VISUAL_RESULT_INVALID/);
   }
+});
+
+function colorProfileFixture() {
+  const chunk = (type, data) => {
+    const bytes = Buffer.alloc(data.length + 12);
+    bytes.writeUInt32BE(data.length); bytes.write(type, 4); data.copy(bytes, 8);
+    bytes.writeUInt32BE(crc32(bytes.subarray(4, 8 + data.length)), 8 + data.length);
+    return bytes;
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(320); header.writeUInt32BE(240, 4); header[8] = 8; header[9] = 6;
+  const head = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header)]);
+  const raster = chunk('IDAT', deflateSync(Buffer.alloc((320 * 4 + 1) * 240)));
+  const end = chunk('IEND', Buffer.alloc(0));
+  // The profile is deliberately opaque. Normalization must discard it without
+  // inflating or interpreting any embedded private string or ICC tag content.
+  const profileData = Buffer.concat([Buffer.from('Display profile\0\0'), deflateSync(Buffer.from('SYNTHETIC_PRIVATE_COLOR_PROFILE'))]);
+  const profile = chunk('iCCP', profileData), plain = Buffer.concat([head, raster, end]);
+  const base = visualFrame({ png: plain, width: 320, height: 240, sessionId: randomUUID(), scroll: { up: false, down: false, left: false, right: false } });
+  const frame = png => ({ ...base, image: { mimeType: 'image/png', data: png.toString('base64') } });
+  return { chunk, head, raster, end, profile, profileData, plain, frame };
+}
+
+test('owned browser ICC normalization preserves raster bytes and crosses the real MCP transport without metadata', async () => {
+  const f = colorProfileFixture(), png = Buffer.concat([f.head, f.profile, f.raster, f.end]);
+  const original = f.frame(png), normalized = normalizeBrowserVisualResult(original);
+  assert.throws(() => validateVisualResult(original), /VISUAL_RESULT_INVALID/, 'ordinary provider/MCP frames cannot admit the profile');
+  assert.throws(() => parseVisualSkillOutput(JSON.stringify(original)), /VISUAL_RESULT_INVALID/);
+  assert.equal(original.image.data, png.toString('base64'), 'normalization does not mutate a caller-owned packet');
+  assert.deepEqual(Buffer.from(normalized.image.data, 'base64'), f.plain, 'only the profile chunk disappears');
+  assert.equal(normalizeBrowserVisualResult(normalized), normalized, 'plain raster avoids another replacement');
+  const input = { schemaVersion: 1, operation: 'skill_run', parameters: { companyId: randomUUID(), skillId: 'synthetic-visual-fixture', releaseId: randomUUID(), arguments: ['screenshot'] } };
+  const result = await handleToolCall('https://example.test', 'continue_trelio_workspace_action', input, {
+    workspaceActionOperation: (origin, args) => handleTrelioWorkspaceActionOperation(origin, args, {
+      runBridge: async () => ({ stdout: JSON.stringify(normalized), stderr: '' }),
+    }),
+  });
+  assert.equal(result.content[1].type, 'image');
+  assert.deepEqual(Buffer.from(result.content[1].data, 'base64'), f.plain);
+  assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC_PRIVATE_COLOR_PROFILE|iCCP|stdout/);
+});
+
+test('browser ICC normalization retains strict CRC, framing, size and non-raster metadata rejection', () => {
+  const f = colorProfileFixture();
+  const corrupt = Buffer.from(f.profile); corrupt[corrupt.length - 1] ^= 1;
+  const invalidProfiles = [
+    corrupt,
+    f.chunk('iCCP', Buffer.from('\0\0payload')),
+    f.chunk('iCCP', Buffer.from('name\0\x01payload')),
+    f.chunk('iCCP', Buffer.from('name\0\0')),
+    f.chunk('iCCP', Buffer.concat([Buffer.from('x'.repeat(80)), Buffer.from('\0\0payload')])),
+    f.chunk('iCCP', Buffer.concat([Buffer.from('name\0\0'), Buffer.alloc(64 * 1024)])),
+    Buffer.concat([f.profile, f.profile]),
+  ];
+  for (const profile of invalidProfiles) assert.throws(() => normalizeBrowserVisualResult(f.frame(Buffer.concat([f.head, profile, f.raster, f.end]))), /VISUAL_RESULT_INVALID/);
+  for (const type of ['tEXt', 'iTXt', 'zTXt', 'eXIf', 'fOoB']) {
+    const metadata = f.chunk(type, Buffer.from('SYNTHETIC_SITE_SOURCE'));
+    assert.throws(() => normalizeBrowserVisualResult(f.frame(Buffer.concat([f.head, f.profile, metadata, f.raster, f.end]))), /VISUAL_RESULT_INVALID/);
+  }
+  for (const png of [
+    Buffer.concat([f.head, f.raster, f.profile, f.end]),
+    Buffer.concat([f.head, f.chunk('PLTE', Buffer.alloc(3)), f.profile, f.raster, f.end]),
+    Buffer.concat([f.head, f.profile, f.raster, f.end, Buffer.from('SYNTHETIC_TRAILING_SOURCE')]),
+    Buffer.concat([f.head, f.profile, f.raster, f.end]).subarray(0, -1),
+  ]) assert.throws(() => normalizeBrowserVisualResult(f.frame(png)), /VISUAL_RESULT_INVALID/);
 });
 
 test('worker binding is verified policy/account data and preserves absolute lease', () => {

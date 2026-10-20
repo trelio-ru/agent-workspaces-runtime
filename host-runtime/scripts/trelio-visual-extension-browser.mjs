@@ -9,7 +9,7 @@ import { visualExtensionWorker } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStatus, validateVisualResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
+import { visualStatus, normalizeBrowserVisualResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 
 // A public manifest identity fixes the extension Origin across private
@@ -284,7 +284,7 @@ export class ExtensionVisualBrowser {
       if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId, ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
       if (value.state !== 'ready') throw fault('operation_failed');
       this.#state = 'ready';
-      return validateVisualResult({ kind: VISUAL_RESULT_KIND, sessionId: this.sessionId, reason: 'none', ...value });
+      return normalizeBrowserVisualResult({ kind: VISUAL_RESULT_KIND, sessionId: this.sessionId, reason: 'none', ...value });
     });
     this.#tail = result.catch(() => {});
     return result.catch(error => {

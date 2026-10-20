@@ -194,7 +194,9 @@ publication tooling также остаются вне этого публичн
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
   image-only MCP, managed Chromium с private live profile и AEAD snapshot
   после нормальной остановки, native OS keyring, company/member claim и
-  непродлеваемая lease. Late bootstrap отменяется до browser launch; main-frame
+  непродлеваемая lease. Собственный capture удаляет bounded ancillary iCCP без
+  распаковки/выдачи профиля; CRC и весь PNG проверяются, обычный MCP validator
+  остаётся строгим. Late bootstrap отменяется до browser launch; main-frame
   navigation отзывает старый frame token; browser load metadata ожидается bounded
   без DOM/selector polling. Window close/ready сохраняют попытку до снятия gate;
   Windows/Linux startup использует внутреннюю new-tab вкладку без URL в argv;
