@@ -68,3 +68,22 @@ test('lost exchange response is fenced across restarts and is never blindly repe
   const restarted=createAssistantPairingClient({origin,store,http,now:()=>100});
   await assert.rejects(restarted.exchange(enrollmentId),/RECOVERY_REQUIRED/); assert.equal(exchanges,1);
 });
+
+
+test('owner renewal recovers the same device after its cached pairing expiry without local re-pairing', async () => {
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  const original={assistantId,deviceId,credential:`tda_${'c'.repeat(43)}`,expiresAt:1};
+  const slot={origin,kind:'device',id:assistantId}; await store.put(slot,original);
+  let renewed=false,calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,body,credential)=>{
+    calls++; assert.equal(operation,'heartbeat'); assert.equal(credential,original.credential);
+    if(!renewed) throw new AssistantTransportError('ASSISTANT_ACCESS_DENIED',403);
+    return {assistantUserId:assistantId,deviceId};
+  }});
+  await assert.rejects(client.heartbeat(),error=>error.code==='ASSISTANT_ACCESS_DENIED' && error.status===403);
+  assert.deepEqual(await store.get(slot),original,'denial must not delete, replace or locally extend the credential');
+  renewed=true;
+  assert.deepEqual(await client.heartbeat(),{assistantId,deviceId});
+  assert.equal(calls,2,'no hidden retry; only the next explicit polling pass contacts the server');
+  assert.deepEqual(await store.get(slot),original,'server renewal needs no private store rewrite or key rotation');
+});

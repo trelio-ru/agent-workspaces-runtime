@@ -28,6 +28,10 @@ publication tooling также остаются вне этого публичн
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
 
+- Продление device authorization проверяется сервером на каждом fixed endpoint;
+  локальная дата pairing не запрещает контакт после owner renewal. Отказ не
+  удаляет credential и не разрешает blind retry mutation.
+
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
   Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.
   Новые plugin hooks и перехват final response для этого не добавляются.

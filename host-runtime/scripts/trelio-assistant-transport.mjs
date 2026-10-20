@@ -87,14 +87,20 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
 
 /** Host-private client. Model tools receive only projections from these named
  * operations; no method returns the credential or delegates an arbitrary URL. */
-export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, store, http, now = Date.now }) => {
+export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, store, http }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== 'function' || typeof http !== 'function') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const call = async (operation, body, signal) => {
     const secret = await store.get({ origin, kind: 'device', id: assistantId });
     if (!secret || secret.assistantId !== assistantId || secret.deviceId !== deviceId
       || !/^tda_[A-Za-z0-9_-]{43}$/u.test(secret.credential ?? '') || !Number.isSafeInteger(secret.expiresAt)
-      || secret.expiresAt <= now()) fail('ASSISTANT_DEVICE_REQUIRED');
+      || secret.expiresAt <= 0) fail('ASSISTANT_DEVICE_REQUIRED');
+    // Pairing's stored expiry is historical metadata, not live authority: the
+    // owner can renew this exact device in Trelio without changing its protected
+    // credential. Every fixed endpoint rechecks current absolute/idle expiry,
+    // revocation and lifecycle. Rejecting by this stale local date would require
+    // touching the assistant computer after an otherwise valid server renewal.
+    // A denial preserves the private slot and never retries a mutation here.
     return http(operation, body, secret.credential, signal);
   };
   return {

@@ -133,3 +133,16 @@ poll -> owner decision -> provision -> mention/timer -> native receipt,
 concurrent hosts, crash recovery and unknown ID/host claims. Private/transport
 tests cover binding isolation, no plaintext fallback, symlink/ACL refusal,
 no cookie/redirect, response redaction and lost pairing exchange.
+
+
+## Authorization renewal
+
+The device credential's private envelope retains the pairing-time expiry only
+as historical metadata. It is not a second offline authorization cache. The
+owner may renew the same device from Trelio, setting now + one year without
+accumulating years or touching the assistant computer. Every fixed runtime
+endpoint remains authoritative for current absolute/idle expiry, lifecycle and
+revocation. A server denial preserves the private credential and queue; it does
+not trigger re-pairing or automatically repeat a mutation. A later model-free
+pass can establish live recovery after the owner renews. Other local identity,
+S256 one-use exchange and secret-storage guards remain unchanged.
