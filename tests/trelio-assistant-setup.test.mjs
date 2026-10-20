@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import path from 'node:path';
+import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
   const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
@@ -143,4 +146,113 @@ test('the same stdio process announces a changed signed-worker catalogue without
     await request(3,'tools/list');assert.equal(messages.at(-1).result.tools.at(-1).name,'complete_assistant_pass');
     health={code:'runtime_update_failed'};await tick();assert.equal(messages.length,count+1,'a failed probe cannot discard the known catalogue');
   } finally {input.end();await done;}
+});
+
+
+test('production host composes real SQLite, fresh private calls and the native adapter, but pairing cannot open business work',async()=>{
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const companyId=randomUUID(),memberId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID();
+  const execution={state:'ready',configuration:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}};
+  let businessReady=false,starts=0,contextCalls=0,databaseClosed=0,reported=0;
+  let currentIdentity=identity;
+  const client={identity,heartbeat:async()=>({}),companies:async()=>[{companyId,memberId}],
+    tasks:async()=>({bindings:[{id:bindingId,taskId,state:'accepted',revision:0}],nextCursor:null}),
+    task:async()=>({id:bindingId,taskId,state:'accepted',revision:0,execution,hostState:'this_device'}),
+    poll:async()=>({events:[],nextCursor:'0',hasMore:false}),
+    claimTaskHost:async input=>({bindingId,provisionId:input.provisionId,threadId:null}),
+    reportSchedule:async input=>{reported++;return {sequence:input.sequence};},
+  };
+  const native={provision:async(input,options)=>{
+    starts++;assert.deepEqual(input.execution,execution.configuration);
+    assert.equal(path.basename(input.cwd),taskId);
+    assert.equal(path.basename(path.dirname(input.cwd)),companyId);
+    options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
+    return {state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};
+  },run:async()=>assert.fail('no business pass in this fixture'),readDelivery:async()=>({state:'uncertain'})};
+  const database=new DatabaseSync(':memory:');
+  const host=await createAssistantRuntimeHost({context:async action=>{
+    contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null});
+  },dependencies:{directory:path.join(os.tmpdir(),'synthetic-assistant-host-'+randomUUID()),
+    ensureDirectory:async()=>{},openDatabase:async directory=>{
+      assert.equal(path.basename(directory),identity.deviceId);
+      return {database,close:async()=>{databaseClosed++;database.close();}};
+    },native,timeZone:'Europe/Moscow',readStatus:async()=>({structuredContent:{schemaVersion:1,
+      assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:memberId,businessReady,
+      availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}})}});
+  try {
+    await host.coordinator.pollOnce();
+    await assert.rejects(host.coordinator.workOnce(),error=>error.code==='ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    assert.equal(starts,0,'a running source poll and configured native adapter do not enable model work');
+    businessReady=true;
+    await host.coordinator.workOnce();
+    assert.equal(starts,1);
+    await host.coordinator.pollOnce();
+    assert.equal(reported,1);
+    assert.equal(host.coordinator.status().length,1);
+    assert.ok(contextCalls>=8,'operations re-enter the private context rather than retaining its token/worker');
+    currentIdentity={...identity,deviceId:randomUUID()};
+    await assert.rejects(host.coordinator.workOnce(),error=>error.code==='ASSISTANT_HOST_REBIND_REQUIRED');
+    assert.equal(starts,1,'re-pairing cannot silently reuse a previous device database');
+  } finally {await host.close();await host.close();}
+  assert.equal(databaseClosed,1);
+});
+
+test('business readiness is exact dedicated identity and complete capabilities, not a backend boolean alone',()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID()};
+  const base={schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+    authorizedByUserId:randomUUID(),businessReady:true,availableCapabilities:['task_context']};
+  assert.equal(assistantCoordinatorReadiness({structuredContent:base},identity),false);
+  assert.throws(()=>assistantCoordinatorReadiness({structuredContent:{...base,deviceId:randomUUID()}},identity),/ADMISSION_INVALID/);
+  assert.throws(()=>assistantCoordinatorReadiness({structuredContent:{...base,authorizedByUserId:identity.assistantId}},identity),/ADMISSION_INVALID/);
+  assert.equal(assistantCoordinatorReadiness({isError:true,structuredContent:base},identity),false);
+});
+
+test('one background worker keeps model-free polling alive during a single native pass and closes after settlement',async()=>{
+  let resolveWork,workCalls=0,pollCalls=0,waits=0,closed=0;
+  const work=new Promise(resolve=>{resolveWork=resolve;});
+  const result=await runAssistantBackgroundTick({createHost:async()=>({coordinator:{
+    pollOnce:async()=>{pollCalls++;},workOnce:()=>{workCalls++;return work;},
+  },close:async()=>{closed++;}}),wait:async(milliseconds)=>{
+    assert.equal(milliseconds,30_000);if(++waits===2)resolveWork({state:'completed'});
+  }});
+  assert.equal(workCalls,1);assert.ok(pollCalls>=2);assert.equal(closed,1);
+  assert.deepEqual(result,{schemaVersion:1,state:'checked'});
+});
+
+test('background supervisor resolves a fresh worker only between cycles and preserves uncertain delivery recovery',async()=>{
+  const controller=new AbortController(),operations=[];let waits=0,reports=0;
+  const result=await runAssistantBackground({signal:controller.signal,request:async(request,options)=>{
+    operations.push(request.operation);assert.equal(options.signal.aborted,false);
+    if(request.operation==='background_tick'){
+      assert.equal(options.timeoutMs,35*60_000);
+      if(waits===0)throw Object.assign(new Error('private transport failure'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    }
+  },reportFailure:async error=>{assert.equal(error.code,'ASSISTANT_CODEX_DELIVERY_UNCERTAIN');reports++;},
+  wait:async(milliseconds)=>{assert.equal(milliseconds,300_000);if(++waits===2)controller.abort();}});
+  assert.deepEqual(operations,['health','background_tick','health','background_tick']);
+  assert.equal(reports,1);assert.deepEqual(result,{schemaVersion:1,state:'stopped'});
+});
+
+
+test('background composition validates timezone before private DB I/O and closes the opened DB after an adapter failure',async()=>{
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  let opened=0,closed=0;
+  const context=async action=>action({identity},{});
+  const dependencies={directory:path.join(os.tmpdir(),'synthetic-assistant-'+randomUUID()),ensureDirectory:async()=>{},
+    openDatabase:async()=>{opened++;const database=new DatabaseSync(':memory:');
+      return {database,close:async()=>{closed++;database.close();}};},native:{}};
+  await assert.rejects(createAssistantRuntimeHost({context,dependencies:{...dependencies,timeZone:'Not/A-Timezone'}}),/INVALID_TIMEZONE/);
+  assert.equal(opened,0);
+  await assert.rejects(createAssistantRuntimeHost({context,dependencies:{...dependencies,timeZone:'UTC'}}),/SETUP_REQUIRED/);
+  assert.equal(opened,1);assert.equal(closed,1);
+});
+
+test('a source failure during native work is retained after settlement without repeating or cancelling the pass',async()=>{
+  let finishWork,polls=0,works=0,closes=0,waits=0;
+  const work=new Promise(resolve=>{finishWork=resolve;});
+  const failure=Object.assign(new Error('private source detail'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  await assert.rejects(runAssistantBackgroundTick({createHost:async()=>({coordinator:{
+    pollOnce:async()=>{if(++polls>1)throw failure;},workOnce:()=>{works++;return work;},
+  },close:async()=>{closes++;}}),wait:async()=>{if(++waits===2)finishWork({state:'completed'});}}),error=>error===failure);
+  assert.equal(works,1);assert.equal(closes,1);
 });

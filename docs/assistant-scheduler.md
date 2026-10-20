@@ -242,6 +242,47 @@ concurrent hosts, crash recovery and unknown ID/host claims. Private/transport
 tests cover binding isolation, no plaintext fallback, symlink/ACL refusal,
 no cookie/redirect, response redaction and lost pairing exchange.
 
+## Protected background host composition
+
+`createAssistantRuntimeHost` composes the real private SQLite opener, fixed device
+client, protected pass journal and existing native Codex adapter. Its directory
+is separated by assistant/device; task working folders use only canonical
+company/task UUIDs. They are chat roots, not accepted material or instruction
+files. Every device/journal call re-enters the bounded private invocation and
+compares the original identity. Re-pairing cannot reuse the old queue silently;
+credentials/private worker handles are not retained by the coordinator.
+
+`assistantCoordinatorReadiness` reads the actual dedicated backend status and
+requires matching assistant/device, human authorizer, `businessReady=true` and
+all declared business capabilities. Pairing/contact, an executable, partial
+capabilities or a caller boolean cannot enable model work. This product gate
+is not proof of a trusted loaded hook or usable Windows desktop: the actual
+protected call still needs the normal observed pass proof and the Windows
+end-to-end gate remains mandatory. Until the complete backend is enabled, source
+polling may work while native business execution refuses readiness.
+
+`bridge assistant background` is an explicit host-only entry. Its stable
+supervisor invokes current signed workers through the existing loader, never
+scans plugin caches or restarts the Codex app. Between cycles it runs normal
+model-free maintenance, then starts one `background_tick` worker. That worker
+keeps 30-second coordinator checks alive during its single native pass; actual
+source polls/discovery retain the five-minute cursor/clock policy. It settles
+the native/receipt/SQLite boundary before returning. The next cycle selects the
+current immutable runtime; an active pass never changes implementation midway.
+The ordinary request timeout stays bounded to three minutes; only this internal
+worker can use the bounded 35-minute lifetime needed by a native pass.
+
+Shutdown and ambiguous worker outcomes preserve existing durable fences. A later
+cycle reconciles native/backend receipts before any new launch, never retries a
+business tool or replaces a chat. Temporary source polling failure does not
+independently cancel/repeat native work, and an unresolved failure is preserved
+when the pass settles. Raw errors/content are not supervisor output.
+
+This entry is not installed by import or pairing. OS registration, actual
+next-run read-back, desktop availability and owner onboarding remain separate
+release gates; no existing pilot machine or user configuration is changed by
+these source changes. Automatic restart of Codex remains backlog-only.
+
 ## Dedicated plugin entry and setup
 
 The separate assistant plugin selects the existing signed-loader ABI as

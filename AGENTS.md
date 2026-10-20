@@ -366,6 +366,10 @@ publication tooling также остаются вне этого публичн
 - Assistant task writes forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
+- Background composition keeps one native pass per signed worker and private
+  invocations per call. Supervisor updates only between cycles; full backend
+  readiness gates business work. OS installation and Windows E2E remain explicit
+  gates: [contract](docs/assistant-scheduler.md#protected-background-host-composition).
 
 ## Граница plugin/runtime
 

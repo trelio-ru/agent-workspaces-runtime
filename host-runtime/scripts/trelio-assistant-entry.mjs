@@ -233,8 +233,9 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
 };
 
 export const runAssistantEntry = async (args, options = {}) => {
-  if (args.length !== 1 || !['mcp', 'hook', 'request'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
+  if (args.length !== 1 || !['mcp', 'hook', 'request', 'background'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
   if (args[0] === 'mcp') return runAssistantSetupMcp(options);
+  if (args[0] === 'background') return (options.runBackground ?? runAssistantBackground)(options);
   if (args[0] === 'request') {
     let bytes=0;const chunks=[];
     for await (const chunk of options.input ?? process.stdin) {
@@ -354,7 +355,7 @@ export const maintainAssistantHost = async ({client,probe,update,versions,signal
  * active invocation, tear down stdio, or replay the request after an error.
  * Secrets/content travel only inside protected runtime or bounded stdin pipes. */
 const validateAssistantRuntimeRequest = request => {
-  if(!request || !['list','call','health','health_check'].includes(request.operation)
+  if(!request || !['list','call','health','health_check','background_tick'].includes(request.operation)
     || Object.keys(request).some(key=>!['operation','name','arguments'].includes(key))
     || request.operation==='call' && (typeof request.name!=='string' || !/^[a-z][a-z0-9_]{0,99}$/u.test(request.name)
       || !request.arguments || Object.getPrototypeOf(request.arguments)!==Object.prototype)
@@ -365,7 +366,7 @@ const validateAssistantRuntimeRequest = request => {
 export const requestCurrentAssistantRuntime = async (request, {environment=process.env,spawnProcess=spawn,
   resolveLoader=resolveHostRuntimeLoader,signal,timeoutMs=120_000}={}) => {
   validateAssistantRuntimeRequest(request);
-  if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>180_000)fail('ASSISTANT_REQUEST_INVALID');
+  if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>(request.operation==='background_tick'?35*60_000:180_000))fail('ASSISTANT_REQUEST_INVALID');
   const input=JSON.stringify(request);
   if(Buffer.byteLength(input)>131072) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
   const loader=await resolveLoader({environment});
@@ -416,6 +417,132 @@ const productionContext = async action => {
   },AbortSignal.timeout(45_000));
 };
 
+const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
+  'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule'];
+const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
+/** The actual dedicated backend must open the whole business profile. A local
+ * executable, successful pairing, timer, or human MCP cannot turn this on.
+ * This is product admission, not evidence of a working Windows desktop or
+ * trusted loaded hooks: every protected call still needs its observed proof.
+ */
+export const assistantCoordinatorReadiness = (result, identity) => {
+  const value=result?.structuredContent;
+  if(result?.isError===true) return false;
+  if(!value || value.schemaVersion!==1 || value.assistantUserId!==identity.assistantId
+    || value.deviceId!==identity.deviceId || !new RegExp(UUID,'u').test(value.authorizedByUserId??'')
+    || value.authorizedByUserId===identity.assistantId || typeof value.businessReady!=='boolean'
+    || !Array.isArray(value.availableCapabilities) || value.availableCapabilities.length>32
+    || value.availableCapabilities.some(item=>typeof item!=='string' || !/^[a-z_]{1,64}$/u.test(item))) fail('ASSISTANT_COORDINATOR_ADMISSION_INVALID');
+  return value.businessReady && businessCapabilities.every(capability=>value.availableCapabilities.includes(capability));
+};
+
+/** Compose the real protected identity/SQLite/client/native adapters. No live
+ * token, native private worker or cached ACL is retained by the long-running
+ * coordinator. Each network/journal operation owns a fresh bounded private
+ * invocation. Dependency injection is internal test composition, never a tool
+ * argument, arbitrary command runner, or alternate credential route.
+ */
+export const createAssistantRuntimeHost = async ({ context=productionContext, dependencies={} }={}) => {
+  const [common,privateRuntime,nativeRuntime,{createAssistantCoordinator},{withPrivateProcessSession}]=await Promise.all([
+    import('./trelio-workspace.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-codex.mjs'),
+    import('./trelio-assistant-coordinator.mjs'),import('./trelio-hook-private-session.mjs'),
+  ]);
+  const identity=await context(client=>client.identity);
+  if(!identity || Object.keys(identity).sort().join(',')!=='assistantId,deviceId,origin'
+    || !new RegExp(UUID,'u').test(identity.assistantId??'') || !new RegExp(UUID,'u').test(identity.deviceId??'')) fail('ASSISTANT_HOST_NOT_CONFIGURED');
+  let origin;try{origin=new URL(identity.origin);}catch{fail('ASSISTANT_HOST_STATE_INVALID');}
+  if(origin.protocol!=='https:' || origin.origin!==identity.origin)fail('ASSISTANT_HOST_STATE_INVALID');
+  const stableIdentity=Object.freeze({origin:identity.origin,assistantId:identity.assistantId,deviceId:identity.deviceId});
+  const timeZone=dependencies.timeZone??Intl.DateTimeFormat().resolvedOptions().timeZone;
+  try{if(typeof timeZone!=='string' || timeZone.length>128)throw new Error();
+    new Intl.DateTimeFormat('en-US',{timeZone}).format(0);
+  }catch{fail('ASSISTANT_COORDINATOR_INVALID_TIMEZONE');}
+  const invoke=async action=>{
+    const value=await context(async(client,host)=>{
+      if(['origin','assistantId','deviceId'].some(key=>client.identity[key]!==stableIdentity[key])) fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      return {value:await action(client,host)};
+    });
+    if(value===null) fail('ASSISTANT_HOST_NOT_CONFIGURED');
+    return value.value;
+  };
+  const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args))]))};
+  const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
+  const root=dependencies.directory??path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime');
+  if(!path.isAbsolute(root)) fail('ASSISTANT_HOST_STATE_INVALID');
+  const ensureDirectory=dependencies.ensureDirectory??(directory=>privateInvocation(()=>common.ensurePrivateDirectory(directory)));
+  await ensureDirectory(root);
+  const deviceRoot=path.join(root,stableIdentity.assistantId.toLowerCase(),stableIdentity.deviceId.toLowerCase());
+  const openDatabase=dependencies.openDatabase??(directory=>privateInvocation(()=>privateRuntime.openAssistantDatabase(directory)));
+  const database=await openDatabase(deviceRoot);
+  let coordinator,closed=false;
+  try {
+    const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
+      readDelivery:nativeRuntime.readAssistantCodexDelivery};
+    if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    const readStatus=dependencies.readStatus??(signal=>invoke(async()=>{
+      const proxy=await createProductionAssistantMcp();
+      if(!proxy) fail('ASSISTANT_HOST_NOT_CONFIGURED');
+      return proxy.callTool('get_assistant_status',{},signal);
+    }));
+    const passHost=Object.fromEntries(['readActivePass','activatePass','releasePass'].map(name=>[name,(...args)=>invoke((_client,host)=>host[name](...args))]));
+    coordinator=createAssistantCoordinator({database:database.database,client,passHost,
+      native:{...native,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
+      workspaceForTask:async scope=>{
+        if(scope.origin!==stableIdentity.origin || scope.assistantId!==stableIdentity.assistantId
+          || !new RegExp(UUID,'u').test(scope.companyId??'') || !new RegExp(UUID,'u').test(scope.taskId??'')) fail('ASSISTANT_HOST_STATE_INVALID');
+        // This is a private chat working folder, not an accepted Workspace or
+        // an instruction authority. The worker opens its native Run separately.
+        const directory=path.join(deviceRoot,'tasks',scope.companyId.toLowerCase(),scope.taskId.toLowerCase());
+        await ensureDirectory(directory);return directory;
+      },timeZone,
+      ...(dependencies.now?{now:dependencies.now}:{}),...(dependencies.notify?{notify:dependencies.notify}:{}),
+    });
+    return {identity:stableIdentity,coordinator,async close(){
+      if(closed)return;closed=true;
+      try {await coordinator.close();} finally {await privateInvocation(()=>database.close());}
+    }};
+  } catch(error) {
+    await privateInvocation(()=>database.close()).catch(()=>undefined);throw error;
+  }
+};
+
+const waitForAssistantPoll = (milliseconds,signal) => new Promise(resolve=>{
+  const finish=()=>{clearTimeout(timer);signal?.removeEventListener('abort',finish);resolve();};
+  const timer=setTimeout(finish,milliseconds);signal?.addEventListener('abort',finish,{once:true});
+  if(signal?.aborted)finish();
+});
+
+/** One worker owns one native pass, but keeps the model-free source poll alive
+ * while that pass waits/runs. Return only after its result and durable recovery
+ * boundary; source polling never starts a second native invocation. A later
+ * worker reconstructs the same SQLite queue rather than replaying the pass.
+ */
+export const runAssistantBackgroundTick = async ({createHost=createAssistantRuntimeHost,signal,
+  wait=waitForAssistantPoll}={}) => {
+  if(signal?.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
+  const host=await createHost();
+  try {
+    await host.coordinator.pollOnce(signal);
+    let done=false,pollFailure=null;
+    const work=host.coordinator.workOnce(signal).then(value=>({value}),error=>({error})).finally(()=>{done=true;});
+    while(!done && !signal?.aborted) {
+      const pollWait=new AbortController();
+      await Promise.race([work,wait(30_000,signal?AbortSignal.any([signal,pollWait.signal]):pollWait.signal)]);
+      pollWait.abort();
+      if(!done && !signal?.aborted) {
+        // A temporary inventory outage cannot independently replay/cancel a
+        // native operation. Its own exact task watcher continues to authorize
+        // or abort it. The next poll retries only model-free source reads.
+        try {await host.coordinator.pollOnce(signal);pollFailure=null;} catch(error){pollFailure=error;}
+      }
+    }
+    if(signal?.aborted)await host.coordinator.close();
+    const result=await work;if(result.error)throw result.error;
+    if(pollFailure)throw pollFailure; // Preserve a source outage after settling the one native pass.
+    return {schemaVersion:1,state:result.value===null?'idle':'checked'};
+  } finally {await host.close();}
+};
+
 /** The old plugin cache can disappear while this facade is still alive. A
  * diagnostic device report does not need that missing loader; use the retained
  * protected control plane, never another plugin path or a business fallback. */
@@ -429,8 +556,37 @@ export const reportAssistantMaintenanceFailure = async (error, client = null) =>
   return client?report(client):productionContext(report);
 };
 
+/** Stable model-free supervisor of our own runtime workers, never Codex.
+ * A fresh verified loader selects the immutable implementation for every
+ * cycle. Updates wait for the active pass; no in-process import replacement,
+ * guessed plugin cache, business retry or automatic Codex restart is involved.
+ * OS registration is a separate explicit onboarding step.
+ */
+export const runAssistantBackground = async ({signal,request=requestCurrentAssistantRuntime,
+  wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure}={}) => {
+  const controller=new AbortController();
+  const stop=()=>controller.abort();
+  const effective=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+  process.on('SIGTERM',stop);process.on('SIGINT',stop);
+  try {
+    while(!effective.aborted) {
+      try {
+        await request({operation:'health'},{signal:effective});
+        if(!effective.aborted)await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000});
+      } catch(error) {
+        if(!effective.aborted)await reportFailure(error).catch(()=>undefined);
+        // Retained SQLite/native-start/pass receipts own recovery. This is the
+        // next polling cycle, never a second invocation of a business tool.
+      }
+      if(!effective.aborted)await wait(300_000,effective);
+    }
+    return {schemaVersion:1,state:'stopped'};
+  } finally {process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);}
+};
+
 export const executeAssistantRuntimeRequest = async request => {
   validateAssistantRuntimeRequest(request);
+  if(request.operation==='background_tick')return runAssistantBackgroundTick();
   if(request.operation==='health') {
     const canUpdate=await productionContext(async (_client,host)=>!await host.readActivePass());
     if(canUpdate===null)return null;

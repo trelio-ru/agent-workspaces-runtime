@@ -32,7 +32,7 @@ test("host runtime keeps one stable three-mode entrypoint", () => {
 });
 
 test("assistant bridge profile selects its own entrypoint and rejects unknown commands before spawn", () => {
-  for (const command of ["mcp", "hook"]) {
+  for (const command of ["mcp", "hook", "request", "background"]) {
     const invocation = resolveHostRuntimeInvocation(["bridge", "assistant", command]);
     assert.equal(invocation.profile, "assistant");
     assert.equal(path.basename(invocation.entrypointPath), "trelio-assistant-entry.mjs");
