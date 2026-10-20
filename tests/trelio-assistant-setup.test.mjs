@@ -3,7 +3,7 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { runAssistantSetupMcp, runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
   const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
@@ -115,4 +115,32 @@ test('stdio discovers live backend read schemas, notifies after pairing and keep
     JSON.stringify({jsonrpc:'2.0',id:2,method:'tools/list'})+'\n']),output,
     createMcp:async()=>{throw new Error('PRIVATE DEVICE DETAIL');}});
   assert.ok(raw.includes('ASSISTANT_SETUP_UNAVAILABLE'));assert.ok(!raw.includes('PRIVATE'));
+});
+
+test('the same stdio process announces a changed signed-worker catalogue without restarting or repeated notices',async()=>{
+  const input=new PassThrough(),output=new PassThrough(),messages=[];let text='',tick;
+  output.on('data',chunk=>{
+    text+=chunk.toString();for(;;){const newline=text.indexOf('\n');if(newline<0)break;
+      messages.push(JSON.parse(text.slice(0,newline)));text=text.slice(newline+1);}
+  });
+  let tools=[{name:'get_task',description:'first catalogue',inputSchema:{type:'object'}}];
+  let health={code:'ready',catalogRevision:assistantCatalogRevision(tools)};
+  const done=runAssistantSetupMcp({input,output,
+    createMcp:async()=>({listTools:async()=>tools}),maintenanceRequest:async()=>health,
+    scheduleMaintenance:callback=>{tick=callback;return setInterval(()=>{},1_000_000);}});
+  const request=async(id,method)=>{
+    input.write(JSON.stringify({jsonrpc:'2.0',id,method})+'\n');
+    for(let n=0;n<100;n++){if(messages.some(message=>message.id===id))return;await new Promise(resolve=>setImmediate(resolve));}
+    assert.fail('synthetic stdio response did not complete');
+  };
+  try {
+    await request(1,'initialize');await request(2,'tools/list');
+    await tick();assert.equal(messages.length,2,'unchanged metadata needs no refresh');
+    tools=[...tools,{name:'complete_assistant_pass',description:'new signed worker capability',inputSchema:{type:'object'}}];
+    health={code:'ready',catalogRevision:assistantCatalogRevision(tools)};
+    await tick();assert.equal(messages.at(-1).method,'notifications/tools/list_changed');
+    const count=messages.length;await tick();assert.equal(messages.length,count);
+    await request(3,'tools/list');assert.equal(messages.at(-1).result.tools.at(-1).name,'complete_assistant_pass');
+    health={code:'runtime_update_failed'};await tick();assert.equal(messages.length,count+1,'a failed probe cannot discard the known catalogue');
+  } finally {input.end();await done;}
 });

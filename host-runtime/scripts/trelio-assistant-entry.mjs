@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-host-runtime-recovery.mjs';
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
@@ -116,17 +116,30 @@ export const createForwardingAssistantMcp = async () => {
  * exception or store envelope is returned/logged. Calls are serialized, so two
  * exchanges from this client cannot race its one-use private journal. */
 export const runAssistantSetupMcp = async ({ input = process.stdin, output = process.stdout,
-  createSetup = createProductionAssistantSetup, createMcp = createForwardingAssistantMcp } = {}) => {
-  let setup, initialized = false, busy = false, maintenance = null, maintenanceController = null;
+  createSetup = createProductionAssistantSetup, createMcp = createForwardingAssistantMcp,
+  maintenanceRequest = requestCurrentAssistantRuntime, scheduleMaintenance = setInterval } = {}) => {
+  let setup, initialized = false, busy = false, maintenance = null, maintenanceController = null, catalogRevision = null;
   const controller=new AbortController();
   const tick=()=>{
     if(busy || maintenance || controller.signal.aborted)return;
     maintenanceController=new AbortController();
     const signal=AbortSignal.any([controller.signal,maintenanceController.signal]);
-    maintenance=requestCurrentAssistantRuntime({operation:'health'},{signal}).catch(error=>
+    maintenance=maintenanceRequest({operation:'health'},{signal}).then(value=>{
+      // Download/activation alone is not a catalogue refresh in Codex. Signal
+      // only a positively read new schema catalogue, never a failed/empty probe.
+      // This stable host ABI lets future signed workers add tools without
+      // restarting the facade or waking a model on each maintenance poll.
+      if(/^[a-f0-9]{64}$/u.test(value?.catalogRevision??'')) {
+        if(catalogRevision!==null && catalogRevision!==value.catalogRevision) reply({jsonrpc:'2.0',method:'notifications/tools/list_changed'});
+        catalogRevision=value.catalogRevision;
+      }
+      return value;
+    }).catch(error=>
       signal.aborted?undefined:reportAssistantMaintenanceFailure(error).catch(()=>undefined)).finally(()=>{maintenance=null;maintenanceController=null;});
+    return maintenance;
   };
-  const timer=createMcp===createForwardingAssistantMcp?setInterval(()=>{if(initialized)tick();},300_000):null;
+  const timer=createMcp===createForwardingAssistantMcp || maintenanceRequest!==requestCurrentAssistantRuntime
+    ?scheduleMaintenance(()=>{if(initialized)return tick();},300_000):null;
   timer?.unref();
   const reply = value => output.write(JSON.stringify(value) + '\n');
   const withProxy = async action => {
@@ -152,7 +165,11 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     if (message.method === 'ping') return respond({});
     if (!initialized) return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: 'Initialize first' } });
     if (message.method === 'tools/list') {
-      try { return respond({ tools: [...ASSISTANT_SETUP_TOOLS, ...await withProxy((proxy, signal) => proxy ? proxy.listTools(signal) : [])] }); }
+      try {
+        const tools=await withProxy((proxy,signal)=>proxy?proxy.listTools(signal):[]);
+        catalogRevision=assistantCatalogRevision(tools);
+        return respond({tools:[...ASSISTANT_SETUP_TOOLS,...tools]});
+      }
       catch (error) { return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: safeError(error) } }); }
     }
     if (message.method === 'tools/call') {
@@ -277,6 +294,14 @@ export const runAssistantEntry = async (args, options = {}) => {
  * retry a business invocation. The shell remains the sole package verifier. */
 
 const fail = code => { throw Object.assign(new Error(code), {code}); };
+/** A fingerprint of bounded public tool definitions, not credentials or task
+ * content. The long-lived process can compare it across immutable workers. */
+export const assistantCatalogRevision = tools => {
+  if(!Array.isArray(tools)) fail('ASSISTANT_MCP_INVALID_RESPONSE');
+  const text=JSON.stringify(tools);
+  if(Buffer.byteLength(text)>768*1024) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
+  return createHash('sha256').update(text).digest('hex');
+};
 const reasons = new Set(['ready','not_checked','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','connection_lost']);
 export const assistantHealthFailure = error => ({
   AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:'plugin_update_required',
@@ -422,10 +447,13 @@ export const executeAssistantRuntimeRequest = async request => {
     }
   }
   if(request.operation==='health_check') {
-    return productionContext(client=>maintainAssistantHost({client,
-      versions:requireTrelioComponentVersions(),update:async()=>{},
-      probe:async signal=>{const proxy=await createProductionAssistantMcp();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');await proxy.listTools(signal);},
-    }));
+    return productionContext(async client=>{
+      let catalog=null;
+      const state=await maintainAssistantHost({client,versions:requireTrelioComponentVersions(),update:async()=>{},
+        probe:async signal=>{const proxy=await createProductionAssistantMcp();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');catalog=await proxy.listTools(signal);},
+      });
+      return {...state,...(catalog===null?{}:{catalogRevision:assistantCatalogRevision(catalog)})};
+    });
   }
   if(!['list','call'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
   // Validate the exact tool before any credential read, as in ordinary MCP.

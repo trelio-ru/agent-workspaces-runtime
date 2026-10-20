@@ -405,3 +405,10 @@ CAS and a durable request UUID. The shared backend transaction commits effects
 and receipt together, then releases deferred messenger copies. A lost response
 is not retried by the facade, worker or transport. These actions do not enable
 businessReady until Workspace/outcome/service and Windows acceptance are wired.
+
+A successful model-free worker probe also returns a fingerprint of its bounded
+public tool catalogue. The long-lived stdio facade compares it with its last
+positive tools/list and emits MCP `notifications/tools/list_changed` only on a
+change. Codex can reload new runtime/backend capabilities without restarting the
+facade. Unchanged or failed probes do not emit repeated notices or erase the
+known catalogue; this control message does not wake a model.
