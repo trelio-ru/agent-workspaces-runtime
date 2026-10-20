@@ -310,3 +310,43 @@ audience, missing setup, post-pair catalog notification, unsupported tools,
 credential echo refusal, preserved pairing after failure, redacted errors and
 one deadline without a hidden retry. This does not install a daemon or prove a
 Windows business pass/outcome; `businessReady=false` remains until those stages.
+
+## Model-free maintenance
+
+The dedicated stdio MCP is a stable facade: `bridge assistant request` selects
+current signed code using the exact installed loader for each bounded invocation.
+No runtime file is overwritten, no in-flight invocation switches executable,
+no MCP business call is replayed, no Codex/plugin config or hook trust is changed.
+Unpaired discovery remains structural lstat only, without worker/credential I/O.
+The request ABI is closed list/call/health/health_check with bounded UTF-8 stdin/stdout and
+suppressed stderr; a failed child is uncertainty, not retry permission.
+
+Every five minutes, while the facade is idle, a maintenance child checks the
+signed updater and live device health. An active protected task pass defers
+updating. A fresh signed health_check child proves activation after a successful
+download; the old process version cannot claim the new runtime is loaded. The updater and signature verifier remain in the common stable shell;
+missing/inaccessible shell is not replaced by a cache scan or human OAuth.
+A proven missing loaded shell reports `plugin_restart_required` directly over
+the retained protected diagnostic client, even when no loader can be spawned.
+Runtime/code updates do not need plugin installation or a Codex restart.
+
+The health API remains independent of business minimum/model policy but retains
+live device/owner/lifecycle/expiry. It returns shared plugin/runtime minimums;
+a merely newer release does not block work. Actual incompatibility refuses new
+business calls and reports a closed reason with CAS and request UUID. No raw
+exception, credential, local path, company/task context or model-generated
+instruction reaches the journal/outbox. Failed health delivery cannot replay
+business work. Only the correct successful boundary may clear a login/trust
+latch; unrelated metadata success is not recovery.
+
+Backend account notifications deduplicate incidents, copy to linked messengers
+with ordinary FIFO/retry rules, and send one recovery notice. The server detects
+missing health reports after 15 minutes even if Codex/host is gone. Unknown
+absence has no invented plugin/network diagnosis. Runtime update failures have
+a five-minute recovery window; owner-action errors are immediate. First mode
+requires the owner for plugin updates, restarting Codex, hook approval and login.
+Automatic external-supervisor restart of Codex is backlog, not implemented.
+
+This model-free MCP lifecycle is not proof of a registered Windows background
+service or businessReady. Source/CI tests do not replace the Windows update and
+notification E2E acceptance gate before product activation.

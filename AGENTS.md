@@ -362,6 +362,8 @@ publication tooling также остаются вне этого публичн
   stdout/stderr или private paths; отказ не превращается в пустой импорт.
   Windows gate проверяет настоящий публичный Python provider как read-only input.
 
+- Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives runtime updates. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
+
 ## Граница plugin/runtime
 
 - Долгие цели: host передаёт только проверенные UUID/path locators собственного

@@ -44,6 +44,15 @@ const executionState = value => {
 };
 const passExecution = value => value.state==='leased' ? executionConfiguration(value.execution)
   : value.execution == null ? null : executionConfiguration(value.execution);
+// These latches describe diagnostic obligations only, never task authority.
+// An unrelated plugin/network recovery must not forget login or hook review.
+const healthState = value => {
+  const codes=['not_checked','ready','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','connection_lost'];
+  if(!object(value) || !codes.includes(value.code) || !Array.isArray(value.latchedCodes) || value.latchedCodes.length>2
+    || new Set(value.latchedCodes).size!==value.latchedCodes.length
+    || value.latchedCodes.some(code=>!['codex_auth_required','hook_review_required'].includes(code))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {revision:revision(value.revision),code:value.code,generation:revision(value.generation),latchedCodes:[...value.latchedCodes]};
+};
 const originOf = origin => {
   let url; try { url = new URL(origin); } catch { fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); }
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
@@ -59,6 +68,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
   if (typeof fetchImpl !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const routes = new Map([
     ['pair', ['POST','/pairings']], ['exchange',['POST','/pairings/exchange']],
+    ['healthRead',['GET','/runtime/health']], ['healthReport',['POST','/runtime/health']],
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['tasks',['POST','/runtime/tasks']], ['task',['POST','/runtime/task']],
     ['claim',['POST','/runtime/task/claim']],
@@ -134,6 +144,23 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
 
   return {
     identity: Object.freeze({ origin, assistantId, deviceId }),
+    async readHealth(signal) {
+      const value=await call('healthRead',undefined,signal),current=healthState(value);
+      const stable=v=>typeof v==='string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/u.test(v);
+      if(!object(value.compatibility) || !stable(value.compatibility.minimumPluginVersion)
+        || value.compatibility.minimumRuntimeVersion!==null && !stable(value.compatibility.minimumRuntimeVersion)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {...current,compatibility:{minimumPluginVersion:value.compatibility.minimumPluginVersion,minimumRuntimeVersion:value.compatibility.minimumRuntimeVersion}};
+    },
+    async reportHealth(input,signal) {
+      const keys=Object.keys(input??{}).filter(key=>key!=='clearedReason').sort().join(',');
+      if(!object(input) || keys!=='clientRequestId,code,expectedRevision'
+        || !['ready','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required'].includes(input.code)
+        || input.clearedReason!==undefined && (input.code!=='ready' || !['codex_auth_required','hook_review_required'].includes(input.clearedReason))) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const value=await call('healthReport',{clientRequestId:id(input.clientRequestId),expectedRevision:revision(input.expectedRevision),code:input.code,
+        ...(input.clearedReason?{clearedReason:input.clearedReason}:{})},signal);
+      if(value.revision!==input.expectedRevision+1) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return healthState(value);
+    },
     async heartbeat(signal) {
       const value = await call('heartbeat', {}, signal);
       if (value.assistantUserId !== assistantId || value.deviceId !== deviceId) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
