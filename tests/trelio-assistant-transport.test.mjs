@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, randomBytes, generateKeyPairSync, verify } from 'node:crypto';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -183,13 +183,14 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'create_comment',description:'Current assistant backend write',inputSchema:shape,annotations:{idempotentHint:true}},
       {name:'continue_assistant_workspace_action',description:'Current local action',inputSchema:shape,annotations:{idempotentHint:false}},
       {name:'request_assistant_action',description:'Live sealed owner action',inputSchema:{...shape,properties:{...shape.properties,operation:{type:'string'},fields:{type:'object'}}}},
-      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist'].map(name=>({name,description:'Live native task operation',inputSchema:shape})),
+      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist'].map(name=>({name,description:'Live native task operation',inputSchema:shape,annotations:{destructiveHint:name==='delete_checklist'||name==='delete_task_relation'}})),
+      ...['search_agent_guidance','get_agent_skill','get_agent_procedure'].map(name=>({name,description:'Live native guidance read',inputSchema:shape})),
       {name:'delete_attachment',description:'Unsupported; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist']);
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','search_agent_guidance','get_agent_skill','get_agent_procedure']);
   assert.deepEqual(tools[1].inputSchema,{type:'object',properties:{},additionalProperties:false});
   assert.deepEqual(Object.keys(shape.properties),['taskPass','runtimeSessionProof']);
   assert.equal(tools[2].annotations.idempotentHint,true);assert.equal(tools[3].annotations.idempotentHint,false);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
@@ -200,6 +201,9 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/call','DELETE']);
   const count=calls.length;await assert.rejects(client.callTool('delete_attachment',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
   assert.equal(tools[2].annotations.readOnlyHint,false);
+  assert.equal(tools.find(tool=>tool.name==='delete_checklist').annotations.destructiveHint,true);
+  assert.equal(tools.find(tool=>tool.name==='delete_task_relation').annotations.destructiveHint,true);
+  assert.equal(tools[0].annotations.destructiveHint,false);
   const beforeWrite=calls.length;
   const body={bodyMarkdown:'Scoped working update',clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
   await client.callTool('create_comment',body);
@@ -217,6 +221,10 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
     const before=calls.filter(method=>method==='tools/call').length;
     await client.callTool(name,apply);assert.deepEqual(receivedArgs,apply);
     assert.equal(calls.filter(method=>method==='tools/call').length,before+1,'live backend validator remains the only domain authority; no hidden retry');
+  }
+  for(const [name,fields]of Object.entries({search_agent_guidance:{query:'follow-up'},get_agent_skill:{skillId:'company-skill',sections:['instructions','execution']},get_agent_procedure:{procedureId:randomUUID()}})){
+    assert.equal(tools.find(tool=>tool.name===name).annotations.readOnlyHint,true);
+    const input={...args,...fields};await client.callTool(name,input);assert.deepEqual(receivedArgs,input);
   }
   echoed=true;await assert.rejects(client.callTool('get_task',{}),/INVALID_RESPONSE/);
   broken=true;await assert.rejects(client.callTool('get_task',{}),error=>error.code==='ASSISTANT_MCP_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
@@ -271,6 +279,27 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   const before=calls.length;await assert.rejects(client.callTool('delete_task_relation',removal),/MCP_UNAVAILABLE/);
   assert.equal(calls.length,before+1,'uncertain mutation must never be repeated by the host');
   assert.deepEqual(calls.at(-1),{name:'delete_task_relation',arguments:removal});
+});
+
+test('managed schema fields are hidden in root alternatives while nested business fields and original validators remain intact',()=>{
+  const business={type:'object',properties:{taskPass:{type:'string'},runtimeSessionProof:{type:'string'}},required:['taskPass','runtimeSessionProof']};
+  const branch={type:'object',properties:{taskPass:{type:'object'},runtimeSessionProof:{type:'object'},parameters:{oneOf:[business]}},required:['taskPass','runtimeSessionProof','parameters'],additionalProperties:false};
+  const source={type:'object',allOf:[{anyOf:[branch,{oneOf:[branch]}]}],$defs:{business}};
+  const before=structuredClone(source),result=assistantModelInputSchema(source);
+  assert.deepEqual(source,before,'projection must never edit the actual wire validators');
+  for(const root of [result.allOf[0].anyOf[0],result.allOf[0].anyOf[1].oneOf[0]]){
+    assert.deepEqual(root.required,['parameters']);assert.deepEqual(Object.keys(root.properties),['parameters']);
+    assert.deepEqual(root.properties.parameters.oneOf[0],business,'nested native JSON fields retain their domain meaning');
+  }
+  assert.deepEqual(result.$defs,source.$defs);assert.equal(result.allOf[0].anyOf[0].additionalProperties,false);
+});
+test('unprojectable root references and excessive root alternatives fail before model discovery',()=>{
+  for(const source of [{type:'object',$ref:'#/$defs/root',$defs:{root:{type:'object'}}},{type:'object',anyOf:{}},{type:'object',anyOf:[null]},
+    {type:'object',anyOf:Array.from({length:513},()=>({type:'object'}))}]){
+    assert.throws(()=>assistantModelInputSchema(source),error=>error.code==='ASSISTANT_MCP_INVALID_RESPONSE');
+  }
+  let nested={type:'object'};for(let i=0;i<34;i++)nested={type:'object',allOf:[nested]};
+  assert.throws(()=>assistantModelInputSchema(nested),error=>error.code==='ASSISTANT_MCP_INVALID_RESPONSE');
 });
 
 test('assistant MCP shares one absolute network deadline and never retries a timed-out call',async()=>{

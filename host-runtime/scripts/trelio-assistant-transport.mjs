@@ -441,7 +441,7 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question"]);
+export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
@@ -459,10 +459,29 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
  */
 export const assistantModelInputSchema = source => {
   const schema=structuredClone(source);
-  for(const key of ['taskPass','runtimeSessionProof']) {
-    if(schema.properties)delete schema.properties[key];
-    if(Array.isArray(schema.required))schema.required=schema.required.filter(value=>value!==key);
-  }
+  let visited=0;
+  const projectRoot=(node,depth=0)=>{
+    if(typeof node==='boolean')return; // Valid boolean alternative schemas have no fields.
+    if(!object(node))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    if(++visited>512||depth>32)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    // A root $ref cannot be pruned by modifying shared $defs: the same target
+    // might also describe nested business data. Require a reviewed host path
+    // instead of rewriting those definitions or exposing managed arguments.
+    if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    for(const key of ['taskPass','runtimeSessionProof']){
+      if(object(node.properties))delete node.properties[key];
+      if(Array.isArray(node.required))node.required=node.required.filter(value=>value!==key);
+    }
+    // Logical alternatives still describe the same argument root. Do NOT walk
+    // properties/items/$defs: similarly named fields inside native parameters
+    // are business data, not hook-owned transport fields.
+    for(const key of ['anyOf','oneOf','allOf'])if(Object.hasOwn(node,key)){
+      if(!Array.isArray(node[key]))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      for(const branch of node[key])projectRoot(branch,depth+1);
+    }
+  };
+  if(!object(schema))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+  projectRoot(schema);
   return schema;
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, timeoutMs = 30_000 }) => {
@@ -501,7 +520,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           seen.add(tool.name);
           // Do not proxy remote App metadata, URLs or OAuth security schemes.
           return { name: tool.name, description: tool.description, inputSchema: assistantModelInputSchema(tool.inputSchema),
-            annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: false,
+            annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: tool.annotations?.destructiveHint===true,
               idempotentHint: tool.annotations?.idempotentHint===true, openWorldHint: false } };
         });
         if (!seen.has("get_assistant_status") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");

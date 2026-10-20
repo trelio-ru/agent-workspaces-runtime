@@ -363,6 +363,12 @@ redaction. They are not a Windows end-to-end task or installed daemon proof.
 After protected pairing, the stdio profile obtains `get_assistant_status`,
 `get_task`, `get_task_sections` and `get_task_instruction_page` definitions from
 `/mcp/assistant`. The backend owns the schemas, company policy and native reads.
+The same read proxy may expose search_agent_guidance, get_agent_skill and
+get_agent_procedure when the dedicated backend advertises them. They retain
+native membership/project ACL, published-only authority and the assistant's own
+personal skill rules. Unsupported dedicated execution does not permit a human
+bridge, OAuth or provider fallback.
+
 The host only applies a closed transport capability allowlist; it does not copy
 schemas, widen authority or expose unknown/new server tools. Setup tools remain
 available before pairing. A successful finish emits `tools/list_changed` so the
@@ -437,7 +443,8 @@ notification E2E acceptance gate before product activation.
 The current signed worker forwards the dedicated backend's task-local comment,
 content/status, checklist, own-control, subtask and direct task-relation tools. Names are a closed
 transport list; input schemas are live backend data, not host copies. Read-only
-annotations remain true only for reads. A backend without these capabilities
+annotations remain true only for reads. Native destructive/idempotent hints remain
+intact. A backend without these capabilities
 continues to expose its old read catalog; this is not a minimum-version bump.
 No owner-only/sensitive authority, human command flag or publication token is added.
 Whole-checklist deletion still needs the exact persisted owner decision and
@@ -504,8 +511,14 @@ The live backend catalog supplies `prepare_assistant_workspace_read`,
 `prepare_assistant_workspace_run` and
 `continue_assistant_workspace_action`; the host adds only reviewed names, never
 copies their domain schemas. Only root `taskPass`/`runtimeSessionProof` and their
-required entries are omitted from model discovery: the hook injects them into
+required entries are omitted from model discovery, including root anyOf/oneOf/allOf
+alternatives: the hook injects them into
 the raw call and the unchanged backend validator/admission still requires them.
+
+Root projection never walks nested properties, items or shared definitions.
+Their similarly named fields remain native business data. Opaque root references
+and bounded traversal overflow refuse discovery rather than rewriting a shared
+schema; backend wire validation and hook injection remain unchanged.
 Live idempotent annotations are preserved, including the non-idempotent local
 continuation boundary. The stable MCP facade forwards the real hook proof once,
 then executes only the resulting bounded local plan. Company/task/pass/device/
