@@ -2149,6 +2149,16 @@ in-process consumer; он обязан разобрать source DTO и прое
 refs до SQLite/model boundary. Raw stderr и exec exception никогда не становятся
 диагностикой; byte copies обнуляются после decode/failure.
 
+Explicit host-only `captureExitCode` вместе с `captureOutput=true` возвращает
+private `{stdout, exitCode}` и для нормального nonzero завершения. Это нужно,
+чтобы consumer мог разобрать native GAP/auth/cursor refusal и сохранить прежнюю
+позицию. Сам executor не толкует provider JSON и не выдаёт его модели: consumer
+допускает только закрытый source protocol. В Error/cause/log/telemetry stdout
+не попадает. Signal, cancellation, timeout, overflow и invalid UTF-8 по-прежнему
+дают только закрытую process error, даже если часть JSON уже пришла.
+Без этой явной опции nonzero exit сохраняет прежний diagnostic/throw ABI;
+interactive execution не принимает её. Новый poll, login или повтор не запускается.
+
 Actual child-process tests проверяют stdin EOF, literal argv, current identity,
 изоляцию account/company, отсутствие inherited chat, разрезанные UTF-8 chars,
 invalid UTF-8, bounded stdout/stderr, numeric exit, cancellation/timeout и

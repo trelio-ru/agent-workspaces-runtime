@@ -484,6 +484,45 @@ test('private monitor preserves numeric provider exit and never retries a failed
   assert.equal(await fs.readFile(path.join(f.input.runtimeDirectory, 'attempts'), 'utf8'), '1');
 });
 
+test('trusted monitor result capture preserves a complete provider refusal without diagnosing or replaying it', async t => {
+  for (const interpreter of ['node','python']) {
+    const source = interpreter === 'node'
+      ? `import fs from 'node:fs';fs.appendFileSync('attempts','1');
+        process.stderr.write('PRIVATE_STDERR');process.stdout.write(JSON.stringify({code:'SYNTHETIC_GAP',message:'Чтение прервано'}));process.exitCode=1;`
+      : `import sys\nwith open('attempts','a') as f: f.write('1')\nsys.stderr.write('PRIVATE_STDERR')\nprint('{"code":"SYNTHETIC_GAP","message":"Чтение прервано"}')\nsys.exit(1)\n`;
+    const f = await monitorFixture(t, source, interpreter);
+    const result = await f.run({ captureExitCode: true });
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(JSON.parse(result.stdout), { code: 'SYNTHETIC_GAP', message: 'Чтение прервано' });
+    assert.deepEqual(Object.keys(result).sort(), ['exitCode','stdout']);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_STDERR|command|cause|stack/u);
+    assert.equal(await fs.readFile(path.join(f.input.runtimeDirectory,'attempts'),'utf8'), '1');
+  }
+  const f = await monitorFixture(t, "process.stdout.write('{}');");
+  assert.deepEqual(await f.run({ captureExitCode: true }), { exitCode: 0, stdout: '{}' });
+});
+
+test('trusted monitor result cannot convert partial, overflowing or invalid output into a provider response', async t => {
+  for (const [source,code] of [
+    ["process.stdout.write(Buffer.from([255]));process.exitCode=1;",'TRELIO_SKILL_RUNTIME_OUTPUT_INVALID'],
+    ["process.stdout.write('PRIVATE'.repeat(200000));process.exitCode=1;",'TRELIO_SKILL_RUNTIME_OUTPUT_LIMIT'],
+    ["process.stderr.write('PRIVATE'.repeat(200000));process.exitCode=1;",'TRELIO_SKILL_RUNTIME_OUTPUT_LIMIT'],
+    ["process.stdout.write('PRIVATE_PARTIAL');setInterval(()=>{},1000);",'TRELIO_SKILL_RUNTIME_LEASE_EXPIRED'],
+  ]) {
+    const f = await monitorFixture(t,source);
+    await assert.rejects(f.run({ captureExitCode: true, timeoutMs: 1000 }),error=>{
+      assert.equal(error.code,code);
+      assert.doesNotMatch(JSON.stringify(error),/PRIVATE|stdout|stderr|cause|main\.mjs/u);
+      return true;
+    });
+  }
+  const f = await monitorFixture(t,"process.stdout.write('PRIVATE_PARTIAL');setInterval(()=>{},1000);");
+  const controller = new AbortController();
+  const pending = f.run({ captureExitCode: true, signal: controller.signal });
+  setTimeout(()=>controller.abort(),100);
+  await assert.rejects(pending,{code:'TRELIO_SKILL_RUNTIME_TERMINATED'});
+});
+
 test('private monitor has a bounded deadline and cancellation without replay or inherited terminal prompts', async t => {
   const f = await monitorFixture(t, 'setInterval(()=>{},1000);');
   let started = performance.now();
@@ -504,7 +543,8 @@ test('private monitor rejects setup, grants, arbitrary commands and invalid budg
   for (const override of [{ runtimeArguments: ['send'] }, { runtimeArguments: ['account','create'] },
     { runtimeArguments: ['monitor',123] }, { grantedEnvironment: { SECRET: 'synthetic' } },
     { grantedStdin: 'synthetic' }, { prepareSetupEnvironment: async () => assert.fail('setup executed') },
-    { timeoutMs: 999 }, { timeoutMs: 180001 }, { signal: {} }]) {
+    { timeoutMs: 999 }, { timeoutMs: 180001 }, { signal: {} }, { captureOutput: 'true' },
+    { captureExitCode: 'true' }, { captureOutput: false, captureExitCode: true }]) {
     await assert.rejects(f.run({ runtimeDirectory: path.join(f.input.runtimeDirectory,'missing'), ...override }),
       { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
   }

@@ -7649,6 +7649,7 @@ export const runMaterializedAgentSkill = async ({
   grantedStdin = null,
   prepareSetupEnvironment = null,
   captureOutput = false,
+  captureExitCode = false,
   timeoutMs = 60_000,
   signal = null,
 }) => {
@@ -7664,7 +7665,9 @@ export const runMaterializedAgentSkill = async ({
   // Monitor cannot borrow a secret checkout, run a setup step or wait for a
   // human prompt on inherited stdin. A provider's command semantics still
   // belong to its reviewed signed implementation, not this string check.
-  if (captureOutput && (!Array.isArray(runtimeArguments) || runtimeArguments[0] !== 'monitor'
+  if (typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
+    || captureExitCode && !captureOutput
+    || captureOutput && (!Array.isArray(runtimeArguments) || runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > 64 || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 180_000
@@ -7744,11 +7747,23 @@ export const runMaterializedAgentSkill = async ({
       // provider fails rather than consuming the user's terminal/session.
       pending.child.stdin.on('error', () => {});
       pending.child.stdin.end();
-      result = await pending;
+      try {
+        result = { ...await pending, exitCode: 0 };
+      } catch (error) {
+        // Reviewed providers return a bounded JSON failure (gap/auth/cursor)
+        // with a nonzero exit. Only an explicit trusted in-process consumer
+        // may inspect that result; never attach it to Error/cause/diagnostics.
+        // A partial pipe from cancellation, overflow or a signal is not a
+        // provider response and must retain the original closed process error.
+        if (!captureExitCode || !Number.isInteger(error.code) || error.code < 0
+          || error.signal || error.killed || signal?.aborted) throw error;
+        result = { stdout: error.stdout, stderr: error.stderr, exitCode: error.code };
+      }
       // Decode only after the pipe is complete. Chunk-level toString() can
       // corrupt a multibyte character; replacement decoding could turn an
       // invalid native ID/checkpoint into a different valid JSON reference.
-      return { stdout: new TextDecoder('utf-8', { fatal: true }).decode(result.stdout) };
+      const stdout = new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+      return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.
       // Raw output is private host memory, not model input or diagnostics.

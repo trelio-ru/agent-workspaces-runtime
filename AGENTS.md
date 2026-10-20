@@ -359,6 +359,7 @@ publication tooling также остаются вне этого публичн
   provider credential code остаётся вне host.
   Private `monitor` capture использует тот же materialized executor: bounded
   pipes/deadline, EOF, без inherited chat, setup/grants или нового admission.
+  Explicit private exit DTO не переносится в Error/log и не принимает partial pipes.
   Справка и синтаксический отказ обрабатываются до account I/O/import;
   неизвестная операция не требует ревизии и не запускает provider.
   Ошибка importer сохраняет закрытую причину и numeric exit, без provider
