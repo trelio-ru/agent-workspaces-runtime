@@ -284,3 +284,25 @@ test('question refs cannot smuggle content or create a wake from an ordinary eve
   }
   assert.equal(inbox.status(source).cursorRevision, 0);
 });
+
+for(const provider of ['telegram','email','max'])test(`${provider} ACK waits for committed processing and preserves an uncertain delivery`,async t=>{
+  const {inbox}=memory(t),source=scope({provider}),task=randomUUID();
+  inbox.register(source);accept(inbox,source,task);page(inbox,source,[event(task)]);
+  assert.equal(inbox.claimAcknowledgements(source),null,'queued metadata is not read content');
+  const delivery=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(delivery.deliveryId);
+  inbox.markDeliveryUncertain(delivery.deliveryId);
+  assert.equal(inbox.claimAcknowledgements(source),null,'an unknown native outcome is not processing evidence');
+  inbox.completeDelivery(delivery.deliveryId,'verified-native-receipt');
+  const ack=inbox.claimAcknowledgements(source);assert.equal(ack.events.length,1);
+  inbox.completeAcknowledgements(source,ack.token);assert.equal(inbox.claimAcknowledgements(source),null);
+});
+
+test('an external ACK token from an older worker cannot mark an unprocessed batch read',t=>{
+  const {inbox,database}=memory(t),source=scope({provider:'telegram'}),task=randomUUID();
+  inbox.register(source);accept(inbox,source,task);page(inbox,source,[event(task),event(task)]);
+  const token=randomUUID();
+  database.prepare('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=?').run(token,2000000);
+  database.prepare('UPDATE assistant_inbox_events SET processed=1 WHERE rowid=(SELECT min(rowid) FROM assistant_inbox_events)').run();
+  assert.throws(()=>inbox.completeAcknowledgements(source,token),/STALE_ACK/);
+  assert.equal(database.prepare('SELECT count(*) AS total FROM assistant_inbox_events WHERE acked=1').get().total,0);
+});

@@ -66,7 +66,12 @@ not change its immutable source snapshot, so provider replays remain deduplicate
 not infer `accepted` from a message, sender display name or a pending approval.
 Unknown, waiting-owner, paused, done and revoked tasks do not cause event dispatch
 or a new read acknowledgement. An accepted task inbox is durable before an ack
-becomes eligible. Merely fetching a page never marks it read.
+becomes eligible. Trelio notification acceptance retains its existing semantics;
+external Telegram/email/MAX references additionally require committed processing
+before an ACK lease is offered. This is necessary, not sufficient: the provider
+adapter still proves the content was actually read and checks the exact revision.
+A merely queued or uncertain external delivery is never ACK-eligible. Merely
+fetching a page never marks it read.
 
 Read acknowledgements have their own bounded lease/outbox. The provider must
 recheck access and exact message revision before marking read; a lost external
@@ -146,3 +151,10 @@ advancement. Question or answer text, usernames and approval flags are rejected.
 The original references survive pre-launch recovery; a new poll cannot replace
 the event set of an already reserved delivery. This is routing metadata, never
 owner consent or content authority.
+
+
+The current Trelio coordinator reconciles, polls and acknowledges only sources
+whose provider is `trelio`. A successful Trelio company inventory does not revoke
+an external source, and an external cursor/ID never reaches the Trelio notification
+endpoint. External registration, polling, task mapping and ACK adapters retain
+their independent authorization and lifecycle; these guards do not activate them.

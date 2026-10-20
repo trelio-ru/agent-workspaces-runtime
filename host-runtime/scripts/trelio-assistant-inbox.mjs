@@ -479,10 +479,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // Unrouted events, owner-pending tasks and mere discovery are NOT read.
         // Durably accepted task inbox entries may be acknowledged even while
         // waiting for the next scheduled task pass; ordinary comments do not wake it.
+        // Messenger/email discovery contains references only. Require durable
+        // processing before even offering an external ACK. The provider adapter
+        // must still verify actual content-read evidence and exact revision;
+        // neither this SQL flag nor a generic completion boolean grants that.
         const events = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id FROM assistant_inbox_events e
           JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
           WHERE e.source_key=? AND e.acked=0 AND t.state='accepted'
-          AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 100`, scope.key, time());
+          AND (?='trelio' OR e.processed=1)
+          AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 100`, scope.key, scope.provider, time());
         if (!events.length) return null;
         const token = randomUUID();
         for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=? WHERE event_key=?', token, time() + LEASE_MS, event.event_key);
@@ -493,6 +498,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope = scopeOf(scopeInput); uuid(token);
       return transaction(() => {
         activeSource(scope);
+        // A token issued by an older worker before this source guard is not
+        // upgraded into read evidence. Reject the entire batch, including mixed
+        // processed/unprocessed rows, without clearing its ambiguous outcome.
+        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND processed=0', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
         const pending = get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND ack_expires_at>? AND acked=0', scope.key, token, time());
         if (!pending.total) fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET acked=1,ack_token=NULL,ack_expires_at=NULL WHERE source_key=? AND ack_token=?', scope.key, token);

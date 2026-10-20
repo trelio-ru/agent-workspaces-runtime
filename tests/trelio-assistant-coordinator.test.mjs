@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import { createAssistantInbox } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 
 const fixture = t => {
@@ -358,4 +359,27 @@ test('owner answer refs wake the existing chat and survive a lost pre-launch cla
   assert.equal(restarted.status()[0].threadId,threadId);assert.equal(f.counts().provisions,1);
   f.advance(300000);await restarted.pollOnce();assert.equal(await restarted.workOnce(),null);
   assert.equal(f.counts().runs,1);
+});
+
+test('Trelio inventory and notification ACK do not revoke or poll external provider rows',async t=>{
+  const f=fixture(t),inbox=createAssistantInbox({database:f.database});
+  const external=[];
+  for(const provider of ['telegram','email','max']){
+    const scope={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,
+      provider,accountId:randomUUID(),bindingId:randomUUID()};
+    inbox.register(scope);external.push(scope);
+  }
+  // Any accidental call with an external cursor is a real test failure, not a
+  // permissive mock that returns an empty notification page for every provider.
+  const poll=f.options.client.poll;let polls=0;
+  f.options.client.poll=async(...args)=>{polls++;assert.equal(args[1],null);return poll(...args);};
+  await f.coordinator.pollOnce();
+  assert.equal(polls,1);assert.equal(f.counts().acks,0);
+  for(const source of external){
+    const status=inbox.status(source);assert.equal(status.state,'active');assert.equal(status.cursorRevision,0);
+    assert.equal(status.nextPollAt,0,'independent poller retains its own clock');
+  }
+  // Removing this company from Trelio inventory revokes only its Trelio source.
+  f.options.client.companies=async()=>[];f.advance(300000);await f.coordinator.pollOnce();
+  for(const source of external)assert.equal(inbox.status(source).state,'active');
 });

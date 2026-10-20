@@ -157,7 +157,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // Only a successful authoritative company inventory permits revocation
         // reconciliation. A timeout/denial is never interpreted as empty.
         for(const old of inbox.listSources()) {
-          if(old.state==='revoked' || sources.some(source=>sameSource(source,old.scope))) continue;
+          // This inventory is authoritative only for Trelio. It says nothing
+          // about a separately registered mailbox or messenger stream. Never
+          // revoke another provider because it is absent from a Trelio list.
+          if(old.scope.provider!=='trelio' || old.state==='revoked' || sources.some(source=>sameSource(source,old.scope))) continue;
           inbox.setSourceState(old.scope,{state:'revoked',expectedRevision:inbox.status(old.scope).revision});
           for(const plan of schedule.list().filter(plan=>sameSource(plan.source,old.scope))) {
             if(plan.state!=='revoked') schedule.setState(scopeFor(old.scope,plan.taskId),{state:'revoked',expectedRevision:plan.revision});
@@ -170,7 +173,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }
         nextDiscoveryAt=now()+300_000;
       }
-      for(const {scope,state} of inbox.listSources()) if(state==='active') {
+      // The native notification client and its ACK endpoint understand only
+      // Trelio IDs. External sources need their own reviewed reader/ACK adapter;
+      // a generic SQLite row cannot silently select the Trelio transport.
+      for(const {scope,state} of inbox.listSources()) if(scope.provider==='trelio' && state==='active') {
         try { await pollSource(scope,signal); }
         catch(error) {
           // A provider/company failure must not stop independent companies.

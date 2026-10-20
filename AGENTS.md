@@ -22,6 +22,8 @@ publication tooling также остаются вне этого публичн
 ## Общие правила
 
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
+  Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
+  требует committed processing и отдельного native read proof.
   SQLite хранит только bounded structural refs. Provider/domain authority,
   private storage и native Codex adapters не заменяются состоянием очереди.
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
