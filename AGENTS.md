@@ -181,6 +181,7 @@ publication tooling также остаются вне этого публичн
   AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
+  Формы без id и signed native browser – [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
 - Hook/bridge/MCP используют общий recovery exact stable loader по
   [контракту](docs/agent-workspace-runtime.md#восстановление-подписанного-рантайма).
   Bridge handoff сохраняет cwd текущего Run через одноразовый process-only

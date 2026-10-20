@@ -425,6 +425,14 @@ const installSecretBrowserController = (
     return ["email", "password", "search", "tel", "text", "url"].includes(element.type);
   };
 
+  // Legacy SMTP forms use input[type=submit] rather than button. Both have
+  // native browser click semantics; never accept image/file inputs, links or
+  // arbitrary elements just because a selector happens to resolve to them.
+  const isSupportedSubmit = (element) => (
+    element instanceof HTMLButtonElement
+    || (element instanceof HTMLInputElement && ["submit", "button"].includes(element.type))
+  );
+
   const isVisible = (element) => {
     if (!element.isConnected) return false;
     const box = element.getBoundingClientRect();
@@ -534,7 +542,7 @@ const installSecretBrowserController = (
     if (submitSelector) {
       const button = resolveUnique(submitSelector);
       if (button === undefined || button === null) return;
-      if (!(button instanceof HTMLButtonElement) || button.disabled || !isVisible(button)) return;
+      if (!isSupportedSubmit(button) || button.disabled || !isVisible(button)) return;
       state.submitTarget = button;
     }
     state.status = "ready";
@@ -622,7 +630,7 @@ const installSecretBrowserController = (
       if (submitSelector) {
         const buttons = document.querySelectorAll(submitSelector);
         if (location.origin !== expectedOrigin || (expectedUrl && location.href !== expectedUrl)
-          || buttons.length !== 1 || !(buttons[0] instanceof HTMLButtonElement)
+          || buttons.length !== 1 || !isSupportedSubmit(buttons[0])
           || buttons[0].disabled || !isVisible(buttons[0])) throw new Error("submit_changed");
         // A framework may have replaced the button together with a field; the
         // exact selector, URL and uniqueness remain the signed authority.
@@ -652,7 +660,7 @@ const installSecretBrowserController = (
       return null;
     }
     const button = matches.length === 1 ? matches[0] : null;
-    if (button !== state.submitTarget || !(button instanceof HTMLButtonElement)
+    if (button !== state.submitTarget || !isSupportedSubmit(button)
       || button.disabled || !isVisible(button)) return null;
     const visiblePoint = () => {
       const box = button.getBoundingClientRect();
