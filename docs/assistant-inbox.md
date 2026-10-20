@@ -133,3 +133,16 @@ atomically. A thrown callback rolls back both sides; a Promise is rejected. No
 model callback, I/O or native action belongs inside this transaction. A persisted
 `scheduled` flag distinguishes a cyclic launch from an event wake: an event
 finishing after the deadline is not proof of the first timer run.
+
+
+## Owner dialogue references (schema v3)
+
+The additive v2 → v3 upgrade retains events, cursors, read acknowledgements,
+started/uncertain deliveries and their exact event sets. One nullable
+`owner_question_id` stores only the UUID supplied by the canonical Trelio answer
+notification. An ordinary event cannot gain a question reference without a wake
+and a task. Same-revision replay with a different reference fails before cursor
+advancement. Question or answer text, usernames and approval flags are rejected.
+The original references survive pre-launch recovery; a new poll cannot replace
+the event set of an already reserved delivery. This is routing metadata, never
+owner consent or content authority.

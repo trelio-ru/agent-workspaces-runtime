@@ -41,9 +41,9 @@ const scopeOf = value => {
   return { ...scope, key: digest(scope) };
 };
 const eventOf = value => {
-  object(value, ['id', 'revision', 'taskId', 'wake']);
-  if (typeof value.wake !== 'boolean') inputError();
-  return { id: opaque(value.id), revision: opaque(value.revision, 128), taskId: value.taskId === null ? null : uuid(value.taskId), wake: value.wake };
+  object(value, ['id', 'revision', 'taskId', 'wake', 'ownerQuestionId']);
+  if (typeof value.wake !== 'boolean' || value.ownerQuestionId !== undefined && (!value.wake || value.taskId === null)) inputError();
+  return { ownerQuestionId: value.ownerQuestionId === undefined ? null : uuid(value.ownerQuestionId), id: opaque(value.id), revision: opaque(value.revision, 128), taskId: value.taskId === null ? null : uuid(value.taskId), wake: value.wake };
 };
 const LEASE_MS = 120_000;
 const MAX_PAGE = 100;
@@ -74,7 +74,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -117,7 +117,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       db.exec("ALTER TABLE assistant_inbox_tasks ADD COLUMN authority_binding_id TEXT; ALTER TABLE assistant_inbox_tasks ADD COLUMN authority_revision INTEGER; ALTER TABLE assistant_inbox_deliveries ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0; ALTER TABLE assistant_inbox_deliveries ADD COLUMN kind TEXT NOT NULL DEFAULT 'task'; ALTER TABLE assistant_inbox_deliveries ADD COLUMN native_thread_id TEXT; ALTER TABLE assistant_inbox_deliveries ADD COLUMN native_started INTEGER NOT NULL DEFAULT 0;");
       run('UPDATE assistant_inbox_meta SET version=2');
     }
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (2)');
+    // Forward-only additive upgrade keeps old leases/cursors and ambiguous
+    // deliveries intact. The new column contains a UUID only, never an answer.
+    if (!versions.length || versions[0].version < 3) {
+      db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN owner_question_id TEXT');
+      run('UPDATE assistant_inbox_meta SET version=3');
+    }
+    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (3)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -197,16 +203,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         let added = 0;
         for (const event of page) {
           const key = digest([scope.key, event.id, event.revision]);
-          const existing = get('SELECT original_task_id,wake FROM assistant_inbox_events WHERE event_key=?', key);
+          const existing = get('SELECT original_task_id,wake,owner_question_id FROM assistant_inbox_events WHERE event_key=?', key);
           if (existing) {
-            if (existing.original_task_id !== event.taskId || existing.wake !== Number(event.wake)) fail('ASSISTANT_INBOX_EVENT_CHANGED');
+            if (existing.original_task_id !== event.taskId || existing.wake !== Number(event.wake) || existing.owner_question_id !== event.ownerQuestionId) fail('ASSISTANT_INBOX_EVENT_CHANGED');
             continue;
           }
           const pending = get('SELECT count(*) AS total FROM assistant_inbox_events WHERE processed=0').total;
           const total = get('SELECT count(*) AS total FROM assistant_inbox_events').total;
           if (pending >= MAX_PENDING || total >= MAX_EVENTS) fail('ASSISTANT_INBOX_FULL');
-          run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake) VALUES (?,?,?,?,?,?,?)',
-            key, scope.key, event.id, event.revision, event.taskId, event.taskId, Number(event.wake));
+          run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id) VALUES (?,?,?,?,?,?,?,?)',
+            key, scope.key, event.id, event.revision, event.taskId, event.taskId, Number(event.wake), event.ownerQuestionId);
           added++;
         }
         // Cursor and durable event acceptance share one transaction. A full
@@ -331,7 +337,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const task = get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', scope.key, candidate.task_id);
         if (task?.state !== 'accepted' || task.revision !== candidate.revision) fail('ASSISTANT_INBOX_CONFLICT');
         if (get("SELECT 1 FROM assistant_inbox_deliveries WHERE state IN ('leased','started','uncertain')")) return null;
-        const events = provisionTask ? [] : all('SELECT event_key,event_id,event_revision,wake FROM assistant_inbox_events WHERE source_key=? AND task_id=? AND processed=0 ORDER BY rowid LIMIT 100', scope.key, task.task_id);
+        const events = provisionTask ? [] : all('SELECT event_key,event_id,event_revision,wake,owner_question_id FROM assistant_inbox_events WHERE source_key=? AND task_id=? AND processed=0 ORDER BY rowid LIMIT 100', scope.key, task.task_id);
         if (!events.length && !scheduled) return null;
         if (get('SELECT count(*) AS total FROM assistant_inbox_deliveries').total >= MAX_EVENTS) fail('ASSISTANT_INBOX_FULL');
         const id = randomUUID();
@@ -422,7 +428,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         recoverExpired();
         return all("SELECT d.*,s.scope_json FROM assistant_inbox_deliveries d JOIN assistant_inbox_sources s ON s.source_key=d.source_key WHERE d.state IN ('leased','started','uncertain') LIMIT 1")
           .map(row => ({ deliveryId: row.delivery_id, taskId: row.task_id, scope: scopeInputWithoutKey(JSON.parse(row.scope_json)),
-            state: row.state, kind: row.kind, threadId: row.native_thread_id, nativeStarted: Boolean(row.native_started) }));
+            state: row.state, kind: row.kind, threadId: row.native_thread_id, nativeStarted: Boolean(row.native_started),
+            // Recovery before native start must carry the original event set,
+            // including question refs. Never recreate it from the latest poll.
+            events: all(`SELECT e.event_key,e.event_id,e.event_revision,e.wake,e.owner_question_id FROM assistant_inbox_events e
+              JOIN assistant_inbox_delivery_events de ON de.event_key=e.event_key WHERE de.delivery_id=? ORDER BY e.rowid LIMIT 100`, row.delivery_id) }));
       });
     },
     readDelivery(id) {

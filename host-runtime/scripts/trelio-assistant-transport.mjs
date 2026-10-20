@@ -283,9 +283,10 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value = await call('poll', { companyId, cursor }, signal);
       if (!Array.isArray(value.events) || value.events.length > 100 || typeof value.hasMore !== 'boolean') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return { events: value.events.map(event => {
-        if (typeof event.wake !== 'boolean') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        if (typeof event.wake !== 'boolean' || event.ownerQuestionId !== undefined && !event.wake) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
         return { id: id(event.id), revision: text(event.revision,128), taskId: id(event.taskId), wake: event.wake,
-          bindingId: id(event.bindingId), bindingRevision: revision(event.bindingRevision), taskState: state(event.taskState) };
+          bindingId: id(event.bindingId), bindingRevision: revision(event.bindingRevision), taskState: state(event.taskState),
+          ...(event.ownerQuestionId === undefined ? {} : { ownerQuestionId: id(event.ownerQuestionId) }) };
       }), nextCursor: text(value.nextCursor), hasMore: value.hasMore };
     },
     async acknowledge(companyId, events, signal) {
@@ -432,11 +433,11 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read"]);
+export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
-  'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
+  'ask_assistant_owner', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",
   "complete_checklist_item", "create_subtask",

@@ -55,7 +55,8 @@ const fixture = t => {
     },
     run:async({threadId,deliveryId,taskContext,execution:choice},options)=>{
       assert.deepEqual(choice,execution.configuration);
-      assert.deepEqual(taskContext,{assistantId,companyId,taskId});
+      const {ownerQuestionIds,...task}=taskContext; assert.deepEqual(task,{assistantId,companyId,taskId});
+      if(ownerQuestionIds) assert.ok(ownerQuestionIds.every(id=>/^[0-9a-f-]{36}$/u.test(id)));
       runs++;options.startInvocation();starts++;
       const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};deliveries.set(deliveryId,result);
       if(nativeFailure)throw Object.assign(new Error('response lost'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
@@ -338,4 +339,23 @@ test('another valid device host blocks native business work even with an accepte
   f.options.client.task=async()=>({...f.authority,hostState:'other_device'});
   f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300000);await f.coordinator.pollOnce();
   await assert.rejects(f.coordinator.workOnce(),/HOST_REVIEW_REQUIRED/);assert.equal(f.counts().runs,0);
+});
+
+
+test('owner answer refs wake the existing chat and survive a lost pre-launch claim without copying answer text', async t => {
+  const f=fixture(t); await f.coordinator.pollOnce(); await f.coordinator.workOnce();
+  const threadId=f.coordinator.status()[0].threadId, questionId=randomUUID(), contexts=[];
+  const run=f.options.native.run;
+  f.options.native.run=async(input,options)=>{contexts.push(input.taskContext);return run(input,options);};
+  const begin=f.options.client.beginTaskPass; let claims=0;
+  f.options.client.beginTaskPass=async input=>{const result=await begin(input);if(++claims===1)throw new Error('lost');return result;};
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true,ownerQuestionId:questionId});
+  f.advance(300000);await f.coordinator.pollOnce();
+  await assert.rejects(f.coordinator.workOnce(),/DELIVERY_UNCERTAIN/);
+  f.advance(90001); // The departed host retains its short lease until expiry.
+  const restarted=createAssistantCoordinator(f.options);await restarted.workOnce();
+  assert.equal(contexts.length,1);assert.deepEqual(contexts[0].ownerQuestionIds,[questionId]);
+  assert.equal(restarted.status()[0].threadId,threadId);assert.equal(f.counts().provisions,1);
+  f.advance(300000);await restarted.pollOnce();assert.equal(await restarted.workOnce(),null);
+  assert.equal(f.counts().runs,1);
 });

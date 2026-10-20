@@ -390,3 +390,17 @@ test('accepted read is exposed as read-only while continuation remains a guarded
   assert.ok(ASSISTANT_MCP_READ_TOOLS.includes('prepare_assistant_workspace_read'));
   assert.ok(!ASSISTANT_MCP_READ_TOOLS.includes('continue_assistant_workspace_action'));
 });
+
+
+test('owner dialogue tools use live backend schemas and poll projection keeps only a validated question UUID', async () => {
+  const {ASSISTANT_MCP_READ_TOOLS,ASSISTANT_MCP_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  assert.ok(ASSISTANT_MCP_READ_TOOLS.includes('get_assistant_owner_question'));
+  assert.ok(ASSISTANT_MCP_TOOLS.includes('ask_assistant_owner'));
+  assert.ok(!ASSISTANT_MCP_READ_TOOLS.includes('ask_assistant_owner'));
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),questionId=randomUUID();
+  const store=memoryStore();await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'a'.repeat(43)}`,expiresAt:10000});
+  const event={id:randomUUID(),revision:'1',taskId:randomUUID(),wake:true,bindingId:randomUUID(),bindingRevision:0,taskState:'accepted',ownerQuestionId:questionId};
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,now:()=>100,http:async()=>({events:[{...event,answerText:'PRIVATE ANSWER'}],nextCursor:'1',hasMore:false})});
+  assert.deepEqual((await client.poll(companyId)).events,[event]);
+  event.ownerQuestionId='PRIVATE QUESTION';await assert.rejects(client.poll(companyId));
+});

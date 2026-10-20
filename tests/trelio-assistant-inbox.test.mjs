@@ -243,3 +243,44 @@ test('verified terminal non-acceptance permits retry without accepting a late ol
   assert.throws(() => inbox.completeDelivery(work.deliveryId, 'late-old-result'), { code: 'ASSISTANT_INBOX_STALE_DELIVERY' });
   assert.equal(inbox.status(source).pending, 1);
 });
+
+
+test('v2 SQLite upgrade preserves question-free events, leases and cursors; question refs are immutable and durable', async t => {
+  const { inbox: initial, database, advance } = memory(t), source = scope(), task = randomUUID();
+  initial.register(source); accept(initial, source, task);
+  page(initial, source, [event(task)]);
+  const first = await initial.claimDelivery({ authorize: authorized });
+  initial.prepareTaskPass(first.deliveryId);
+  // Real previous schema on the same connection, not a mock version flag on a
+  // new table: the upgrade must add the column without resetting pending work.
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; UPDATE assistant_inbox_meta SET version=2');
+  const inbox = createAssistantInbox({ database, now: () => 1_000_000 });
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 3);
+  assert.equal(inbox.status(source).cursorRevision, 1);
+  assert.equal(inbox.incompleteDeliveries()[0].deliveryId, first.deliveryId);
+  assert.equal(inbox.incompleteDeliveries()[0].events[0].owner_question_id, null);
+  inbox.startDelivery(first.deliveryId); inbox.completeDelivery(first.deliveryId, 'old-completed');
+  // Use the original injected clock for the next polling lease.
+  const active = createAssistantInbox({ database, now: () => 1_300_000 });
+  const question = randomUUID(), incoming = { ...event(task), ownerQuestionId: question };
+  assert.equal(page(active, source, [incoming], 'owner-reply').added, 1);
+  const restarted = createAssistantInbox({ database, now: () => 1_600_000 });
+  const lease = restarted.claimPoll(source);
+  assert.equal(restarted.commitPage(source, { ...lease, nextCursor: 'same', hasMore: true, events: [incoming] }).added, 0);
+  assert.throws(() => restarted.commitPage(source, { ...restarted.claimPoll(source), nextCursor: 'changed', hasMore: false,
+    events: [{ ...incoming, ownerQuestionId: randomUUID() }] }), { code: 'ASSISTANT_INBOX_EVENT_CHANGED' });
+  const work = await restarted.claimDelivery({ authorize: authorized });
+  assert.equal(work.events[0].owner_question_id, question);
+  restarted.prepareTaskPass(work.deliveryId);
+  assert.equal(restarted.incompleteDeliveries()[0].events[0].owner_question_id, question);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n, 2);
+});
+
+test('question refs cannot smuggle content or create a wake from an ordinary event', t => {
+  const { inbox } = memory(t), source = scope(), task = randomUUID(); inbox.register(source);
+  for (const incoming of [{ ...event(task), ownerQuestionId: 'PRIVATE ANSWER' },
+    { ...event(task, false), ownerQuestionId: randomUUID() }, { ...event(null), ownerQuestionId: randomUUID() }]) {
+    assert.throws(() => page(inbox, source, [incoming]), { code: 'ASSISTANT_INBOX_INVALID_INPUT' });
+  }
+  assert.equal(inbox.status(source).cursorRevision, 0);
+});

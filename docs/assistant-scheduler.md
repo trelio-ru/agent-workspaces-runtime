@@ -549,3 +549,22 @@ device, company and task. It cannot overwrite another assistant's personal
 profile or the human inspection cache. Missing resolver denies before filesystem
 access. This read has no finish registry, Run heartbeat or fake timestamp-only
 checkpoint; human default paths and the shared integrity/cache guards are unchanged.
+
+
+## Private owner dialogue
+
+The dedicated live catalog may expose `ask_assistant_owner` and
+`get_assistant_owner_question`. The common proxy forwards their current backend
+schemas with the same observed task pass/proof, without a human OAuth alias,
+new shell hook or model-authored approval assertion. Ask uses a durable request
+UUID; the backend owns idempotency, ACL and notification creation. The runtime
+never retries an ambiguous question mutation automatically.
+
+The fixed poll client projects an optional validated `ownerQuestionId`; SQLite
+stores only that structural reference. A business delivery receives at most one
+hundred unique question UUIDs over stdin in its exact task context, including
+recovery before native launch. Nothing enters argv or the prompt from question
+bodies. The task worker reads each answer live under its current pass and saves
+pending IDs in its own accepted WORK.md. Replies resume the permanent chat; they
+do not provision another chat or authorize sensitive actions. Missing/newer
+backend capabilities remain closed and do not enable business readiness.

@@ -14,6 +14,11 @@ const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:ran
 
 test('work-state locators use immutable assistant identity and refuse paths or source text', async()=>{
   const state=assistantWorkStateContext(taskContext);
+  const ownerQuestionIds=[randomUUID(),randomUUID()];
+  assert.deepEqual(assistantWorkStateContext({...taskContext,ownerQuestionIds}).ownerQuestionIds,ownerQuestionIds);
+  for(const invalid of [[],['private question'],[...ownerQuestionIds,ownerQuestionIds[0]],Array.from({length:101},()=>randomUUID())]) {
+    assert.throws(()=>assistantWorkStateContext({...taskContext,ownerQuestionIds:invalid}),/INVALID_INPUT/);
+  }
   assert.equal(state.workStatePath,`assistants/${taskContext.assistantId}/WORK.md`);
   assert.notEqual(assistantWorkStateContext({...taskContext,assistantId:randomUUID()}).workStatePath,state.workStatePath);
   assert.equal(assistantWorkStateContext({...taskContext,taskId:randomUUID()}).workStatePath,state.workStatePath,
@@ -147,6 +152,7 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   t.after(() => fs.rm(cwd,{ recursive:true,force:true }));
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const expectedCwd = await fs.realpath(cwd);
+  const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()]};
   let starts=0,reads=0,launches=0,input='';
   const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,SHOULD_NOT_PASS:'private' },
     startInvocation:() => { if (starts++) throw new Error('private state error'); },
@@ -164,11 +170,13 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
       })); return child;
     },
   };
-  const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },options);
+  const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext:repliedTaskContext,execution },options);
   assert.equal(result.state,'completed'); assert.equal(launches,1); assert.equal(starts,1);
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   const scopeLine=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_SCOPE '));
-  assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(taskContext));
+  assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
+  assert.ok(input.includes('get_assistant_owner_question'));
+  assert.ok(input.includes('never sensitive-action approval'));
   // A lost/empty history lookup cannot bypass the durable first-attempt fence.
   reads=0;
   await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },options), /DELIVERY_NOT_STARTED/);

@@ -119,7 +119,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       lease();
       for(const event of result.events) apply(source,{id:event.bindingId,taskId:event.taskId,state:event.taskState,revision:event.bindingRevision});
       inbox.commitPage(source,{...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
-        events:result.events.map(({id,revision,taskId,wake})=>({id,revision,taskId,wake}))});
+        events:result.events.map(({id,revision,taskId,wake,ownerQuestionId})=>({id,revision,taskId,wake,
+          ...(ownerQuestionId === undefined ? {} : {ownerQuestionId})}))});
       if(!result.hasMore) break;
     }
     const ack=inbox.claimAcknowledgements(source); if(!ack) return;
@@ -321,7 +322,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         await passHost.activatePass(taskPass);
         execution=assistantExecutionConfiguration(admitted.execution);
         result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
-          taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId}},options);
+          taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
+            // Only current delivery refs enter stdin. Full answers are read
+            // by the task worker under fresh backend pass/owner/assignment ACL.
+            ...(job.events.some(event=>event.owner_question_id) ? {ownerQuestionIds:[...new Set(job.events
+              .flatMap(event=>event.owner_question_id?[event.owner_question_id]:[]))]} : {})}},options);
       }
       if(result.state!=='completed') fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
       const threadId=job.kind==='provision'?result.threadId:findSchedule(job.scope,job.taskId)?.threadId;
