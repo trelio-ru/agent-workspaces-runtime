@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -115,4 +115,57 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   await assert.rejects(client.registerRuntime({...request,observation:{...observation,source:'agent_request'}}),/INVALID_INPUT/);
   assert.deepEqual(await client.endRuntime({...locator,runtimeSessionId:sessionId}),{ended:true});
   assert.deepEqual(operations,['passBegin','passRead','passRenew','registerRuntime','registerRuntime','endRuntime']);
+});
+
+
+test('assistant MCP reuses the bounded protocol with its real device profile and no schema copies or hidden retry', async () => {
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  const credential=`tda_${'z'.repeat(43)}`;
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  const {buildRemoteMcpRequestHeaders,validateRemoteMcpPublicationConfig}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const calls=[];let echoed=false,broken=false,receivedArgs;
+  const shape={type:'object',properties:{taskPass:{},runtimeSessionProof:{}},additionalProperties:false};
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest:async(input,{signal})=>{
+    assert.ok(signal);assert.equal(input.config.endpoint,origin+'/mcp/assistant');assert.equal(input.config.authentication.type,'assistant_device');
+    assert.equal(buildRemoteMcpRequestHeaders({...input,body:null}).authorization,`Bearer ${credential}`);
+    assert.equal(input.credential,credential);calls.push(input.method??input.payload.method);
+    if(broken)throw new Error('PRIVATE HTTP DETAIL');
+    const response=result=>({sessionId:'fixture-session',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE')return response({});
+    if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='notifications/initialized')return response({});
+    if(input.payload.method==='tools/list')return response({tools:[
+      {name:'get_assistant_status',description:'Live status',inputSchema:shape,_meta:{private:'DO_NOT_PROXY_METADATA'}},
+      {name:'get_task',description:'Live backend schema',inputSchema:shape},
+      {name:'human_login',description:'Never delegate this',inputSchema:shape},
+    ]});
+    assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
+    return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
+  }});
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task']);
+  assert.deepEqual(tools[1].inputSchema,shape);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
+  const args={taskPass:{passId:randomUUID()},runtimeSessionProof:{signature:'original'}};
+  const resultPromise=client.callTool('get_task',args);args.runtimeSessionProof.signature='changed';
+  const result=await resultPromise;assert.equal(receivedArgs.runtimeSessionProof.signature,'original');
+  assert.equal(result.content[0].text,'native content');assert.ok(!('_meta' in result));
+  assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/call','DELETE']);
+  const count=calls.length;await assert.rejects(client.callTool('create_comment',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
+  echoed=true;await assert.rejects(client.callTool('get_task',{}),/INVALID_RESPONSE/);
+  broken=true;await assert.rejects(client.callTool('get_task',{}),error=>error.code==='ASSISTANT_MCP_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
+  assert.equal((await store.get({origin,kind:'device',id:assistantId})).credential,credential,'failure preserves the exact pairing');
+  assert.throws(()=>validateRemoteMcpPublicationConfig({schemaVersion:1,endpoint:origin+'/mcp/assistant',transport:'streamable_http',
+    protocolVersion:'2025-03-26',authentication:{type:'assistant_device'},headers:{},allowedTools:['get_task']}),
+    error=>error.code==='REMOTE_MCP_UNSUPPORTED_AUTH', 'public Remote MCP declarations cannot request the trusted device profile');
+});
+
+test('assistant MCP shares one absolute network deadline and never retries a timed-out call',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
+  let calls=0;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,timeoutMs:100,httpRequest:async(_input,{signal})=>{
+    calls++;await new Promise((resolve,reject)=>{if(signal.aborted)reject(new Error('abort'));else signal.addEventListener('abort',()=>reject(new Error('abort')),{once:true});});
+  }});
+  const keepAlive=setTimeout(()=>{},1000);
+  try{await assert.rejects(client.callTool('get_task',{}),/MCP_UNAVAILABLE/);assert.equal(calls,1);}
+  finally{clearTimeout(keepAlive);}
 });

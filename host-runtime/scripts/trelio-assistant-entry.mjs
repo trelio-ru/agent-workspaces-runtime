@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import fs from 'node:fs/promises';
+import { ASSISTANT_MCP_READ_TOOLS } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup } from './trelio-assistant-setup.mjs';
@@ -35,8 +37,8 @@ export const callAssistantSetupTool = async (setup, name, args) => {
 };
 
 /** This profile never imports/starts the human local MCP, reads its OAuth, or
- * migrates Codex configuration. Private primitives are loaded lazily on an
- * actual setup call, not for tools/list or an unsupported command. */
+ * migrates Codex configuration. Setup primitives load only for an actual
+ * setup call; paired schema discovery uses the separate protected read adapter. */
 export const createProductionAssistantSetup = async () => {
   const [{ createAssistantPrivateStore }, { createAssistantHttp }, common, { withPrivateProcessSession }, { createAssistantHostState }] = await Promise.all([
     import('./trelio-assistant-private.mjs'), import('./trelio-assistant-transport.mjs'), import('./trelio-workspace.mjs'),
@@ -76,13 +78,37 @@ export const createProductionAssistantHook = async () => {
     lockDirectory: path.join(directory, 'runtime-locks') });
 };
 
-/** Bounded JSON-lines MCP facade for setup only. No raw incoming body, transport
+/** Schema discovery before enrollment needs no credential/private worker.
+ * A present structural host journal switches to the ordinary protected path;
+ * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
+export const createProductionAssistantMcp = async () => {
+  const common = await import('./trelio-workspace.mjs');
+  const directory = path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants');
+  try { await fs.lstat(path.join(directory, 'identity.json')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const [{ createAssistantPrivateStore }, { createAssistantHostState }, { createAssistantMcpClient }] = await Promise.all([
+    import('./trelio-assistant-private.mjs'), import('./trelio-assistant-hook.mjs'), import('./trelio-assistant-transport.mjs'),
+  ]);
+  const store = createAssistantPrivateStore({ directory: path.join(directory, 'credentials') });
+  const host = createAssistantHostState({ directory, store });
+  const identity = await host.readIdentity();
+  if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
+  return createAssistantMcpClient({ ...identity, store });
+};
+
+/** Bounded JSON-lines MCP facade for setup and declared read capabilities. No raw incoming body, transport
  * exception or store envelope is returned/logged. Calls are serialized, so two
  * exchanges from this client cannot race its one-use private journal. */
 export const runAssistantSetupMcp = async ({ input = process.stdin, output = process.stdout,
-  createSetup = createProductionAssistantSetup } = {}) => {
+  createSetup = createProductionAssistantSetup, createMcp = createProductionAssistantMcp } = {}) => {
   let setup, initialized = false;
   const reply = value => output.write(JSON.stringify(value) + '\n');
+  const withProxy = async action => {
+    const { withPrivateProcessSession, runtimeHookSignal } = await import('./trelio-hook-private-session.mjs');
+    // One deadline covers journal/DPAPI, initialization, request, body and
+    // cleanup. A long-lived stdio process never caches a private worker/token.
+    return withPrivateProcessSession(async () => action(await createMcp(), runtimeHookSignal()), AbortSignal.timeout(45_000));
+  };
   const dispatch = async message => {
     const requestId = message?.id;
     const hasId = typeof requestId === 'string' && requestId.length <= 128 || Number.isSafeInteger(requestId);
@@ -93,23 +119,39 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     const respond = result => reply({ jsonrpc: '2.0', id: requestId, result });
     if (message.method === 'initialize' && !initialized) {
       initialized = true;
-      return respond({ protocolVersion: '2025-06-18', capabilities: { tools: {} },
+      return respond({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true } },
         serverInfo: { name: 'trelio-assistant', version: '1.0.0' },
         instructions: 'This computer uses assistant device pairing, not human OAuth. Setup/contact alone does not authorize task work.' });
     }
     if (message.method === 'ping') return respond({});
     if (!initialized) return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: 'Initialize first' } });
-    if (message.method === 'tools/list') return respond({ tools: ASSISTANT_SETUP_TOOLS });
+    if (message.method === 'tools/list') {
+      try { return respond({ tools: [...ASSISTANT_SETUP_TOOLS, ...await withProxy((proxy, signal) => proxy ? proxy.listTools(signal) : [])] }); }
+      catch (error) { return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: safeError(error) } }); }
+    }
     if (message.method === 'tools/call') {
       try {
         // Validate before touching private storage. Unknown tools cannot cause
         // an auth read or be delegated to another MCP implementation.
+        if (ASSISTANT_MCP_READ_TOOLS.includes(message.params?.name)) {
+          if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
+            throw Object.assign(new Error(), { code: 'ASSISTANT_TASK_INPUT_INVALID' });
+          }
+          return respond(await withProxy((proxy, signal) => {
+            if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
+            return proxy.callTool(message.params.name, message.params.arguments, signal);
+          }));
+        }
         if (!codes.has(message.params?.name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
         // The adapter is constructed once but every paired status revalidates
         // the protected slot and live device. It contains no cached authority.
         setup ??= await createSetup();
         const result = await callAssistantSetupTool(setup, message.params.name, message.params.arguments);
-        return respond({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result });
+        respond({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result });
+        if (message.params.name === 'finish_assistant_setup' && result.state === 'paired') {
+          reply({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+        }
+        return;
       } catch (error) {
         const result = { code: safeError(error) };
         return respond({ isError: true, content: [{ type: 'text', text: result.code }], structuredContent: result });

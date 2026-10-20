@@ -32,12 +32,17 @@ publication tooling также остаются вне этого публичн
   локальная дата pairing не запрещает контакт после owner renewal. Отказ не
   удаляет credential и не разрешает blind retry mutation.
 - Dedicated plugin использует явный `bridge assistant mcp|hook` profile общего
-  signed entry; unknown command не переходит к human bridge/OAuth. Setup-only MCP
+  signed entry; unknown command не переходит к human bridge/OAuth. Setup MCP
   композирует protected S256/private storage/fixed HTTPS без model credential и
   не объявляет businessReady. Assistant hook использует общий observer/proof/lock
   и exact protected pass journal; без live task-pass registration даёт JSON deny
   с exit 0. Ключ до HTTP сохраняется в OS-backed runtime slot, не human state. Контракт –
   [assistant setup](docs/assistant-scheduler.md#dedicated-plugin-entry-and-setup).
+- Assistant stdio получает read schemas только из dedicated backend catalog;
+  fixed host allowlist и общий bounded MCP transport не создают domain authority.
+  Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.
+  Before pairing discovery не читает credential; paired ACL/I/O ошибки не пустой
+  catalog. [Контракт](docs/assistant-scheduler.md#assistant-read-mcp-proxy).
 
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
   Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.

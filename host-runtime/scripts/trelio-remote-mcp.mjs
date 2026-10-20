@@ -1277,7 +1277,7 @@ export const buildRemoteMcpRequestHeaders = ({
     "content-length": String(body.byteLength),
   } : {}),
   ...(sessionId ? { "mcp-session-id": sessionId } : {}),
-  ...(["personal_bearer_pat", "oauth2_pkce"].includes(config.authentication.type)
+  ...(["personal_bearer_pat", "oauth2_pkce", "assistant_device"].includes(config.authentication.type)
     ? { authorization: `Bearer ${credential}` }
     : {}),
 });
@@ -1521,7 +1521,7 @@ export const remoteMcpHttpRequest = ({
   });
 };
 
-const assertJsonRpcResult = (response, method) => {
+export const assertJsonRpcResult = (response, method) => {
   if (
     !response?.message
     || response.message.jsonrpc !== "2.0"
@@ -1536,7 +1536,7 @@ const assertJsonRpcResult = (response, method) => {
   return response.message.result;
 };
 
-const createRemoteSession = async (
+export const createRemoteSession = async (
   config,
   credential,
   httpRequest = remoteMcpHttpRequest,
@@ -1590,7 +1590,7 @@ const createRemoteSession = async (
   };
 };
 
-const closeRemoteSession = async (
+export const closeRemoteSession = async (
   config,
   credential,
   sessionId,
@@ -1608,7 +1608,7 @@ const closeRemoteSession = async (
   }, { signal }).catch(() => undefined);
 };
 
-const listRemoteTools = async (
+export const listRemoteTools = async (
   config,
   credential,
   session,

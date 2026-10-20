@@ -58,7 +58,7 @@ test('actual stdio frames discover setup without auth I/O and reject unknown fie
     {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'get_assistant_setup_status',arguments:{enrollmentId:randomUUID()}}}];
   const output=new PassThrough();let raw='',created=0,reads=0;output.on('data',chunk=>raw+=chunk);
   await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
-    createSetup:async()=>{created++;return {status:async()=>{reads++;return {state:'not_started'};}};}});
+    createMcp:async()=>null,createSetup:async()=>{created++;return {status:async()=>{reads++;return {state:'not_started'};}};}});
   const messages=raw.trim().split('\n').map(JSON.parse);
   assert.equal(messages.length,5);
   assert.equal(messages[1].result.tools.length,3);
@@ -84,4 +84,35 @@ test('assistant hook permits setup and blocks task tools without an installed ho
     const result=JSON.parse(raw);
     assert.equal(result.hookSpecificOutput?.permissionDecision,tool.endsWith('begin_assistant_setup')?undefined:'deny');
   }
+});
+
+
+test('stdio discovers live backend read schemas, notifies after pairing and keeps failures closed',async()=>{
+  let paired=false,proxyCalls=0,setupCalls=0,raw='';const output=new PassThrough();output.on('data',chunk=>raw+=chunk);
+  const tool={name:'get_task',description:'backend-owned',inputSchema:{type:'object'}};
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+    {jsonrpc:'2.0',id:2,method:'tools/list'},
+    {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'finish_assistant_setup',arguments:{enrollmentId:randomUUID()}}},
+    {jsonrpc:'2.0',id:4,method:'tools/list'},
+    {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'get_task',arguments:{taskPass:{passId:'host'},runtimeSessionProof:{nonce:'hook'}}}},
+    {jsonrpc:'2.0',id:6,method:'tools/call',params:{name:'get_task'}},
+    {jsonrpc:'2.0',id:7,method:'tools/call',params:{name:'human_login',arguments:{}}}];
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createSetup:async()=>({finish:async()=>{setupCalls++;paired=true;return {state:'paired',businessReady:false};}}),
+    createMcp:async()=>paired?{listTools:async signal=>{assert.ok(signal);return [tool];},callTool:async(name,args,signal)=>{
+      assert.ok(signal);proxyCalls++;assert.equal(name,'get_task');assert.equal(args.runtimeSessionProof.nonce,'hook');
+      return {content:[{type:'text',text:'ordinary task content'}],structuredContent:{tasks:[]}};
+    }}:null});
+  const messages=raw.trim().split('\n').map(JSON.parse);
+  assert.equal(messages[0].result.capabilities.tools.listChanged,true);
+  assert.equal(messages[1].result.tools.length,3);
+  assert.equal(messages[3].method,'notifications/tools/list_changed');
+  assert.deepEqual(messages[4].result.tools.at(-1),tool);
+  assert.equal(messages[5].result.content[0].text,'ordinary task content');
+  assert.equal(messages[6].result.isError,true);assert.equal(messages[7].result.isError,true);
+  assert.equal(proxyCalls,1);assert.equal(setupCalls,1);
+  raw='';await runAssistantSetupMcp({input:Readable.from([JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize'})+'\n',
+    JSON.stringify({jsonrpc:'2.0',id:2,method:'tools/list'})+'\n']),output,
+    createMcp:async()=>{throw new Error('PRIVATE DEVICE DETAIL');}});
+  assert.ok(raw.includes('ASSISTANT_SETUP_UNAVAILABLE'));assert.ok(!raw.includes('PRIVATE'));
 });

@@ -176,11 +176,12 @@ The separate assistant plugin selects the existing signed-loader ABI as
 human bridge, config migration, credential access or cache maintenance. Hook
 startup retains the common non-sliding clock and never consumes a human Run cwd.
 
-The setup-only stdio surface exposes begin/finish/status with a non-authorizing
+Before enrollment, the stdio surface exposes begin/finish/status with a non-authorizing
 enrollment UUID. It composes the existing protected S256 journal, OS private store
 and fixed HTTPS client, under one invocation-local Windows native worker. No
 human OAuth/client configuration, owner browser login or credential-valued MCP
-arguments exist. Discovery does not load private storage. Input frames are bounded
+arguments exist. Unpaired discovery does not load private credentials. After pairing,
+the read proxy below obtains live backend schemas. Input frames are bounded
 at 128 KiB; unknown tools/fields and raw failures cannot expose the private journal.
 
 An already completed pairing is read back privately and checked by live heartbeat;
@@ -240,3 +241,37 @@ Tests cover real Ed25519 verification, current native transcript observation,
 wrong chat/device/pass, concurrent registration, lost response/restart, model
 refresh, expired deadline before first read, exact journal release and stdio
 redaction. They are not a Windows end-to-end task or installed daemon proof.
+
+
+## Assistant read MCP proxy
+
+After protected pairing, the stdio profile obtains `get_assistant_status`,
+`get_task`, `get_task_sections` and `get_task_instruction_page` definitions from
+`/mcp/assistant`. The backend owns the schemas, company policy and native reads.
+The host only applies a closed transport capability allowlist; it does not copy
+schemas, widen authority or expose unknown/new server tools. Setup tools remain
+available before pairing. A successful finish emits `tools/list_changed` so the
+client can refresh the catalog without storing an OAuth token or rewriting config.
+
+The dedicated device bearer is read from the same protected slot on every
+invocation. Shared Remote MCP protocol/session/HTTP primitives provide bounded
+JSON/SSE, fixed HTTPS with pinned DNS validation, no redirects and cleanup. The
+internal assistant-device header profile is rejected by the public provider
+configuration validator. It is not a personal PAT or human OAuth connection.
+No private credential/key enters tool data, schemas, logs, prompt, argv or env;
+an accidental response echo of the exact device credential is refused.
+
+Before enrollment, discovery checks only whether the structural host journal
+exists. A present journal requires the normal private ACL/identity path. Denial,
+corruption, failed network contact or lost response never becomes an empty paired
+catalog, re-pairing, login, or an automatic repeated `tools/call`. One invocation
+scope bounds journal/DPAPI, MCP handshake/request/body and cleanup. Private worker
+and token are not cached in the long-lived stdio process. Results preserve the
+native read/authority envelope, while App metadata/security schemes are not
+proxied. Each task call still requires the actual hook's exact pass and proof.
+
+Transport/stdio tests verify live schema forwarding, argument snapshots, fixed
+audience, missing setup, post-pair catalog notification, unsupported tools,
+credential echo refusal, preserved pairing after failure, redacted errors and
+one deadline without a hidden retry. This does not install a daemon or prove a
+Windows business pass/outcome; `businessReady=false` remains until those stages.

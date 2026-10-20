@@ -93,24 +93,28 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
   };
 };
 
+const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, store }) => {
+  const secret = await store.get({ origin, kind: 'device', id: assistantId });
+  if (!secret || secret.assistantId !== assistantId || secret.deviceId !== deviceId
+    || !/^tda_[A-Za-z0-9_-]{43}$/u.test(secret.credential ?? '') || !Number.isSafeInteger(secret.expiresAt)
+    || secret.expiresAt <= 0) fail('ASSISTANT_DEVICE_REQUIRED');
+  // Pairing's stored expiry is historical metadata, not live authority: the
+  // owner can renew this exact device in Trelio without changing its protected
+  // credential. Every fixed endpoint rechecks current absolute/idle expiry,
+  // revocation and lifecycle. Rejecting by this stale local date would require
+  // touching the assistant computer after an otherwise valid server renewal.
+  // A denial preserves the private slot and never retries a mutation here.
+  return secret.credential;
+};
+
 /** Host-private client. Model tools receive only projections from these named
  * operations; no method returns the credential or delegates an arbitrary URL. */
 export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, store, http }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== 'function' || typeof http !== 'function') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-  const call = async (operation, body, signal) => {
-    const secret = await store.get({ origin, kind: 'device', id: assistantId });
-    if (!secret || secret.assistantId !== assistantId || secret.deviceId !== deviceId
-      || !/^tda_[A-Za-z0-9_-]{43}$/u.test(secret.credential ?? '') || !Number.isSafeInteger(secret.expiresAt)
-      || secret.expiresAt <= 0) fail('ASSISTANT_DEVICE_REQUIRED');
-    // Pairing's stored expiry is historical metadata, not live authority: the
-    // owner can renew this exact device in Trelio without changing its protected
-    // credential. Every fixed endpoint rechecks current absolute/idle expiry,
-    // revocation and lifecycle. Rejecting by this stale local date would require
-    // touching the assistant computer after an otherwise valid server renewal.
-    // A denial preserves the private slot and never retries a mutation here.
-    return http(operation, body, secret.credential, signal);
-  };
+  const call = async (operation, body, signal) => http(operation, body,
+    await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store }), signal);
+
   return {
     identity: Object.freeze({ origin, assistantId, deviceId }),
     async heartbeat(signal) {
@@ -276,6 +280,75 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
         deviceId: identity.deviceId, credential: result.credential, expiresAt: Date.parse(result.expiresAt) });
       await store.put(key, { phase: 'complete', ...identity }); // Erase verifier.
       return { state: 'ready', ...identity };
+    },
+  };
+};
+
+/** The backend owns these schemas and business authorization. This closed host
+ * capability list is only a transport boundary: unknown/new server tools are
+ * not exposed until the host can execute them. No input schema is copied here. */
+export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page"]);
+export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, timeoutMs = 30_000 }) => {
+  origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
+  if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
+  const perform = async (action, signal) => {
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    try {
+      const protocol = await import("./trelio-remote-mcp.mjs");
+      const request = httpRequest ?? protocol.remoteMcpHttpRequest;
+      const credential = await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store });
+      if (boundedSignal.aborted) fail("ASSISTANT_MCP_UNAVAILABLE");
+      // A trusted internal authentication profile, not a personal PAT/OAuth
+      // declaration. The public provider-config validator still rejects it.
+      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: {},
+        authentication: { type: "assistant_device" } };
+      const session = await protocol.createRemoteSession(config, credential, request, { signal: boundedSignal });
+      try { return await action({ protocol, config, credential, session, request, signal: boundedSignal }); }
+      finally { await protocol.closeRemoteSession(config, credential, session.sessionId, request, { signal: boundedSignal }); }
+    } catch (error) {
+      if (error instanceof AssistantTransportError) throw error;
+      // Raw HTTP/JSON-RPC errors may contain paths or upstream detail. Preserve
+      // the private credential and queue; never login or retry a tools/call.
+      fail("ASSISTANT_MCP_UNAVAILABLE");
+    }
+  };
+  return {
+    async listTools(signal) {
+      return perform(async ({ protocol, config, credential, session, request, signal }) => {
+        const tools = await protocol.listRemoteTools(config, credential, session, request, { signal });
+        const seen = new Set();
+        const selected = tools.filter(tool => ASSISTANT_MCP_READ_TOOLS.includes(tool?.name)).map(tool => {
+          if (seen.has(tool.name) || typeof tool.description !== "string" || tool.description.length > 4096
+            || !object(tool.inputSchema) || tool.inputSchema.type !== "object") fail("ASSISTANT_MCP_INVALID_RESPONSE");
+          seen.add(tool.name);
+          // Do not proxy remote App metadata, URLs or OAuth security schemes.
+          return { name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
+            annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } };
+        });
+        if (!seen.has("get_assistant_status") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        return selected;
+      }, signal);
+    },
+    async callTool(name, args, signal) {
+      if (!ASSISTANT_MCP_READ_TOOLS.includes(name) || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
+      // Snapshot once before asynchronous private/network I/O, as in the shared
+      // Remote MCP transport. A mutable caller cannot replace reviewed args.
+      const argumentsSnapshot = JSON.parse(JSON.stringify(args));
+      return perform(async ({ protocol, config, credential, session, request, signal }) => {
+        const response = await request({ config, credential, sessionId: session.sessionId, payload: {
+          jsonrpc: "2.0", id: session.nextRequestId(), method: "tools/call", params: { name, arguments: argumentsSnapshot },
+        } }, { signal });
+        const value = protocol.assertJsonRpcResult(response, "tools/call");
+        if (!object(value) || !Array.isArray(value.content) || value.content.length > 20
+          || value.content.some(item => !object(item) || item.type !== "text" || typeof item.text !== "string")
+          || (value.structuredContent !== undefined && !object(value.structuredContent))
+          || (value.isError !== undefined && typeof value.isError !== "boolean")
+          || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        return { content: value.content.map(({ type, text }) => ({ type, text })),
+          ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
+          ...(value.isError === undefined ? {} : { isError: value.isError }) };
+      }, signal);
     },
   };
 };
