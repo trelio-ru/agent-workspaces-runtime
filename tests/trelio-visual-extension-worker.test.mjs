@@ -28,7 +28,11 @@ test('extension installs literal origin guards before bootstrap and never naviga
       runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: { addListener(fn) { detach = fn; } }, onEvent: events, async attach() {}, async sendCommand(_source, method) { guardCommands.push(method); return {}; } },
       webRequest: { onBeforeRequest: events, onHeadersReceived: events },
       windows: { onCreated: events, onRemoved: events, async getAll() { assert.ok(rules, 'navigation policy precedes window discovery'); return [{ id: 1 }]; } },
-      tabs: { onCreated: events, onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'about:blank' }]; }, async update(_id, value) { assert.equal(value.url, 'https://www.example.test/'); } },
+      tabs: { onCreated: events, onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'chrome://newtab/' }]; }, async update(_id, value) {
+        if (value.url === 'about:blank') assert.equal(guardCommands.includes('Fetch.enable'), false, 'privileged new-tab commits inert blank before attachment');
+        else { assert.equal(value.url, 'https://www.example.test/'); assert.ok(guardCommands.includes('Fetch.enable'), 'provider URL follows the installed response guard'); }
+        return { id: 1, url: value.url, status: 'complete' };
+      } },
       cookies: { onChanged: events, async getAll() { return []; }, async set() { throw Error('unexpected_cookie_restore'); } },
       declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules(value) { rules = value.addRules; } },
     },

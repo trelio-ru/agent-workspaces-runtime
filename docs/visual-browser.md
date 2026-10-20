@@ -140,7 +140,9 @@ navigation и не сохраняются как persistent extension ruleset. �
 MIME-only DNR rule нельзя применять к 301 без Content-Type: это обычный переход,
 не готовый файл. Host сначала включает Fetch guard exact owned tab, затем даёт
 только этому tab исключение из main-frame MIME rule. Первый URL открывается
-через blank после guard; новые незащищённые popups и subframes сохраняют строгий
+через blank после guard. Служебная new-tab Windows/Linux сначала коммитится в
+инертную about:blank под прежним deadline; до Fetch нет provider HTTP.
+Новые незащищённые popups и subframes сохраняют строгий
 DNR default. При native detach exception отзывается, input/capture ждут policy
 write и fail-closed при ошибке. Browser error document возвращает document_blocked,
 не выдаётся за страницу с отсутствующим text adapter.

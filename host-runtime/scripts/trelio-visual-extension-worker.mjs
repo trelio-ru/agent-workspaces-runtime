@@ -497,6 +497,15 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
       else if (!windows.length) initial = (await chrome.windows.create({ url: 'about:blank', focused: manual, width: 1440, height: 1000 })).tabs?.[0];
       else initial = await chrome.tabs.create({ url: 'about:blank', active: manual });
+      // Windows/Linux start with Chrome's privileged new-tab page. Its target
+      // cannot be attached like an ordinary document. Commit an owned inert
+      // about:blank first; this performs no HTTP and leaves DNR fully strict.
+      // tabs.update may acknowledge before that commit, so poll only the native
+      // URL/status metadata under the original lease, never page code/selectors.
+      if (initial.url !== 'about:blank') initial = await chrome.tabs.update(initial.id, { url: 'about:blank' });
+      const blankUntil = Math.min(Date.now() + 8000, config.deadlineAt);
+      while ((initial.status === 'loading' || initial.url !== 'about:blank') && Date.now() < blankUntil) { await pause(100); initial = await chrome.tabs.get(initial.id); }
+      if (initial.url !== 'about:blank' || initial.status === 'loading') throw Error('document_blocked');
       await attach(initial.id);
       initial = await chrome.tabs.update(initial.id, { url: allowedNavigation(config.initialUrl) });
       // Manual setup must not announce its window before the first document has

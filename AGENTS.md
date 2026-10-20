@@ -238,7 +238,9 @@ publication tooling также остаются вне этого публичн
   без чтения body/headers в MCP. Headerless HTTP redirects разрешаются по status;
   конечный main document требует HTML и не может стать download. MIME exception
   DNR даётся exact tab только после включения Fetch; новые popups и subframes
-  сохраняют строгий DNR default. Detach отзывает exception и блокирует input
+  сохраняют строгий DNR default. Служебная new-tab Windows/Linux переводится в
+  about:blank до attach; bounded native metadata wait не делает HTTP.
+  Detach отзывает exception и блокирует input
   до завершения policy write. Cookie API отдельно
   обслуживает private session-auth: signed domain scope, bounded schema, CHIPS
   identity и AEAD snapshot, без cookie-valued полей в MCP. Restore идёт до
