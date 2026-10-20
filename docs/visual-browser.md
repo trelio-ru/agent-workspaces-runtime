@@ -88,9 +88,14 @@ Chromium запускается как обычный headed browser с собс
 Нет Puppeteer launch, remote-debugging port/pipe, `--enable-automation`,
 AutomationControlled override или fingerprint spoof. MV3 extension использует
 внутренний `chrome.debugger`: только фиксированные Page raster/layout/MIME
-и Input события. Отдельный закрытый Cookie API обслуживает локальное сохранение
+и Input события. Fixed Fetch guard приостанавливает только Document response
+до body: по status и bounded заголовкам разрешает настоящий 301/302/303/307/308
+с Location либо конечный HTML. Attachment, отсутствующий/иной MIME конечного
+ответа, неоднозначные headers и неизвестная стадия запрещены; Location на 200
+не делает ресурс редиректом. Body не запрашивается, headers/URL не выдаются модели.
+Отдельный закрытый Cookie API обслуживает локальное сохранение
 авторизации, без model-facing read/write методов. Downloads ограничивает
-response-stage DNR guard. Это всё ещё debugger API; отсутствие startup
+response-stage guard и независимое DNR attachment rule. Это всё ещё debugger API; отсутствие startup
 DevTools mode само по себе не гарантирует принятие внешним сайтом.
 
 Extension подключается к одному host-owned loopback WebSocket: exact path,
@@ -132,6 +137,15 @@ Main-frame HTTP(S) navigation ограничена signed origins/domains чер
 Правила принадлежат browser session: устанавливаются до первой provider
 navigation и не сохраняются как persistent extension ruleset. Их lifetime
 совпадает с owned browser process; reconnect не снимает действующие правила.
+MIME-only DNR rule нельзя применять к 301 без Content-Type: это обычный переход,
+не готовый файл. Host сначала включает Fetch guard exact owned tab, затем даёт
+только этому tab исключение из main-frame MIME rule. Первый URL открывается
+через blank после guard. Служебная new-tab Windows/Linux сначала коммитится в
+инертную about:blank под прежним deadline; до Fetch нет provider HTTP.
+Новые незащищённые popups и subframes сохраняют строгий
+DNR default. При native detach exception отзывается, input/capture ждут policy
+write и fail-closed при ошибке. Browser error document возвращает document_blocked,
+не выдаётся за страницу с отсутствующим text adapter.
 Source/resource URLs и специальные схемы отклоняются. Browser downloads
 запрещены отдельно: suffix URL не доказывает тип ответа.
 

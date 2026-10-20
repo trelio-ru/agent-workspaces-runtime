@@ -3,19 +3,36 @@ import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-p
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { visualExtensionWorker } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
+import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
-const startWorker = (config, context) => vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()});`, context);
+const startWorker = (config, context) => vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
+
+test('document response guard distinguishes redirects from final resources without revealing headers', () => {
+  const header = (name, value) => ({ name, value });
+  for (const status of [301, 302, 303, 307, 308]) assert.equal(visualDocumentResponsePolicy(status, [header('Location', '/detail')]), 'redirect');
+  assert.equal(visualDocumentResponsePolicy(200, [header('Content-Type', 'text/html; charset=utf-8')]), 'html');
+  for (const headers of [[], [header('Location', '/detail')], [header('content-type', 'application/json')], [header('content-type', 'application/octet-stream'), header('location', '/detail')], [header('content-type', 'text/html'), header('content-disposition', 'attachment; filename=synthetic')], [header('content-type', 'text/html'), header('Content-Type', 'application/json')]]) {
+    assert.equal(visualDocumentResponsePolicy(200, headers), 'block');
+  }
+  assert.equal(visualDocumentResponsePolicy(301, [header('location', '/detail'), header('content-disposition', 'attachment')]), 'block');
+  assert.equal(visualDocumentResponsePolicy(undefined, []), 'block');
+  assert.equal(visualDocumentResponsePolicy(200, [header('content-type', 'text/html'), header('irrelevant', 'x'.repeat(65536))]), 'block');
+});
 
 test('extension installs literal origin guards before bootstrap and never navigates an adversarial sibling', async () => {
-  let rules, socket; const sent = [], events = { addListener() {} };
+  let rules, socket, detach; const sent = [], events = { addListener() {} };
+  const guardCommands = [];
   const context = {
     URL, Date, TextEncoder, setTimeout, clearTimeout,
     chrome: {
-      runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
+      runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: { addListener(fn) { detach = fn; } }, onEvent: events, async attach() {}, async sendCommand(_source, method) { guardCommands.push(method); return {}; } },
       webRequest: { onBeforeRequest: events, onHeadersReceived: events },
       windows: { onCreated: events, onRemoved: events, async getAll() { assert.ok(rules, 'navigation policy precedes window discovery'); return [{ id: 1 }]; } },
-      tabs: { onCreated: events, onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'about:blank' }]; }, async update(_id, value) { assert.equal(value.url, 'https://www.example.test/'); } },
+      tabs: { onCreated: events, onRemoved: events, async query() { assert.ok(rules); return [{ id: 1, url: 'chrome://newtab/' }]; }, async update(_id, value) {
+        if (value.url === 'about:blank') assert.equal(guardCommands.includes('Fetch.enable'), false, 'privileged new-tab commits inert blank before attachment');
+        else { assert.equal(value.url, 'https://www.example.test/'); assert.ok(guardCommands.includes('Fetch.enable'), 'provider URL follows the installed response guard'); }
+        return { id: 1, url: value.url, status: 'complete' };
+      } },
       cookies: { onChanged: events, async getAll() { return []; }, async set() { throw Error('unexpected_cookie_restore'); } },
       declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules(value) { rules = value.addRules; } },
     },
@@ -33,6 +50,12 @@ test('extension installs literal origin guards before bootstrap and never naviga
   socket.onmessage({ data: JSON.stringify({ id: 'bootstrap', operation: 'restore-session-auth', args: { cookies: [], replace: false } }) });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sent.at(-1).kind, 'hello');
+  assert.ok(guardCommands.includes('Fetch.enable'), 'response interception precedes the first provider URL');
+  assert.deepEqual([...rules.find(rule => rule.id === 3).condition.excludedTabIds], [1]);
+  assert.equal(rules.find(rule => rule.id === 4).condition.excludedTabIds, undefined, 'subframe MIME guards remain strict');
+  detach({ tabId: 1 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rules.find(rule => rule.id === 3).condition.excludedTabIds, undefined, 'native detach revokes the exact MIME exception');
   const allows = url => rules.some(rule => rule.action.type === 'allow' && new RegExp(rule.condition.regexFilter).test(url));
   assert.equal(allows('https://www.example.test/detail'), true);
   for (const url of ['https://wwwXexampleXtest/detail', 'https://example.test.evil.com/detail', 'https://evilexample.test/detail', 'https://example.test:444/detail']) assert.equal(allows(url), false, url);
@@ -44,7 +67,7 @@ test('extension installs literal origin guards before bootstrap and never naviga
 test('bootstrap reports only a closed policy failure before accepting input', async () => {
   const sent = [], events = { addListener() {} }; let socket;
   const context = { URL, Date, TextEncoder, setTimeout, clearTimeout, chrome: {
-    runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
+    runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events, async attach() {}, async sendCommand() { return {}; } },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events }, windows: { onCreated: events, onRemoved: events },
     tabs: { onCreated: events, onRemoved: events }, cookies: { onChanged: events },
     declarativeNetRequest: { async getSessionRules() { throw Error('PRIVATE native detail'); } },
@@ -63,7 +86,7 @@ test('private auth observes logout but freezes before last-window cleanup and ne
   const cookie = { name: 'fixture_session', value: 'SYNTHETIC_PRIVATE_AUTH', domain: 'example.test', path: '/', hostOnly: true, httpOnly: true, secure: true, sameSite: 'strict', session: true, storeId: '0' };
   let socket, cookieChanged, tabRemoved, windowRemoved, windowCreated, live = [cookie], windows = [{ id: 1 }];
   const context = { URL, Date, TextEncoder, setTimeout, clearTimeout, chrome: {
-    runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
+    runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events, async attach() {}, async sendCommand() { return {}; } },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events },
     declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
     windows: { onCreated: { addListener(fn) { windowCreated = fn; } }, onRemoved: { addListener(fn) { windowRemoved = fn; } }, async getAll() { assert.ok(windows.length, 'no async window API after final profile close'); return windows; } },
@@ -106,7 +129,7 @@ test('lease expiry during private cookie restore cannot open a late provider win
   // Delay the actual Cookie API acknowledgement, rather than a public call.
   // An expired host lease must still block the continuation after that await.
   const context = { URL, Date: class extends Date { static now() { return now; } }, TextEncoder, setTimeout, clearTimeout, chrome: {
-    runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events },
+    runtime: { id: 'fixture', onMessage: events }, debugger: { onDetach: events, onEvent: events, async attach() {}, async sendCommand() { return {}; } },
     webRequest: { onBeforeRequest: events, onHeadersReceived: events },
     declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
     windows: { onCreated: events, onRemoved: events, async getAll() { return []; }, async create() { navigations++; } },

@@ -180,3 +180,36 @@ test('manual window close and ready save once before unlocking images; crash pre
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
+
+test('document guard follows headerless redirects and blocks final files including deceptive Location', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 120_000 }, async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-redirect-')));
+  const server = http.createServer((request, response) => {
+    if (request.url === '/short' || request.url === '/chain') {
+      response.writeHead(request.url === '/short' ? 301 : 302, { Location: request.url === '/short' ? '/detail' : '/short' }); response.end(); return;
+    }
+    if (request.url === '/json') { response.setHeader('Content-Type', 'application/json'); response.end('{"synthetic":"must not be observed"}'); return; }
+    if (request.url === '/binary-location') { response.writeHead(200, { 'Content-Type': 'application/octet-stream', Location: '/detail' }); response.end('SYNTHETIC_NOT_A_REDIRECT'); return; }
+    if (request.url === '/attachment') { response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Disposition': 'attachment; filename=synthetic.html' }); response.end('SYNTHETIC_ATTACHMENT'); return; }
+    if (request.url === '/missing-type') { response.end('SYNTHETIC_WITHOUT_CONTENT_TYPE'); return; }
+    response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body>Completed synthetic redirect</body>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const store = { directory, async read() {}, async prepare() {}, async write() {}, close() {} };
+  const browser = new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], observationMode: 'text', lease: { deadlineAt: Date.now() + 110_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+  try {
+    for (const suffix of ['/short', '/chain']) {
+      const result = await browser.call('navigate', { url: origin + suffix });
+      assert.equal(result.state, 'ready', JSON.stringify({ state: result.state, reason: result.reason }));
+      assert.match(result.text, /Completed synthetic redirect/);
+    }
+    for (const suffix of ['/json', '/binary-location', '/attachment', '/missing-type']) {
+      const result = await browser.call('navigate', { url: origin + suffix });
+      assert.equal(result.state, 'error');
+      assert.equal(result.reason, 'document_blocked');
+      assert.equal(result.text, undefined);
+      assert.equal(result.image, undefined);
+    }
+  } finally { await browser.close().catch(() => browser.abort()); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); }
+});

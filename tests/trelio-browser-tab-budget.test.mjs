@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { createBrowserTabBudget } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 import { createBrowserRequestPacing } from '../host-runtime/scripts/trelio-browser-policy.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
-import { visualExtensionWorker } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
+import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 
 test('five tabs over the browser lifetime, not five more after a tab is closed', () => {
   const budget = createBrowserTabBudget();
@@ -22,7 +22,7 @@ test('native extension events remove popup overflow; close removes every owned w
   let socket, onCreated, onRemoved;
   const config = { origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'], initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', deadlineAt: Date.now() + 10000, manual: true };
   const context = { URL, Date, TextEncoder, setTimeout, clearTimeout, chrome: {
-    runtime: { id: 'fixture', onMessage: noop }, debugger: { onDetach: noop, onEvent: noop },
+    runtime: { id: 'fixture', onMessage: noop }, debugger: { onDetach: noop, onEvent: noop, async attach() {}, async detach() {}, async sendCommand() { return {}; } },
     webRequest: { onBeforeRequest: noop, onHeadersReceived: noop },
     cookies: { onChanged: noop, async getAll() { return []; } },
     declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
@@ -30,7 +30,7 @@ test('native extension events remove popup overflow; close removes every owned w
     tabs: { onCreated: { addListener(fn) { onCreated = fn; } }, onRemoved: { addListener(fn) { onRemoved = fn; } },
       async query() { return [{ id: 1, url: 'about:blank' }]; }, async update() { return { id: 1, status: 'complete' }; }, async remove(id) { removed.push(id); onRemoved(id, { windowId: 2, isWindowClosing: false }); } },
   }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
-  vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()});`, context);
+  vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
   const tick = () => new Promise(resolve => setImmediate(resolve));
   await tick(); socket.onopen();
   socket.onmessage({ data: JSON.stringify({ id: 'auth', operation: 'restore-session-auth', args: { cookies: [], replace: false } }) });

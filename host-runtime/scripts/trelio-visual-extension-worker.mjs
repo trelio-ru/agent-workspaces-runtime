@@ -1,10 +1,30 @@
 /**
- * This function is materialized as the owned MV3 service worker. It has no
+ * These functions are materialized as the owned MV3 service worker. It has no
  * scripting permission, arbitrary page evaluate or DOM-tree projection.
  * Fixed isolated adapters route links and, only on signed opt-in, read rendered text.
  * Only the closed host command vocabulary below can reach chrome.debugger.
  */
-export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget) {
+export function visualDocumentResponsePolicy(status, headers) {
+  // Response metadata stays inside the trusted adapter. A redirect is not a
+  // document: valid 301/302/303/307/308 responses may omit Content-Type entirely.
+  // A Location on a 200 must NOT exempt a binary/download response from checks.
+  if (!Number.isInteger(status) || status < 200 || status > 599 || !Array.isArray(headers) || headers.length > 256) return 'block';
+  let bytes = 0;
+  const fields = new Map();
+  for (const header of headers) {
+    if (typeof header?.name !== 'string' || typeof header.value !== 'string' || (bytes += header.name.length + header.value.length) > 65536) return 'block';
+    const name = header.name.toLowerCase();
+    if (['content-type', 'location', 'content-disposition'].includes(name)) {
+      if (fields.has(name)) return 'block';
+      fields.set(name, header.value);
+    }
+  }
+  if (/\battachment\b/i.test(fields.get('content-disposition') || '')) return 'block';
+  if ([301, 302, 303, 307, 308].includes(status) && fields.get('location')?.trim()) return 'redirect';
+  return (fields.get('content-type') || '').split(';', 1)[0].trim().toLowerCase() === 'text/html' ? 'html' : 'block';
+}
+
+export function visualExtensionWorker(config, cookieState, createPacing, createTabBudget, documentPolicy) {
   const requestPacing = createPacing();
   const tabBudget = createTabBudget();
   let observedFrameId, navigationGeneration = 0;
@@ -15,6 +35,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const ownedWindows = new Set(), windowChanges = [];
   let windowInventoryReady = false;
   const attached = new Set();
+  const guardedTabs = new Set(), documentFailures = new Set();
+  let guardUpdate = Promise.resolve(), guardFailed = false;
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
   const admitTab = tab => {
     if (tabBudget.admit(tab.id)) return;
@@ -101,7 +123,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   chrome.tabs.onRemoved.addListener((_tabId, info) => { tabBudget.removed(_tabId); httpFailures.delete(_tabId); if (info.isWindowClosing) windowClosing(info.windowId, true); });
   // Numeric main-document evidence only: no request/response headers or body,
   // and no URL path/query leaves this adapter. Transport errors have no status.
-  chrome.webRequest.onBeforeRequest.addListener(details => { httpFailures.delete(details.tabId); }, { urls: config.matches, types: ['main_frame'] });
+  chrome.webRequest.onBeforeRequest.addListener(details => { httpFailures.delete(details.tabId); documentFailures.delete(details.tabId); }, { urls: config.matches, types: ['main_frame'] });
   chrome.webRequest.onHeadersReceived.addListener(details => {
     const url = new URL(details.url);
     if (url.protocol === 'https:' && allowed(details.url) && details.statusCode >= 400 && details.statusCode <= 599) httpFailures.set(details.tabId, { origin: url.origin, httpStatus: details.statusCode });
@@ -113,8 +135,29 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     catch { pending.reject(Error('navigation_blocked')); }
   });
   const command = (tabId, method, args = {}) => chrome.debugger.sendCommand({ tabId }, method, args);
-  chrome.debugger.onDetach.addListener(source => { attached.delete(source.tabId); if (frame?.tabId === source.tabId) frame = undefined; });
+  chrome.debugger.onDetach.addListener(source => {
+    attached.delete(source.tabId); guardedTabs.delete(source.tabId);
+    if (frame?.tabId === source.tabId) frame = undefined;
+    // Revoke the response-rule exception after unexpected native detach. No
+    // further observation/input runs while that policy write is unresolved.
+    guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+  });
   chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (method === 'Fetch.requestPaused') {
+      // Fixed response-stage Document interception only; never request a body,
+      // evaluate site code or return headers/URLs through the pixels/text API.
+      // DNR still bounds every main-frame destination and blocks attachments.
+      void (async () => {
+        const decision = params.resourceType === 'Document' ? documentPolicy(params.responseStatusCode, params.responseHeaders) : 'block';
+        if (decision !== 'block') {
+          await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
+        } else {
+          frame = undefined; documentFailures.add(source.tabId);
+          await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'BlockedByClient' });
+        }
+      })().catch(() => { guardFailed = true; frame = undefined; });
+      return;
+    }
     // An allowed navigation still replaces the pictured document. Retire its
     // token without reading/forwarding event URLs, frame trees or page data.
     if ((method === 'Page.frameNavigated' && !params.frame?.parentId) || method === 'Page.navigatedWithinDocument') navigationGeneration++;
@@ -128,12 +171,21 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // Do not enable Runtime/Debugger/Network or inspect a page's source. The
     // only page reads are layout metrics, MIME type and raster screenshot.
     await command(tabId, 'Page.enable');
+    // Enable the final-document guard BEFORE exempting this exact owned tab
+    // from DNR's MIME-only rule. Unattached popups keep the strict default;
+    // their mere creation never opens an unguarded download/navigation gap.
+    await command(tabId, 'Fetch.enable', { patterns: [{ resourceType: 'Document', requestStage: 'Response' }] });
+    guardedTabs.add(tabId);
+    guardUpdate = guardUpdate.then(() => installRules());
+    try { await guardUpdate; } catch (error) { guardFailed = true; throw error; }
   }
   // Input belongs to the browser's already-selected tab. Merely choosing the
   // newest background popup can capture its pixels but lose keyboard input;
   // choosing an existing active target needs no per-action focus activation.
   const preferredTab = tabs => tabs.sort((a, b) => Number(Boolean(b.active)) - Number(Boolean(a.active)) || b.id - a.id)[0];
   async function selected() {
+    await guardUpdate;
+    if (guardFailed) throw Error('document_blocked');
     await tabCleanup;
     if (tabCleanupFailed) throw Error('tab_limit_reached');
     const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => tabBudget.contains(t.id) && allowed(t.url));
@@ -155,8 +207,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // Capture the selected renderer without selecting its browser tab: on
     // macOS even tabs.update({active:true}) can activate the containing app.
     await attach(tab.id);
+    if (documentFailures.has(tab.id)) throw Error('document_blocked');
     if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
     const tree = await command(tab.id, 'Page.getFrameTree');
+    if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
     if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
@@ -198,7 +252,9 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     allowedNavigation(tab.url);
     if (httpFailures.has(tab.id)) return { state: 'error', reason: 'http_document_failure', ...httpFailures.get(tab.id) };
     await attach(tab.id);
+    if (documentFailures.has(tab.id)) throw Error('document_blocked');
     const tree = await command(tab.id, 'Page.getFrameTree');
+    if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
     if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
@@ -274,16 +330,21 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       return { state: 'closed' };
     }
     if (manual) throw Error('manual_control_active');
+    await guardUpdate;
+    if (guardFailed) throw Error('document_blocked');
     if (op === 'navigate') {
       const url = allowedNavigation(args.url);
       frame = undefined;
       await tabCleanup;
       if (tabCleanupFailed) throw Error('tab_limit_reached');
       const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => tabBudget.contains(t.id) && allowed(t.url));
-      if (tabs.length) await chrome.tabs.update(preferredTab(tabs).id, { url });
+      let target;
+      if (tabs.length) target = preferredTab(tabs);
       else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
-      else if ((await chrome.windows.getAll({ windowTypes: ['normal'] })).length) await chrome.tabs.create({ url, active: false });
-      else await chrome.windows.create({ url, focused: false, width: 1440, height: 1000 });
+      else if ((await chrome.windows.getAll({ windowTypes: ['normal'] })).length) target = await chrome.tabs.create({ url: 'about:blank', active: false });
+      else target = (await chrome.windows.create({ url: 'about:blank', focused: false, width: 1440, height: 1000 })).tabs?.[0];
+      await attach(target.id);
+      await chrome.tabs.update(target.id, { url });
       await pause(1000);
       return captureDefault();
     }
@@ -384,18 +445,19 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   // report one closed stage rather than disappear into a socket timeout.
   // Reconnection only repeats readiness, never the initial navigation.
   connect();
-  (async () => {
-    try {
+  async function installRules() {
       const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // Response-stage guards deny a document download before its body reaches
-      // a file. They outrank origin allow rules, including a hidden attachment
-      // behind a normal URL. No headers/body are exposed through the API.
+      // Attachment rules always outrank origin allow rules. The MIME-only
+      // fallback stays strict for new/unattached tabs and subframes; an exact
+      // tab is exempted only after its response-status-aware Fetch guard exists.
+      // Otherwise a legitimate headerless redirect is mistaken for a file.
       const rules = [
         { id: 1, priority: 1, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'] } },
         { id: 2, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
-        { id: 3, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
+        { id: 3, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'], ...(guardedTabs.size ? { excludedTabIds: [...guardedTabs] } : {}), excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
+        { id: 4, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['sub_frame'], excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
       ];
-      let ruleId = 4;
+      let ruleId = 5;
       for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
       // This profile and its signed navigation policy live for one browser
@@ -406,6 +468,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       const previous = await chrome.declarativeNetRequest.getSessionRules();
       bootstrapStage = 'policy_write';
       await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: previous.map(rule => rule.id), addRules: rules });
+  }
+  (async () => {
+    try {
+      await installRules();
       bootstrapStage = 'window_inventory';
       for (const window of await chrome.windows.getAll({ windowTypes: ['normal', 'popup'] })) ownedWindows.add(window.id);
       for (const change of windowChanges.splice(0)) { if (change.removed) ownedWindows.delete(change.id); else ownedWindows.add(change.id); }
@@ -427,10 +493,21 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
       activeStartup();
       let initial;
-      if (blank) initial = await chrome.tabs.update(blank.id, { url: allowedNavigation(config.initialUrl) });
+      if (blank) initial = blank;
       else if (!tabBudget.canCreate) throw Error('tab_limit_reached');
-      else if (!windows.length) initial = (await chrome.windows.create({ url: allowedNavigation(config.initialUrl), focused: manual, width: 1440, height: 1000 })).tabs?.[0];
-      else initial = await chrome.tabs.create({ url: allowedNavigation(config.initialUrl), active: manual });
+      else if (!windows.length) initial = (await chrome.windows.create({ url: 'about:blank', focused: manual, width: 1440, height: 1000 })).tabs?.[0];
+      else initial = await chrome.tabs.create({ url: 'about:blank', active: manual });
+      // Windows/Linux start with Chrome's privileged new-tab page. Its target
+      // cannot be attached like an ordinary document. Commit an owned inert
+      // about:blank first; this performs no HTTP and leaves DNR fully strict.
+      // tabs.update may acknowledge before that commit, so poll only the native
+      // URL/status metadata under the original lease, never page code/selectors.
+      if (initial.url !== 'about:blank') initial = await chrome.tabs.update(initial.id, { url: 'about:blank' });
+      const blankUntil = Math.min(Date.now() + 8000, config.deadlineAt);
+      while ((initial.status === 'loading' || initial.url !== 'about:blank') && Date.now() < blankUntil) { await pause(100); initial = await chrome.tabs.get(initial.id); }
+      if (initial.url !== 'about:blank' || initial.status === 'loading') throw Error('document_blocked');
+      await attach(initial.id);
+      initial = await chrome.tabs.update(initial.id, { url: allowedNavigation(config.initialUrl) });
       // Manual setup must not announce its window before the first document has
       // loaded: a fast ready/close otherwise snapshots an unopened login page.
       // Read only browser tab metadata, under the original absolute deadline.
