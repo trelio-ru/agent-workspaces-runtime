@@ -504,6 +504,48 @@ Codex/Claude Code, чтобы загрузить установленную ве
 указанной рабочей папки, отказ доступа и ошибка уже запущенного child сохраняют
 обычный путь ошибки; пользовательская отмена остаётся приоритетной.
 
+<a id="protected-browser-fields"></a>
+
+## Защищённый ввод в поля без id
+
+Browser grant сохраняет exact HTTPS URL/hash, поля, selectors и one-use
+consume; секрет не входит в MCP/browser-tool input/output, argv, clipboard или
+диагностику. Runtime выбирает transport до consume; после выдачи нет повторной
+подстановки или смены поверхности.
+
+Native id locators сохраняют прежний ABI. Явный `input[type="password"]`
+(также с одинарными кавычками или без них) передаётся helper как
+`passwordInput=true`, не как пустой id. AXSecureTextField / UIA IsPassword
+проверяются без чтения значения. Во всём exact top-level документе должен
+существовать ровно один такой объект; hidden/disabled/read-only, дубликат,
+смена URL/объекта либо перекрывающиеся id/role mappings дают отказ.
+Native object identity и роль перепроверяются до каждого setter.
+
+Только план с этим явным password locator расширяет discovery native клиента
+на работающий Google Chrome: macOS проверяет bundle `com.google.Chrome` и
+Apple team `EQHXZ8M8AV`, Windows – Authenticode `Google LLC` и product
+`Google Chrome`. Выбирается единственный exact документ среди разрешённых
+подписанных приложений, затем сохраняются окно/контейнер/объекты.
+Профиль, cookies и вкладка остаются прежними; приложения не активируются.
+Так SMTP-форма с публичным username и единственным id-less password input
+может получить только password после обычной подготовки публичных полей.
+
+Quoted `[name="..."]` с optional `input|textarea|button` использует DOM
+transport: AX/UIA не умеет проверить HTML name и не заменяет его label/order.
+Имя – до 128 ASCII-символов `A-Za-z0-9_.:-` с первым `A-Za-z_`.
+Составные/partial/positional selectors не входят в новый ABI. DOM выполняет
+полный unique/visible/writable preflight до checkout. Submit допускает button
+либо input type submit/button, сохраняя exact hit test перед browser mouse
+event. File/image inputs и произвольные элементы не принимаются.
+DOM использует собственный persistent профиль, не авторизацию обычного Chrome.
+Embedded-only field-only план не переключается на него и сообщает конкретную
+причину до выдачи секрета. Для уже авторизованной формы подходит явный native
+password locator; общедоступные non-secret поля заполняются отдельно.
+
+Проверки – production controller в synthetic SMTP DOM, native request/binding
+regressions, compilation macOS helper и настоящие UIA secure-edit fixtures
+в Windows CI. Fixtures содержат только искусственные canary credentials.
+
 <a id="browser-bootstrap"></a>
 
 ## Bootstrap браузерных навыков
