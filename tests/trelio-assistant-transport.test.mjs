@@ -234,7 +234,7 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});
   const fields={
     create_comment:{acceptedFiles:{type:'array',items:{type:'object',properties:{runId:{type:'string'},filePath:{type:'string'}},additionalProperties:false},minItems:1,maxItems:10}},
-    ask_assistant_owner:{answerOptions:{type:'array',items:{type:'string'},minItems:2,maxItems:8}},
+    ask_assistant_owner:{options:{type:'array',items:{type:'string'},minItems:2,maxItems:8}},
     create_task_relation:{targetTaskId:{type:'string'},relationType:{type:'string'}},
     delete_task_relation:{relationId:{type:'string'}},
   };
@@ -263,7 +263,7 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   const expected=structuredClone(fileBody),pending=client.callTool('create_comment',fileBody);
   fileBody.acceptedFiles[0].filePath='changed-after-invocation.pdf';await pending;
   assert.deepEqual(calls.at(-1),{name:'create_comment',arguments:expected});
-  const question={...proof,clientRequestId:randomUUID(),questionText:'Choose the next step',answerOptions:['Prepare a draft','Wait for the supplier']};
+  const question={...proof,clientRequestId:randomUUID(),questionText:'Choose the next step',options:['Prepare a draft','Wait for the supplier']};
   await client.callTool('ask_assistant_owner',question);assert.deepEqual(calls.at(-1),{name:'ask_assistant_owner',arguments:question});
   const relation={...proof,clientRequestId:randomUUID(),targetTaskId:randomUUID(),relationType:'Needs coordination'};
   await client.callTool('create_task_relation',relation);assert.deepEqual(calls.at(-1),{name:'create_task_relation',arguments:relation});
