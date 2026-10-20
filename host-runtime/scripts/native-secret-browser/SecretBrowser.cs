@@ -39,6 +39,7 @@ internal sealed class NativeLease : IDisposable {
 public sealed class Field {
     public string fieldKey { get; set; }
     public string id { get; set; }
+    public bool passwordInput { get; set; }
 }
 public sealed class Step {
     public string targetOrigin { get; set; }
@@ -98,6 +99,7 @@ internal static class Signature {
             using (var certificate = new X509Certificate2(X509Certificate.CreateFromSignedFile(file))) {
                 string publisher = certificate.GetNameInfo(X509NameType.SimpleName, false);
                 string product = FileVersionInfo.GetVersionInfo(file).ProductName ?? "";
+                if (family == "chrome") return publisher == "Google LLC" && product == "Google Chrome";
                 return family == "codex"
                     ? new[] { "OpenAI OpCo, LLC", "OpenAI, L.L.C.", "OpenAI" }.Contains(publisher)
                         // Codex is also shipped as the unified ChatGPT app;
@@ -187,8 +189,16 @@ internal sealed class Session {
             return true;
         }).ToList();
     }
-    private static AutomationElement Find(List<AutomationElement> nodes, AutomationElement doc, string id, bool isButton) {
-        var candidates = nodes.Where(element => element.Current.AutomationId == id && Belongs(element, doc)).ToArray();
+    private static bool MatchesField(AutomationElement element, Field field) {
+        // IsPassword is provider metadata, never ValuePattern.Current.Value.
+        // A role locator must not be silently treated as a missing/empty id.
+        return field.passwordInput
+            ? field.id == null && element.Current.ControlType == ControlType.Edit && element.Current.IsPassword
+            : field.id != null && element.Current.AutomationId == field.id;
+    }
+    private static AutomationElement Find(List<AutomationElement> nodes, AutomationElement doc, string id, bool isButton, bool passwordInput = false) {
+        var field = new Field { id = id, passwordInput = passwordInput };
+        var candidates = nodes.Where(element => MatchesField(element, field) && Belongs(element, doc)).ToArray();
         if (candidates.Length == 0) throw new Stop("field_not_found");
         if (candidates.Length != 1) throw new Stop("field_ambiguous");
         var target = candidates[0];
@@ -208,7 +218,9 @@ internal sealed class Session {
     }
     private static AutomationElement[] Controls(AutomationElement doc, Step step, out AutomationElement button) {
         var nodes = Walk(doc, true);
-        var result = step.fields.Select(field => Find(nodes, doc, field.id, false)).ToArray();
+        var result = step.fields.Select(field => Find(nodes, doc, field.id, false, field.passwordInput)).ToArray();
+        if (result.Where((target, index) => result.Take(index).Any(previous => Equal(target, previous))).Any())
+            throw new Stop("field_ambiguous");
         button = step.submitId == null ? null : Find(nodes, doc, step.submitId, true);
         return result;
     }
@@ -252,7 +264,8 @@ internal sealed class Session {
             || request.steps.Any(step => step.fields == null || step.fields.Length == 0 || step.fields.Length > 50))
             throw new Stop("adapter_error");
         steps = request.steps;
-        var names = request.clientFamily == "codex" ? new[] { "Codex", "ChatGPT" } : new[] { "Claude" };
+        var names = (request.clientFamily == "codex" ? new[] { "Codex", "ChatGPT" } : new[] { "Claude" })
+            .Concat(steps.Any(step => step.fields.Any(field => field.passwordInput)) ? new[] { "chrome" } : new string[0]).ToArray();
         var applications = Process.GetProcesses().Where(candidate => names.Contains(candidate.ProcessName, StringComparer.OrdinalIgnoreCase)).ToArray();
         var candidates = new List<Tuple<Process, AutomationElement, AutomationElement>>();
         int exposed = 0, windowCount = 0;
@@ -265,7 +278,11 @@ internal sealed class Session {
             }, IntPtr.Zero);
             if (handles.Count == 0) continue; // Ignore Chromium background helpers.
             windowCount += handles.Count;
-            if (!Signature.Trusted(application.MainModule.FileName, request.clientFamily)) throw new Stop("adapter_error");
+            // Chrome participates only in an explicit unique-password plan.
+            // The publisher AND product are verified; a same-named process
+            // cannot receive a value merely because it exposes a matching URL.
+            var family = application.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ? "chrome" : request.clientFamily;
+            if (!Signature.Trusted(application.MainModule.FileName, family)) throw new Stop("adapter_error");
             foreach (var handle in handles) {
                 var root = AutomationElement.FromHandle(handle);
                 var documents = Documents(root);
@@ -334,7 +351,7 @@ internal sealed class Session {
                 var fresh = Controls(document, step, out freshButton);
                 if (fresh.Length != targets.Length || !fresh.Zip(targets, Equal).All(equal => equal)) throw new Stop("field_write_failed");
                 var target = targets[field];
-                if (!Belongs(target, document) || target.Current.AutomationId != step.fields[field].id) throw new Stop("field_write_failed");
+                if (!Belongs(target, document) || !MatchesField(target, step.fields[field])) throw new Stop("field_write_failed");
                 var pattern = (ValuePattern)target.GetCurrentPattern(ValuePattern.Pattern);
                 if (pattern.Current.IsReadOnly) throw new Stop("field_write_failed");
                 // Direct element setter: changing keyboard focus cannot redirect

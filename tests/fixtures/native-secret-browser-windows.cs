@@ -29,6 +29,15 @@ internal sealed class PagePeer : FrameworkElementAutomationPeer, IValueProvider 
     string IValueProvider.Value { get { return ((FixturePage)Owner).Url; } }
     void IValueProvider.SetValue(string value) { throw new InvalidOperationException(); }
 }
+// Exercise the real UIA IsPassword metadata without storing a real credential.
+// WPF PasswordBox does not expose a writable ValuePattern; Chromium does.
+public sealed class SecureInput : TextBox {
+    protected override AutomationPeer OnCreateAutomationPeer() { return new SecureInputPeer(this); }
+}
+internal sealed class SecureInputPeer : TextBoxAutomationPeer {
+    internal SecureInputPeer(SecureInput owner) : base(owner) {}
+    protected override bool IsPasswordCore() { return true; }
+}
 internal static class Harness {
     static Window window;
     static FixturePage page;
@@ -202,6 +211,36 @@ internal static class Harness {
             }));
             try { Fill(session); throw new Exception("repeated fill was accepted"); }
             catch (Exception error) { Check(Reason(error) == "adapter_error", "session must be one-use"); }
+
+            // A real protected Edit with no AutomationId is selected by role,
+            // pinned before fill, and never approximated from its label/order.
+            SecureInput secure = null, secondSecure = null;
+            window.Dispatcher.Invoke(new Action(() => {
+                panel.Children.Remove(password);
+                secure = new SecureInput { Height = 35, Margin = new Thickness(5) };
+                panel.Children.Insert(1, secure);
+                username.Text = ""; submitted = 0; window.UpdateLayout();
+            }));
+            step.fields[1] = new Field { fieldKey = "password", passwordInput = true };
+            var secureSession = Prepared();
+            Fill(secureSession);
+            window.Dispatcher.Invoke(new Action(() => {
+                Check(secure.Text == "synthetic-native-password", "id-less secure setter failed");
+                secondSecure = new SecureInput { Height = 35, Margin = new Thickness(5) };
+                panel.Children.Insert(2, secondSecure); window.UpdateLayout();
+            }));
+            try { Prepared(); throw new Exception("duplicate password role was accepted"); }
+            catch (Exception error) { Check(Reason(error) == "field_ambiguous", "password role must be unique before fill"); }
+            window.Dispatcher.Invoke(new Action(() => { panel.Children.Remove(secondSecure); window.UpdateLayout(); }));
+            var replacedSecure = Prepared();
+            window.Dispatcher.Invoke(new Action(() => {
+                panel.Children.Remove(secure);
+                secure = new SecureInput { Height = 35, Margin = new Thickness(5) };
+                panel.Children.Insert(1, secure); window.UpdateLayout();
+            }));
+            try { Fill(replacedSecure); throw new Exception("replacement password was accepted"); }
+            catch (Exception error) { Check(Reason(error) == "field_write_failed", "secure object identity must stay pinned"); }
+            window.Dispatcher.Invoke(new Action(() => Check(secure.Text == "", "replacement received a secret")));
             using (Lease()) Check(ProbeLease().Contains("browser_unavailable"), "parallel helper acquired an owned lease");
             using (var holder = Process.Start(new ProcessStartInfo {
                 FileName = Assembly.GetExecutingAssembly().Location, Arguments = "--hold-native-lease",

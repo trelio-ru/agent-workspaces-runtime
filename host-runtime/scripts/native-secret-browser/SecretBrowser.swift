@@ -34,7 +34,7 @@ enum Stop: Error {
     case failed(String)
     case unavailable(String)
 }
-struct Field: Decodable { let fieldKey: String; let id: String }
+struct Field: Decodable { let fieldKey: String; let id: String?; let passwordInput: Bool? }
 struct Step: Decodable {
     let targetOrigin: String
     let targetUrlSha256: String
@@ -110,6 +110,17 @@ func visible(_ element: AXUIElement, in document: AXUIElement) -> Bool {
           let frame = rectangle(element), let page = rectangle(document),
           frame.intersects(page) else { return false }
     return true
+}
+
+func matchesField(_ element: AXUIElement, _ field: Field) -> Bool {
+    // AXSecureTextField is Chromium's native representation of a password
+    // input, not its accessible label or its (unread) current value. Reject
+    // malformed mixed locators rather than weakening id-bound grants.
+    if field.passwordInput == true {
+        return field.id == nil && text(element, kAXRoleAttribute) == "AXTextField"
+            && text(element, kAXSubroleAttribute) == kAXSecureTextFieldSubrole
+    }
+    return field.id != nil && text(element, "AXDOMIdentifier") == field.id
 }
 
 // Bounded traversal ignores nested WebAreas when resolving fields. An iframe
@@ -188,8 +199,8 @@ final class Session {
     }
     static func controls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
         let nodes = try walk(document, stopAtWebArea: true)
-        func find(_ id: String, button: Bool) throws -> AXUIElement {
-            let found = nodes.filter { text($0, "AXDOMIdentifier") == id && belongs($0, to: document) }
+        func find(_ field: Field, button: Bool) throws -> AXUIElement {
+            let found = nodes.filter { matchesField($0, field) && belongs($0, to: document) }
             guard !found.isEmpty else { throw Stop.failed("field_not_found") }
             guard found.count == 1 else { throw Stop.failed("field_ambiguous") }
             let target = found[0]
@@ -211,8 +222,11 @@ final class Session {
             }
             return target
         }
-        let fields = try step.fields.map { try find($0.id, button: false) }
-        let button = try step.submitId.map { try find($0, button: true) }
+        let fields = try step.fields.map { try find($0, button: false) }
+        for index in fields.indices {
+            guard !fields[..<index].contains(where: { CFEqual($0, fields[index]) }) else { throw Stop.failed("field_ambiguous") }
+        }
+        let button = try step.submitId.map { try find(Field(fieldKey: "", id: $0, passwordInput: nil), button: true) }
         return (fields, button)
     }
     static func preparedControls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
@@ -263,16 +277,26 @@ final class Session {
         guard let steps = request.steps, !steps.isEmpty, steps.count <= 10,
               steps.allSatisfy({ !$0.fields.isEmpty && $0.fields.count <= 50 }) else { throw Stop.failed("adapter_error") }
         self.steps = steps
-        var requirement: SecRequirement?
-        let rule = "anchor apple generic and identifier \"" + bundle + "\" and certificate leaf[subject.OU] = \"" + team + "\""
-        guard SecRequirementCreateWithString(rule as CFString, SecCSFlags(), &requirement) == errSecSuccess,
-              let requirement = requirement else { throw Stop.failed("adapter_error") }
-        self.requirement = requirement
-        let applications = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundle }
+        // Id-less password forms can already be authenticated in the user's
+        // Chrome. Select that existing signed application by exact top-level
+        // URL; never copy cookies, open another profile or guess a tab. Only
+        // this explicit secure-field locator opts into external Chrome.
+        var identities = [(bundle, team)]
+        if steps.contains(where: { $0.fields.contains(where: { $0.passwordInput == true }) }) {
+            identities.append(("com.google.Chrome", "EQHXZ8M8AV"))
+        }
+        let applications = NSWorkspace.shared.runningApplications.filter { app in
+            identities.contains(where: { $0.0 == app.bundleIdentifier })
+        }
         guard !applications.isEmpty else { throw Stop.unavailable("application_unavailable") }
-        var candidates: [(NSRunningApplication, AXUIElement, AXUIElement)] = []
+        var candidates: [(NSRunningApplication, AXUIElement, AXUIElement, SecRequirement)] = []
         var exposedDocuments = 0
         for app in applications {
+            guard let identity = identities.first(where: { $0.0 == app.bundleIdentifier }) else { throw Stop.failed("adapter_error") }
+            var parsedRequirement: SecRequirement?
+            let rule = "anchor apple generic and identifier \"" + identity.0 + "\" and certificate leaf[subject.OU] = \"" + identity.1 + "\""
+            guard SecRequirementCreateWithString(rule as CFString, SecCSFlags(), &parsedRequirement) == errSecSuccess,
+                  let requirement = parsedRequirement else { throw Stop.failed("adapter_error") }
             guard Session.trust(app, requirement) else { throw Stop.failed("adapter_error") }
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(ax, 1)
@@ -281,14 +305,14 @@ final class Session {
             AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
             let docs = try Session.applicationDocuments(ax)
             exposedDocuments += docs.count
-            for doc in docs where matches(documentURL(doc), steps[0]) { candidates.append((app, ax, doc)) }
+            for doc in docs where matches(documentURL(doc), steps[0]) { candidates.append((app, ax, doc, requirement)) }
         }
         if candidates.isEmpty {
             if exposedDocuments == 0 { throw Stop.unavailable("accessibility_unavailable") }
             throw Stop.failed("target_url_changed")
         }
         guard candidates.count == 1 else { throw Stop.failed("field_ambiguous") }
-        (application, appElement, document) = candidates[0]
+        (application, appElement, document, requirement) = candidates[0]
         guard let window = elementAttribute(document, kAXWindowAttribute) else { throw Stop.failed("adapter_error") }
         self.window = window
         // Pin the native view containing this single document, not the entire
@@ -350,7 +374,7 @@ final class Session {
                 guard zip(fresh, targets).allSatisfy({ CFEqual($0.0, $0.1) }), fresh.count == targets.count else {
                     throw Stop.failed("field_write_failed")
                 }
-                guard belongs(target, to: document), text(target, "AXDOMIdentifier") == field.id,
+                guard belongs(target, to: document), matchesField(target, field),
                       let value = values[field.fieldKey] else { throw Stop.failed("field_write_failed") }
                 // Chromium's AX kSetValue dispatches input/change events. It
                 // writes the bound element directly even if focus moves.

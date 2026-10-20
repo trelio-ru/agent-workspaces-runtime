@@ -81,6 +81,19 @@ export const nativeIdFromSecretSelector = (selector) => {
   return hash?.[1] ?? attribute[2];
 };
 
+// These are the only id-less DOM selectors admitted by the backend. A name
+// cannot be inferred from AX/UIA labels or field order: use the existing DOM
+// transport before checkout instead. Password inputs have an exact native
+// secure-edit role, whose uniqueness and object identity the helper verifies.
+export const isNamedSecretBrowserSelector = (selector) => (
+  /^(?:(?:input|textarea|button))?\[name=(["'])[A-Za-z_][A-Za-z0-9_.:-]{0,127}\1\]$/u.test(normalizeSecretBrowserFieldSelector(selector))
+);
+export const nativeFieldFromSecretSelector = (selector) => (
+  /^input\[type=(?:"password"|'password'|password)\]$/u.test(normalizeSecretBrowserFieldSelector(selector))
+    ? { passwordInput: true }
+    : { id: nativeIdFromSecretSelector(selector) }
+);
+
 export const browserFillBinding = (context) => {
   if (!context || context.deliveryMode !== "browser" || context.executable !== "trelio-workspace"
     || !Array.isArray(context.fieldKeys) || context.fieldKeys.length < 1
@@ -350,6 +363,18 @@ export const prepareSecretBrowserSession = async ({
     normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
     if (!["darwin", "win32"].includes(platform)) throw new EmbeddedBrowserUnavailable("platform_unsupported");
     if (!["codex", "claude-code"].includes(binding.clientFamily)) throw new EmbeddedBrowserUnavailable("client_unsupported");
+    if (binding.browserSteps.some((step) => (
+      [...step.fields.map(({ selector }) => selector), step.activationSelector, step.submitSelector]
+        .filter(Boolean).some(isNamedSecretBrowserSelector)
+    ))) {
+      if (mode === "embedded") {
+        throw new SecretBrowserFillError(
+          'Name selectors require the runtime DOM browser and an exact submitSelector. For the existing tab use a unique input[type="password"] with public fields prepared separately.',
+          "field_selector_invalid",
+        );
+      }
+      return chrome("field_selector_invalid");
+    }
     const steps = binding.browserSteps.map((step, index) => {
       if (index < binding.browserSteps.length - 1 && !step.submitSelector) {
         throw new SecretBrowserFillError(
@@ -357,8 +382,8 @@ export const prepareSecretBrowserSession = async ({
           "field_selector_invalid",
         );
       }
-      const fields = step.fields.map(({ fieldKey, selector }) => ({ fieldKey, id: nativeIdFromSecretSelector(selector) }));
-      if (new Set(fields.map((field) => field.id)).size !== fields.length) {
+      const fields = step.fields.map(({ fieldKey, selector }) => ({ fieldKey, ...nativeFieldFromSecretSelector(selector) }));
+      if (new Set(fields.map(({ id, passwordInput }) => passwordInput ? "password-input" : "id:" + id)).size !== fields.length) {
         throw new SecretBrowserFillError("Browser selectors разрешаются в одно поле.", "field_ambiguous");
       }
       return {

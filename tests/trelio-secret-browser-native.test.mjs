@@ -12,7 +12,7 @@ import {
   assertBrowserFillBindingUnchanged, browserFillBinding, buildNativeSecretBrowserHelper,
   describeBackgroundSecretBrowserContinuation, EmbeddedBrowserUnavailable,
   nativeIdFromSecretSelector, openNativeSecretBrowserChannel,
-  prepareSecretBrowserSession,
+  prepareSecretBrowserSession, nativeFieldFromSecretSelector, isNamedSecretBrowserSelector,
 } from "../host-runtime/scripts/trelio-secret-browser-native.mjs";
 import {
   createSecretBrowserControllerExpression, observeSecretBrowserPostSubmit,
@@ -77,6 +77,50 @@ test("native selectors preserve CSS id meaning and reject compound, type and pse
   for (const selector of ["#password.hidden", "#password:focus", "input#password", "[name=password]", "#a #b", "#a\\:b"]) {
     assert.throws(() => nativeIdFromSecretSelector(selector), SecretBrowserFillError);
   }
+});
+
+test("native id-less password binding is explicit; names never become guessed AX ids", async () => {
+  assert.deepEqual(nativeFieldFromSecretSelector('input[type="password"]'), { passwordInput: true });
+  assert.deepEqual(nativeFieldFromSecretSelector("input[type=password]"), { passwordInput: true });
+  assert.deepEqual(nativeFieldFromSecretSelector("#password"), { id: "password" });
+  assert.equal(isNamedSecretBrowserSelector('input[name="cfsw"]'), true);
+  for (const selector of ['input[name="cfsw"] + input', '[name=password]', 'input[type="text"]']) {
+    assert.equal(isNamedSecretBrowserSelector(selector), false);
+    assert.throws(() => nativeFieldFromSecretSelector(selector), SecretBrowserFillError);
+  }
+  const f = fixture();
+  f.args.context.fieldKeys = ["password"];
+  f.args.context.browserSteps[0].fields = [{ fieldKey: "password", selector: 'input[type="password"]' }];
+  delete f.args.context.browserSteps[0].submitSelector;
+  const session = await prepareSecretBrowserSession({ ...f.args, mode: "embedded" });
+  assert.deepEqual(f.requests[0].steps[0].fields, [{ fieldKey: "password", passwordInput: true }]);
+  assert.equal(f.chromePreflights, 0, "the existing authenticated tab must not be replaced");
+  assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/u);
+  await session.fill({ secretValues: { password: values.password } });
+  assert.equal(f.requests[1].values.password, values.password);
+  await session.close();
+});
+
+test("quoted name selectors select DOM before any native helper or value delivery", async () => {
+  const f = fixture();
+  f.args.context.browserSteps[0].fields = [
+    { fieldKey: "username", selector: 'input[name="cfsl"]' },
+    { fieldKey: "password", selector: 'input[name="cfsw"]' },
+  ];
+  const session = await prepareSecretBrowserSession(f.args);
+  assert.equal(session.surface, "chrome");
+  assert.equal(f.builds, 0);
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.chromePreflights, 1);
+  assert.equal(f.chromeCalls, 0);
+  await session.fill({ secretValues: values });
+  assert.equal(f.chromeCalls, 1);
+  await session.close();
+  const onlyEmbedded = fixture();
+  onlyEmbedded.args.context = f.args.context;
+  await assert.rejects(prepareSecretBrowserSession({ ...onlyEmbedded.args, mode: "embedded" }),
+    (error) => error.reasonCode === "field_selector_invalid" && /unique input/u.test(error.message));
+  assert.equal(onlyEmbedded.chromePreflights, 0);
 });
 
 for (const platform of ["darwin", "win32"]) for (const clientFamily of ["codex", "claude-code"]) {
@@ -755,6 +799,67 @@ test("Chrome fallback fills both fields and binds the exact visible submit point
   assert.equal(f.realm.__trelioSecretBrowserApply(values).outcome, "submit_ready");
   assert.deepEqual({ ...f.realm.__trelioSecretBrowserSubmitPoint() }, { x: 15, y: 25 });
   assert.deepEqual(f.events, ["username", "password"]);
+});
+
+test("SMTP-style named controls and input submit fill without returning credential bytes", () => {
+  const f = controllerFixture();
+  const username = f.fields["#username"], password = f.fields["#password"];
+  username.id = ""; password.id = ""; password.type = "password";
+  const submit = new f.realm.HTMLInputElement("focus");
+  submit.type = "submit";
+  f.fields['input[name="cfsl"]'] = username;
+  f.fields['input[name="cfsw"]'] = password;
+  f.fields["#focus"] = submit;
+  f.realm.document.elementFromPoint = () => submit;
+  vm.runInContext(createSecretBrowserControllerExpression(context.targetOrigin, [
+    { fieldKey: "username", selector: 'input[name="cfsl"]' },
+    { fieldKey: "password", selector: 'input[name="cfsw"]' },
+  ], "#focus", targetUrl), f.realm);
+  const ready = f.realm.__trelioSecretBrowserController();
+  assert.equal(ready.status, "ready");
+  const result = f.realm.__trelioSecretBrowserApply(values);
+  assert.equal(result.outcome, "submit_ready");
+  assert.doesNotMatch(JSON.stringify({ ready, result }), /CANARY/u);
+  assert.equal(password.value, values.password);
+  assert.deepEqual({ ...f.realm.__trelioSecretBrowserSubmitPoint() }, { x: 15, y: 25 });
+  submit.type = "file";
+  assert.equal(f.realm.__trelioSecretBrowserSubmitPoint(), null);
+});
+
+for (const failure of ["duplicate", "disabled", "readonly", "missing", "url"]) {
+  test("id-less SMTP preflight refuses " + failure + " without requesting values", () => {
+    const f = controllerFixture();
+    const password = f.fields["#password"];
+    password.type = "password";
+    f.fields['input[name="cfsw"]'] = password;
+    const original = f.realm.document.querySelectorAll;
+    if (failure === "duplicate") f.realm.document.querySelectorAll = (selector) => (
+      selector === 'input[name="cfsw"]' ? [password, new f.realm.HTMLInputElement("")] : original(selector)
+    );
+    if (failure === "disabled") password.disabled = true;
+    if (failure === "readonly") password.readOnly = true;
+    if (failure === "missing") delete f.fields['input[name="cfsw"]'];
+    if (failure === "url") f.realm.location.href += "&changed";
+    vm.runInContext(createSecretBrowserControllerExpression(context.targetOrigin, [
+      { fieldKey: "password", selector: 'input[name="cfsw"]' },
+    ], "#login", targetUrl), f.realm);
+    const ready = f.realm.__trelioSecretBrowserController();
+    assert.notEqual(ready.status, "ready");
+    assert.equal(password.value, "");
+    assert.deepEqual(f.events, []);
+    assert.doesNotMatch(JSON.stringify(ready), /CANARY/u);
+  });
+}
+
+test("id-less native secure-role aliases cannot receive two different secret fields", async () => {
+  const f = fixture();
+  f.args.context.browserSteps[0].fields = [
+    { fieldKey: "username", selector: "input[type=password]" },
+    { fieldKey: "password", selector: 'input[type="password"]' },
+  ];
+  await assert.rejects(prepareSecretBrowserSession(f.args), (error) => error.reasonCode === "field_ambiguous");
+  assert.equal(f.builds, 0);
+  assert.equal(f.chromePreflights, 0);
 });
 test("Chrome clicks the visible part when the button centre falls below the hidden viewport", () => {
   const f = controllerFixture();
