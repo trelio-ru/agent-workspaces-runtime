@@ -211,5 +211,13 @@ test('document guard follows headerless redirects and blocks final files includi
       assert.equal(result.text, undefined);
       assert.equal(result.image, undefined);
     }
-  } finally { await browser.close().catch(() => browser.abort()); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await browser.close().catch(() => browser.abort());
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+    // Windows may release Chromium's Account Web Data handle just after the
+    // owned process has exited. Match the other native fixtures' bounded
+    // cleanup; exhaustion still fails, and no document assertion is skipped.
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
 });
