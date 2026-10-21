@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
@@ -122,7 +123,22 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   const loader = path.join(directory, 'fixture loader.mjs'), marker = path.join(directory, 'receipt.json');
   const fixture = { ...identity, assistantId: randomUUID(), deviceId: randomUUID() };
   await fs.writeFile(loader, `import fs from 'node:fs';\nif(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);\nfs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({ready:true}));\n`);
-  const controller = createAssistantWindowsBackground({ readIdentity: async () => fixture, verifyContact: async () => {}, resolveLoader: async () => loader });
+  const controller = createAssistantWindowsBackground({ readIdentity: async () => fixture, verifyContact: async () => {}, resolveLoader: async () => loader,
+    runNative: (plan, options) => runAssistantWindowsBackgroundNative(plan, { ...options, spawnProcess: (command, args, settings) => {
+      const child = spawn(command, args, { ...settings, stdio: ['pipe', 'pipe', 'pipe'] });
+      let diagnostic = '';
+      child.stderr.on('data', chunk => {
+        diagnostic += chunk.toString('utf8');
+        for (;;) {
+          const end = diagnostic.indexOf('\n'); if (end < 0) break;
+          const line = diagnostic.slice(0, end).trim(); diagnostic = diagnostic.slice(end + 1);
+          if (/^TRELIO_TASK_CHECK [a-z_]{1,32}$/u.test(line)) console.log(line);
+        }
+        if (diagnostic.length > 4096) diagnostic = '';
+      });
+      return child;
+    } }),
+  });
   const manage = async operation => {
     console.log(`Native fixture step: ${operation}`);
     try { const result = await controller(operation); console.log(`Native fixture result: ${operation} ${result.state}`); return result; }

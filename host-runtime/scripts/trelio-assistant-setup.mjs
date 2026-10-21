@@ -106,18 +106,35 @@ try {
   }
   function Test-Definition($task) {
     $d = $task.Definition
-    return $d.RegistrationInfo.Description -ceq $marker -and $d.Principal.UserId -ceq $sid -and
-      $d.Principal.LogonType -eq 3 -and $d.Principal.RunLevel -eq 0 -and
-      $d.Actions.Count -eq 1 -and $d.Actions.Item(1).Type -eq 0 -and
-      $d.Actions.Item(1).Path -ceq $p.command -and $d.Actions.Item(1).Arguments -ceq $p.arguments -and
-      $d.Actions.Item(1).WorkingDirectory -ceq $p.workingDirectory -and
-      $d.Triggers.Count -eq 1 -and $d.Triggers.Item(1).Type -eq 9 -and
-      $d.Triggers.Item(1).UserId -ceq $sid -and $d.Triggers.Item(1).Enabled -and
-      $d.Triggers.Item(1).Delay -ceq 'PT15S' -and $d.Settings.Enabled -and
-      $d.Settings.MultipleInstances -eq 2 -and $d.Settings.ExecutionTimeLimit -ceq 'PT0S' -and
-      $d.Settings.AllowDemandStart -and $d.Settings.StartWhenAvailable -and
-      !$d.Settings.DisallowStartIfOnBatteries -and !$d.Settings.StopIfGoingOnBatteries -and
-      $d.Settings.RestartCount -eq 3 -and $d.Settings.RestartInterval -ceq 'PT1M'
+    $checks = @{
+      marker = $d.RegistrationInfo.Description -ceq $marker
+      principal = $d.Principal.UserId -ceq $sid
+      logon = $d.Principal.LogonType -eq 3 -and $d.Principal.RunLevel -eq 0
+      action_count = $d.Actions.Count -eq 1
+      action_type = $d.Actions.Item(1).Type -eq 0
+      action_path = $d.Actions.Item(1).Path -ceq $p.command
+      action_arguments = $d.Actions.Item(1).Arguments -ceq $p.arguments
+      action_cwd = $d.Actions.Item(1).WorkingDirectory -ceq $p.workingDirectory
+      trigger_count = $d.Triggers.Count -eq 1
+      trigger_type = $d.Triggers.Item(1).Type -eq 9
+      trigger_user = $d.Triggers.Item(1).UserId -ceq $sid
+      trigger_enabled = [bool]$d.Triggers.Item(1).Enabled
+      trigger_delay = $d.Triggers.Item(1).Delay -ceq 'PT15S'
+      enabled = [bool]$d.Settings.Enabled
+      instances = $d.Settings.MultipleInstances -eq 2
+      duration = $d.Settings.ExecutionTimeLimit -ceq 'PT0S'
+      demand = [bool]$d.Settings.AllowDemandStart
+      available = [bool]$d.Settings.StartWhenAvailable
+      battery_start = !$d.Settings.DisallowStartIfOnBatteries
+      battery_stop = !$d.Settings.StopIfGoingOnBatteries
+      restarts = $d.Settings.RestartCount -eq 3
+      restart_interval = $d.Settings.RestartInterval -ceq 'PT1M'
+    }
+    $failed = @($checks.Keys | Where-Object { !$checks[$_] })
+    # Diagnostic field names only, never an OS value/path/SID/definition. The
+    # production parent ignores stderr; the hosted fixture reads this allowlist.
+    foreach ($key in $failed) { [Console]::Error.WriteLine('TRELIO_TASK_CHECK ' + $key) }
+    return $failed.Count -eq 0
   }
   if ($existing -and !(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
   if ($p.operation -eq 'install' -and !$existing) {
@@ -192,7 +209,7 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact,
     const remaining = () => {
       const value = 45_000 - (performance.now() - started);
       if (signal?.aborted || value < 10) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
-      return Math.min(30_000, Math.floor(value));
+      return Math.min(40_000, Math.floor(value));
     };
     if (!operations.has(operation)) fail('ASSISTANT_BACKGROUND_INVALID_INPUT');
     if (platform !== 'win32') fail('ASSISTANT_BACKGROUND_PLATFORM_UNSUPPORTED');
@@ -232,9 +249,9 @@ export const projectAssistantBackgroundResult = value => {
  * this boundary, and an ambiguous registration/start is never retried.
  */
 export const runAssistantWindowsBackgroundNative = (plan, { environment = process.env,
-  spawnProcess = spawn, timeoutMs = 30_000, signal } = {}) => new Promise((resolve, reject) => {
+  spawnProcess = spawn, timeoutMs = 40_000, signal } = {}) => new Promise((resolve, reject) => {
   const root = environment.SystemRoot ?? environment.SYSTEMROOT;
-  if (!windowsPath(root) || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 30_000) {
+  if (!windowsPath(root) || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 40_000) {
     reject(Object.assign(new Error(), { code: 'ASSISTANT_BACKGROUND_UNAVAILABLE' })); return;
   }
   let child, done = false, output = '', bytes = 0;
