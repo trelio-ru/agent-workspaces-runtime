@@ -397,6 +397,9 @@ publication tooling также остаются вне этого публичн
   unbound labels. Separately admitted owner empty-create uses the SAME catalogue
   and atomic intent receipt; no provider login or readiness inference. Current
   signed worker discovery does not require a new stable plugin setup ABI.
+  Protected email setup needs a separate native owner opt-in; fixed browser-only
+  capture reuses the same account/process engine and original human-input budget.
+  It never accepts credentials/terminal args or upgrades passive reader limits.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).

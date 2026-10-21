@@ -154,6 +154,9 @@ test('source config rejects scope/protocol/duplicate errors and never maps refus
     ...['companyId','deviceId'].map(key=>({...valid,sources:[{...row,[key]:randomUUID()}]})),
     ...[true,undefined,'false'].map(executionVerified=>({...valid,sources:[{...row,executionVerified}]})),
     ...[null,0,'true',{}].map(provisionLocalAccount=>({...valid,sources:[{...row,provisionLocalAccount}]})),
+    ...[null,0,'true',{}].map(interactiveSetupAllowed=>({...valid,sources:[{...row,interactiveSetupAllowed}]})),
+    {...valid,sources:[{...row,interactiveSetupAllowed:true}]},
+    {...valid,sources:[{...row,skillId:'telegram-mtproto',provisionLocalAccount:true,interactiveSetupAllowed:true}]},
     ...[-1,1.5,2_147_483_648].map(revision=>({...valid,sources:[{...row,revision}]})),
     {...valid,sources:[{...row,skillId:'arbitrary-provider'}]},{...valid,sources:[{...row,state:'ready'}]},
   ];
@@ -163,6 +166,8 @@ test('source config rejects scope/protocol/duplicate errors and never maps refus
     await assert.rejects(client.sourceAccounts(companyId),error=>error===response);
   }
   assert.equal(calls,malformed.length+4,'no hidden retry or human auth/account fallback');
+  response={...valid,sources:[{...row,provisionLocalAccount:true,interactiveSetupAllowed:true}]};
+  assert.equal((await client.sourceAccounts(companyId))[0].interactiveSetupAllowed,true,'separate native email permission survives bounded projection');
   response={...valid,sources:['active','paused','revoked'].map((state,index)=>({...row,id:randomUUID(),state,revision:index}))};
   assert.equal((await client.sourceAccounts(companyId)).length,3,'desired states remain separate from verified execution');
   const {ASSISTANT_MCP_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');

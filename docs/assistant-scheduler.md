@@ -312,6 +312,49 @@ or discovery cannot clear hook-review/login latches. `state:prepared` and
 provider setup, actual polling/body processing/ACK and Windows business E2E
 remain required. No second vault, journal, provider or executor is introduced.
 
+The separate `configure_assistant_email_source` tool accepts only company/source
+UUIDs. It requires a newly registered source with native
+`interactiveSetupAllowed=true`, not an empty-create request, an existing local
+UUID or a model consent flag. Both native resolution and download repeat the
+same live owner/device/company/project/revision/write-scope checks, then return
+`accountSetup.operation=configure`, `email-configure/v1` and a fixed ten-minute
+budget. A fresh native resolve after materialization must keep the same artifact,
+release and hash. Plain verified email only; Linux storage and Telegram/MAX login
+remain closed here. The passive reader's original limits do not change.
+
+This is the SAME signed loader, managed account catalogue and Node/Python process
+engine, with a closed `assistant_source_setup` capture profile. A private one-use
+callback verifies the exact account/member/release/command and bounds the process
+by the original monotonic deadline. The only provider arguments are
+`configure --account <native UUID> --password-input browser`; no terminal values,
+secret checkout, stdin, environment grants, SMTP-only flag or arbitrary overrides.
+The human enters/submits credentials in the existing protected local provider
+form. The operator may explicitly choose SMTP-only in that form: saving it is
+reported with `incomingEnabled:false`, never as an enabled monitor.
+
+The request worker, forwarding facade and private invocation allow a fixed
+eleven-minute outer envelope ONLY for this exact setup tool. The native ten-minute
+budget includes resolution, download, interpreter/bootstrap and input; it does
+not slide at form launch. Other requests/polls keep their existing deadlines.
+An already running old facade cannot magically gain a longer wait budget; source
+onboarding compatibility must be checked on the installed assistant before
+claiming hot-update readiness. No new stable-plugin method or automatic restart
+is added. A lost/cancelled/failed invocation never replays the provider.
+
+Only `configuration_saved`, `incomingEnabled`, exact structural IDs and
+`connectionVerified:false` cross the private result boundary. Provider errors,
+mailbox address, paths, field values and diagnostics stay out of MCP/logs/SQLite.
+A closed window is not successful configuration, and saved credentials are not
+network readiness, sending authority, processed messages or a passed Windows
+business pilot. Setup metadata does not clear hook/login health latches.
+
+This source entry is not proof that arbitrary task-skill arguments cannot open
+a provider-owned setup command. The existing account-CRUD and secret-setup
+guards do not classify every provider command (`configure`, login, reconnect).
+A signed provider execution-profile contract, native rejection before credential
+I/O and composition tests are required before autonomous business activation;
+neither instructions nor this separate source tool close that release gate.
+
 `readAssistantSourceMonitor` composes the same package resolution validator,
 Ed25519/digest/file-inventory verifier, executable cache, explicit bound local
 account selector and materialized Node/Python executor as ordinary skills. It

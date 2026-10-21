@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount}=
+const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -26,11 +26,13 @@ const store={get:async slot=>{
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
 let setupFixture=null;
-const admission=()=>({schemaVersion:1,assistantUserId:assistantId,deviceId,provider:'telegram',protocol:'telegram-monitor/v1',
-  command:'monitor',pollIntervalSeconds:300,maximumDurationMs:60000,
-  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',
+const admission=()=>({schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':'telegram',
+  protocol:setupFixture?.operation==='configure'?'email-configure/v1':scope.skillId==='email-imap-smtp'?'email-monitor/v1':'telegram-monitor/v1',
+  command:setupFixture?.operation==='configure'?'configure':'monitor',pollIntervalSeconds:300,
+  maximumDurationMs:setupFixture?.operation==='configure'?600000:60000,
+  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:setupFixture?.operation==='configure'?'2026-10-21T00:10:00.000Z':'2026-10-21T00:02:00.000Z',
   ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
-    localAccountId:setupFixture.localAccountId,operation:'create'}}:{})});
+    localAccountId:setupFixture.localAccountId,operation:setupFixture.operation??'create'}}:{})});
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
 const event={id:'message:123:5',revision:'a'.repeat(64),kind:'new',chatId:'123',messageId:'5',topicId:null,
   senderUserId:'123',senderNamespace:'telegram_user_id',outgoing:false,forwarded:false,viaBot:false};
@@ -54,6 +56,7 @@ const payload=()=>({releaseId,company:{id:companyId,slug:'synthetic',name:'Synth
 const resolution=()=>{
   const raw=payload();const query=new URLSearchParams({companyId,skillId:scope.skillId,expectedReleaseId:releaseId,artifactId});
   if(setupFixture){query.set('accountSetupSourceId',setupFixture.id);query.set('accountSetupRevision',String(setupFixture.revision));}
+  if(setupFixture?.operation==='configure')query.set('accountSetupOperation','configure');
   raw.packageUrl=`${prefix}/package?${query}`;return raw;
 };
 const originalFetch=globalThis.fetch;
@@ -66,7 +69,8 @@ globalThis.fetch=async(url,options)=>{
   assert.ok(options.headers.get('x-trelio-host-runtime-version'));
   if(url.pathname===`${prefix}/resolve`){
     resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null,
-      ...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision}}:{})});
+      ...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
+        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{})});
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
   assert.equal(url.pathname,`${prefix}/package`);downloadCalls++;
@@ -227,6 +231,78 @@ test('native owner setup uses the same signed loader/catalogue, has atomic creat
   resolveOverride=null;setupFixture=source();setupFixture.provisionLocalAccount=false;
   const start=resolveCalls;await assert.rejects(prepare(),/SETUP_REQUIRED/);assert.equal(resolveCalls,start,'an ordinary reference never requests setup admission');
   assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls);
+});
+
+test('protected email setup consumes separate native permission and the same signed account/process engine',async t=>{
+  const selected={...scope};
+  t.after(()=>{Object.assign(scope,selected);setupFixture=null;resolveOverride=null;});
+  scope.skillId='email-imap-smtp';
+  setupFixture={...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
+    provisionLocalAccount:true,interactiveSetupAllowed:true,executionVerified:false};
+  const sourceId=setupFixture.id,accountId=setupFixture.localAccountId;
+  const client={identity,sourceAccounts:async()=>[setupFixture]};
+  const configure=()=>configureAssistantEmailSource({identity,host,store,client,companyId,sourceId});
+  if(!['darwin','win32'].includes(process.platform)){
+    const before=resolveCalls;
+    await assert.rejects(configure(),/SETUP_UNAVAILABLE/);
+    assert.equal(resolveCalls,before,'unsupported storage cannot open a form or borrow a human account');return;
+  }
+  const sourceDir=path.join(directory,'email-setup-package');await fs.mkdir(sourceDir);
+  const marker=path.join(directory,'email-setup-native-calls');
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),['configure','--account',${JSON.stringify(accountId)},'--password-input','browser']);
+    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
+    fs.appendFileSync(${JSON.stringify(marker)},'1');
+    process.stdout.write(JSON.stringify({configured:${JSON.stringify(accountId)},passwordInput:'browser',connectionMode:'imap_smtp',
+      credentialStore:process.platform==='win32'?'dpapi':'keychain',configPath:'PRIVATE_PATH',email:'PRIVATE_ADDRESS',
+      message:'PRIVATE_PROVIDER_DETAIL'}));`);
+  artifactId=randomUUID();releaseId=randomUUID();
+  packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  await prepareAssistantSourceAccount({identity,host,store,client,companyId,sourceId});
+  setupFixture.operation='configure';
+  const readMarker=()=>fs.readFile(marker,'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
+  const before=resolveCalls;
+  setupFixture.interactiveSetupAllowed=false;
+  await assert.rejects(configure(),/SETUP_REQUIRED/);assert.equal(resolveCalls,before);assert.equal(await readMarker(),'');
+  setupFixture.interactiveSetupAllowed=true;
+  resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),
+    accountSetup:{...admission().accountSetup,operation:'create'}}}));
+  await assert.rejects(configure(),/INVALID_RESPONSE/);assert.equal(await readMarker(),'','empty-create is not login permission');
+  let calls=0;
+  resolveOverride=()=>++calls===1?new Response(JSON.stringify(resolution())):
+    new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED',message:'PRIVATE'}),{status:403});
+  await assert.rejects(configure(),/ACCESS_DENIED/);assert.equal(calls,2);assert.equal(await readMarker(),'','late revocation denies provider launch');
+  resolveOverride=null;
+  const result=await configure();
+  assert.deepEqual(result,{sourceId,localAccountId:accountId,state:'configuration_saved',incomingEnabled:true,connectionVerified:false});
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE|credential|password|Path/);
+  assert.equal(await readMarker(),'1','one explicit invocation starts precisely one existing provider process');
+
+  // An independently constructed private profile must still refuse terminal,
+  // secret, account and argument overrides before interpreter/provider I/O.
+  const p=await createAssistantSourceRuntimeProfile({identity,host,store,scope,
+    accountSetup:{sourceId,expectedRevision:0,operation:'configure'}});
+  const token=await p.requireToken(origin);
+  await p.prepareRequest({origin,token,pathname:`${prefix}/resolve`,options:{method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,
+    accountSetup:{sourceId,expectedRevision:0,operation:'configure'}})},buildHeaders:()=>new Headers()});
+  const raw=resolution(),normalized=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
+  await p.bindResolution(normalized,raw.sourceAdmission);
+  // Every rejected invocation must stop before path/entrypoint or interpreter
+  // I/O, so the normalized native descriptor suffices at this guard boundary.
+  const executionContext={...scope,releaseId,localIdentity:normalized.localIdentity,companyConnection:null,account:{id:accountId}};
+  for(const args of [['configure','--account',accountId,'--terminal-prompts'],
+    ['configure','--account',randomUUID(),'--password-input','browser'],['configure','--account',accountId,'--password-input','browser','--smtp-only']]){
+    await assert.rejects(engine.withWorkspaceExecutionProfile(p,()=>engine.runMaterializedAgentSkill({artifact:normalized.artifact,
+      runtimeDirectory:sourceDir,executionContext,runtimeArguments:args,captureOutput:true,captureMode:'assistant_source_setup',timeoutMs:5000})),/SETUP_REQUIRED/);
+  }
+  const validArguments=['configure','--account',accountId,'--password-input','browser'];
+  await p.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext,runtimeArguments:validArguments});
+  await assert.rejects(p.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext,runtimeArguments:validArguments}),/SETUP_REQUIRED/,
+    'one native in-process permission cannot open a second form');
+  p.close();assert.equal(await readMarker(),'1');
 });
 
 test('structural projection rejects bad pages, scope swaps, receipts and gaps without losing the old cursor',()=>{

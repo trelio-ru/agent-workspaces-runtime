@@ -122,13 +122,16 @@ const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyI
       || !['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)
       || !['active','paused','revoked'].includes(row.state) || row.executionVerified !== false
       || row.provisionLocalAccount !== undefined && typeof row.provisionLocalAccount !== 'boolean'
+      || row.interactiveSetupAllowed !== undefined && typeof row.interactiveSetupAllowed !== 'boolean'
+      || row.interactiveSetupAllowed === true && (row.provisionLocalAccount !== true || row.skillId !== 'email-imap-smtp')
       || !Number.isSafeInteger(row.revision) || row.revision < 0 || row.revision > 2_147_483_647) invalid();
     const sourceId = responseId(row.id);
     if (seen.has(sourceId)) invalid();
     seen.add(sourceId);
     return Object.freeze({ id:sourceId, companyId, deviceId, localAccountId:responseId(row.localAccountId),
       projectId:row.projectId === null ? null : responseId(row.projectId), skillId:row.skillId,
-      state:row.state, revision:row.revision, provisionLocalAccount:row.provisionLocalAccount === true, executionVerified:false });
+      state:row.state, revision:row.revision, provisionLocalAccount:row.provisionLocalAccount === true,
+      ...(row.interactiveSetupAllowed===true?{interactiveSetupAllowed:true}:{}),executionVerified:false });
   }));
 };
 export const validateAssistantPassOutcome = (value, expected) => {
@@ -848,17 +851,23 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   monotonic=()=>performance.now(),startedAt=monotonic()}) => {
   scope=sourceScope(scope);
   if(accountSetup!==null){
-    if(!object(accountSetup) || Object.keys(accountSetup).sort().join(',')!=='expectedRevision,sourceId'
+    if(!object(accountSetup) || Object.keys(accountSetup).some(key=>!['sourceId','expectedRevision','operation'].includes(key))
+      || accountSetup.operation!==undefined && accountSetup.operation!=='configure'
+      || accountSetup.operation==='configure' && scope.skillId!=='email-imap-smtp'
       || !Number.isSafeInteger(accountSetup.expectedRevision) || accountSetup.expectedRevision<0
       || accountSetup.expectedRevision>2_147_483_647)fail('ASSISTANT_SOURCE_INVALID_INPUT');
-    accountSetup=Object.freeze({sourceId:id(accountSetup.sourceId),expectedRevision:accountSetup.expectedRevision});
+    accountSetup=Object.freeze({sourceId:id(accountSetup.sourceId),expectedRevision:accountSetup.expectedRevision,
+      ...(accountSetup.operation?{operation:accountSetup.operation}:{})});
   }
+  const interactive=accountSetup?.operation==='configure';
+  const maximumBudgetMs=interactive?10*60_000:120_000;
   const origin=originOf(identity?.origin),assistantId=id(identity?.assistantId),deviceId=id(identity?.deviceId);
   if(!host || typeof host.readIdentity!=='function' || !store || typeof store.get!=='function'
     || typeof monotonic!=='function' || !Number.isFinite(startedAt)) fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const expected={schemaVersion:1,origin,assistantId,deviceId};
-  let active=true,resolveSent=false,packageSent=false,packagePath=null,budgetMs=120_000;
+  let active=true,resolveSent=false,packageSent=false,packagePath=null,budgetMs=maximumBudgetMs;
   let creation=null,creationUsed=false;
+  let interactiveSetup=null,interactiveUsed=false;
   const handle=Object.freeze(Object.create(null));
   const assertCurrent=async()=>{
     // Monotonic time starts before resolve/private I/O. Neither a delayed
@@ -891,6 +900,26 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       creationUsed=true;
       return Object.freeze({creationRequestId:accountSetup.sourceId});
     },
+    async authorizeInteractiveSourceSetup({artifact,executionContext:context,runtimeArguments}){
+      await assertCurrent();
+      // A native EMPTY-create admission never enters this branch. The fixed
+      // command opens the provider's existing protected browser form; it cannot
+      // receive credentials, terminal input, secret checkout or arbitrary args.
+      // Saving still requires the human's explicit action in that local form.
+      const approved=interactiveSetup;
+      if(!approved || interactiveUsed || artifact?.id!==approved.artifactId || artifact.skillId!==scope.skillId
+        || context?.companyId!==scope.companyId || (context.projectId??null)!==scope.projectId
+        || context.releaseId!==approved.releaseId || context.localIdentity?.memberId!==approved.memberId
+        || (context.localIdentity?.connectionId??null)!==approved.connectionId || context.account?.id!==approved.accountId
+        || JSON.stringify(runtimeArguments)!==JSON.stringify(['configure','--account',approved.accountId,'--password-input','browser']))
+        fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      interactiveUsed=true;
+      return Math.floor(budgetMs-(monotonic()-startedAt));
+    },
+    async assertInteractiveSourceSetupCurrent(){
+      await assertCurrent();
+      if(!interactiveSetup || !interactiveUsed)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+    },
     async requireToken(requestOrigin){
       if(requestOrigin!==origin)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
       await assertCurrent();return handle;
@@ -922,12 +951,13 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==protocol.protocol || admission.command!=='monitor'
-        || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==60_000
+        || admission.provider!==protocol.provider || admission.protocol!==(interactive?'email-configure/v1':protocol.protocol)
+        || admission.command!==(interactive?'configure':'monitor')
+        || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.expiresAt)
-        || !Number.isFinite(issued) || !Number.isFinite(expires) || expires-issued!==120_000
+        || !Number.isFinite(issued) || !Number.isFinite(expires) || expires-issued!==maximumBudgetMs
         || resolution.localIdentity?.companyId!==scope.companyId || resolution.localIdentity?.projectId!==scope.projectId
         || resolution.artifact.skillId!==scope.skillId || resolution.artifact.contentProtection!=='plain'
         || resolution.trust.level!=='platform_verified' || resolution.trust.artifactLevel!=='platform_verified'
@@ -936,18 +966,21 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const url=new URL(resolution.packageUrl,origin);
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
-        ...(accountSetup?{accountSetupSourceId:accountSetup.sourceId,accountSetupRevision:String(accountSetup.expectedRevision)}:{})};
+        ...(accountSetup?{accountSetupSourceId:accountSetup.sourceId,accountSetupRevision:String(accountSetup.expectedRevision),
+          ...(interactive?{accountSetupOperation:'configure'}:{})}:{})};
       if(url.origin!==origin || url.pathname!==`${ASSISTANT_SOURCE_PREFIX}/package` || url.hash
         || [...url.searchParams.keys()].length!==Object.keys(query).length
         || Object.entries(query).some(([key,value])=>url.searchParams.get(key)!==value)) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
         if(!object(approved) || Object.keys(approved).sort().join(',')!=='localAccountId,operation,schemaVersion,sourceId,sourceRevision'
-          || approved.schemaVersion!==1 || approved.operation!=='create' || approved.sourceId!==accountSetup.sourceId
+          || approved.schemaVersion!==1 || approved.operation!==(interactive?'configure':'create') || approved.sourceId!==accountSetup.sourceId
           || approved.sourceRevision!==accountSetup.expectedRevision || !UUID.test(approved.localAccountId??'')
           || !UUID.test(resolution.localIdentity.memberId??''))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
-        creation=Object.freeze({accountId:id(approved.localAccountId),memberId:id(resolution.localIdentity.memberId),
-          connectionId:resolution.localIdentity.connectionId??null});
+        const bound={accountId:id(approved.localAccountId),memberId:id(resolution.localIdentity.memberId),
+          connectionId:resolution.localIdentity.connectionId??null};
+        if(interactive)interactiveSetup=Object.freeze({...bound,artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId)});
+        else creation=Object.freeze(bound);
       }else if(admission.accountSetup!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       // The wire date pair bounds duration, not local wall time. Original
       // monotonic start already charged transport latency before this response.
@@ -1042,7 +1075,11 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
   if(typeof action!=='function')fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const startedAt=performance.now(),controller=new AbortController();
   const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
-  const timer=setTimeout(()=>controller.abort(),120_000);
+  // A separately native-admitted form has a fixed ten-minute outer budget,
+  // including preparation; the provider retains its shorter input deadline.
+  // This is not a longer passive reader or
+  // a caller-controlled timeout; both resolves and bootstrap charge this clock.
+  const timer=setTimeout(()=>controller.abort(),accountSetup?.operation==='configure'?10*60_000:120_000);
   let profile;
   try{
     // Import the existing engine lazily: discovery/pairing never initializes
@@ -1135,6 +1172,49 @@ export const prepareAssistantSourceAccount = async ({identity,host,store,client,
   }catch(error){
     rethrowAssistantSourceError(error,{signal,setup:true});
   }
+};
+
+/** The operator enters credentials ONLY in the existing provider's protected
+ * browser form on this device. This helper cannot choose an old human account,
+ * supply fields, invoke a terminal prompt or infer permission from EMPTY-create.
+ * A saved configuration is not a network/login/readiness/processing receipt. */
+export const configureAssistantEmailSource = async ({identity,host,store,client,companyId,sourceId,signal}) => {
+  companyId=id(companyId);sourceId=id(sourceId);
+  if(!['win32','darwin'].includes(process.platform))fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
+  if(!identity || !client || typeof client.sourceAccounts!=='function'
+    || ['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+  const rows=await client.sourceAccounts(companyId,signal),source=rows.find(row=>row.id===sourceId);
+  if(!source || source.state!=='active' || source.skillId!=='email-imap-smtp'
+    || source.provisionLocalAccount!==true || source.interactiveSetupAllowed!==true)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
+  const scope={companyId,projectId:source.projectId,skillId:source.skillId};
+  try{
+    return await withAssistantSourcePackage({identity,host,store,scope,signal,
+      accountSetup:{sourceId,expectedRevision:source.revision,operation:'configure'}},
+    async({engine,profile,materialized,resolution,signal:currentSignal})=>{
+      const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,
+        companyConnection:resolution.companyConnection};
+      const args=['configure','--local-account',source.localAccountId,'--account',source.localAccountId,'--password-input','browser'];
+      const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
+        runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
+      if(selected.handled || selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
+      executionContext.account=selected.account;
+      const remaining=await profile.remainingMs();
+      if(currentSignal.aborted || remaining<1000)fail('ASSISTANT_SOURCE_DEADLINE');
+      const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+        executionContext,runtimeArguments:selected.runtimeArguments,captureOutput:true,captureExitCode:true,
+        captureMode:'assistant_source_setup',timeoutMs:remaining,signal:currentSignal});
+      await profile.remainingMs();
+      if(currentSignal.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
+      let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_INVALID_RESPONSE');}
+      if(result.exitCode!==0 || !object(value) || value.configured!==source.localAccountId || value.passwordInput!=='browser'
+        || !['imap_smtp','smtp_only'].includes(value.connectionMode) || value.credentialStore!==(process.platform==='win32'?'dpapi':'keychain'))
+        fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
+      // Discard provider diagnostics, mailbox/address, config paths and labels.
+      // Neither stdout nor the fact that the window closed is owner authority.
+      return Object.freeze({sourceId,localAccountId:source.localAccountId,state:'configuration_saved',
+        incomingEnabled:value.connectionMode==='imap_smtp',connectionVerified:false});
+    });
+  }catch(error){rethrowAssistantSourceError(error,{signal,setup:true});}
 };
 
 export const readAssistantSourceMonitor = async ({identity,host,store,source,signal}) => {

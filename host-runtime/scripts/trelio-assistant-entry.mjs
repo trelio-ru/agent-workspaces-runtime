@@ -19,6 +19,10 @@ const schema = properties => ({ type: 'object', properties, required: Object.key
 export const ASSISTANT_SOURCE_SETUP_TOOL=Object.freeze({name:'prepare_assistant_source_account',
   description:'With sourceId=null list owner-configured source refs for one company. With an exact sourceId prepare only its owner-requested empty local account through the common signed loader/catalogue. No login, old-account bind/import, secrets, polling or readiness claim.',
   inputSchema:schema({companyId:enrollment,sourceId:{anyOf:[enrollment,{type:'null'}]}}),annotations:{idempotentHint:true}});
+export const ASSISTANT_EMAIL_SETUP_TOOL=Object.freeze({name:'configure_assistant_email_source',
+  description:'Open the existing protected local email configuration form only for an exact native owner-enabled source. The human enters and saves credentials in that form on this device. No terminal/chat values, old human account import, automatic login, sending or readiness claim. Do not repeat after an uncertain result.',
+  inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{idempotentHint:false}});
+const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name];
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
     || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
@@ -26,9 +30,9 @@ const sourceSetupArguments=args=>{
   return {companyId:args.companyId,sourceId:args.sourceId};
 };
 export const assistantWorkerToolCatalogue=tools=>{
-  if(!Array.isArray(tools)||tools.some(tool=>tool?.name===ASSISTANT_SOURCE_SETUP_TOOL.name))
+  if(!Array.isArray(tools)||tools.some(tool=>sourceToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
-  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL];
+  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL];
 };
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
@@ -227,11 +231,12 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     ?scheduleMaintenance(()=>{if(initialized)return tick();},300_000):null;
   timer?.unref();
   const reply = value => output.write(JSON.stringify(value) + '\n');
-  const withProxy = async action => {
+  const withProxy = async (action,{interactiveSourceSetup=false}={}) => {
     const { withPrivateProcessSession, runtimeHookSignal } = await import('./trelio-hook-private-session.mjs');
     // One deadline covers journal/DPAPI, initialization, request, body and
     // cleanup. A long-lived stdio process never caches a private worker/token.
-    return withPrivateProcessSession(async () => action(await createMcp(), runtimeHookSignal()), AbortSignal.timeout(45_000));
+    return withPrivateProcessSession(async () => action(await createMcp(), runtimeHookSignal()),
+      AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000));
   };
   const dispatch = async message => {
     const requestId = message?.id;
@@ -261,7 +266,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
       try {
         // Validate before touching private storage. Unknown tools cannot cause
         // an auth read or be delegated to another MCP implementation.
-        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name) || message.params?.name===ASSISTANT_SOURCE_SETUP_TOOL.name
+        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name) || sourceToolNames().includes(message.params?.name)
           || createMcp===createForwardingAssistantMcp && !codes.has(message.params?.name)
             && /^[a-z][a-z0-9_]{0,99}$/u.test(message.params?.name ?? '')) {
           if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
@@ -270,7 +275,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
           return respond(await withProxy((proxy, signal) => {
             if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
             return proxy.callTool(message.params.name, message.params.arguments, signal);
-          }));
+          },{interactiveSourceSetup:message.params.name===ASSISTANT_EMAIL_SETUP_TOOL.name}));
         }
         if (!codes.has(message.params?.name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
         // The adapter is constructed once but every paired status revalidates
@@ -354,7 +359,7 @@ export const runAssistantEntry = async (args, options = {}) => {
   const assistantTool = /^(?:mcp__)?trelio[-_]assistant__|^mcp__plugin_trelio-digital-assistant_trelio-assistant__|^(?:mcp[:./-])?trelio-assistant[:./-]/u.test(tool);
   let decision = {};
   if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name)
-    && name !== ASSISTANT_SOURCE_SETUP_TOOL.name && name !== 'get_assistant_status') {
+    && !sourceToolNames().includes(name) && name !== 'get_assistant_status') {
     const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
     const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
     try {
@@ -430,7 +435,7 @@ export const assistantHealthCompatibility = (state, versions) => {
 export const assistantHealthyBoundary = (current,request) => ({code:'ready',
   ...((current.code==='hook_review_required' || current.latchedCodes?.includes('hook_review_required'))
     && request.operation==='call' && request.name!=='get_assistant_status'
-    && request.name!==ASSISTANT_SOURCE_SETUP_TOOL.name ? {clearedReason:'hook_review_required'} : {}),
+    && !sourceToolNames().includes(request.name) ? {clearedReason:'hook_review_required'} : {}),
 });
 
 export const maintainAssistantHost = async ({client,probe,update,versions,signal}) => {
@@ -460,9 +465,11 @@ const validateAssistantRuntimeRequest = request => {
 };
 
 export const requestCurrentAssistantRuntime = async (request, {environment=process.env,spawnProcess=spawn,
-  resolveLoader=resolveHostRuntimeLoader,signal,timeoutMs=120_000}={}) => {
+  resolveLoader=resolveHostRuntimeLoader,signal,timeoutMs}={}) => {
   validateAssistantRuntimeRequest(request);
-  if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>(request.operation==='background_tick'?35*60_000:180_000))fail('ASSISTANT_REQUEST_INVALID');
+  const interactive=request.operation==='call'&&request.name===ASSISTANT_EMAIL_SETUP_TOOL.name;
+  timeoutMs??=interactive?11*60_000:120_000;
+  if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>(request.operation==='background_tick'?35*60_000:interactive?11*60_000:180_000))fail('ASSISTANT_REQUEST_INVALID');
   const input=JSON.stringify(request);
   if(Buffer.byteLength(input)>131072) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
   const loader=await resolveLoader({environment});
@@ -496,7 +503,7 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   });
 };
 
-const productionContext = async (action, { signal } = {}) => {
+const productionContext = async (action, { signal, interactiveSourceSetup=false } = {}) => {
   const [{createAssistantPrivateStore},{createAssistantHostState},{createAssistantDeviceClient,createAssistantHttp},common,
     {withPrivateProcessSession}]=await Promise.all([
     import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-transport.mjs'),
@@ -510,7 +517,8 @@ const productionContext = async (action, { signal } = {}) => {
     if(!identity)return null;
     if(identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
     return action(createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})}),host,store);
-  }, signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000));
+  }, signal ? AbortSignal.any([signal, AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000)])
+    : AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000));
 };
 
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
@@ -721,7 +729,8 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 };
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
-  versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input)}={}) => {
+  versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
+  configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
   if(request.operation==='background_tick')return runAssistantBackgroundTick();
   if(request.operation==='health') {
@@ -751,8 +760,10 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   if(!['list','call'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
   // Validate the exact tool before any credential read, as in ordinary MCP.
   const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
-  const sourceSetup=request.operation==='call'&&request.name===ASSISTANT_SOURCE_SETUP_TOOL.name;
+  const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
+  const interactiveSourceSetup=sourceSetup&&request.name===ASSISTANT_EMAIL_SETUP_TOOL.name;
   const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
+  if(interactiveSourceSetup&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
   if(request.operation==='call' && !sourceSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
     const current=await client.readHealth();
@@ -768,10 +779,11 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       if(sourceSetup){
         try{
           const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
-          const value=sourceArguments.sourceId===null?
+          const value=interactiveSourceSetup?await configureSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
             {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
               skillId:source.skillId,projectId:source.projectId,state:source.state,revision:source.revision,
-              provisionLocalAccount:source.provisionLocalAccount,executionVerified:false}))}:
+              provisionLocalAccount:source.provisionLocalAccount,
+              ...(source.interactiveSetupAllowed===true?{interactiveSetupAllowed:true}:{}),executionVerified:false}))}:
             await prepareSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()});
           result={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
         }catch(error){const code=safeError(error);result={isError:true,content:[{type:'text',text:code}],structuredContent:{code}};}
@@ -791,7 +803,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       if(code)await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code}).catch(()=>undefined);
       throw error; // Never repeat the original business invocation.
     }
-  }).then(result=>result ?? (request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED')));
+  },{interactiveSourceSetup}).then(result=>result ?? (request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED')));
 };
 
 /** Internal server plan, never an arbitrary command/directory selected by a

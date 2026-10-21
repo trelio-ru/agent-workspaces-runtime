@@ -7739,22 +7739,38 @@ export const runMaterializedAgentSkill = async ({
   // human prompt on inherited stdin. A provider's command semantics still
   // belong to its reviewed signed implementation, not this string check.
   const taskCapture = captureMode === 'assistant_task';
+  const sourceSetupCapture = captureMode === 'assistant_source_setup';
   const profile = currentWorkspaceExecutionProfile();
-  if (!['monitor','assistant_task'].includes(captureMode)
+  if (!['monitor','assistant_task','assistant_source_setup'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
+    || sourceSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
+      || typeof profile.authorizeInteractiveSourceSetup !== 'function'
+      || typeof profile.assertInteractiveSourceSetupCurrent !== 'function')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && runtimeArguments[0] !== 'monitor'
+    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > (taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null
-    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 180_000
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture ? 10 * 60_000 : 180_000)
     || signal !== null && !(signal instanceof AbortSignal))) {
     throw Object.assign(new Error('Invalid private monitor invocation.'), { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
   }
   if (captureOutput && signal?.aborted) {
     throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Чтение навыка отменено.',
       { operation: 'skill_run', causeCode: 'ABORT_ERR' });
+  }
+  // Opening a protected provider form is a different native permission from
+  // polling or creating an empty catalogue entry. The SAME process engine is
+  // reused, but a private profile must consume its exact live owner admission
+  // before interpreter/bootstrap I/O. Neither a capture-mode string nor an
+  // arbitrary provider command grants setup. Later, immediately before spawn,
+  // we repeat the non-consuming identity/deadline check below.
+  if (sourceSetupCapture) {
+    const remaining = await profile.authorizeInteractiveSourceSetup({artifact, executionContext, runtimeArguments});
+    if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 10 * 60_000)
+      throw Object.assign(new Error('Invalid protected setup budget.'), {code:'ASSISTANT_SKILL_SETUP_REQUIRED'});
+    timeoutMs = Math.min(timeoutMs, remaining);
   }
   const entrypointPath = path.join(
     runtimeDirectory,
@@ -7794,6 +7810,7 @@ export const runMaterializedAgentSkill = async ({
     grantedEnvironment,
     now: runtimeStartedAt,
   });
+  if (sourceSetupCapture) await profile.assertInteractiveSourceSetupCurrent();
   const browserSessionDeadlineAt = Number(
     runtimeEnvironment.TRELIO_BROWSER_SESSION_DEADLINE_AT || 0,
   );
