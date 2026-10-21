@@ -40,9 +40,10 @@ test('popup router changes window.open only during one explicit trusted file cli
   const nonce = '00000000-0000-4000-8000-000000000001';
   const arm = () => message({ source: window, data: { kind:'trelio_attachment_arm',nonce,x:10,y:20 } });
   arm(); click({isTrusted:false,clientX:10,clientY:20}); assert.equal(window.open('https://example.test/untrusted'), 'native');
-  arm(); click({isTrusted:true,clientX:10,clientY:20}); assert.equal(window.open('https://example.test/incoming'), null);
+  arm(); const cached = window.open; click({isTrusted:true,clientX:10,clientY:20}); assert.equal(window.open('https://example.test/incoming'), null);
   assert.equal(calls, 1); assert.equal(window.open, nativeOpen);
   assert.equal(messages.at(-1).kind, 'trelio_attachment_open'); assert.equal(messages.at(-1).url, 'https://example.test/incoming');
+  assert.equal(cached('https://example.test/later'), 'native'); assert.equal(calls,2, 'cached temporary wrapper keeps the exact native function after disarm');
   arm(); message({source:window,data:{kind:'trelio_attachment_cancel',nonce}}); assert.equal(window.open,nativeOpen);
   arm(); now += 5001; timers.at(-1)(); assert.equal(window.open,nativeOpen, 'expiry restores the same original');
 });

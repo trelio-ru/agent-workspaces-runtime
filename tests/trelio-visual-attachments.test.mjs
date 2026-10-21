@@ -64,3 +64,17 @@ test('attachment delivery refuses a symlink-backed destination before writing', 
     assert.deepEqual(await fs.readdir(other), []);
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
+
+test('maximum-size original uses canonical decoding and a full cache never evicts fresh files', async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-attachment-bounds-')));
+  try {
+    const bytes = Buffer.alloc(MAX_ATTACHMENT_BYTES, 0x20); bytes.write('%PDF-1.7\n'); bytes.write('%%EOF\n',bytes.length-6);
+    const sessionId = randomUUID(), input = {mimeType:'application/pdf',dataBase64:bytes.toString('base64')};
+    const receipt = await saveVisualAttachment(directory,input,sessionId); assert.equal(receipt.sizeBytes,MAX_ATTACHMENT_BYTES);
+    assert.equal((await fs.stat(receipt.filePath)).size,MAX_ATTACHMENT_BYTES);
+    await assert.rejects(saveVisualAttachment(directory,{...input,dataBase64:input.dataBase64+'\n'},sessionId),{code:'attachment_unsupported'});
+    for (let i=1;i<32;i++) await fs.writeFile(path.join(directory,'attachments',`${randomUUID()}.txt`),'synthetic',{mode:0o600});
+    await assert.rejects(saveVisualAttachment(directory,{mimeType:'text/plain',dataBase64:Buffer.from('extra').toString('base64')},sessionId),{code:'attachment_limit_reached'});
+    assert.equal((await fs.readdir(path.join(directory,'attachments'))).length,32); assert.equal((await fs.stat(receipt.filePath)).size,MAX_ATTACHMENT_BYTES);
+  } finally { await fs.rm(directory,{recursive:true,force:true}); }
+});
