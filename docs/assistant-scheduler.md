@@ -348,12 +348,29 @@ A closed window is not successful configuration, and saved credentials are not
 network readiness, sending authority, processed messages or a passed Windows
 business pilot. Setup metadata does not clear hook/login health latches.
 
-This source entry is not proof that arbitrary task-skill arguments cannot open
-a provider-owned setup command. The existing account-CRUD and secret-setup
-guards do not classify every provider command (`configure`, login, reconnect).
-A signed provider execution-profile contract, native rejection before credential
-I/O and composition tests are required before autonomous business activation;
-neither instructions nor this separate source tool close that release gate.
+Arbitrary task-skill arguments require `trelio-assistant-execution.json` in the
+SAME verified signed package file inventory. Its v1 object has exactly
+`schemaVersion:1` and `taskCommands`: 1–64 unique literal positional prefixes,
+each 1–3 command tokens `[a-z][a-z0-9-]{0,63}`, at most 8192 UTF-8 bytes.
+Provider authors classify their own real parser leaves; the generic host has no
+provider command map, regex/glob, option-skipping or second executor. Unknown or
+missing policy fails closed; unsigned resolve metadata/model flags cannot opt in.
+
+The shared `skillCommand` checks after package verification but BEFORE managed
+account selection/import. It removes only the host's strict local-account
+selector, then compares literal leading tokens. The shared materialized executor
+checks again before interpreter/bootstrap/provider I/O. Native host account
+commands retain their independent existing gates. Human calls retain the old
+CLI; fixed source monitor/setup keep their separate exact native admissions.
+The composition fixture executes a real signed Node provider, verifies approved
+task work, and proves forbidden setup/policy/ACK/import commands never launch it.
+
+This is restriction, not business permission: send/reply still require the
+existing task/operator/owner authority and provider guards. Exact source ACK
+needs committed processing/read proof/lease, independently of this file. Email
+is the first reviewed provider opt-in; other providers remain unavailable to
+generic task execution until their actual CLI classification is signed/tested.
+Owner onboarding and the Windows business E2E remain separate release gates.
 
 `readAssistantSourceMonitor` composes the same package resolution validator,
 Ed25519/digest/file-inventory verifier, executable cache, explicit bound local

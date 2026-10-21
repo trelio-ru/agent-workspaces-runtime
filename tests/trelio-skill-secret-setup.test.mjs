@@ -1,12 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
 
 const command = { id: "configure", arguments: ["configure"], bindingKey: "service_token",
   fieldKey: "value", environmentVariable: "TRELIO_TEST_SETUP_TOKEN" };
 const packageWith = (commands, extra = {}) => ({ capabilities: ["secret-checkout"], files: [{
   path: "trelio-secret-setup.json", bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, commands, ...extra })),
 }] });
+
+test('assistant command policy is signed bytes only, exact positional prefixes and fail-closed for legacy packages', () => {
+  const policy = {schemaVersion:1,taskCommands:[['read'],['policy','show']]};
+  const packaged = value => ({files:[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(value))}]});
+  for (const args of [['read'],['read','--uid','11'],['policy','show','--account','own']])
+    assert.doesNotThrow(()=>assertAssistantTaskSkillCommand(packaged(policy),args));
+  for (const args of [['configure'],['policy','set'],['--help','read'],['Read'],['read-more'],[],['read',null]])
+    assert.throws(()=>assertAssistantTaskSkillCommand(packaged(policy),args),{code:'ASSISTANT_SKILL_COMMAND_DENIED'});
+  assert.throws(()=>assertAssistantTaskSkillCommand({files:[],taskCommands:[['configure']]},['configure']),
+    {code:'ASSISTANT_SKILL_COMMAND_UNAVAILABLE'},'unsigned metadata is never a fallback');
+  for(const value of [{...policy,schemaVersion:2},{...policy,allowSetup:true},{...policy,taskCommands:[]},
+    {...policy,taskCommands:[['read'],['read']]},{...policy,taskCommands:[['*']]},
+    {...policy,taskCommands:[['read','a','b','c']]}, {...policy,taskCommands:Array(65).fill(['read'])}])
+    assert.throws(()=>assertAssistantTaskSkillCommand(packaged(value),['read']),{code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
+  for(const bytes of [Buffer.from('{'),Buffer.from([0xff]),Buffer.alloc(8193)])
+    assert.throws(()=>assertAssistantTaskSkillCommand({files:[{path:'trelio-assistant-execution.json',bytes}]},['read']),
+      {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
+});
 
 test("setup declaration permits only complete signed argument vectors", () => {
   assert.deepEqual(readSkillSecretSetupCommand(packageWith([command]), ["configure"]), command);

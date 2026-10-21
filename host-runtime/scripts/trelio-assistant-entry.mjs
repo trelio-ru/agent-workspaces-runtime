@@ -993,7 +993,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       ...(plan.localAction.operation==='open'?{directory:root}:{}),
       ...(['checkpoint','finish','pause'].includes(plan.localAction.operation)?{taskOutcome:'no_status_change'}:{}),
     }};
-    let nativeReason,nativeHealthCause;
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
     try {return await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{
       resolveRunRootDirectory:async()=>root,
       runBridge:async(_origin,args,options)=>{
@@ -1018,6 +1018,11 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           // Reuse the ordinary in-process -> CLI error projection so common
           // lease/recovery and bounded HTTP classification remain identical.
           if(assistantHealthFailure(error))nativeHealthCause=error.code;
+          // These are closed local policy outcomes, not provider stderr or an
+          // HTTP diagnosis. Preserve them across the common CLI wrapper so a
+          // missing provider opt-in is not reported as a transport outage.
+          if(['ASSISTANT_SKILL_COMMAND_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_POLICY_INVALID',
+            'ASSISTANT_SKILL_COMMAND_DENIED'].includes(error?.code))nativeCommandPolicyCause=error.code;
           if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(error.payload?.reason))nativeReason=error.payload.reason;
           throw Object.assign(error,{stderr:'Ошибка: '+common.formatBridgeCommandError(error,args[0])});
         }
@@ -1027,6 +1032,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       const diagnostic=error?.details?.http?.failureCode;
       if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;
       if(nativeHealthCause)error.code=nativeHealthCause;
+      if(nativeCommandPolicyCause)error.code=nativeCommandPolicyCause;
       if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && nativeReason)error.reason=nativeReason;
       throw error;
     }

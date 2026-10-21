@@ -6,6 +6,39 @@ const invalid = () => new Error("Подписанная декларация н�
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 
+/** The provider owns CLI classification in the SAME signed file inventory.
+ * Absence is not legacy permission: a package that has not reviewed its task
+ * surface cannot run with assistant credentials. This is a restriction only;
+ * a matching command still needs live task/account/action authority. No model
+ * flag, environment value or unsigned resolve metadata supplies this policy.
+ */
+export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments) => {
+  const fail = code => { throw Object.assign(new Error(code), { code }); };
+  const files = parsedPackage?.files?.filter(file => file.path === 'trelio-assistant-execution.json') ?? [];
+  if (!files.length) fail('ASSISTANT_SKILL_COMMAND_UNAVAILABLE');
+  if (files.length !== 1 || !Buffer.isBuffer(files[0].bytes) || files[0].bytes.length > 8192)
+    fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+  let policy;
+  try { policy = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(files[0].bytes)); }
+  catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
+  if (!exactKeys(policy, ['schemaVersion', 'taskCommands']) || policy.schemaVersion !== 1
+    || !Array.isArray(policy.taskCommands) || !policy.taskCommands.length || policy.taskCommands.length > 64)
+    fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+  const seen = new Set();
+  for (const prefix of policy.taskCommands) {
+    if (!Array.isArray(prefix) || !prefix.length || prefix.length > 3
+      || prefix.some(token => typeof token !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/u.test(token))
+      || seen.has(JSON.stringify(prefix))) fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+    seen.add(JSON.stringify(prefix));
+  }
+  // Literal positional tokens only. No regex/glob, shell expansion, substring
+  // matching, option skipping or parser abbreviation can broaden a prefix.
+  // Provider arguments after it retain their existing strict native parser.
+  if (!Array.isArray(runtimeArguments) || runtimeArguments.some(arg => typeof arg !== 'string')
+    || !policy.taskCommands.some(prefix => prefix.every((token, index) => runtimeArguments[index] === token)))
+    fail('ASSISTANT_SKILL_COMMAND_DENIED');
+};
+
 /** Read only the bytes whose package signature and per-file hashes were verified. */
 export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) => {
   const file = parsedPackage.files.find((item) => item.path === SKILL_SECRET_SETUP_FILE);

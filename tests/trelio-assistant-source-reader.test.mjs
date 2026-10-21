@@ -372,6 +372,7 @@ test('task skills use the SAME signed package, native command and process engine
   const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,
     lockDirectory:path.join(directory,'task-locks'),lock:(_file,action)=>action()});
   const sourceDir=path.join(directory,'task-package');await fs.mkdir(sourceDir);
+  await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:1,taskCommands:[['read'],['fail']]}));
   const calls=path.join(directory,'task-native-calls');
   // This executes a real signed Node provider through runWorkspaceCommand.
   // The fixture must not inherit the source reader's chat or any human token.
@@ -424,6 +425,19 @@ test('task skills use the SAME signed package, native command and process engine
     await assert.rejects(run(plan));assert.equal(await fs.readFile(calls,'utf8'),'111','late native refusal blocks cached execution');
     denyNextLaunch=false;live=false;
     await assert.rejects(run(plan),/PASS_REVIEW_REQUIRED/);assert.equal(await fs.readFile(calls,'utf8'),'111');live=true;
+    for(const args of [['configure','--password-input','browser'],['policy','set','--mode','confirm'],
+      ['ack-reference','--confirm'],['__trelio_accounts_import'],['read-more','PRIVATE_SETUP_CANARY']]) {
+      const denied=structuredClone(plan);denied.localAction.parameters.arguments=args;
+      await assert.rejects(run(denied),error=>error.code==='ASSISTANT_SKILL_COMMAND_DENIED'
+        && !JSON.stringify(error).includes('PRIVATE_SETUP_CANARY'));
+      assert.equal(await fs.readFile(calls,'utf8'),'111','forbidden command must not launch the signed provider');
+    }
+    // The same policy is checked inside the common process engine, before
+    // interpreter/path access; a caller cannot skip skillCommand's early guard.
+    await assert.rejects(engine.withWorkspaceExecutionProfile(profile,()=>engine.runMaterializedAgentSkill({
+      artifact:{parsedPackage:engine.parseAndValidateAgentSkillPackage(bytes)},runtimeDirectory:'/not-an-executable-fixture',
+      runtimeArguments:['configure'],executionContext:{},captureOutput:true,captureMode:'assistant_task'})),
+      {code:'ASSISTANT_SKILL_COMMAND_DENIED'});
     for(const change of [{runIdentity:{workspaceId:randomUUID(),runId:randomUUID()}},{localAction:{...plan.localAction,parameters:{...plan.localAction.parameters,directory:'/other'}}}]){
       await assert.rejects(run({...plan,...change}));
     }

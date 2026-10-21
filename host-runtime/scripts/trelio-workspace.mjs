@@ -24,7 +24,7 @@ const reportFinishProgress = (stage, counts = {}) => {
   writeFinishProgress({ stage, ...counts });
 };
 
-import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from "./trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -7772,6 +7772,10 @@ export const runMaterializedAgentSkill = async ({
       throw Object.assign(new Error('Invalid protected setup budget.'), {code:'ASSISTANT_SKILL_SETUP_REQUIRED'});
     timeoutMs = Math.min(timeoutMs, remaining);
   }
+  // Defense in the shared executor, before interpreter discovery, provider
+  // credentials or native bootstrap. Source setup has its own exact one-use
+  // native admission; it cannot select this task capture mode.
+  if (taskCapture) assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments);
   const entrypointPath = path.join(
     runtimeDirectory,
     ...artifact.parsedPackage.entrypoint.path.split("/"),
@@ -8336,6 +8340,13 @@ const skillCommand = async (
     runtimeDirectory = materialized.runtimeDirectory;
   }
 
+  if (assistant && !parseAccountCommand(positional.slice(1))) {
+    // Check before prepareSkillAccount: catalogue import/selection is I/O too.
+    // Only the existing host selector is removed, by its strict shared parser.
+    const providerArguments = artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
+      ? splitAccountArguments(positional.slice(1)).providerArguments : positional.slice(1);
+    assertAssistantTaskSkillCommand(artifactForCache.parsedPackage, providerArguments);
+  }
   const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
   if (assistant && setupCommand) throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
   if (setupCommand && (Object.keys(grantedEnvironment).length || grantedStdin !== null)) {
