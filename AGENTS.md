@@ -413,6 +413,9 @@ publication tooling также остаются вне этого публичн
   Protected email setup needs a separate native owner opt-in; fixed browser-only
   capture reuses the same account/process engine and original human-input budget.
   It never accepts credentials/terminal args or upgrades passive reader limits.
+  Telegram QR/2FA onboarding uses the SAME protected provider and catalogue;
+  exact native `login` admission is separate from email configure/empty-create.
+  Login never proves owner identity, enables intake/ACK or clears hook trust.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).

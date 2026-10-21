@@ -123,7 +123,7 @@ const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyI
       || !['active','paused','revoked'].includes(row.state) || row.executionVerified !== false
       || row.provisionLocalAccount !== undefined && typeof row.provisionLocalAccount !== 'boolean'
       || row.interactiveSetupAllowed !== undefined && typeof row.interactiveSetupAllowed !== 'boolean'
-      || row.interactiveSetupAllowed === true && (row.provisionLocalAccount !== true || row.skillId !== 'email-imap-smtp')
+      || row.interactiveSetupAllowed === true && (row.provisionLocalAccount !== true || !['email-imap-smtp','telegram-mtproto'].includes(row.skillId))
       || !Number.isSafeInteger(row.revision) || row.revision < 0 || row.revision > 2_147_483_647) invalid();
     const sourceId = responseId(row.id);
     if (seen.has(sourceId)) invalid();
@@ -884,14 +884,20 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   scope=sourceScope(scope);
   if(accountSetup!==null){
     if(!object(accountSetup) || Object.keys(accountSetup).some(key=>!['sourceId','expectedRevision','operation'].includes(key))
-      || accountSetup.operation!==undefined && accountSetup.operation!=='configure'
+      || accountSetup.operation!==undefined && !['configure','login'].includes(accountSetup.operation)
       || accountSetup.operation==='configure' && scope.skillId!=='email-imap-smtp'
+      || accountSetup.operation==='login' && scope.skillId!=='telegram-mtproto'
       || !Number.isSafeInteger(accountSetup.expectedRevision) || accountSetup.expectedRevision<0
       || accountSetup.expectedRevision>2_147_483_647)fail('ASSISTANT_SOURCE_INVALID_INPUT');
     accountSetup=Object.freeze({sourceId:id(accountSetup.sourceId),expectedRevision:accountSetup.expectedRevision,
       ...(accountSetup.operation?{operation:accountSetup.operation}:{})});
   }
-  const interactive=accountSetup?.operation==='configure';
+  const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
+  // Only these two separately reviewed native admissions may open a local
+  // provider form. This map selects fixed syntax, never a provider implementation
+  // or model-selected operation; ordinary monitor/empty-create stay unchanged.
+  const interactiveCommand=accountSetup?.operation==='login'?'login':'configure';
+  const interactiveProtocol=accountSetup?.operation==='login'?'telegram-login/v1':'email-configure/v1';
   const maximumBudgetMs=interactive?10*60_000:120_000;
   const origin=originOf(identity?.origin),assistantId=id(identity?.assistantId),deviceId=id(identity?.deviceId);
   if(!host || typeof host.readIdentity!=='function' || !store || typeof store.get!=='function'
@@ -943,7 +949,9 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         || context?.companyId!==scope.companyId || (context.projectId??null)!==scope.projectId
         || context.releaseId!==approved.releaseId || context.localIdentity?.memberId!==approved.memberId
         || (context.localIdentity?.connectionId??null)!==approved.connectionId || context.account?.id!==approved.accountId
-        || JSON.stringify(runtimeArguments)!==JSON.stringify(['configure','--account',approved.accountId,'--password-input','browser']))
+        || JSON.stringify(runtimeArguments)!==JSON.stringify(interactiveCommand==='login'
+          ?['login','--account',approved.accountId,'--qr']
+          :['configure','--account',approved.accountId,'--password-input','browser']))
         fail('ASSISTANT_SKILL_SETUP_REQUIRED');
       interactiveUsed=true;
       return Math.floor(budgetMs-(monotonic()-startedAt));
@@ -983,8 +991,8 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(interactive?'email-configure/v1':protocol.protocol)
-        || admission.command!==(interactive?'configure':'monitor')
+        || admission.provider!==protocol.provider || admission.protocol!==(interactive?interactiveProtocol:protocol.protocol)
+        || admission.command!==(interactive?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
@@ -999,14 +1007,14 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
         ...(accountSetup?{accountSetupSourceId:accountSetup.sourceId,accountSetupRevision:String(accountSetup.expectedRevision),
-          ...(interactive?{accountSetupOperation:'configure'}:{})}:{})};
+          ...(interactive?{accountSetupOperation:accountSetup.operation}:{})}:{})};
       if(url.origin!==origin || url.pathname!==`${ASSISTANT_SOURCE_PREFIX}/package` || url.hash
         || [...url.searchParams.keys()].length!==Object.keys(query).length
         || Object.entries(query).some(([key,value])=>url.searchParams.get(key)!==value)) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
         if(!object(approved) || Object.keys(approved).sort().join(',')!=='localAccountId,operation,schemaVersion,sourceId,sourceRevision'
-          || approved.schemaVersion!==1 || approved.operation!==(interactive?'configure':'create') || approved.sourceId!==accountSetup.sourceId
+          || approved.schemaVersion!==1 || approved.operation!==(interactive?accountSetup.operation:'create') || approved.sourceId!==accountSetup.sourceId
           || approved.sourceRevision!==accountSetup.expectedRevision || !UUID.test(approved.localAccountId??'')
           || !UUID.test(resolution.localIdentity.memberId??''))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
         const bound={accountId:id(approved.localAccountId),memberId:id(resolution.localIdentity.memberId),
@@ -1110,7 +1118,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
   // including preparation; the provider retains its shorter input deadline.
   // This is not a longer passive reader or
   // a caller-controlled timeout; both resolves and bootstrap charge this clock.
-  const timer=setTimeout(()=>controller.abort(),accountSetup?.operation==='configure'?10*60_000:120_000);
+  const timer=setTimeout(()=>controller.abort(),['configure','login'].includes(accountSetup?.operation)?10*60_000:120_000);
   let profile;
   try{
     // Import the existing engine lazily: discovery/pairing never initializes
@@ -1209,22 +1217,24 @@ export const prepareAssistantSourceAccount = async ({identity,host,store,client,
  * browser form on this device. This helper cannot choose an old human account,
  * supply fields, invoke a terminal prompt or infer permission from EMPTY-create.
  * A saved configuration is not a network/login/readiness/processing receipt. */
-export const configureAssistantEmailSource = async ({identity,host,store,client,companyId,sourceId,signal}) => {
+const configureAssistantInteractiveSource = async ({identity,host,store,client,companyId,sourceId,signal},kind) => {
   companyId=id(companyId);sourceId=id(sourceId);
   if(!['win32','darwin'].includes(process.platform))fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
   if(!identity || !client || typeof client.sourceAccounts!=='function'
     || ['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
   const rows=await client.sourceAccounts(companyId,signal),source=rows.find(row=>row.id===sourceId);
-  if(!source || source.state!=='active' || source.skillId!=='email-imap-smtp'
+  const telegram=kind==='telegram',skillId=telegram?'telegram-mtproto':'email-imap-smtp',operation=telegram?'login':'configure';
+  if(!source || source.state!=='active' || source.skillId!==skillId
     || source.provisionLocalAccount!==true || source.interactiveSetupAllowed!==true)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
   const scope={companyId,projectId:source.projectId,skillId:source.skillId};
   try{
     return await withAssistantSourcePackage({identity,host,store,scope,signal,
-      accountSetup:{sourceId,expectedRevision:source.revision,operation:'configure'}},
+      accountSetup:{sourceId,expectedRevision:source.revision,operation}},
     async({engine,profile,materialized,resolution,signal:currentSignal})=>{
       const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,
         companyConnection:resolution.companyConnection};
-      const args=['configure','--local-account',source.localAccountId,'--account',source.localAccountId,'--password-input','browser'];
+      const args=telegram?['login','--local-account',source.localAccountId,'--account',source.localAccountId,'--qr']:
+        ['configure','--local-account',source.localAccountId,'--account',source.localAccountId,'--password-input','browser'];
       const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
         runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
       if(selected.handled || selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
@@ -1237,6 +1247,16 @@ export const configureAssistantEmailSource = async ({identity,host,store,client,
       await profile.remainingMs();
       if(currentSignal.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
       let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_INVALID_RESPONSE');}
+      if(telegram){
+        if(result.exitCode!==0||!object(value)||value.authorized!==true)fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
+        // The native Telegram account's ID/username and QR/login factors never
+        // leave the provider boundary. Successful login does not identify the
+        // assistant OWNER, approve new tasks, alter read-state or prove polling.
+        const current=await client.sourceAccounts(companyId,currentSignal);await profile.remainingMs();
+        if(!sameAssistantSourceRegistration(source,current.find(row=>row.id===sourceId)))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+        return Object.freeze({sourceId,localAccountId:source.localAccountId,state:'session_authorized',
+          incomingVerified:false,backgroundVerified:false});
+      }
       if(result.exitCode!==0 || !object(value) || value.configured!==source.localAccountId || value.passwordInput!=='browser'
         || !['imap_smtp','smtp_only'].includes(value.connectionMode) || value.credentialStore!==(process.platform==='win32'?'dpapi':'keychain'))
         fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
@@ -1248,6 +1268,12 @@ export const configureAssistantEmailSource = async ({identity,host,store,client,
     });
   }catch(error){rethrowAssistantSourceError(error,{signal,setup:true});}
 };
+
+export const configureAssistantEmailSource = input => configureAssistantInteractiveSource(input,'email');
+/** Opens the SAME provider's protected QR/2FA page on the assistant computer.
+ * The human scans/types there. No terminal prompts, app identity, login factor,
+ * human-session import, credential copying or automatic retry enters this host. */
+export const configureAssistantTelegramSource = input => configureAssistantInteractiveSource(input,'telegram');
 
 /** Registration equality is shared with the background coordinator. A late
  * pause/revoke/rebind must invalidate a verification just as it invalidates

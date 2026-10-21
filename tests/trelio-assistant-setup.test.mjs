@@ -7,7 +7,7 @@ import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
   const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
@@ -97,7 +97,7 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
       return {sourceId,state:'prepared',loginVerified:false};
     }};
   const tools=await executeAssistantRuntimeRequest({operation:'list'},dependencies);
-  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL],'the current worker owns source discovery');
+  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL],'the current worker owns source discovery');
   const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
   const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
@@ -123,11 +123,11 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
 
 test('assistant hook permits setup and blocks task tools without an installed host profile', async () => {
   for(const tool of ['mcp__trelio_assistant__get_task','mcp__plugin_trelio-digital-assistant_trelio-assistant__clear_task_control',
-    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source']){
+    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source','mcp__trelio_assistant__configure_assistant_telegram_source']){
     const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
     await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output,createHook:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});}});
     const result=JSON.parse(raw);
-    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source'].some(name=>tool.endsWith(name))?undefined:'deny');
+    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source','configure_assistant_telegram_source'].some(name=>tool.endsWith(name))?undefined:'deny');
   }
 });
 
@@ -153,6 +153,24 @@ test('email setup routes only exact locators under its private wait envelope and
   assert.equal(contexts,1,'invalid arguments cannot read credentials or create a second form');assert.equal(calls,1);
 });
 
+
+test('Telegram setup selects only its exact native route and long input budget without clearing hook trust',async()=>{
+  const companyId=randomUUID(),sourceId=randomUUID(),reports=[];let calls=0,contexts=0;
+  const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
+    context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,true);return action({identity:{},
+      readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
+      reportHealth:async value=>reports.push(value)}, {}, {});},proxyFor:async()=>({}),
+    configureSource:async()=>assert.fail('Telegram cannot enter email configure'),configureTelegramSource:async input=>{
+      calls++;assert.equal(input.companyId,companyId);assert.equal(input.sourceId,sourceId);
+      return {sourceId,state:'session_authorized',incomingVerified:false,backgroundVerified:false};
+    }};
+  const request={operation:'call',name:'configure_assistant_telegram_source',arguments:{companyId,sourceId}};
+  assert.equal((await executeAssistantRuntimeRequest(request,dependencies)).structuredContent.state,'session_authorized');
+  for(const arguments_ of [{companyId,sourceId:null},{companyId,sourceId,qr:'PRIVATE_FACTOR'},
+    {companyId,sourceId,terminalPrompts:true},{companyId,sourceId,timeoutMs:600000}])
+    await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:arguments_},dependencies),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
+  assert.equal(calls,1);assert.equal(contexts,1);assert.ok(reports.every(value=>value.clearedReason===undefined));
+});
 
 test('email verification uses the normal read budget, preserves source reasons and cannot clear login/hooks',async()=>{
   const companyId=randomUUID(),sourceId=randomUUID(),reports=[];let calls=0,contexts=0;

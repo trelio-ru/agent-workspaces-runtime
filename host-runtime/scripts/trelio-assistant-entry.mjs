@@ -25,7 +25,11 @@ export const ASSISTANT_EMAIL_SETUP_TOOL=Object.freeze({name:'configure_assistant
 export const ASSISTANT_EMAIL_VERIFY_TOOL=Object.freeze({name:'verify_assistant_email_source',
   description:'After saved configuration, verify one exact owner-configured email source with the SAME passive signed reader. Reads INBOX metadata only; does not open a form, change configuration/cursor/queue/read-state, test SMTP or prove background scheduling. A failure never permits repeating setup.',
   inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{readOnlyHint:true,idempotentHint:true}});
-const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name];
+export const ASSISTANT_TELEGRAM_SETUP_TOOL=Object.freeze({name:'configure_assistant_telegram_source',
+  description:'Open the existing protected Telegram QR/2FA login page on this device only for an exact native owner-enabled source. The human scans/enters factors there. No terminal/chat credentials, human session import, automatic login, sending, owner identity proof or background readiness. Never repeat an uncertain login.',
+  inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{idempotentHint:false}});
+const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name];
+const interactiveSourceTool=name=>[ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name].includes(name);
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
     || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
@@ -35,7 +39,7 @@ const sourceSetupArguments=args=>{
 export const assistantWorkerToolCatalogue=tools=>{
   if(!Array.isArray(tools)||tools.some(tool=>sourceToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
-  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL];
+  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL];
 };
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
@@ -279,7 +283,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
           return respond(await withProxy((proxy, signal) => {
             if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
             return proxy.callTool(message.params.name, message.params.arguments, signal);
-          },{interactiveSourceSetup:message.params.name===ASSISTANT_EMAIL_SETUP_TOOL.name}));
+          },{interactiveSourceSetup:interactiveSourceTool(message.params.name)}));
         }
         if (!codes.has(message.params?.name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
         // The adapter is constructed once but every paired status revalidates
@@ -471,7 +475,7 @@ const validateAssistantRuntimeRequest = request => {
 export const requestCurrentAssistantRuntime = async (request, {environment=process.env,spawnProcess=spawn,
   resolveLoader=resolveHostRuntimeLoader,signal,timeoutMs}={}) => {
   validateAssistantRuntimeRequest(request);
-  const interactive=request.operation==='call'&&request.name===ASSISTANT_EMAIL_SETUP_TOOL.name;
+  const interactive=request.operation==='call'&&interactiveSourceTool(request.name);
   timeoutMs??=interactive?11*60_000:120_000;
   if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>(request.operation==='background_tick'?35*60_000:interactive?11*60_000:180_000))fail('ASSISTANT_REQUEST_INVALID');
   const input=JSON.stringify(request);
@@ -737,6 +741,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
   configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
+  configureTelegramSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantTelegramSource(input),
   verifySource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
   if(request.operation==='background_tick')return runAssistantBackgroundTick();
@@ -768,7 +773,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   // Validate the exact tool before any credential read, as in ordinary MCP.
   const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
   const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
-  const interactiveSourceSetup=sourceSetup&&request.name===ASSISTANT_EMAIL_SETUP_TOOL.name;
+  const interactiveSourceSetup=sourceSetup&&interactiveSourceTool(request.name);
   const sourceVerification=sourceSetup&&request.name===ASSISTANT_EMAIL_VERIFY_TOOL.name;
   const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
   if((interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
@@ -788,7 +793,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
         try{
           const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
           const value=sourceVerification?await verifySource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):
-            interactiveSourceSetup?await configureSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
+            interactiveSourceSetup?await(request.name===ASSISTANT_TELEGRAM_SETUP_TOOL.name?configureTelegramSource:configureSource)
+              ({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
             {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
               skillId:source.skillId,projectId:source.projectId,state:source.state,revision:source.revision,
               provisionLocalAccount:source.provisionLocalAccount,

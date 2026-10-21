@@ -80,7 +80,7 @@ test('worker preserves one response and never exposes raw exceptions or copies c
   assert.ok(!raw.includes('PRIVATE'));assert.equal(JSON.parse(raw).failure,'ASSISTANT_SETUP_UNAVAILABLE');
 });
 
-test('the longer private worker wait is reserved for the fixed protected email tool, never general commands',async()=>{
+test('the longer private worker wait is reserved for the fixed protected setup tools, never general commands',async()=>{
   let spawns=0;
   const options={timeoutMs:11*60_000,resolveLoader:async()=>'/fixture/loader.mjs',spawnProcess:()=>{
     spawns++;const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};
@@ -88,11 +88,14 @@ test('the longer private worker wait is reserved for the fixed protected email t
   }};
   await assert.rejects(requestCurrentAssistantRuntime({operation:'call',name:'get_task',arguments:{}},options),/REQUEST_INVALID/);
   assert.equal(spawns,0);
-  const result=await requestCurrentAssistantRuntime({operation:'call',name:'configure_assistant_email_source',arguments:{}},options);
-  assert.equal(result.state,'configuration_saved');assert.equal(spawns,1);
-  await assert.rejects(requestCurrentAssistantRuntime({operation:'call',name:'configure_assistant_email_source',arguments:{}},
-    {...options,timeoutMs:11*60_000+1}),/REQUEST_INVALID/);
-  assert.equal(spawns,1);
+  for(const name of ['configure_assistant_email_source','configure_assistant_telegram_source']){
+    const before=spawns;
+    const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:{}},options);
+    assert.equal(result.state,'configuration_saved');assert.equal(spawns,before+1);
+    await assert.rejects(requestCurrentAssistantRuntime({operation:'call',name,arguments:{}},
+      {...options,timeoutMs:11*60_000+1}),/REQUEST_INVALID/);
+    assert.equal(spawns,before+1);
+  }
 });
 
 test('a failed worker invocation is not retried or replaced with a human profile',async()=>{

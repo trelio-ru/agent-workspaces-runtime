@@ -367,6 +367,31 @@ configure or clear hook/ChatGPT login latches. This dynamic signed-worker tool
 uses the normal wait envelope and does not change the stable six-method setup
 ABI. Actual background next-run/processing/ACK and Windows E2E remain independent.
 
+`configure_assistant_telegram_source` uses this SAME interactive account/process
+path for a separately native owner-enabled Telegram source. It accepts only
+company/source UUIDs; native `accountSetup.operation=login`,
+`telegram-login/v1`, fixed `login` command and exact current registration are
+required at resolve and package boundaries. Empty-create, email configure,
+an old account UUID or a model boolean cannot authorize the provider launch.
+An older backend lacking this exact operation fails closed; host support alone
+does not enable owner onboarding or business readiness.
+
+The sole provider syntax is `login --account <native UUID> --qr`. It opens the
+existing protected local Telegram QR/2FA page; the human scans/enters factors
+there. No terminal prompts, phone/code/password/QR values, application identity,
+human-session import or configurable timeout cross the host API. It shares the
+original ten-minute native budget and eleven-minute outer wait envelope with
+email setup, without changing the six-method stable setup ABI or passive reads.
+Failed/cancelled/uncertain login is never automatically repeated.
+
+After the native provider reports `authorized:true`, the exact source registration
+is reread before publishing the closed `session_authorized` result. Provider user
+ID/username, paths and login factors are discarded. This is the assistant's local
+Telegram account, not proof of its OWNER's identity or authority to create tasks.
+It does not verify background polling, process/ACK messages or clear login/hooks
+health latches. Native owner control-plane/UI opt-in and a real Windows business
+pilot remain independent gates.
+
 Production source polling also reads the native per-source diagnostic CAS before
 its signed provider read, then reports exactly one closed result to the existing
 account incident mechanism. Source revision and health CAS are independent of

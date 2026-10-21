@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,verifyAssistantEmailSource}=
+const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -27,10 +27,10 @@ const store={get:async slot=>{
 }};
 let setupFixture=null;
 const admission=()=>({schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':'telegram',
-  protocol:setupFixture?.operation==='configure'?'email-configure/v1':scope.skillId==='email-imap-smtp'?'email-monitor/v1':'telegram-monitor/v1',
-  command:setupFixture?.operation==='configure'?'configure':'monitor',pollIntervalSeconds:300,
-  maximumDurationMs:setupFixture?.operation==='configure'?600000:60000,
-  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:setupFixture?.operation==='configure'?'2026-10-21T00:10:00.000Z':'2026-10-21T00:02:00.000Z',
+  protocol:setupFixture?.operation==='configure'?'email-configure/v1':setupFixture?.operation==='login'?'telegram-login/v1':scope.skillId==='email-imap-smtp'?'email-monitor/v1':'telegram-monitor/v1',
+  command:setupFixture?.operation??'monitor',pollIntervalSeconds:300,
+  maximumDurationMs:setupFixture?.operation?600000:60000,
+  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:setupFixture?.operation?'2026-10-21T00:10:00.000Z':'2026-10-21T00:02:00.000Z',
   ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
     localAccountId:setupFixture.localAccountId,operation:setupFixture.operation??'create'}}:{})});
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
@@ -56,7 +56,7 @@ const payload=()=>({releaseId,company:{id:companyId,slug:'synthetic',name:'Synth
 const resolution=()=>{
   const raw=payload();const query=new URLSearchParams({companyId,skillId:scope.skillId,expectedReleaseId:releaseId,artifactId});
   if(setupFixture){query.set('accountSetupSourceId',setupFixture.id);query.set('accountSetupRevision',String(setupFixture.revision));}
-  if(setupFixture?.operation==='configure')query.set('accountSetupOperation','configure');
+  if(setupFixture?.operation)query.set('accountSetupOperation',setupFixture.operation);
   raw.packageUrl=`${prefix}/package?${query}`;return raw;
 };
 const originalFetch=globalThis.fetch;
@@ -304,6 +304,70 @@ test('protected email setup consumes separate native permission and the same sig
   await assert.rejects(p.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext,runtimeArguments:validArguments}),/SETUP_REQUIRED/,
     'one native in-process permission cannot open a second form');
   p.close();assert.equal(await readMarker(),'1');
+});
+
+test('Telegram QR setup uses the same signed native child and never leaks factors or proves owner identity',async t=>{
+  const savedScope={...scope};t.after(()=>{Object.assign(scope,savedScope);setupFixture=null;resolveOverride=null;});
+  scope.skillId='telegram-mtproto';
+  setupFixture={...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
+    provisionLocalAccount:true,interactiveSetupAllowed:true,executionVerified:false};
+  const sourceId=setupFixture.id,accountId=setupFixture.localAccountId;
+  let inventoryCalls=0;
+  const client={identity,sourceAccounts:async()=>{inventoryCalls++;return [{...setupFixture}];}};
+  const configure=()=>configureAssistantTelegramSource({identity,host,store,client,companyId,sourceId});
+  if(!['darwin','win32'].includes(process.platform)){
+    const before=resolveCalls;await assert.rejects(configure(),/SETUP_UNAVAILABLE/);assert.equal(resolveCalls,before);return;
+  }
+  const sourceDir=path.join(directory,'telegram-login-package');await fs.mkdir(sourceDir);
+  const marker=path.join(directory,'telegram-login-native-calls');
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),['login','--account',${JSON.stringify(accountId)},'--qr']);
+    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
+    fs.appendFileSync(${JSON.stringify(marker)},'1');
+    process.stdout.write(JSON.stringify({authorized:true,userId:12345,username:'PRIVATE_USERNAME',qr:'PRIVATE_QR',password:'PRIVATE_FACTOR'}));`);
+  artifactId=randomUUID();releaseId=randomUUID();
+  packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  await prepareAssistantSourceAccount({identity,host,store,client,companyId,sourceId});
+  setupFixture.operation='login';
+  const markerValue=()=>fs.readFile(marker,'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
+  setupFixture.interactiveSetupAllowed=false;const before=resolveCalls;
+  await assert.rejects(configure(),/SETUP_REQUIRED/);assert.equal(resolveCalls,before);assert.equal(await markerValue(),'');
+  setupFixture.interactiveSetupAllowed=true;
+  resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),protocol:'email-configure/v1'}}));
+  await assert.rejects(configure(),/INVALID_RESPONSE/);assert.equal(await markerValue(),'');
+  let calls=0;resolveOverride=()=>++calls===1?new Response(JSON.stringify(resolution())):
+    new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED'}),{status:403});
+  await assert.rejects(configure(),/ACCESS_DENIED/);assert.equal(await markerValue(),'','late denial does not start login');
+  resolveOverride=null;
+  const result=await configure();
+  assert.deepEqual(result,{sourceId,localAccountId:accountId,state:'session_authorized',incomingVerified:false,backgroundVerified:false});
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE|userId|username|password|qr|owner/i);
+  assert.equal(await markerValue(),'1');
+  // Native registration is reread after the successful child. A changed owner
+  // intent cannot publish a successful setup receipt; the child is never replayed.
+  const read=client.sourceAccounts;let late=0;
+  client.sourceAccounts=async()=>{const rows=await read();if(++late===2)rows[0].revision++;return rows;};
+  await assert.rejects(configure(),/BINDING_CHANGED/);assert.equal(await markerValue(),'11');
+  assert.ok(inventoryCalls>=5);
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,
+    accountSetup:{sourceId,expectedRevision:0,operation:'login'}});
+  const token=await profile.requireToken(origin);
+  await profile.prepareRequest({origin,token,pathname:`${prefix}/resolve`,options:{method:'POST',body:JSON.stringify({...scope,
+    expectedReleaseId:null,accountSetup:{sourceId,expectedRevision:0,operation:'login'}})},buildHeaders:()=>new Headers()});
+  const raw=resolution(),normalized=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
+  await profile.bindResolution(normalized,raw.sourceAdmission);
+  const context={...scope,releaseId,localIdentity:normalized.localIdentity,companyConnection:null,account:{id:accountId}};
+  for(const runtimeArguments of [['login','--account',accountId,'--qr','--terminal-prompts'],['login','--account',accountId,'--code'],
+    ['login','--account',randomUUID(),'--qr'],['login','--account',accountId,'--qr','--qr-timeout','600']])
+    await assert.rejects(profile.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext:context,runtimeArguments}),/SETUP_REQUIRED/);
+  const exact={artifact:normalized.artifact,executionContext:context,runtimeArguments:['login','--account',accountId,'--qr']};
+  await profile.authorizeInteractiveSourceSetup(exact);
+  await assert.rejects(profile.authorizeInteractiveSourceSetup(exact),/SETUP_REQUIRED/);profile.close();
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope:{...scope,skillId:'email-imap-smtp'},
+    accountSetup:{sourceId,expectedRevision:0,operation:'login'}}),/INVALID_INPUT/);
 });
 
 test('email incoming verification reuses one signed passive read, drops its cursor and rechecks live registration',async t=>{
