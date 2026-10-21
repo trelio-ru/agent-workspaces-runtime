@@ -184,9 +184,27 @@ pages after restart add no rows. This is wired reference intake, not full extern
 message delivery or production business readiness.
 
 MAX has no native conversation selector in the current registration, so intake
-refuses it before provider launch. Telegram channel hints/unresolved deletion IDs
-need independent durable streams; until implemented, a page containing them is
-refused before cursor advancement instead of discarding hints. Cursors exceeding
+refuses it before provider launch. Telegram channel hints still require independent
+initialized/backfilled streams and refuse account cursor advancement. A fresh
+channel baseline cannot prove that the message which triggered its hint was
+read; it must not silently drop that initial backlog.
+
+Cloud deletion IDs carry no peer. The coordinator consults only exact literal
+suffix matches in this same source's existing event journal, discards channel
+numbering (marked peers <= -10^12), and requires exactly one prior native message
+reference per ID. No other company/account/binding, sender name, first match or
+current uncommitted page can supply a peer. Missing/ambiguous references or a
+combined page over the original 100-event bound retain the old cursor and report
+`history_gap`. The closed host deletion revision binds exact source/ID/checkpoint;
+it is metadata, never message-body read proof. New refs and cursor commit through
+the SAME inbox transaction, remain unrouted/non-waking/unprocessed/unacked and
+replay identically after restart. `findEventRefsBySuffix` is a bounded parameterized
+metadata query, not a second index/database or model-facing search surface.
+
+Telegram's marked channel representation is documented by
+[Telethon](https://docs.telethon.dev/en/stable/concepts/chats-vs-channels.html).
+Unresolved deletion review, initial channel/backfill and business handling remain
+gates; no baseline/reset, provider mutation or guessed routing is introduced. Cursors exceeding
 the inbox's existing 2048-character bound are likewise refused, never truncated
 or reset. These closed diagnostic conditions, owner-visible source recovery,
 stream onboarding, routing/body/ACK and actual Windows E2E remain release gates.

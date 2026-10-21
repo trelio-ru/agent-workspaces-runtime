@@ -222,6 +222,22 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         return { added, cursorRevision: cursorRevision + 1 };
       });
     },
+    /** Structural lookup in the SAME scoped event journal, never a content
+     * index or permission to read/ACK. A trusted provider adapter may resolve
+     * an unqualified native ID only from its own previously persisted refs.
+     * SQL parameters preserve exact suffixes; no LIKE wildcard or full journal
+     * is exposed. Ambiguous/oversized candidates remain an explicit blocker. */
+    findEventRefsBySuffix(scopeInput, suffixes) {
+      const scope = scopeOf(scopeInput); source(scope);
+      if (!Array.isArray(suffixes) || !suffixes.length || suffixes.length > MAX_PAGE
+        || new Set(suffixes).size !== suffixes.length) inputError();
+      const values = suffixes.map(value => opaque(value, 64));
+      const matches = all(`SELECT DISTINCT event_id FROM assistant_inbox_events WHERE source_key=? AND
+        (${values.map(() => 'substr(event_id,-length(?))=? COLLATE BINARY').join(' OR ')}) ORDER BY event_id LIMIT 101`,
+        scope.key, ...values.flatMap(value => [value, value]));
+      if (matches.length > MAX_PAGE) fail('ASSISTANT_INBOX_REFERENCE_AMBIGUOUS');
+      return matches.map(row => ({ id: row.event_id }));
+    },
     /** Current backend approval, not an inference from an incoming message. */
     applyTaskState(scopeInput, { taskId, state, expectedRevision, authority = null }) {
       const scope = scopeOf(scopeInput); taskId = uuid(taskId); integer(expectedRevision, 0, Number.MAX_SAFE_INTEGER);

@@ -540,3 +540,39 @@ test('source health snapshots precede provider reads; reports never replay work,
     assert.equal(f.position(),'committed');assert.ok(!JSON.stringify(f.notifications).includes('PRIVATE'));
   }finally{await f.coordinator.close();}
 });
+
+test('native cloud deletions resolve only exact durable account references and survive restart without wake or ACK',async t=>{
+  const f=await externalFixture(t);
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();f.advance(300000);
+    f.read(async()=>({events:[{id:'message:123:5',revision:'a'.repeat(64)}],nextCursor:'known',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(f.position(),'known');f.advance(300000);
+    const deleted={events:[],nextCursor:'deleted',hasMore:false,unresolvedDeletionIds:['5']};
+    f.read(async()=>deleted);await f.coordinator.pollOnce();assert.equal(f.position(),'deleted');
+    const rows=()=>f.database.prepare('SELECT event_id,event_revision,task_id,wake,processed,acked FROM assistant_inbox_events ORDER BY rowid').all();
+    assert.equal(rows().length,2);assert.equal(rows()[1].event_id,'message:123:5');assert.match(rows()[1].event_revision,/^[a-f0-9]{64}$/u);
+    assert.notEqual(rows()[1].event_revision,'a'.repeat(64));assert.equal(rows()[1].task_id,null);
+    assert.ok(rows().every(row=>!row.wake&&!row.processed&&!row.acked));
+    await f.restart();f.advance(300000);await f.coordinator.pollOnce();assert.equal(rows().length,2,'exact page replay has the same metadata revision');
+    assert.equal(await f.coordinator.workOnce(),null);assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+  }finally{await f.coordinator.close();}
+});
+
+test('ambiguous, unjournaled, channel-numbered and mixed-overflow deletions retain the original account position',async t=>{
+  for(const kind of ['ambiguous','unknown','channel','oversized']){
+    const f=await externalFixture(t);
+    try{
+      await f.coordinator.pollOnce();f.advance(300000);
+      const ids=kind==='ambiguous'?['message:123:5','message:456:5']:kind==='channel'?['message:-1000000000123:5']:
+        kind==='unknown'?['message:123:25']:['message:123:5'];
+      f.read(async()=>({events:ids.map(id=>({id,revision:'a'.repeat(64)})),nextCursor:'before-delete',hasMore:false}));
+      await f.coordinator.pollOnce();f.advance(300000);
+      f.read(async()=>({events:kind==='oversized'?Array.from({length:100},(_,n)=>({id:`message:123:${n+100}`,revision:'b'.repeat(64)})):[],
+        nextCursor:'must-not-commit',hasMore:false,unresolvedDeletionIds:['5']}));
+      await f.coordinator.pollOnce();assert.equal(f.position(),'before-delete',kind);
+      assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,ids.length);
+      assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED'),kind);
+      assert.equal(f.counts().acks,0);assert.equal(f.counts().runs,0);
+    }finally{await f.coordinator.close();}
+  }
+});

@@ -5,7 +5,7 @@ import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 export class AssistantCoordinatorError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -160,6 +160,30 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     for(const {row} of refs)if(row.state==='active')externalRegistrations.set(row.id,row);
   };
+  // Telegram cloud deletions carry native message IDs but no peer. Provider
+  // policy permits only an exact prior account reference, never guessing from
+  // sender/title/another account or a channel's independent message numbering.
+  // This is deletion metadata, not content-read/owner/sending/ACK evidence.
+  const resolveCloudDeletions=(source,result)=>{
+    const ids=result.unresolvedDeletionIds??[];
+    if(!Array.isArray(ids)||ids.length>100||ids.some(id=>typeof id!=='string'||!/^[1-9]\d{0,18}$/u.test(id))
+      ||new Set(ids).size!==ids.length)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
+    if(!ids.length)return [];
+    if(source.provider!=='telegram')fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
+    const known=inbox.findEventRefsBySuffix(source,ids.map(id=>`:${id}`));
+    return ids.map(messageId=>{
+      const matches=known.filter(({id})=>{
+        const match=/^message:(-?[1-9]\d{0,18}):([1-9]\d{0,18})$/u.exec(id);
+        // Marked channel IDs are <= -10^12. Their local numbering must never
+        // satisfy an unqualified cloud deletion, even with the same suffix.
+        return match&&match[2]===messageId&&BigInt(match[1])>-1000000000000n;
+      });
+      if(matches.length!==1)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
+      const id=matches[0].id;
+      return {id,revision:createHash('sha256').update(JSON.stringify(['telegram-cloud-delete/v1',source,
+        id,result.nextCursor])).digest('hex')};
+    });
+  };
   const pollExternalSource=async(row,signal)=>{
     const source=externalSourceFor(identity,row);
     // One page per source per coordinator tick: a large backlog cannot occupy
@@ -190,10 +214,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(row.skillId==='max-web')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
         accountId:row.localAccountId,cursor:poll.cursor},signal);lease();
-      // Account-level Telegram channel/deletion hints are not messages. Until
-      // their independent streams have durable positions, retain the old
-      // cursor instead of silently discarding those hints on advancement.
-      if(result.channelsToSync?.length || result.unresolvedDeletionIds?.length)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      // Channel hints need independent initialized/backfilled streams. Retain
+      // the account position until that flow exists. Cloud deletions below
+      // may use only exact references already durable in this account source.
+      if(result.channelsToSync?.length)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      const deletions=resolveCloudDeletions(source,result);
+      if(!Array.isArray(result.events)||result.events.length+deletions.length>100)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
       if(typeof result.nextCursor==='string' && result.nextCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT');
       const after=await client.sourceAccounts(row.companyId,signal);lease();
       if(!sameRegistration(row,after.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
@@ -201,7 +227,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Keep new refs unrouted and non-waking. No provider ACK is attempted;
       // body read, native mapping and committed processing remain required.
       inbox.commitPage(source,{...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
-        events:result.events.map(({id,revision})=>({id,revision,taskId:null,wake:false}))});
+        events:[...result.events,...deletions].map(({id,revision})=>({id,revision,taskId:null,wake:false}))});
       await report('ready');
     }catch(error){
       // Read-only recovery retains both position and queued events. Neither
@@ -211,7 +237,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const reason=code==='ASSISTANT_COORDINATOR_SOURCE_CHANGED'?null:
         ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'].includes(code)?'setup_required':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:SCOPE_CHANGED|UIDVALIDITY_CHANGED)$/u.test(code??'')?'scope_changed':
-        /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||code==='ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT'?'history_gap':'read_failed';
+        /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||['ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT','ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED','ASSISTANT_INBOX_REFERENCE_AMBIGUOUS'].includes(code)?'history_gap':'read_failed';
       await report(reason);throw error;
     }
   };

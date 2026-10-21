@@ -306,3 +306,18 @@ test('an external ACK token from an older worker cannot mark an unprocessed batc
   assert.throws(()=>inbox.completeAcknowledgements(source,token),/STALE_ACK/);
   assert.equal(database.prepare('SELECT count(*) AS total FROM assistant_inbox_events WHERE acked=1').get().total,0);
 });
+
+test('exact suffix metadata lookup is source-scoped, literal, bounded and never alters processing or cursors', t => {
+  const {inbox,database}=memory(t),source=scope({provider:'telegram'}),other={...source,bindingId:randomUUID()};
+  inbox.register(source);inbox.register(other);
+  page(inbox,source,[event(null,false,'message:123:5'),event(null,false,'message:123:25'),event(null,false,'message:321:5')]);
+  page(inbox,other,[event(null,false,'message:999:7')]);
+  const before=database.prepare('SELECT * FROM assistant_inbox_sources ORDER BY source_key').all();
+  assert.deepEqual(inbox.findEventRefsBySuffix(source,[':5']),[{id:'message:123:5'},{id:'message:321:5'}]);
+  assert.deepEqual(inbox.findEventRefsBySuffix(source,[':7']),[],'another binding cannot identify a peer');
+  assert.deepEqual(inbox.findEventRefsBySuffix(source,[':%']),[],'wildcards remain literal SQL parameters');
+  assert.throws(()=>inbox.findEventRefsBySuffix(source,[':5',':5']),/INVALID_INPUT/);
+  assert.throws(()=>inbox.findEventRefsBySuffix(source,Array.from({length:101},(_,n)=>`:${n}`)),/INVALID_INPUT/);
+  assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_sources ORDER BY source_key').all(),before);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1 OR acked=1').get().n,0);
+});

@@ -27,7 +27,9 @@ publication tooling также остаются вне этого публичн
   SQLite хранит только bounded structural refs. Provider/domain authority,
   private storage и native Codex adapters не заменяются состоянием очереди.
   Native source discovery/passive reads feed that same queue; unknown refs stay
-  unrouted/non-waking. Stream hints must not disappear through cursor advance.
+  unrouted/non-waking. Channel hints retain their source position until initialized/backfilled.
+  Cloud deletions resolve only from unique exact prior refs in the SAME account
+  journal; unknown/ambiguous peers retain the cursor without wake/ACK.
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
