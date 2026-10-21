@@ -24,7 +24,13 @@ publication tooling также остаются вне этого публичн
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
   требует committed processing и отдельного native read proof.
-  SQLite хранит только bounded structural refs. Provider/domain authority,
+  SQLite хранит только bounded structural refs; child stream hints/cursors
+  commit in that SAME journal, never as guessed task/ACK authority. Final
+  streams sleep until a new native hint; new hints cannot be consumed by an
+  older final read. New channel hints retain the ORIGINAL account checkpoint;
+  initial history is not narrowed by another client's unread marker and keeps
+  the pre-history channel pts. No seed/reset for an existing channel cursor.
+  Provider/domain authority,
   private storage и native Codex adapters не заменяются состоянием очереди.
   Native source discovery/passive reads feed that same queue; unknown refs stay
   unrouted/non-waking. Channel hints retain their source position until initialized/backfilled.

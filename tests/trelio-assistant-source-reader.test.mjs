@@ -112,7 +112,17 @@ test('source reader composes real signature/cache/account/executor and resolves 
       const account=JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON);assert.equal(account.id,${JSON.stringify('ACCOUNT_ID')});
       let stdin='';for await(const chunk of process.stdin)stdin+=chunk;assert.equal(stdin,'');
       const fs=await import('node:fs');fs.appendFileSync(${JSON.stringify(path.join(directory,'native-calls'))},'1');
-      process.stdout.write(JSON.stringify(${JSON.stringify(page())}));
+      const result=${JSON.stringify(page())};
+      if(args.includes('--chat')){
+        const unread=args.includes('--unread-backfill'),account=args.includes('--initial-account-cursor');
+        assert.deepEqual(args,['monitor','--chat','-1000000000055',...(unread?['--unread-backfill']:
+          [account?'--initial-account-cursor':'--cursor',${JSON.stringify(previousCursor)}]),'--limit','100']);
+        result.stream={kind:'channel',chatId:'-1000000000055'};result.channelsToSync=[];
+        result.events[0].chatId='-1000000000055';result.events[0].id='message:-1000000000055:5';
+        result.hasMore=true;Object.assign(result.coverage,{historicalBackfill:true,[unread?'initialUnreadOnly':'initialAccountInterval']:true,
+          snapshotAtomic:false,...(unread?{}:{earlierEditsIncluded:false})});
+      }
+      process.stdout.write(JSON.stringify(result));
     }`;
   const makeCatalogue=(root,selectedCompany=companyId)=>createAccountCatalogue({directory:root,
     scope:accountScope({origin,skillId:scope.skillId,companyId:selectedCompany,memberId,connectionId:null}),io:{
@@ -149,6 +159,15 @@ test('source reader composes real signature/cache/account/executor and resolves 
   assert.deepEqual(await readAssistantSourceMonitor({identity,host,store,source}),projected);
   assert.deepEqual(await readAssistantSourceMonitor({identity,host,store,source}),projected);
   assert.equal(resolveCalls,before+4);assert.equal(downloadCalls,1,'verified cache never bypasses fresh server admission');
+  for(const mode of ['unread','account','continued']){
+    const child=await readAssistantSourceMonitor({identity,host,store,source:{...source,chat:'-1000000000055',
+      cursor:mode==='continued'?previousCursor:null,...(mode==='unread'?{initialUnread:true}:
+        mode==='account'?{initialAccountCursor:previousCursor}:{})}});
+    assert.equal(child[mode==='unread'?'initialUnreadBackfill':'initialAccountBackfill'],true);
+    assert.equal(child.baselineOnly,false);assert.equal(child.hasMore,true);
+    assert.equal(child.events[0].id,'message:-1000000000055:5');assert.equal(child.events[0].chatId,'-1000000000055');
+    assert.doesNotMatch(JSON.stringify(child),/PRIVATE/);
+  }
   let listed,discoveries=0;
   const localProfile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
   const prepare=runtimeArguments=>engine.withWorkspaceExecutionProfile(localProfile,()=>engine.prepareSkillAccount({origin,
@@ -430,6 +449,31 @@ test('structural projection rejects bad pages, scope swaps, receipts and gaps wi
     assert.throws(()=>projectAssistantMonitorPage({exitCode:1,stdout:JSON.stringify({code,message:'PRIVATE',nextCursor:'do_not_use'})},options),error=>error.code===code && !JSON.stringify(error).includes('PRIVATE'));
   }
   assert.throws(()=>projectAssistantMonitorPage({exitCode:1,stdout:JSON.stringify({code:'PRIVATE_ERROR',message:'PRIVATE'})},options),/SOURCE_PROVIDER_UNAVAILABLE/);
+});
+
+test('initial unread coverage is accepted only for the exact passive channel and never a silent baseline or final',()=>{
+  const chat='-1000000000055',raw={...page(),stream:{kind:'channel',chatId:chat},channelsToSync:[],events:[],hasMore:true,
+    coverage:{...page().coverage,historicalBackfill:true,initialUnreadOnly:true,snapshotAtomic:false}};
+  const project=(value,options={skillId:scope.skillId,chat,cursor:null,initialUnread:true})=>
+    projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify(value)},options);
+  assert.equal(project(raw).initialUnreadBackfill,true);
+  assert.equal(project(raw,{skillId:scope.skillId,chat,cursor:previousCursor}).initialUnreadBackfill,true);
+  for(const change of [{baselineOnly:true},{hasMore:false},{stream:{kind:'channel',chatId:'-1000000000066'}},
+    {coverage:{...raw.coverage,initialUnreadOnly:false}},{coverage:{...raw.coverage,snapshotAtomic:true}},
+    {coverage:{...raw.coverage,historicalBackfill:false}},{readState:{readReceiptsSent:true,viewsRegistered:false}}])
+    assert.throws(()=>project({...raw,...change}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(raw,{skillId:scope.skillId,cursor:null,initialUnread:true}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(raw,{skillId:'email-imap-smtp',chat,cursor:null,initialUnread:true}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(raw,{skillId:scope.skillId,chat,cursor:previousCursor,initialUnread:true}),/INVALID_RESPONSE/);
+  const account={...raw,coverage:{historicalBackfill:true,secretChatsIncluded:false,otherChannelStreamsIncluded:false,
+    initialAccountInterval:true,earlierEditsIncluded:false,snapshotAtomic:false}};
+  const accountOptions={skillId:scope.skillId,chat,cursor:null,initialAccountCursor:previousCursor};
+  assert.equal(project(account,accountOptions).initialAccountBackfill,true);
+  assert.throws(()=>project(raw,accountOptions),/INVALID_RESPONSE/,'unread flag cannot replace the original account interval');
+  for(const change of [{earlierEditsIncluded:true},{initialUnreadOnly:true},{historicalBackfill:false},{snapshotAtomic:true}])
+    assert.throws(()=>project({...account,coverage:{...account.coverage,...change}},accountOptions),/INVALID_RESPONSE/);
+  assert.throws(()=>project(account,{...accountOptions,initialUnread:true}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(account,{...accountOptions,chat:'123'}),/INVALID_RESPONSE/);
 });
 
 test('profile refuses changed identity and wrong package scope without touching a human credential',async()=>{

@@ -49,6 +49,7 @@ const LEASE_MS = 120_000;
 const MAX_PAGE = 100;
 const MAX_PENDING = 10_000;
 const MAX_EVENTS = 50_000;
+const MAX_STREAMS = 10_000;
 
 /**
  * The caller owns SQLite file/sidecar protection and lifecycle. Keeping the DB
@@ -74,7 +75,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -110,6 +111,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         event_key TEXT NOT NULL REFERENCES assistant_inbox_events(event_key),
         PRIMARY KEY(delivery_id,event_key)
       );
+      CREATE TABLE IF NOT EXISTS assistant_inbox_streams (
+        source_key TEXT NOT NULL REFERENCES assistant_inbox_sources(source_key), stream_id TEXT NOT NULL,
+        signal_revision TEXT NOT NULL, signal_generation INTEGER NOT NULL DEFAULT 1,
+        completed_generation INTEGER NOT NULL DEFAULT 0, initial_cursor TEXT, cursor TEXT, cursor_revision INTEGER NOT NULL DEFAULT 0,
+        next_poll_at INTEGER NOT NULL DEFAULT 0, poll_token TEXT, poll_expires_at INTEGER, poll_generation INTEGER,
+        PRIMARY KEY(source_key,stream_id)
+      );
     `);
     if (versions[0]?.version === 1) {
       // SQLite DDL and the schema marker commit together. Existing cursors,
@@ -123,7 +131,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN owner_question_id TEXT');
       run('UPDATE assistant_inbox_meta SET version=3');
     }
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (3)');
+    // The additive stream journal is in the SAME private database. No cursor,
+    // uncertain delivery, ACK or task generation is reset during this upgrade.
+    if (versions.length && versions[0].version < 4) run('UPDATE assistant_inbox_meta SET version=4');
+    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (4)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -139,6 +150,34 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     const row = activeSource(scope);
     if (row.poll_token !== token || row.poll_expires_at <= time()) fail('ASSISTANT_INBOX_STALE_POLL');
     return row;
+  };
+  const validStreamPoll = (scope, streamId, token, generation) => {
+    activeSource(scope);
+    const row=get('SELECT * FROM assistant_inbox_streams WHERE source_key=? AND stream_id=?',scope.key,streamId);
+    if(!row || row.poll_token!==token || row.poll_expires_at<=time() || row.poll_generation!==generation)
+      fail('ASSISTANT_INBOX_STALE_POLL');
+    return row;
+  };
+  // Both account and child-stream pages enter the exact same event journal.
+  // Keep dedup/snapshot/bounds in one implementation under the caller's tx.
+  const commitEvents = (scope,page) => {
+    let added=0;
+    for(const event of page){
+      const key=digest([scope.key,event.id,event.revision]);
+      const existing=get('SELECT original_task_id,wake,owner_question_id FROM assistant_inbox_events WHERE event_key=?',key);
+      if(existing){
+        if(existing.original_task_id!==event.taskId || existing.wake!==Number(event.wake)
+          || existing.owner_question_id!==event.ownerQuestionId)fail('ASSISTANT_INBOX_EVENT_CHANGED');
+        continue;
+      }
+      const pending=get('SELECT count(*) AS total FROM assistant_inbox_events WHERE processed=0').total;
+      const total=get('SELECT count(*) AS total FROM assistant_inbox_events').total;
+      if(pending>=MAX_PENDING || total>=MAX_EVENTS)fail('ASSISTANT_INBOX_FULL');
+      run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id) VALUES (?,?,?,?,?,?,?,?)',
+        key,scope.key,event.id,event.revision,event.taskId,event.taskId,Number(event.wake),event.ownerQuestionId);
+      added++;
+    }
+    return added;
   };
   const delivery = id => {
     const row = get('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?', uuid(id));
@@ -172,6 +211,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if (row.revision !== expectedRevision || row.state === 'revoked') fail('ASSISTANT_INBOX_CONFLICT');
         if (row.state !== state) {
           run('UPDATE assistant_inbox_sources SET state=?,revision=revision+1,poll_token=NULL,poll_expires_at=NULL WHERE source_key=?', state, scope.key);
+          run('UPDATE assistant_inbox_streams SET poll_token=NULL,poll_expires_at=NULL,poll_generation=NULL WHERE source_key=?',scope.key);
           // A source pause/restore cycle invalidates outstanding workers too;
           // merely seeing "active" again must not revive an earlier lease.
           run('UPDATE assistant_inbox_events SET ack_token=NULL,ack_expires_at=NULL WHERE source_key=? AND acked=0', scope.key);
@@ -192,34 +232,92 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         return { token, cursor: row.cursor, cursorRevision: row.cursor_revision };
       });
     },
-    commitPage(scopeInput, { token, cursorRevision, nextCursor, hasMore, events }) {
+    commitPage(scopeInput, { token, cursorRevision, nextCursor, hasMore, events, streams=[] }) {
       const scope = scopeOf(scopeInput); uuid(token); integer(cursorRevision, 0, Number.MAX_SAFE_INTEGER);
       if (nextCursor !== null) opaque(nextCursor, 2048);
       if (typeof hasMore !== 'boolean' || (hasMore && nextCursor === null) || !Array.isArray(events) || events.length > MAX_PAGE) inputError();
       const page = events.map(eventOf);
+      if(!Array.isArray(streams) || streams.length>MAX_PAGE || streams.length && scope.provider==='trelio')inputError();
+      const hints=streams.map(value=>{
+        object(value,['id','revision','initialCursor']);return {id:opaque(value.id,64),revision:opaque(value.revision,128),
+          initialCursor:value.initialCursor==null?null:opaque(value.initialCursor,2048)};
+      });
+      if(new Set(hints.map(value=>value.id)).size!==hints.length)inputError();
       return transaction(() => {
         const row = validPoll(scope, token);
         if (row.cursor_revision !== cursorRevision || (hasMore && nextCursor === row.cursor)) fail('ASSISTANT_INBOX_CONFLICT');
-        let added = 0;
-        for (const event of page) {
-          const key = digest([scope.key, event.id, event.revision]);
-          const existing = get('SELECT original_task_id,wake,owner_question_id FROM assistant_inbox_events WHERE event_key=?', key);
-          if (existing) {
-            if (existing.original_task_id !== event.taskId || existing.wake !== Number(event.wake) || existing.owner_question_id !== event.ownerQuestionId) fail('ASSISTANT_INBOX_EVENT_CHANGED');
-            continue;
-          }
-          const pending = get('SELECT count(*) AS total FROM assistant_inbox_events WHERE processed=0').total;
-          const total = get('SELECT count(*) AS total FROM assistant_inbox_events').total;
-          if (pending >= MAX_PENDING || total >= MAX_EVENTS) fail('ASSISTANT_INBOX_FULL');
-          run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id) VALUES (?,?,?,?,?,?,?,?)',
-            key, scope.key, event.id, event.revision, event.taskId, event.taskId, Number(event.wake), event.ownerQuestionId);
-          added++;
+        for(const hint of hints){
+          const old=get('SELECT signal_revision,signal_generation FROM assistant_inbox_streams WHERE source_key=? AND stream_id=?',scope.key,hint.id);
+          if(old?.signal_revision===hint.revision)continue;
+          if(!old && get('SELECT count(*) AS total FROM assistant_inbox_streams').total>=MAX_STREAMS)fail('ASSISTANT_INBOX_FULL');
+          if(old)integer(old.signal_generation+1,1,Number.MAX_SAFE_INTEGER);
+          // A hint is durable BEFORE the account cursor can advance. Do not
+          // overwrite child cursor/lease/ORIGINAL account seed or claim that
+          // the new signal is done. A newer seed could skip earlier messages.
+          run(`INSERT INTO assistant_inbox_streams(source_key,stream_id,signal_revision,initial_cursor,next_poll_at) VALUES (?,?,?,?,?)
+            ON CONFLICT(source_key,stream_id) DO UPDATE SET signal_revision=excluded.signal_revision,
+              signal_generation=signal_generation+1,next_poll_at=min(next_poll_at,excluded.next_poll_at)`,
+            scope.key,hint.id,hint.revision,hint.initialCursor,time());
         }
+        const added=commitEvents(scope,page);
         // Cursor and durable event acceptance share one transaction. A full
         // inbox or conflicting event rolls BOTH back, so no page gets lost.
         run('UPDATE assistant_inbox_sources SET cursor=?,cursor_revision=cursor_revision+1,next_poll_at=?,poll_token=NULL,poll_expires_at=NULL WHERE source_key=?',
           nextCursor, hasMore ? time() : time() + 300_000, scope.key);
         return { added, cursorRevision: cursorRevision + 1 };
+      });
+    },
+    /** The host resolves native stream identity; this table grants no provider
+     * access. Final streams sleep until a NEW durable native account hint. */
+    dueStreamPolls(scopeInput,{limit=4}={}) {
+      const scope=scopeOf(scopeInput);activeSource(scope);integer(limit,1,MAX_PAGE);
+      return all(`SELECT stream_id,next_poll_at FROM assistant_inbox_streams WHERE source_key=?
+        AND signal_generation>completed_generation AND next_poll_at<=?
+        AND (poll_token IS NULL OR poll_expires_at<=?) ORDER BY next_poll_at,stream_id LIMIT ?`,scope.key,time(),time(),limit)
+        .map(row=>({streamId:row.stream_id,nextPollAt:row.next_poll_at}));
+    },
+    hasPendingStreams(scopeInput) {
+      const scope=scopeOf(scopeInput);activeSource(scope);
+      return Boolean(get('SELECT 1 FROM assistant_inbox_streams WHERE source_key=? AND signal_generation>completed_generation LIMIT 1',scope.key));
+    },
+    claimStreamPoll(scopeInput,streamId) {
+      const scope=scopeOf(scopeInput);streamId=opaque(streamId,64);
+      return transaction(()=>{
+        activeSource(scope);
+        const row=get('SELECT * FROM assistant_inbox_streams WHERE source_key=? AND stream_id=?',scope.key,streamId),timestamp=time();
+        if(!row || row.signal_generation<=row.completed_generation || row.next_poll_at>timestamp
+          || row.poll_token && row.poll_expires_at>timestamp)return null;
+        const token=randomUUID();
+        run('UPDATE assistant_inbox_streams SET poll_token=?,poll_expires_at=?,poll_generation=? WHERE source_key=? AND stream_id=?',
+          token,timestamp+LEASE_MS,row.signal_generation,scope.key,streamId);
+        return {token,cursor:row.cursor,cursorRevision:row.cursor_revision,generation:row.signal_generation,initialCursor:row.initial_cursor};
+      });
+    },
+    commitStreamPage(scopeInput,{streamId,token,cursorRevision,generation,nextCursor,hasMore,events}) {
+      const scope=scopeOf(scopeInput);streamId=opaque(streamId,64);uuid(token);
+      integer(cursorRevision,0,Number.MAX_SAFE_INTEGER);integer(generation,1,Number.MAX_SAFE_INTEGER);
+      opaque(nextCursor,2048);
+      if(typeof hasMore!=='boolean' || !Array.isArray(events) || events.length>MAX_PAGE)inputError();
+      const page=events.map(eventOf);
+      return transaction(()=>{
+        const row=validStreamPoll(scope,streamId,token,generation);
+        if(row.cursor_revision!==cursorRevision || hasMore && nextCursor===row.cursor)fail('ASSISTANT_INBOX_CONFLICT');
+        const added=commitEvents(scope,page);
+        // Only the generation CLAIMED before provider I/O can be completed.
+        // A concurrent newer hint survives final read-back and remains due.
+        run(`UPDATE assistant_inbox_streams SET cursor=?,cursor_revision=cursor_revision+1,
+          completed_generation=?,next_poll_at=?,poll_token=NULL,poll_expires_at=NULL,poll_generation=NULL
+          WHERE source_key=? AND stream_id=?`,nextCursor,hasMore?row.completed_generation:generation,time(),scope.key,streamId);
+        return {added,cursorRevision:cursorRevision+1};
+      });
+    },
+    abandonStreamPoll(scopeInput,{streamId,token,generation,retryAfterMs}) {
+      const scope=scopeOf(scopeInput);streamId=opaque(streamId,64);uuid(token);
+      integer(generation,1,Number.MAX_SAFE_INTEGER);integer(retryAfterMs,30_000,3_600_000);
+      return transaction(()=>{
+        validStreamPoll(scope,streamId,token,generation);
+        run('UPDATE assistant_inbox_streams SET next_poll_at=?,poll_token=NULL,poll_expires_at=NULL,poll_generation=NULL WHERE source_key=? AND stream_id=?',
+          time()+retryAfterMs,scope.key,streamId);
       });
     },
     /** Structural lookup in the SAME scoped event journal, never a content

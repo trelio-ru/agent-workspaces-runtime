@@ -255,7 +255,7 @@ test('v2 SQLite upgrade preserves question-free events, leases and cursors; ques
   // new table: the upgrade must add the column without resetting pending work.
   database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; UPDATE assistant_inbox_meta SET version=2');
   const inbox = createAssistantInbox({ database, now: () => 1_000_000 });
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 3);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 4);
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.incompleteDeliveries()[0].deliveryId, first.deliveryId);
   assert.equal(inbox.incompleteDeliveries()[0].events[0].owner_question_id, null);
@@ -320,4 +320,81 @@ test('exact suffix metadata lookup is source-scoped, literal, bounded and never 
   assert.throws(()=>inbox.findEventRefsBySuffix(source,Array.from({length:101},(_,n)=>`:${n}`)),/INVALID_INPUT/);
   assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_sources ORDER BY source_key').all(),before);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1 OR acked=1').get().n,0);
+});
+
+test('durable child streams preserve new hints across concurrent final reads, restart and source pause',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-streams-')),file=path.join(directory,'queue.sqlite');
+  let db=new DatabaseSync(file),other=new DatabaseSync(file),timestamp=1_000_000;
+  t.after(async()=>{db.close();other.close();await fs.rm(directory,{recursive:true,force:true});});
+  let first=createAssistantInbox({database:db,now:()=>timestamp});
+  const second=createAssistantInbox({database:other,now:()=>timestamp}),source=scope({provider:'telegram'}),streamId='-1000000000055';
+  first.register(source);
+  const signal=(revision,events=[],hasMore=false)=>second.commitPage(source,{...second.claimPoll(source),nextCursor:`account-${revision}`,
+    hasMore,events,streams:[{id:streamId,revision,initialCursor:`origin-seed-${revision}`}]});
+  signal('hint-1',[],true);assert.equal(first.hasPendingStreams(source),true);
+  const start=first.claimStreamPoll(source,streamId);assert.equal(start.cursor,null);
+  assert.equal(start.initialCursor,'origin-seed-hint-1');
+  assert.equal(second.claimStreamPoll(source,streamId),null,'one lease per child, shared with the other SQLite connection');
+  const incoming=event(null,false,'message:-1000000000055:9');
+  first.commitStreamPage(source,{...start,streamId,nextCursor:'history-1',hasMore:true,events:[incoming]});
+  const final=first.claimStreamPoll(source,streamId);assert.equal(final.cursor,'history-1');
+  timestamp++;signal('hint-2');
+  first.commitStreamPage(source,{...final,streamId,nextCursor:'final-1',hasMore:false,events:[]});
+  assert.equal(first.dueStreamPolls(source).length,1,'a newer native hint cannot be consumed by an older final read');
+  const pending=first.claimStreamPoll(source,streamId);assert.equal(pending.generation,2);
+  assert.equal(pending.initialCursor,'origin-seed-hint-1','newer hints cannot replace the earliest initial account checkpoint');
+  db.close();db=new DatabaseSync(file);first=createAssistantInbox({database:db,now:()=>timestamp});
+  assert.equal(first.claimStreamPoll(source,streamId),null,'restart retains the existing lease');
+  timestamp+=120_001;
+  const resumed=first.claimStreamPoll(source,streamId);assert.equal(resumed.cursor,'final-1');
+  assert.throws(()=>second.commitStreamPage(source,{...pending,streamId,nextCursor:'stale',hasMore:false,events:[]}),{code:'ASSISTANT_INBOX_STALE_POLL'});
+  first.commitStreamPage(source,{...resumed,streamId,nextCursor:'final-2',hasMore:false,events:[incoming]});
+  assert.deepEqual(first.dueStreamPolls(source),[]);assert.equal(first.hasPendingStreams(source),false);
+  assert.equal(first.status(source).pending,1,'replayed refs deduplicate in the account journal');
+  timestamp+=300_000;signal('hint-2');assert.deepEqual(first.dueStreamPolls(source),[],'same checkpoint hint is idempotent');
+  timestamp+=300_000;signal('hint-3');const interrupted=first.claimStreamPoll(source,streamId);
+  first.setSourceState(source,{state:'paused',expectedRevision:0});first.setSourceState(source,{state:'active',expectedRevision:1});
+  assert.throws(()=>first.commitStreamPage(source,{...interrupted,streamId,nextCursor:'revived',hasMore:false,events:[]}),{code:'ASSISTANT_INBOX_STALE_POLL'});
+  const recovered=first.claimStreamPoll(source,streamId);assert.equal(recovered.cursor,'final-2');
+  first.abandonStreamPoll(source,{...recovered,streamId,retryAfterMs:300_000});assert.deepEqual(first.dueStreamPolls(source),[]);
+  assert.equal(first.hasPendingStreams(source),true,'backoff is not completion');
+  assert.equal(first.claimAcknowledgements(source),null);
+  assert.deepEqual(db.prepare('SELECT task_id,wake,processed,acked FROM assistant_inbox_events').get(),
+    Object.assign(Object.create(null),{task_id:null,wake:0,processed:0,acked:0}));
+});
+
+test('stream hints and cursor roll back with conflicting refs or capacity; child pages retain the same event bounds',t=>{
+  const {inbox,database,advance}=memory(t),source=scope({provider:'telegram'}),streamId='-1000000000055';inbox.register(source);
+  const incoming=event(null,false,'message:-1000000000055:9');
+  inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'one',hasMore:true,events:[incoming],streams:[{id:streamId,revision:'hint-1'}]});
+  const poll=inbox.claimPoll(source);
+  assert.throws(()=>inbox.commitPage(source,{...poll,nextCursor:'lost',hasMore:false,
+    events:[{...incoming,taskId:randomUUID()}],streams:[{id:streamId,revision:'hint-2'}]}),{code:'ASSISTANT_INBOX_EVENT_CHANGED'});
+  assert.equal(database.prepare('SELECT signal_generation FROM assistant_inbox_streams').get().signal_generation,1);
+  assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'one');
+  inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000});
+  const child=inbox.claimStreamPoll(source,streamId);
+  assert.throws(()=>inbox.commitStreamPage(source,{...child,streamId,nextCursor:'lost-child',hasMore:true,
+    events:[{...incoming,wake:true}]}),{code:'ASSISTANT_INBOX_EVENT_CHANGED'});
+  assert.equal(database.prepare('SELECT cursor_revision FROM assistant_inbox_streams').get().cursor_revision,0);
+  inbox.commitStreamPage(source,{...child,streamId,nextCursor:'done',hasMore:false,events:[incoming]});
+  const sourceKey=database.prepare('SELECT source_key FROM assistant_inbox_sources').get().source_key;
+  database.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<9999)
+    INSERT INTO assistant_inbox_streams(source_key,stream_id,signal_revision) SELECT ?,'fixture-'||x,'fixture' FROM n`).run(sourceKey);
+  advance(300_000);
+  assert.throws(()=>inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'overflow',hasMore:false,
+    events:[],streams:[{id:'new-stream',revision:'new-hint'}]}),{code:'ASSISTANT_INBOX_FULL'});
+  assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'one');
+});
+
+test('v3 to v4 stream upgrade preserves source cursors and started delivery ambiguity',async t=>{
+  const {inbox,database}=memory(t),source=scope(),task=randomUUID();inbox.register(source);accept(inbox,source,task);
+  page(inbox,source,[event(task)],'existing-cursor');const work=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(work.deliveryId);
+  const before=database.prepare('SELECT * FROM assistant_inbox_deliveries').get();
+  database.exec('DROP TABLE assistant_inbox_streams; UPDATE assistant_inbox_meta SET version=3');
+  const upgraded=createAssistantInbox({database});
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,4);
+  assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
+  assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'existing-cursor');
+  assert.equal(await upgraded.claimDelivery({authorize:authorized}),null);
 });

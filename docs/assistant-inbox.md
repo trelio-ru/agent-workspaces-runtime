@@ -184,10 +184,49 @@ pages after restart add no rows. This is wired reference intake, not full extern
 message delivery or production business readiness.
 
 MAX has no native conversation selector in the current registration, so intake
-refuses it before provider launch. Telegram channel hints still require independent
-initialized/backfilled streams and refuse account cursor advancement. A fresh
-channel baseline cannot prove that the message which triggered its hint was
-read; it must not silently drop that initial backlog.
+refuses it before provider launch. Telegram's typed channel hints enter the SAME
+SQLite transaction as account events/cursor. Their marked native peer is derived
+only from the known channel constructor, never an untyped message/username.
+Each scoped child stream has its own signed checkpoint, lease, cursor revision,
+pending signal generation and completed generation. The additive schema v4
+retains all existing source/task state, leases, unknown deliveries and ACKs.
+No new database, credential store, provider or account namespace is created.
+
+One shared page-acceptance routine enforces the original dedup/snapshot/50,000
+event and 10,000 pending bounds for both account and child pages. The global
+10,000-stream bound fails before account advancement; stream IDs/revisions,
+native cursors (including the ORIGINAL account checkpoint before a new hint),
+counters and timestamps are the only new persisted fields.
+Pause/revoke invalidates child leases as well as the account lease. New native
+hint + account cursor commit atomically; repeated same-checkpoint hints do not
+reopen a completed stream. A final read completes only its CLAIMED generation,
+so a concurrent newer hint remains pending. Read failure retains both positions
+and applies the same five-minute backoff. Final streams are not polled again
+until a new account hint. Parent and child jobs share the four oldest-due pages
+per tick; discovery failure cannot continue either from stale registrations.
+
+The first child read uses the SAME signed passive reader with fixed
+`monitor --chat MARKED_ID --initial-account-cursor ORIGINAL_ACCOUNT_CURSOR`, not
+a silent empty baseline or current unread flag. The provider validates the seed's
+native account/member/company/local binding and monitor HMAC. It returns visible
+history at or after the ORIGINAL account date (inclusive), frozen top/offset/date
+bounds and the pre-history channel pts checkpoint. Messages read on another
+device therefore remain in that initial new-message interval. A newer account
+hint must NEVER replace the earliest stored seed. Continuations retain the
+signed checkpoint and then require its native difference catch-up. A legacy
+baseline, unread-only coverage, missing seed, unknown provider option, foreign
+chat or incomplete/invalid coverage fails closed without a new child cursor.
+This does not reconstruct old edits/deleted bytes before the first channel pts:
+`initialAccountInterval=true,snapshotAtomic=false,earlierEditsIncluded=false`
+remains explicit. Full initial account inventory and ordinary cloud unread
+bootstrap remain independent release gates. The provider's separately explicit
+initial-unread mode is not sufficient to finish an already observed account hint.
+
+All child refs stay in their existing account/source event partition, unrouted,
+non-waking, unprocessed and unacknowledged. Neither the passive history hash nor
+its cursor proves body read, owner authority, task routing or committed business
+handling. An unrelated successful account/page cannot clear source recovery while
+any child signal is pending; only all streams caught up permits native `ready`.
 
 Cloud deletion IDs carry no peer. The coordinator consults only exact literal
 suffix matches in this same source's existing event journal, discards channel
@@ -203,7 +242,7 @@ metadata query, not a second index/database or model-facing search surface.
 
 Telegram's marked channel representation is documented by
 [Telethon](https://docs.telethon.dev/en/stable/concepts/chats-vs-channels.html).
-Unresolved deletion review, initial channel/backfill and business handling remain
+Unresolved deletion review, initial account/cloud backfill and business handling remain
 gates; no baseline/reset, provider mutation or guessed routing is introduced. Cursors exceeding
 the inbox's existing 2048-character bound are likewise refused, never truncated
 or reset. These closed diagnostic conditions, owner-visible source recovery,

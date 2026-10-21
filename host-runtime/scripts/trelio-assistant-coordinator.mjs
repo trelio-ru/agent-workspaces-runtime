@@ -184,11 +184,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         id,result.nextCursor])).digest('hex')};
     });
   };
-  const pollExternalSource=async(row,signal)=>{
+  const pollExternalSource=async(row,signal,streamId=null)=>{
     const source=externalSourceFor(identity,row);
     // One page per source per coordinator tick: a large backlog cannot occupy
     // the worker indefinitely before another company or native task gets time.
-    lease();const poll=inbox.claimPoll(source);if(!poll)return;
+    lease();const poll=streamId===null?inbox.claimPoll(source):inbox.claimStreamPoll(source,streamId);if(!poll)return;
     let observation=null;
     // Capture the native CAS BEFORE reading the provider. A later report uses
     // that exact snapshot once; report failures never replay a provider read or
@@ -212,12 +212,26 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // MAX requires an exact native conversation selector. The current
       // registration has none; guessing/opening a default chat is forbidden.
       if(row.skillId==='max-web')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      if(streamId!==null && poll.cursor===null && typeof poll.initialCursor!=='string')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
-        accountId:row.localAccountId,cursor:poll.cursor},signal);lease();
-      // Channel hints need independent initialized/backfilled streams. Retain
-      // the account position until that flow exists. Cloud deletions below
-      // may use only exact references already durable in this account source.
-      if(result.channelsToSync?.length)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+        accountId:row.localAccountId,cursor:poll.cursor,...(streamId===null?{}:{chat:streamId,
+          ...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})})},signal);lease();
+      // A native Channel constructor supplies a positive channel ID, not an
+      // untyped chat number. Apply Telethon's documented marked representation
+      // only to this typed hint; never guess a peer from an incoming message.
+      const channelHints=result.channelsToSync??[];
+      if(!Array.isArray(channelHints) || channelHints.length>100 || new Set(channelHints).size!==channelHints.length
+        || channelHints.some(value=>typeof value!=='string'||!/^[1-9]\d{0,18}$/u.test(value))
+        || channelHints.length && (row.skillId!=='telegram-mtproto'||streamId!==null||typeof poll.cursor!=='string'))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      const streams=channelHints.map(channelId=>{
+        const marked=-1000000000000n-BigInt(channelId);
+        if(marked<=-9223372036854775808n)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+        return {id:String(marked),revision:createHash('sha256').update(JSON.stringify(['telegram-channel-signal/v1',source,
+          channelId,result.nextCursor])).digest('hex'),initialCursor:poll.cursor};
+      });
+      if(streamId!==null && (row.skillId!=='telegram-mtproto' || result.baselineOnly!==false
+        || poll.cursor===null && result.initialAccountBackfill!==true
+        || (result.unresolvedDeletionIds??[]).length))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const deletions=resolveCloudDeletions(source,result);
       if(!Array.isArray(result.events)||result.events.length+deletions.length>100)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
       if(typeof result.nextCursor==='string' && result.nextCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT');
@@ -226,13 +240,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Polling is not routing, owner-command authority or content handling.
       // Keep new refs unrouted and non-waking. No provider ACK is attempted;
       // body read, native mapping and committed processing remain required.
-      inbox.commitPage(source,{...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
-        events:[...result.events,...deletions].map(({id,revision})=>({id,revision,taskId:null,wake:false}))});
-      await report('ready');
+      const page={...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
+        events:[...result.events,...deletions].map(({id,revision})=>({id,revision,taskId:null,wake:false}))};
+      if(streamId===null)inbox.commitPage(source,{...page,streams});
+      else inbox.commitStreamPage(source,{...page,streamId});
+      // An unrelated successful account/page cannot hide an outstanding child
+      // history/login failure. Only all committed stream generations being
+      // caught up permits the existing native source health to recover.
+      if(!inbox.hasPendingStreams(source))await report('ready');
     }catch(error){
       // Read-only recovery retains both position and queued events. Neither
       // a provider gap nor changed owner configuration resets the source.
-      inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000});
+      if(streamId===null)inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000});
+      else inbox.abandonStreamPoll(source,{streamId,token:poll.token,generation:poll.generation,retryAfterMs:300_000});
       const code=error?.code;
       const reason=code==='ASSISTANT_COORDINATOR_SOURCE_CHANGED'?null:
         ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'].includes(code)?'setup_required':
@@ -301,11 +321,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }
       // Oldest persisted due position wins across restarts; no in-memory
       // round-robin cursor can repeatedly starve later accounts after a crash.
-      const externalDue=[...externalRegistrations.values()].map(row=>({row,status:inbox.status(externalSourceFor(identity,row))}))
-        .filter(({status})=>status.state==='active'&&status.nextPollAt<=now())
-        .sort((left,right)=>left.status.nextPollAt-right.status.nextPollAt||left.row.id.localeCompare(right.row.id)).slice(0,4);
-      for(const {row} of externalDue){
-        try{await pollExternalSource(row,signal);}
+      const externalDue=[...externalRegistrations.values()].flatMap(row=>{
+        const source=externalSourceFor(identity,row),status=inbox.status(source);
+        if(status.state!=='active')return [];
+        return [...(status.nextPollAt<=now()?[{row,streamId:null,nextPollAt:status.nextPollAt}]:[]),
+          ...inbox.dueStreamPolls(source).map(stream=>({row,...stream}))];
+      }).sort((left,right)=>left.nextPollAt-right.nextPollAt||left.row.id.localeCompare(right.row.id)
+        || (left.streamId??'').localeCompare(right.streamId??'')).slice(0,4);
+      for(const {row,streamId} of externalDue){
+        try{await pollExternalSource(row,signal,streamId);}
         catch(error){emit(errorCode(error));}
       }
       await reportSchedules(signal);

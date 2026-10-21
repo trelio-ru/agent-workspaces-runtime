@@ -477,8 +477,8 @@ test('changed owner registration after provider read rolls back page acceptance 
   }finally{await f.coordinator.close();}
 });
 
-test('unpersisted channel/deletion streams and oversized cursor refuse advancement instead of losing provider events',async t=>{
-  for(const extra of [{channelsToSync:['123']},{unresolvedDeletionIds:['5']},{nextCursor:'x'.repeat(2049)}]){
+test('invalid stream hints, unknown deletions and oversized cursor refuse advancement instead of losing provider events',async t=>{
+  for(const extra of [{channelsToSync:['not-a-native-channel']},{unresolvedDeletionIds:['5']},{nextCursor:'x'.repeat(2049)}]){
     const f=await externalFixture(t);
     try{
       await f.coordinator.pollOnce();f.advance(300000);
@@ -575,4 +575,66 @@ test('ambiguous, unjournaled, channel-numbered and mixed-overflow deletions reta
       assert.equal(f.counts().acks,0);assert.equal(f.counts().runs,0);
     }finally{await f.coordinator.close();}
   }
+});
+
+test('Telegram channel hints survive restart, initial unread catch-up and final idle without waking or acknowledging',async t=>{
+  const f=await externalFixture(t),chat='-1000000000123';
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();f.advance(300000);
+    f.read(async source=>{assert.equal(source.chat,undefined);return {baselineOnly:false,events:[],
+      nextCursor:'account-hint-1',hasMore:false,channelsToSync:['123']};});
+    await f.coordinator.pollOnce();assert.equal(f.position(),'account-hint-1');
+    assert.equal(f.inbox.hasPendingStreams(f.scope()),true,'hint commits with account cursor before any channel I/O');
+    const calls=[];
+    f.read(async source=>{calls.push({...source});assert.equal(source.chat,chat);
+      assert.equal(source.initialAccountCursor,'baseline');assert.equal(source.initialUnread,undefined);assert.equal(source.cursor,null);
+      return {baselineOnly:false,initialAccountBackfill:true,events:[{id:`message:${chat}:9`,revision:'a'.repeat(64)}],
+        nextCursor:'initial-unread-page',hasMore:true};});
+    await f.coordinator.pollOnce();await f.restart();f.advance(1);
+    f.read(async source=>{calls.push({...source});assert.equal(source.chat,chat);assert.equal(source.initialAccountCursor,undefined);
+      assert.equal(source.cursor,'initial-unread-page');return {baselineOnly:false,initialAccountBackfill:true,
+        events:[],nextCursor:'original-pts',hasMore:true};});
+    await f.coordinator.pollOnce();f.advance(1);
+    f.read(async source=>{calls.push({...source});assert.equal(source.cursor,'original-pts');return {baselineOnly:false,
+      events:[{id:`message:${chat}:10`,revision:'b'.repeat(64)}],nextCursor:'channel-final',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.inbox.hasPendingStreams(f.scope()),false);
+    const count=f.reads();await f.coordinator.pollOnce();f.advance(30000);await f.coordinator.pollOnce();
+    assert.equal(f.reads(),count,'a final channel is not polled again without a new native account hint');
+    f.advance(300000);
+    f.read(async source=>{assert.equal(source.chat,undefined);return {baselineOnly:false,events:[],
+      nextCursor:'account-hint-2',hasMore:false,channelsToSync:['123']};});
+    await f.coordinator.pollOnce();f.advance(1);
+    f.read(async source=>{calls.push({...source});assert.equal(source.cursor,'channel-final');assert.equal(source.initialAccountCursor,undefined);
+      return {baselineOnly:false,events:[{id:`message:${chat}:9`,revision:'a'.repeat(64)}],nextCursor:'channel-final-2',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.inbox.hasPendingStreams(f.scope()),false);
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,2);
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+    assert.ok(f.database.prepare('SELECT task_id,wake,processed,acked FROM assistant_inbox_events').all()
+      .every(row=>row.task_id===null&&!row.wake&&!row.processed&&!row.acked));
+    assert.equal(calls.length,4);assert.equal(f.counts().provisions,1);
+  }finally{await f.coordinator.close();}
+});
+
+test('a legacy baseline or changed owner registration cannot advance a channel cursor or hide pending source recovery',async t=>{
+  let revision=0;const reports=[];
+  const f=await externalFixture(t,{sourceHealth:{read:async row=>({revision,sourceRevision:row.revision,code:'not_checked'}),
+    report:async(_row,value)=>{reports.push(value.code);revision++;}}});
+  try{
+    await f.coordinator.pollOnce();f.advance(300000);
+    f.read(async()=>({baselineOnly:false,events:[],nextCursor:'with-channel',hasMore:false,channelsToSync:['123']}));
+    await f.coordinator.pollOnce();assert.deepEqual(reports,['ready'],'account success does not clear a pending channel');
+    f.advance(1);f.read(async()=>({baselineOnly:true,events:[],nextCursor:'silent-baseline',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(reports.at(-1),'setup_required');
+    assert.equal(f.database.prepare('SELECT cursor FROM assistant_inbox_streams').get().cursor,null);
+    f.advance(300000);
+    f.read(async source=>source.chat?{baselineOnly:false,initialAccountBackfill:true,events:[],nextCursor:'unread',hasMore:true}
+      :{baselineOnly:false,events:[],nextCursor:'account-fresh',hasMore:false});
+    await f.coordinator.pollOnce();assert.equal(reports.filter(value=>value==='ready').length,1,
+      'another successful account page cannot hide the unresolved child incident');
+    f.advance(1);f.read(async()=>{f.row.revision++;f.row.state='paused';return {baselineOnly:false,
+      events:[{id:'must-not-commit',revision:'1'}],nextCursor:'changed',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.database.prepare('SELECT cursor FROM assistant_inbox_streams').get().cursor,'unread');
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,0);
+    assert.equal(f.counts().acks,0);assert.equal(f.counts().runs,0);
+  }finally{await f.coordinator.close();}
 });
