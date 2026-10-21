@@ -153,8 +153,40 @@ the event set of an already reserved delivery. This is routing metadata, never
 owner consent or content authority.
 
 
-The current Trelio coordinator reconciles, polls and acknowledges only sources
-whose provider is `trelio`. A successful Trelio company inventory does not revoke
-an external source, and an external cursor/ID never reaches the Trelio notification
-endpoint. External registration, polling, task mapping and ACK adapters retain
-their independent authorization and lifecycle; these guards do not activate them.
+The Trelio notification client reconciles/polls/acknowledges only `trelio` rows.
+An optional trusted source reader enables the coordinator's separate external
+reference intake. Production host composition supplies the existing device
+`sourceAccounts` client and signed `readAssistantSourceMonitor`; neither a model
+argument nor a SQLite row chooses another transport. A successful Trelio company
+inventory alone still does not revoke external sources, and an external cursor/ID
+never reaches the notification endpoint or its ACK method.
+
+Every five minutes, a successful exact source inventory registers scoped native
+account/binding refs and reconciles pause/revocation. Failed inventories are not
+empty: positions remain, and the old discovery map cannot continue polling.
+Each page rechecks the same native row before and after provider read. Changed
+state/revision/account/project prevents page acceptance; the cursor and events
+still commit together under the existing inbox lease/transaction. The provider
+reader uses the common private invocation, signed package/cache/account engine
+and child process, with its narrower private cancellation signal propagated.
+
+At most four oldest-due registrations receive one page per coordinator tick.
+Persisted `next_poll_at` provides fairness across worker restarts and continued
+pages; a large account backlog cannot monopolize all companies. Final pages wait
+five minutes, continued pages are immediately due, and read failures retain the
+cursor with the same bounded five-minute backoff. Pause/revoke retains history.
+
+Only id/revision pairs enter the inbox, with `taskId:null,wake:false`. Provider
+body/sender/claimed mapping cannot wake a model, create a task or authorize an
+owner command. Such refs remain unprocessed/unacknowledged until separately
+implemented native mapping, exact body read and committed processing. Duplicate
+pages after restart add no rows. This is wired reference intake, not full external
+message delivery or production business readiness.
+
+MAX has no native conversation selector in the current registration, so intake
+refuses it before provider launch. Telegram channel hints/unresolved deletion IDs
+need independent durable streams; until implemented, a page containing them is
+refused before cursor advancement instead of discarding hints. Cursors exceeding
+the inbox's existing 2048-character bound are likewise refused, never truncated
+or reset. These closed diagnostic conditions, owner-visible source recovery,
+stream onboarding, routing/body/ACK and actual Windows E2E remain release gates.

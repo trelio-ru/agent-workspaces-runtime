@@ -26,6 +26,8 @@ publication tooling также остаются вне этого публичн
   требует committed processing и отдельного native read proof.
   SQLite хранит только bounded structural refs. Provider/domain authority,
   private storage и native Codex adapters не заменяются состоянием очереди.
+  Native source discovery/passive reads feed that same queue; unknown refs stay
+  unrouted/non-waking. Stream hints must not disappear through cursor advance.
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.

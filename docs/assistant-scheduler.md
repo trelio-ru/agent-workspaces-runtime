@@ -366,6 +366,23 @@ fixtures. The same native-child fixture proves human/other-company selectors
 cannot start a provider and verifies the shared task/source namespace. It does
 not assert that production provider monitoring or owner onboarding is enabled.
 
+### Background source reference intake
+
+Production composition connects the existing protected source inventory and
+signed passive reader to the coordinator's SAME private SQLite inbox. Source
+registration, five-minute positions, bounded fair polling, before/after native
+row checks, pause/revocation and restart deduplication are described in
+[`assistant-inbox.md`](assistant-inbox.md). No provider implementation, executor,
+credential store or model polling turn is added. Calls re-enter device identity
+and propagate the common private invocation's narrower cancellation boundary.
+
+External references stay unrouted/non-waking/unacknowledged. Unknown conversations
+are never assigned to a convenient task/company, and sender metadata is not a
+direct-owner command. MAX selector onboarding, Telegram channel/deletion streams,
+owner-visible source recovery, exact content reads/mapping, committed processing
+and native ACK remain required before full product readiness. A failed/gapped
+source retains its position and cannot manufacture a successful empty page.
+
 ## Protected background host composition
 
 `createAssistantRuntimeHost` composes the real private SQLite opener, fixed device

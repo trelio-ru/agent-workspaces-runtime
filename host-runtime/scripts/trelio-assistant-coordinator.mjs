@@ -19,12 +19,18 @@ const scopeFor = (source,taskId) => ({ origin:source.origin,assistantId:source.a
 const sourceFor = (identity,company) => ({ origin:identity.origin,assistantId:identity.assistantId,companyId:company.companyId,
   provider:'trelio',accountId:company.memberId,bindingId:identity.deviceId });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const externalProviders=Object.freeze({'telegram-mtproto':'telegram','email-imap-smtp':'email','max-web':'max'});
+const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:identity.assistantId,companyId:row.companyId,
+  provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
+const sameRegistration=(left,right)=>right && ['id','companyId','deviceId','localAccountId','projectId','skillId','state','revision']
+  .every(key=>left[key]===right[key]);
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, readSourceMonitor = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+  if(readSourceMonitor!==null && (typeof readSourceMonitor!=='function' || typeof client.sourceAccounts!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   const schedule = createAssistantScheduler({database,now});
   const inbox = createAssistantInbox({database,now,onDeliveryCompleted:schedule.completeInsideInboxTransaction});
   const identity = client.identity;
@@ -47,6 +53,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     } catch(error) { database.exec('ROLLBACK'); throw error; }
   };
   let active = null, polling = false, nextDiscoveryAt = 0;
+  // This map contains only the current invocation's native structural refs.
+  // Persistent positions/events use the SAME inbox as Trelio. A failed source
+  // inventory never becomes authoritative absence or permits stale polling.
+  const externalRegistrations=new Map();
   const reports = new Map();
   const notices = new Set();
   let blockedCompanies = new Set();
@@ -134,6 +144,54 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     await client.acknowledge(source.companyId,events,signal); lease();
     inbox.completeAcknowledgements(source,ack.token);
   };
+  const syncExternalSources=async(companyId,signal)=>{
+    const rows=await client.sourceAccounts(companyId,signal);lease();
+    const refs=rows.map(row=>({row,scope:externalSourceFor(identity,row)}));
+    for(const old of inbox.listSources()){
+      if(old.scope.companyId!==companyId || old.scope.provider==='trelio' || old.state==='revoked'
+        || refs.some(({scope})=>sameSource(scope,old.scope)))continue;
+      // Only this successful exact source inventory, never the company/task
+      // inventory, can retire an absent external registration in this device DB.
+      inbox.setSourceState(old.scope,{state:'revoked',expectedRevision:inbox.status(old.scope).revision});
+    }
+    for(const {row,scope} of refs){
+      const existing=inbox.register(scope);
+      if(existing.state==='revoked' && row.state!=='revoked')fail('ASSISTANT_COORDINATOR_SOURCE_REBIND_REQUIRED');
+      if(existing.state!==row.state)inbox.setSourceState(scope,{state:row.state,expectedRevision:existing.revision});
+    }
+    for(const {row} of refs)if(row.state==='active')externalRegistrations.set(row.id,row);
+  };
+  const pollExternalSource=async(row,signal)=>{
+    const source=externalSourceFor(identity,row);
+    // One page per source per coordinator tick: a large backlog cannot occupy
+    // the worker indefinitely before another company or native task gets time.
+    lease();const poll=inbox.claimPoll(source);if(!poll)return;
+    try{
+      const current=await client.sourceAccounts(row.companyId,signal);lease();
+      if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      // MAX requires an exact native conversation selector. The current
+      // registration has none; guessing/opening a default chat is forbidden.
+      if(row.skillId==='max-web')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
+        accountId:row.localAccountId,cursor:poll.cursor},signal);lease();
+      // Account-level Telegram channel/deletion hints are not messages. Until
+      // their independent streams have durable positions, retain the old
+      // cursor instead of silently discarding those hints on advancement.
+      if(result.channelsToSync?.length || result.unresolvedDeletionIds?.length)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      if(typeof result.nextCursor==='string' && result.nextCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT');
+      const after=await client.sourceAccounts(row.companyId,signal);lease();
+      if(!sameRegistration(row,after.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      // Polling is not routing, owner-command authority or content handling.
+      // Keep new refs unrouted and non-waking. No provider ACK is attempted;
+      // body read, native mapping and committed processing remain required.
+      inbox.commitPage(source,{...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
+        events:result.events.map(({id,revision})=>({id,revision,taskId:null,wake:false}))});
+    }catch(error){
+      // Read-only recovery retains both position and queued events. Neither
+      // a provider gap nor changed owner configuration resets the source.
+      inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000});throw error;
+    }
+  };
   const reportSchedules = async signal => {
     for(const plan of schedule.list()) {
       if(inbox.status(plan.source).state!=='active') continue;
@@ -171,6 +229,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           if(registered.state==='revoked') fail('ASSISTANT_COORDINATOR_SOURCE_REBIND_REQUIRED');
           await syncTasks(source,signal);
         }
+        if(readSourceMonitor){
+          externalRegistrations.clear();
+          for(const company of companies){
+            try{await syncExternalSources(company.companyId,signal);}
+            catch(error){emit(errorCode(error));}
+          }
+        }
         nextDiscoveryAt=now()+300_000;
       }
       // The native notification client and its ACK endpoint understand only
@@ -184,6 +249,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           if([401,403].includes(error.status)) throw error;
           emit(errorCode(error));
         }
+      }
+      // Oldest persisted due position wins across restarts; no in-memory
+      // round-robin cursor can repeatedly starve later accounts after a crash.
+      const externalDue=[...externalRegistrations.values()].map(row=>({row,status:inbox.status(externalSourceFor(identity,row))}))
+        .filter(({status})=>status.state==='active'&&status.nextPollAt<=now())
+        .sort((left,right)=>left.status.nextPollAt-right.status.nextPollAt||left.row.id.localeCompare(right.row.id)).slice(0,4);
+      for(const {row} of externalDue){
+        try{await pollExternalSource(row,signal);}
+        catch(error){emit(errorCode(error));}
       }
       await reportSchedules(signal);
       return true;

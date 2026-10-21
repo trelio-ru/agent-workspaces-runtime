@@ -383,3 +383,124 @@ test('Trelio inventory and notification ACK do not revoke or poll external provi
   f.options.client.companies=async()=>[];f.advance(300000);await f.coordinator.pollOnce();
   for(const source of external)assert.equal(inbox.status(source).state,'active');
 });
+
+// The real coordinator and SQLite are used here. Provider I/O is the same
+// trusted injected boundary as the native notification client above; synthetic
+// private text is a canary that must never become queue data or a task wake.
+const externalFixture=async t=>{
+  const f=fixture(t);await f.coordinator.close();
+  const row={id:randomUUID(),companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:randomUUID(),projectId:null,
+    skillId:'telegram-mtproto',state:'active',revision:0,executionVerified:false};
+  let rows=[row],inventoryFailure=false,read=async source=>({schemaVersion:1,baselineOnly:source.cursor===null,
+    events:[],nextCursor:'baseline',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}),reads=0;
+  f.options.client.sourceAccounts=async companyId=>{
+    assert.equal(companyId,f.companyId);
+    if(inventoryFailure)throw Object.assign(new Error('PRIVATE_SOURCE_ERROR'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
+    return structuredClone(rows);
+  };
+  const options={...f.options,readSourceMonitor:async(source,signal)=>{reads++;return read(source,signal);}};
+  let coordinator=createAssistantCoordinator(options);
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  const scope=()=>({origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,
+    provider:row.skillId==='email-imap-smtp'?'email':row.skillId==='max-web'?'max':'telegram',accountId:row.localAccountId,bindingId:row.id});
+  return {...f,row,inbox,scope,get coordinator(){return coordinator;},read:value=>{read=value;},rows:value=>{rows=value;},
+    failSources:value=>{inventoryFailure=value;},reads:()=>reads,position:()=>f.database.prepare('SELECT scope_json,cursor FROM assistant_inbox_sources').all().find(value=>JSON.parse(value.scope_json).bindingId===row.id)?.cursor,restart:async()=>{await coordinator.close();coordinator=createAssistantCoordinator(options);}};
+};
+
+test('native source refs poll every five minutes into durable unrouted SQLite refs without model starts or read ACKs',async t=>{
+  const f=await externalFixture(t);
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    assert.equal(f.position(),'baseline');assert.equal(f.reads(),1);
+    f.read(async source=>{assert.equal(source.cursor,'baseline');return {schemaVersion:1,baselineOnly:false,
+      events:[{id:'message:123:5',revision:'a'.repeat(64),text:'PRIVATE_MESSAGE',senderUserId:'123',taskId:f.taskId,wake:true}],
+      nextCursor:'next',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]};});
+    await f.coordinator.pollOnce();assert.equal(f.reads(),1,'30-second coordinator ticks do not repeat a five-minute source read');
+    f.advance(300000);await f.coordinator.pollOnce();
+    const stored=f.database.prepare('SELECT event_id,event_revision,task_id,wake,processed,acked FROM assistant_inbox_events').all();
+    assert.deepEqual(stored.map(row=>({...row})),[{event_id:'message:123:5',event_revision:'a'.repeat(64),task_id:null,wake:0,processed:0,acked:0}]);
+    assert.equal(f.position(),'next');assert.equal(await f.coordinator.workOnce(),null);
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+    await f.restart();f.advance(300000);f.read(async source=>{assert.equal(source.cursor,'next');return {schemaVersion:1,baselineOnly:false,
+      events:[{id:'message:123:5',revision:'a'.repeat(64)}],nextCursor:'next',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]};});
+    await f.coordinator.pollOnce();assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,1);
+    assert.equal(f.counts().provisions,1,'a restarted source does not create another task chat');
+  }finally{await f.coordinator.close();}
+});
+
+test('failed source inventories retain positions and cannot revoke or continue polling stale registrations',async t=>{
+  const f=await externalFixture(t);
+  try{
+    await f.coordinator.pollOnce();f.failSources(true);f.advance(300000);
+    await f.coordinator.pollOnce();assert.equal(f.reads(),1);assert.equal(f.inbox.status(f.scope()).state,'active');
+    assert.equal(f.position(),'baseline');assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_SOURCE_UNAVAILABLE'));
+    f.failSources(false);f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.reads(),2);
+    f.rows([]);f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.inbox.status(f.scope()).state,'revoked');
+    assert.equal(f.reads(),2,'only the successful exact empty inventory retires the registration');
+  }finally{await f.coordinator.close();}
+});
+
+test('an unavailable company source does not stop another company account from reaching the durable inbox',async t=>{
+  const f=await externalFixture(t),companyB=randomUUID(),memberB=randomUUID();
+  const second={...f.row,id:randomUUID(),companyId:companyB,skillId:'email-imap-smtp'};
+  f.options.client.companies=async()=>[{companyId:f.companyId,memberId:f.memberId},{companyId:companyB,memberId:memberB}];
+  const tasks=f.options.client.tasks,poll=f.options.client.poll;
+  f.options.client.tasks=async company=>company===companyB?{bindings:[],nextCursor:null}:tasks(company);
+  f.options.client.poll=async(company,cursor)=>company===companyB?{events:[],nextCursor:'0',hasMore:false}:poll(company,cursor);
+  f.options.client.sourceAccounts=async company=>{
+    if(company===f.companyId)throw Object.assign(new Error('PRIVATE_FIRST_COMPANY'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
+    assert.equal(company,companyB);return [second];
+  };
+  f.read(async source=>{assert.equal(source.companyId,companyB);assert.equal(source.accountId,second.localAccountId);
+    return {events:source.cursor===null?[]:[{id:'uid:2:3',revision:'a'.repeat(64),subject:'PRIVATE_SUBJECT'}],nextCursor:'mail-next',hasMore:false};});
+  try{
+    await f.coordinator.pollOnce();assert.equal(f.reads(),1);
+    f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.reads(),2);
+    const stored=f.database.prepare('SELECT e.event_id,e.task_id,e.wake,s.scope_json FROM assistant_inbox_events e JOIN assistant_inbox_sources s USING(source_key)').get();
+    assert.equal(stored.event_id,'uid:2:3');assert.equal(stored.task_id,null);assert.equal(stored.wake,0);
+    assert.equal(JSON.parse(stored.scope_json).companyId,companyB);assert.equal(f.counts().acks,0);
+    assert.ok(!JSON.stringify(stored).includes('PRIVATE'));
+  }finally{await f.coordinator.close();}
+});
+
+test('changed owner registration after provider read rolls back page acceptance and preserves the original cursor',async t=>{
+  const f=await externalFixture(t);
+  try{
+    await f.coordinator.pollOnce();f.advance(300000);
+    f.read(async()=>{f.row.state='paused';f.row.revision++;return {events:[{id:'uncommitted',revision:'1'}],nextCursor:'lost',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.position(),'baseline');
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,0);
+    assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_SOURCE_CHANGED'));
+    f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.inbox.status(f.scope()).state,'paused');
+    f.row.state='active';f.row.revision++;f.read(async()=>({events:[],nextCursor:'resumed',hasMore:false}));
+    f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.position(),'resumed');
+  }finally{await f.coordinator.close();}
+});
+
+test('unpersisted channel/deletion streams and oversized cursor refuse advancement instead of losing provider events',async t=>{
+  for(const extra of [{channelsToSync:['123']},{unresolvedDeletionIds:['5']},{nextCursor:'x'.repeat(2049)}]){
+    const f=await externalFixture(t);
+    try{
+      await f.coordinator.pollOnce();f.advance(300000);
+      f.read(async()=>({events:[{id:'not-yet-durable',revision:'1'}],nextCursor:'do-not-advance',hasMore:false,...extra}));
+      await f.coordinator.pollOnce();assert.equal(f.position(),'baseline');
+      assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,0);
+      assert.equal(f.counts().acks,0);assert.equal(f.inbox.status(f.scope()).nextPollAt,f.options.now()+300000);
+    }finally{await f.coordinator.close();}
+  }
+});
+
+test('MAX source does not guess a conversation and one busy source cannot consume the whole coordinator tick',async t=>{
+  const f=await externalFixture(t);
+  try{
+    f.row.skillId='max-web';await f.coordinator.pollOnce();assert.equal(f.reads(),0);
+    assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'));
+    f.row.skillId='telegram-mtproto';const rows=Array.from({length:6},()=>({...f.row,id:randomUUID(),localAccountId:randomUUID()}));
+    f.rows(rows);f.advance(300000);f.read(async()=>({events:[],nextCursor:'more',hasMore:true,channelsToSync:[],unresolvedDeletionIds:[]}));
+    await f.coordinator.pollOnce();assert.equal(f.reads(),4,'one page from at most four oldest due registrations');
+    // No time advance: the two never-polled rows retain due=0 and must win.
+    f.read(async()=>({events:[],nextCursor:'end',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(f.reads(),8);
+    assert.equal(rows.filter(row=>f.inbox.status({...f.scope(),accountId:row.localAccountId,bindingId:row.id}).cursorRevision>0).length,6);
+  }finally{await f.coordinator.close();}
+});

@@ -554,9 +554,9 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     new Intl.DateTimeFormat('en-US',{timeZone}).format(0);
   }catch{fail('ASSISTANT_COORDINATOR_INVALID_TIMEZONE');}
   const invoke=async action=>{
-    const value=await context(async(client,host)=>{
+    const value=await context(async(client,host,store)=>{
       if(['origin','assistantId','deviceId'].some(key=>client.identity[key]!==stableIdentity[key])) fail('ASSISTANT_HOST_REBIND_REQUIRED');
-      return {value:await action(client,host)};
+      return {value:await action(client,host,store)};
     });
     if(value===null) fail('ASSISTANT_HOST_NOT_CONFIGURED');
     return value.value;
@@ -609,7 +609,18 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return proxy.callTool('get_assistant_status',{},signal);
     }));
     const passHost=Object.fromEntries(['readActivePass','activatePass','releasePass'].map(name=>[name,(...args)=>invoke((_client,host)=>host[name](...args))]));
-    coordinator=createAssistantCoordinator({database:database.database,client,passHost,
+    // Source calls re-enter the same protected private invocation and signed
+    // account/provider reader. No long-lived credential/worker or provider code
+    // is copied into this coordinator. The narrower private deadline propagates
+    // to the child as well as native I/O; it never extends a poll lease.
+    const readSourceMonitor=dependencies.readSourceMonitor??((source,signal)=>invoke(async(_client,host,store)=>{
+      const {readAssistantSourceMonitor}=await import('./trelio-assistant-transport.mjs');
+      const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+      const current=runtimeHookSignal(),combined=signal?AbortSignal.any([signal,current]):current;
+      return readAssistantSourceMonitor({identity:stableIdentity,host,store,source,signal:combined});
+    }));
+    coordinator=createAssistantCoordinator({database:database.database,client:{...client,
+      sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args))},passHost,readSourceMonitor,
       native:{...observedNative,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
       workspaceForTask:async scope=>{
         if(scope.origin!==stableIdentity.origin || scope.assistantId!==stableIdentity.assistantId

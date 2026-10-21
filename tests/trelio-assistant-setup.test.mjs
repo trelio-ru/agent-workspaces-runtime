@@ -199,7 +199,10 @@ test('production host composes real SQLite, fresh private calls and the native a
   const taskConfig=path.join(os.tmpdir(),'synthetic-assistant-host-'+randomUUID());
   let businessReady=false,starts=0,contextCalls=0,databaseClosed=0,reported=0;
   let currentIdentity=identity;
+  const sourceId=randomUUID(),sourceAccountId=randomUUID();let sourceInventories=0,sourcePolls=0;
   const client={identity,heartbeat:async()=>({}),companies:async()=>[{companyId,memberId}],
+    sourceAccounts:async selected=>{sourceInventories++;assert.equal(selected,companyId);return [{id:sourceId,companyId,deviceId:identity.deviceId,
+      localAccountId:sourceAccountId,projectId:null,skillId:'email-imap-smtp',state:'active',revision:0,executionVerified:false}];},
     tasks:async()=>({bindings:[{id:bindingId,taskId,state:'accepted',revision:0}],nextCursor:null}),
     task:async()=>({id:bindingId,taskId,state:'accepted',revision:0,execution,hostState:'this_device'}),
     poll:async()=>({events:[],nextCursor:'0',hasMore:false}),
@@ -216,6 +219,8 @@ test('production host composes real SQLite, fresh private calls and the native a
   const host=await createAssistantRuntimeHost({context:async action=>{
     contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null});
   },dependencies:{directory:taskConfig,
+    readSourceMonitor:async(source,signal)=>{sourcePolls++;assert.ok(signal);assert.deepEqual(source,{companyId,projectId:null,
+      skillId:'email-imap-smtp',accountId:sourceAccountId,cursor:null});return {events:[],nextCursor:'email-baseline',hasMore:false};},
     ensureDirectory:async()=>{},openDatabase:async directory=>{
       assert.equal(path.basename(directory),identity.deviceId);
       return {database,close:async()=>{databaseClosed++;database.close();}};
@@ -224,6 +229,7 @@ test('production host composes real SQLite, fresh private calls and the native a
       availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}})}});
   try {
     await host.coordinator.pollOnce();
+    assert.equal(sourcePolls,1);assert.equal(sourceInventories,3,'source inventory and both sides of the read re-enter the protected context');
     await assert.rejects(host.coordinator.workOnce(),error=>error.code==='ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     assert.equal(starts,0,'a running source poll and configured native adapter do not enable model work');
     businessReady=true;
