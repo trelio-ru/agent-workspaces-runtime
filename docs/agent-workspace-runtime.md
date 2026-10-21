@@ -2079,10 +2079,11 @@ Create принимает name/comment и optional UUID; update – exact UUID �
 не authority и не место для секретов или закрытого company context.
 
 Внутренний owner-authorized assistant setup использует ту же операцию create,
-lock и atomic write, добавляя optional v1-поле `creation`: UUID native intent,
-хеш company/member scope и хеш исходных id/name/comment. CLI не принимает это
-поле. Receipt сохраняется вместе с metadata/binding и не выдаётся через list
-или provider environment. Fresh native admission обязателен при каждом вызове;
+lock и atomic write, добавляя optional v1-карту `creations` в корне каталога:
+account UUID → UUID native intent, хеш company/member scope и хеш исходных
+id/name/comment. CLI не принимает это поле. Receipt сохраняется вместе с
+metadata/binding и не входит в account record, поэтому не выдаётся через list
+или provider environment, включая старую shallow-spread проекцию. Fresh native admission обязателен при каждом вызове;
 receipt не является разрешением. После потерянного ответа тот же intent читает
 свой результат даже при старой CAS-ревизии, без повторной записи. Другой UUID,
 payload, scope, чужая запись без receipt или снятая binding дают отказ; owner

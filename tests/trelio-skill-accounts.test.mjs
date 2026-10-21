@@ -21,11 +21,11 @@ async function fixture(t) {
 
 test('native empty-account intent is atomic with creation and survives a lost write response without duplication',async t=>{
   const {directory,make}=await fixture(t),accountId=crypto.randomUUID(),requestId=crypto.randomUUID();
-  let writes=0;
+  let writes=0,published=null;
   const catalogue=createAccountCatalogue({directory,scope:accountScope(identity),io:{...io,write:async(file,value)=>{
     await io.write(file,value);
     if(value.schemaVersion===1&&Array.isArray(value.accounts)){
-      writes++;throw new Error('synthetic response lost after atomic publication');
+      writes++;published=structuredClone(value);throw new Error('synthetic response lost after atomic publication');
     }
   }}});
   const intent={operation:'create',id:accountId,name:'Empty account',expectedRevision:0,creationRequestId:requestId};
@@ -37,6 +37,10 @@ test('native empty-account intent is atomic with creation and survives a lost wr
   assert.equal((await recovered.select(accountId)).providerRef,null);
   assert.equal((await recovered.select(accountId)).creation,undefined,'receipt is not provider environment');
   assert.ok(!JSON.stringify(await recovered.list()).includes(requestId),'receipt is not an ordinary account-list field');
+  assert.equal(published.creations[accountId].requestId,requestId);
+  // The legacy selection contract spread the complete account record. Keeping
+  // provenance at catalogue root protects that still-running older projection.
+  assert.deepEqual(Object.keys({...published.accounts[0]}).sort(),['comment','id','name','providerRef']);
 });
 
 test('native create replay cannot adopt old accounts, alter metadata, cross bindings or reuse one intent for another id',async t=>{

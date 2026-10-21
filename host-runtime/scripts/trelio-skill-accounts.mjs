@@ -158,23 +158,27 @@ function validateState(value) {
     object(value.bindings) && object(value.imports) &&
     Object.keys(value.bindings).length <= 512 && Object.keys(value.imports).length <= 2048,
   'ACCOUNT_CATALOGUE_INVALID');
-  const ids = new Set(), creationRequests = new Set();
+  const ids = new Set();
   for (const account of value.accounts) {
     requireThat(object(account) && UUID.test(account.id) && !ids.has(account.id) && validRef(account.providerRef),
       'ACCOUNT_CATALOGUE_INVALID');
     requireThat(accountText(account.name, 120) === account.name &&
       accountText(account.comment, 2000, { empty: true }) === account.comment, 'ACCOUNT_CATALOGUE_INVALID');
-    // Optional v1-compatible host-only provenance is committed in the SAME
-    // atomic file as the empty account and its binding. It is not permission:
-    // the caller must first obtain fresh native owner authorization. Older
-    // accounts have no receipt and can never be adopted as an own creation.
-    if (account.creation !== undefined) {
-      requireThat(object(account.creation) && Object.keys(account.creation).sort().join(',') === 'intentHash,requestId,scope'
-        && UUID.test(account.creation.requestId) && !creationRequests.has(account.creation.requestId)
-        && HASH.test(account.creation.scope) && HASH.test(account.creation.intentHash), 'ACCOUNT_CATALOGUE_INVALID');
-      creationRequests.add(account.creation.requestId);
-    }
     ids.add(account.id);
+  }
+  // Optional v1 provenance shares the SAME atomic catalogue file, but lives
+  // outside account records. Older runtimes may spread an account record into
+  // provider environment: a top-level receipt cannot leak through that older
+  // projection, while their existing read/write path preserves unknown fields.
+  // Receipt is never authority; every new invocation needs native owner consent.
+  if(value.creations!==undefined){
+    requireThat(object(value.creations)&&Object.keys(value.creations).length<=ACCOUNT_LIMIT,'ACCOUNT_CATALOGUE_INVALID');
+    const requests=new Set();
+    for(const [id,receipt] of Object.entries(value.creations)){
+      requireThat(ids.has(id)&&object(receipt)&&Object.keys(receipt).sort().join(',')==='intentHash,requestId,scope'
+        &&UUID.test(receipt.requestId)&&!requests.has(receipt.requestId)&&HASH.test(receipt.scope)&&HASH.test(receipt.intentHash),'ACCOUNT_CATALOGUE_INVALID');
+      requests.add(receipt.requestId);
+    }
   }
   for (const [scope, binding] of Object.entries(value.bindings)) {
     requireThat(HASH.test(scope) && object(binding) && Array.isArray(binding.accountIds) &&
@@ -341,14 +345,15 @@ export function createAccountCatalogue({ directory, scope, io }) {
         intentHash:hash([id,accountText(name,120),accountText(comment??'',2000,{empty:true})])};
       return transaction(state => {
         const current = binding(state);
-        if (creation) requireThat(!state.accounts.some(account => account.id !== id && account.creation?.requestId === creation.requestId), 'ACCOUNT_ID_CONFLICT');
+        if (creation) requireThat(!Object.entries(state.creations??{}).some(([key,receipt]) => key!==id && receipt.requestId===creation.requestId), 'ACCOUNT_ID_CONFLICT');
         const previous = creation && state.accounts.find(account => account.id === id);
         if (previous) {
           // Idempotent read-back is allowed only for the SAME native intent
           // and still-bound company/member. It never rebinds, renames, imports
           // or resets a provider session, even if the owner later changed data.
-          requireThat(previous.providerRef === null && previous.creation
-            && ['requestId','scope','intentHash'].every(key => previous.creation[key] === creation[key]), 'ACCOUNT_ID_CONFLICT');
+          const receipt=state.creations?.[id];
+          requireThat(previous.providerRef === null && receipt
+            && ['requestId','scope','intentHash'].every(key => receipt[key] === creation[key]), 'ACCOUNT_ID_CONFLICT');
           requireThat(current.accountIds.includes(id), 'ACCOUNT_NOT_BOUND');
           return {id,replayed:true};
         }
@@ -361,8 +366,8 @@ export function createAccountCatalogue({ directory, scope, io }) {
           // cannot duplicate or silently activate this already-known account.
           const source = hash([scope.catalogue, id]);
           requireThat(!Object.hasOwn(state.imports, source), 'ACCOUNT_ID_CONFLICT');
-          state.accounts.push({ id, name: accountText(name, 120), comment: accountText(comment ?? '', 2000, { empty: true }),
-            providerRef: null, ...(creation?{creation}:{}) });
+          state.accounts.push({ id, name: accountText(name, 120), comment: accountText(comment ?? '', 2000, { empty: true }), providerRef: null });
+          if(creation){state.creations??={};state.creations[id]=creation;}
           state.imports[source] = id;
           current.accountIds.push(id);
           if (current.accountIds.length === 1) current.defaultAccountId = id;
