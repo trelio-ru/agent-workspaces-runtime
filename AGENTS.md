@@ -511,8 +511,11 @@ publication tooling также остаются вне этого публичн
   продолжай в сохранённом worktree через напечатанный `worktree:bootstrap`, не
   создавая вторую ветку. `--skip-bootstrap` допустим только без локальных
   отчётов, сборок и тестов.
-- Завершённая правка получает commit на русском и интегрируется только через
-  `npm run git:push-main`; raw push в `main` запрещён.
+- Завершённая правка получает commit на русском. Сначала опубликуй только task
+  branch, открой PR и дождись SUCCESS exact head во всех обязательных hosted
+  Windows/ARM64/visual/macOS/Linux jobs. Только затем `npm run git:push-main`:
+  это transport интеграции, он не создаёт PR и сам не запускает/не проверяет CI.
+  Push workflow на `main` не заменяет PR gate. Raw push в `main` запрещён.
 - После интеграции выполни из canonical checkout
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
