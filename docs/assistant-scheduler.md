@@ -319,8 +319,8 @@ UUID or a model consent flag. Both native resolution and download repeat the
 same live owner/device/company/project/revision/write-scope checks, then return
 `accountSetup.operation=configure`, `email-configure/v1` and a fixed ten-minute
 budget. A fresh native resolve after materialization must keep the same artifact,
-release and hash. Plain verified email only; Linux storage and Telegram/MAX login
-remain closed here. The passive reader's original limits do not change.
+release and hash. Plain verified email only; Linux storage and non-email login
+remain closed under this email admission. The passive reader's original limits do not change.
 
 This is the SAME signed loader, managed account catalogue and Node/Python process
 engine, with a closed `assistant_source_setup` capture profile. A private one-use
@@ -391,6 +391,28 @@ Telegram account, not proof of its OWNER's identity or authority to create tasks
 It does not verify background polling, process/ACK messages or clear login/hooks
 health latches. Native owner control-plane/UI opt-in and a real Windows business
 pilot remain independent gates.
+
+`configure_assistant_max_source` uses that SAME account/process engine and the
+existing MAX protected browser, with explicit native owner opt-in and fixed
+`accountSetup.operation=login`, `max-login/v1`. Its only provider command is
+`login --headed --hold-ms 540000`; the common account catalogue selects the exact
+native UUID without injecting a nonexistent MAX `--account` flag. No browser
+path, selector, timeout, session import or credential reaches the model. It shares
+the original ten-minute input lease, eleven-minute outer envelope, fresh resolve
+and no-automatic-retry rule. Only Windows/macOS interactive storage is admitted.
+
+Closing the window or reaching the hold limit yields `login_handoff_finished`,
+`sessionVerified:false` and one `verify_assistant_max_source` continuation. The
+provider's private profile/path/fingerprint is discarded. Handoff is never auth.
+The independent native `verify_login` / `max-login-verify/v1` admission selects
+only `probe`, keeps the original 120-second lease/60-second child bound and
+repeats source/write/owner/device/registration checks at both resolve and package.
+The existing MAX implementation verifies authenticated home and structural search
+readiness; both true plus a final unchanged native registration are required for
+`session_verified`. Failed verification cannot reopen or repeat login. Neither
+result reads bodies, changes queues/read-state, registers a conversation, proves
+owner identity, clears health latches or enables business readiness. MAX stream
+selection and a real Windows pilot remain separate gates.
 
 Production source polling also reads the native per-source diagnostic CAS before
 its signed provider read, then reports exactly one closed result to the existing

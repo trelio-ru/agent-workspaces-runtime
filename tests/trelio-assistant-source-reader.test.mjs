@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource}=
+const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -26,13 +26,18 @@ const store={get:async slot=>{
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
 let setupFixture=null;
-const admission=()=>({schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':'telegram',
-  protocol:setupFixture?.operation==='configure'?'email-configure/v1':setupFixture?.operation==='login'?'telegram-login/v1':scope.skillId==='email-imap-smtp'?'email-monitor/v1':'telegram-monitor/v1',
-  command:setupFixture?.operation??'monitor',pollIntervalSeconds:300,
-  maximumDurationMs:setupFixture?.operation?600000:60000,
-  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:setupFixture?.operation?'2026-10-21T00:10:00.000Z':'2026-10-21T00:02:00.000Z',
-  ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
-    localAccountId:setupFixture.localAccountId,operation:setupFixture.operation??'create'}}:{})});
+const admission=()=>{
+  const max=scope.skillId==='max-web',email=scope.skillId==='email-imap-smtp',operation=setupFixture?.operation;
+  const interactive=['configure','login'].includes(operation);
+  return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:max?'max':email?'email':'telegram',
+    protocol:operation==='verify_login'?'max-login-verify/v1':operation==='login'?(max?'max-login/v1':'telegram-login/v1'):
+      operation==='configure'?'email-configure/v1':max?'max-monitor/v1':email?'email-monitor/v1':'telegram-monitor/v1',
+    command:operation==='verify_login'?'probe':operation??'monitor',pollIntervalSeconds:300,
+    maximumDurationMs:interactive?600000:60000,
+    issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:interactive?'2026-10-21T00:10:00.000Z':'2026-10-21T00:02:00.000Z',
+    ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
+      localAccountId:setupFixture.localAccountId,operation:operation??'create'}}:{})};
+};
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
 const event={id:'message:123:5',revision:'a'.repeat(64),kind:'new',chatId:'123',messageId:'5',topicId:null,
   senderUserId:'123',senderNamespace:'telegram_user_id',outgoing:false,forwarded:false,viaBot:false};
@@ -585,4 +590,73 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     // The public executor's monitor boundary remains independent of task mode.
     await assert.rejects(engine.runMaterializedAgentSkill({captureOutput:true,captureMode:'assistant_task',runtimeArguments:['read']}),/MONITOR_INPUT_INVALID|private monitor/);
   }finally{globalThis.fetch=savedFetch;}
+});
+
+// Exercises the production signed loader/catalogue and native child, not an
+// injected success function. All paths/accounts/provider output are synthetic.
+test('MAX handoff is never login proof; independent short probe rechecks native registration and drops private diagnostics',async t=>{
+  const saved={...scope};t.after(()=>{Object.assign(scope,saved);setupFixture=null;resolveOverride=null;});
+  scope.skillId='max-web';
+  setupFixture={...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
+    provisionLocalAccount:true,interactiveSetupAllowed:true,executionVerified:false};
+  const sourceId=setupFixture.id,accountId=setupFixture.localAccountId;
+  const client={identity,sourceAccounts:async()=>[{...setupFixture}]};
+  const input={identity,host,store,client,companyId,sourceId};
+  if(!['darwin','win32'].includes(process.platform)){
+    const before=resolveCalls;await assert.rejects(configureAssistantMaxSource(input),/SETUP_UNAVAILABLE/);
+    await assert.rejects(verifyAssistantMaxSource(input),/SETUP_UNAVAILABLE/);assert.equal(resolveCalls,before);return;
+  }
+  const sourceDir=path.join(directory,'max-login-package');await fs.mkdir(sourceDir);
+  const marker=path.join(directory,'max-login-calls'),output=path.join(directory,'max-login-output');
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    const args=process.argv.slice(2);assert.deepEqual(args,args[0]==='probe'?['probe']:['login','--headed','--hold-ms','540000']);
+    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    let stdin='';for await(const c of process.stdin)stdin+=c;assert.equal(stdin,'');
+    fs.appendFileSync(${JSON.stringify(marker)},args[0]+';');
+    process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
+  artifactId=randomUUID();releaseId=randomUUID();
+  packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  await prepareAssistantSourceAccount(input);
+  const handoff={opened:true,sessionVerified:false,handoffCompletion:'window_closed',profile:'PRIVATE_PATH',credential:'PRIVATE_VALUE'};
+  await fs.writeFile(output,JSON.stringify(handoff));setupFixture.operation='login';
+  const expected={sourceId,localAccountId:accountId,state:'login_handoff_finished',sessionVerified:false,
+    incomingVerified:false,backgroundVerified:false,nextAction:{tool:'verify_assistant_max_source',arguments:{companyId,sourceId}}};
+  assert.deepEqual(await configureAssistantMaxSource(input),expected);
+  await fs.writeFile(output,JSON.stringify({...handoff,handoffCompletion:'hold_expired'}));
+  assert.deepEqual(await configureAssistantMaxSource(input),expected,'hold expiration never masquerades as successful authentication');
+  setupFixture.operation='verify_login';
+  await fs.writeFile(output,JSON.stringify({authenticated:true,searchReady:false,fingerprint:'PRIVATE_UI'}));
+  await assert.rejects(verifyAssistantMaxSource(input),/SETUP_UNAVAILABLE/);
+  await fs.writeFile(output,JSON.stringify({authenticated:true,searchReady:true,fingerprint:'PRIVATE_UI',ownerUserId:'PRIVATE_OWNER'}));
+  const before=resolveCalls;
+  const verified=await verifyAssistantMaxSource(input);
+  assert.deepEqual(verified,{sourceId,localAccountId:accountId,state:'session_verified',sessionVerified:true,
+    incomingVerified:false,backgroundVerified:false});
+  assert.doesNotMatch(JSON.stringify(verified),/PRIVATE|profile|fingerprint|owner/);
+  assert.equal(resolveCalls,before+2,'probe also re-resolves after materialization');
+  const calls=await fs.readFile(marker,'utf8');
+  resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),protocol:'max-login/v1'}}));
+  await assert.rejects(verifyAssistantMaxSource(input),/INVALID_RESPONSE/);
+  assert.equal(await fs.readFile(marker,'utf8'),calls,'login admission cannot launch a probe');resolveOverride=null;
+  const read=client.sourceAccounts;let n=0;
+  client.sourceAccounts=async()=>{const rows=await read();if(++n===2)rows[0].state='paused';return rows;};
+  await assert.rejects(verifyAssistantMaxSource(input),/BINDING_CHANGED/);
+  assert.equal(await fs.readFile(marker,'utf8'),calls+'probe;','late pause never replays provider work');client.sourceAccounts=read;
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,
+    accountSetup:{sourceId,expectedRevision:0,operation:'verify_login'}});
+  const token=await profile.requireToken(origin);
+  await profile.prepareRequest({origin,token,pathname:`${prefix}/resolve`,options:{method:'POST',body:JSON.stringify({...scope,
+    expectedReleaseId:null,accountSetup:{sourceId,expectedRevision:0,operation:'verify_login'}})},buildHeaders:()=>new Headers()});
+  const raw=resolution(),normalized=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
+  await profile.bindResolution(normalized,raw.sourceAdmission);
+  const context={...scope,releaseId,localIdentity:normalized.localIdentity,companyConnection:null,account:{id:accountId}};
+  for(const runtimeArguments of [['login','--headed'],['probe','--headed'],['probe','--timeout-ms','600000'],['probe','--account',accountId]])
+    await assert.rejects(profile.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext:context,runtimeArguments}),/SETUP_REQUIRED/);
+  const exact={artifact:normalized.artifact,executionContext:context,runtimeArguments:['probe']};
+  assert.ok(await profile.authorizeInteractiveSourceSetup(exact)<=60000,'probe cannot borrow the human-input budget');
+  await assert.rejects(profile.authorizeInteractiveSourceSetup(exact),/SETUP_REQUIRED/);profile.close();
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope:{...scope,skillId:'telegram-mtproto'},
+    accountSetup:{sourceId,expectedRevision:0,operation:'verify_login'}}),/INVALID_INPUT/);
 });

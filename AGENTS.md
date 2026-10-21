@@ -415,6 +415,8 @@ publication tooling также остаются вне этого публичн
   It never accepts credentials/terminal args or upgrades passive reader limits.
   Telegram QR/2FA onboarding uses the SAME protected provider and catalogue;
   exact native `login` admission is separate from email configure/empty-create.
+  MAX reuses the same handoff path; only a fresh short native probe verifies
+  its structural login, never owner identity/streams/processing readiness.
   Login never proves owner identity, enables intake/ACK or clears hook trust.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 

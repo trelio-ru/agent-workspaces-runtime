@@ -88,7 +88,7 @@ test('the longer private worker wait is reserved for the fixed protected setup t
   }};
   await assert.rejects(requestCurrentAssistantRuntime({operation:'call',name:'get_task',arguments:{}},options),/REQUEST_INVALID/);
   assert.equal(spawns,0);
-  for(const name of ['configure_assistant_email_source','configure_assistant_telegram_source']){
+  for(const name of ['configure_assistant_email_source','configure_assistant_telegram_source','configure_assistant_max_source']){
     const before=spawns;
     const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:{}},options);
     assert.equal(result.state,'configuration_saved');assert.equal(spawns,before+1);

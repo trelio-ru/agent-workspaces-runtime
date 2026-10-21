@@ -156,7 +156,7 @@ test('source config rejects scope/protocol/duplicate errors and never maps refus
     ...[null,0,'true',{}].map(provisionLocalAccount=>({...valid,sources:[{...row,provisionLocalAccount}]})),
     ...[null,0,'true',{}].map(interactiveSetupAllowed=>({...valid,sources:[{...row,interactiveSetupAllowed}]})),
     {...valid,sources:[{...row,interactiveSetupAllowed:true}]},
-    {...valid,sources:[{...row,skillId:'max-web',provisionLocalAccount:true,interactiveSetupAllowed:true}]},
+    {...valid,sources:[{...row,skillId:'max-web',provisionLocalAccount:false,interactiveSetupAllowed:true}]},
     ...[-1,1.5,2_147_483_648].map(revision=>({...valid,sources:[{...row,revision}]})),
     {...valid,sources:[{...row,skillId:'arbitrary-provider'}]},{...valid,sources:[{...row,state:'ready'}]},
   ];
@@ -168,6 +168,8 @@ test('source config rejects scope/protocol/duplicate errors and never maps refus
   assert.equal(calls,malformed.length+4,'no hidden retry or human auth/account fallback');
   response={...valid,sources:[{...row,provisionLocalAccount:true,interactiveSetupAllowed:true}]};
   assert.equal((await client.sourceAccounts(companyId))[0].interactiveSetupAllowed,true,'separate native email permission survives bounded projection');
+  response={...valid,sources:[{...row,skillId:'max-web',provisionLocalAccount:true,interactiveSetupAllowed:true}]};
+  assert.equal((await client.sourceAccounts(companyId))[0].interactiveSetupAllowed,true,'MAX still requires a native provisioned source');
   response={...valid,sources:[{...row,skillId:'telegram-mtproto',provisionLocalAccount:true,interactiveSetupAllowed:true}]};
   assert.equal((await client.sourceAccounts(companyId))[0].interactiveSetupAllowed,true,'Telegram still requires its own native login admission after inventory');
   response={...valid,sources:['active','paused','revoked'].map((state,index)=>({...row,id:randomUUID(),state,revision:index}))};

@@ -28,8 +28,14 @@ export const ASSISTANT_EMAIL_VERIFY_TOOL=Object.freeze({name:'verify_assistant_e
 export const ASSISTANT_TELEGRAM_SETUP_TOOL=Object.freeze({name:'configure_assistant_telegram_source',
   description:'Open the existing protected Telegram QR/2FA login page on this device only for an exact native owner-enabled source. The human scans/enters factors there. No terminal/chat credentials, human session import, automatic login, sending, owner identity proof or background readiness. Never repeat an uncertain login.',
   inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{idempotentHint:false}});
-const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name];
-const interactiveSourceTool=name=>[ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name].includes(name);
+export const ASSISTANT_MAX_SETUP_TOOL=Object.freeze({name:'configure_assistant_max_source',
+  description:'Open the existing protected MAX login window on this device only for an exact native owner-enabled source. The human logs in there and closes it. Handoff is not authentication: use the separate fresh verify tool next, never automatically repeat login. No credentials, session import, owner proof or background readiness.',
+  inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{idempotentHint:false}});
+export const ASSISTANT_MAX_VERIFY_TOOL=Object.freeze({name:'verify_assistant_max_source',
+  description:'After the MAX local login handoff, run one fresh native structural home probe for the same owner-enabled source. Does not reopen login, read message bodies, register streams, advance queues, ACK messages or prove owner identity/background readiness.',
+  inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{readOnlyHint:true,idempotentHint:true}});
+const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name];
+const interactiveSourceTool=name=>[ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name].includes(name);
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
     || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
@@ -39,7 +45,7 @@ const sourceSetupArguments=args=>{
 export const assistantWorkerToolCatalogue=tools=>{
   if(!Array.isArray(tools)||tools.some(tool=>sourceToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
-  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL];
+  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL];
 };
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
@@ -742,6 +748,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
   configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
   configureTelegramSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantTelegramSource(input),
+  configureMaxSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantMaxSource(input),
+  verifyMaxSource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantMaxSource(input),
   verifySource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
   if(request.operation==='background_tick')return runAssistantBackgroundTick();
@@ -774,7 +782,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
   const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
   const interactiveSourceSetup=sourceSetup&&interactiveSourceTool(request.name);
-  const sourceVerification=sourceSetup&&request.name===ASSISTANT_EMAIL_VERIFY_TOOL.name;
+  const sourceVerification=sourceSetup&&[ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name].includes(request.name);
   const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
   if((interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
   if(request.operation==='call' && !sourceSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
@@ -792,8 +800,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       if(sourceSetup){
         try{
           const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
-          const value=sourceVerification?await verifySource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):
-            interactiveSourceSetup?await(request.name===ASSISTANT_TELEGRAM_SETUP_TOOL.name?configureTelegramSource:configureSource)
+          const value=sourceVerification?await(request.name===ASSISTANT_MAX_VERIFY_TOOL.name?verifyMaxSource:verifySource)({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):
+            interactiveSourceSetup?await(request.name===ASSISTANT_MAX_SETUP_TOOL.name?configureMaxSource:request.name===ASSISTANT_TELEGRAM_SETUP_TOOL.name?configureTelegramSource:configureSource)
               ({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
             {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
               skillId:source.skillId,projectId:source.projectId,state:source.state,revision:source.revision,

@@ -123,7 +123,7 @@ const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyI
       || !['active','paused','revoked'].includes(row.state) || row.executionVerified !== false
       || row.provisionLocalAccount !== undefined && typeof row.provisionLocalAccount !== 'boolean'
       || row.interactiveSetupAllowed !== undefined && typeof row.interactiveSetupAllowed !== 'boolean'
-      || row.interactiveSetupAllowed === true && (row.provisionLocalAccount !== true || !['email-imap-smtp','telegram-mtproto'].includes(row.skillId))
+      || row.interactiveSetupAllowed === true && (row.provisionLocalAccount !== true || !['email-imap-smtp','telegram-mtproto','max-web'].includes(row.skillId))
       || !Number.isSafeInteger(row.revision) || row.revision < 0 || row.revision > 2_147_483_647) invalid();
     const sourceId = responseId(row.id);
     if (seen.has(sourceId)) invalid();
@@ -884,20 +884,24 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   scope=sourceScope(scope);
   if(accountSetup!==null){
     if(!object(accountSetup) || Object.keys(accountSetup).some(key=>!['sourceId','expectedRevision','operation'].includes(key))
-      || accountSetup.operation!==undefined && !['configure','login'].includes(accountSetup.operation)
+      || accountSetup.operation!==undefined && !['configure','login','verify_login'].includes(accountSetup.operation)
       || accountSetup.operation==='configure' && scope.skillId!=='email-imap-smtp'
-      || accountSetup.operation==='login' && scope.skillId!=='telegram-mtproto'
+      || accountSetup.operation==='login' && !['telegram-mtproto','max-web'].includes(scope.skillId)
+      || accountSetup.operation==='verify_login' && scope.skillId!=='max-web'
       || !Number.isSafeInteger(accountSetup.expectedRevision) || accountSetup.expectedRevision<0
       || accountSetup.expectedRevision>2_147_483_647)fail('ASSISTANT_SOURCE_INVALID_INPUT');
     accountSetup=Object.freeze({sourceId:id(accountSetup.sourceId),expectedRevision:accountSetup.expectedRevision,
       ...(accountSetup.operation?{operation:accountSetup.operation}:{})});
   }
   const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
-  // Only these two separately reviewed native admissions may open a local
-  // provider form. This map selects fixed syntax, never a provider implementation
-  // or model-selected operation; ordinary monitor/empty-create stay unchanged.
-  const interactiveCommand=accountSetup?.operation==='login'?'login':'configure';
-  const interactiveProtocol=accountSetup?.operation==='login'?'telegram-login/v1':'email-configure/v1';
+  // The closed setup operation also admits one independent MAX probe after
+  // the human handoff. Probe retains the short read budget; it cannot reopen
+  // login. These are protocol selectors, not a second provider/executor.
+  const setupCommand=Boolean(accountSetup?.operation);
+  const interactiveCommand=accountSetup?.operation==='verify_login'?'probe':accountSetup?.operation==='login'?'login':'configure';
+  const interactiveProtocol=scope.skillId==='max-web'
+    ?(interactive?'max-login/v1':'max-login-verify/v1')
+    :accountSetup?.operation==='login'?'telegram-login/v1':'email-configure/v1';
   const maximumBudgetMs=interactive?10*60_000:120_000;
   const origin=originOf(identity?.origin),assistantId=id(identity?.assistantId),deviceId=id(identity?.deviceId);
   if(!host || typeof host.readIdentity!=='function' || !store || typeof store.get!=='function'
@@ -949,12 +953,13 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         || context?.companyId!==scope.companyId || (context.projectId??null)!==scope.projectId
         || context.releaseId!==approved.releaseId || context.localIdentity?.memberId!==approved.memberId
         || (context.localIdentity?.connectionId??null)!==approved.connectionId || context.account?.id!==approved.accountId
-        || JSON.stringify(runtimeArguments)!==JSON.stringify(interactiveCommand==='login'
-          ?['login','--account',approved.accountId,'--qr']
+        || JSON.stringify(runtimeArguments)!==JSON.stringify(scope.skillId==='max-web'
+          ?(interactiveCommand==='probe'?['probe']:['login','--headed','--hold-ms','540000'])
+          :interactiveCommand==='login'?['login','--account',approved.accountId,'--qr']
           :['configure','--account',approved.accountId,'--password-input','browser']))
         fail('ASSISTANT_SKILL_SETUP_REQUIRED');
       interactiveUsed=true;
-      return Math.floor(budgetMs-(monotonic()-startedAt));
+      return Math.floor(Math.min(interactive?600000:60000,budgetMs-(monotonic()-startedAt)));
     },
     async assertInteractiveSourceSetupCurrent(){
       await assertCurrent();
@@ -991,8 +996,8 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(interactive?interactiveProtocol:protocol.protocol)
-        || admission.command!==(interactive?interactiveCommand:'monitor')
+        || admission.provider!==protocol.provider || admission.protocol!==(setupCommand?interactiveProtocol:protocol.protocol)
+        || admission.command!==(setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
@@ -1007,19 +1012,19 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
         ...(accountSetup?{accountSetupSourceId:accountSetup.sourceId,accountSetupRevision:String(accountSetup.expectedRevision),
-          ...(interactive?{accountSetupOperation:accountSetup.operation}:{})}:{})};
+          ...(setupCommand?{accountSetupOperation:accountSetup.operation}:{})}:{})};
       if(url.origin!==origin || url.pathname!==`${ASSISTANT_SOURCE_PREFIX}/package` || url.hash
         || [...url.searchParams.keys()].length!==Object.keys(query).length
         || Object.entries(query).some(([key,value])=>url.searchParams.get(key)!==value)) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
         if(!object(approved) || Object.keys(approved).sort().join(',')!=='localAccountId,operation,schemaVersion,sourceId,sourceRevision'
-          || approved.schemaVersion!==1 || approved.operation!==(interactive?accountSetup.operation:'create') || approved.sourceId!==accountSetup.sourceId
+          || approved.schemaVersion!==1 || approved.operation!==(setupCommand?accountSetup.operation:'create') || approved.sourceId!==accountSetup.sourceId
           || approved.sourceRevision!==accountSetup.expectedRevision || !UUID.test(approved.localAccountId??'')
           || !UUID.test(resolution.localIdentity.memberId??''))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
         const bound={accountId:id(approved.localAccountId),memberId:id(resolution.localIdentity.memberId),
           connectionId:resolution.localIdentity.connectionId??null};
-        if(interactive)interactiveSetup=Object.freeze({...bound,artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId)});
+        if(setupCommand)interactiveSetup=Object.freeze({...bound,artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId)});
         else creation=Object.freeze(bound);
       }else if(admission.accountSetup!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       // The wire date pair bounds duration, not local wall time. Original
@@ -1223,7 +1228,8 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
   if(!identity || !client || typeof client.sourceAccounts!=='function'
     || ['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
   const rows=await client.sourceAccounts(companyId,signal),source=rows.find(row=>row.id===sourceId);
-  const telegram=kind==='telegram',skillId=telegram?'telegram-mtproto':'email-imap-smtp',operation=telegram?'login':'configure';
+  const telegram=kind==='telegram',max=kind==='max'||kind==='max-verify',verify=kind==='max-verify';
+  const skillId=max?'max-web':telegram?'telegram-mtproto':'email-imap-smtp',operation=verify?'verify_login':telegram||max?'login':'configure';
   if(!source || source.state!=='active' || source.skillId!==skillId
     || source.provisionLocalAccount!==true || source.interactiveSetupAllowed!==true)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
   const scope={companyId,projectId:source.projectId,skillId:source.skillId};
@@ -1233,7 +1239,8 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
     async({engine,profile,materialized,resolution,signal:currentSignal})=>{
       const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,
         companyConnection:resolution.companyConnection};
-      const args=telegram?['login','--local-account',source.localAccountId,'--account',source.localAccountId,'--qr']:
+      const args=max?[...(verify?['probe']:['login','--headed','--hold-ms','540000']),'--local-account',source.localAccountId]:
+        telegram?['login','--local-account',source.localAccountId,'--account',source.localAccountId,'--qr']:
         ['configure','--local-account',source.localAccountId,'--account',source.localAccountId,'--password-input','browser'];
       const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
         runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
@@ -1243,10 +1250,25 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
       if(currentSignal.aborted || remaining<1000)fail('ASSISTANT_SOURCE_DEADLINE');
       const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
         executionContext,runtimeArguments:selected.runtimeArguments,captureOutput:true,captureExitCode:true,
-        captureMode:'assistant_source_setup',timeoutMs:remaining,signal:currentSignal});
+        captureMode:'assistant_source_setup',timeoutMs:verify?Math.min(60000,remaining):remaining,signal:currentSignal});
       await profile.remainingMs();
       if(currentSignal.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
       let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_INVALID_RESPONSE');}
+      if(max){
+        // Closing a login window or reaching its hold limit proves no login.
+        // Drop the provider's private profile/path/fingerprint and never repeat
+        // the handoff automatically. A fresh native probe is a separate read.
+        if(result.exitCode!==0||!object(value)|| (verify
+          ?value.authenticated!==true||value.searchReady!==true
+          :value.opened!==true||value.sessionVerified!==false||!['window_closed','hold_expired'].includes(value.handoffCompletion)))
+          fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
+        const current=await client.sourceAccounts(companyId,currentSignal);await profile.remainingMs();
+        if(!sameAssistantSourceRegistration(source,current.find(row=>row.id===sourceId)))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+        return Object.freeze({sourceId,localAccountId:source.localAccountId,
+          state:verify?'session_verified':'login_handoff_finished',sessionVerified:verify,
+          incomingVerified:false,backgroundVerified:false,
+          ...(verify?{}:{nextAction:{tool:'verify_assistant_max_source',arguments:{companyId,sourceId}}})});
+      }
       if(telegram){
         if(result.exitCode!==0||!object(value)||value.authorized!==true)fail('ASSISTANT_SOURCE_SETUP_UNAVAILABLE');
         // The native Telegram account's ID/username and QR/login factors never
@@ -1274,6 +1296,10 @@ export const configureAssistantEmailSource = input => configureAssistantInteract
  * The human scans/types there. No terminal prompts, app identity, login factor,
  * human-session import, credential copying or automatic retry enters this host. */
 export const configureAssistantTelegramSource = input => configureAssistantInteractiveSource(input,'telegram');
+/** SAME protected browser and account engine. Neither handoff nor a fresh
+ * structural home probe grants owner identity, chat routing or read ACK. */
+export const configureAssistantMaxSource = input => configureAssistantInteractiveSource(input,'max');
+export const verifyAssistantMaxSource = input => configureAssistantInteractiveSource(input,'max-verify');
 
 /** Registration equality is shared with the background coordinator. A late
  * pause/revoke/rebind must invalidate a verification just as it invalidates
