@@ -284,6 +284,34 @@ local accounts, import sessions, register queue sources, poll providers, dispatc
 chats or ACK messages. Owner device onboarding and production orchestration
 remain separate gates; no model tool or timer is added by this client.
 
+The current signed request worker exposes `prepare_assistant_source_account`
+through the existing dynamic catalogue, not a new stable-plugin setup method.
+`companyId` plus `sourceId:null` discovers only scoped owner-configured structural
+refs. An exact `sourceId` can prepare a new EMPTY local account only when the
+server's persisted owner intent has `provisionLocalAccount=true`. Existing-account
+references do not authorize binding, adoption, import or login. Device identity,
+current owner membership, project access, device write grant and exact source
+revision are checked by native resolution/package endpoints. The model supplies
+locators, never account UUID selection or a consent boolean.
+
+Preparation uses the SAME signed package materializer and common account
+catalogue as task skills. After materialization it exits the first HTTP profile
+and obtains fresh native setup admission under the ORIGINAL deadline; nested
+profile replacement stays prohibited. The reviewed artifact/release/hash must
+remain unchanged. A private one-use closure admits precisely one fixed empty
+create with the server-generated UUID; no provider process is launched. Metadata,
+company/member binding and the native-intent receipt commit in the catalogue's
+existing atomic transaction. A lost response can read back only that same intent,
+without another account, rename, rebind or session reset. Receipt is provenance,
+not authority: every preparation still obtains fresh native admission.
+
+The tool is discovered and fingerprinted by the current signed worker, so the
+existing facade can announce it without a plugin/Codex restart. Successful setup
+or discovery cannot clear hook-review/login latches. `state:prepared` and
+`loginVerified:false` prove only local empty-account creation; owner sign-in,
+provider setup, actual polling/body processing/ACK and Windows business E2E
+remain required. No second vault, journal, provider or executor is introduced.
+
 `readAssistantSourceMonitor` composes the same package resolution validator,
 Ed25519/digest/file-inventory verifier, executable cache, explicit bound local
 account selector and materialized Node/Python executor as ordinary skills. It
@@ -295,7 +323,8 @@ Source polling and task execution resolve the same assistant/device account
 catalogue through the common account engine. Company/member bindings are still
 checked by that catalogue. A source never imports/selects the interactive human's
 legacy accounts, returns labels of unbound company accounts or changes account
-setup. The profile rechecks its protected identity and original read deadline
+setup during ordinary reads/task execution. Only the separately admitted empty
+creation above can change the catalogue. The profile rechecks its protected identity and original read deadline
 before resolving the namespace; a closed/expired profile cannot reuse it. Owner
 onboarding must populate this namespace explicitly, not copy human sessions.
 

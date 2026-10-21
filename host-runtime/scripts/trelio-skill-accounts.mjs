@@ -158,12 +158,22 @@ function validateState(value) {
     object(value.bindings) && object(value.imports) &&
     Object.keys(value.bindings).length <= 512 && Object.keys(value.imports).length <= 2048,
   'ACCOUNT_CATALOGUE_INVALID');
-  const ids = new Set();
+  const ids = new Set(), creationRequests = new Set();
   for (const account of value.accounts) {
     requireThat(object(account) && UUID.test(account.id) && !ids.has(account.id) && validRef(account.providerRef),
       'ACCOUNT_CATALOGUE_INVALID');
     requireThat(accountText(account.name, 120) === account.name &&
       accountText(account.comment, 2000, { empty: true }) === account.comment, 'ACCOUNT_CATALOGUE_INVALID');
+    // Optional v1-compatible host-only provenance is committed in the SAME
+    // atomic file as the empty account and its binding. It is not permission:
+    // the caller must first obtain fresh native owner authorization. Older
+    // accounts have no receipt and can never be adopted as an own creation.
+    if (account.creation !== undefined) {
+      requireThat(object(account.creation) && Object.keys(account.creation).sort().join(',') === 'intentHash,requestId,scope'
+        && UUID.test(account.creation.requestId) && !creationRequests.has(account.creation.requestId)
+        && HASH.test(account.creation.scope) && HASH.test(account.creation.intentHash), 'ACCOUNT_CATALOGUE_INVALID');
+      creationRequests.add(account.creation.requestId);
+    }
     ids.add(account.id);
   }
   for (const [scope, binding] of Object.entries(value.bindings)) {
@@ -321,13 +331,28 @@ export function createAccountCatalogue({ directory, scope, io }) {
         id, name, comment, bound: current.accountIds.includes(id), default: current.defaultAccountId === id,
       })) };
     },
-    async change({ operation, id, name, comment, expectedRevision }) {
+    async change({ operation, id, name, comment, expectedRevision, creationRequestId = null }) {
       requireThat(['create', 'update', 'bind', 'unbind', 'default'].includes(operation), 'ACCOUNT_OPERATION_INVALID');
       requireThat(['create', 'update'].includes(operation) || name === undefined && comment === undefined, 'ACCOUNT_ARGUMENTS_INVALID');
       requireThat(operation !== 'update' || name !== undefined || comment !== undefined, 'ACCOUNT_ARGUMENTS_INVALID');
+      requireThat(Number.isSafeInteger(expectedRevision) && expectedRevision>=0, 'ACCOUNT_CATALOGUE_CONFLICT');
+      requireThat(creationRequestId === null || operation === 'create' && UUID.test(creationRequestId), 'ACCOUNT_ARGUMENTS_INVALID');
+      const creation = creationRequestId === null ? null : {requestId:creationRequestId,scope:scope.company,
+        intentHash:hash([id,accountText(name,120),accountText(comment??'',2000,{empty:true})])};
       return transaction(state => {
-        requireThat(Number.isSafeInteger(expectedRevision) && expectedRevision === state.revision, 'ACCOUNT_CATALOGUE_CONFLICT');
         const current = binding(state);
+        if (creation) requireThat(!state.accounts.some(account => account.id !== id && account.creation?.requestId === creation.requestId), 'ACCOUNT_ID_CONFLICT');
+        const previous = creation && state.accounts.find(account => account.id === id);
+        if (previous) {
+          // Idempotent read-back is allowed only for the SAME native intent
+          // and still-bound company/member. It never rebinds, renames, imports
+          // or resets a provider session, even if the owner later changed data.
+          requireThat(previous.providerRef === null && previous.creation
+            && ['requestId','scope','intentHash'].every(key => previous.creation[key] === creation[key]), 'ACCOUNT_ID_CONFLICT');
+          requireThat(current.accountIds.includes(id), 'ACCOUNT_NOT_BOUND');
+          return {id,replayed:true};
+        }
+        requireThat(Number.isSafeInteger(expectedRevision) && expectedRevision === state.revision, 'ACCOUNT_CATALOGUE_CONFLICT');
         if (operation === 'create') {
           requireThat(UUID.test(id) && !state.accounts.some(a => a.id === id), 'ACCOUNT_ID_CONFLICT');
           // A provider may retain new accounts beside legacy device entries
@@ -336,7 +361,8 @@ export function createAccountCatalogue({ directory, scope, io }) {
           // cannot duplicate or silently activate this already-known account.
           const source = hash([scope.catalogue, id]);
           requireThat(!Object.hasOwn(state.imports, source), 'ACCOUNT_ID_CONFLICT');
-          state.accounts.push({ id, name: accountText(name, 120), comment: accountText(comment ?? '', 2000, { empty: true }), providerRef: null });
+          state.accounts.push({ id, name: accountText(name, 120), comment: accountText(comment ?? '', 2000, { empty: true }),
+            providerRef: null, ...(creation?{creation}:{}) });
           state.imports[source] = id;
           current.accountIds.push(id);
           if (current.accountIds.length === 1) current.defaultAccountId = id;
@@ -355,7 +381,7 @@ export function createAccountCatalogue({ directory, scope, io }) {
           } else throw new SkillAccountError('ACCOUNT_OPERATION_INVALID');
         }
         state.bindings[scope.company] = current;
-        return { id };
+        return { id, ...(creation?{replayed:false}:{}) };
       });
     },
     async select(id = null) {
@@ -364,7 +390,10 @@ export function createAccountCatalogue({ directory, scope, io }) {
       const selected = id || current.defaultAccountId || (current.accountIds.length === 1 ? current.accountIds[0] : null);
       requireThat(selected, current.accountIds.length ? 'ACCOUNT_SELECTION_REQUIRED' : 'ACCOUNT_SETUP_REQUIRED');
       requireThat(current.accountIds.includes(selected), 'ACCOUNT_NOT_BOUND');
-      return { ...find(state, selected), companyBinding: scope.company };
+      const account = find(state, selected);
+      // Internal native-intent receipts never enter provider environment or
+      // ordinary account list output. Keep the original public account shape.
+      return { id:account.id,name:account.name,comment:account.comment,providerRef:account.providerRef,companyBinding:scope.company };
     },
     async importOnce(discover) {
       return transaction(async state => {

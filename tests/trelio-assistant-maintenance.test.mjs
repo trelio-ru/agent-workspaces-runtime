@@ -109,5 +109,6 @@ test('only a successful protected read clears hook review; metadata cannot clear
   const current={code:'plugin_update_required',latchedCodes:['hook_review_required','codex_auth_required']};
   assert.deepEqual(assistantHealthyBoundary(current,{operation:'list'}),{code:'ready'});
   assert.deepEqual(assistantHealthyBoundary(current,{operation:'call',name:'get_assistant_status'}),{code:'ready'});
+  assert.deepEqual(assistantHealthyBoundary(current,{operation:'call',name:'prepare_assistant_source_account'}),{code:'ready'});
   assert.deepEqual(assistantHealthyBoundary(current,{operation:'call',name:'get_task'}),{code:'ready',clearedReason:'hook_review_required'});
 });

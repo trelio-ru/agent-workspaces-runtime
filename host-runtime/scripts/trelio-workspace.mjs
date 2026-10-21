@@ -8436,10 +8436,18 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   // Treating a source as an ordinary human here would import that OS user's
   // legacy sessions before any explicit assistant/company account binding.
   const assistant = ["digital_assistant", "digital_assistant_source"].includes(profile?.kind);
+  let accountCreation = null;
   if (assistant && command?.operation && command.operation !== "list") {
-    // A task does not authorize creating/rebinding an assistant account. Setup
-    // belongs to the owner path; reuse the catalogue, never a second vault.
-    throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+    // A task/read profile cannot authorize setup. The native source-owner
+    // profile may admit one exact new EMPTY entry only after live server
+    // consent; it repeats identity/deadline/scope and never admits bind/import.
+    if (profile.kind !== "digital_assistant_source" || typeof profile.authorizeAccountCreation !== "function")
+      throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+    accountCreation = await profile.authorizeAccountCreation(command,{companyId:executionContext.companyId,projectId:executionContext.projectId??null,
+      skillId:artifact.skillId,memberId:executionContext.localIdentity?.memberId,connectionId:executionContext.localIdentity?.connectionId??null});
+    if (!accountCreation || Object.keys(accountCreation).join(',') !== 'creationRequestId'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(accountCreation.creationRequestId))
+      throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
   }
   if (command?.help) {
     output({ ok: true, help: command.help }); return { handled: true };
@@ -8465,7 +8473,7 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     output({ ok: true, ...listed, ...(assistant ? {accounts:listed.accounts.filter(account=>account.bound)} : {}) }); return { handled: true };
   }
   if (command) {
-    const result = await catalogue.change({ ...command, id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });
+    const result = await catalogue.change({ ...command, ...(accountCreation??{}), id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });
     output({ ok: true, ...result, ...await catalogue.list() }); return { handled: true };
   }
   const account = await catalogue.select(parsed.accountId);

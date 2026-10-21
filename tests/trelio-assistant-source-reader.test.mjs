@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage}=
+const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -25,9 +25,12 @@ const store={get:async slot=>{
   reads++;assert.deepEqual(slot,{origin,kind:'device',id:assistantId});
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
+let setupFixture=null;
 const admission=()=>({schemaVersion:1,assistantUserId:assistantId,deviceId,provider:'telegram',protocol:'telegram-monitor/v1',
   command:'monitor',pollIntervalSeconds:300,maximumDurationMs:60000,
-  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z'});
+  issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',
+  ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
+    localAccountId:setupFixture.localAccountId,operation:'create'}}:{})});
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
 const event={id:'message:123:5',revision:'a'.repeat(64),kind:'new',chatId:'123',messageId:'5',topicId:null,
   senderUserId:'123',senderNamespace:'telegram_user_id',outgoing:false,forwarded:false,viaBot:false};
@@ -50,6 +53,7 @@ const payload=()=>({releaseId,company:{id:companyId,slug:'synthetic',name:'Synth
 // URL parameters are independently constructed, never an arbitrary package URL.
 const resolution=()=>{
   const raw=payload();const query=new URLSearchParams({companyId,skillId:scope.skillId,expectedReleaseId:releaseId,artifactId});
+  if(setupFixture){query.set('accountSetupSourceId',setupFixture.id);query.set('accountSetupRevision',String(setupFixture.revision));}
   raw.packageUrl=`${prefix}/package?${query}`;return raw;
 };
 const originalFetch=globalThis.fetch;
@@ -61,7 +65,8 @@ globalThis.fetch=async(url,options)=>{
   assert.equal(options.headers.get('cookie'),null);assert.equal(options.headers.get('x-trelio-assistant-pass'),null);
   assert.ok(options.headers.get('x-trelio-host-runtime-version'));
   if(url.pathname===`${prefix}/resolve`){
-    resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null});
+    resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null,
+      ...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision}}:{})});
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
   assert.equal(url.pathname,`${prefix}/package`);downloadCalls++;
@@ -182,6 +187,46 @@ test('source reader composes real signature/cache/account/executor and resolves 
   resolveOverride=null;
   const wrong={...source,accountId:randomUUID()};
   await assert.rejects(readAssistantSourceMonitor({identity,host,store,source:wrong}),/SOURCE_/);
+});
+
+test('native owner setup uses the same signed loader/catalogue, has atomic create replay and never starts a provider',async t=>{
+  t.after(()=>{setupFixture=null;resolveOverride=null;});
+  const localProfile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await localProfile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());localProfile.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId:null}),io:{
+    ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
+    checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  const source=()=>({...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
+    provisionLocalAccount:true,executionVerified:false});
+  setupFixture=source();
+  const client={identity,sourceAccounts:async selected=>{assert.equal(selected,companyId);return [setupFixture];}};
+  const prepare=()=>prepareAssistantSourceAccount({identity,host,store,client,companyId,sourceId:setupFixture.id});
+  const calls=await fs.readFile(path.join(directory,'native-calls'),'utf8'),before=await catalogue.list(),resolves=resolveCalls;
+  assert.deepEqual(await prepare(),{sourceId:setupFixture.id,localAccountId:setupFixture.localAccountId,
+    state:'prepared',replayed:false,loginVerified:false});
+  assert.equal(resolveCalls,resolves+2,'materialization is followed by fresh native owner authorization');
+  assert.equal((await catalogue.list()).revision,before.revision+1);
+  assert.equal((await catalogue.select(setupFixture.localAccountId)).providerRef,null);
+  assert.equal((await prepare()).replayed,true);
+  assert.equal((await catalogue.list()).revision,before.revision+1,'the same native intent reads back its own committed receipt');
+  assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls,'no importer, provider login or monitor process is launched');
+  const stable=await catalogue.list();
+  setupFixture=source();let phases=0;
+  resolveOverride=()=>++phases===1?new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}}):
+    new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED'}),{status:403,headers:{'content-type':'application/json'}});
+  await assert.rejects(prepare());assert.equal(phases,2);
+  assert.deepEqual(await catalogue.list(),stable,'native refusal after materialization cannot create an account');
+  resolveOverride=null;setupFixture=source();
+  await catalogue.change({operation:'create',id:setupFixture.localAccountId,name:'Unrelated account',expectedRevision:stable.revision});
+  await assert.rejects(prepare(),error=>error.code==='ACCOUNT_ID_CONFLICT');
+  assert.equal((await catalogue.select(setupFixture.localAccountId)).name,'Unrelated account','an existing UUID without the own receipt cannot be adopted');
+  setupFixture=source();
+  resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),
+    accountSetup:{...admission().accountSetup,operation:'bind'}}}),{headers:{'content-type':'application/json'}});
+  await assert.rejects(prepare(),error=>error.code==='ASSISTANT_SOURCE_INVALID_RESPONSE');
+  resolveOverride=null;setupFixture=source();setupFixture.provisionLocalAccount=false;
+  const start=resolveCalls;await assert.rejects(prepare(),/SETUP_REQUIRED/);assert.equal(resolveCalls,start,'an ordinary reference never requests setup admission');
+  assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls);
 });
 
 test('structural projection rejects bad pages, scope swaps, receipts and gaps without losing the old cursor',()=>{

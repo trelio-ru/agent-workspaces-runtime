@@ -5,7 +5,7 @@ import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-ho
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory } from './trelio-assistant-transport.mjs';
+import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -13,6 +13,23 @@ import { createAssistantSetup, createAssistantWindowsBackground } from './trelio
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
 const enrollment = { type: 'string', pattern: UUID };
 const schema = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
+// Returned by the CURRENT signed worker, not captured by the long-lived stdio
+// facade. A runtime update can expose this tool through the existing list-change
+// mechanism without a plugin/Codex restart or duplicating the stable setup ABI.
+export const ASSISTANT_SOURCE_SETUP_TOOL=Object.freeze({name:'prepare_assistant_source_account',
+  description:'With sourceId=null list owner-configured source refs for one company. With an exact sourceId prepare only its owner-requested empty local account through the common signed loader/catalogue. No login, old-account bind/import, secrets, polling or readiness claim.',
+  inputSchema:schema({companyId:enrollment,sourceId:{anyOf:[enrollment,{type:'null'}]}}),annotations:{idempotentHint:true}});
+const sourceSetupArguments=args=>{
+  if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
+    || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
+    throw Object.assign(new Error(),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
+  return {companyId:args.companyId,sourceId:args.sourceId};
+};
+export const assistantWorkerToolCatalogue=tools=>{
+  if(!Array.isArray(tools)||tools.some(tool=>tool?.name===ASSISTANT_SOURCE_SETUP_TOOL.name))
+    throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL];
+};
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
     inputSchema: schema({ enrollmentId: enrollment, deviceName: { type: 'string', minLength: 1, maxLength: 120 } }) },
@@ -29,7 +46,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
 ]);
 const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
 const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
-const safeError = error => assistantHealthFailure(error) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
+const safeError = error => assistantHealthFailure(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
 export const callAssistantSetupTool = async (setup, name, args) => {
@@ -244,7 +261,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
       try {
         // Validate before touching private storage. Unknown tools cannot cause
         // an auth read or be delegated to another MCP implementation.
-        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name)
+        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name) || message.params?.name===ASSISTANT_SOURCE_SETUP_TOOL.name
           || createMcp===createForwardingAssistantMcp && !codes.has(message.params?.name)
             && /^[a-z][a-z0-9_]{0,99}$/u.test(message.params?.name ?? '')) {
           if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
@@ -336,7 +353,8 @@ export const runAssistantEntry = async (args, options = {}) => {
   const name = tool.split(/__|[:./-]/u).at(-1);
   const assistantTool = /^(?:mcp__)?trelio[-_]assistant__|^mcp__plugin_trelio-digital-assistant_trelio-assistant__|^(?:mcp[:./-])?trelio-assistant[:./-]/u.test(tool);
   let decision = {};
-  if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name) && name !== 'get_assistant_status') {
+  if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name)
+    && name !== ASSISTANT_SOURCE_SETUP_TOOL.name && name !== 'get_assistant_status') {
     const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
     const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
     try {
@@ -411,7 +429,8 @@ export const assistantHealthCompatibility = (state, versions) => {
  * was repaired. Those latches clear only at their own successful boundary. */
 export const assistantHealthyBoundary = (current,request) => ({code:'ready',
   ...((current.code==='hook_review_required' || current.latchedCodes?.includes('hook_review_required'))
-    && request.operation==='call' && request.name!=='get_assistant_status' ? {clearedReason:'hook_review_required'} : {}),
+    && request.operation==='call' && request.name!=='get_assistant_status'
+    && request.name!==ASSISTANT_SOURCE_SETUP_TOOL.name ? {clearedReason:'hook_review_required'} : {}),
 });
 
 export const maintainAssistantHost = async ({client,probe,update,versions,signal}) => {
@@ -490,7 +509,7 @@ const productionContext = async (action, { signal } = {}) => {
     const identity=await host.readIdentity();
     if(!identity)return null;
     if(identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
-    return action(createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})}),host);
+    return action(createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})}),host,store);
   }, signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000));
 };
 
@@ -690,11 +709,12 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
   } finally {process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);}
 };
 
-export const executeAssistantRuntimeRequest = async request => {
+export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
+  versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input)}={}) => {
   validateAssistantRuntimeRequest(request);
   if(request.operation==='background_tick')return runAssistantBackgroundTick();
   if(request.operation==='health') {
-    const canUpdate=await productionContext(async (_client,host)=>!await host.readActivePass());
+    const canUpdate=await context(async (_client,host)=>!await host.readActivePass());
     if(canUpdate===null)return null;
     try {
       if(canUpdate)await prepareHostRuntimeUpgrade({timeoutMs:30_000});
@@ -703,16 +723,16 @@ export const executeAssistantRuntimeRequest = async request => {
       return await requestCurrentAssistantRuntime({operation:'health_check'});
     } catch(error) {
       const direct=assistantHealthFailure(error);
-      return productionContext(client=>maintainAssistantHost({client,versions:requireTrelioComponentVersions(),
+      return context(client=>maintainAssistantHost({client,versions:versions(),
         update:async()=>{throw new Error();},probe:async()=>{if(direct)fail(error.code);},
       }));
     }
   }
   if(request.operation==='health_check') {
-    return productionContext(async client=>{
+    return context(async client=>{
       let catalog=null;
-      const state=await maintainAssistantHost({client,versions:requireTrelioComponentVersions(),update:async()=>{},
-        probe:async signal=>{const proxy=await createProductionAssistantMcp();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');catalog=await proxy.listTools(signal);},
+      const state=await maintainAssistantHost({client,versions:versions(),update:async()=>{},
+        probe:async signal=>{const proxy=await proxyFor();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');catalog=assistantWorkerToolCatalogue(await proxy.listTools(signal));},
       });
       return {...state,...(catalog===null?{}:{catalogRevision:assistantCatalogRevision(catalog)})};
     });
@@ -720,18 +740,32 @@ export const executeAssistantRuntimeRequest = async request => {
   if(!['list','call'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
   // Validate the exact tool before any credential read, as in ordinary MCP.
   const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
-  if(request.operation==='call' && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-  return productionContext(async client=>{
+  const sourceSetup=request.operation==='call'&&request.name===ASSISTANT_SOURCE_SETUP_TOOL.name;
+  const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
+  if(request.operation==='call' && !sourceSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  return context(async (client,host,store)=>{
     const current=await client.readHealth();
-    const blocked=assistantHealthCompatibility(current,requireTrelioComponentVersions());
+    const blocked=assistantHealthCompatibility(current,versions());
     if(blocked) {
       await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code:blocked});
       fail(blocked==='plugin_update_required'?'ASSISTANT_PLUGIN_UPDATE_REQUIRED':'ASSISTANT_RUNTIME_UPDATE_REQUIRED');
     }
-    const proxy=await createProductionAssistantMcp();
+    const proxy=await proxyFor();
     if(!proxy)return request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED');
     try {
-      const result=await (request.operation==='list'?proxy.listTools():proxy.callTool(request.name,request.arguments));
+      let result;
+      if(sourceSetup){
+        try{
+          const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+          const value=sourceArguments.sourceId===null?
+            {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
+              skillId:source.skillId,projectId:source.projectId,state:source.state,revision:source.revision,
+              provisionLocalAccount:source.provisionLocalAccount,executionVerified:false}))}:
+            await prepareSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()});
+          result={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+        }catch(error){const code=safeError(error);result={isError:true,content:[{type:'text',text:code}],structuredContent:{code}};}
+      }else result=await(request.operation==='list'?proxy.listTools():proxy.callTool(request.name,request.arguments));
+      if(request.operation==='list')result=assistantWorkerToolCatalogue(result);
       const code=result?.isError?assistantHealthFailure(result.structuredContent):null;
       if(code)await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code}).catch(()=>undefined);
       if(!result?.isError) {

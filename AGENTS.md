@@ -389,8 +389,10 @@ publication tooling также остаются вне этого публичн
 - Model-free source reads reuse common signature/cache/account execution under a fresh fixed device HTTP profile; no human admission cache, task pass, ACK or cursor reset. [Contract](docs/assistant-scheduler.md#model-free-source-reader).
   Fixed device discovery returns scoped desired refs only, never login/readiness
   evidence; failed/foreign/malformed inventories are not empty configurations.
-  Source/task profiles share the managed device account namespace; neither imports
-  the human catalogue nor mutates owner setup or lists unbound company labels.
+  Source/task reads share the managed device namespace without human import or
+  unbound labels. Separately admitted owner empty-create uses the SAME catalogue
+  and atomic intent receipt; no provider login or readiness inference. Current
+  signed worker discovery does not require a new stable plugin setup ABI.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).

@@ -2078,6 +2078,17 @@ Create принимает name/comment и optional UUID; update – exact UUID �
 включается только после выбора пользователя; общие комментарии – данные,
 не authority и не место для секретов или закрытого company context.
 
+Внутренний owner-authorized assistant setup использует ту же операцию create,
+lock и atomic write, добавляя optional v1-поле `creation`: UUID native intent,
+хеш company/member scope и хеш исходных id/name/comment. CLI не принимает это
+поле. Receipt сохраняется вместе с metadata/binding и не выдаётся через list
+или provider environment. Fresh native admission обязателен при каждом вызове;
+receipt не является разрешением. После потерянного ответа тот же intent читает
+свой результат даже при старой CAS-ревизии, без повторной записи. Другой UUID,
+payload, scope, чужая запись без receipt или снятая binding дают отказ; owner
+rename не отменяется. Повреждённый receipt закрывает весь каталог по прежнему
+fail-closed правилу, без сброса или adoption. Отдельного журнала/хранилища нет.
+
 `--local-account UUID` удаляется из provider argv до запуска; unknown/unbound
 selector отклоняется, дубликат тоже. Без selector используется default либо
 единственный bound account; иначе требуется выбор. Глобального active account

@@ -19,6 +19,53 @@ async function fixture(t) {
     scope: accountScope({ ...identity, ...overrides }), io }) };
 }
 
+test('native empty-account intent is atomic with creation and survives a lost write response without duplication',async t=>{
+  const {directory,make}=await fixture(t),accountId=crypto.randomUUID(),requestId=crypto.randomUUID();
+  let writes=0;
+  const catalogue=createAccountCatalogue({directory,scope:accountScope(identity),io:{...io,write:async(file,value)=>{
+    await io.write(file,value);
+    if(value.schemaVersion===1&&Array.isArray(value.accounts)){
+      writes++;throw new Error('synthetic response lost after atomic publication');
+    }
+  }}});
+  const intent={operation:'create',id:accountId,name:'Empty account',expectedRevision:0,creationRequestId:requestId};
+  await assert.rejects(catalogue.change(intent),/synthetic response lost/);
+  const recovered=make();
+  assert.deepEqual(await recovered.change(intent),{id:accountId,replayed:true});
+  assert.equal(writes,1);assert.equal((await recovered.list()).revision,1);
+  assert.equal((await recovered.list()).accounts.length,1);
+  assert.equal((await recovered.select(accountId)).providerRef,null);
+  assert.equal((await recovered.select(accountId)).creation,undefined,'receipt is not provider environment');
+  assert.ok(!JSON.stringify(await recovered.list()).includes(requestId),'receipt is not an ordinary account-list field');
+});
+
+test('native create replay cannot adopt old accounts, alter metadata, cross bindings or reuse one intent for another id',async t=>{
+  const {make}=await fixture(t),catalogue=make(),accountId=crypto.randomUUID(),requestId=crypto.randomUUID();
+  const intent={operation:'create',id:accountId,name:'Original',expectedRevision:0,creationRequestId:requestId};
+  assert.deepEqual(await catalogue.change(intent),{id:accountId,replayed:false});
+  await catalogue.change({operation:'update',id:accountId,name:'Owner renamed',expectedRevision:1});
+  assert.deepEqual(await catalogue.change(intent),{id:accountId,replayed:true});
+  assert.equal((await catalogue.list()).revision,2);assert.equal((await catalogue.select()).name,'Owner renamed');
+  await assert.rejects(catalogue.change({...intent,name:'Changed intent'}),error=>error.code==='ACCOUNT_ID_CONFLICT');
+  await assert.rejects(catalogue.change({...intent,id:crypto.randomUUID()}),error=>error.code==='ACCOUNT_ID_CONFLICT');
+  const other=make({companyId:crypto.randomUUID()});
+  await assert.rejects(other.change(intent),error=>error.code==='ACCOUNT_ID_CONFLICT');
+  const ordinaryId=crypto.randomUUID();
+  await catalogue.change({operation:'create',id:ordinaryId,name:'Existing human-style account',expectedRevision:2});
+  await assert.rejects(catalogue.change({...intent,id:ordinaryId,creationRequestId:crypto.randomUUID(),expectedRevision:3}),error=>error.code==='ACCOUNT_ID_CONFLICT');
+  await catalogue.change({operation:'unbind',id:accountId,expectedRevision:3});
+  await assert.rejects(catalogue.change(intent),error=>error.code==='ACCOUNT_NOT_BOUND');
+  assert.equal((await catalogue.list()).revision,4,'refusals never rename, rebind or reset the catalogue');
+});
+
+test('concurrent identical native empty-account intents have one atomic creation and one read-back',async t=>{
+  const {make}=await fixture(t),first=make(),second=make();
+  const intent={operation:'create',id:crypto.randomUUID(),name:'One',expectedRevision:0,creationRequestId:crypto.randomUUID()};
+  const results=await Promise.all([first.change(intent),second.change(intent)]);
+  assert.deepEqual(results.map(row=>row.replayed).sort(),[false,true]);
+  assert.equal((await first.list()).accounts.length,1);assert.equal((await first.list()).revision,1);
+});
+
 test('import is durable, does not move provider state or disclose its locator, and unbind survives retries', async t => {
   const { make } = await fixture(t), catalogue = make();
   let probes = 0;

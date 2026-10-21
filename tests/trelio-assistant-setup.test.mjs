@@ -6,7 +6,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
+  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
   const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
@@ -79,13 +80,54 @@ test('oversized frames and unsupported entry commands fail before setup or priva
   assert.equal(created,0);
 });
 
+test('source setup stdio accepts exact owner-ref locators only and returns closed native catalogue failures',async()=>{
+  const companyId=randomUUID(),sourceId=randomUUID(),output=new PassThrough();let raw='',calls=0,contexts=0;
+  output.on('data',chunk=>raw+=chunk);
+  const reported=[];
+  const client={identity:{origin:'https://source.test',assistantId:randomUUID(),deviceId:randomUUID()},
+    readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
+    reportHealth:async value=>reported.push(value),sourceAccounts:async selected=>{assert.equal(selected,companyId);return [{id:sourceId,
+      skillId:'telegram-mtproto',projectId:null,state:'active',revision:0,provisionLocalAccount:true,executionVerified:false,label:'PRIVATE_LABEL'}];}};
+  const dependencies={context:async action=>{contexts++;return action(client,{readIdentity:async()=>client.identity},{});},
+    versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
+    proxyFor:async()=>({listTools:async()=>[],callTool:async()=>assert.fail('host setup is never delegated to human/native task MCP')}),
+    prepareSource:async input=>{
+      calls++;assert.equal(input.companyId,companyId);assert.equal(input.sourceId,sourceId);assert.equal(input.client,client);
+      if(calls===2)throw Object.assign(new Error('PRIVATE_STORE_DETAIL'),{code:'ACCOUNT_ID_CONFLICT'});
+      return {sourceId,state:'prepared',loginVerified:false};
+    }};
+  const tools=await executeAssistantRuntimeRequest({operation:'list'},dependencies);
+  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL],'the current worker owns new setup discovery');
+  const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
+  assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
+  const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
+  assert.deepEqual(discovered.structuredContent,{sources:[{sourceId,skillId:'telegram-mtproto',projectId:null,state:'active',revision:0,
+    provisionLocalAccount:true,executionVerified:false}]});
+  assert.equal(calls,0,'listing refs never prepares an account');assert.ok(!JSON.stringify(discovered).includes('PRIVATE_LABEL'));
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+    {jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'prepare_assistant_source_account',arguments:{companyId,sourceId}}},
+    {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'prepare_assistant_source_account',arguments:{companyId,sourceId,localAccountId:randomUUID()}}},
+    {jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'prepare_assistant_source_account',arguments:{companyId,sourceId}}}];
+  const before=contexts;
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createSetup:async()=>assert.fail('the long-lived setup facade is not replaced or used for this new tool'),
+    createMcp:async()=>({callTool:(name,args)=>executeAssistantRuntimeRequest({operation:'call',name,arguments:args},dependencies)})});
+  const messages=raw.trim().split('\n').map(JSON.parse);
+  assert.deepEqual(messages[1].result.structuredContent,{sourceId,state:'prepared',loginVerified:false});
+  assert.equal(messages[2].result.structuredContent.code,'ASSISTANT_SETUP_INVALID_INPUT');
+  assert.equal(messages[3].result.structuredContent.code,'ACCOUNT_ID_CONFLICT');
+  assert.equal(calls,2);assert.ok(!raw.includes('PRIVATE_STORE_DETAIL'));
+  assert.equal(contexts,before+2,'invalid extra fields fail before private context');
+  assert.ok(reported.every(value=>value.clearedReason===undefined),'metadata setup never clears hook-review obligations');
+});
+
 test('assistant hook permits setup and blocks task tools without an installed host profile', async () => {
   for(const tool of ['mcp__trelio_assistant__get_task','mcp__plugin_trelio-digital-assistant_trelio-assistant__clear_task_control',
-    'mcp__trelio_assistant__begin_assistant_setup']){
+    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account']){
     const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
     await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output,createHook:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});}});
     const result=JSON.parse(raw);
-    assert.equal(result.hookSpecificOutput?.permissionDecision,tool.endsWith('begin_assistant_setup')?undefined:'deny');
+    assert.equal(result.hookSpecificOutput?.permissionDecision,tool.endsWith('begin_assistant_setup')||tool.endsWith('prepare_assistant_source_account')?undefined:'deny');
   }
 });
 

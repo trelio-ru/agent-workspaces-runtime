@@ -105,7 +105,7 @@ test('source configuration uses one fixed device GET and returns immutable scope
   const slot={origin,kind:'device',id:assistantId},store=memoryStore(),credential=`tda_${'s'.repeat(43)}`;
   await store.put(slot,{assistantId,deviceId,credential,expiresAt:1});
   const row={id:randomUUID(),companyId,deviceId,localAccountId:randomUUID(),projectId:null,
-    skillId:'telegram-mtproto',state:'active',revision:0,executionVerified:false};
+    skillId:'telegram-mtproto',state:'active',revision:0,provisionLocalAccount:false,executionVerified:false};
   const wire={schemaVersion:1,assistantUserId:assistantId,deviceId,companyId,
     sources:[{...row,label:'PRIVATE_LABEL',selectors:{chat:'PRIVATE_CHAT'}}],private:'PRIVATE_EXTRA'};
   let calls=0;
@@ -122,11 +122,15 @@ test('source configuration uses one fixed device GET and returns immutable scope
   assert.throws(()=>{result[0].state='revoked';},TypeError);assert.ok(!JSON.stringify(result).includes('PRIVATE'));
   // A fresh, identity-bound empty list is real absence. It cannot be supplied
   // by a failed request, another company's response or stale admission cache.
-  wire.sources=[];assert.deepEqual(await client.sourceAccounts(companyId),[]);assert.equal(calls,2);
+  wire.sources=[{...row,provisionLocalAccount:true}];
+  assert.equal((await client.sourceAccounts(companyId))[0].provisionLocalAccount,true,'native new-account intent is retained, not inferred');
+  wire.sources=[{...row,provisionLocalAccount:undefined}];
+  assert.equal((await client.sourceAccounts(companyId))[0].provisionLocalAccount,false,'older references cannot silently authorize creation');
+  wire.sources=[];assert.deepEqual(await client.sourceAccounts(companyId),[]);assert.equal(calls,4);
   assert.equal(result[0].state,'active');
   for(const bad of [{companyId,selector:'x'},{companyId:'bad'},undefined])
     await assert.rejects(http('sourceAccounts',bad,credential),/INVALID_INPUT/);
-  assert.equal(calls,2,'bad queries never reach fetch');
+  assert.equal(calls,4,'bad queries never reach fetch');
   let reads=0;
   const invalid=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>{reads++;}},http});
   await assert.rejects(invalid.sourceAccounts('bad'),/INVALID_INPUT/);assert.equal(reads,0);
@@ -149,6 +153,7 @@ test('source config rejects scope/protocol/duplicate errors and never maps refus
     ...['id','companyId','deviceId','localAccountId','projectId'].map(key=>({...valid,sources:[{...row,[key]:'bad'}]})),
     ...['companyId','deviceId'].map(key=>({...valid,sources:[{...row,[key]:randomUUID()}]})),
     ...[true,undefined,'false'].map(executionVerified=>({...valid,sources:[{...row,executionVerified}]})),
+    ...[null,0,'true',{}].map(provisionLocalAccount=>({...valid,sources:[{...row,provisionLocalAccount}]})),
     ...[-1,1.5,2_147_483_648].map(revision=>({...valid,sources:[{...row,revision}]})),
     {...valid,sources:[{...row,skillId:'arbitrary-provider'}]},{...valid,sources:[{...row,state:'ready'}]},
   ];
