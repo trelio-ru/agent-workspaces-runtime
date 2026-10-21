@@ -122,14 +122,19 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   const loader = path.join(directory, 'fixture loader.mjs'), marker = path.join(directory, 'receipt.json');
   const fixture = { ...identity, assistantId: randomUUID(), deviceId: randomUUID() };
   await fs.writeFile(loader, `import fs from 'node:fs';\nif(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);\nfs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({ready:true}));\n`);
-  const manage = createAssistantWindowsBackground({ readIdentity: async () => fixture, verifyContact: async () => {}, resolveLoader: async () => loader });
+  const controller = createAssistantWindowsBackground({ readIdentity: async () => fixture, verifyContact: async () => {}, resolveLoader: async () => loader });
+  const manage = async operation => {
+    console.log(`Native fixture step: ${operation}`);
+    try { const result = await controller(operation); console.log(`Native fixture result: ${operation} ${result.state}`); return result; }
+    catch (error) { throw new Error(`Native fixture ${operation}: ${error.code}`, { cause: error }); }
+  };
   t.after(async () => {
     // The fixture exits immediately; a busy task is polled, never killed or
     // unregistered underneath a native action. Random UUIDs isolate runs.
     let removed = false;
     for (let attempt = 0; attempt < 20; attempt++) {
       try { await manage('remove'); removed = true; break; }
-      catch (error) { if (error.code !== 'ASSISTANT_BACKGROUND_BUSY') throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
+      catch (error) { if (error.cause?.code !== 'ASSISTANT_BACKGROUND_BUSY') throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
     }
     assert.equal(removed, true, 'a busy native fixture is preserved and reported instead of deleting its action');
     await fs.rm(directory, { recursive: true, force: true });
