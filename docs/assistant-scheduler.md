@@ -278,6 +278,14 @@ accepts only the reviewed Telegram, IMAP email and MAX monitor protocols. The
 provider retains its APIs, credential/session storage, selectors and passive
 read guards. No provider implementation or credential is copied into the host.
 
+Source polling and task execution resolve the same assistant/device account
+catalogue through the common account engine. Company/member bindings are still
+checked by that catalogue. A source never imports/selects the interactive human's
+legacy accounts, returns labels of unbound company accounts or changes account
+setup. The profile rechecks its protected identity and original read deadline
+before resolving the namespace; a closed/expired profile cannot reuse it. Owner
+onboarding must populate this namespace explicitly, not copy human sessions.
+
 A separate internal async HTTP profile uses the existing protected device slot
 and common version headers. Each poll resolves the current package through the
 fixed `/api/digital-assistants/runtime/source-skills/resolve` endpoint, even on a
@@ -312,7 +320,9 @@ task mapping, fresh owner-command intake, ACK after actual content processing an
 Windows end-to-end acceptance remain separate product gates. The helper does
 not enable `businessReady`, register a timer or touch a live provider account.
 Tests use real synthetic signed packages/native children plus strict wire DTO
-fixtures; they do not assert that production provider monitoring is enabled.
+fixtures. The same native-child fixture proves human/other-company selectors
+cannot start a provider and verifies the shared task/source namespace. It does
+not assert that production provider monitoring or owner onboarding is enabled.
 
 ## Protected background host composition
 

@@ -100,10 +100,21 @@ test('source reader composes real signature/cache/account/executor and resolves 
       const fs=await import('node:fs');fs.appendFileSync(${JSON.stringify(path.join(directory,'native-calls'))},'1');
       process.stdout.write(JSON.stringify(${JSON.stringify(page())}));
     }`;
-  const catalogue=createAccountCatalogue({directory:engine.resolveWorkspaceBridgeConfigDirectory(),
-    scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId:null}),io:{
+  const makeCatalogue=(root,selectedCompany=companyId)=>createAccountCatalogue({directory:root,
+    scope:accountScope({origin,skillId:scope.skillId,companyId:selectedCompany,memberId,connectionId:null}),io:{
       ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
       checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  // Both managed profiles must consume an explicitly bound assistant account.
+  // A human catalogue with an otherwise identical company/member is a canary:
+  // source admission must not import or select it under the daemon's OS user.
+  const human=makeCatalogue(engine.resolveWorkspaceBridgeConfigDirectory());
+  await human.change({operation:'create',id:randomUUID(),name:'PRIVATE_HUMAN_ACCOUNT',expectedRevision:0});
+  const humanAccount=(await human.list()).accounts[0].id,humanRevision=(await human.list()).revision;
+  const accountProfile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const accountDirectory=await accountProfile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());
+  accountProfile.close();
+  await assert.rejects(accountProfile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory()),/DEADLINE/);
+  const catalogue=makeCatalogue(accountDirectory);
   await catalogue.importOnce(async()=>[]);
   const accountId=randomUUID();await catalogue.change({operation:'create',id:accountId,name:'Synthetic',expectedRevision:(await catalogue.list()).revision});
   await fs.writeFile(path.join(sourceDir,'main.mjs'),entry.replace('ACCOUNT_ID',accountId));
@@ -113,9 +124,41 @@ test('source reader composes real signature/cache/account/executor and resolves 
   const projected={schemaVersion:1,baselineOnly:false,events:[event],nextCursor,hasMore:false,
     channelsToSync:['456'],unresolvedDeletionIds:[]};
   const before=resolveCalls;
+  await assert.rejects(readAssistantSourceMonitor({identity,host,store,source:{...source,accountId:humanAccount}}),
+    error=>error.code==='ASSISTANT_SOURCE_ACCOUNT_REQUIRED' && !JSON.stringify(error).includes('PRIVATE'));
+  await assert.rejects(fs.stat(path.join(directory,'native-calls')),{code:'ENOENT'});
+  assert.equal((await human.list()).revision,humanRevision,'source cannot mutate/import the human catalogue');
+  const foreign=makeCatalogue(accountDirectory,randomUUID()),foreignAccount=randomUUID();
+  await foreign.change({operation:'create',id:foreignAccount,name:'PRIVATE_OTHER_COMPANY',expectedRevision:(await foreign.list()).revision});
+  await assert.rejects(readAssistantSourceMonitor({identity,host,store,source:{...source,accountId:foreignAccount}}),/ACCOUNT_REQUIRED/);
+  await assert.rejects(fs.stat(path.join(directory,'native-calls')),{code:'ENOENT'});
   assert.deepEqual(await readAssistantSourceMonitor({identity,host,store,source}),projected);
   assert.deepEqual(await readAssistantSourceMonitor({identity,host,store,source}),projected);
-  assert.equal(resolveCalls,before+2);assert.equal(downloadCalls,1,'verified cache never bypasses fresh server admission');
+  assert.equal(resolveCalls,before+4);assert.equal(downloadCalls,1,'verified cache never bypasses fresh server admission');
+  let listed,discoveries=0;
+  const localProfile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const prepare=runtimeArguments=>engine.withWorkspaceExecutionProfile(localProfile,()=>engine.prepareSkillAccount({origin,
+    artifact:{skillId:scope.skillId},runtimeDirectory:sourceDir,executionContext:{companyId,localIdentity:{memberId,connectionId:null}},
+    runtimeArguments,discover:async()=>{discoveries++;throw new Error('PRIVATE_IMPORT_FORBIDDEN');},output:value=>{listed=value;}}));
+  await prepare(['account','list']);
+  assert.deepEqual(listed.accounts.map(account=>account.id),[accountId]);
+  assert.doesNotMatch(JSON.stringify(listed),/PRIVATE_OTHER_COMPANY|PRIVATE_HUMAN_ACCOUNT/);
+  assert.equal(discoveries,0);
+  const revision=(await catalogue.list()).revision;
+  await assert.rejects(prepare(['account','create','--name','Forbidden','--expected-revision',String(revision)]),/SETUP_REQUIRED/);
+  assert.equal((await catalogue.list()).revision,revision);
+  localProfile.close();
+  for(const changedIdentity of [{...identity,assistantId:randomUUID()},{...identity,deviceId:randomUUID()}]){
+    const isolated=await createAssistantSourceRuntimeProfile({identity:changedIdentity,
+      host:{readIdentity:async()=>changedIdentity},store,scope});
+    const isolatedDirectory=await isolated.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());
+    assert.notEqual(isolatedDirectory,accountDirectory);
+    await assert.rejects(engine.withWorkspaceExecutionProfile(isolated,()=>engine.prepareSkillAccount({origin,
+      artifact:{skillId:scope.skillId},runtimeDirectory:sourceDir,executionContext:{companyId,localIdentity:{memberId}},
+      runtimeArguments:['monitor','--local-account',accountId],discover:async()=>assert.fail('managed source attempted import')})),
+    /ACCOUNT_NOT_BOUND/);
+    isolated.close();
+  }
   // Corrupt executable bytes without changing any remote metadata. Marker and
   // prior successful execution cannot authorize this tampered cache entry.
   const cacheRoot=process.platform==='win32'?path.join(process.env.LOCALAPPDATA,'Trelio','workspace-bridge','cache'):
@@ -265,6 +308,11 @@ test('task skills use the SAME signed package, native command and process engine
     }
     const catalogue=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());
     assert.ok(catalogue.includes(taskIdentity.assistantId));assert.notEqual(catalogue,engine.resolveWorkspaceBridgeConfigDirectory());
+    const sourceProfile=await createAssistantSourceRuntimeProfile({identity:taskIdentity,host:taskHost,store:taskStore,
+      scope:{companyId:pass.companyId,skillId:'telegram-mtproto'}});
+    assert.equal(await sourceProfile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory()),catalogue,
+      'source reads and task execution share the same managed account catalogue');
+    sourceProfile.close();
     const localIdentity={companyId:pass.companyId,memberId:randomUUID(),connectionId:null},accountSkill='task-account-fixture';
     const io={ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
       checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')};

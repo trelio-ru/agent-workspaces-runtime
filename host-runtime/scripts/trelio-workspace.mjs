@@ -8432,7 +8432,10 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   // marker and may spawn the provider. Help and malformed input need neither.
   const command = parseAccountCommand(runtimeArguments);
   const profile = currentWorkspaceExecutionProfile();
-  const assistant = profile?.kind === "digital_assistant";
+  // Background reads use the same managed account namespace as task calls.
+  // Treating a source as an ordinary human here would import that OS user's
+  // legacy sessions before any explicit assistant/company account binding.
+  const assistant = ["digital_assistant", "digital_assistant_source"].includes(profile?.kind);
   if (assistant && command?.operation && command.operation !== "list") {
     // A task does not authorize creating/rebinding an assistant account. Setup
     // belongs to the owner path; reuse the catalogue, never a second vault.

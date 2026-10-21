@@ -13,6 +13,14 @@ export class AssistantTransportError extends Error {
 const fail = (code, status) => { throw new AssistantTransportError(code, status); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const id = value => { if (typeof value !== 'string' || !UUID.test(value)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); return value.toLowerCase(); };
+/** One catalogue for source polling and task execution on this managed device.
+ * Company/member bindings remain inside the common catalogue. Neither profile
+ * may read/import the interactive human's catalogue merely because both run as
+ * the same OS user. The caller rechecks its live identity before resolving it. */
+const assistantSkillCatalogueDirectory = (configDirectory, identity) => {
+  if (!path.isAbsolute(configDirectory ?? '')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+  return path.join(configDirectory,'digital-assistants','runtime',id(identity.assistantId),id(identity.deviceId),'accounts');
+};
 /** Compact identity-bound task roots avoid concatenating five UUIDs into a
  * Windows cwd. The same digest isolates origin/assistant/device/company/task;
  * it is a locator only, never permission or a substitute for private ACLs. */
@@ -233,8 +241,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     },
     async resolveSkillCatalogueDirectory(configDirectory){
       await assertIdentity();
-      if(!path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-      return path.join(configDirectory,'digital-assistants','runtime',identity.assistantId.toLowerCase(),identity.deviceId.toLowerCase(),'accounts');
+      return assistantSkillCatalogueDirectory(configDirectory,identity);
     },
     async resolveInspectionDirectory(configDirectory){
       // Accepted files are shared company content, but the accompanying
@@ -797,6 +804,10 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   await assertCurrent();
   return Object.freeze({
     kind:'digital_assistant_source',
+    async resolveSkillCatalogueDirectory(configDirectory){
+      await assertCurrent();
+      return assistantSkillCatalogueDirectory(configDirectory,expected);
+    },
     async requireToken(requestOrigin){
       if(requestOrigin!==origin)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
       await assertCurrent();return handle;
