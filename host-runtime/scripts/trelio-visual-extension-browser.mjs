@@ -268,12 +268,25 @@ export class ExtensionVisualBrowser {
     // On macOS closing the last window may leave the ordinary app alive. Ask
     // this exact launched PID to quit through AppKit, without activation.
     if (process.platform === 'darwin' && child.exitCode === null && child.signalCode === null) {
-      const script = 'ObjC.import("AppKit"); function run(a) { const app=$.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(a[0])); if(app) app.terminate; }';
-      await promisify(execFile)('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script, String(child.pid)], { env: visualChildEnvironment(), timeout: 5000 }).catch(() => {});
+      const script = 'ObjC.import("AppKit"); function run(a) { const app=$.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(a[0])); return app.isNil() ? "not_found" : (app.terminate ? "accepted" : "refused"); }';
+      // Closed fixture-only evidence distinguishes an absent LaunchServices
+      // entry from an accepted quit which did not exit. No PID/path, stdout,
+      // native error or auth bytes enter diagnostics; this is NOT a retry or
+      // extra shutdown budget, and an unconfirmed stop still cannot save.
+      let quitState = 'helper_failed';
+      try {
+        const result = await promisify(execFile)('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script, String(child.pid)], { env: visualChildEnvironment(), timeout: 5000 });
+        const state = String(result.stdout).trim();
+        if (['accepted', 'refused', 'not_found'].includes(state)) quitState = state;
+      } catch {}
+      this.testDiagnostics?.({ stage: 'browser_quit', state: quitState });
     }
     const until = Date.now() + 10_000;
     while (child.exitCode === null && child.signalCode === null && Date.now() < until) await sleep(100);
-    if (child.exitCode === null && child.signalCode === null) throw fault('operation_failed');
+    if (child.exitCode === null && child.signalCode === null) {
+      this.testDiagnostics?.({ stage: 'browser_stop_timeout' });
+      throw fault('operation_failed');
+    }
     await this.#nativeDiagnostics();
     if (child.exitCode !== 0 || child.signalCode) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
     this.#child = undefined;

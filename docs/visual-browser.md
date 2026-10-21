@@ -190,6 +190,10 @@ post-creation защитой. Сбой удаления блокирует да�
 процесс; crash не выдаётся за успешное сохранение. User browser process/PID из
 claim не убивается. SIGKILL/отключение ОС не позволяет выполнить finally: прежний
 durable auth snapshot сохраняется, unknown orphan state не удаляется вслепую.
+Synthetic macOS shutdown diagnostics distinguish only fixed AppKit quit states
+(`accepted|refused|not_found|helper_failed`) and a stop-timeout stage. They do not
+add retries, extend the deadline or turn an unconfirmed stop into a saved profile;
+native output, PID, profile paths and auth content are never reported.
 
 ## Входящие вложения
 

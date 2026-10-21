@@ -252,7 +252,12 @@ test("ACL requests wait for readiness, with a separate startup diagnostic and un
     const children = [];
     let receivedBytes = 0;
     const worker = createPrivateAclWorker({
-      executable: "fixture", aclScript: "", requestTimeoutMilliseconds: 250, startupTimeoutMilliseconds: 250,
+      // The ready branch tests the REQUEST timeout, not cold Node startup.
+      // Hosted macOS may need >250ms to launch the real fixture process. Give
+      // that distinct stage its own explicit budget; request timing and every
+      // production/default deadline remain unchanged. The no-ready branch
+      // still proves a bounded startup denial before sending any bytes.
+      executable: "fixture", aclScript: "", requestTimeoutMilliseconds: 250, startupTimeoutMilliseconds: ready ? 5000 : 250,
       spawnProcess: (_program, _args, options) => {
         const child = spawn(process.execPath, ["-e", `
           process.stdin.resume();
