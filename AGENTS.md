@@ -372,6 +372,9 @@ publication tooling также остаются вне этого публичн
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+- Assistant task skills use the SAME `skill_run`, signed loader/cache, account
+  catalogue and process engine. Only native read admission/profile changes;
+  no human cache/import/setup fallback. [Contract](docs/assistant-scheduler.md#shared-task-skill-execution).
 
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).
 - Source owner identity uses fresh native bindings, never usernames or a task grant: [contract](docs/assistant-scheduler.md#owner-identity-metadata-for-source-routing).

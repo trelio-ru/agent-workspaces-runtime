@@ -1930,7 +1930,11 @@ test("encryption setup reports plain companies without creating a Run", async ()
         cwd: temporaryDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: homeDirectory },
+        // This fixture checks plain-company HTTP routing with a synthetic
+        // legacy credential, not OS Keychain. A temporary HOME otherwise
+        // triggers a cold Swift helper build before the first loopback read.
+        // Native Keychain fixtures below retain their independent real gate.
+        env: { ...process.env, HOME: homeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
     assert.deepEqual(JSON.parse(result.stdout), {

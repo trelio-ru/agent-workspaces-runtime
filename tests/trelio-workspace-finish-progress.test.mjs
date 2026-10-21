@@ -199,3 +199,12 @@ test('shared finish process accepts a bounded assistant envelope on stdin with u
   const result=await runWorkspaceFinishProcess(process.execPath,['--input-type=module','-e',source],{input:JSON.stringify({note:'Только stdin'})});
   assert.equal(result.stdout,'Только stdin');
 });
+
+test('shared child transport retains complete visual-size frames only under the fixed skill output bound',async()=>{
+  const source=`process.stdout.write(JSON.stringify({data:'x'.repeat(1500000)}));`;
+  const full=await runWorkspaceFinishProcess(process.execPath,['-e',source],{maximumCharacters:3*1024*1024});
+  assert.equal(JSON.parse(full.stdout).data.length,1500000);
+  const ordinary=await runWorkspaceFinishProcess(process.execPath,['-e',source],{});
+  assert.equal(ordinary.stdout.length,1024*1024);
+  await assert.rejects(runWorkspaceFinishProcess(process.execPath,['-e','process.exit(99)'],{maximumCharacters:16*1024*1024}),/output bound/);
+});

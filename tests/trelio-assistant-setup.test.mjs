@@ -361,6 +361,23 @@ test('assistant Workspace continuation uses fixed signed child and stdin; unknow
   }}),error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
 });
 
+test('only a native skill result can cross the existing visual projection boundary',async()=>{
+  const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const plan=workspacePlan();
+  plan.localAction={schemaVersion:1,operation:'skill_run',parameters:{companyId:plan.scope.companyId,skillId:'visual-fixture',
+    releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['status']}};
+  const visual={kind:'trelio.visual-browser/v1',state:'closed',reason:'none'};
+  const run=(raw,value)=>runAssistantWorkspaceProcess(raw,{resolveLoader:async()=>'/verified/loader.mjs',
+    runProcess:async()=>({stdout:JSON.stringify(value),stderr:''})});
+  const valid={schemaVersion:1,operation:'skill_run',visual};
+  assert.deepEqual((await run(plan,valid)).visual,visual);
+  for(const value of [{...valid,stdout:'PRIVATE_RAW'},{...valid,stderr:'PRIVATE_RAW'},
+    {...valid,visual:{...visual,privateContent:'PRIVATE_RAW'}},{...valid,visual:{...visual,image:{mimeType:'image/png',data:'invalid'}}}]){
+    await assert.rejects(run(plan,value));
+  }
+  await assert.rejects(run(workspacePlan(),{...valid,operation:'open'}),/WORKSPACE_RESULT_INVALID/);
+});
+
 test('assistant finish has one writer, own poll route and no previous-pass receipt',async()=>{
   const {createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const plan=workspacePlan(),identity={workspaceId:plan.localAction.parameters.workspaceId,runId:plan.localAction.parameters.runId};

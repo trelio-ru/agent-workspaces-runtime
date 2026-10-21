@@ -222,6 +222,20 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
     kind:'digital_assistant',
+    async resolveSkillRuntimeChat({companyId,runtimeSessionId}){
+      await assertIdentity();
+      if(companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+      if(!uuid.test(runtimeSessionId??'') || record?.schemaVersion!==1 || record?.ended
+        || record?.state?.runtimeSessionId!==runtimeSessionId || !Number.isFinite(Date.parse(record.state.expiresAt))
+        || Date.parse(record.state.expiresAt)<=now())fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+      return pass.threadId;
+    },
+    async resolveSkillCatalogueDirectory(configDirectory){
+      await assertIdentity();
+      if(!path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      return path.join(configDirectory,'digital-assistants','runtime',identity.assistantId.toLowerCase(),identity.deviceId.toLowerCase(),'accounts');
+    },
     async resolveInspectionDirectory(configDirectory){
       // Accepted files are shared company content, but the accompanying
       // personal profile belongs to this exact assistant/device/task. Never
@@ -239,12 +253,27 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       // the live pass. No redirect, encoded separator or native secret/admin
       // path can turn this profile into a bearer-forwarding primitive.
       if(requestOrigin!==identity.origin || token!==handle || typeof pathname!=='string' || pathname.length>16_384
-        || !pathname.startsWith(nativePrefix+'/') || typeof buildHeaders!=='function') fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        || typeof buildHeaders!=='function') fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       let url;try{url=new URL(pathname,identity.origin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
       if(url.origin!==identity.origin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();
-      const rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);
-      const route=assistantWorkspaceConcreteRequest(method,rewritten);
+      let rewritten,route;
+      if(url.pathname==='/api/agent-skills/runtime/resolve' && method==='POST'
+        || url.pathname==='/api/agent-skills/runtime/package' && method==='GET'){
+        // The signed-skill engine is shared. Only its two existing read
+        // endpoints gain this narrower device/task profile; consent, setup,
+        // remote MCP and secret routes remain denied before credential I/O.
+        let input;
+        try{input=method==='GET'?Object.fromEntries(url.searchParams):JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+        if(!object(input) || input.companyId!==pass.companyId
+          || method==='GET' && new Set(url.searchParams.keys()).size!==[...url.searchParams.keys()].length)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=url.pathname;
+        route={proofTool:method==='POST'?'assistant-skill:resolve':'assistant-skill:package'};
+      }else{
+        if(!pathname.startsWith(nativePrefix+'/'))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);
+        route=assistantWorkspaceConcreteRequest(method,rewritten);
+      }
       return lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
         await assertIdentity();
         const live=await client.readTaskPass(locator,options.signal);

@@ -497,6 +497,40 @@ native membership/project ACL, published-only authority and the assistant's own
 personal skill rules. Unsupported dedicated execution does not permit a human
 bridge, OAuth or provider fallback.
 
+### Shared task-skill execution
+
+`get_agent_skill` may return the existing `skill_run` action through
+`continue_assistant_workspace_action`. Its parameters/release come from the
+native reader and strict backend branch validator, not a host schema copy.
+No second executor, package loader, HTTP endpoint or account vault is created.
+The existing isolated action worker calls `runWorkspaceCommand` under the same
+assistant Workspace HTTP profile. Only native `runtime/resolve` and
+`runtime/package` gain this task profile: fixed origin/company, genuine device
+grant, exact pass/project, observed model/effort and fresh operation proof.
+Setup/consent/Remote MCP/secret endpoints never fall through to human OAuth.
+
+The common engine verifies/materializes the signed artifact, selects the
+account and starts the normal Node/Python provider. Human admission caching is
+disabled for this profile; live resolve runs again immediately before launch
+and must retain the artifact/hash. A cached package never preserves revoked
+task/device/policy authority. Only public, verified, non-revoked, plain and
+secret-free runtimes/configurations are currently admitted. Protected setup,
+owner account onboarding, Remote MCP and encrypted execution remain independent
+readiness gaps; this increment does not change `businessReady=false`.
+
+The same account catalogue uses an assistant/device namespace with native
+company bindings. Task calls do not migrate human legacy accounts, mutate
+account setup or list unbound other-company labels. No provider credential is
+copied into the catalogue. The verified permanent task chat supplies
+`CODEX_THREAD_ID`; model-free monitor still strips it. Host origin is inserted
+before the provider `--` boundary and never changes provider arguments.
+
+The shared process engine's internal task capture returns bounded complete
+UTF-8 pipes with closed stdin and an absolute deadline; no inherited fd1 bypass
+of the action worker is allowed. The existing visual validator/MCP projector
+handles visual results. Monitor-only capture and ordinary human stdio retain
+their current boundaries. Failed/uncertain provider execution is never replayed.
+
 `cancel_agent_workspace_run` is a server-only native cancellation, exposed only
 when the dedicated backend advertises its live schema. The host forwards one
 exact Run/reason intent with hook-owned admission, without a human flag, local

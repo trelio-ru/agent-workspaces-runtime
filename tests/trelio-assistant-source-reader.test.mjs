@@ -191,3 +191,101 @@ test('email/MAX wire projections discard content and cannot promote a sender to 
     assert.throws(()=>run({...raw,events:[],coverage:{historicalBackfill:false}}),/INVALID_RESPONSE/);
   }
 });
+
+test('task skills use the SAME signed package, native command and process engine with fresh pass admission',async()=>{
+  const {createAssistantWorkspaceProfile}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const taskIdentity={schemaVersion:1,origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+  const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
+    expiresAt:new Date(Date.now()+300000).toISOString(),privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
+    observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}}};
+  let live=true;
+  const taskHost={readIdentity:async()=>taskIdentity,readActivePass:async()=>pass};
+  const taskStore={get:async slot=>slot.kind==='runtime'?runtime:{assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,credential,expiresAt:1}};
+  const client={readTaskPass:async()=>({...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300000).toISOString()})};
+  const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,
+    lockDirectory:path.join(directory,'task-locks'),lock:(_file,action)=>action()});
+  const sourceDir=path.join(directory,'task-package');await fs.mkdir(sourceDir);
+  const calls=path.join(directory,'task-native-calls');
+  // This executes a real signed Node provider through runWorkspaceCommand.
+  // The fixture must not inherit the source reader's chat or any human token.
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.equal(process.env.CODEX_THREAD_ID,${JSON.stringify(pass.threadId)});
+    assert.equal(process.env.TRELIO_SKILL_COMPANY_ID,${JSON.stringify(pass.companyId)});
+    assert.equal(process.env.TRELIO_MCP_ACCESS_TOKEN,undefined);
+    let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
+    fs.appendFileSync(${JSON.stringify(calls)},'1');
+    if(process.argv[2]==='fail'){process.stderr.write('PRIVATE_PROVIDER_ERROR');process.exit(7);}
+    process.stdout.write(JSON.stringify({result:'Прочитано',args:process.argv.slice(2)}));`);
+  const bytes=await engine.buildAgentSkillPackage({skillId:'task-runtime-fixture',runtimeVersion:'1.0.0',sourceDirectory:sourceDir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network']});
+  const currentRelease=randomUUID(),currentArtifact=randomUUID(),packageHash=createHash('sha256').update(bytes).digest('hex');
+  const packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({companyId:pass.companyId,skillId:'task-runtime-fixture',expectedReleaseId:currentRelease,artifactId:currentArtifact});
+  const dto=()=>({releaseId:currentRelease,company:{id:pass.companyId,slug:'fixture',name:'Fixture'},
+    localIdentity:{companyId:pass.companyId,projectId:null,skillId:'task-runtime-fixture',memberId:randomUUID(),connectionId:null},companyConnection:null,
+    trust:{level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null},packageUrl,
+    artifact:{id:currentArtifact,skillId:'task-runtime-fixture',runtimeVersion:'1.0.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
+      packageSha256:packageHash,packageSizeBytes:bytes.length,packageSignature:sign(null,bytes,privateKey).toString('base64'),
+      signingKeyId:'task-test',signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1',manifest:{}}});
+  const rules='# Synthetic task platform rules\n',rulesHash=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
+  let resolutions=0,downloads=0,denyNextLaunch=false;const nonces=new Set(),savedFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    assert.equal(url.origin,taskIdentity.origin);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
+    const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));
+    assert.equal(nonces.has(proof.nonce),false,'every native request has a distinct one-use observed proof');nonces.add(proof.nonce);
+    assert.equal(options.headers.get('cookie'),null);
+    if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-compatibility')return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{
+      status:options.headers.get('x-trelio-agent-rules-sha256')===rulesHash?'current':'update_required',revisionId,version:1,sha256:rulesHash,rulesMarkdown:rules}}));
+    if(url.pathname==='/api/agent-skills/runtime/resolve'){
+      resolutions++;
+      if(denyNextLaunch && resolutions%2===0)return new Response(JSON.stringify({code:'ASSISTANT_OWNER_PAUSED',message:'PRIVATE'}),{status:409});
+      return new Response(JSON.stringify(dto()));
+    }
+    assert.equal(url.pathname,'/api/agent-skills/runtime/package');downloads++;return new Response(bytes);
+  };
+  const plan={prepared:true,scope:{assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
+    localAction:{schemaVersion:1,operation:'skill_run',parameters:{companyId:pass.companyId,skillId:'task-runtime-fixture',releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read','hello world']}}};
+  const run=raw=>engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(raw,{withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost})}));
+  try{
+    const first=await run(plan);assert.deepEqual(JSON.parse(first.stdout),{result:'Прочитано',args:['read','hello world']});
+    assert.deepEqual(JSON.parse((await run(plan)).stdout),JSON.parse(first.stdout));
+    assert.equal(downloads,1);assert.equal(resolutions,4,'cache hit still resolves before and immediately before provider launch');
+    assert.equal(await fs.readFile(calls,'utf8'),'11');
+    const failed=structuredClone(plan);failed.localAction.parameters.arguments=['fail'];
+    await assert.rejects(run(failed),error=>!JSON.stringify(error).includes('PRIVATE_PROVIDER_ERROR'));
+    assert.equal(await fs.readFile(calls,'utf8'),'111','a failed provider is not replayed');
+    denyNextLaunch=true;
+    await assert.rejects(run(plan));assert.equal(await fs.readFile(calls,'utf8'),'111','late native refusal blocks cached execution');
+    denyNextLaunch=false;live=false;
+    await assert.rejects(run(plan),/PASS_REVIEW_REQUIRED/);assert.equal(await fs.readFile(calls,'utf8'),'111');live=true;
+    for(const change of [{runIdentity:{workspaceId:randomUUID(),runId:randomUUID()}},{localAction:{...plan.localAction,parameters:{...plan.localAction.parameters,directory:'/other'}}}]){
+      await assert.rejects(run({...plan,...change}));
+    }
+    const catalogue=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());
+    assert.ok(catalogue.includes(taskIdentity.assistantId));assert.notEqual(catalogue,engine.resolveWorkspaceBridgeConfigDirectory());
+    const localIdentity={companyId:pass.companyId,memberId:randomUUID(),connectionId:null},accountSkill='task-account-fixture';
+    const io={ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
+      checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')};
+    const makeCatalogue=(selectedCompany,root=catalogue)=>createAccountCatalogue({directory:root,
+      scope:accountScope({origin:taskIdentity.origin,skillId:accountSkill,companyId:selectedCompany,memberId:localIdentity.memberId,connectionId:null}),io});
+    const own=makeCatalogue(pass.companyId),other=makeCatalogue(randomUUID());
+    const ownAccount=randomUUID();
+    await own.change({operation:'create',id:ownAccount,name:'Current company',expectedRevision:0});
+    await other.change({operation:'create',id:randomUUID(),name:'FOREIGN_ACCOUNT_LABEL',expectedRevision:1});
+    let listed,discoveries=0;
+    const prepare=(runtimeArguments)=>engine.withWorkspaceExecutionProfile(profile,()=>engine.prepareSkillAccount({origin:taskIdentity.origin,
+      artifact:{skillId:accountSkill},runtimeDirectory:sourceDir,executionContext:{companyId:pass.companyId,localIdentity},runtimeArguments,
+      discover:async()=>{discoveries++;throw new Error('HUMAN_IMPORT_FORBIDDEN');},output:value=>{listed=value;}}));
+    await prepare(['account','list']);
+    assert.deepEqual(listed.accounts.map(account=>account.id),[ownAccount]);
+    assert.doesNotMatch(JSON.stringify(listed),/FOREIGN_ACCOUNT_LABEL/);assert.equal(discoveries,0);
+    assert.equal((await prepare(['read'])).account.id,ownAccount);
+    const revision=(await own.list()).revision;
+    await assert.rejects(prepare(['account','create','--name','Forbidden','--expected-revision',String(revision)]),/SETUP_REQUIRED/);
+    assert.equal((await own.list()).revision,revision,'task cannot mutate owner account setup');
+    // The public executor's monitor boundary remains independent of task mode.
+    await assert.rejects(engine.runMaterializedAgentSkill({captureOutput:true,captureMode:'assistant_task',runtimeArguments:['read']}),/MONITOR_INPUT_INVALID|private monitor/);
+  }finally{globalThis.fetch=savedFetch;}
+});

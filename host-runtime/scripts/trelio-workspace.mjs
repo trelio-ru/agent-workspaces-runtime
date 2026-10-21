@@ -7722,6 +7722,7 @@ export const runMaterializedAgentSkill = async ({
   prepareSetupEnvironment = null,
   captureOutput = false,
   captureExitCode = false,
+  captureMode = 'monitor',
   timeoutMs = 60_000,
   signal = null,
 }) => {
@@ -7737,10 +7738,15 @@ export const runMaterializedAgentSkill = async ({
   // Monitor cannot borrow a secret checkout, run a setup step or wait for a
   // human prompt on inherited stdin. A provider's command semantics still
   // belong to its reviewed signed implementation, not this string check.
-  if (typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
+  const taskCapture = captureMode === 'assistant_task';
+  const profile = currentWorkspaceExecutionProfile();
+  if (!['monitor','assistant_task'].includes(captureMode)
+    || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
+      || typeof profile.resolveSkillRuntimeChat !== 'function')
+    || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || runtimeArguments[0] !== 'monitor'
-    || runtimeArguments.length > 64 || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
+    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && runtimeArguments[0] !== 'monitor'
+    || runtimeArguments.length > (taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 180_000
     || signal !== null && !(signal instanceof AbortSignal))) {
@@ -7794,7 +7800,7 @@ export const runMaterializedAgentSkill = async ({
   if (captureOutput) {
     // A model-free poll has no active Codex conversation. Never leak a stale
     // persistent MCP process's inherited chat ID into a provider prompt/route.
-    delete runtimeEnvironment.CODEX_THREAD_ID;
+    if (!taskCapture) delete runtimeEnvironment.CODEX_THREAD_ID;
     // A single monotonic budget includes interpreter/bootstrap preparation.
     // The signed browser lease can shorten it, never extend it. execFile owns
     // bounded pipes and destroys them when timeout/overflow kills the child;
@@ -7813,7 +7819,7 @@ export const runMaterializedAgentSkill = async ({
     try {
       const pending = execFileAsync(executable, args, {
         cwd: runtimeDirectory, env: runtimeEnvironment, shell: false, windowsHide: true,
-        encoding: 'buffer', maxBuffer: 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
+        encoding: 'buffer', maxBuffer: (taskCapture ? 3 : 1) * 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
         killSignal: 'SIGKILL', ...(signal ? { signal } : {}),
       });
       // No input values are supplied. Close immediately so a misconfigured
@@ -8234,17 +8240,23 @@ const skillCommand = async (
 
   const token = await requireToken(origin);
   await ensureBridgeCompatibility(origin, token);
-  const admissionKey = skillAdmissionKey({ origin, token,
+  const profile = currentWorkspaceExecutionProfile();
+  const assistant = profile?.kind === "digital_assistant";
+  // Same executor and package/account/secret engine, different admission.
+  // Human admission caching must never hold an assistant task's grant alive
+  // after pause/reassignment, or hash its private opaque handle as a token.
+  if (assistant && typeof profile.resolveSkillRuntimeChat !== "function") denyWorkspaceExecutionProfile();
+  const admissionKey = assistant ? null : skillAdmissionKey({ origin, token,
     sessionId: runtimeSessionId, kind: "runtime", companyId, projectId,
     skillId, releaseId, hostVersion: HOST_RUNTIME_VERSION });
-  const cachedAdmission = refreshAdmission ? null
+  const cachedAdmission = assistant || refreshAdmission ? null
     : await readRuntimeSkillAdmission(admissionKey, token);
   const admissionCheckedAt = Date.now();
   let rawResolution = cachedAdmission;
   if (!rawResolution) {
     // A positive admission covers at most twelve hours of this exact session.
     // Expiry never falls back to stale access when Trelio is unavailable.
-    await assertOrdinaryRuntimePolicyForCompany({
+    if (!assistant) await assertOrdinaryRuntimePolicyForCompany({
       origin, token, companyId, runtimeSessionId,
     });
     const response = await resolveAgentSkillRuntimeWithDeviceConsent({
@@ -8308,6 +8320,7 @@ const skillCommand = async (
   }
 
   const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
+  if (assistant && setupCommand) throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
   if (setupCommand && (Object.keys(grantedEnvironment).length || grantedStdin !== null)) {
     throw new Error("Команда настройки использует собственную signed-доставку. Запустите её через runtimeExecution без checkout grant.");
   }
@@ -8316,7 +8329,7 @@ const skillCommand = async (
   if (setupCommand && cachedAdmission) {
     return skillCommand(origin, options, positional, { refreshAdmission: true });
   }
-  if (!cachedAdmission) {
+  if (!assistant && !cachedAdmission) {
     await saveRuntimeSkillAdmission(admissionKey, token, admissionResolution, admissionCheckedAt);
   }
   const executionContext = {
@@ -8326,7 +8339,7 @@ const skillCommand = async (
     // neither current nor authoritative. The private hook binding carries only
     // the exact session/thread identity and preserves that session's deadline.
     runtimeSessionId,
-    codexThreadId: runtimeSessionId ? await readRuntimeChatBinding({
+    codexThreadId: assistant ? await profile.resolveSkillRuntimeChat({companyId,runtimeSessionId}) : runtimeSessionId ? await readRuntimeChatBinding({
       configDirectory: resolveWorkspaceBridgeConfigDirectory(), origin, runtimeSessionId,
       readPrivateJsonFile,
     }) : null,
@@ -8341,18 +8354,35 @@ const skillCommand = async (
     executionContext.account = accountResult.account;
     runtimeArguments = accountResult.runtimeArguments;
   }
-  await runMaterializedAgentSkill({
+  if (assistant) {
+    // Materialization/account discovery may cross I/O. Repeat only the native
+    // read admission immediately before launch; never replay the provider.
+    // The same resolver verifies live policy/pass and exact current release.
+    const current = await request(origin, token, "/api/agent-skills/runtime/resolve", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({companyId,projectId,skillId,expectedReleaseId:releaseId}),
+    });
+    const live = normalizeResolvedSkillRuntimeArtifact(await current.json());
+    if (live.artifact.id !== artifactForCache.id || live.artifact.packageSha256 !== artifactForCache.packageSha256)
+      throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
+  }
+  const executed = await runMaterializedAgentSkill({
     artifact: artifactForCache,
     runtimeDirectory,
     runtimeArguments,
     executionContext,
     grantedEnvironment,
     grantedStdin,
+    ...(assistant ? {captureOutput:true,captureMode:'assistant_task',timeoutMs:180_000} : {}),
     prepareSetupEnvironment: setupCommand ? () => deliverSkillSetupEnvironment({
       request, origin, token, command: setupCommand, resolution, companyId,
       projectId, skillId, releaseId, runtimeSessionId,
     }) : null,
   });
+  // In-process assistant composition must not inherit the provider's OS fd1:
+  // it would bypass the bridge's bounded result/visual projection. The SAME
+  // native executor captures its pipes and hands bytes back to that projector.
+  if (assistant) process.stdout.write(executed.stdout);
 };
 
 /** Run only the signed provider's fixed read-only migration entry. Its bounded
@@ -8401,6 +8431,13 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   // pass must precede account I/O: even an empty legacy import writes a durable
   // marker and may spawn the provider. Help and malformed input need neither.
   const command = parseAccountCommand(runtimeArguments);
+  const profile = currentWorkspaceExecutionProfile();
+  const assistant = profile?.kind === "digital_assistant";
+  if (assistant && command?.operation && command.operation !== "list") {
+    // A task does not authorize creating/rebinding an assistant account. Setup
+    // belongs to the owner path; reuse the catalogue, never a second vault.
+    throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+  }
   if (command?.help) {
     output({ ok: true, help: command.help }); return { handled: true };
   }
@@ -8408,13 +8445,21 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   const scope = accountScope({ origin, skillId: artifact.skillId, companyId: executionContext.companyId,
     memberId: executionContext.localIdentity?.memberId,
     connectionId: executionContext.localIdentity?.connectionId ?? null });
+  if (assistant) {
+    if (typeof profile.resolveSkillCatalogueDirectory !== "function") denyWorkspaceExecutionProfile();
+    catalogueDirectory = await profile.resolveSkillCatalogueDirectory(catalogueDirectory);
+  }
   const catalogue = createAccountCatalogue({ directory: catalogueDirectory, scope, io: {
     ensureDirectory: ensurePrivateDirectory, read: readPrivateJsonFile, write: writePrivateJsonFile,
     checkDirectory: directory => assertPrivatePathKind(directory, "directory"),
   } });
-  await catalogue.importOnce(() => discover({ artifact, runtimeDirectory, executionContext }));
+  // A managed identity never silently imports the logged-in human's old local
+  // accounts. The owner must configure/bind its accounts explicitly. Ordinary
+  // users retain the existing migration, catalogue and storage implementation.
+  await catalogue.importOnce(assistant ? async () => [] : () => discover({ artifact, runtimeDirectory, executionContext }));
   if (command?.operation === 'list') {
-    output({ ok: true, ...await catalogue.list() }); return { handled: true };
+    const listed = await catalogue.list();
+    output({ ok: true, ...listed, ...(assistant ? {accounts:listed.accounts.filter(account=>account.bound)} : {}) }); return { handled: true };
   }
   if (command) {
     const result = await catalogue.change({ ...command, id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });

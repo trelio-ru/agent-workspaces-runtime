@@ -172,6 +172,10 @@ export const createForwardingAssistantMcp = async () => {
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}
+      if(executed?.operation==='skill_run' && executed.visual){
+        const {visualMcpResult}=await import('./trelio-visual-result.mjs');
+        return visualMcpResult(executed.visual);
+      }
       return {content:[{type:'text',text:'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
     }};
 };
@@ -754,13 +758,19 @@ export const validateAssistantWorkspacePlan = async raw => {
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
-  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause'].includes(action.operation)
+  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run'].includes(action.operation)
     || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
     || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
     || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
     || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
   const invocation=buildTrelioWorkspaceActionInvocation(action);
+  if(action.operation==='skill_run'){
+    if(action.runIdentity!==undefined || action.parameters.companyId!==snapshot.scope.companyId
+      || !new RegExp(UUID,'u').test(action.parameters.runtimeSessionId??'')
+      || Buffer.byteLength(JSON.stringify(snapshot))>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    return {...snapshot,invocation};
+  }
   const runIdentity=action.operation==='inspect'?{workspaceId:action.parameters.workspaceId}
     :action.operation==='open'?{workspaceId:action.parameters.workspaceId,runId:action.parameters.runId}:action.runIdentity;
   if(action.operation==='inspect' && action.runIdentity!==undefined)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
@@ -808,7 +818,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     const plan=await validateAssistantWorkspacePlan(raw);
     // Accepted inspection has no Run, renewal, progress registry or writable
     // task directory. The common reader selects its isolated cache in the child.
-    if(plan.localAction.operation==='inspect')return runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal});
+    if(['inspect','skill_run'].includes(plan.localAction.operation))return runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal});
     const root=assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
     const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
     const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
@@ -860,7 +870,8 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   const loader=await resolveLoader({environment});
   const {runWorkspaceFinishProcess}=await import('./trelio-workspace-finish-progress.mjs');
   let result;
-  try {result=await (runProcess??runWorkspaceFinishProcess)(process.execPath,[loader,'bridge','assistant','workspace'],{signal,onProgress,input});}
+  try {result=await (runProcess??runWorkspaceFinishProcess)(process.execPath,[loader,'bridge','assistant','workspace'],{signal,onProgress,input,
+    maximumCharacters:(plan.localAction.operation==='skill_run'?3:1)*1024*1024});}
   catch(error) {
     // The isolated worker emits one closed error frame; never classify raw
     // child prose/cause or retry the command. A killed/ambiguous writer remains
@@ -871,9 +882,14 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
       ...(code==='TRELIO_RUNTIME_HOOK_REQUIRED' && ['missing','invalid','expired','replayed'].includes(frame?.reason)?{reason:frame.reason}:{})});
   }
   let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_WORKSPACE_RESULT_INVALID');}
-  if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation || typeof value.stdout!=='string'
-    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr'].includes(key))
-    || Buffer.byteLength(JSON.stringify(value))>768*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
+  if(!value || value.schemaVersion!==1 || value.operation!==plan.localAction.operation
+    || Object.keys(value).some(key=>!['schemaVersion','operation','stdout','stderr','visual'].includes(key)))fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
+  if(value.visual!==undefined){
+    if(value.operation!=='skill_run' || value.stdout!==undefined || value.stderr!==undefined
+      || Buffer.byteLength(JSON.stringify(value))>3*1024*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
+    const {validateVisualResult}=await import('./trelio-visual-result.mjs');
+    validateVisualResult(value.visual);
+  }else if(typeof value.stdout!=='string' || Buffer.byteLength(JSON.stringify(value))>768*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');
   return value;
 };
 
@@ -894,20 +910,25 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     // canonical target/own-Run checks, even for local status or heartbeat.
     const token=await common.requireToken(identity.origin);
     const inspecting=plan.localAction.operation==='inspect';
-    const response=await common.request(identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
-    const snapshot=JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,inspecting?'Assistant accepted Workspace':'Assistant Run')).toString('utf8'));
-    if(inspecting ? snapshot.workspace?.id!==plan.runIdentity.workspaceId || snapshot.workspace.scopeType!=='task'
-      || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
-      : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-    if(plan.localAction.operation==='open') {
+    const skill=plan.localAction.operation==='skill_run';
+    if(!skill){
+      const response=await common.request(identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
+      const snapshot=JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,inspecting?'Assistant accepted Workspace':'Assistant Run')).toString('utf8'));
+      if(inspecting ? snapshot.workspace?.id!==plan.runIdentity.workspaceId || snapshot.workspace.scopeType!=='task'
+        || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
+        : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    }
+    if(plan.localAction.operation==='open' || skill) {
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
       if(runtime?.ended || runtime?.state?.runtimeSessionId!==plan.localAction.parameters.runtimeSessionId)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
     }
     const config=common.resolveWorkspaceBridgeConfigDirectory();
     if(!inspecting)await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan));
-    const root=assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
+    // Signed skill commands use the same task-local cwd, but need no invented
+    // Workspace/Run. Their native resolver repeats task admission before launch.
+    const root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan)):assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
     if(!inspecting)await common.ensurePrivateDirectory(root);
-    if(!inspecting && plan.localAction.operation!=='open') {
+    if(!inspecting && !skill && plan.localAction.operation!=='open') {
       const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     }
@@ -924,10 +945,18 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         const previousDirectory=process.cwd();
         process.stdout.write=function(chunk,encoding,callback){
           const part=Buffer.isBuffer(chunk)?chunk.toString('utf8'):String(chunk);bytes+=Buffer.byteLength(part);
-          if(bytes>1024*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');stdout+=part;
+          if(bytes>(skill?3:1)*1024*1024)fail('ASSISTANT_WORKSPACE_RESULT_INVALID');stdout+=part;
           const done=typeof encoding==='function'?encoding:callback;done?.();return true;
         };
-        try {process.chdir(options.cwd??(inspecting?previousDirectory:root));await common.runWorkspaceCommand([...args,'--origin',identity.origin]);return {stdout,stderr:''};}
+        try {
+          process.chdir(options.cwd??(inspecting?previousDirectory:root));
+          // The common CLI's `--` starts provider arguments. Keep host origin
+          // before that boundary; appending it would mutate the provider's
+          // command instead of selecting the authenticated native endpoint.
+          const boundary=args.indexOf('--'),nativeArgs=[...args];
+          nativeArgs.splice(boundary<0?args.length:boundary,0,'--origin',identity.origin);
+          await common.runWorkspaceCommand(nativeArgs);return {stdout,stderr:''};
+        }
         catch(error) {
           // Reuse the ordinary in-process -> CLI error projection so common
           // lease/recovery and bounded HTTP classification remain identical.
