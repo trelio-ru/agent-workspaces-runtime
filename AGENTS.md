@@ -373,7 +373,7 @@ publication tooling также остаются вне этого публичн
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).
 - Source owner identity uses fresh native bindings, never usernames or a task grant: [contract](docs/assistant-scheduler.md#owner-identity-metadata-for-source-routing).
 - Model-free source reads reuse common signature/cache/account execution under a fresh fixed device HTTP profile; no human admission cache, task pass, ACK or cursor reset. [Contract](docs/assistant-scheduler.md#model-free-source-reader).
-- Assistant reads/writes, native guidance, relation intents, accepted file refs and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
+- Assistant reads/writes, native guidance, relation intents, accepted file refs/deletion and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
 - Background composition keeps one native pass per signed worker and private

@@ -246,14 +246,14 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'create_comment',description:'Current assistant backend write',inputSchema:shape,annotations:{idempotentHint:true}},
       {name:'continue_assistant_workspace_action',description:'Current local action',inputSchema:shape,annotations:{idempotentHint:false}},
       {name:'request_assistant_action',description:'Live sealed owner action',inputSchema:{...shape,properties:{...shape.properties,operation:{type:'string'},fields:{type:'object'}}}},
-      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist'].map(name=>({name,description:'Live native task operation',inputSchema:shape,annotations:{destructiveHint:name==='delete_checklist'||name==='delete_task_relation'}})),
+      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment'].map(name=>({name,description:'Live native task operation',inputSchema:shape,annotations:{destructiveHint:name==='delete_checklist'||name==='delete_task_relation'||name==='delete_attachment'}})),
       ...['search_agent_guidance','get_agent_skill','get_agent_procedure'].map(name=>({name,description:'Live native guidance read',inputSchema:shape})),
-      {name:'delete_attachment',description:'Unsupported; must remain closed',inputSchema:shape},
+      {name:'delete_workspace',description:'Unsupported; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','search_agent_guidance','get_agent_skill','get_agent_procedure']);
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment','search_agent_guidance','get_agent_skill','get_agent_procedure']);
   assert.deepEqual(tools[1].inputSchema,{type:'object',properties:{},additionalProperties:false});
   assert.deepEqual(Object.keys(shape.properties),['taskPass','runtimeSessionProof']);
   assert.equal(tools[2].annotations.idempotentHint,true);assert.equal(tools[3].annotations.idempotentHint,false);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
@@ -262,9 +262,10 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   const result=await resultPromise;assert.equal(receivedArgs.runtimeSessionProof.signature,'original');
   assert.equal(result.content[0].text,'native content');assert.ok(!('_meta' in result));
   assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/call','DELETE']);
-  const count=calls.length;await assert.rejects(client.callTool('delete_attachment',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
+  const count=calls.length;await assert.rejects(client.callTool('delete_workspace',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
   assert.equal(tools[2].annotations.readOnlyHint,false);
   assert.equal(tools.find(tool=>tool.name==='delete_checklist').annotations.destructiveHint,true);
+  assert.equal(tools.find(tool=>tool.name==='delete_attachment').annotations.destructiveHint,true);
   assert.equal(tools.find(tool=>tool.name==='delete_task_relation').annotations.destructiveHint,true);
   assert.equal(tools[0].annotations.destructiveHint,false);
   const beforeWrite=calls.length;
@@ -279,12 +280,15 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   await client.callTool('request_assistant_action',intent);assert.deepEqual(receivedArgs,intent);
   const apply={...intent.fields,clientRequestId:intent.clientRequestId,expectedTaskUpdatedAt:intent.expectedTaskUpdatedAt,ownerDecisionId:randomUUID()};
   await client.callTool('clear_task_control',apply);assert.deepEqual(receivedArgs,apply,'no generated human assertion or replacement intent');
-  for(const name of ['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist']) {
+  for(const name of ['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment']) {
     assert.equal(tools.find(tool=>tool.name===name).annotations.readOnlyHint,false);
     const before=calls.filter(method=>method==='tools/call').length;
     await client.callTool(name,apply);assert.deepEqual(receivedArgs,apply);
     assert.equal(calls.filter(method=>method==='tools/call').length,before+1,'live backend validator remains the only domain authority; no hidden retry');
   }
+  const attachmentIntent={attachmentId:randomUUID(),ownerDecisionId:randomUUID(),clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  await client.callTool('delete_attachment',attachmentIntent);
+  assert.deepEqual(receivedArgs,attachmentIntent,'exact target/owner decision stay backend authority; host never reads bytes or substitutes a human assertion');
   for(const [name,fields]of Object.entries({search_agent_guidance:{query:'follow-up'},get_agent_skill:{skillId:'company-skill',sections:['instructions','execution']},get_agent_procedure:{procedureId:randomUUID()}})){
     assert.equal(tools.find(tool=>tool.name===name).annotations.readOnlyHint,true);
     const input={...args,...fields};await client.callTool(name,input);assert.deepEqual(receivedArgs,input);

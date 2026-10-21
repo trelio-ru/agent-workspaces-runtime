@@ -494,7 +494,7 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
   "update_task_due_date", "update_task_assignee", "set_task_participants", "update_task_custom_field",
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",
-  "complete_checklist_item", "create_subtask", "create_task_relation", "delete_task_relation", "delete_checklist",
+  "complete_checklist_item", "create_subtask", "create_task_relation", "delete_task_relation", "delete_checklist", "delete_attachment",
 ]);
 /** Hook-owned admission fields never belong to the model's tool arguments.
  * Keep the live backend validators as the wire authority, while removing only

@@ -504,14 +504,14 @@ notification E2E acceptance gate before product activation.
 ## Task-local domain actions
 
 The current signed worker forwards the dedicated backend's task-local comment,
-content/status, checklist, own-control, subtask and direct task-relation tools. Names are a closed
+content/status, checklist, own-control, subtask, direct task-relation and ordinary attachment-delete tools. Names are a closed
 transport list; input schemas are live backend data, not host copies. Read-only
 annotations remain true only for reads. Native destructive/idempotent hints remain
 intact. A backend without these capabilities
 continues to expose its old read catalog; this is not a minimum-version bump.
 No owner-only/sensitive authority, human command flag or publication token is added.
 Whole-checklist deletion still needs the exact persisted owner decision and
-current native linked-subtask guards. Direct relations require native access to both tasks; a target UUID does not
+current native linked-subtask guards. Ordinary attachment deletion needs its exact persisted owner decision, native ordinary-file/ACL checks and the shared retention/rollback lifecycle; inline blobs remain unavailable. The host transports only the live schema and locators, never file bytes or a human deletion assertion. Direct relations require native access to both tasks; a target UUID does not
 expand the current task pass or grant access. New live fields, including accepted
 file references on comments and optional owner-question choices, pass through
 unchanged. The backend retains source-file ACL, validation, action policy and
