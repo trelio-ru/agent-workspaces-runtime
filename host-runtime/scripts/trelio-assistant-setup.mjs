@@ -87,11 +87,18 @@ $ProgressPreference = 'SilentlyContinue'
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 try {
+  # Closed diagnostic stages only. The ordinary parent discards stderr; the
+  # hosted native fixture may observe these enums to distinguish cold process
+  # startup, input EOF and Task Scheduler COM timeouts without OS/user data.
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE input')
   $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE identity')
   $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   if ($sid -notmatch '^S-1-(5-21|12-1)-[0-9-]+$') { throw 'ASSISTANT_BACKGROUND_UNAVAILABLE' }
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE scheduler')
   $service = New-Object -ComObject 'Schedule.Service'
   $service.Connect()
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE folder')
   $folder = $service.GetFolder('\')
   $name = 'Trelio-DigitalAssistant-' + $p.assistantId
   $marker = 'Trelio digital assistant background v1 ' + $p.assistantId + '/' + $p.deviceId
@@ -101,6 +108,7 @@ try {
     while ($cause.InnerException) { $cause = $cause.InnerException }
     return $cause.HResult -eq -2147024894
   }
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE lookup')
   try { $existing = $folder.GetTask($name) } catch {
     if (!(Test-NotFound $_)) { throw }
   }
@@ -192,6 +200,7 @@ try {
   $state = 'not_installed'
   if ($existing) { $state = 'registered'; if ($existing.State -eq 4) { $state = 'running' }; if ($existing.State -eq 2) { $state = 'queued' } }
   $result = @{schemaVersion=1; state=$state; installed=[bool]$existing; interactiveUserRequired=$true; startsAtUserLogon=[bool]$existing; businessReady=$false}
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE result')
   [Console]::Out.WriteLine(($result | ConvertTo-Json -Compress))
 } catch {
   $cause = $_.Exception

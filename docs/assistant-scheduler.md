@@ -379,6 +379,10 @@ current SID, never a display name. Missing/foreign/unresolvable principals deny.
 One non-sliding 45-second setup budget includes private/contact I/O and native
 registration; its remaining native process budget is at most 40 seconds. A
 slow ARM64 PowerShell start cannot renew that deadline or cause an OS retry.
+The constant helper emits only closed input/identity/scheduler/folder/lookup/result
+stage names on stderr. Production discards that pipe; the hosted fixture may
+print only the explicit enum to locate startup/EOF/COM timeouts. No OS value,
+task definition, account, path or exception is added to diagnostic output.
 
 The deterministic task belongs to the current Windows SID with least privilege
 and `InteractiveToken`. A single logon trigger waits 15 seconds; unlimited task
