@@ -284,3 +284,60 @@ gates; no baseline/reset, provider mutation or guessed routing is introduced. Cu
 the inbox's existing 2048-character bound are likewise refused, never truncated
 or reset. These closed diagnostic conditions, owner-visible source recovery,
 stream onboarding, routing/body/ACK and actual Windows E2E remain release gates.
+
+## Known-conversation dispatch (schema v6)
+
+The SAME private SQLite journal adds only structural conversation keys, native
+source/route revisions, a canonical dispatch-source key, a dispatched bit and an
+internal per-delivery read slot. No message body, sender identity, rule, credential
+or second outbox/vault enters these fields. Source configuration changes and
+pause/resume retire pending routes/read evidence without resetting any account or
+child-stream cursor, uncertain native turn or original ACK-attempt fence.
+
+A signed Telegram monitor may supply its opaque domain-separated account HMAC.
+Older providers remain passive and non-routable. A newer verified replay may fill
+legacy ABSENCE once, without changing initial mapping/wake or granting processing;
+a known key cannot change. An older replay cannot erase the newer capability.
+`pendingExternalRoutes` scans bounded oldest unchecked refs with a durable
+five-minute cadence. Only a successful exact native lookup selects current
+accepted task bindings on this device. Failure is an error, never authoritative
+absence. Native lookup receives HMACs only, not provider IDs or bodies.
+
+`routeExternalEvents` validates the complete source/assistant/company partition,
+current native configuration revision and exact already accepted canonical task
+binding. It never provisions a task, changes a binding or rebinds the scheduler.
+Current mappings put incoming refs into the SAME task delivery as Trelio mentions
+and due cycles. Outgoing/deletion refs are context only; unknown conversations do
+not wake, create tasks or disclose bodies. Delivery scope remains the canonical
+Trelio source. Each event retains its own provider source for separate processing
+and ACK. Trelio notification poll/ACK never receives external provider IDs.
+
+The bounded batch prioritizes an undispatched wake over old unread context, so a
+full context page cannot repeatedly hide the event that woke the task. Its exact
+order, conversation key and route/source generation are frozen in the original
+delivery-event rows. Recovery does not replace them with a newly valid route.
+Read-only routing failures retain mappings under durable bounded backoff; they
+do not starve later source scans or fabricate an authoritative empty result.
+
+The coordinator repeats live native source/route/task checks before a turn and
+while it runs. SQLite synchronously rechecks the allocated external snapshots at
+prepare/start/renew, closing a local pause/reconfiguration race after network
+validation. A source resume cannot revive that old delivery snapshot. Native
+runtime context includes bounded structural source references over stdin only;
+message text and owner-command authority are not supplied by this projection.
+
+`completeDelivery` marks refs dispatched to suppress repeated unsolicited wakes.
+For an external ref this does NOT mean processed/read. Unread work remains in
+later normal task cycles. The internal trusted `recordExternalRead` boundary
+accepts no content and binds independently validated native read evidence to the
+exact currently started delivery/route/event/source generation. A native or
+business receipt alone cannot populate that slot. The actual signed body-result
+observer, granular committed processing and production provider ACK composition
+remain required; they are NOT implemented by a conversation mapping or this
+ledger API. Business readiness and encrypted-device execution remain closed.
+
+The true v5→v6 fixture keeps cursors, original leases, uncertain deliveries and
+ACK fences. Additional real SQLite/coordinator tests cover one permanent chat,
+unknown/outgoing refs, bounded immutable native locators, source/route revocation,
+no repeat wake, unread retention and refusal before the one-use native start.
+They do not claim a real Telegram/Windows business E2E or production ACK.

@@ -182,6 +182,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['ownerIdentities',['GET','/runtime/owner-identities']],
     ['sourceAccounts',['GET','/runtime/source-skills/accounts']],
+    ['sourceRoutes',['POST','/runtime/source-skills/routing']],
     ['sourceHealthRead',['GET','/runtime/source-skills/health']],['sourceHealthReport',['POST','/runtime/source-skills/health']],
     ['tasks',['POST','/runtime/tasks']], ['task',['POST','/runtime/task']],
     ['claim',['POST','/runtime/task/claim']],
@@ -384,6 +385,30 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // no model turn, task pass, account import/setup or provider launch here.
       companyId = id(companyId);
       return projectAssistantSourceAccounts(await call('sourceAccounts',{companyId},signal),{assistantId,deviceId,companyId});
+    },
+    async sourceRoutes(input, signal) {
+      // Only opaque provider/account HMACs cross this fixed boundary. The
+      // native server rechecks owner/source/task/device authority on EVERY read;
+      // an old SQLite mapping or a model-authored key never grants body access.
+      const key=value=>typeof value==='string' && /^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(value);
+      if(!object(input)||Object.keys(input).sort().join(',')!=='companyId,conversationKeys,sourceId,sourceRevision'
+        ||!Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
+        || !Array.isArray(input.conversationKeys)||!input.conversationKeys.length||input.conversationKeys.length>100
+        || input.conversationKeys.some(value=>!key(value))||new Set(input.conversationKeys).size!==input.conversationKeys.length)
+        fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={companyId:id(input.companyId),sourceId:id(input.sourceId),sourceRevision:revision(input.sourceRevision),
+        conversationKeys:[...input.conversationKeys]};
+      const value=await call('sourceRoutes',body,signal);
+      if(value.schemaVersion!==1||value.sourceId!==body.sourceId||value.sourceRevision!==body.sourceRevision
+        ||!Array.isArray(value.routes)||value.routes.length>body.conversationKeys.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const seen=new Set();
+      return value.routes.map(row=>{
+        if(!object(row)||row.sourceId!==body.sourceId||row.sourceRevision!==body.sourceRevision
+          ||!body.conversationKeys.includes(row.conversationKey)||seen.has(row.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        seen.add(row.conversationKey);
+        return {id:id(row.id),sourceId:body.sourceId,sourceRevision:body.sourceRevision,conversationKey:row.conversationKey,
+          bindingId:id(row.bindingId),bindingRevision:revision(row.bindingRevision),taskId:id(row.taskId)};
+      });
     },
     async readSourceHealth(companyId,sourceId,signal){
       companyId=id(companyId);sourceId=id(sourceId);
@@ -602,6 +627,9 @@ export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
+  // Native task-local mapping only. Live schema/proof/CAS remain backend-owned;
+  // exposing the name does not read a provider body or create a new task.
+  'bind_assistant_source_conversation',
   'ask_assistant_owner', 'request_assistant_action', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
   // Native server cancellation needs no local file/CLI adapter. Its live
   // dedicated schema and pass/own-Run checks remain backend authority; adding
@@ -1088,6 +1116,12 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
     if(skillId==='telegram-mtproto'){
       if(!peer(row.chatId) || !positive(row.messageId) || row.id!==`message:${row.chatId}:${row.messageId}`
         || chat!==null && row.chatId!==chat)invalid();
+      // Older signed providers may still omit this capability; keep their
+      // passive cursor protocol usable, but do not invent a routable key.
+      if(row.conversationKey!==undefined){
+        if(typeof row.conversationKey!=='string'||!/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(row.conversationKey))invalid();
+        event.conversationKey=row.conversationKey;
+      }
       if(row.kind!=='delete'){
         if(row.topicId!==null && !positive(row.topicId) || row.senderUserId!==null && !positive(row.senderUserId)
           || row.senderNamespace!==(row.senderUserId===null?null:'telegram_user_id')

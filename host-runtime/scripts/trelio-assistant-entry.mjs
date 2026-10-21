@@ -642,7 +642,8 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return readAssistantSourceMonitor({identity:stableIdentity,host,store,source,signal:combined});
     }));
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
-      sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args))},passHost,readSourceMonitor,
+      sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
         report:(row,observation,signal)=>invoke(live=>live.reportSourceHealth({companyId:row.companyId,sourceId:row.id,...observation},signal))},
       native:{...observedNative,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},

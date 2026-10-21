@@ -824,3 +824,32 @@ test('source diagnostics are fixed device-only structural calls, strict before p
   await assert.rejects(client.reportSourceHealth(input),error=>error.code==='ASSISTANT_TRANSPORT_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
   assert.equal(calls,count+1,'unknown report outcome is never retried');
 });
+
+test('source routing uses fixed device HTTP and projects only exact requested opaque keys/current source generation',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID();
+  const store=memoryStore(),credential=`tda_${'r'.repeat(43)}`;await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  const conversationKey=`telegram-conversation/v1.${'a'.repeat(64)}`;
+  const input={companyId,sourceId,sourceRevision:3,conversationKeys:[conversationKey]};
+  const route={id:randomUUID(),sourceId,sourceRevision:3,conversationKey,bindingId:randomUUID(),bindingRevision:2,taskId:randomUUID()};
+  let output={schemaVersion:1,sourceId,sourceRevision:3,routes:[{...route,title:'PRIVATE_BODY'}]},calls=0;
+  const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;assert.equal(url,`${origin}/api/digital-assistants/runtime/source-skills/routing`);
+    assert.equal(options.method,'POST');assert.equal(options.credentials,'omit');assert.equal(options.redirect,'error');
+    assert.equal(options.headers.authorization,`Bearer ${credential}`);assert.deepEqual(JSON.parse(options.body),input);
+    if(output instanceof Error)throw output;
+    return new Response(JSON.stringify(output),{status:200,headers:{'content-type':'application/json'}});
+  }});
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
+  assert.deepEqual(await client.sourceRoutes(input),[route]);
+  const before=calls;
+  for(const extra of [{messageId:'message:123:4'},{conversationKeys:['PRIVATE']},{conversationKeys:[conversationKey,conversationKey]},
+    {conversationKeys:[]},{sourceRevision:-1},{companyId:'unknown'}])await assert.rejects(client.sourceRoutes({...input,...extra}),/INVALID_INPUT/);
+  assert.equal(calls,before,'malformed routing never reaches credentials or HTTP');
+  for(output of [{schemaVersion:2,sourceId,sourceRevision:3,routes:[route]},
+    {schemaVersion:1,sourceId,sourceRevision:2,routes:[]},
+    {schemaVersion:1,sourceId,sourceRevision:3,routes:[{...route,conversationKey:`telegram-conversation/v1.${'b'.repeat(64)}`}]},
+    {schemaVersion:1,sourceId,sourceRevision:3,routes:[route,route]}])await assert.rejects(client.sourceRoutes(input),/INVALID_RESPONSE/);
+  output=new Error('PRIVATE_HTTP');const count=calls;
+  await assert.rejects(client.sourceRoutes(input),error=>error.code==='ASSISTANT_TRANSPORT_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
+  assert.equal(calls,count+1,'failed lookup is not retried or converted to an empty routing inventory');
+});

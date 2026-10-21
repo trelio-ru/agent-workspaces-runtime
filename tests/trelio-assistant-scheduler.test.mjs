@@ -115,9 +115,14 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   const source = { origin: 'https://example.test', assistantId: randomUUID(), companyId: randomUUID(), provider: 'trelio', accountId: randomUUID(), bindingId: randomUUID() };
   const taskId = randomUUID(); inbox.register(source); inbox.applyTaskState(source, { taskId, state: 'paused', expectedRevision: 0 });
   inbox.commitPage(source, { ...inbox.claimPoll(source), nextCursor: 'old-position', hasMore: false, events: [] });
+  // Materialize the actual old schema, not a current table with a v1 marker.
+  db.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN configuration_revision');
+  for(const name of ['conversation_key','provider_wake','dispatch_source_key','route_id','route_source_revision','route_checked_at','dispatched','read_delivery_id'])
+    db.exec(`ALTER TABLE assistant_inbox_events DROP COLUMN ${name}`);
+  for(const name of ['conversation_key','route_id','route_source_revision','event_ordinal'])db.exec(`ALTER TABLE assistant_inbox_delivery_events DROP COLUMN ${name}`);
   db.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_tasks DROP COLUMN authority_binding_id; ALTER TABLE assistant_inbox_tasks DROP COLUMN authority_revision; ALTER TABLE assistant_inbox_deliveries DROP COLUMN scheduled; ALTER TABLE assistant_inbox_deliveries DROP COLUMN kind; ALTER TABLE assistant_inbox_deliveries DROP COLUMN native_thread_id; ALTER TABLE assistant_inbox_deliveries DROP COLUMN native_started; UPDATE assistant_inbox_meta SET version=1');
   inbox = createAssistantInbox({ database: db });
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.taskState(source, taskId).state, 'paused');
-  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 5);
+  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 6);
 });

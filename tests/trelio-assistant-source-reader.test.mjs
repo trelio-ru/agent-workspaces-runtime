@@ -704,3 +704,13 @@ test('MAX handoff is never login proof; independent short probe rechecks native 
   await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope:{...scope,skillId:'telegram-mtproto'},
     accountSetup:{sourceId,expectedRevision:0,operation:'verify_login'}}),/INVALID_INPUT/);
 });
+
+test('native account-scoped conversation keys survive the private projection, while old/malformed providers gain no guessed route',()=>{
+  const options={skillId:'telegram-mtproto',cursor:previousCursor},key=`telegram-conversation/v1.${'a'.repeat(64)}`;
+  const project=value=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify(value)},options);
+  assert.equal(project(page()).events[0].conversationKey,undefined);
+  const mapped={...page(),events:[{...event,conversationKey:key,text:'PRIVATE_BODY'}]};
+  assert.equal(project(mapped).events[0].conversationKey,key);assert.ok(!JSON.stringify(project(mapped)).includes('PRIVATE'));
+  for(const conversationKey of ['',null,'message:123','telegram-conversation/v1.'+'A'.repeat(64),`https://other.test/${key}`])
+    assert.throws(()=>project({...mapped,events:[{...event,conversationKey}]}),/INVALID_RESPONSE/);
+});

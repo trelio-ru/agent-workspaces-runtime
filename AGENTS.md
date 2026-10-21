@@ -37,6 +37,11 @@ publication tooling также остаются вне этого публичн
   private storage и native Codex adapters не заменяются состоянием очереди.
   Native source discovery/passive reads feed that same queue; unknown refs stay
   unrouted/non-waking. Channel hints retain their source position until initialized/backfilled.
+  Native known-conversation routes dispatch only through the canonical Trelio
+  task source/permanent chat; source rows never rebind its scheduler. Fresh
+  source/task generations and a synchronous pre-start snapshot fence are required.
+  Native/business completion alone never processes an external body; dispatched
+  unread refs stay pending without a repeat wake or ACK. See inbox schema v6.
   Cloud deletions resolve only from unique exact prior refs in the SAME account
   journal; unknown/ambiguous peers retain the cursor without wake/ACK.
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).

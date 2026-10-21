@@ -250,3 +250,14 @@ test('a successful CLI exit/queue claim without exact completed-turn read-back r
     },
   }),/DELIVERY_UNCERTAIN/);
 });
+
+test('external task context permits bounded structural refs only, without bodies/owner assertions/argv options',()=>{
+  const ref={sourceId:randomUUID(),sourceRevision:3,provider:'telegram',accountId:randomUUID(),eventId:'message:123:4',
+    eventRevision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
+  assert.deepEqual(assistantWorkStateContext({...taskContext,sourceReferences:[ref]}).sourceReferences,[ref]);
+  for(const changed of [{body:'PRIVATE'},{owner:true},{provider:'max'},{sourceId:'--config'},{accountId:'PRIVATE'},
+    {sourceRevision:-1},{eventId:'PRIVATE'},{eventRevision:'PRIVATE'},{conversationKey:'PRIVATE'}])
+    assert.throws(()=>assistantWorkStateContext({...taskContext,sourceReferences:[{...ref,...changed}]}),/INVALID_INPUT/);
+  for(const refs of [[],[ref,ref],Array.from({length:101},(_,index)=>({...ref,eventId:`message:123:${index+1}`}))])
+    assert.throws(()=>assistantWorkStateContext({...taskContext,sourceReferences:refs}),/INVALID_INPUT/);
+});

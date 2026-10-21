@@ -84,11 +84,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const state=binding.state==='accepted'?(plan.state==='done'?'done':'active'):binding.state==='done'?'done':binding.state==='revoked'?'revoked':'paused';
     if (plan.state!==state) schedule.setState(scopeFor(source,binding.taskId),{state,expectedRevision:plan.revision});
   };
-  const authorize = async ({scope,taskId},signal,{captureExecution=null,captureBinding=null,requireModel=true,allowTaskDone=false}={}) => {
+  const authorize = async ({scope,taskId},signal,{captureExecution=null,captureBinding=null,requireModel=true,allowTaskDone=false,job=null}={}) => {
     lease();
     const value=await client.task(scope.companyId,taskId,signal);
     lease(); apply(scope,value);
     if(value.hostState==='other_device') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    if(job)await verifyExternalDelivery(job,value,signal);
     if(captureBinding) captureBinding(value);
     // Only completion/recovery of an already started exact pass opts in. New
     // claims/launches still require accepted task authority and model policy.
@@ -157,6 +158,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const existing=inbox.register(scope);
       if(existing.state==='revoked' && row.state!=='revoked')fail('ASSISTANT_COORDINATOR_SOURCE_REBIND_REQUIRED');
       if(existing.state!==row.state)inbox.setSourceState(scope,{state:row.state,expectedRevision:existing.revision});
+      inbox.observeExternalSourceRevision(scope,row.revision);
     }
     for(const {row} of refs)if(row.state==='active')externalRegistrations.set(row.id,row);
   };
@@ -241,7 +243,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Keep new refs unrouted and non-waking. No provider ACK is attempted;
       // body read, native mapping and committed processing remain required.
       const page={...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
-        events:[...result.events,...deletions].map(({id,revision})=>({id,revision,taskId:null,wake:false}))};
+        events:[...result.events,...deletions].map(({id,revision,conversationKey,kind,outgoing})=>({id,revision,taskId:null,wake:false,
+          ...(conversationKey?{conversationKey,providerWake:kind!=='delete' && outgoing===false}:{})}))};
       if(streamId===null)inbox.commitPage(source,{...page,streams});
       else inbox.commitStreamPage(source,{...page,streamId});
       // An unrelated successful account/page cannot hide an outstanding child
@@ -259,6 +262,49 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:SCOPE_CHANGED|UIDVALIDITY_CHANGED)$/u.test(code??'')?'scope_changed':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||['ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT','ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED','ASSISTANT_INBOX_REFERENCE_AMBIGUOUS'].includes(code)?'history_gap':'read_failed';
       await report(reason);throw error;
+    }
+  };
+  const canonicalSourceFor=companyId=>{
+    const sources=inbox.listSources().filter(value=>value.state==='active'&&value.scope.provider==='trelio'
+      &&value.scope.origin===identity.origin&&value.scope.assistantId===identity.assistantId&&value.scope.companyId===companyId);
+    if(sources.length!==1)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    return sources[0].scope;
+  };
+  const routeExternalSource=async(row,signal,pending=inbox.pendingExternalRoutes(externalSourceFor(identity,row)))=>{
+    if(row.skillId!=='telegram-mtproto'||typeof client.sourceRoutes!=='function')return;
+    const source=externalSourceFor(identity,row);
+    if(!pending.length)return;
+    const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
+      conversationKeys:[...new Set(pending.map(event=>event.conversation_key))]},signal);lease();
+    const canonicalSource=canonicalSourceFor(row.companyId);
+    // Native lookup selects only accepted current task bindings on THIS host.
+    // Refresh the existing task projection, never register/rebind a second
+    // source with the scheduler or provision a chat from a conversation key.
+    for(const taskId of new Set(routes.map(route=>route.taskId))){
+      const binding=await client.task(row.companyId,taskId,signal);lease();
+      if(binding.hostState==='other_device')fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      apply(canonicalSource,binding);
+    }
+    const current=await client.sourceAccounts(row.companyId,signal);lease();
+    if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    inbox.routeExternalEvents(source,{canonicalSource,sourceRevision:row.revision,
+      eventKeys:pending.map(event=>event.event_key),routes});
+  };
+  const verifyExternalDelivery=async(job,binding,signal)=>{
+    const external=job.events.filter(event=>JSON.parse(event.event_scope_json).provider!=='trelio');
+    if(!external.length)return;
+    if(typeof client.sourceRoutes!=='function')fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    const rows=await client.sourceAccounts(job.scope.companyId,signal);lease();
+    for(const sourceId of new Set(external.map(event=>JSON.parse(event.event_scope_json).bindingId))){
+      const events=external.filter(event=>JSON.parse(event.event_scope_json).bindingId===sourceId),row=rows.find(value=>value.id===sourceId);
+      if(!row||row.state!=='active'||row.skillId!=='telegram-mtproto'
+        ||events.some(event=>!sameSource(externalSourceFor(identity,row),JSON.parse(event.event_scope_json))
+          ||event.route_source_revision!==row.revision||!event.conversation_key))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
+        conversationKeys:[...new Set(events.map(event=>event.conversation_key))]},signal);lease();
+      if(events.some(event=>!routes.some(route=>route.id===event.route_id&&route.conversationKey===event.conversation_key
+        &&route.taskId===job.taskId&&route.bindingId===binding.id&&route.bindingRevision===binding.revision)))
+        fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
     }
   };
   const reportSchedules = async signal => {
@@ -331,6 +377,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       for(const {row,streamId} of externalDue){
         try{await pollExternalSource(row,signal,streamId);}
         catch(error){emit(errorCode(error));}
+      }
+      // Routing is its own native read. A failed lookup neither rolls back an
+      // already committed provider page nor masquerades as an empty inventory.
+      const routingDue=[...externalRegistrations.values()].flatMap(row=>{
+        if(row.skillId!=='telegram-mtproto'||inbox.status(externalSourceFor(identity,row)).state!=='active')return [];
+        const pending=inbox.pendingExternalRoutes(externalSourceFor(identity,row));return pending.length?[{row,pending}]:[];
+      }).sort((a,b)=>a.pending[0].route_checked_at-b.pending[0].route_checked_at||a.row.id.localeCompare(b.row.id)).slice(0,4);
+      for(const {row,pending} of routingDue){
+        try{await routeExternalSource(row,signal,pending);}catch(error){
+          try{inbox.deferExternalRouting(externalSourceFor(identity,row),{sourceRevision:row.revision,eventKeys:pending.map(value=>value.event_key)});}
+          catch{/* A changed/paused source cannot receive this old local backoff. */}
+          emit(errorCode(error));
+        }
       }
       await reportSchedules(signal);
       return true;
@@ -422,7 +481,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(checking) return; checking=true;
       void (async()=>{
         let watchedBinding;
-        if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{allowTaskDone:job.kind!=='provision' && started,
+        if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:job.kind!=='provision' && started,
           captureBinding:value=>{watchedBinding=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
         if(started && watchedBinding.state==='accepted') inbox.renewDelivery(job.deliveryId);
         if(taskPass) {
@@ -436,9 +495,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     },watchIntervalMs);
     try {
       let execution;
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const options={signal:combined,startInvocation:()=>{lease();inbox.startDelivery(job.deliveryId);started=true;}};
       let result;
       if(job.kind==='provision') {
@@ -476,6 +535,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         execution=assistantExecutionConfiguration(admitted.execution);
         result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
+            ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
+              const source=JSON.parse(event.event_scope_json);
+              return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,provider:source.provider,
+                accountId:source.accountId,eventId:event.event_id,eventRevision:event.event_revision,conversationKey:event.conversation_key};
+            })}:{}),
             // Only current delivery refs enter stdin. Full answers are read
             // by the task worker under fresh backend pass/owner/assignment ACL.
             ...(job.events.some(event=>event.owner_question_id) ? {ownerQuestionIds:[...new Set(job.events
@@ -514,7 +578,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           throw error;
         }
       };
-      for(const {scope,state} of inbox.listSources()) if(state==='active' && !blockedCompanies.has(scope.companyId)) {
+      for(const {scope,state} of inbox.listSources()) if(scope.provider==='trelio' && state==='active' && !blockedCompanies.has(scope.companyId)) {
         for(const task of inbox.listTasks(scope).filter(task=>task.state==='accepted' && !findSchedule(scope,task.taskId))) {
           const job=await claim({provisionTask:{scope,taskId:task.taskId}});
           if(job) return perform(job,signal);

@@ -638,3 +638,71 @@ test('a legacy baseline or changed owner registration cannot advance a channel c
     assert.equal(f.counts().acks,0);assert.equal(f.counts().runs,0);
   }finally{await f.coordinator.close();}
 });
+
+test('native known-conversation routing wakes only the existing canonical task chat and never ACKs an unread body',async t=>{
+  const f=await externalFixture(t),key=`telegram-conversation/v1.${'a'.repeat(64)}`,unknown=`telegram-conversation/v1.${'b'.repeat(64)}`;
+  const route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
+  let routingCalls=0;
+  f.options.client.sourceRoutes=async input=>{
+    routingCalls++;assert.equal(input.companyId,f.companyId);assert.equal(input.sourceId,f.row.id);
+    assert.equal(input.sourceRevision,0);assert.ok(input.conversationKeys.every(value=>value===key||value===unknown));
+    return input.conversationKeys.includes(key)?[route]:[];
+  };
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    const threadId=f.coordinator.status()[0].threadId;
+    f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'messages',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],events:[
+      {id:'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key},
+      {id:'message:124:1',revision:'d'.repeat(64),kind:'new',outgoing:false,conversationKey:unknown},
+      {id:'message:123:2',revision:'e'.repeat(64),kind:'new',outgoing:true,conversationKey:key}]}));
+    f.advance(300_000);await f.coordinator.pollOnce();
+    let runs=0;
+    f.options.native.run=async(input,options)=>{
+      assert.equal(input.threadId,threadId);assert.equal(input.taskContext.sourceReferences.length,2);
+      for(const ref of input.taskContext.sourceReferences){assert.equal(ref.sourceId,f.row.id);assert.equal(ref.accountId,f.row.localAccountId);assert.equal(ref.conversationKey,key);}
+      runs++;options.startInvocation();const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
+    };
+    await f.coordinator.workOnce();assert.equal(runs,1);assert.equal(f.counts().provisions,1);
+    assert.equal(f.coordinator.status().length,1);assert.equal(f.coordinator.status()[0].source.provider,'trelio');
+    assert.equal(await f.coordinator.workOnce(),null);
+    assert.equal(f.inbox.claimAcknowledgements(f.scope()),null,'native/business completion is not an actual body read');
+    f.advance(300_000);await f.coordinator.pollOnce();assert.equal(await f.coordinator.workOnce(),null,'replayed metadata cannot cause another wake');
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,3);
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1 OR acked=1').get().n,0);
+    assert.ok(routingCalls>=2,'live route authority is rechecked immediately before native work');
+  }finally{await f.coordinator.close();}
+});
+
+test('route/source revocation immediately before native launch blocks delivery without a second chat, ACK or stale source adoption',async t=>{
+  const f=await externalFixture(t),key=`telegram-conversation/v1.${'a'.repeat(64)}`;
+  const route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
+  f.options.client.sourceRoutes=async()=>[route];
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}],
+      nextCursor:'pending',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}));
+    f.advance(300_000);await f.coordinator.pollOnce();
+    f.options.client.sourceRoutes=async()=>[];
+    await assert.rejects(f.coordinator.workOnce(),/SOURCE_CHANGED/);
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().provisions,1);
+    assert.equal(f.inbox.claimAcknowledgements(f.scope()),null);
+    f.row.revision=1;f.advance(300_000);await f.coordinator.pollOnce();
+    assert.equal(await f.coordinator.workOnce(),null);
+    assert.equal(f.position(),'pending','source changes retain the native cursor');
+    assert.equal(f.database.prepare('SELECT task_id FROM assistant_inbox_events').get().task_id,null);
+  }finally{await f.coordinator.close();}
+});
+
+test('routing outage cannot roll back a committed provider page or become authoritative absence',async t=>{
+  const f=await externalFixture(t),key=`telegram-conversation/v1.${'a'.repeat(64)}`;
+  f.options.client.sourceRoutes=async()=>{throw Object.assign(new Error('PRIVATE_BODY'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});};
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}],
+      nextCursor:'retained',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}));
+    f.advance(300_000);await f.coordinator.pollOnce();
+    assert.equal(f.position(),'retained');assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,1);
+    assert.equal(await f.coordinator.workOnce(),null);assert.equal(f.inbox.claimAcknowledgements(f.scope()),null);
+    assert.ok(!JSON.stringify(f.notifications).includes('PRIVATE_BODY'));
+  }finally{await f.coordinator.close();}
+});

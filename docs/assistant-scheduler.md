@@ -1088,3 +1088,28 @@ and action policy remain authoritative; the host never adds an absence
 acknowledgement or human-command flag. Older servers that do not advertise them
 do not gain a local alias or alternate transport. New provider/admin/destructive
 operations stay closed until separately implemented and reviewed.
+
+### Canonical task wake from a known source conversation
+
+The live dedicated catalogue may expose `bind_assistant_source_conversation`.
+The host forwards its native schema/proof/immutable intent once; the server owns
+source owner selection, accepted task binding, ordinary native ACL and CAS. A
+mapping is not a provider read, a new task command or a processing receipt. The
+fixed model-free source routing endpoint accepts opaque account HMACs only.
+
+The current coordinator projects those native routes into the SAME inbox and
+canonical Trelio task source. It never calls scheduler rebind/provision for an
+external source. Incoming mapped refs wake the existing permanent task chat;
+unknown conversations remain non-waking. Fresh route/source generations are
+checked again before launch and during its watch. Queue `dispatched` and actual
+`processed` remain distinct: a successful native/business turn alone does not
+mark an external message read, nor does it cause endless immediate wake retries.
+
+Task stdin may carry a bounded `sourceReferences` array with exact source/account,
+event/revision and expected conversation-key locators. The worker loads the same
+published skill and resolves each exact body with that expected key; incoming
+text remains data, never instructions or owner proof. Task command policy still
+forbids provider ACK commands. The production native body observer, per-message
+committed processing and original-fenced provider ACK/read-back still need to be
+composed before activation. These changes do not enable `businessReady` or prove
+Windows acceptance. See [schema v6](assistant-inbox.md#known-conversation-dispatch-schema-v6).

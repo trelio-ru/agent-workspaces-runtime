@@ -41,9 +41,15 @@ const scopeOf = value => {
   return { ...scope, key: digest(scope) };
 };
 const eventOf = value => {
-  object(value, ['id', 'revision', 'taskId', 'wake', 'ownerQuestionId']);
+  object(value, ['id', 'revision', 'taskId', 'wake', 'ownerQuestionId', 'conversationKey', 'providerWake']);
   if (typeof value.wake !== 'boolean' || value.ownerQuestionId !== undefined && (!value.wake || value.taskId === null)) inputError();
-  return { ownerQuestionId: value.ownerQuestionId === undefined ? null : uuid(value.ownerQuestionId), id: opaque(value.id), revision: opaque(value.revision, 128), taskId: value.taskId === null ? null : uuid(value.taskId), wake: value.wake };
+  if(value.conversationKey!==undefined && (typeof value.conversationKey!=='string'
+    || !/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(value.conversationKey)
+    || value.taskId!==null || value.wake || typeof value.providerWake!=='boolean')
+    || value.providerWake!==undefined && value.conversationKey===undefined)inputError();
+  return { ownerQuestionId: value.ownerQuestionId === undefined ? null : uuid(value.ownerQuestionId), id: opaque(value.id), revision: opaque(value.revision, 128),
+    taskId: value.taskId === null ? null : uuid(value.taskId), wake: value.wake,
+    conversationKey:value.conversationKey??null,providerWake:Boolean(value.providerWake) };
 };
 const LEASE_MS = 120_000;
 const MAX_PAGE = 100;
@@ -75,7 +81,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -142,7 +148,26 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND source_key IN (SELECT source_key FROM assistant_inbox_sources WHERE json_extract(scope_json,'$.provider')!='trelio')`);
       run('UPDATE assistant_inbox_meta SET version=5');
     }
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (5)');
+    if(!versions.length || versions[0].version<6){
+      // SAME private journal, forward-only structural routing. Legacy external
+      // rows gain no guessed mapping/read proof and existing ambiguous native
+      // deliveries/ACK fences/cursors are retained byte-for-byte.
+      db.exec(`ALTER TABLE assistant_inbox_sources ADD COLUMN configuration_revision INTEGER;
+        ALTER TABLE assistant_inbox_events ADD COLUMN conversation_key TEXT;
+        ALTER TABLE assistant_inbox_events ADD COLUMN provider_wake INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE assistant_inbox_events ADD COLUMN dispatch_source_key TEXT;
+        ALTER TABLE assistant_inbox_events ADD COLUMN route_id TEXT;
+        ALTER TABLE assistant_inbox_events ADD COLUMN route_source_revision INTEGER;
+        ALTER TABLE assistant_inbox_events ADD COLUMN route_checked_at INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE assistant_inbox_events ADD COLUMN dispatched INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE assistant_inbox_events ADD COLUMN read_delivery_id TEXT;
+        ALTER TABLE assistant_inbox_delivery_events ADD COLUMN conversation_key TEXT;
+        ALTER TABLE assistant_inbox_delivery_events ADD COLUMN route_id TEXT;
+        ALTER TABLE assistant_inbox_delivery_events ADD COLUMN route_source_revision INTEGER;
+        ALTER TABLE assistant_inbox_delivery_events ADD COLUMN event_ordinal INTEGER CHECK(event_ordinal>=0 AND event_ordinal<100);`);
+      run('UPDATE assistant_inbox_meta SET version=6');
+    }
+    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (6)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -172,17 +197,25 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     let added=0;
     for(const event of page){
       const key=digest([scope.key,event.id,event.revision]);
-      const existing=get('SELECT original_task_id,wake,owner_question_id FROM assistant_inbox_events WHERE event_key=?',key);
+      if(event.conversationKey && scope.provider!=='telegram')inputError();
+      const existing=get('SELECT original_task_id,wake,owner_question_id,conversation_key,provider_wake FROM assistant_inbox_events WHERE event_key=?',key);
       if(existing){
         if(existing.original_task_id!==event.taskId || existing.wake!==Number(event.wake)
           || existing.owner_question_id!==event.ownerQuestionId)fail('ASSISTANT_INBOX_EVENT_CHANGED');
+        if(event.conversationKey===null && scope.provider==='telegram')continue; // Never erase a newer capability on legacy replay.
+        if(existing.conversation_key===null && event.conversationKey && scope.provider==='telegram'){
+          // A verified newer provider may enrich legacy ABSENCE once. This
+          // adds no route/read/processed/ACK authority and never revives an
+          // already handled event. A known key can never be replaced later.
+          run('UPDATE assistant_inbox_events SET conversation_key=?,provider_wake=? WHERE event_key=?',event.conversationKey,Number(event.providerWake),key);
+        }else if(existing.conversation_key!==event.conversationKey||existing.provider_wake!==Number(event.providerWake))fail('ASSISTANT_INBOX_EVENT_CHANGED');
         continue;
       }
       const pending=get('SELECT count(*) AS total FROM assistant_inbox_events WHERE processed=0').total;
       const total=get('SELECT count(*) AS total FROM assistant_inbox_events').total;
       if(pending>=MAX_PENDING || total>=MAX_EVENTS)fail('ASSISTANT_INBOX_FULL');
-      run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id) VALUES (?,?,?,?,?,?,?,?)',
-        key,scope.key,event.id,event.revision,event.taskId,event.taskId,Number(event.wake),event.ownerQuestionId);
+      run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id,conversation_key,provider_wake) VALUES (?,?,?,?,?,?,?,?,?,?)',
+        key,scope.key,event.id,event.revision,event.taskId,event.taskId,Number(event.wake),event.ownerQuestionId,event.conversationKey,Number(event.providerWake));
       added++;
     }
     return added;
@@ -198,6 +231,24 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     run("DELETE FROM assistant_inbox_delivery_events WHERE delivery_id IN (SELECT delivery_id FROM assistant_inbox_deliveries WHERE state='leased' AND expires_at<=?)", time());
     run("DELETE FROM assistant_inbox_deliveries WHERE state='leased' AND expires_at<=?", time());
     run("UPDATE assistant_inbox_deliveries SET state='uncertain' WHERE state='started' AND expires_at<=?", time());
+  };
+  const deliveryEvents=id=>all(`SELECT e.event_key,e.event_id,e.event_revision,e.wake,e.owner_question_id,
+    de.conversation_key,de.route_id,de.route_source_revision,s.scope_json AS event_scope_json
+    FROM assistant_inbox_events e JOIN assistant_inbox_sources s ON s.source_key=e.source_key
+    JOIN assistant_inbox_delivery_events de ON de.event_key=e.event_key WHERE de.delivery_id=? ORDER BY coalesce(de.event_ordinal,e.rowid) LIMIT 100`,id);
+  const assertExternalDeliverySnapshot=job=>{
+    // Native source rechecks happen outside SQLite; close the remaining local
+    // race synchronously at prepare/start/renew. A paused/reconfigured/rerouted
+    // source cannot revive a delivery snapshot that was allocated earlier.
+    const invalid=get(`SELECT 1 FROM assistant_inbox_events e JOIN assistant_inbox_sources s ON s.source_key=e.source_key
+      JOIN assistant_inbox_delivery_events de ON de.event_key=e.event_key WHERE de.delivery_id=?
+      AND json_extract(s.scope_json,'$.provider')!='trelio' AND (s.state!='active' OR e.conversation_key IS NOT NULL AND (
+        e.dispatch_source_key IS NULL OR e.dispatch_source_key!=? OR e.task_id IS NULL OR e.task_id!=?
+        OR de.conversation_key IS NULL OR de.conversation_key!=e.conversation_key OR de.route_id IS NULL OR e.route_id IS NULL OR de.route_id!=e.route_id
+        OR de.route_source_revision IS NULL OR s.configuration_revision IS NULL OR de.route_source_revision!=s.configuration_revision
+        OR e.route_source_revision IS NULL OR e.route_source_revision!=de.route_source_revision)) LIMIT 1`,
+      job.delivery_id,job.source_key,job.task_id);
+    if(invalid)fail('ASSISTANT_INBOX_STALE_DELIVERY');
   };
   return {
     register(scopeInput) {
@@ -223,10 +274,26 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           // A source pause/restore cycle invalidates outstanding workers too;
           // merely seeing "active" again must not revive an earlier lease.
           run('UPDATE assistant_inbox_events SET ack_token=NULL,ack_expires_at=NULL WHERE source_key=? AND acked=0', scope.key);
+          if(scope.provider!=='trelio')run(`UPDATE assistant_inbox_events SET dispatch_source_key=NULL,route_id=NULL,
+            route_source_revision=NULL,read_delivery_id=NULL,task_id=NULL WHERE source_key=? AND processed=0`,scope.key);
           run("DELETE FROM assistant_inbox_delivery_events WHERE delivery_id IN (SELECT delivery_id FROM assistant_inbox_deliveries WHERE source_key=? AND state='leased')", scope.key);
           run("DELETE FROM assistant_inbox_deliveries WHERE source_key=? AND state='leased'", scope.key);
         }
         return { state, revision: row.revision + Number(row.state !== state) };
+      });
+    },
+    observeExternalSourceRevision(scopeInput,nativeRevision){
+      const scope=scopeOf(scopeInput);if(scope.provider==='trelio')inputError();integer(nativeRevision,0,2_147_483_647);
+      return transaction(()=>{
+        const row=source(scope);
+        if(row.configuration_revision!==null && nativeRevision<row.configuration_revision)fail('ASSISTANT_INBOX_CONFLICT');
+        if(row.configuration_revision===nativeRevision)return;
+        // Changed source configuration never resets a native stream cursor or
+        // adopts an old route/read proof. Explicit current server routes must
+        // select the target again; unprocessed refs remain durable throughout.
+        run(`UPDATE assistant_inbox_events SET dispatch_source_key=NULL,route_id=NULL,route_source_revision=NULL,
+          read_delivery_id=NULL,task_id=NULL WHERE source_key=? AND processed=0`,scope.key);
+        run('UPDATE assistant_inbox_sources SET configuration_revision=? WHERE source_key=?',nativeRevision,scope.key);
       });
     },
     /** One bounded poll per exact source binding; the host performs provider I/O. */
@@ -417,6 +484,94 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope = scopeOf(scopeInput); activeSource(scope);
       return all('SELECT event_key,event_id,event_revision FROM assistant_inbox_events WHERE source_key=? AND task_id IS NULL ORDER BY rowid LIMIT 100', scope.key);
     },
+    pendingExternalRoutes(scopeInput){
+      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();activeSource(scope);
+      return all(`SELECT event_key,event_id,event_revision,conversation_key,task_id,route_id,route_source_revision,route_checked_at
+        FROM assistant_inbox_events WHERE source_key=? AND processed=0 AND conversation_key IS NOT NULL
+        AND (route_checked_at=0 OR route_checked_at<=?) ORDER BY route_checked_at,rowid LIMIT 100`,scope.key,Math.max(0,time()-300_000));
+    },
+    deferExternalRouting(scopeInput,{sourceRevision,eventKeys}){
+      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();integer(sourceRevision,0,2_147_483_647);
+      if(!Array.isArray(eventKeys)||!eventKeys.length||eventKeys.length>100||new Set(eventKeys).size!==eventKeys.length
+        ||eventKeys.some(key=>typeof key!=='string'||!/^[0-9a-f]{64}$/u.test(key)))inputError();
+      return transaction(()=>{
+        if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
+        // Read-only lookup backoff, NOT an empty native mapping result. Keep
+        // any previous route intact; dispatch still repeats live authority.
+        // Persisting the attempt clock prevents a broken first account from
+        // starving later accounts after every service restart.
+        for(const key of eventKeys)run('UPDATE assistant_inbox_events SET route_checked_at=? WHERE source_key=? AND event_key=? AND processed=0',time(),scope.key,key);
+      });
+    },
+    routeExternalEvents(scopeInput,{canonicalSource,sourceRevision,eventKeys,routes}){
+      const scope=scopeOf(scopeInput),canonical=scopeOf(canonicalSource);
+      if(scope.provider!=='telegram'||canonical.provider!=='trelio'
+        ||['origin','assistantId','companyId'].some(key=>scope[key]!==canonical[key])
+        ||!Array.isArray(routes)||routes.length>100||!Array.isArray(eventKeys)||!eventKeys.length||eventKeys.length>100
+        ||eventKeys.some(key=>typeof key!=='string'||!/^[a-f0-9]{64}$/u.test(key))||new Set(eventKeys).size!==eventKeys.length)inputError();
+      integer(sourceRevision,0,2_147_483_647);
+      const projected=routes.map(row=>{
+        object(row,['id','sourceId','sourceRevision','conversationKey','bindingId','bindingRevision','taskId']);
+        if(row.sourceId!==scope.bindingId||row.sourceRevision!==sourceRevision||typeof row.conversationKey!=='string'
+          ||!/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(row.conversationKey))inputError();
+        return {...row,id:uuid(row.id),taskId:uuid(row.taskId),bindingId:uuid(row.bindingId),bindingRevision:integer(row.bindingRevision,0,2_147_483_647)};
+      });
+      if(new Set(projected.map(row=>row.conversationKey)).size!==projected.length)inputError();
+      return transaction(()=>{
+        if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
+        activeSource(canonical);
+        const selected=eventKeys.map(key=>get('SELECT * FROM assistant_inbox_events WHERE source_key=? AND event_key=? AND processed=0',scope.key,key));
+        if(selected.some(row=>!row?.conversation_key))fail('ASSISTANT_INBOX_CONFLICT');
+        if(projected.some(route=>!selected.some(row=>row.conversation_key===route.conversationKey)))inputError();
+        for(const row of projected){
+          const task=get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',canonical.key,row.taskId);
+          // A mapping cannot provision a task or overwrite its permanent chat.
+          // The native accepted task inventory remains the scheduling source.
+          if(!task||task.state!=='accepted'||task.authority_binding_id!==row.bindingId||task.authority_revision!==row.bindingRevision)
+            fail('ASSISTANT_INBOX_TASK_REQUIRED');
+          const old=get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',scope.key,row.taskId);
+          if(!old||old.state!=='accepted'||old.authority_binding_id!==row.bindingId||old.authority_revision!==row.bindingRevision){
+            if(!old&&get('SELECT count(*) AS total FROM assistant_inbox_tasks').total>=10_000)fail('ASSISTANT_INBOX_FULL');
+            run(`INSERT INTO assistant_inbox_tasks(source_key,task_id,state,revision,authority_binding_id,authority_revision) VALUES (?,?,'accepted',?,?,?)
+              ON CONFLICT(source_key,task_id) DO UPDATE SET state=excluded.state,revision=excluded.revision,
+                authority_binding_id=excluded.authority_binding_id,authority_revision=excluded.authority_revision`,
+              scope.key,row.taskId,(old?.revision??0)+1,row.bindingId,row.bindingRevision);
+          }
+          const conflict=get(`SELECT 1 FROM assistant_inbox_events WHERE source_key=? AND processed=0
+            AND conversation_key=? AND task_id IS NOT NULL AND (task_id!=? OR route_id!=?)`,scope.key,row.conversationKey,row.taskId,row.id);
+          if(conflict)fail('ASSISTANT_INBOX_CONFLICT');
+        }
+        // This successful lookup is authoritative only for the exact requested
+        // bounded keys. Absent/revoked routes lose dispatch eligibility, while
+        // a failed network lookup never reaches this transaction or becomes [].
+        for(const event of selected){
+          const route=projected.find(row=>row.conversationKey===event.conversation_key);
+          run(`UPDATE assistant_inbox_events SET task_id=?,dispatch_source_key=?,route_id=?,route_source_revision=?,route_checked_at=?
+            WHERE event_key=?`,route?.taskId??null,route?canonical.key:null,route?.id??null,route?sourceRevision:null,time(),event.event_key);
+        }
+      });
+    },
+    /** Internal trusted native-read observer, NOT a model tool or read grant.
+     * Caller must validate a complete signed provider result for this exact
+     * account/key/ref/revision before calling. This ledger only binds that
+     * evidence to the current durable delivery; native business completion is
+     * still required, and no message body is accepted or saved here. */
+    recordExternalRead(scopeInput,{deliveryId,eventKey,sourceRevision,routeId}){
+      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();
+      deliveryId=uuid(deliveryId);routeId=uuid(routeId);integer(sourceRevision,0,2_147_483_647);
+      if(typeof eventKey!=='string'||!/^[0-9a-f]{64}$/u.test(eventKey))inputError();
+      return transaction(()=>{
+        if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
+        const job=delivery(deliveryId),event=get(`SELECT e.*,de.route_id AS original_route_id,de.route_source_revision AS original_source_revision FROM assistant_inbox_events e
+          JOIN assistant_inbox_delivery_events de ON de.event_key=e.event_key WHERE de.delivery_id=? AND e.event_key=? AND e.source_key=?`,deliveryId,eventKey,scope.key);
+        const task=get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',job.source_key,job.task_id);
+        if(job.state!=='started'||!job.native_started||job.expires_at<=time()||task?.state!=='accepted'||task.revision!==job.task_revision
+          ||!event?.conversation_key||event.route_id!==routeId||event.route_source_revision!==sourceRevision
+          ||event.original_route_id!==routeId||event.original_source_revision!==sourceRevision
+          ||event.dispatch_source_key!==job.source_key||event.task_id!==job.task_id)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        run('UPDATE assistant_inbox_events SET read_delivery_id=? WHERE event_key=?',deliveryId,eventKey);
+      });
+    },
     /**
      * `authorize` MUST use fresh server/provider ACL, assistant lifecycle and
      * task-start approval. Local rows and this callback's return grant no rights.
@@ -446,10 +601,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if (scheduled) return get(`SELECT t.source_key,t.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_tasks t
           JOIN assistant_inbox_sources s ON s.source_key=t.source_key
           WHERE t.source_key=? AND t.task_id=? AND t.state='accepted' AND s.state='active'${exclusion}`, scheduled.scope.key, scheduled.taskId,...excluded);
-        return get(`SELECT e.source_key,e.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_events e
-          JOIN assistant_inbox_sources s ON s.source_key=e.source_key
-          JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
-          WHERE e.processed=0 AND e.wake=1 AND s.state='active' AND t.state='accepted'${exclusion} ORDER BY e.rowid LIMIT 1`,...excluded);
+        return get(`SELECT t.source_key,e.task_id,t.revision,s.scope_json,s.revision AS source_revision FROM assistant_inbox_events e
+          JOIN assistant_inbox_sources es ON es.source_key=e.source_key
+          JOIN assistant_inbox_sources s ON s.source_key=coalesce(e.dispatch_source_key,e.source_key)
+          JOIN assistant_inbox_tasks t ON t.source_key=s.source_key AND t.task_id=e.task_id
+          WHERE e.processed=0 AND e.dispatched=0 AND (e.wake=1 OR e.dispatch_source_key IS NOT NULL AND e.provider_wake=1)
+          AND es.state='active' AND s.state='active' AND t.state='accepted'${exclusion} ORDER BY e.rowid LIMIT 1`,...excluded);
       });
       if (!candidate) return null;
       const scope = JSON.parse(candidate.scope_json);
@@ -459,13 +616,22 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const task = get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', scope.key, candidate.task_id);
         if (task?.state !== 'accepted' || task.revision !== candidate.revision) fail('ASSISTANT_INBOX_CONFLICT');
         if (get("SELECT 1 FROM assistant_inbox_deliveries WHERE state IN ('leased','started','uncertain')")) return null;
-        const events = provisionTask ? [] : all('SELECT event_key,event_id,event_revision,wake,owner_question_id FROM assistant_inbox_events WHERE source_key=? AND task_id=? AND processed=0 ORDER BY rowid LIMIT 100', scope.key, task.task_id);
+        const events = provisionTask ? [] : all(`SELECT e.event_key,e.event_id,e.event_revision,e.wake,e.owner_question_id,
+          e.conversation_key,e.route_id,e.route_source_revision,s.scope_json AS event_scope_json
+          FROM assistant_inbox_events e JOIN assistant_inbox_sources s ON s.source_key=e.source_key
+          WHERE coalesce(e.dispatch_source_key,e.source_key)=? AND e.task_id=? AND e.processed=0 AND s.state='active'
+          ORDER BY CASE WHEN e.dispatched=0 AND (e.wake=1 OR e.dispatch_source_key IS NOT NULL AND e.provider_wake=1)
+            THEN 0 ELSE 1 END,e.rowid LIMIT 100`,scope.key,task.task_id);
         if (!events.length && !scheduled) return null;
         if (get('SELECT count(*) AS total FROM assistant_inbox_deliveries').total >= MAX_EVENTS) fail('ASSISTANT_INBOX_FULL');
         const id = randomUUID();
         const kind = provisionTask ? 'provision' : 'task';
         run("INSERT INTO assistant_inbox_deliveries(delivery_id,source_key,task_id,task_revision,state,expires_at,scheduled,kind) VALUES (?,?,?,?,'leased',?,?,?)", id, scope.key, task.task_id, task.revision, time() + LEASE_MS, Number(Boolean(scheduledTask)), kind);
-        for (const event of events) run('INSERT INTO assistant_inbox_delivery_events(delivery_id,event_key) VALUES (?,?)', id, event.event_key);
+        // Put the actual undispatched wake into this bounded batch even when
+        // old unread context fills a page. Persist the order/scope snapshot so
+        // recovery cannot select a different set or loop on the same old page.
+        for (const [ordinal,event] of events.entries()) run(`INSERT INTO assistant_inbox_delivery_events(delivery_id,event_key,conversation_key,route_id,route_source_revision,event_ordinal)
+          VALUES (?,?,?,?,?,?)`,id,event.event_key,event.conversation_key,event.route_id,event.route_source_revision,ordinal);
         return { deliveryId: id, taskId: task.task_id, scope: scopeInputWithoutKey(scope), events, kind };
       });
     },
@@ -477,6 +643,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
         const eligible = row.state === 'leased' || (row.state === 'started' && !row.native_started);
         if (!eligible || row.native_started || row.expires_at <= time() || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        assertExternalDeliverySnapshot(row);
         run("UPDATE assistant_inbox_deliveries SET state='started',native_started=1 WHERE delivery_id=?", id);
       });
     },
@@ -505,6 +672,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
         if (row.kind !== 'task' || row.native_started || !['leased','started','uncertain'].includes(row.state)
           || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        assertExternalDeliverySnapshot(row);
         run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?", time()+LEASE_MS, id);
       });
     },
@@ -517,6 +685,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         activeSource(scope);
         const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
         if (row.state !== 'started' || row.expires_at <= time() || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        assertExternalDeliverySnapshot(row);
         run('UPDATE assistant_inbox_deliveries SET expires_at=? WHERE delivery_id=?', time() + LEASE_MS, id);
       });
     },
@@ -553,8 +722,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
             state: row.state, kind: row.kind, threadId: row.native_thread_id, nativeStarted: Boolean(row.native_started),
             // Recovery before native start must carry the original event set,
             // including question refs. Never recreate it from the latest poll.
-            events: all(`SELECT e.event_key,e.event_id,e.event_revision,e.wake,e.owner_question_id FROM assistant_inbox_events e
-              JOIN assistant_inbox_delivery_events de ON de.event_key=e.event_key WHERE de.delivery_id=? ORDER BY e.rowid LIMIT 100`, row.delivery_id) }));
+            events: deliveryEvents(row.delivery_id) }));
       });
     },
     readDelivery(id) {
@@ -577,7 +745,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           if (result && typeof result.then === 'function') fail('ASSISTANT_INBOX_ASYNC_COMPLETION');
         }
         run("UPDATE assistant_inbox_deliveries SET state='complete',external_receipt=? WHERE delivery_id=?", receipt, id);
-        run('UPDATE assistant_inbox_events SET processed=1 WHERE event_key IN (SELECT event_key FROM assistant_inbox_delivery_events WHERE delivery_id=?)', id);
+        // An external wake can reach the SAME task chat, but a native/business
+        // receipt alone is not evidence that the message body was actually read.
+        // Suppress duplicate unsolicited wakes while retaining unread work for
+        // later task cycles. Only the trusted exact read observer can supply the
+        // per-delivery evidence; until it is wired no external ACK is possible.
+        run(`UPDATE assistant_inbox_events SET dispatched=1,processed=CASE WHEN
+          source_key IN (SELECT source_key FROM assistant_inbox_sources WHERE json_extract(scope_json,'$.provider')='trelio')
+          OR read_delivery_id=? THEN 1 ELSE processed END
+          WHERE event_key IN (SELECT event_key FROM assistant_inbox_delivery_events WHERE delivery_id=?)`,id,id);
       });
     },
     /** Verified terminal non-acceptance, never a missing/slow lookup response. */
