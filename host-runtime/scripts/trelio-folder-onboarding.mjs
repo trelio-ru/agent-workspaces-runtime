@@ -23,7 +23,7 @@ const MAX_NAME_LENGTH = 200;
 const MAX_SLUG_LENGTH = 120;
 const MAX_INSTRUCTION_FILE_BYTES = 256 * 1024;
 const INSTRUCTION_FILES = new Set(["AGENTS.md", "AGENTS.override.md"]);
-const BINDING_CLIENTS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
+const BINDING_CLIENTS = new Set(["codex", "claude-code", "cursor", "antigravity", "gigacode"]);
 const ROOT_ALLOWED_FILES = new Set([
   "AGENTS.md",
   "AGENTS.override.md",
@@ -876,9 +876,9 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
   const requestedTarget = normalizeInstructionTarget(rawInput.instructionTarget);
   // AGENTS.override.md belongs to Codex's precedence rules. Native clients
   // load AGENTS.md, so never pretend that writing the override binds them.
-  if (["cursor", "antigravity"].includes(clientKind)
+  if (["cursor", "antigravity", "gigacode"].includes(clientKind)
     && (requestedTarget === "AGENTS.override.md" || inspection.status === "instruction_target_required")) {
-    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "Cursor/Antigravity require AGENTS.md; resolve the existing AGENTS.override.md before binding this shared folder.");
+    throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "This native client requires AGENTS.md; resolve the existing AGENTS.override.md before binding this shared folder.");
   }
   if (inspection.status === "instruction_target_required" && !requestedTarget) {
     return { inspection, plan: null, files: null };
@@ -1029,7 +1029,7 @@ export const prepareTrelioFolderDiagnostic = async (rawInput, clientKind, depend
     const git = await (dependencies.gitResolver ?? resolveGitExecutable)({ filesystem, execFileCommand: dependencies.execFileCommand });
     await verifyServiceGitIsolation({ rootPath: inspection.folder.path, gitPath: git.gitPath, filesystem, execFileCommand: dependencies.execFileCommand ?? execFileAsync });
   }
-  if (["cursor", "antigravity"].includes(clientKind) && inspection.status === "instruction_target_required") {
+  if (["cursor", "antigravity", "gigacode"].includes(clientKind) && inspection.status === "instruction_target_required") {
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET", "This client loads AGENTS.md; an existing override needs an explicit target decision.");
   }
   const instructionTarget = inspection.status === "instruction_target_required"

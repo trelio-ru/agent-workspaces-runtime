@@ -943,6 +943,19 @@ export const inspectBundledPlugin = async ({
   loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION,
   clientKind = null,
 } = {}) => {
+  if (clientKind === "gigacode") {
+    // GigaCode's supported importer preserves the shell and writes its own
+    // extension manifest. Inspect that exact loaded root only; do not read its
+    // settings, token file or foreign Codex/Claude hook trust stores.
+    const manifest = await readDiagnosticJsonFile(path.join(pluginDirectory, "gigacode-extension.json"));
+    const loadedVersion = STABLE_VERSION_PATTERN.test(String(loadedPluginVersion || "")) ? loadedPluginVersion : null;
+    const gigacodeVersion = manifest.value?.version ?? null;
+    const issues = [];
+    if (!loadedVersion) issues.push("LOADED_PLUGIN_VERSION_INVALID");
+    if (manifest.value?.name !== "trelio-agent-workspaces" || gigacodeVersion !== loadedVersion) issues.push("GIGACODE_MANIFEST_INVALID");
+    return { status: issues.length ? "action_required" : "ready", loadedVersion,
+      manifests: { gigacodeVersion }, hooks: { status: "not_applicable" }, issues };
+  }
   if (clientKind === "antigravity") {
     // Antigravity auto-discovers root manifests. Its schema has no version;
     // the installer records shell version separately and materializes absolute
@@ -1273,7 +1286,7 @@ export const diagnoseLocalPrerequisites = async (options = {}) => {
   const [git, plugin, runtimeSessions, connection] = await withPrivateProcessSession(() => Promise.all([
     verifyGitRuntime(gitOptions),
     inspectBundledPlugin({ pluginDirectory, loadedPluginVersion, clientKind }),
-    ["cursor", "antigravity"].includes(clientKind) ? { status: "not_applicable" }
+    ["cursor", "antigravity", "gigacode"].includes(clientKind) ? { status: "not_applicable" }
       : skipPrivateInspection ? skippedPrivateState : inspectLocalRuntimeSessions({ configDirectory, nowMilliseconds }),
     skipPrivateInspection ? skippedPrivateState : inspectLocalBridgeConnection({ origin, configDirectory, nowMilliseconds }),
   ]), signal);

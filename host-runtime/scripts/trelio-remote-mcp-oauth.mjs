@@ -193,10 +193,16 @@ export const discoverRemoteMcpOAuth = async (config, options) => {
     authorizationEndpoint: sameOriginUrl(value.authorization_endpoint, origin),
     tokenEndpoint: sameOriginUrl(value.token_endpoint, origin),
     registrationEndpoint: sameOriginUrl(value.registration_endpoint, origin),
+    // Native Trelio setup reads the server's scope catalogue rather than
+    // freezing an ever-growing copy in the desktop adapter. Provider skills
+    // keep their exact signed declaration and do not select this option.
+    supportedScopes: Array.isArray(value.scopes_supported) && value.scopes_supported.length <= 100
+      && value.scopes_supported.every(scope => typeof scope === "string" && /^[A-Za-z0-9:._-]{1,128}$/u.test(scope))
+      ? value.scopes_supported : null,
   };
 };
 
-const tokenFromResponse = (body, previousRefreshToken = null) => {
+const tokenFromResponse = (body, previousRefreshToken = null, maxExpiresIn = 86_400) => {
   if (
     typeof body?.token_type !== "string"
     || body.token_type.toLowerCase() !== "bearer"
@@ -206,7 +212,7 @@ const tokenFromResponse = (body, previousRefreshToken = null) => {
     || /[\r\n\0]/u.test(body.access_token)
     || !Number.isFinite(body.expires_in)
     || body.expires_in <= 0
-    || body.expires_in > 86_400
+    || body.expires_in > maxExpiresIn
   ) {
     throw fail("REMOTE_MCP_OAUTH_TOKEN_INVALID", "OAuth token response не прошёл проверку.");
   }
@@ -314,42 +320,52 @@ const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, 
 
 export const connectRemoteMcpOAuth = async (
   config,
-  { resolveEndpoint, openBrowserFn = openBrowser, httpJson = oauthHttpJson, signal } = {},
+  { resolveEndpoint, openBrowserFn = openBrowser, httpJson = oauthHttpJson, signal,
+    fixedClientId = null, resource = null, useSupportedScopes = false, maxExpiresIn = 86_400 } = {},
 ) => {
   const metadata = await discoverRemoteMcpOAuth(config, { resolveEndpoint, httpJson, signal });
   const verifier = crypto.randomBytes(32).toString("base64url");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-  const scopes = config.authentication.scopes.join(" ");
-  let clientId = null;
+  const requestedScopes = useSupportedScopes ? metadata.supportedScopes : config.authentication.scopes;
+  // A provider's signed declaration may intentionally request no scopes.
+  // Only native discovery requires a nonempty server catalogue; introducing
+  // that profile must not change existing scope-free DCR integrations.
+  if (!Array.isArray(requestedScopes) || (useSupportedScopes && !requestedScopes.length)) {
+    throw fail("REMOTE_MCP_OAUTH_METADATA_INVALID", "OAuth server не объявил необходимые scopes.");
+  }
+  const scopes = requestedScopes.join(" ");
+  let clientId = fixedClientId;
   const { code, redirectUri } = await waitForOAuthCallback({
     issuer: metadata.issuer,
     openBrowserFn,
     signal,
     buildAuthorizeUrl: async ({ redirectUri: callbackUrl, state }) => {
-      const registration = await httpJson(metadata.registrationEndpoint, {
-        method: "POST",
-        contentType: "application/json",
-        body: JSON.stringify({
-          client_name: "Trelio Remote MCP host",
-          application_type: "native",
-          redirect_uris: [callbackUrl],
-          grant_types: ["authorization_code", "refresh_token"],
-          response_types: ["code"],
-          token_endpoint_auth_method: "none",
-          scope: scopes,
-        }),
-        signal,
-      }, { resolveEndpoint });
-      clientId = registration.body?.client_id;
-      if (
-        typeof clientId !== "string"
-        || !clientId
-        || clientId.length > 1_024
-        || registration.body?.token_endpoint_auth_method !== "none"
-        || (Array.isArray(registration.body?.redirect_uris)
-          && !registration.body.redirect_uris.includes(callbackUrl))
-      ) {
-        throw fail("REMOTE_MCP_OAUTH_REGISTRATION_INVALID", "OAuth client registration не вернул client_id.");
+      if (!fixedClientId) {
+        const registration = await httpJson(metadata.registrationEndpoint, {
+          method: "POST",
+          contentType: "application/json",
+          body: JSON.stringify({
+            client_name: "Trelio Remote MCP host",
+            application_type: "native",
+            redirect_uris: [callbackUrl],
+            grant_types: ["authorization_code", "refresh_token"],
+            response_types: ["code"],
+            token_endpoint_auth_method: "none",
+            scope: scopes,
+          }),
+          signal,
+        }, { resolveEndpoint });
+        clientId = registration.body?.client_id;
+        if (
+          typeof clientId !== "string"
+          || !clientId
+          || clientId.length > 1_024
+          || registration.body?.token_endpoint_auth_method !== "none"
+          || (Array.isArray(registration.body?.redirect_uris)
+            && !registration.body.redirect_uris.includes(callbackUrl))
+        ) {
+          throw fail("REMOTE_MCP_OAUTH_REGISTRATION_INVALID", "OAuth client registration не вернул client_id.");
+        }
       }
       const url = new URL(metadata.authorizationEndpoint);
       url.searchParams.set("response_type", "code");
@@ -359,6 +375,7 @@ export const connectRemoteMcpOAuth = async (
       url.searchParams.set("code_challenge_method", "S256");
       url.searchParams.set("state", state);
       url.searchParams.set("scope", scopes);
+      if (resource) url.searchParams.set("resource", resource);
       return url.toString();
     },
   });
@@ -371,19 +388,20 @@ export const connectRemoteMcpOAuth = async (
       client_id: clientId,
       redirect_uri: redirectUri,
       code_verifier: verifier,
+      ...(resource ? { resource } : {}),
     }).toString(),
     signal,
   }, { resolveEndpoint });
   if (typeof tokenResponse.body?.scope === "string") {
     const granted = new Set(tokenResponse.body.scope.split(/\s+/u));
-    if (config.authentication.scopes.some((scope) => !granted.has(scope))) {
+    if (requestedScopes.some((scope) => !granted.has(scope))) {
       throw fail("REMOTE_MCP_OAUTH_SCOPE_MISMATCH", "OAuth server не предоставил объявленные scopes.");
     }
   }
   return {
     issuer: metadata.issuer,
     clientId,
-    ...tokenFromResponse(tokenResponse.body),
+    ...tokenFromResponse(tokenResponse.body, null, maxExpiresIn),
   };
 };
 

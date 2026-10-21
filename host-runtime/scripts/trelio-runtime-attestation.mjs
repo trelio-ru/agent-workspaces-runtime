@@ -251,6 +251,13 @@ export const detectAgentRuntimeAttestation = async ({
   hookInput = {},
   environment = process.env,
 } = {}) => {
+  // GigaCode's Claude-compatible hook payload also contains session_id. That
+  // field alone must not make its transcript a Codex observation, even when a
+  // developer launched the app with inherited CODEX_/CLAUDE_ variables.
+  if (environment.GIGACODE_PROJECT_DIR) return {
+    schemaVersion: 1, clientFamily: "other", modelId: null, effortLevel: null,
+    evidenceLevel: "unavailable", source: "unknown", observedAt: new Date().toISOString(),
+  };
   const claudeCode = Boolean(
     environment.CLAUDE_CODE_ENTRYPOINT
     || environment.CLAUDE_EFFORT

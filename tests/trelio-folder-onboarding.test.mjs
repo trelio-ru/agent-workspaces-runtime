@@ -55,12 +55,12 @@ const binding = {
   project: { name: "Рабочий проект", slug: "work-project" },
 };
 
-for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "gigacode"]) {
   test(`${clientKind} binds and refreshes the folder without replacing personal instructions`, async () => {
     const root = await makeRoot();
     const personal = "# Personal\n\nKeep my formatting.\n";
     await fs.writeFile(path.join(root, "AGENTS.md"), personal);
-    const native = ["cursor", "antigravity"].includes(clientKind);
+    const native = ["cursor", "antigravity", "gigacode"].includes(clientKind);
     const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, clientKind, ...binding });
     assert.deepEqual(prepared.plan.changes.map((change) => change.path), native ? ["AGENTS.md"] : ["AGENTS.md", "CLAUDE.md"]);
     const result = await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
@@ -83,7 +83,7 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
 test("native clients reject a Codex override instead of claiming an unloaded binding", async () => {
   const root = await makeRoot();
   await fs.writeFile(path.join(root, "AGENTS.override.md"), "# Existing override\n");
-  for (const clientKind of ["cursor", "antigravity"]) {
+  for (const clientKind of ["cursor", "antigravity", "gigacode"]) {
     await assert.rejects(prepareTrelioFolderOnboarding({ folderPath: root, clientKind, ...binding }),
       { code: "TRELIO_FOLDER_ONBOARDING_INACTIVE_TARGET" });
   }

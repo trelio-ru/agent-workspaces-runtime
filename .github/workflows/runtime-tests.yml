@@ -251,6 +251,7 @@ jobs:
           node tests/trelio-assistant-maintenance.test.mjs
           node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
+          node tests/trelio-gigacode-mcp.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
           node tests/trelio-hook-signed-chain.test.mjs
           node tests/trelio-host-runtime-recovery.test.mjs

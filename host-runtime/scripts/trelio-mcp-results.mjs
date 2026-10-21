@@ -8,16 +8,23 @@ import path from "node:path";
 export const resolveLocalMcpTextCompatibility = async (environment = process.env) => {
   const root = environment.TRELIO_PLUGIN_ROOT;
   if (typeof root !== "string" || !path.isAbsolute(root)) return false;
-  const file = path.join(root, "plugin.json");
-  try {
-    const stat = await fs.lstat(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return false;
-    const manifest = JSON.parse(await fs.readFile(file, "utf8"));
-    return manifest.name === "trelio-agent-workspaces";
-  } catch (error) {
-    if (error.code === "ENOENT" || error instanceof SyntaxError) return false;
-    throw error;
+  // GigaCode's imported extension has its own native manifest and forwards
+  // only content blocks to the model. Reuse the same hydrated text delivery;
+  // neither marker proves OAuth, hook trust or permission to read company data.
+  for (const name of ["plugin.json", "gigacode-extension.json"]) {
+    const file = path.join(root, name);
+    try {
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return false;
+      const manifest = JSON.parse(await fs.readFile(file, "utf8"));
+      return manifest.name === "trelio-agent-workspaces";
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      if (error instanceof SyntaxError) return false;
+      throw error;
+    }
   }
+  return false;
 };
 
 export const deliverLocalMcpResult = (result, textCompatibility = false, nativeTool = "") =>

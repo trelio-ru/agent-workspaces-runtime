@@ -32,6 +32,14 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
     throw new Error("Trelio host runtime ожидает mode bridge, hook или mcp.");
   }
 
+  // GigaCode selects a native human-MCP relay inside the existing signed mcp
+  // mode. No new shell entrypoint, unsigned wrapper or provider runtime is
+  // required. Unknown arguments must not fall through to the skill server.
+  if (mode === "mcp" && argumentsAfterMode[0] === "gigacode") {
+    if (argumentsAfterMode.length !== 1) throw new Error("TRELIO_GIGACODE_ARGUMENTS_UNSUPPORTED");
+    return { mode, profile: "gigacode", entrypointPath: path.join(SCRIPT_DIRECTORY, "trelio-gigacode-mcp.mjs"), arguments: [] };
+  }
+
   // Keep the stable three-mode shell ABI. The dedicated plugin selects an
   // explicit bridge subprofile; neither an unknown assistant command nor a
   // missing capability may fall through to human bridge/MCP authentication.
