@@ -37,7 +37,7 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
   // required. Unknown arguments must not fall through to the skill server.
   if (mode === "mcp" && argumentsAfterMode[0] === "gigacode") {
     if (argumentsAfterMode.length !== 1) throw new Error("TRELIO_GIGACODE_ARGUMENTS_UNSUPPORTED");
-    return { mode, profile: "gigacode", entrypointPath: path.join(SCRIPT_DIRECTORY, "trelio-gigacode-mcp.mjs"), arguments: [] };
+    return { mode, profile: "gigacode", entrypointPath: path.join(SCRIPT_DIRECTORY, "trelio-remote-mcp.mjs"), arguments: ["gigacode"] };
   }
 
   // Keep the stable three-mode shell ABI. The dedicated plugin selects an

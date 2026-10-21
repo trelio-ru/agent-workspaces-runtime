@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createGigaCodeMcpHandler } from "../host-runtime/scripts/trelio-gigacode-mcp.mjs";
+import { PassThrough } from "node:stream";
+import { createGigaCodeMcpHandler, runGigaCodeMcp } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { resolveHostRuntimeInvocation } from "../host-runtime/scripts/trelio-host-runtime-entry.mjs";
 import { detectAgentRuntimeAttestation } from "../host-runtime/scripts/trelio-runtime-attestation.mjs";
 
@@ -32,9 +33,9 @@ const fixture = (options = {}) => {
 
 test("signed mcp subprofile preserves the shell ABI and rejects extra flags", () => {
   const invocation = resolveHostRuntimeInvocation(["mcp", "gigacode"]);
-  assert.match(invocation.entrypointPath, /trelio-gigacode-mcp\.mjs$/);
+  assert.match(invocation.entrypointPath, /trelio-remote-mcp\.mjs$/);
   assert.equal(invocation.profile, "gigacode");
-  assert.deepEqual(invocation.arguments, []);
+  assert.deepEqual(invocation.arguments, ["gigacode"]);
   assert.throws(() => resolveHostRuntimeInvocation(["mcp", "gigacode", "--token"]), /ARGUMENTS_UNSUPPORTED/);
 });
 
@@ -58,6 +59,35 @@ test("bootstrap never opens OAuth or returns credentials during enumeration", as
   assert.deepEqual(f.calls, []);
   assert.deepEqual(f.connects, []);
   assert.deepEqual((await f.handler(message(3, "ping"))).result, {});
+});
+
+test("native stdio EOF cancels consent and never inspects foreign Codex config", { timeout: 5000 }, async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  let frames = "";
+  output.setEncoding("utf8").on("data", chunk => { frames += chunk; });
+  const started = Promise.withResolvers();
+  let attempts = 0;
+  const running = runGigaCodeMcp({
+    inputStream: input, outputStream: output, environment: {}, platform: "darwin",
+    startupTrace: () => {}, diagnosticReporter: { record() {}, close() {} },
+    legacyMcpMigration: () => assert.fail("native profile must not inspect foreign settings"),
+    vault: { read: async () => null },
+    connect: async (_config, { signal }) => {
+      attempts++;
+      return await new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(Object.assign(new Error("synthetic cancellation"),
+          { code: "REMOTE_MCP_OAUTH_CANCELLED" })), { once: true });
+        started.resolve();
+      });
+    },
+  });
+  input.write(JSON.stringify(message(1, "tools/call", { name: "connect_trelio_gigacode" })) + "\n");
+  await started.promise;
+  input.end();
+  await running;
+  assert.equal(attempts, 1);
+  assert.equal(JSON.parse(frames.trim()).error.message, "TRELIO_GIGACODE_CANCELLED");
 });
 
 test("browser consent persists once, reads back, notifies catalogue and forwards native guards", async () => {
