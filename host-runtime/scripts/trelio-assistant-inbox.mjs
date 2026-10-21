@@ -75,7 +75,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -134,7 +134,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // The additive stream journal is in the SAME private database. No cursor,
     // uncertain delivery, ACK or task generation is reset during this upgrade.
     if (versions.length && versions[0].version < 4) run('UPDATE assistant_inbox_meta SET version=4');
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (4)');
+    if (!versions.length || versions[0].version < 5) {
+      db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN ack_started INTEGER NOT NULL DEFAULT 0 CHECK(ack_started IN (0,1)); ALTER TABLE assistant_inbox_events ADD COLUMN ack_attempt_token TEXT; ALTER TABLE assistant_inbox_events ADD COLUMN ack_retry_at INTEGER NOT NULL DEFAULT 0');
+      // A previous external lease might already have reached its provider.
+      // Upgrade never turns that ambiguity into a fresh write permission.
+      run(`UPDATE assistant_inbox_events SET ack_started=1 WHERE acked=0 AND ack_token IS NOT NULL
+        AND source_key IN (SELECT source_key FROM assistant_inbox_sources WHERE json_extract(scope_json,'$.provider')!='trelio')`);
+      run('UPDATE assistant_inbox_meta SET version=5');
+    }
+    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (5)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -597,15 +605,51 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // processing before even offering an external ACK. The provider adapter
         // must still verify actual content-read evidence and exact revision;
         // neither this SQL flag nor a generic completion boolean grants that.
-        const events = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id FROM assistant_inbox_events e
+        const candidates = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id,e.ack_started FROM assistant_inbox_events e
           JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
           WHERE e.source_key=? AND e.acked=0 AND t.state='accepted'
           AND (?='trelio' OR e.processed=1)
-          AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 100`, scope.key, scope.provider, time());
-        if (!events.length) return null;
+          AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_started,e.rowid LIMIT 100`, scope.key, scope.provider, time(), time());
+        if (!candidates.length) return null;
+        // Never mix a fresh provider attempt with recovery from an old one.
+        // An expired ACK lease is NOT evidence that a mutation did not happen.
+        const reconcileOnly=scope.provider!=='trelio' && candidates[0].ack_started===1;
+        const events=candidates.filter(row=>scope.provider==='trelio'||row.ack_started===Number(reconcileOnly))
+          .map(({ack_started,...row})=>row);
         const token = randomUUID();
         for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=? WHERE event_key=?', token, time() + LEASE_MS, event.event_key);
-        return { token, events };
+        return { token, events, ...(scope.provider==='trelio'?{}:{reconcileOnly}) };
+      });
+    },
+    /** Host-only fence immediately BEFORE the one native provider invocation.
+     * Fresh domain ACL, exact read proof and committed processing are still
+     * required by that adapter. This SQLite bit is never sending authority. */
+    startExternalAcknowledgements(scopeInput,token) {
+      const scope=scopeOf(scopeInput);uuid(token);
+      if(scope.provider==='trelio')inputError();
+      return transaction(()=>{
+        activeSource(scope);
+        const rows=all('SELECT ack_started,processed,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
+        if(!rows.length || rows.some(row=>row.ack_started!==0 || row.processed!==1 || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
+        run('UPDATE assistant_inbox_events SET ack_started=1,ack_attempt_token=? WHERE source_key=? AND ack_token=? AND acked=0',token,scope.key,token);
+      });
+    },
+    /** Bounded recovery backoff without erasing an uncertain provider attempt.
+     * notAttempted is accepted ONLY from a complete, validated signed native
+     * provider result proving no write; never from model text, a timeout, an
+     * absent response or verify-only acknowledged=false. It is not a replay. */
+    deferExternalAcknowledgements(scopeInput,{token,retryAfterMs,notAttempted=false}) {
+      const scope=scopeOf(scopeInput);uuid(token);integer(retryAfterMs,30_000,3_600_000);
+      if(scope.provider==='trelio'||typeof notAttempted!=='boolean')inputError();
+      return transaction(()=>{
+        activeSource(scope);
+        const rows=all('SELECT ack_expires_at,ack_started,ack_attempt_token FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
+        if(!rows.length||rows.some(row=>row.ack_expires_at<=time()
+          || notAttempted && (row.ack_started!==1 || row.ack_attempt_token!==token)))fail('ASSISTANT_INBOX_STALE_ACK');
+        // Recovery invalidates the old lease immediately. A separate structural
+        // retry time must NOT extend its original expiry or admit a late reply.
+        run('UPDATE assistant_inbox_events SET ack_token=NULL,ack_expires_at=NULL,ack_retry_at=?,ack_started=CASE WHEN ? THEN 0 ELSE ack_started END,ack_attempt_token=CASE WHEN ? THEN NULL ELSE ack_attempt_token END WHERE source_key=? AND ack_token=? AND acked=0',
+          time()+retryAfterMs,Number(notAttempted),Number(notAttempted),scope.key,token);
       });
     },
     completeAcknowledgements(scopeInput, token) {
@@ -615,7 +659,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // A token issued by an older worker before this source guard is not
         // upgraded into read evidence. Reject the entire batch, including mixed
         // processed/unprocessed rows, without clearing its ambiguous outcome.
-        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND processed=0', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
+        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND (processed=0 OR ack_started=0)', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
         const pending = get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND ack_expires_at>? AND acked=0', scope.key, token, time());
         if (!pending.total) fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET acked=1,ack_token=NULL,ack_expires_at=NULL WHERE source_key=? AND ack_token=?', scope.key, token);

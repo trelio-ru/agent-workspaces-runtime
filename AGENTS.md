@@ -24,6 +24,9 @@ publication tooling также остаются вне этого публичн
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
   требует committed processing и отдельного native read proof.
+  External ACK attempts are durably fenced before provider invocation; expiry,
+  restart or source resume permit read-only reconciliation, never blind write
+  replay. A no-write result may release only its own exact attempt token.
   SQLite хранит только bounded structural refs; child stream hints/cursors
   commit in that SAME journal, never as guessed task/ACK authority. Final
   streams sleep until a new native hint; new hints cannot be consumed by an

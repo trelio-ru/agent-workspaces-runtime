@@ -117,6 +117,43 @@ ordinary comments versus wake events, scheduled passes, owner-pending tasks,
 read acknowledgement, revocation and uncertain external dispatch. It does not
 claim a live Telegram/Trelio/Codex end-to-end run.
 
+## External ACK attempts (schema v5)
+
+The same private event journal adds an `ack_started` bit, original attempt
+lease UUID and retry timestamp, never body/read proof/credentials or a second outbox. `claimAcknowledgements`
+keeps the Trelio ABI and idempotent native notification handling. For external
+sources it additionally returns `reconcileOnly`; fresh and uncertain rows never
+share a batch. Committed processing remains mandatory before either kind is
+claimable. A mere claim cannot complete an external ACK.
+
+The trusted provider adapter must first verify live source/task authority, exact
+content-read evidence and committed processing. Immediately before its ONE
+native provider invocation it calls `startExternalAcknowledgements`. A crash
+before that boundary may reclaim a fresh attempt; after it, lease expiry/restart
+retains the bit and offers only read-only reconciliation. Source pause/revoke
+invalidates the current lease without clearing the original attempt fence.
+Neither processed=true, a lease nor this queue API authorizes a provider write.
+
+`deferExternalAcknowledgements` preserves that fence under bounded backoff and
+invalidates the old lease immediately; the retry timestamp never extends the
+original deadline or admits a late completion. Only
+a complete validated signed provider result proving `writeAttempted=false` may
+set `notAttempted=true`, and ONLY for the exact original attempt token. A later
+verify-only result also performs no write, but cannot clear uncertainty about an
+earlier invocation: a replacement lease fails that token check. Timeout, missing
+reply, arbitrary model output and `acknowledged=false` never release the fence.
+Native positive read-back under the current lease is required before the adapter
+calls `completeAcknowledgements`; the queue never infers it from its own bits.
+
+The v4 → v5 upgrade retains source/channel cursors, task/delivery state and ACK
+leases atomically. Pre-existing unacknowledged external leases are conservatively
+marked uncertain without adopting their old token as new no-write evidence.
+Their next claim is read-only. Trelio leases remain unchanged. Unknown schemas
+remain closed. Tests cover actual SQLite restart, late completion, no-write
+recovery, mixed batches, source pause and real prior-schema migration. This is
+the durable lifecycle boundary for the production adapter; it does NOT itself
+wire provider ACK execution, native read proofs or business readiness.
+
 ## Coordinator projection and schema v2
 
 Schema v2 upgrades existing private SQLite atomically, retaining cursors, task

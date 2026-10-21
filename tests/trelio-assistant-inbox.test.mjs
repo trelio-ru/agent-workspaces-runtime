@@ -253,9 +253,9 @@ test('v2 SQLite upgrade preserves question-free events, leases and cursors; ques
   initial.prepareTaskPass(first.deliveryId);
   // Real previous schema on the same connection, not a mock version flag on a
   // new table: the upgrade must add the column without resetting pending work.
-  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; UPDATE assistant_inbox_meta SET version=2');
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=2');
   const inbox = createAssistantInbox({ database, now: () => 1_000_000 });
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 4);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 5);
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.incompleteDeliveries()[0].deliveryId, first.deliveryId);
   assert.equal(inbox.incompleteDeliveries()[0].events[0].owner_question_id, null);
@@ -294,6 +294,9 @@ for(const provider of ['telegram','email','max'])test(`${provider} ACK waits for
   assert.equal(inbox.claimAcknowledgements(source),null,'an unknown native outcome is not processing evidence');
   inbox.completeDelivery(delivery.deliveryId,'verified-native-receipt');
   const ack=inbox.claimAcknowledgements(source);assert.equal(ack.events.length,1);
+  assert.equal(ack.reconcileOnly,false);
+  assert.throws(()=>inbox.completeAcknowledgements(source,ack.token),/STALE_ACK/,'a claim is not a provider invocation/read receipt');
+  inbox.startExternalAcknowledgements(source,ack.token);
   inbox.completeAcknowledgements(source,ack.token);assert.equal(inbox.claimAcknowledgements(source),null);
 });
 
@@ -305,6 +308,79 @@ test('an external ACK token from an older worker cannot mark an unprocessed batc
   database.prepare('UPDATE assistant_inbox_events SET processed=1 WHERE rowid=(SELECT min(rowid) FROM assistant_inbox_events)').run();
   assert.throws(()=>inbox.completeAcknowledgements(source,token),/STALE_ACK/);
   assert.equal(database.prepare('SELECT count(*) AS total FROM assistant_inbox_events WHERE acked=1').get().total,0);
+});
+
+test('external ACK attempts survive expiry and restart as read-only recovery, never another write',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-ack-fence-')),file=path.join(directory,'queue.sqlite');
+  let db=new DatabaseSync(file),timestamp=1_000_000;
+  t.after(async()=>{db.close();await fs.rm(directory,{recursive:true,force:true});});
+  let inbox=createAssistantInbox({database:db,now:()=>timestamp});
+  const source=scope({provider:'telegram'}),task=randomUUID();inbox.register(source);accept(inbox,source,task);
+  page(inbox,source,[event(task)]);
+  const work=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(work.deliveryId);inbox.completeDelivery(work.deliveryId,'committed');
+  let ack=inbox.claimAcknowledgements(source);assert.equal(ack.reconcileOnly,false);
+  timestamp+=120_001;ack=inbox.claimAcknowledgements(source);assert.equal(ack.reconcileOnly,false,'a crash before native invocation permits a fresh attempt');
+  inbox.startExternalAcknowledgements(source,ack.token);
+  assert.throws(()=>inbox.startExternalAcknowledgements(source,ack.token),/STALE_ACK/,'one use before provider I/O');
+  db.close();db=new DatabaseSync(file);inbox=createAssistantInbox({database:db,now:()=>timestamp});
+  assert.equal(inbox.claimAcknowledgements(source),null,'restart retains the exact active ACK lease');
+  timestamp+=120_001;const reconcile=inbox.claimAcknowledgements(source);assert.equal(reconcile.reconcileOnly,true);
+  assert.throws(()=>inbox.startExternalAcknowledgements(source,reconcile.token),/STALE_ACK/);
+  assert.throws(()=>inbox.completeAcknowledgements(source,ack.token),/STALE_ACK/,'late native reply cannot complete a replacement lease');
+  assert.throws(()=>inbox.deferExternalAcknowledgements(source,{token:reconcile.token,retryAfterMs:300_000,notAttempted:true}),/STALE_ACK/,
+    'verify-only performs no write but cannot prove that the ORIGINAL write did not happen');
+  inbox.deferExternalAcknowledgements(source,{token:reconcile.token,retryAfterMs:300_000});
+  assert.throws(()=>inbox.completeAcknowledgements(source,reconcile.token),/STALE_ACK/,
+    'backoff invalidates the original lease instead of extending it for late replies');
+  assert.equal(inbox.claimAcknowledgements(source),null);timestamp+=300_001;
+  const final=inbox.claimAcknowledgements(source);assert.equal(final.reconcileOnly,true);
+  // Only the adapter's fresh native positive read-back may reach this commit;
+  // the queue does not infer it from its own processed/attempted bits.
+  inbox.completeAcknowledgements(source,final.token);
+  assert.equal(inbox.claimAcknowledgements(source),null);
+  assert.equal(db.prepare('SELECT acked FROM assistant_inbox_events').get().acked,1);
+});
+
+test('proved no-write result is bound to its own attempt; fresh and uncertain batches never mix',async t=>{
+  const {inbox,database,advance}=memory(t),source=scope({provider:'email'}),task=randomUUID();inbox.register(source);accept(inbox,source,task);
+  const process=async(id,cursor)=>{
+    page(inbox,source,[event(task,true,id)],cursor);
+    const work=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(work.deliveryId);inbox.completeDelivery(work.deliveryId,`committed-${id}`);
+  };
+  await process('first','one');const first=inbox.claimAcknowledgements(source);inbox.startExternalAcknowledgements(source,first.token);
+  inbox.deferExternalAcknowledgements(source,{token:first.token,retryAfterMs:300_000,notAttempted:true});
+  assert.equal(inbox.claimAcknowledgements(source),null);advance(300_001);
+  const fresh=inbox.claimAcknowledgements(source);assert.equal(fresh.reconcileOnly,false);inbox.startExternalAcknowledgements(source,fresh.token);
+  inbox.deferExternalAcknowledgements(source,{token:fresh.token,retryAfterMs:30_000});advance(300_000);
+  await process('second','two');const second=inbox.claimAcknowledgements(source);
+  assert.equal(second.reconcileOnly,false);assert.deepEqual(second.events.map(row=>row.event_id),['second']);
+  inbox.startExternalAcknowledgements(source,second.token);inbox.completeAcknowledgements(source,second.token);
+  const old=inbox.claimAcknowledgements(source);assert.equal(old.reconcileOnly,true);assert.deepEqual(old.events.map(row=>row.event_id),['first']);
+  inbox.setSourceState(source,{state:'paused',expectedRevision:0});inbox.setSourceState(source,{state:'active',expectedRevision:1});
+  assert.throws(()=>inbox.completeAcknowledgements(source,old.token),/STALE_ACK/);
+  const resumed=inbox.claimAcknowledgements(source);assert.equal(resumed.reconcileOnly,true,'source resume never clears an unknown write');
+  assert.equal(database.prepare("SELECT acked FROM assistant_inbox_events WHERE event_id='first'").get().acked,0);
+});
+
+test('v4 ACK upgrade preserves cursors, streams and legacy uncertainty without changing Trelio ACK ABI',async t=>{
+  const {inbox,database}=memory(t),external=scope({provider:'max'}),trelio=scope(),task=randomUUID();
+  for(const source of [external,trelio]){
+    inbox.register(source);accept(inbox,source,task);page(inbox,source,[event(task)],`original-${source.provider}`);
+    const work=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(work.deliveryId);inbox.completeDelivery(work.deliveryId,`committed-${source.provider}`);
+    assert.ok(inbox.claimAcknowledgements(source));
+  }
+  const positions=database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all();
+  const streamCount=database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n;
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=4');
+  const upgraded=createAssistantInbox({database,now:()=>3_000_000});
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,5);
+  assert.deepEqual(database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n,streamCount);
+  const recovered=upgraded.claimAcknowledgements(external);assert.equal(recovered.reconcileOnly,true);
+  assert.throws(()=>upgraded.deferExternalAcknowledgements(external,{token:recovered.token,retryAfterMs:30_000,notAttempted:true}),/STALE_ACK/);
+  const ordinary=upgraded.claimAcknowledgements(trelio);assert.equal(Object.hasOwn(ordinary,'reconcileOnly'),false);
+  upgraded.completeAcknowledgements(trelio,ordinary.token);
+  assert.throws(()=>upgraded.startExternalAcknowledgements(trelio,ordinary.token),/INVALID_INPUT/);
 });
 
 test('exact suffix metadata lookup is source-scoped, literal, bounded and never alters processing or cursors', t => {
@@ -391,9 +467,9 @@ test('v3 to v4 stream upgrade preserves source cursors and started delivery ambi
   const {inbox,database}=memory(t),source=scope(),task=randomUUID();inbox.register(source);accept(inbox,source,task);
   page(inbox,source,[event(task)],'existing-cursor');const work=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(work.deliveryId);
   const before=database.prepare('SELECT * FROM assistant_inbox_deliveries').get();
-  database.exec('DROP TABLE assistant_inbox_streams; UPDATE assistant_inbox_meta SET version=3');
+  database.exec('DROP TABLE assistant_inbox_streams; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=3');
   const upgraded=createAssistantInbox({database});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,4);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,5);
   assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'existing-cursor');
   assert.equal(await upgraded.claimDelivery({authorize:authorized}),null);
