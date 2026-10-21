@@ -575,3 +575,77 @@ test('compact task storage binds every identity without a long concatenated cwd'
   assert.notEqual(root,assistantTaskStorageDirectory(config,{...scope,origin:'https://other.example'}));
   assert.equal(root,assistantTaskStorageDirectory(config,{...scope,assistantId:scope.assistantId.toUpperCase()}));
 });
+
+// The same private local attachment primitive serves both actor profiles. The
+// fixture replaces only HTTP/auth plumbing, never filesystem publication/ACL.
+test('assistant original file uses fixed binary delivery, exact digest and native private local storage', async () => {
+  const fs=await import('node:fs/promises'),{createHash}=await import('node:crypto');
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const attachments=await import('../host-runtime/scripts/trelio-local-attachments.mjs');
+  const {materializeAssistantAttachment}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-original-file-'));
+  const bytes=Buffer.from('Exact original bytes\n'),attachmentId=randomUUID(),taskId=randomUUID();
+  const descriptor={schemaVersion:1,delivery:'assistant-local-file',taskId,attachmentId,originalName:'../../private.txt',mimeType:'text/plain',
+    sizeBytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),revision:'b'.repeat(64)};
+  let requests=0,publications=0,profile=true,body=bytes,headers={};
+  const http={...common,currentWorkspaceExecutionProfile:()=>profile?{kind:'digital_assistant'}:null,
+    requireToken:async()=>Object.freeze({}),request:async(origin,_token,pathname,options)=>{
+      requests++;assert.equal(origin,'https://assistant.test');
+      assert.equal(pathname,`/api/agent-workspaces/scopes/task/${taskId}/attachments/${attachmentId}?revision=${descriptor.revision}`);
+      assert.equal(options.maximumErrorResponseBytes,16*1024);
+      return new Response(body,{headers:{'content-type':'application/octet-stream','content-length':String(bytes.length),
+        'x-trelio-attachment-sha256':descriptor.sha256,'x-trelio-attachment-revision':descriptor.revision,...headers}});
+    }};
+  const local={...attachments,materializeLocalAttachment:async value=>{publications++;return attachments.materializeLocalAttachment({...value,root});}};
+  const input={result:{structuredContent:descriptor,content:[{type:'text',text:'REMOTE_PRIVATE_BYTES_NEVER_FORWARD'}]},
+    attachmentId,origin:'https://assistant.test',common:http,attachments:local};
+  try{
+    const result=await materializeAssistantAttachment(input),file=result.structuredContent;
+    assert.equal(file.delivery,'local-file');assert.equal(file.sha256,descriptor.sha256);
+    assert.deepEqual(await fs.readFile(file.localFilePath),bytes);
+    assert.ok(file.localFilePath.startsWith(root+path.sep));assert.equal(path.basename(file.localFilePath),'attachment.txt');
+    if(process.platform!=='win32')assert.equal((await fs.stat(file.localFilePath)).mode&0o777,0o600);
+    assert.doesNotMatch(JSON.stringify(result),/REMOTE_PRIVATE_BYTES_NEVER_FORWARD|dataBase64|downloadUrl/);
+    assert.equal(publications,1);
+    // A wrong/short body or dishonest response metadata never creates a file.
+    for(const wrong of [Buffer.from('wrong bytes'),bytes.subarray(0,1)]){
+      body=wrong;await assert.rejects(materializeAssistantAttachment(input),/SOURCE_CHANGED/);
+    }
+    body=bytes;headers={'content-length':'999999999'};
+    await assert.rejects(materializeAssistantAttachment(input),/SOURCE_CHANGED/);headers={};
+    profile=false;const before=requests;await assert.rejects(materializeAssistantAttachment(input),/PROFILE_DENIED/);
+    assert.equal(requests,before,'no active device profile cannot select the human vault');profile=true;
+    for(const changes of [{downloadUrl:'https://untrusted.test/file'},{sizeBytes:attachments.LOCAL_ATTACHMENT_MAX_BYTES+1},{attachmentId:randomUUID()}]){
+      await assert.rejects(materializeAssistantAttachment({...input,result:{...input.result,structuredContent:{...descriptor,...changes}}}),/DESCRIPTOR_INVALID/);
+    }
+    assert.equal(publications,1);
+  }finally{await fs.rm(root,{recursive:true,force:true});}
+});
+
+test('MCP original download is hidden without a trusted materializer and returns only its local result',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
+  let calls=0,materializations=0,failDownload=false;
+  const httpRequest=async input=>{
+    const response=result=>({sessionId:'fixture',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE')return response({});
+    if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='notifications/initialized')return response({});
+    if(input.payload.method==='tools/list')return response({tools:['get_assistant_status','download_attachment'].map(name=>({
+      name,description:'Live schema',inputSchema:{type:'object',properties:{attachmentId:{type:'string'},taskPass:{},runtimeSessionProof:{}}}}))});
+    calls++;return response({content:[{type:'text',text:'REMOTE_FILE_PLAN'}],structuredContent:{attachmentId:input.payload.params.arguments.attachmentId}});
+  };
+  const base={origin,assistantId,deviceId,store,httpRequest};
+  const closed=createAssistantMcpClient(base);
+  assert.deepEqual((await closed.listTools()).map(tool=>tool.name),['get_assistant_status']);
+  await assert.rejects(closed.callTool('download_attachment',{attachmentId:randomUUID()}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
+  const delivered={content:[{type:'text',text:'Private local file'}],structuredContent:{delivery:'local-file',localFilePath:'fixture-local-file'}};
+  const client=createAssistantMcpClient({...base,materializeAttachment:async({result,attachmentId,signal})=>{
+    materializations++;assert.equal(result.structuredContent.attachmentId,attachmentId);assert.ok(signal instanceof AbortSignal);
+    if(failDownload)throw new AssistantTransportError('ASSISTANT_ATTACHMENT_SOURCE_CHANGED');return delivered;
+  }});
+  assert.equal((await client.listTools()).find(tool=>tool.name==='download_attachment').annotations.readOnlyHint,true);
+  assert.deepEqual(await client.callTool('download_attachment',{attachmentId:randomUUID()}),delivered);
+  failDownload=true;await assert.rejects(client.callTool('download_attachment',{attachmentId:randomUUID()}),/SOURCE_CHANGED/);
+  assert.equal(calls,2);assert.equal(materializations,2,'uncertain binary read has no automatic replay');
+});

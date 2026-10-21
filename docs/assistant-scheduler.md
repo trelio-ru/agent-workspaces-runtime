@@ -534,6 +534,31 @@ known catalogue; this control message does not wake a model.
 
 <a id="shared-workspace-http-profile"></a>
 
+## Original attachment local-file delivery
+
+The live `download_attachment` definition is exposed only when the signed host
+has its trusted local materializer. The remote tool returns a bounded descriptor;
+the facade intercepts it before model delivery. Names/schemas remain backend-owned.
+No new plugin hook, custom credential store, Run, public URL, base64 or caller path
+is added. Old hosts omit the new capability instead of returning a remote plan.
+
+Within the same MCP deadline, production composes the existing device Workspace
+profile and rechecks the host identity. The fixed native path
+`/scopes/task/:taskId/attachments/:attachmentId?revision=...` is rewritten by the
+generated closed route policy. Each read has fresh pass/model proof and server
+native attachment ACL/revision checks before bytes. Missing/ended profile refuses
+before the human vault; redirects, encoded route tricks and stale source refuse.
+
+The common original reader supports local media, native S3 and shared Workspace
+references. The host validates full binary metadata, exact size and SHA-256 before
+using `trelio-local-attachments.mjs`: existing 24 MiB bound, private OS permissions,
+exclusive file, one-hour lease and cleanup outside Git. MCP receives only its
+local-file metadata/path/expiry. Server TextContent/plans are never forwarded as a
+second copy. Cancellation/refusal closes the body and partial file publication is
+forbidden; there is no automatic replay or public/human fallback. Large native
+browser/Workspace downloads retain their independent limits. Encrypted assistant
+execution stays closed until its independent device data plane is implemented.
+
 ## Shared Workspace HTTP profile
 
 Assistant Workspace execution is an internal async profile of the common

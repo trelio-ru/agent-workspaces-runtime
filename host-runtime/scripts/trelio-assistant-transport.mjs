@@ -486,7 +486,7 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
+export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "download_attachment", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
@@ -529,7 +529,7 @@ export const assistantModelInputSchema = source => {
   projectRoot(schema);
   return schema;
 };
-export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, timeoutMs = 30_000 }) => {
+export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, timeoutMs = 30_000 }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
   const perform = async (action, signal) => {
@@ -559,7 +559,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
         const tools = await protocol.listRemoteTools(config, credential, session, request, { signal });
         const seen = new Set();
-        const selected = tools.filter(tool => ASSISTANT_MCP_TOOLS.includes(tool?.name)).map(tool => {
+        const selected = tools.filter(tool => ASSISTANT_MCP_TOOLS.includes(tool?.name)
+          && (tool.name !== "download_attachment" || typeof materializeAttachment === "function")).map(tool => {
           if (seen.has(tool.name) || typeof tool.description !== "string" || tool.description.length > 4096
             || !object(tool.inputSchema) || tool.inputSchema.type !== "object") fail("ASSISTANT_MCP_INVALID_RESPONSE");
           seen.add(tool.name);
@@ -573,7 +574,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       }, signal);
     },
     async callTool(name, args, signal) {
-      if (!ASSISTANT_MCP_TOOLS.includes(name) || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
+      if (!ASSISTANT_MCP_TOOLS.includes(name) || name === "download_attachment" && typeof materializeAttachment !== "function" || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
       // Snapshot once before asynchronous private/network I/O, as in the shared
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
@@ -587,12 +588,68 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || (value.structuredContent !== undefined && !object(value.structuredContent))
           || (value.isError !== undefined && typeof value.isError !== "boolean")
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        // Binary plans never enter model context. The trusted production
+        // callback composes the common device/pass HTTP profile and private
+        // local-file primitive under this same non-renewable MCP deadline.
+        if (name === "download_attachment" && value.isError !== true) return materializeAttachment({
+          result: value, attachmentId: argumentsSnapshot.attachmentId, signal });
         return { content: value.content.map(({ type, text }) => ({ type, text })),
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
       }, signal);
     },
   };
+};
+
+/** Read one fixed, authenticated original under the active Workspace profile.
+ * A remote descriptor cannot choose an origin, route, local destination or
+ * header. Only its exact native task/attachment revision selects the bytes.
+ * Buffering is bounded by the existing local-file limit and never returned by
+ * MCP; permissions, one-hour lease and cleanup remain in the shared primitive. */
+export const materializeAssistantAttachment = async ({ result, attachmentId, origin, signal,
+  common, attachments }) => {
+  common ??= await import('./trelio-workspace.mjs');
+  attachments ??= await import('./trelio-local-attachments.mjs');
+  const value=result?.structuredContent;
+  const fields=['schemaVersion','delivery','taskId','attachmentId','originalName','mimeType','sizeBytes','sha256','revision'];
+  if(!object(value)||Object.keys(value).length!==fields.length||Object.keys(value).some(key=>!fields.includes(key))
+    ||value.schemaVersion!==1||value.delivery!=='assistant-local-file'||!UUID.test(value.taskId??'')
+    ||!UUID.test(value.attachmentId??'')||value.attachmentId.toLowerCase()!==id(attachmentId)
+    ||typeof value.originalName!=='string'||!value.originalName.length||value.originalName.length>255
+    ||typeof value.mimeType!=='string'||!value.mimeType.length||value.mimeType.length>255
+    ||!Number.isSafeInteger(value.sizeBytes)||value.sizeBytes<0||value.sizeBytes>attachments.LOCAL_ATTACHMENT_MAX_BYTES
+    ||!(/^[a-f0-9]{64}$/u).test(value.sha256??'')||!(/^[a-f0-9]{64}$/u).test(value.revision??'')) fail('ASSISTANT_ATTACHMENT_DESCRIPTOR_INVALID');
+  let response,bytes;
+  try {
+    signal?.throwIfAborted();
+    if(common.currentWorkspaceExecutionProfile()?.kind!=='digital_assistant')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    const token=await common.requireToken(origin);
+    const pathname=`/api/agent-workspaces/scopes/task/${value.taskId}/attachments/${value.attachmentId}?revision=${value.revision}`;
+    response=await common.request(origin,token,pathname,{signal,maximumErrorResponseBytes:16*1024});
+    // Refuse redirects/encoding, unexpected bytes or a changed snapshot before
+    // allocating or creating a local file. The shared profile rejects redirects
+    // before credentials leave the admitted endpoint; no public URL fallback.
+    if(response.status!==200||response.redirected===true||response.headers.has('content-range')
+      ||response.headers.get('content-length')!==String(value.sizeBytes)
+      ||response.headers.get('x-trelio-attachment-sha256')!==value.sha256
+      ||response.headers.get('x-trelio-attachment-revision')!==value.revision
+      ||response.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/octet-stream'
+      ||!['', 'identity'].includes(response.headers.get('content-encoding')??'')) fail('ASSISTANT_ATTACHMENT_SOURCE_CHANGED');
+    bytes=await common.readBoundedResponseBuffer(response,attachments.LOCAL_ATTACHMENT_MAX_BYTES,'Attachment');
+    signal?.throwIfAborted();
+    if(bytes.length!==value.sizeBytes||createHash('sha256').update(bytes).digest('hex')!==value.sha256) fail('ASSISTANT_ATTACHMENT_SOURCE_CHANGED');
+    const file=await attachments.materializeLocalAttachment({bytes,originalName:value.originalName,signal});
+    // Explicit projection discards server TextContent; it cannot smuggle bytes,
+    // credentials, App links or arbitrary instructions through a second copy.
+    return attachments.buildLocalAttachmentFileResult({result:{structuredContent:value,content:[]},opened:value,file});
+  } catch(error) {
+    if(error instanceof AssistantTransportError)throw error;
+    if(error?.code==='ASSISTANT_ATTACHMENT_SOURCE_CHANGED')fail(error.code);
+    fail('ASSISTANT_ATTACHMENT_DOWNLOAD_UNAVAILABLE');
+  } finally {
+    bytes?.fill(0);
+    if(response?.body&&!response.body.locked)await response.body.cancel().catch(()=>undefined);
+  }
 };
 
 // BEGIN GENERATED ASSISTANT WORKSPACE POLICY
@@ -611,6 +668,7 @@ const assistantWorkspacePolicyDenied = () => new AssistantWorkspacePolicyError()
 // especially restore/cancel, secrets, company context, grants and proposals.
 const assistantWorkspaceReadPaths = new Set([
     "/bridge-compatibility", "/bridge-routing",
+    "/scopes/:scopeType/:scopeId/attachments/:attachmentId",
     "/scopes/:scopeType/:scopeId", "/workspaces/:workspaceId", "/workspaces/:workspaceId/runs/:runId",
     "/workspaces/:workspaceId/read-snapshot", "/workspaces/:workspaceId/bundle", "/workspaces/:workspaceId/file",
     "/runs/:runId/bundle", "/runs/:runId/file", "/runs/:runId/objects/:sha256", "/runs/:runId/codex-conversation",

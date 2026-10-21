@@ -120,7 +120,15 @@ export const createProductionAssistantMcp = async () => {
   const host = createAssistantHostState({ directory, store });
   const identity = await host.readIdentity();
   if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
-  return createAssistantMcpClient({ ...identity, store });
+  return createAssistantMcpClient({ ...identity, store,
+    materializeAttachment: ({result,attachmentId,signal}) => withProductionAssistantWorkspace(async current => {
+      if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
+        throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+      }
+      const {materializeAssistantAttachment}=await import('./trelio-assistant-transport.mjs');
+      return materializeAssistantAttachment({origin:identity.origin,result,attachmentId,signal});
+    },{signal}),
+  });
 };
 
 // Long-lived stdio is deliberately only a facade. A fresh child resolves the
