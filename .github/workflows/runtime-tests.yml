@@ -359,7 +359,23 @@ jobs:
         run: node tests/trelio-folder-onboarding.test.mjs
 
       - name: Run Windows personal account catalogue regressions
-        run: node tests/trelio-skill-accounts.test.mjs
+        # setup-python installs into the Actions toolcache, deliberately outside
+        # production fixed-root discovery. Supply a real per-user installation
+        # for this fixture instead of depending on incidental runner software or
+        # weakening Python trust/PATH rules. The discovery suite above separately
+        # tests this layout, rejects junctions and removes its own installation.
+        shell: pwsh
+        run: |
+          $fixtureRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Programs\Python\Python313'
+          if (Test-Path -LiteralPath $fixtureRoot) { throw 'The Python fixture must not replace an existing installation' }
+          New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
+          try {
+            Copy-Item -Path (Join-Path $env:pythonLocation '*') -Destination $fixtureRoot -Recurse
+            node tests/trelio-skill-accounts.test.mjs
+            if ($LASTEXITCODE -ne 0) { throw "Account fixture failed with exit $LASTEXITCODE" }
+          } finally {
+            Remove-Item -LiteralPath $fixtureRoot -Recurse -Force
+          }
 
       - name: Run Windows assistant runtime and private storage regressions
         run: |

@@ -416,7 +416,11 @@ test('missing import executable preserves a safe startup cause and no catalogue 
 // multibyte pipes, cancellation, code-page handling or native process exits.
 async function monitorFixture(t, source, interpreter = 'node') {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-monitor-process-'));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  // On Windows the native abort callback may precede release of the child's
+  // cwd handle. Retry only removal of this owned disposable fixture, under a
+  // bounded 1.5s backoff. Keep the original execution deadline/assertions and
+  // propagate a persistent cleanup failure; no provider invocation is retried.
+  t.after(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const entry = interpreter === 'python' ? 'main.py' : 'main.mjs';
   await fs.writeFile(path.join(directory, entry), source);
   const account = { id: crypto.randomUUID(), companyBinding: 'a'.repeat(64), providerRef: null };
