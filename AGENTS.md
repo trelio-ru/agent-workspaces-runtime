@@ -493,3 +493,7 @@ publication tooling также остаются вне этого публичн
   the live native schema. No local cancel/restore alias, cleanup, human flag or
   automatic retry; accepted history, goal and cycle are retained. See the
   [MCP contract](docs/assistant-scheduler.md#assistant-read-mcp-proxy).
+- Own accepted-error repair also forwards only the live dedicated native schema:
+  retire evidence, safe accepted correction, exact file verification and record
+  the correction before a valid business outcome. No local history reset or
+  replay; source/correction never complete the goal. Same MCP contract.

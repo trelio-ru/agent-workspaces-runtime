@@ -495,6 +495,10 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
   // dedicated schema and pass/own-Run checks remain backend authority; adding
   // this name never opens cancel/restore in the local Workspace dispatcher.
   'cancel_agent_workspace_run',
+  // Self-repair is also server-only. The live dedicated schema selects native
+  // retirement/restore under the current pass; this name grants no generic
+  // history restore, filesystem reset or second mutation attempt.
+  'repair_assistant_workspace_result',
   "update_task_due_date", "update_task_assignee", "set_task_participants", "update_task_custom_field",
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",

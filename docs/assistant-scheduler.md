@@ -506,6 +506,27 @@ native receipt fences that Run; it does not finish the task goal or disable its
 cycle. Accepted history and useful local work remain available for recovery.
 Cancel/restore stay closed in the local Workspace continuation and HTTP profile.
 
+`repair_assistant_workspace_result` is a separate server-only self-repair surface,
+available only from the dedicated live catalogue. The host forwards its native
+`operation=retract|restore` schema, exact accepted Run/head and hook-owned pass/proof
+once. It neither copies native branch validators nor invents approval flags.
+`retract` retires erroneous own evidence without changing accepted files. Native
+`restore` is restricted to that retired Run's exact base while its candidate is
+current; subsequent changes require a normal `no_status_change` Run that reverses
+only the own erroneous delta and preserves later work. Conflicts remain blockers.
+
+The worker must inspect the resulting accepted files, then call `retract` with
+the verified `correctionRunId` and exact current head. Neither the source nor the
+correction is business completion. Continue the real human goal with a valid
+material result or a concrete blocker; no timestamp-only Run or reuse of retired
+evidence through `noChange`. Dirty local work is preserved by the common bridge
+recovery. An uncertain restore requires native read-back of the original result,
+never another restore attempt. No new local dispatcher/HTTP operation, human
+OAuth path or encrypted data-plane fallback is introduced. Backend integration
+tests exercise native Git restoration and completion exclusion; the proxy tests
+verify live-schema projection, immutable intent and no mutation replay. These
+are not proof of real Windows business readiness.
+
 The host only applies a closed transport capability allowlist; it does not copy
 schemas, widen authority or expose unknown/new server tools. Setup tools remain
 available before pairing. A successful finish emits `tools/list_changed` so the

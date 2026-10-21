@@ -356,6 +356,60 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   assert.deepEqual(calls.at(-1),{name:'cancel_agent_workspace_run',arguments:cancellation});
 });
 
+test('self-repair proxies the dedicated live schema and exact immutable intent without exposing generic restore',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'p'.repeat(43)}`,expiresAt:1});
+  // This is intentionally a changed synthetic server contract, not a second
+  // production validator. A newly advertised optional native field must survive
+  // projection without the generic host maintaining its own recovery schema.
+  const properties={operation:{enum:['retract','restore']},workspaceId:{type:'string',format:'uuid'},
+    runId:{type:'string',format:'uuid'},expectedHead:{type:'string'},targetHead:{type:'string'},
+    correctionRunId:{type:'string',format:'uuid'},futureNativeField:{type:'boolean'}};
+  const required=['operation','workspaceId','runId','expectedHead'];
+  const calls=[];let failed=false;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest:async input=>{
+    const response=result=>({sessionId:'fixture-session',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE')return response({});
+    if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='notifications/initialized')return response({});
+    if(input.payload.method==='tools/list')return response({tools:[
+      {name:'get_assistant_status',description:'Status',inputSchema:{type:'object'}},
+      {name:'repair_assistant_workspace_result',description:'Current dedicated native repair',
+        inputSchema:{type:'object',properties:{...properties,taskPass:{},runtimeSessionProof:{}},
+          required:[...required,'taskPass'],additionalProperties:false},
+        annotations:{readOnlyHint:false,destructiveHint:true,idempotentHint:false}},
+      {name:'restore_agent_workspace_revision',description:'Human route',inputSchema:{type:'object'}},
+      {name:'retract_agent_workspace_run_result',description:'Human route',inputSchema:{type:'object'}},
+    ]});
+    assert.equal(input.payload.method,'tools/call');calls.push(structuredClone(input.payload.params));
+    if(failed)throw new Error('uncertain native result, no replay');
+    return response({content:[{type:'text',text:'Inspect native receipt'}],structuredContent:{retracted:true,corrected:false}});
+  }});
+  const tools=await client.listTools();
+  assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','repair_assistant_workspace_result']);
+  assert.deepEqual(tools[1].inputSchema,{type:'object',properties,required,additionalProperties:false});
+  assert.deepEqual(tools[1].annotations,{readOnlyHint:false,destructiveHint:true,idempotentHint:false,openWorldHint:false});
+  const admission={taskPass:{passId:randomUUID()},runtimeSessionProof:{signature:'hook-owned'}};
+  const source={...admission,operation:'retract',workspaceId:randomUUID(),runId:randomUUID(),expectedHead:'a'.repeat(40),
+    errorKind:'incorrect_result',agentRecognizedOwnError:true};
+  const expected=structuredClone(source),pending=client.callTool('repair_assistant_workspace_result',source);
+  source.expectedHead='b'.repeat(40);await pending;
+  assert.deepEqual(calls.at(-1),{name:'repair_assistant_workspace_result',arguments:expected});
+  const restore={...admission,operation:'restore',workspaceId:expected.workspaceId,runId:expected.runId,
+    expectedHead:expected.expectedHead,targetHead:'c'.repeat(40),reason:'Established own error'};
+  await client.callTool('repair_assistant_workspace_result',restore);
+  assert.deepEqual(calls.at(-1),{name:'repair_assistant_workspace_result',arguments:restore});
+  const verified={...expected,expectedHead:'d'.repeat(40),correctionRunId:randomUUID()};
+  await client.callTool('repair_assistant_workspace_result',verified);
+  assert.deepEqual(calls.at(-1),{name:'repair_assistant_workspace_result',arguments:verified});
+  failed=true;const before=calls.length;
+  await assert.rejects(client.callTool('repair_assistant_workspace_result',restore),/MCP_UNAVAILABLE/);
+  assert.equal(calls.length,before+1,'an uncertain native restore never becomes a second attempt');
+  for(const name of ['restore_agent_workspace_revision','retract_agent_workspace_run_result'])
+    await assert.rejects(client.callTool(name,restore),/CAPABILITY_UNAVAILABLE/);
+  assert.equal(calls.length,before+1,'human routes are refused before remote I/O');
+});
+
 test('managed schema fields are hidden in root alternatives while nested business fields and original validators remain intact',()=>{
   const business={type:'object',properties:{taskPass:{type:'string'},runtimeSessionProof:{type:'string'}},required:['taskPass','runtimeSessionProof']};
   const branch={type:'object',properties:{taskPass:{type:'object'},runtimeSessionProof:{type:'object'},parameters:{oneOf:[business]}},required:['taskPass','runtimeSessionProof','parameters'],additionalProperties:false};
