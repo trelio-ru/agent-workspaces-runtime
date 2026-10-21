@@ -2805,7 +2805,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.clientKind.enum,
-    ["codex", "claude-code", "cursor", "antigravity"],
+    ["codex", "claude-code", "cursor", "antigravity", "gigacode"],
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.intent.enum,

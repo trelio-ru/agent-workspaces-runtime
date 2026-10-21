@@ -469,7 +469,7 @@ test("command-only Workspace actions are outside the current ABI", () => {
 });
 
 test("native folder format and authorized refresh survive the exact local apply envelope", async () => {
-  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "gigacode"]) {
     const parameters = { folderPath: actionWorkingDirectory, instructionTarget: "AGENTS.md",
       company: { name: "Компания", slug: "company" }, planHash: "a".repeat(64),
       userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind };
