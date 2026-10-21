@@ -104,11 +104,20 @@ try {
   try { $existing = $folder.GetTask($name) } catch {
     if (!(Test-NotFound $_)) { throw }
   }
+  function Resolve-PrincipalSid([string]$value) {
+    # Task Scheduler normalizes a submitted SID to an account name on read.
+    # Resolve it with the native account API and compare the immutable SID;
+    # never accept a display-name/string match or a different domain account.
+    try {
+      if ($value -match '^S-1-[0-9-]+$') { return ([System.Security.Principal.SecurityIdentifier]::new($value)).Value }
+      return ([System.Security.Principal.NTAccount]::new($value)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch { return '' }
+  }
   function Test-Definition($task) {
     $d = $task.Definition
     $checks = @{
       marker = $d.RegistrationInfo.Description -ceq $marker
-      principal = $d.Principal.UserId -ceq $sid
+      principal = (Resolve-PrincipalSid $d.Principal.UserId) -ceq $sid
       logon = $d.Principal.LogonType -eq 3 -and $d.Principal.RunLevel -eq 0
       action_count = $d.Actions.Count -eq 1
       action_type = $d.Actions.Item(1).Type -eq 0
@@ -117,7 +126,7 @@ try {
       action_cwd = $d.Actions.Item(1).WorkingDirectory -ceq $p.workingDirectory
       trigger_count = $d.Triggers.Count -eq 1
       trigger_type = $d.Triggers.Item(1).Type -eq 9
-      trigger_user = $d.Triggers.Item(1).UserId -ceq $sid
+      trigger_user = (Resolve-PrincipalSid $d.Triggers.Item(1).UserId) -ceq $sid
       trigger_enabled = [bool]$d.Triggers.Item(1).Enabled
       trigger_delay = $d.Triggers.Item(1).Delay -ceq 'PT15S'
       enabled = [bool]$d.Settings.Enabled

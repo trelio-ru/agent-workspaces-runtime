@@ -364,6 +364,13 @@ credential, private-worker pipe or raw OS error is exposed. It does not perform
 ACL/DPAPI work, change policy or run the supervisor as SYSTEM. Existing common
 private runtime and every business authority check remain unchanged.
 
+Task Scheduler may return an account name for a SID submitted at registration;
+read-back resolves it with the Windows account API and compares the immutable
+current SID, never a display name. Missing/foreign/unresolvable principals deny.
+One non-sliding 45-second setup budget includes private/contact I/O and native
+registration; its remaining native process budget is at most 40 seconds. A
+slow ARM64 PowerShell start cannot renew that deadline or cause an OS retry.
+
 The deterministic task belongs to the current Windows SID with least privilege
 and `InteractiveToken`. A single logon trigger waits 15 seconds; unlimited task
 duration, IgnoreNew, battery continuation and three one-minute crash restarts
