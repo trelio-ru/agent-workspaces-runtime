@@ -818,6 +818,9 @@ const SOURCE_PROTOCOLS=Object.freeze({
 });
 export const ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES=Object.freeze(['ACCOUNT_CATALOGUE_CONFLICT','ACCOUNT_CATALOGUE_INVALID',
   'ACCOUNT_CATALOGUE_TOO_LARGE','ACCOUNT_CATALOGUE_BUSY','ACCOUNT_CATALOGUE_READBACK_FAILED','ACCOUNT_ID_CONFLICT','ACCOUNT_NOT_BOUND']);
+export const ASSISTANT_SOURCE_MONITOR_ERROR_CODES=Object.freeze(['TELEGRAM','EMAIL','MAX'].flatMap(prefix=>
+  ['INVALID_CURSOR','SCOPE_CHANGED','UIDVALIDITY_CHANGED','GAP','INVALID_RESPONSE','REFERENCE_UNAVAILABLE','UNAVAILABLE']
+    .map(suffix=>`${prefix}_MONITOR_${suffix}`)));
 const SOURCE_BACKEND_ERROR_CODES=Object.freeze(['ASSISTANT_SOURCE_AUTH_REQUIRED','ASSISTANT_SOURCE_ACCESS_DENIED','ASSISTANT_SOURCE_SCOPE_UNAVAILABLE',
   'ASSISTANT_SOURCE_INPUT_INVALID','ASSISTANT_SOURCE_PROTOCOL_REQUIRED','ASSISTANT_SOURCE_PROTOCOL_UNAVAILABLE',
   'ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_SOURCE_ENCRYPTED_UNAVAILABLE','ASSISTANT_SOURCE_SKILL_UNAVAILABLE',
@@ -1003,8 +1006,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
   if(!object(raw))invalid();
   if(result.exitCode!==0){
     const prefix={ 'telegram-mtproto':'TELEGRAM','email-imap-smtp':'EMAIL','max-web':'MAX' }[skillId];
-    const suffixes=['INVALID_CURSOR','SCOPE_CHANGED','UIDVALIDITY_CHANGED','GAP','INVALID_RESPONSE','REFERENCE_UNAVAILABLE','UNAVAILABLE'];
-    const allowed=suffixes.map(suffix=>`${prefix}_MONITOR_${suffix}`);
+    const allowed=ASSISTANT_SOURCE_MONITOR_ERROR_CODES.filter(code=>code.startsWith(`${prefix}_MONITOR_`));
     fail(allowed.includes(raw.code)?raw.code:'ASSISTANT_SOURCE_PROVIDER_UNAVAILABLE');
   }
   const ref=value=>typeof value==='string' && value.length>0 && value.length<=512 && !/[\x00-\x20\x7f]/u.test(value);
@@ -1212,9 +1214,38 @@ export const configureAssistantEmailSource = async ({identity,host,store,client,
       // Discard provider diagnostics, mailbox/address, config paths and labels.
       // Neither stdout nor the fact that the window closed is owner authority.
       return Object.freeze({sourceId,localAccountId:source.localAccountId,state:'configuration_saved',
-        incomingEnabled:value.connectionMode==='imap_smtp',connectionVerified:false});
+        incomingEnabled:value.connectionMode==='imap_smtp',connectionVerified:false,
+        ...(value.connectionMode==='imap_smtp'?{nextAction:{tool:'verify_assistant_email_source',arguments:{companyId,sourceId}}}:{})});
     });
   }catch(error){rethrowAssistantSourceError(error,{signal,setup:true});}
+};
+
+/** Registration equality is shared with the background coordinator. A late
+ * pause/revoke/rebind must invalidate a verification just as it invalidates
+ * a poll; a successful provider read cannot resurrect stale desired state. */
+export const sameAssistantSourceRegistration = (left,right) => Boolean(left && right)
+  && ['id','companyId','deviceId','localAccountId','projectId','skillId','state','revision'].every(key=>left[key]===right[key]);
+
+/** Independently verify incoming access AFTER a saved local configuration.
+ * This reuses the exact passive reader and normal native/account/signature
+ * gates. No SQLite is opened and the returned baseline/cursor/refs are thrown
+ * away: testing a connection must not advance a live worker's durable position.
+ * It checks INBOX metadata only, never SMTP, body processing or read-state.
+ */
+export const verifyAssistantEmailSource = async ({identity,host,store,client,companyId,sourceId,signal}) => {
+  companyId=id(companyId);sourceId=id(sourceId);
+  if(!identity || !client || typeof client.sourceAccounts!=='function'
+    || ['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+  const rows=await client.sourceAccounts(companyId,signal),source=rows.find(row=>row.id===sourceId);
+  if(!source || source.state!=='active' || source.skillId!=='email-imap-smtp')fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
+  await readAssistantSourceMonitor({identity,host,store,signal,source:{companyId,projectId:source.projectId,
+    skillId:source.skillId,accountId:source.localAccountId,cursor:null}});
+  const current=(await client.sourceAccounts(companyId,signal)).find(row=>row.id===sourceId);
+  if(signal?.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
+  if(!sameAssistantSourceRegistration(source,current))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+  return Object.freeze({sourceId,localAccountId:source.localAccountId,state:'incoming_verified',
+    verification:'imap_inbox_metadata',incomingVerified:true,outgoingVerified:false,
+    queuePositionChanged:false,readStateChanged:false});
 };
 
 export const readAssistantSourceMonitor = async ({identity,host,store,source,signal}) => {

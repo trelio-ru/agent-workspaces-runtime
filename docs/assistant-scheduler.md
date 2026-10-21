@@ -348,6 +348,25 @@ A closed window is not successful configuration, and saved credentials are not
 network readiness, sending authority, processed messages or a passed Windows
 business pilot. Setup metadata does not clear hook/login health latches.
 
+For IMAP configuration the saved result supplies a separate exact
+`verify_assistant_email_source` continuation (company/source UUIDs only).
+It uses the SAME source inventory, signed passive monitor, managed account and
+native provider engine under the ordinary read budget; it never opens another
+form, supplies fields, tests SMTP or modifies the saved configuration. Its fresh
+INBOX metadata baseline is discarded, not committed to SQLite: verification
+cannot reset/advance a running worker's checkpoint or claim historical messages
+processed. Body/refs/cursor are absent from the result and no read-state changes.
+
+Owner registration is read before and after the provider using the same equality
+guard as coordinator polling. A late pause/revoke/revision/account change rejects
+the result. A failed second inventory is not empty or successful verification.
+Only the successful current read returns `incomingVerified:true`, with explicit
+`outgoingVerified:false`. Saved SMTP-only configuration has no incoming follow-up.
+Provider failure is a closed typed reason, never raw output; it cannot reopen
+configure or clear hook/ChatGPT login latches. This dynamic signed-worker tool
+uses the normal wait envelope and does not change the stable six-method setup
+ABI. Actual background next-run/processing/ACK and Windows E2E remain independent.
+
 Arbitrary task-skill arguments require `trelio-assistant-execution.json` in the
 SAME verified signed package file inventory. Its v1 object has exactly
 `schemaVersion:1` and `taskCommands`: 1–64 unique literal positional prefixes,

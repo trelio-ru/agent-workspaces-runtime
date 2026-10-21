@@ -3,7 +3,7 @@
 import { createAssistantInbox } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
-import { validateAssistantPassOutcome } from './trelio-assistant-transport.mjs';
+import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -22,8 +22,6 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const externalProviders=Object.freeze({'telegram-mtproto':'telegram','email-imap-smtp':'email','max-web':'max'});
 const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:identity.assistantId,companyId:row.companyId,
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
-const sameRegistration=(left,right)=>right && ['id','companyId','deviceId','localAccountId','projectId','skillId','state','revision']
-  .every(key=>left[key]===right[key]);
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
   passHost = null, readSourceMonitor = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {

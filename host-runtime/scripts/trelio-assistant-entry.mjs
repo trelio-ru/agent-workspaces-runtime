@@ -5,7 +5,7 @@ import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-ho
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES } from './trelio-assistant-transport.mjs';
+import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -22,7 +22,10 @@ export const ASSISTANT_SOURCE_SETUP_TOOL=Object.freeze({name:'prepare_assistant_
 export const ASSISTANT_EMAIL_SETUP_TOOL=Object.freeze({name:'configure_assistant_email_source',
   description:'Open the existing protected local email configuration form only for an exact native owner-enabled source. The human enters and saves credentials in that form on this device. No terminal/chat values, old human account import, automatic login, sending or readiness claim. Do not repeat after an uncertain result.',
   inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{idempotentHint:false}});
-const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name];
+export const ASSISTANT_EMAIL_VERIFY_TOOL=Object.freeze({name:'verify_assistant_email_source',
+  description:'After saved configuration, verify one exact owner-configured email source with the SAME passive signed reader. Reads INBOX metadata only; does not open a form, change configuration/cursor/queue/read-state, test SMTP or prove background scheduling. A failure never permits repeating setup.',
+  inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{readOnlyHint:true,idempotentHint:true}});
+const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name];
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
     || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
@@ -32,7 +35,7 @@ const sourceSetupArguments=args=>{
 export const assistantWorkerToolCatalogue=tools=>{
   if(!Array.isArray(tools)||tools.some(tool=>sourceToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
-  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL];
+  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL];
 };
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
@@ -50,7 +53,8 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
 ]);
 const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
 const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
-const safeError = error => assistantHealthFailure(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
+const safeError = error => assistantHealthFailure(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code)
+  || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error?.code) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
 export const callAssistantSetupTool = async (setup, name, args) => {
@@ -730,7 +734,8 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
-  configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input)}={}) => {
+  configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
+  verifySource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
   if(request.operation==='background_tick')return runAssistantBackgroundTick();
   if(request.operation==='health') {
@@ -762,8 +767,9 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   const {ASSISTANT_MCP_TOOLS}=await import('./trelio-assistant-transport.mjs');
   const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
   const interactiveSourceSetup=sourceSetup&&request.name===ASSISTANT_EMAIL_SETUP_TOOL.name;
+  const sourceVerification=sourceSetup&&request.name===ASSISTANT_EMAIL_VERIFY_TOOL.name;
   const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
-  if(interactiveSourceSetup&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
+  if((interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
   if(request.operation==='call' && !sourceSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
     const current=await client.readHealth();
@@ -779,7 +785,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       if(sourceSetup){
         try{
           const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
-          const value=interactiveSourceSetup?await configureSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
+          const value=sourceVerification?await verifySource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):
+            interactiveSourceSetup?await configureSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
             {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
               skillId:source.skillId,projectId:source.projectId,state:source.state,revision:source.revision,
               provisionLocalAccount:source.provisionLocalAccount,

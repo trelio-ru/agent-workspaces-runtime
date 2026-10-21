@@ -405,6 +405,9 @@ publication tooling также остаются вне этого публичн
   unbound labels. Separately admitted owner empty-create uses the SAME catalogue
   and atomic intent receipt; no provider login or readiness inference. Current
   signed worker discovery does not require a new stable plugin setup ABI.
+  Email incoming verification reuses one passive signed read and the same
+  registration recheck as polling; it never commits its baseline/cursor or
+  proves SMTP/background readiness. Source reasons remain closed/typed.
   Protected email setup needs a separate native owner opt-in; fixed browser-only
   capture reuses the same account/process engine and original human-input budget.
   It never accepts credentials/terminal args or upgrades passive reader limits.

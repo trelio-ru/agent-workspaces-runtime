@@ -7,7 +7,7 @@ import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
   const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
@@ -97,7 +97,7 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
       return {sourceId,state:'prepared',loginVerified:false};
     }};
   const tools=await executeAssistantRuntimeRequest({operation:'list'},dependencies);
-  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL],'the current worker owns new setup discovery');
+  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL],'the current worker owns source discovery');
   const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
   const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
@@ -123,11 +123,11 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
 
 test('assistant hook permits setup and blocks task tools without an installed host profile', async () => {
   for(const tool of ['mcp__trelio_assistant__get_task','mcp__plugin_trelio-digital-assistant_trelio-assistant__clear_task_control',
-    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source']){
+    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source']){
     const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
     await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output,createHook:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});}});
     const result=JSON.parse(raw);
-    assert.equal(result.hookSpecificOutput?.permissionDecision,tool.endsWith('begin_assistant_setup')||tool.endsWith('prepare_assistant_source_account')||tool.endsWith('configure_assistant_email_source')?undefined:'deny');
+    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source'].some(name=>tool.endsWith(name))?undefined:'deny');
   }
 });
 
@@ -153,6 +153,27 @@ test('email setup routes only exact locators under its private wait envelope and
   assert.equal(contexts,1,'invalid arguments cannot read credentials or create a second form');assert.equal(calls,1);
 });
 
+
+test('email verification uses the normal read budget, preserves source reasons and cannot clear login/hooks',async()=>{
+  const companyId=randomUUID(),sourceId=randomUUID(),reports=[];let calls=0,contexts=0;
+  const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
+    context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,false);return action({identity:{},
+      readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
+      reportHealth:async value=>reports.push(value)}, {}, {});},proxyFor:async()=>({}),
+    configureSource:async()=>assert.fail('verification cannot repeat configure'),verifySource:async input=>{
+      calls++;assert.equal(input.companyId,companyId);assert.equal(input.sourceId,sourceId);
+      throw Object.assign(new Error('PRIVATE_PROVIDER_MESSAGE'),{code:'EMAIL_MONITOR_UNAVAILABLE'});
+    }};
+  const request={operation:'call',name:'verify_assistant_email_source',arguments:{companyId,sourceId}};
+  const result=await executeAssistantRuntimeRequest(request,dependencies);
+  assert.deepEqual(result.structuredContent,{code:'EMAIL_MONITOR_UNAVAILABLE'});assert.equal(result.isError,true);
+  assert.equal(calls,1);assert.doesNotMatch(JSON.stringify(result),/PRIVATE/);
+  assert.ok(reports.every(value=>value.clearedReason===undefined));
+  for(const arguments_ of [{companyId,sourceId:null},{companyId,sourceId,cursor:'override'},
+    {companyId,sourceId,folder:'private'},{companyId,sourceId,localAccountId:randomUUID()}])
+    await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:arguments_},dependencies),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
+  assert.equal(contexts,1,'invalid selectors cannot enter the private invocation');assert.equal(calls,1);
+});
 
 test('stdio discovers live backend read schemas, notifies after pairing and keeps failures closed',async()=>{
   let paired=false,proxyCalls=0,setupCalls=0,raw='';const output=new PassThrough();output.on('data',chunk=>raw+=chunk);

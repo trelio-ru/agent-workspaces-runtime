@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource}=
+const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,verifyAssistantEmailSource}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -277,7 +277,8 @@ test('protected email setup consumes separate native permission and the same sig
   await assert.rejects(configure(),/ACCESS_DENIED/);assert.equal(calls,2);assert.equal(await readMarker(),'','late revocation denies provider launch');
   resolveOverride=null;
   const result=await configure();
-  assert.deepEqual(result,{sourceId,localAccountId:accountId,state:'configuration_saved',incomingEnabled:true,connectionVerified:false});
+  assert.deepEqual(result,{sourceId,localAccountId:accountId,state:'configuration_saved',incomingEnabled:true,connectionVerified:false,
+    nextAction:{tool:'verify_assistant_email_source',arguments:{companyId,sourceId}}});
   assert.doesNotMatch(JSON.stringify(result),/PRIVATE|credential|password|Path/);
   assert.equal(await readMarker(),'1','one explicit invocation starts precisely one existing provider process');
 
@@ -303,6 +304,48 @@ test('protected email setup consumes separate native permission and the same sig
   await assert.rejects(p.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext,runtimeArguments:validArguments}),/SETUP_REQUIRED/,
     'one native in-process permission cannot open a second form');
   p.close();assert.equal(await readMarker(),'1');
+});
+
+test('email incoming verification reuses one signed passive read, drops its cursor and rechecks live registration',async t=>{
+  const savedScope={...scope};
+  t.after(()=>{Object.assign(scope,savedScope);setupFixture=null;resolveOverride=null;});
+  scope.skillId='email-imap-smtp';
+  const row={...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
+    provisionLocalAccount:true,executionVerified:false};
+  let inventoryReads=0,lateChange=null;
+  const client={identity,sourceAccounts:async()=>{inventoryReads++;return [{...row,...(inventoryReads%2===0?lateChange:null)}];}};
+  const sourceDir=path.join(directory,'email-incoming-verification');await fs.mkdir(sourceDir);
+  const marker=path.join(directory,'verification-native-calls'),failure=path.join(directory,'verification-failure');
+  const baseline={schemaVersion:1,baselineOnly:true,events:[],nextCursor:'PRIVATE_CURSOR',hasMore:false,
+    coverage:{historicalBackfill:false,bodyContentRead:false},readState:{readReceiptsSent:false}};
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),['monitor','--limit','100']);
+    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(row.localAccountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);let input='';for await(const c of process.stdin)input+=c;assert.equal(input,'');
+    fs.appendFileSync(${JSON.stringify(marker)},'1');
+    if(fs.existsSync(${JSON.stringify(failure)})){process.stdout.write(JSON.stringify({code:'EMAIL_MONITOR_UNAVAILABLE',message:'PRIVATE_FAILURE'}));process.exit(2);}
+    process.stdout.write(${JSON.stringify(JSON.stringify({...baseline,private:'PRIVATE_PROVIDER_BODY'}))});`);
+  artifactId=randomUUID();releaseId=randomUUID();
+  packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  setupFixture=row;
+  await prepareAssistantSourceAccount({identity,host,store,client:{identity,sourceAccounts:async()=>[row]},companyId,sourceId:row.id});
+  setupFixture=null;
+  const verify=()=>verifyAssistantEmailSource({identity,host,store,client,companyId,sourceId:row.id});
+  const result=await verify();
+  assert.deepEqual(result,{sourceId:row.id,localAccountId:row.localAccountId,state:'incoming_verified',
+    verification:'imap_inbox_metadata',incomingVerified:true,outgoingVerified:false,queuePositionChanged:false,readStateChanged:false});
+  assert.equal(inventoryReads,2);assert.equal(await fs.readFile(marker,'utf8'),'1');
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE|cursor|events|body/i,'no baseline can replace a worker checkpoint');
+  lateChange={revision:1,state:'paused'};
+  await assert.rejects(verify(),{code:'ASSISTANT_SOURCE_BINDING_CHANGED'});
+  assert.equal(await fs.readFile(marker,'utf8'),'11','late pause cannot turn the read into a successful verification');
+  lateChange=null;row.state='paused';
+  await assert.rejects(verify(),{code:'ASSISTANT_SOURCE_SETUP_REQUIRED'});
+  assert.equal(await fs.readFile(marker,'utf8'),'11','paused source cannot launch a provider');row.state='active';
+  inventoryReads=0;await fs.writeFile(failure,'synthetic');
+  await assert.rejects(verify(),error=>error.code==='EMAIL_MONITOR_UNAVAILABLE'&&!JSON.stringify(error).includes('PRIVATE_FAILURE'));
+  assert.equal(await fs.readFile(marker,'utf8'),'111','failed verification never repeats configure or monitor');
 });
 
 test('structural projection rejects bad pages, scope swaps, receipts and gaps without losing the old cursor',()=>{
