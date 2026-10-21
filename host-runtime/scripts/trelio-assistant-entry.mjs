@@ -553,6 +553,33 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
       readDelivery:nativeRuntime.readAssistantCodexDelivery};
     if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    // Observe the native boundary before the coordinator deliberately replaces
+    // a post-admission error with its durable delivery-uncertain fence. That
+    // fence must stay intact, but must not hide a positively established login
+    // problem from the owner. Neither a message nor metadata success supplies
+    // this evidence; the native adapter calls the positive callback only after
+    // a fresh completed turn and exact read-back. Every report re-enters the
+    // protected identity; health failure never retries or changes business work.
+    const reportAuthentication=async(code,signal)=>{
+      try {await invoke(async live=>{
+        const current=await live.readHealth(signal);
+        // This API clears an exact latch only with a ready report. A native
+        // model turn does not establish recovery of an unrelated plugin/MCP
+        // incident, so retain a covered login latch until that independent
+        // boundary is repaired and login becomes the current problem again.
+        if(code==='ready' && current.code!=='codex_auth_required')return;
+        await live.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code,
+          ...(code==='ready'?{clearedReason:'codex_auth_required'}:{})},signal);
+      });} catch { /* A CAS/transport refusal preserves the original receipt and incident. */ }
+    };
+    const observedNative={...native,...Object.fromEntries(['provision','run'].map(name=>[name,async(input,options)=>{
+      try {return await native[name](input,{...options,
+        onAuthenticationConfirmed:()=>reportAuthentication('ready',options.signal)});}
+      catch(error){
+        if(error?.code==='ASSISTANT_CODEX_AUTH_REQUIRED')await reportAuthentication('codex_auth_required',options.signal);
+        throw error;
+      }
+    }]))};
     const readStatus=dependencies.readStatus??(signal=>invoke(async()=>{
       const proxy=await createProductionAssistantMcp();
       if(!proxy) fail('ASSISTANT_HOST_NOT_CONFIGURED');
@@ -560,7 +587,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
     }));
     const passHost=Object.fromEntries(['readActivePass','activatePass','releasePass'].map(name=>[name,(...args)=>invoke((_client,host)=>host[name](...args))]));
     coordinator=createAssistantCoordinator({database:database.database,client,passHost,
-      native:{...native,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
+      native:{...observedNative,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
       workspaceForTask:async scope=>{
         if(scope.origin!==stableIdentity.origin || scope.assistantId!==stableIdentity.assistantId
           || !new RegExp(UUID,'u').test(scope.companyId??'') || !new RegExp(UUID,'u').test(scope.taskId??'')) fail('ASSISTANT_HOST_STATE_INVALID');

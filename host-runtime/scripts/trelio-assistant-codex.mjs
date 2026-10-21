@@ -105,7 +105,13 @@ const readNative = async (threadId, project, options = {}) => {
         if (thread?.id !== threadId || typeof thread.cwd !== 'string' || !path.isAbsolute(thread.cwd)) return abort();
         const value = await project(thread, request);
         if (!done) finish(null, value);
-      })().catch(abort);
+      })().catch(error => {
+        // Only our own structural account check can establish missing login.
+        // RPC errors, provider prose and unavailable history remain unknown;
+        // none may become a request to sign in or expose native diagnostics.
+        finish(error instanceof AssistantCodexError && error.code === 'ASSISTANT_CODEX_AUTH_REQUIRED'
+          ? error.code : 'ASSISTANT_CODEX_READ_UNAVAILABLE');
+      });
     } catch { abort(); }
   });
 };
@@ -113,12 +119,23 @@ const readNative = async (threadId, project, options = {}) => {
 export const readAssistantCodexMetadata = (threadId, options) => readNative(id(threadId), thread => ({ threadId: thread.id, cwd: thread.cwd }), options);
 
 /** Account-visible native capabilities are authoritative for availability.
- * Read only model/list, with bounded pagination under the original RPC deadline.
+ * Read account state and model/list under the original RPC deadline.
  * Do not cache account data, return labels, inspect credentials or pick a model
  * which merely resembles the exact owner choice. */
 export const readAssistantCodexExecutionAvailability = async (configuration, options = {}) => {
   const execution = assistantExecutionConfiguration(configuration);
   return readNative(null, async (_thread, request) => {
+    // A catalogue can exist while Codex is signed out. Refuse before the
+    // durable native-start boundary only when the documented native response
+    // explicitly requires OpenAI authentication and has no account. This is
+    // not a token validity check: a saved account never proves usable login.
+    // Providers which explicitly require no OpenAI auth retain that behavior.
+    const account = await request('account/read', { refreshToken: false });
+    if (!account || typeof account.requiresOpenaiAuth !== 'boolean'
+      || !Object.hasOwn(account, 'account') || account.account !== null
+        && (typeof account.account !== 'object' || Array.isArray(account.account)
+          || !['apiKey', 'chatgpt', 'amazonBedrock'].includes(account.account.type))) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+    if (account.requiresOpenaiAuth && account.account === null) fail('ASSISTANT_CODEX_AUTH_REQUIRED');
     let cursor = null;
     const seen = new Set();
     for (let page = 0; page < 10; page++) {
@@ -188,6 +205,7 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   await executeNativePass({ threadId, deliveryId, cwd: actual, workStateContext, execution }, options);
   const result = await readDelivery(threadId, deliveryId, options);
   if (!['completed','failed'].includes(result.state)) fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+  if (result.state === 'completed') await confirmFreshAuthentication(options);
   return result;
 };
 
@@ -203,7 +221,19 @@ export const provisionAssistantCodexChat = async ({ deliveryId, cwd, execution }
   const threadId = await executeNativePass({ threadId: null, deliveryId, cwd: actual, execution }, { ...options, readinessProbe: true });
   const result = await (options.readDelivery ?? readAssistantCodexDelivery)(threadId, deliveryId, options);
   if (result.state !== 'completed') fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+  await confirmFreshAuthentication(options);
   return { ...result, threadId };
+};
+
+/** Only a newly executed successful turn plus its exact marker read-back is
+ * positive authentication evidence. Saved account metadata, an old completed
+ * delivery and an exec exit code cannot clear the owner's login incident.
+ * Health reporting is best effort and cannot replace/undo the native receipt
+ * or turn a diagnostic transport failure into permission to replay work. */
+const confirmFreshAuthentication = async options => {
+  if (typeof options.onAuthenticationConfirmed === 'function') {
+    try { await options.onAuthenticationConfirmed(); } catch { /* Retain the incident until another positive boundary. */ }
+  }
 };
 
 const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, execution }, options) => {

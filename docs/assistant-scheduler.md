@@ -167,6 +167,15 @@ malformed or looping results never select a fallback or launch model work.
 The returned account catalogue/labels are not logged, cached or stored in SQLite.
 See [official model/list](https://learn.chatgpt.com/docs/app-server#list-models-modellist).
 
+The same bounded native preflight first calls documented `account/read` with
+`refreshToken:false`. Only `account:null` together with
+`requiresOpenaiAuth:true` establishes `ASSISTANT_CODEX_AUTH_REQUIRED`, before the
+one-use native-start fence or a model request. Configured account metadata does
+not validate a token or prove recovery. An explicitly authentication-free
+provider remains supported; malformed/unsupported account data, RPC refusal and
+transport loss stay unknown. No email, plan, credential or raw error leaves this
+in-memory boundary. See [official auth state](https://learn.chatgpt.com/docs/app-server#1-check-auth-state).
+
 A blocked company is skipped in provisioning, event and due-cycle selection;
 other companies retain fresh independent authorization. Skipping does not pause
 or rewrite source/task state, consume queued mentions, advance dates, erase goals
@@ -560,6 +569,20 @@ absence has no invented plugin/network diagnosis. Runtime update failures have
 a five-minute recovery window; owner-action errors are immediate. First mode
 requires the owner for plugin updates, restarting Codex, hook approval and login.
 Automatic external-supervisor restart of Codex is backlog, not implemented.
+
+The production host reports a structurally confirmed native missing-login error
+before the coordinator replaces a post-admission failure with its durable
+delivery-uncertain fence. The native/pass/event fences are retained. A new
+completed native turn with exact marker read-back may clear only a currently
+dominant `codex_auth_required` latch through the existing diagnostic API. A saved
+account, catalogue, old completed receipt, failed/uncertain turn or metadata poll
+cannot clear it. When another incident currently covers that latch, its own
+successful boundary must recover first; native success cannot clear an unrelated
+plugin or MCP problem. Hook trust remains independent. Every report re-enters
+protected device identity and uses fresh health revision/request UUID. Lost
+responses/CAS refusals are never retried and cannot discard a positive business
+receipt, advance a failed schedule or replay work. Source tests exercise real
+SQLite/native stream fixtures; no Windows business E2E or activation is implied.
 
 This model-free MCP lifecycle is not proof of a registered Windows background
 service or businessReady. Source/CI tests do not replace the Windows update and

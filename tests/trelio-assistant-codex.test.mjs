@@ -68,6 +68,10 @@ test('company execution is an immutable closed pair; missing/argv-like choices n
 test('native model/list discovers account effort support with bounded pagination and no fallback', async()=>{
   let calls=0;
   const options={executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+    if(request.method==='account/read'){
+      assert.deepEqual(request.params,{refreshToken:false});
+      return {result:{account:{type:'chatgpt',email:'PRIVATE ACCOUNT',planType:'pro'},requiresOpenaiAuth:true}};
+    }
     assert.equal(request.method,'model/list');assert.equal(request.params.includeHidden,false);calls++;
     if(!request.params.cursor) return {result:{data:[{model:'other-model'}],nextCursor:'next-page'}};
     assert.equal(request.params.cursor,'next-page');
@@ -76,10 +80,47 @@ test('native model/list discovers account effort support with bounded pagination
   })};
   assert.equal(await readAssistantCodexExecutionAvailability(execution,options),true);assert.equal(calls,2);
   assert.equal(await readAssistantCodexExecutionAvailability({...execution,effortLevel:'max'},options),false);
-  const unavailable={...options,spawnProcess:nativeRpc(()=>({result:{data:[],nextCursor:null}}))};
+  const unavailable={...options,spawnProcess:nativeRpc(request=>({result:request.method==='account/read'
+    ? {account:null,requiresOpenaiAuth:false} : {data:[],nextCursor:null}}))};
   assert.equal(await readAssistantCodexExecutionAvailability(execution,unavailable),false);
-  const loop={...options,spawnProcess:nativeRpc(()=>({result:{data:[],nextCursor:'same-cursor'}}))};
+  const loop={...options,spawnProcess:nativeRpc(request=>({result:request.method==='account/read'
+    ? {account:{type:'apiKey'},requiresOpenaiAuth:true} : {data:[],nextCursor:'same-cursor'}}))};
   await assert.rejects(readAssistantCodexExecutionAvailability(execution,loop),/READ_UNAVAILABLE/);
+});
+
+test('only explicit native missing authentication reports login, before any model lookup or invocation',async()=>{
+  const calls=[];
+  const options={executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+    calls.push(request.method);assert.equal(request.method,'account/read');
+    assert.deepEqual(request.params,{refreshToken:false});
+    return {result:{account:null,requiresOpenaiAuth:true}};
+  })};
+  await assert.rejects(readAssistantCodexExecutionAvailability(execution,options),{code:'ASSISTANT_CODEX_AUTH_REQUIRED'});
+  let starts=0;
+  await assert.rejects(runAssistantCodexPass({threadId:randomUUID(),deliveryId:randomUUID(),cwd:process.cwd(),taskContext,execution},{
+    ...options,readDelivery:async()=>({state:'uncertain'}),readMetadata:async threadId=>({threadId,cwd:process.cwd()}),
+    startInvocation:()=>{starts++;},
+  }),{code:'ASSISTANT_CODEX_AUTH_REQUIRED'});
+  assert.equal(starts,0);assert.deepEqual(calls,['account/read','account/read']);
+
+  // A provider that explicitly needs no OpenAI auth remains supported. Stored
+  // accounts are merely configured, not token-validity or recovery evidence.
+  for(const account of [{account:null,requiresOpenaiAuth:false},
+    ...['apiKey','chatgpt','amazonBedrock'].map(type=>({account:{type},requiresOpenaiAuth:true}))]){
+    assert.equal(await readAssistantCodexExecutionAvailability(execution,{...options,spawnProcess:nativeRpc(request=>({result:
+      request.method==='account/read'?account:{data:[{model:execution.modelId,supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:null}}))}),true);
+  }
+});
+
+test('malformed, unsupported or failed account reads remain unknown and expose no native diagnostics',async()=>{
+  for(const value of [null,{}, {account:null}, {account:null,requiresOpenaiAuth:'true'},
+    {account:[],requiresOpenaiAuth:true}, {account:{type:'futureAccount'},requiresOpenaiAuth:true}]){
+    await assert.rejects(readAssistantCodexExecutionAvailability(execution,{executable:process.execPath,environment:{},
+      spawnProcess:nativeRpc(()=>({result:value}))}),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+  }
+  await assert.rejects(readAssistantCodexExecutionAvailability(execution,{executable:process.execPath,environment:{},
+    spawnProcess:nativeRpc(()=>({error:{code:-32000,message:'ASSISTANT_CODEX_AUTH_REQUIRED PRIVATE'}}))}),
+    error=>error.code==='ASSISTANT_CODEX_READ_UNAVAILABLE' && !error.message.includes('PRIVATE'));
 });
 
 test('an unavailable native model never crosses the durable invocation fence', async()=>{
@@ -127,8 +168,9 @@ test('malformed native JSON frames fail closed instead of crashing the coordinat
 
 test('initial native chat persists its ID synchronously and consumes no business instruction', async t=>{
   const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-provision-test-'));t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
-  const threadId=randomUUID(),deliveryId=randomUUID();let started=false,saved=null,input='';
+  const threadId=randomUUID(),deliveryId=randomUUID();let started=false,saved=null,input='',confirmed=0;
   const options={readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+    onAuthenticationConfirmed:async()=>{confirmed++;},
     startInvocation:()=>{started=true;},onThreadStarted:value=>{assert.equal(started,true);saved=value;},
     readDelivery:async value=>{assert.equal(saved,threadId);assert.equal(value,threadId);return{state:'completed',receipt:'fixture:ready'};},
     spawnProcess:(_executable,args)=>{
@@ -141,10 +183,12 @@ test('initial native chat persists its ID synchronously and consumes no business
     },
   };
   const result=await provisionAssistantCodexChat({deliveryId,cwd,execution},options);
+  assert.equal(confirmed,1);
   assert.equal(result.threadId,threadId);assert.match(input,/Do not use tools/u);
   assert.doesNotMatch(input,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd,execution},{...options,onThreadStarted:()=>{throw new Error('private disk failure');}}),/DELIVERY_UNCERTAIN/);
+  assert.equal(confirmed,1,'an unknown provision never reports login recovery');
 });
 
 test('native execution uses the exact chat/cwd, stdin marker, one-use start and positive live read-back', async t => {
@@ -153,8 +197,9 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const expectedCwd = await fs.realpath(cwd);
   const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()]};
-  let starts=0,reads=0,launches=0,input='';
+  let starts=0,reads=0,launches=0,confirmed=0,input='';
   const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,SHOULD_NOT_PASS:'private' },
+    onAuthenticationConfirmed:async()=>{confirmed++;throw new Error('PRIVATE health report failed');},
     startInvocation:() => { if (starts++) throw new Error('private state error'); },
     readMetadata:async () => ({ threadId,cwd }), readDelivery:async () => ++reads===1 ? { state:'uncertain' }
       : { state:'completed',turnId,receipt:`codex:${threadId}:${turnId}` },
@@ -172,6 +217,9 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   };
   const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext:repliedTaskContext,execution },options);
   assert.equal(result.state,'completed'); assert.equal(launches,1); assert.equal(starts,1);
+  assert.equal(confirmed,1,'diagnostic failure neither discards nor replays a fresh positive native result');
+  assert.equal((await runAssistantCodexPass({threadId,deliveryId,cwd,taskContext,execution},options)).state,'completed');
+  assert.equal(confirmed,1,'old receipt reconciliation cannot clear a current login incident');
   assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   const scopeLine=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_SCOPE '));
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
@@ -192,6 +240,7 @@ test('a successful CLI exit/queue claim without exact completed-turn read-back r
   t.after(()=>fs.rm(cwd,{ recursive:true,force:true }));
   const threadId=randomUUID(),deliveryId=randomUUID();
   await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },{
+    onAuthenticationConfirmed:()=>assert.fail('an uncertain result is not login recovery'),
     readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
     readDelivery:async()=>({ state:'uncertain' }),spawnProcess:()=>{
       const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{

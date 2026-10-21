@@ -208,6 +208,69 @@ test('business readiness is exact dedicated identity and complete capabilities, 
   assert.equal(assistantCoordinatorReadiness({isError:true,structuredContent:base},identity),false);
 });
 
+test('production native health reports survive the delivery fence; only fresh confirmed authentication clears its own latch',async()=>{
+  for(const scenario of ['missing','confirmed','metadata','unknown','report_failed','report_conflict','rebound','unrelated']){
+    const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+    const companyId=randomUUID(),memberId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID();
+    const reports=[];let currentIdentity=identity,contactReads=0,starts=0,schedules=0;
+    const database=new DatabaseSync(':memory:');
+    const client={identity,heartbeat:async()=>({}),companies:async()=>[{companyId,memberId}],
+      tasks:async()=>({bindings:[{id:bindingId,taskId,state:'accepted',revision:0}],nextCursor:null}),
+      task:async()=>({id:bindingId,taskId,state:'accepted',revision:0,hostState:'this_device',
+        execution:{state:'ready',configuration:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}}}),
+      poll:async()=>({events:[],nextCursor:'0',hasMore:false}),
+      claimTaskHost:async input=>({bindingId,provisionId:input.provisionId,threadId:null}),
+      reportSchedule:async input=>{schedules++;return {sequence:input.sequence};},
+      readHealth:async()=>{contactReads++;return {code:scenario==='unrelated'?'plugin_update_required':'codex_auth_required',revision:7,
+        latchedCodes:['hook_review_required','codex_auth_required']};},
+      reportHealth:async input=>{
+        reports.push(input);
+        if(scenario==='report_failed')throw new Error('PRIVATE diagnostic outage');
+        if(scenario==='report_conflict')throw Object.assign(new Error('PRIVATE CAS race'),{code:'ASSISTANT_HEALTH_CHANGED'});
+        return {};
+      },
+    };
+    const host=await createAssistantRuntimeHost({context:async action=>action({...client,identity:currentIdentity},{readActivePass:async()=>null}),
+      dependencies:{directory:path.join(os.tmpdir(),'synthetic-auth-health-'+randomUUID()),ensureDirectory:async()=>{},
+        openDatabase:async()=>({database,close:async()=>database.close()}),timeZone:'UTC',
+        readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+          authorizedByUserId:memberId,businessReady:true,
+          availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
+        native:{readDelivery:async()=>({state:'uncertain'}),run:async()=>assert.fail('this fixture provisions only'),
+          provision:async(_input,options)=>{
+            if(scenario==='missing')throw Object.assign(new Error('PRIVATE native account'),{code:'ASSISTANT_CODEX_AUTH_REQUIRED'});
+            if(scenario==='unknown')throw Object.assign(new Error('Please sign in PRIVATE'),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+            options.startInvocation();starts++;const threadId=randomUUID();options.onThreadStarted(threadId);
+            if(scenario==='rebound')currentIdentity={...identity,deviceId:randomUUID()};
+            if(scenario!=='metadata')await options.onAuthenticationConfirmed();
+            return {state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};
+          }}}});
+    try {
+      await host.coordinator.pollOnce();
+      if(['missing','unknown','rebound'].includes(scenario)){
+        await assert.rejects(host.coordinator.workOnce());
+        assert.equal(schedules,0,'a diagnostic report never advances the business schedule');
+      }else{
+        assert.equal((await host.coordinator.workOnce()).state,'completed');
+        await host.coordinator.pollOnce();assert.equal(schedules,1);
+      }
+      if(['metadata','unknown','rebound'].includes(scenario)){
+        assert.equal(contactReads,0);assert.equal(reports.length,0,'metadata/unknown/rebound identity cannot recover or diagnose login');
+      }else if(scenario==='unrelated'){
+        assert.equal(contactReads,1);assert.equal(reports.length,0,'a completed native turn cannot clear an unrelated plugin incident');
+      }else{
+        assert.equal(contactReads,1);assert.equal(reports.length,1,'no diagnostic retry after an uncertain response or CAS conflict');
+        assert.equal(reports[0].expectedRevision,7);assert.match(reports[0].clientRequestId,/^[0-9a-f-]{36}$/u);
+        assert.equal(reports[0].code,scenario==='missing'?'codex_auth_required':'ready');
+        assert.equal(reports[0].clearedReason,scenario==='missing'?undefined:'codex_auth_required',
+          'the unrelated hook-review latch is never cleared');
+        assert.ok(!JSON.stringify(reports).includes('PRIVATE'));
+      }
+      assert.equal(starts,['missing','unknown'].includes(scenario)?0:1);
+    }finally{await host.close();}
+  }
+});
+
 test('one background worker keeps model-free polling alive during a single native pass and closes after settlement',async()=>{
   let resolveWork,workCalls=0,pollCalls=0,waits=0,closed=0;
   const work=new Promise(resolve=>{resolveWork=resolve;});

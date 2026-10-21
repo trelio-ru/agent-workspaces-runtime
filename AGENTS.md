@@ -376,6 +376,10 @@ publication tooling также остаются вне этого публичн
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
+- Native account preflight diagnoses login only from explicit missing auth, not
+  prose or a cached catalogue. Only a fresh completed turn with exact read-back
+  clears its current login latch; unrelated health incidents and delivery fences
+  remain independent. [Contract](docs/assistant-scheduler.md#company-model-selection).
 - Background composition keeps one native pass per signed worker and private
   invocations per call. Supervisor updates only between cycles; full backend
   readiness gates business work. Task folders use compact full-identity hashes; prototype writable roots require review. OS installation and Windows E2E remain explicit
