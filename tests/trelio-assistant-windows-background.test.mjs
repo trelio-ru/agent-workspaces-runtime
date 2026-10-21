@@ -133,7 +133,7 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
           const end = diagnostic.indexOf('\n'); if (end < 0) break;
           const line = diagnostic.slice(0, end).trim(); diagnostic = diagnostic.slice(end + 1);
           if (/^TRELIO_TASK_CHECK [a-z_]{1,32}$/u.test(line)
-            || /^TRELIO_TASK_STAGE (?:input|identity|scheduler|folder|lookup|result)$/u.test(line)) console.log(line);
+            || /^TRELIO_TASK_STAGE (?:script|encoding|input|identity|scheduler|folder|lookup|result)$/u.test(line)) console.log(line);
         }
         if (diagnostic.length > 4096) diagnostic = '';
       });

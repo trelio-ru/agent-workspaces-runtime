@@ -82,14 +82,18 @@ export const quoteAssistantWindowsArgument = value => '"' + value.replace(/(\\*)
  * not permission to overwrite another task using Register -Force.
  */
 export const ASSISTANT_WINDOWS_BACKGROUND_SCRIPT = String.raw`
+[Console]::Error.WriteLine('TRELIO_TASK_STAGE script')
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+[Console]::Error.WriteLine('TRELIO_TASK_STAGE encoding')
 [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 try {
   # Closed diagnostic stages only. The ordinary parent discards stderr; the
   # hosted native fixture may observe these enums to distinguish cold process
-  # startup, input EOF and Task Scheduler COM timeouts without OS/user data.
+  # startup, encoding/module loading, input EOF and Task Scheduler COM timeouts
+  # without OS/user data. The first two stages precede New-Object on purpose:
+  # absence of the input stage alone cannot distinguish startup from autoload.
   [Console]::Error.WriteLine('TRELIO_TASK_STAGE input')
   $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
   [Console]::Error.WriteLine('TRELIO_TASK_STAGE identity')

@@ -49,6 +49,14 @@ internal static class Harness {
     static Type sessionType;
     static AutomationElement root, document;
     static Step step;
+    static volatile string startupStage = "thread";
+    static void Stage(string value) {
+        startupStage = value;
+        // Only fixed fixture stages; no UI tree, field value, path or request.
+        // Hosted chronology separates CLR/WPF startup from Show/Activate without
+        // extending the fixture wait or any production helper deadline.
+        Console.Error.WriteLine("TRELIO_UIA_FIXTURE_STAGE " + value);
+    }
     static readonly BindingFlags Hidden = BindingFlags.NonPublic | BindingFlags.Instance;
     static readonly BindingFlags Static = BindingFlags.NonPublic | BindingFlags.Static;
     static object Call(string name, params object[] args) { return sessionType.GetMethod(name, Static).Invoke(null, args); }
@@ -141,9 +149,12 @@ internal static class Harness {
         Exception uiError = null;
         var thread = new Thread(() => {
             try {
+                Stage("window");
                 window = new Window { Title = "Trelio synthetic UIA fixture", Width = 500, Height = 400 };
+                Stage("document");
                 page = new FixturePage();
                 panel = new StackPanel();
+                Stage("controls");
                 username = Input("username"); password = Input("password"); distraction = Input("distraction");
                 submit = new Button { Content = "Synthetic submit", Height = 35, Margin = new Thickness(5) };
                 AutomationProperties.SetAutomationId(submit, "login");
@@ -151,19 +162,23 @@ internal static class Harness {
                 username.TextChanged += (sender, e) => distraction.Focus();
                 panel.Children.Add(username); panel.Children.Add(password); panel.Children.Add(distraction); panel.Children.Add(submit);
                 page.Child = panel; window.Content = page;
-                window.Show(); window.Activate();
+                Stage("show"); window.Show();
+                Stage("activate"); window.Activate();
+                Stage("handle");
                 handle = new WindowInteropHelper(window).Handle;
+                Stage("ready");
                 ready.Set();
                 System.Windows.Threading.Dispatcher.Run();
             } catch (Exception error) { uiError = error; ready.Set(); }
         });
         thread.SetApartmentState(ApartmentState.STA); thread.IsBackground = true; thread.Start();
+        Console.Error.WriteLine("TRELIO_UIA_FIXTURE_STAGE thread-started");
         try {
             // Cold hosted Windows may spend more than ten seconds loading
             // WPF/composition before the synthetic window is created. This
             // bounded wait precedes all field preparation/fill; production
             // helper deadlines and every UIA assertion remain unchanged.
-            Check(ready.WaitOne(25000), "fixture window timeout");
+            Check(ready.WaitOne(25000), "fixture window timeout (stage=" + startupStage + ")");
             if (uiError != null) throw uiError;
             sessionType = typeof(Step).Assembly.GetType("Session");
             root = AutomationElement.FromHandle(handle);
@@ -263,7 +278,10 @@ internal static class Harness {
             Console.Error.WriteLine("Windows UIA fixture failed: " + (error.GetType() == typeof(Exception) ? error.Message : Reason(error)));
             return 1;
         } finally {
-            if (window != null) window.Dispatcher.Invoke(new Action(() => window.Close()));
+            // A failed window startup must not block cleanup on the very UI
+            // thread whose progress is unknown. This is a disposable background
+            // fixture thread; process exit still destroys its synthetic window.
+            if (window != null) window.Dispatcher.BeginInvoke(new Action(() => window.Close()));
         }
     }
 }
