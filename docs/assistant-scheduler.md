@@ -424,6 +424,12 @@ only public registration metadata; code is constant and no shell interpolation,
 credential, private-worker pipe or raw OS error is exposed. It does not perform
 ACL/DPAPI work, change policy or run the supervisor as SYSTEM. Existing common
 private runtime and every business authority check remain unchanged.
+The helper disables automatic module discovery in its own process and explicitly
+imports only the OS utility module from the fixed PSHOME manifest. UTF-8
+encodings use .NET constructors before that import. In hosted ARM64 evidence,
+script entry took under 0.3 seconds but the first unqualified New-Object spent
+22–35 seconds in module initialization/discovery; bypassing that catalogue search
+does not raise any time budget or change installed modules or Windows policy.
 
 Task Scheduler may return an account name for a SID submitted at registration;
 read-back resolves it with the Windows account API and compares the immutable
@@ -431,8 +437,8 @@ current SID, never a display name. Missing/foreign/unresolvable principals deny.
 One non-sliding 45-second setup budget includes private/contact I/O and native
 registration; its remaining native process budget is at most 40 seconds. A
 slow ARM64 PowerShell start cannot renew that deadline or cause an OS retry.
-The constant helper emits only closed input/identity/scheduler/folder/lookup/result
-stage names on stderr. Production discards that pipe; the hosted fixture may
+The constant helper emits only closed script/encoding/module/input/identity/
+scheduler/folder/lookup/result stage names on stderr. Production discards that pipe; the hosted fixture may
 print only the explicit enum to locate startup/EOF/COM timeouts. No OS value,
 task definition, account, path or exception is added to diagnostic output.
 

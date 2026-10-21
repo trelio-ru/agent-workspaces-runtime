@@ -85,15 +85,20 @@ export const ASSISTANT_WINDOWS_BACKGROUND_SCRIPT = String.raw`
 [Console]::Error.WriteLine('TRELIO_TASK_STAGE script')
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$PSModuleAutoLoadingPreference = 'None'
 [Console]::Error.WriteLine('TRELIO_TASK_STAGE encoding')
-[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 try {
   # Closed diagnostic stages only. The ordinary parent discards stderr; the
   # hosted native fixture may observe these enums to distinguish cold process
   # startup, encoding/module loading, input EOF and Task Scheduler COM timeouts
-  # without OS/user data. The first two stages precede New-Object on purpose:
-  # absence of the input stage alone cannot distinguish startup from autoload.
+  # without OS/user data. Command discovery for the first unqualified New-Object
+  # took 22-35 seconds on hosted ARM64, while this script entered in <0.3s.
+  # Import only the OS utility module by its fixed PSHOME manifest. Do not scan
+  # installed/user modules, extend the native deadline or change machine policy.
+  [Console]::Error.WriteLine('TRELIO_TASK_STAGE module')
+  Microsoft.PowerShell.Core\Import-Module -Name ([System.IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
   [Console]::Error.WriteLine('TRELIO_TASK_STAGE input')
   $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
   [Console]::Error.WriteLine('TRELIO_TASK_STAGE identity')

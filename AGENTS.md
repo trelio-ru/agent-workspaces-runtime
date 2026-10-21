@@ -410,6 +410,8 @@ publication tooling также остаются вне этого публичн
   InteractiveToken and exact native Task Scheduler read-back. No saved password,
   autologon, force overwrite, active-pass termination or readiness inference.
   Constant public-metadata PowerShell is separate from native ACL/DPAPI.
+  It loads only the fixed OS utility manifest with process-local autoload off;
+  slow module discovery never permits extra time or OS mutation replay.
   [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
 
 ## Граница plugin/runtime

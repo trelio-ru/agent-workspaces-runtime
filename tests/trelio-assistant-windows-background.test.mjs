@@ -79,12 +79,13 @@ test('native helper uses constant code, JSON stdin, bounded closed output and no
     return child;
   };
   const result = await runAssistantWindowsBackgroundNative({ operation: 'status' }, { spawnProcess,
-    environment: { SystemRoot: 'C:\\Windows', USERPROFILE: 'C:\\Users\\Irina', PRIVATE_TOKEN: 'DO_NOT_COPY' } });
+    environment: { SystemRoot: 'C:\\Windows', USERPROFILE: 'C:\\Users\\Irina', PRIVATE_TOKEN: 'DO_NOT_COPY', PSModulePath: 'C:\\UntrustedModules' } });
   assert.deepEqual(result, registered());
   assert.equal(supplied.executable, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
   assert.equal(Buffer.from(supplied.args.at(-1), 'base64').toString('utf16le'), ASSISTANT_WINDOWS_BACKGROUND_SCRIPT);
   assert.equal(supplied.options.shell, false);
   assert.equal(supplied.options.env.PRIVATE_TOKEN, undefined);
+  assert.equal(supplied.options.env.PSModulePath, undefined, 'the public helper never loads an inherited module catalogue');
   assert.ok(!JSON.stringify(supplied).includes('DO_NOT_COPY'));
   for (const value of [{ ...registered(), stdout: 'PRIVATE' }, { ...registered(), businessReady: true },
     { ...registered(), state: 'not_installed' }, { code: 'RAW_PRIVATE_ERROR', message: 'PRIVATE' }]) {
@@ -133,7 +134,7 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
           const end = diagnostic.indexOf('\n'); if (end < 0) break;
           const line = diagnostic.slice(0, end).trim(); diagnostic = diagnostic.slice(end + 1);
           if (/^TRELIO_TASK_CHECK [a-z_]{1,32}$/u.test(line)
-            || /^TRELIO_TASK_STAGE (?:script|encoding|input|identity|scheduler|folder|lookup|result)$/u.test(line)) console.log(line);
+            || /^TRELIO_TASK_STAGE (?:script|encoding|module|input|identity|scheduler|folder|lookup|result)$/u.test(line)) console.log(line);
         }
         if (diagnostic.length > 4096) diagnostic = '';
       });
