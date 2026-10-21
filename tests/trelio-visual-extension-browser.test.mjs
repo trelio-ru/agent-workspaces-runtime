@@ -7,6 +7,7 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
@@ -218,6 +219,56 @@ test('document guard follows headerless redirects and blocks final files includi
     // Windows may release Chromium's Account Web Data handle just after the
     // owned process has exited. Match the other native fixtures' bounded
     // cleanup; exhaustion still fails, and no document assertion is skipped.
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
+test('explicit incoming attachment uses browser transport, preserves the chat and delivers only verified local bytes', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 150_000 }, async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-attachment-')));
+  const pdf = Buffer.from('%PDF-1.7\nSYNTHETIC_ATTACHMENT_NOT_MCP_TEXT\n%%EOF\n'), text = Buffer.from('Synthetic incoming document\n');
+  const received = [];
+  const server = http.createServer((request, response) => {
+    received.push(request.url);
+    if (request.url === '/redirect') { response.writeHead(302, { Location: '/file' }); response.end(); return; }
+    if (request.url === '/file') { response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename=untrusted-name.pdf', 'Content-Length': pdf.length }); response.end(pdf); return; }
+    if (request.url === '/text') { response.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': 'attachment', 'Content-Length': text.length }); response.end(text); return; }
+    if (request.url === '/html') { response.writeHead(200, { 'Content-Type': 'text/html', 'Content-Disposition': 'attachment; filename=pretend.pdf' }); response.end('<html>SYNTHETIC_SOURCE_MUST_NOT_EXPORT</html>'); return; }
+    if (request.url === '/fake') { response.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment' }); response.end('SYNTHETIC_NOT_PDF'); return; }
+    if (request.url === '/large') { response.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment', 'Content-Length': 30 * 1024 * 1024 }); response.end(); return; }
+    response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body style="font:25px sans-serif">Original synthetic chat<a target="_blank" download href="/redirect" style="position:absolute;left:30px;top:60px">PDF</a><a href="/text" style="position:absolute;left:30px;top:120px">Text</a><a href="/html" style="position:absolute;left:30px;top:180px">HTML</a><a href="/fake" style="position:absolute;left:30px;top:240px">Invalid PDF</a><a href="/large" style="position:absolute;left:30px;top:300px">Large</a><button style="position:absolute;left:200px;top:60px" onclick="setTimeout(() =&gt; window.open(&quot;/file&quot;, &quot;_blank&quot;), 20)">Button file</button>');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const browser = new ExtensionVisualBrowser({ dependencies, store: { directory, async read() {}, async prepare() {}, async write() {}, close() {} }, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], observationMode: 'text', attachmentDownloads: true, lease: { deadlineAt: Date.now() + 140_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+  const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1' ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
+  try {
+    let f = await browser.call('navigate', { url: origin + '/' }); assert.equal(f.state, 'ready');
+    await new Promise(resolve => setTimeout(resolve, 1200)); const before = focus();
+    const file = await browser.call('download-attachment', { frameId: f.frameId, x: 50, y: 75 });
+    assert.equal(file.state, 'ready', JSON.stringify({ reason: file.reason })); assert.equal(file.kind, 'trelio.browser-file/v1');
+    assert.deepEqual(await fs.readFile(file.filePath), pdf); assert.equal(file.sha256, createHash('sha256').update(pdf).digest('hex')); assert.equal(file.mimeType, 'application/pdf');
+    assert.doesNotMatch(JSON.stringify(file), /SYNTHETIC_ATTACHMENT|untrusted-name|\/redirect|dataBase64/);
+    f = await browser.call('read-text'); assert.equal(f.state, 'ready'); assert.match(f.text, /Original synthetic chat/);
+    assert.equal((await browser.call('download-attachment', { frameId: f.frameId, x: 1000, y: 500 })).reason, 'attachment_link_required');
+    for (const [y, expected] of [[135, 'ready'], [195, 'attachment_unsupported'], [255, 'attachment_unsupported'], [315, 'attachment_too_large']]) {
+      f = await browser.call('read-text'); assert.equal(f.state, 'ready');
+      const value = await browser.call('download-attachment', { frameId: f.frameId, x: 50, y });
+      assert.equal(value.state === 'ready' ? 'ready' : value.reason, expected);
+      if (value.state === 'ready') assert.deepEqual(await fs.readFile(value.filePath), text);
+      // An intentional refusal may leave Chrome's error document. A fresh
+      // explicit fixture navigation is a new read, never a blind file retry.
+      await browser.call('navigate', { url: origin + '/' });
+    }
+    if (before) assert.equal(focus(), before, 'attachment receipt never creates/activates a tab or native Save As');
+    f = await browser.call('read-text');
+    const button = await browser.call('download-attachment', {frameId:f.frameId,x:230,y:70});
+    assert.equal(button.state, 'ready', JSON.stringify({reason:button.reason})); assert.deepEqual(await fs.readFile(button.filePath), pdf);
+    if (before) assert.equal(focus(), before, 'script-open attachment never activates a popup');
+    assert.equal(received.filter(url => url === '/file').length, 2, 'each of the two deliberate reads fetches once');
+    await browser.close(); assert.deepEqual(await fs.readFile(file.filePath), pdf, 'browser close does not remove the delivered original');
+  } finally {
+    await browser.close().catch(() => browser.abort()); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });

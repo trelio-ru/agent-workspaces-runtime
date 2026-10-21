@@ -59,8 +59,8 @@ async function request(owner, operation, args) {
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', env = process.env, fixture }) {
-  if (!['image', 'text'].includes(observationMode)) return visualStatus('error', 'invalid_input');
+export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, env = process.env, fixture }) {
+  if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads)) return visualStatus('error', 'invalid_input');
   const binding = visualSessionBinding(env);
   const policy = createVisualOriginPolicy({ origins, domains, allowLoopback: Boolean(fixture) });
   if (!args || typeof args !== 'object' || Array.isArray(args) || Buffer.byteLength(JSON.stringify(args)) > 32_768) return visualStatus('error', 'invalid_input');
@@ -112,7 +112,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     // Upgrading a provider may reuse its saved auth but must not silently
     // reuse an older live worker with a different content-disclosure mode.
     // Cleanup/status remain available so the exact owner can finish it safely.
-    if ((owner.observationMode || 'image') !== observationMode && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+    if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
     // Do not slide the original deadline when another CLI invocation arrives.
     if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
     if (Number.isInteger(owner.port) && owner.port > 0 && owner.port < 65536) {
@@ -165,7 +165,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   owner = {
     schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
     pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-    origins, domains, directory: configDirectory, operation, args, observationMode,
+    origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads,
     ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
   };
   await writePrivateJsonFile(file, owner);

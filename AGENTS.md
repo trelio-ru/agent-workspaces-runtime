@@ -268,6 +268,14 @@ publication tooling также остаются вне этого публичн
   Capture/input не активируют app; native foreground test проверяет это без
   возврата прежнего фокуса. Anchor routing не доказывает поддержку всех site
   popups/iframes. Source probes не входят в package и не являются fallback.
+- Входящие вложения – отдельный signed `attachmentDownloads` opt-in в
+  [visual contract](docs/visual-browser.md#входящие-вложения). Только координаты
+  fresh frame: локальный href/one-click popup router, browser-owned authenticated
+  stream, 20 МиБ/30с, exact main-frame DNR exception и отзыв. Не raw HTTP и не
+  body/URL в MCP; проверенный original выдаётся private local receipt на 24ч,
+  с quota/unsafe-path guards, без исполнения, извлечения архива или auth reset.
+  Обычные non-HTML navigate остаются запрещены; native fixtures проверяют
+  anchor/button, bytes, сохранение чата и отсутствие focus на всех OS.
 - Signed provider может явно выбрать bounded text observation по
   [контракту](docs/visual-browser.md#текстовый-режим). Default image-only не
   расширяется автоматически. Fixed isolated reader не выдаёт HTML/JS, input

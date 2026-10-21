@@ -84,7 +84,7 @@ try {
   fixtureDiagnostic({ stage: 'startup_browser' });
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.
-  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, observationMode: owner.observationMode || 'image', lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
+  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, observationMode: owner.observationMode || 'image', attachmentDownloads: owner.attachmentDownloads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   current = await engine.call(owner.operation, owner.args);
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed' });

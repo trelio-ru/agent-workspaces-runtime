@@ -85,6 +85,7 @@ jobs:
           node tests/trelio-visual-store.test.mjs
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
+          node tests/trelio-visual-attachments.test.mjs
           node tests/trelio-visual-profile.test.mjs
           node tests/trelio-visual-cookie-state.test.mjs
           node tests/trelio-visual-link-router.test.mjs
@@ -219,6 +220,7 @@ jobs:
           node tests/trelio-visual-store.test.mjs
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
+          node tests/trelio-visual-attachments.test.mjs
           node tests/trelio-visual-profile.test.mjs
           node tests/trelio-visual-cookie-state.test.mjs
           node tests/trelio-visual-link-router.test.mjs

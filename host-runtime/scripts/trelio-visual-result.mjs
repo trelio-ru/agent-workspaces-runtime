@@ -1,15 +1,17 @@
 import { validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
+import path from 'node:path';
 
 // A browser picture is a binary MCP block, never a base64 string in an ordinary
 // text result. This boundary is provider-neutral and accepts no page prose,
 // paths, HTML, URLs, headers, selectors or arbitrary structured payloads.
 export const VISUAL_RESULT_KIND = 'trelio.visual-browser/v1';
+export const BROWSER_FILE_KIND = 'trelio.browser-file/v1';
 export const MAX_VISUAL_PNG_BYTES = 2 * 1024 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const states = new Set(['not_configured', 'preparing', 'manual_input_required', 'saved_unverified', 'ready', 'closed', 'error']);
-const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'navigation_blocked', 'document_blocked', 'lease_expired', 'operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'session_busy', 'session_closed', 'browser_process_lost', 'invalid_input', 'http_document_failure', 'request_not_reviewed', 'request_not_ready', 'observation_mode_mismatch', 'tab_limit_reached']);
+const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'navigation_blocked', 'document_blocked', 'lease_expired', 'operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'session_busy', 'session_closed', 'browser_process_lost', 'invalid_input', 'http_document_failure', 'request_not_reviewed', 'request_not_ready', 'observation_mode_mismatch', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required', 'attachment_limit_reached']);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
 
@@ -75,7 +77,17 @@ function validateResult(value, discardBrowserColorProfile) {
   return value;
 }
 
-export function validateVisualResult(value) { return value?.kind === TEXT_KIND ? validateTextResult(value) : validateResult(value, false); }
+export function validateVisualResult(value) {
+  if (value?.kind === BROWSER_FILE_KIND) {
+    if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'filePath', 'sizeBytes', 'sha256', 'mimeType', 'expiresAt']) || value.state !== 'ready' || value.reason !== 'none' || !uuid.test(value.sessionId)
+      || typeof value.filePath !== 'string' || value.filePath.length > 4096 || !path.isAbsolute(value.filePath) || /[\x00-\x1f]/u.test(value.filePath)
+      || !Number.isInteger(value.sizeBytes) || value.sizeBytes < 1 || value.sizeBytes > 20 * 1024 * 1024 || !/^[0-9a-f]{64}$/u.test(value.sha256)
+      || typeof value.mimeType !== 'string' || value.mimeType.length > 128 || !/^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:pdf|rtf|zip|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u.test(value.mimeType)
+      || !Number.isSafeInteger(value.expiresAt)) fail();
+    return value;
+  }
+  return value?.kind === TEXT_KIND ? validateTextResult(value) : validateResult(value, false);
+}
 
 /** Normalize only a host-owned raster capture, before it enters the private
  * worker HTTP transport and ordinary strict MCP validation. No website code,
@@ -110,12 +122,12 @@ export function visualMcpResult(value) {
 // Only the skill-run transport may interpret this marker. A malformed visual
 // attempt fails closed instead of falling back to echoing its original stdout.
 export function parseVisualSkillOutput(stdout) {
-  if (typeof stdout !== 'string' || (!stdout.includes(VISUAL_RESULT_KIND) && !stdout.includes(TEXT_KIND))) return null;
+  if (typeof stdout !== 'string' || (!stdout.includes(VISUAL_RESULT_KIND) && !stdout.includes(TEXT_KIND) && !stdout.includes(BROWSER_FILE_KIND))) return null;
   if (Buffer.byteLength(stdout) > 3 * 1024 * 1024) fail();
   let value;
   try { value = JSON.parse(stdout); } catch { fail(); }
   // Ordinary provider data may mention the protocol in prose. Only its exact
   // top-level marker opts into closed browser projection; legacy JSON stays unchanged.
-  if (value?.kind !== VISUAL_RESULT_KIND && value?.kind !== TEXT_KIND) return null;
+  if (value?.kind !== VISUAL_RESULT_KIND && value?.kind !== TEXT_KIND && value?.kind !== BROWSER_FILE_KIND) return null;
   return validateVisualResult(value);
 }

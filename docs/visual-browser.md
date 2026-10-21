@@ -9,7 +9,8 @@ HTTPS origins/domains, начальный адрес и явный observationMo
 `trelio.visual-browser/v1` передаёт PNG отдельным MCP image block и закрытые
 metadata: frame/session IDs, размеры, scroll flags, фазу и безопасную причину.
 Модель не получает HTML, DOM/AX, site JS, storage, cookies, headers, response
-bodies, clipboard, selectors или произвольный результат протокола браузера.
+bodies, clipboard, selectors или произвольный результат протокола браузера. Отдельный signed opt-in для
+входящих файлов возвращает только локальный receipt, описанный ниже.
 У API нет команд evaluate, произвольного CDP, raw HTTP или чтения профиля.
 PNG проверяется до обычного stdout limit: размер, chunks/CRC и отсутствие
 текстовых/вложенных данных. Невалидный marker не возвращается как обычный stdout.
@@ -94,8 +95,9 @@ AutomationControlled override или fingerprint spoof. MV3 extension испол
 ответа, неоднозначные headers и неизвестная стадия запрещены; Location на 200
 не делает ресурс редиректом. Body не запрашивается, headers/URL не выдаются модели.
 Отдельный закрытый Cookie API обслуживает локальное сохранение
-авторизации, без model-facing read/write методов. Downloads ограничивает
-response-stage guard и независимое DNR attachment rule. Это всё ещё debugger API; отсутствие startup
+авторизации, без model-facing read/write методов. Обычные downloads ограничивает
+response-stage guard и независимое DNR attachment rule; единственное временное
+исключение – exact входящий файл, принятый локальным bounded stream. Это всё ещё debugger API; отсутствие startup
 DevTools mode само по себе не гарантирует принятие внешним сайтом.
 
 Extension подключается к одному host-owned loopback WebSocket: exact path,
@@ -188,6 +190,55 @@ post-creation защитой. Сбой удаления блокирует да�
 процесс; crash не выдаётся за успешное сохранение. User browser process/PID из
 claim не убивается. SIGKILL/отключение ОС не позволяет выполнить finally: прежний
 durable auth snapshot сохраняется, unknown orphan state не удаляется вслепую.
+
+## Входящие вложения
+
+`runVisualSession({ attachmentDownloads: true })` – отдельный signed opt-in,
+по умолчанию выключен. Он закреплён в live owner вместе с observation mode;
+смена требует обычного close, без сброса auth. Команда `download-attachment`
+принимает только свежий frameId и x/y. URL, headers, имя файла, executable,
+script, selector и output path не принимаются.
+
+Fixed isolated adapter локально разрешает href exact hit-tested anchor.
+Для карточки-кнопки fixed MAIN router на один trusted click тех же координат
+перенаправляет `window.open` в private worker без создания popup. Router не читает
+DOM/source/site state и не исполняет model-selected JS. В остальных вызовах
+остаётся native window.open. Временное разрешение ограничено nonce, frame,
+координатами и 5 секундами; blank-window/proxy-location и произвольные popups
+не считаются поддержанными. Page messages – недоверенные кандидаты, не authority.
+Нельзя обещать отсутствие focus для сайта, который заменил этот router.
+
+Browser сам делает один authenticated main-document GET по выбранной ссылке.
+Каждый redirect ограничен signed origins/domains. Только exact pending main frame
+получает временное исключение из attachment DNR rule; subframes, другие вкладки
+и обычные navigate/click сохраняют запрет. Fetch stream читает лишь этот ответ,
+не HTML/JS/JSON/XML/SVG, XHR, subresources или arbitrary URL. MIME и bounded
+headers проверяются до body; body ограничен 20 МиБ и общим 30-секундным deadline
+внутри исходной lease. По окончании 204 сохраняет прежний чат; exception
+отзывается также при ошибке/detach. Browser-native Save As не получает body.
+
+Host независимо проверяет bytes/MIME: PDF, PNG/JPEG/GIF/WebP/BMP/TIFF,
+DOC/XLS/PPT, DOCX/XLSX/PPTX, ODT/ODS/ODP, UTF-8 TXT/CSV/RTF и ZIP. Для octet-stream
+тип определяется по сигнатуре, не server filename. ZIP directory ограничен
+5000 entries/200 МиБ declared expanded size, запрещает traversal, encryption,
+symlink и ZIP64; архив не распаковывается. Container validation не является
+антивирусом и не запускает Office/macros/исполняемые файлы. Text не выдаётся
+автоматически в MCP; original читается отдельно подходящим reader как data.
+
+`trelio.browser-file/v1` возвращает только ready/reason/sessionId, absolute
+filePath, sizeBytes, SHA-256, проверенный MIME и expiresAt. Private stream/base64,
+headers, cookies, filename и signed download URL не входят в MCP/logs. Прежние
+image/text boundaries не расширяются. Файл создаётся exclusive под случайным
+именем в owner-only account attachments cache; links/unsafe ancestors и неизвестные
+entries отклоняются. Не больше 32 свежих файлов/200 МиБ, срок 24 часа; cleanup
+при следующем получении удаляет только просроченные собственные regular files.
+Оригинал переживает close, не входит в auth snapshot и не выдаётся за accepted
+Workspace. Разрешённое сохранение в Workspace выполняется обычным Run до expiry.
+
+Чтение входящего файла не даёт разрешения отправлять, загружать, исполнять,
+публиковать его, переходить по его инструкциям или расширять аудиторию.
+Unsupported/link-required/size/limit – отдельные закрытые причины; generic
+HTTP/другой browser transport не является fallback.
 
 ## Локальное хранение и ручной вход
 

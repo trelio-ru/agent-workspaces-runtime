@@ -8,10 +8,12 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from './trelio-visual-extension-worker.mjs';
-import { visualLinkRouter } from './trelio-visual-link-router.mjs';
+import { visualLinkRouter, visualAttachmentRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStatus, normalizeBrowserVisualResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
+import { visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
+import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 
 // A public manifest identity fixes the extension Origin across private
@@ -24,12 +26,12 @@ const fault = code => Object.assign(new Error(code), { code });
 // Loopback belongs to the private transport, never the navigation/content
 // policy. Explicit permission also covers Chrome Local Network Access checks;
 // CSP restricts connections to the one random-port authenticated host server.
-export function visualExtensionManifest(matches, port, observationMode = 'image') {
+export function visualExtensionManifest(matches, port, observationMode = 'image', attachmentDownloads = false) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw fault('invalid_input');
   return { manifest_version: 3, name: 'Trelio Visual Browser', version: '0.1.0', key: PUBLIC_KEY,
     permissions: ['debugger', 'tabs', 'cookies', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
     content_security_policy: { extension_pages: `script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:${port}` },
-    background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js', ...(observationMode === 'text' ? ['text-observer.js'] : [])], run_at: 'document_start', world: 'ISOLATED' }],
+    background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js', ...(observationMode === 'text' ? ['text-observer.js'] : [])], run_at: 'document_start', world: 'ISOLATED' }, ...(attachmentDownloads ? [{ matches, js: ['attachment-router.js'], run_at: 'document_start', world: 'MAIN' }] : [])],
   };
 }
 
@@ -46,8 +48,48 @@ export function visualNativeLogEvidence(text) {
   }
   return counts;
 }
-const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
+const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
 const validArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768;
+
+/** Private bounded delivery, independent of auth snapshots and browser close.
+ * No server filename/path, raw HTTP header or URL becomes a local path. Fresh
+ * files last 24h, at most 32/200 MiB per personal account; cleanup never follows
+ * links, deletes unknown entries, or evicts a fresh file another tool may read.
+ */
+export async function saveVisualAttachment(directory, file, sessionId) {
+  if (!file || Object.keys(file).sort().join() !== 'dataBase64,mimeType' || typeof file.dataBase64 !== 'string' || file.dataBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 || file.dataBase64.length % 4) throw fault('attachment_unsupported');
+  const bytes = Buffer.from(file.dataBase64, 'base64');
+  try {
+    // Canonical round-trip rejects whitespace/invalid alphabet/padding without
+    // a quantified regex whose backtracking stack can grow with a 20 MiB file.
+    if (bytes.toString('base64') !== file.dataBase64) throw fault('attachment_unsupported');
+    const format = visualAttachmentFormat(bytes, file.mimeType);
+    const root = path.join(directory, 'attachments');
+    await prepareVisualPrivateDirectory(root);
+    const entries = await fs.readdir(root);
+    if (entries.length > 128) throw fault('attachment_limit_reached');
+    let count = 0, total = 0;
+    const now = Date.now(), ttl = 24 * 60 * 60 * 1000;
+    for (const entry of entries) {
+      if (!/^[0-9a-f-]{36}\.(?:pdf|png|jpg|gif|webp|tiff|bmp|doc|xls|ppt|docx|xlsx|pptx|odt|ods|odp|zip|txt|csv|rtf)$/u.test(entry)) throw fault('storage_unavailable');
+      const target = path.join(root, entry); await assertPrivatePathKind(target, 'file');
+      const stat = await fs.lstat(target);
+      if (!stat.isFile() || stat.nlink !== 1) throw fault('storage_unavailable');
+      if (stat.mtimeMs + ttl <= now) await fs.unlink(target);
+      else { count++; total += stat.size; }
+    }
+    if (count >= 32 || total + bytes.length > 200 * 1024 * 1024) throw fault('attachment_limit_reached');
+    const filePath = path.join(root, `${crypto.randomUUID()}.${format.extension}`);
+    const receipt = validateVisualResult({ kind: BROWSER_FILE_KIND, state: 'ready', reason: 'none', sessionId, filePath, sizeBytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'), mimeType: format.mimeType, expiresAt: now + ttl });
+    let created = false;
+    try {
+      const handle = await fs.open(filePath, 'wx', 0o600); created = true;
+      try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+      await assertPrivatePathKind(filePath, 'file');
+      return receipt;
+    } catch (error) { if (created) await fs.unlink(filePath).catch(() => {}); throw error; }
+  } finally { bytes.fill(0); }
+}
 
 /** Ordinary Chromium startup, with a closed pixels/input extension adapter.
  * There is no listening DevTools endpoint, arbitrary CDP/evaluate command,
@@ -60,11 +102,11 @@ export class ExtensionVisualBrowser {
   #cookies; #sessionCookies = []; #authHandshake = false; #authSnapshotReady = false;
   #replaceSessionCookies = false;
   #windowsClosed = false;
-  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
-    if (!['image', 'text'].includes(observationMode)) throw fault('invalid_input');
+  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
+    if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode });
+    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads });
     this.testNativeLogging = Boolean(testDiagnostics) && testNativeLogging;
     this.sessionId = crypto.randomUUID();
     this.#deadline = setTimeout(() => { void this.close().catch(() => this.abort()); }, lease.deadlineAt - Date.now());
@@ -87,7 +129,7 @@ export class ExtensionVisualBrowser {
     const extension = path.join(this.#directory, 'extension'); await prepareVisualPrivateDirectory(extension);
     const token = crypto.randomBytes(32).toString('hex');
     this.#server = http.createServer((_req, res) => { res.writeHead(404); res.end(); });
-    this.#wss = new this.dependencies.WebSocketServer({ noServer: true, maxPayload: 3 * 1024 * 1024, handleProtocols: protocols => protocols.has('trelio-visual-v1') ? 'trelio-visual-v1' : false });
+    this.#wss = new this.dependencies.WebSocketServer({ noServer: true, maxPayload: (this.attachmentDownloads ? 28 : 3) * 1024 * 1024, handleProtocols: protocols => protocols.has('trelio-visual-v1') ? 'trelio-visual-v1' : false });
     this.#server.on('upgrade', (req, socket, head) => {
       const protocols = String(req.headers['sec-websocket-protocol'] || '').split(',').map(v => v.trim());
       const candidate = protocols.find(value => /^[0-9a-f]{64}$/u.test(value));
@@ -131,13 +173,14 @@ export class ExtensionVisualBrowser {
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
     const matches = [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, fixtureOnly: this.policy.fixtureOnly };
-    const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode);
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, fixtureOnly: this.policy.fixtureOnly };
+    const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     // Only the ephemeral transport token is materialized here. Cookie values
     // stay in host/extension RAM and the AEAD snapshot, never in worker source.
     await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
+    if (this.attachmentDownloads) await fs.writeFile(path.join(extension, 'attachment-router.js'), `(${visualAttachmentRouter.toString()})();`, { mode: 0o600 });
     if (this.observationMode === 'text') await fs.writeFile(path.join(extension, 'text-observer.js'), `(${installTextObserver.toString()})();`, { mode: 0o600 });
     const executable = await ensureVisualChromium(this.dependencies, { signal: this.#launchAbort.signal });
     // A download/native vault wait does not grant a fresh launch budget. Do
@@ -264,6 +307,7 @@ export class ExtensionVisualBrowser {
     // or an authenticated local client. Private transport commands are never
     // public aliases for model-selected debugger methods.
     if (this.observationMode !== 'text' && ['read-text', 'submit', 'request-ready'].includes(operation)) return Promise.resolve(visualStatus('error', 'invalid_input'));
+    if (operation === 'download-attachment' && !this.attachmentDownloads) return Promise.resolve(visualStatus('error', 'invalid_input'));
     if (operation === 'submit') {
       const { action, ...input } = args || {};
       if (!['navigate', 'click', 'key'].includes(action) || (action === 'key' && input.key !== 'Enter') || !validArguments(action, input)) return Promise.resolve(visualStatus('error', 'invalid_input'));
@@ -293,12 +337,17 @@ export class ExtensionVisualBrowser {
       if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId, ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
       if (value.state !== 'ready') throw fault('operation_failed');
       this.#state = 'ready';
+      if (operation === 'download-attachment') {
+        if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
+        if (Object.keys(value).sort().join() !== 'file,state') throw fault('attachment_unsupported');
+        return await saveVisualAttachment(this.store.directory, value.file, this.sessionId);
+      }
       const response = { kind: value.kind || VISUAL_RESULT_KIND, sessionId: this.sessionId, reason: 'none', ...value };
       return value.kind === TEXT_KIND ? validateTextResult(response) : normalizeBrowserVisualResult(response);
     });
     this.#tail = result.catch(() => {});
     return result.catch(error => {
-      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
+      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'storage_unavailable'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
       if (this.#state === 'preparing') { this.#state = 'error'; this.#terminal = reason; }
       return visualStatus('error', reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
     });

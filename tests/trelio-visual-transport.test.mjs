@@ -48,6 +48,17 @@ test('full visual payload crosses the real typed action handler as an image, not
   }
 });
 
+test('incoming original crosses the typed handler as a file receipt without stdout/body fallback', async () => {
+  const visual = validateVisualResult({ kind:'trelio.browser-file/v1',state:'ready',reason:'none',sessionId:randomUUID(),filePath:path.join(os.tmpdir(), `${randomUUID()}.pdf`),sizeBytes:123,sha256:'a'.repeat(64),mimeType:'application/pdf',expiresAt:Date.now()+86400000 });
+  const input = { schemaVersion:1,operation:'skill_run',parameters:{companyId:randomUUID(),skillId:'synthetic-visual-fixture',releaseId:randomUUID(),arguments:['download-attachment','--frameId',randomUUID(),'--x','10','--y','20']} };
+  const result = await handleToolCall('https://example.test','continue_trelio_workspace_action',input,{
+    workspaceActionOperation:(origin,args)=>handleTrelioWorkspaceActionOperation(origin,args,{runBridge:async()=>({stdout:JSON.stringify(visual),stderr:''})}),
+  });
+  assert.equal(result.content.length,1); assert.equal(JSON.parse(result.content[0].text).filePath,visual.filePath);
+  assert.doesNotMatch(JSON.stringify(result),/stdout|dataBase64|responseHeaders|cookies/);
+  assert.throws(()=>parseVisualSkillOutput(JSON.stringify({...visual,body:'SYNTHETIC_SOURCE'})),/VISUAL_RESULT_INVALID/);
+});
+
 function colorProfileFixture() {
   const chunk = (type, data) => {
     const bytes = Buffer.alloc(data.length + 12);

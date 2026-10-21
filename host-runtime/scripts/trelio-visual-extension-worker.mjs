@@ -37,6 +37,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const attached = new Set();
   const guardedTabs = new Set(), documentFailures = new Set();
   let guardUpdate = Promise.resolve(), guardFailed = false;
+  let pendingAttachment, pendingFileLink;
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
   const admitTab = tab => {
     if (tabBudget.admit(tab.id)) return;
@@ -129,7 +130,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (url.protocol === 'https:' && allowed(details.url) && details.statusCode >= 400 && details.statusCode <= 599) httpFailures.set(details.tabId, { origin: url.origin, httpStatus: details.statusCode });
   }, { urls: config.matches, types: ['main_frame'] });
   chrome.runtime.onMessage.addListener((message, sender) => {
-    if (manual || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0 || message?.kind !== 'route_link_click' || !pendingLink || pendingLink.tabId !== sender.tab.id) return;
+    if (manual || sender.id !== chrome.runtime.id || !sender.tab || sender.frameId !== 0) return;
+    if (message?.kind === 'route_attachment_open' && pendingFileLink?.tabId === sender.tab.id && pendingFileLink.nonce === message.nonce) {
+      pendingFileLink.resolve(message.url); return;
+    }
+    if (message?.kind !== 'route_link_click' || !pendingLink || pendingLink.tabId !== sender.tab.id) return;
     const pending = pendingLink; pendingLink = undefined;
     try { if (message.download) throw Error('document_blocked'); pending.resolve(allowedNavigation(message.url)); }
     catch { pending.reject(Error('navigation_blocked')); }
@@ -138,6 +143,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   chrome.debugger.onDetach.addListener(source => {
     attached.delete(source.tabId); guardedTabs.delete(source.tabId);
     if (frame?.tabId === source.tabId) frame = undefined;
+    if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
     // Revoke the response-rule exception after unexpected native detach. No
     // further observation/input runs while that policy write is unresolved.
     guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
@@ -148,6 +154,20 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // evaluate site code or return headers/URLs through the pixels/text API.
       // DNR still bounds every main-frame destination and blocks attachments.
       void (async () => {
+        const download = pendingAttachment;
+        if (download && source.tabId === download.tabId && params.frameId === download.mainFrameId && params.resourceType === 'Document') {
+          try {
+            if (!allowed(params.request?.url)) throw Error('navigation_blocked');
+            if (documentPolicy(params.responseStatusCode, params.responseHeaders) === 'redirect') {
+              await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId }); return;
+            }
+            await receiveAttachment(download, params);
+          } catch (error) {
+            await command(source.tabId, 'Fetch.failRequest', { requestId: params.requestId, errorReason: 'Aborted' }).catch(() => {});
+            download.reject(error);
+          }
+          return;
+        }
         const decision = params.resourceType === 'Document' ? documentPolicy(params.responseStatusCode, params.responseHeaders) : 'block';
         if (decision !== 'block') {
           await command(source.tabId, 'Fetch.continueRequest', { requestId: params.requestId });
@@ -164,6 +184,64 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (source.tabId === frame?.tabId && ((method === 'Page.frameNavigated' && !params.frame?.parentId)
       || (method === 'Page.navigatedWithinDocument' && params.frameId === frame.mainFrameId))) frame = undefined;
   });
+  async function receiveAttachment(download, params) {
+    // The only body-reading path belongs to one explicit coordinate-selected
+    // incoming attachment. It cannot read an HTML page/source, take a URL from
+    // the model, intercept XHR/subresources, or continue into native Save As.
+    const maximum = 20 * 1024 * 1024, headers = new Map();
+    if (params.responseStatusCode !== 200 || !Array.isArray(params.responseHeaders) || params.responseHeaders.length > 256) throw Error('attachment_unsupported');
+    let headerBytes = 0;
+    for (const header of params.responseHeaders) {
+      if (typeof header.name !== 'string' || typeof header.value !== 'string' || (headerBytes += header.name.length + header.value.length) > 65536) throw Error('attachment_unsupported');
+      const name = header.name.toLowerCase();
+      if (['content-type', 'content-length', 'content-disposition', 'content-encoding'].includes(name)) { if (headers.has(name)) throw Error('attachment_unsupported'); headers.set(name, header.value); }
+    }
+    const mimeType = (headers.get('content-type') || '').split(';', 1)[0].trim().toLowerCase();
+    const types = /^(?:image\/(?:png|jpeg|gif|webp|tiff|bmp)|text\/(?:plain|csv|rtf)|application\/(?:octet-stream|pdf|rtf|zip|x-zip-compressed|msword|vnd\.ms-(?:excel|powerpoint)|vnd\.openxmlformats-officedocument\.(?:wordprocessingml\.document|spreadsheetml\.sheet|presentationml\.presentation)|vnd\.oasis\.opendocument\.(?:text|spreadsheet|presentation)))$/u;
+    if (!types.test(mimeType)) throw Error('attachment_unsupported');
+    const length = headers.get('content-length');
+    if (length !== undefined && (!/^\d{1,10}$/u.test(length) || Number(length) > maximum)) throw Error('attachment_too_large');
+    const check = () => { if (pendingAttachment !== download || Date.now() >= download.until || Date.now() >= config.deadlineAt) throw Error('operation_failed'); };
+    check();
+    const { stream } = await command(download.tabId, 'Fetch.takeResponseBodyAsStream', { requestId: params.requestId });
+    let total = 0; const chunks = [];
+    try {
+      for (;;) {
+        check();
+        let timer;
+        const item = await Promise.race([command(download.tabId, 'IO.read', { handle: stream, size: 65536 }), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('operation_failed')), Math.max(1, download.until - Date.now())); })]).finally(() => clearTimeout(timer));
+        check();
+        if (typeof item.data !== 'string' || item.data.length > 131072) throw Error('attachment_too_large');
+        const chunk = item.base64Encoded ? Uint8Array.from(atob(item.data), c => c.charCodeAt(0)) : new TextEncoder().encode(item.data);
+        if ((total += chunk.length) > maximum) throw Error('attachment_too_large');
+        chunks.push(chunk);
+        if (item.eof) break;
+        if (!chunk.length) throw Error('operation_failed');
+      }
+      check();
+      // Content-Length may describe the encoded transfer; IO reads decoded
+      // bytes. Enforce the hard decoded budget independently, and compare the
+      // declared size only for an identity/no-encoding response.
+      if (!total || (length !== undefined && (!headers.get('content-encoding') || headers.get('content-encoding') === 'identity') && Number(length) !== total)) throw Error('attachment_unsupported');
+      const bytes = new Uint8Array(total); let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; chunk.fill(0); }
+      let dataBase64 = '';
+      try {
+        // Each nonfinal segment is a multiple of three bytes, so concatenation
+        // preserves canonical base64 without an unbounded spread/call stack.
+        for (let i = 0; i < total; i += 49152) dataBase64 += btoa(String.fromCharCode(...bytes.subarray(i, i + 49152)));
+      } finally { bytes.fill(0); }
+      check();
+      // 204 cancels document replacement while preserving the current chat.
+      // Browser-native downloads never receive the original attachment body.
+      await command(download.tabId, 'Fetch.fulfillRequest', { requestId: params.requestId, responseCode: 204, responseHeaders: [], body: '' });
+      check();
+      download.resolve({ state: 'ready', file: { mimeType, dataBase64 } });
+    } finally {
+      for (const chunk of chunks) chunk.fill(0);
+      await command(download.tabId, 'IO.close', { handle: stream }).catch(() => {});
+    }
+  }
   async function attach(tabId) {
     if (attached.has(tabId)) return;
     await chrome.debugger.attach({ tabId }, '1.3');
@@ -371,8 +449,54 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const tab = await chrome.tabs.get(f.tabId); allowedNavigation(tab.url);
     frame = undefined; // consume before any input, including an unknown outcome
     const integer = (v, low, high) => Number.isInteger(v) && v >= low && v <= high;
-    if (['click', 'scroll'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
+    if (['click', 'scroll', 'download-attachment'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
     const x = args.x * f.cssWidth / f.width, y = args.y * f.cssHeight / f.height;
+    if (op === 'download-attachment') {
+      if (config.attachmentDownloads !== true || pendingAttachment) throw Error('invalid_input');
+      const link = await chrome.tabs.sendMessage(f.tabId, { kind: 'resolve_attachment_link', x, y }, { frameId: 0 });
+      let candidate = link?.url;
+      if (!candidate) {
+        // Some attachment cards are buttons calling window.open, without an
+        // anchor href. A fixed one-click MAIN router captures that destination
+        // locally before Chrome can activate a popup. No site code is read or
+        // evaluated, and a timeout never falls back to opening a native window.
+        const nonce = crypto.randomUUID(); let linkTimer;
+        const destination = new Promise((resolve, reject) => { pendingFileLink = { tabId: f.tabId, nonce, resolve }; linkTimer = setTimeout(() => reject(Error('attachment_link_required')), 5000); });
+        destination.catch(() => {});
+        try {
+          const ack = await chrome.tabs.sendMessage(f.tabId, { kind: 'arm_attachment_click', nonce, x, y }, { frameId: 0 });
+          if (!ack?.ready) throw Error('attachment_link_required');
+          await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+          await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+          await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+          candidate = await destination;
+        } finally {
+          clearTimeout(linkTimer); pendingFileLink = undefined;
+          await chrome.tabs.sendMessage(f.tabId, { kind: 'cancel_attachment_click' }, { frameId: 0 }).catch(() => {});
+        }
+      }
+      if (typeof candidate !== 'string' || !candidate || candidate.length > 4096) throw Error('attachment_link_required');
+      const url = new URL(candidate, tab.url);
+      if (!allowed(url.href) || /\.(?:js|mjs|cjs|css|json|map|xml|html?|xhtml|svg|wasm|exe|dll|dmg|sh|ps1|bat|cmd)$/iu.test(decodeURIComponent(url.pathname))) throw Error('navigation_blocked');
+      let timer;
+      const promise = new Promise((resolve, reject) => {
+        pendingAttachment = { tabId: f.tabId, mainFrameId: f.mainFrameId, until: Math.min(Date.now() + 30_000, config.deadlineAt), resolve, reject };
+        timer = setTimeout(() => reject(Error('operation_failed')), Math.max(1, pendingAttachment.until - Date.now()));
+      });
+      // Observe rejection immediately while Chrome installs the exact-tab rule;
+      // a detach/expiry must not become an unhandled rejected worker promise.
+      promise.catch(() => {});
+      try {
+        guardUpdate = guardUpdate.then(() => installRules()); await guardUpdate;
+        if (guardFailed || Date.now() >= pendingAttachment.until) throw Error('operation_failed');
+        await chrome.tabs.update(f.tabId, { url: url.href });
+        return await promise;
+      } finally {
+        clearTimeout(timer); pendingAttachment = undefined;
+        guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
+        await guardUpdate;
+      }
+    }
     if (op === 'click') {
       // Arm a fixed, isolated content adapter before this exact trusted click.
       // It prevents a target=_blank link's default new-tab activation and
@@ -422,7 +546,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         try { send({ kind: 'result', id: message.id, result: await execute(message.operation, message.args || {}) }); }
         catch (error) {
           const pacingReason = { BROWSER_REQUEST_PREVIOUS_RESULT_NOT_REVIEWED: 'request_not_reviewed', BROWSER_REQUEST_NO_RESULT_TO_REVIEW: 'request_not_ready' }[error.message];
-          const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached'].includes(error.message) ? error.message : 'operation_failed');
+          const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required'].includes(error.message) ? error.message : 'operation_failed');
           send({ kind: 'result', id: message.id, result: { state: 'error', reason } });
         }
       };
@@ -453,11 +577,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // Otherwise a legitimate headerless redirect is mistaken for a file.
       const rules = [
         { id: 1, priority: 1, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'] } },
-        { id: 2, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame', 'sub_frame'], responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
+        { id: 2, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'], ...(pendingAttachment && guardedTabs.has(pendingAttachment.tabId) ? { excludedTabIds: [pendingAttachment.tabId] } : {}), responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
         { id: 3, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['main_frame'], ...(guardedTabs.size ? { excludedTabIds: [...guardedTabs] } : {}), excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
         { id: 4, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['sub_frame'], excludedResponseHeaders: [{ header: 'content-type', values: ['text/html*'] }] } },
+        { id: 5, priority: 3, action: { type: 'block' }, condition: { regexFilter: '^https?://', resourceTypes: ['sub_frame'], responseHeaders: [{ header: 'content-disposition', values: ['*attachment*'] }] } },
       ];
-      let ruleId = 5;
+      let ruleId = 6;
       for (const origin of config.origins) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^' + escape(origin) + '(?:/|$)', resourceTypes: ['main_frame'] } });
       for (const domain of config.domains) rules.push({ id: ruleId++, priority: 2, action: { type: 'allow' }, condition: { regexFilter: '^https://([a-zA-Z0-9-]+\\.)*' + escape(domain) + '/', resourceTypes: ['main_frame'] } });
       // This profile and its signed navigation policy live for one browser
