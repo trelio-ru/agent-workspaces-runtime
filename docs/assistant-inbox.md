@@ -331,10 +331,24 @@ For an external ref this does NOT mean processed/read. Unread work remains in
 later normal task cycles. The internal trusted `recordExternalRead` boundary
 accepts no content and binds independently validated native read evidence to the
 exact currently started delivery/route/event/source generation. A native or
-business receipt alone cannot populate that slot. The actual signed body-result
-observer, granular committed processing and production provider ACK composition
-remain required; they are NOT implemented by a conversation mapping or this
-ledger API. Business readiness and encrypted-device execution remain closed.
+business receipt alone cannot populate that slot. The SAME signed task executor
+now observes exact `read-reference` successful bounded EOF output, checks its
+account/key/revision/coverage and repeats native pass/source/route plus original
+SQLite checks before storing that slot. Failed, partial, changed, context-expanded
+or read-state-mutating results never earn evidence. No body is saved.
+
+The observed completion hook separately signs only explicitly selected actual-read
+slots with the SAME runtime key/nonce engine and generated structural serializer.
+The native immutable outcome binds original source/route UUIDs and delivery
+ordinals to accepted material. No message ID/revision/content hash enters that
+server manifest. Recovery reads its exact committed manifest; `completeDelivery`
+processes ONLY those slots, after independently checking their original read and
+routing snapshot. Schedule continuation and selected processing commit atomically
+in the SAME SQLite transaction. An omitted slot stays pending even if its body
+was read. A whole-pass receipt/read slot alone is never enough. Task-local provider
+ACK remains forbidden. Production provider ACK admission/composition, unknown
+conversation intake, Windows business E2E and encrypted-device execution remain
+independent gates; `businessReady` is still false.
 
 The true v5→v6 fixture keeps cursors, original leases, uncertain deliveries and
 ACK fences. Additional real SQLite/coordinator tests cover one permanent chat,

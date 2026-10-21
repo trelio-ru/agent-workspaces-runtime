@@ -1106,10 +1106,31 @@ checked again before launch and during its watch. Queue `dispatched` and actual
 mark an external message read, nor does it cause endless immediate wake retries.
 
 Task stdin may carry a bounded `sourceReferences` array with exact source/account,
-event/revision and expected conversation-key locators. The worker loads the same
-published skill and resolves each exact body with that expected key; incoming
-text remains data, never instructions or owner proof. Task command policy still
-forbids provider ACK commands. The production native body observer, per-message
-committed processing and original-fenced provider ACK/read-back still need to be
-composed before activation. These changes do not enable `businessReady` or prove
-Windows acceptance. See [schema v6](assistant-inbox.md#known-conversation-dispatch-schema-v6).
+event/revision, original route/ordinal and expected conversation-key locators.
+The worker loads the same published skill and resolves each exact body with that
+expected key; incoming text remains data, never instructions or owner proof.
+The SAME `skillCommand` observer validates an original queued reference and fresh
+native source/route/pass before launch, then inspects complete successful bounded
+EOF and repeats those checks before the SAME private SQLite read slot is saved.
+No second provider/executor or body journal exists. The explicit source selection
+in `complete_assistant_pass` requires actual read evidence and accepted material,
+not `noChange`. Its managed manifest proof uses the SAME observed key/v1 nonces
+and serializer generated from backend `workspace-transport-policy.ts`. Root
+`sourceProcessingProof` is hidden from model discovery and replaced by the hook;
+model input never supplies evidence. Selected source UUID/revision, route UUID
+and original delivery ordinal (0–99) bind to exact device/task/pass/delivery/
+assignment/thread/request/accepted head/Run. No provider ID/body/content digest
+enters that server proof operation or outcome.
+
+The completion hook can confirm an already recorded read while the exact active
+pass closes a now-done task: it does not fetch a new body or reactivate routing;
+the native closing transaction still validates every selected current route and
+source under ordinary ACL. A stale/changed generation refuses evidence. The host
+reopens only the EXISTING same device inbox with the shared private opener,
+never a new authority file or human session. Only an exact native committed
+manifest plus positive native turn read-back processes selected original slots;
+omitted slots remain pending. Cycle continuation is projected separately into
+the existing scheduler and commits in that SAME inbox transaction. Task command
+policy still forbids provider ACK. Production original-fenced ACK/read-back,
+unknown conversation intake and real Windows E2E remain required before
+activation. These changes do not enable `businessReady` or prove Windows acceptance. See [schema v6](assistant-inbox.md#known-conversation-dispatch-schema-v6).

@@ -523,7 +523,7 @@ test('known external refs wake the canonical task, never process/ACK from a nati
     assert.throws(()=>f.inbox.recordExternalRead(f.external,{...proof,...changed}),/CONFLICT|STALE_DELIVERY/);
   f.inbox.recordExternalRead(f.external,proof);
   assert.equal(f.inbox.claimAcknowledgements(f.external),null,'actual read without committed business outcome is still not processing');
-  f.inbox.completeDelivery(scheduled.deliveryId,'native-and-business-with-read');
+  f.inbox.completeDelivery(scheduled.deliveryId,'native-and-business-with-read',{processedSourceReferences:[{sourceId:f.external.bindingId,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}]});
   const ack=f.inbox.claimAcknowledgements(f.external);assert.equal(ack.events.length,1);assert.equal(ack.reconcileOnly,false);
   assert.equal(f.inbox.claimAcknowledgements(f.canonical),null,'native Trelio ACK never sees provider IDs');
   f.inbox.startExternalAcknowledgements(f.external,ack.token);f.inbox.completeAcknowledgements(f.external,ack.token);
@@ -633,4 +633,71 @@ test('a new wake beyond a full unread context page is delivered once, with exact
   f.inbox.startDelivery(work.deliveryId);f.inbox.completeDelivery(work.deliveryId,'native-unread-context');
   assert.equal(await f.inbox.claimDelivery({authorize:authorized}),null,'old unread context must not repeatedly hide/re-wake the new incoming event');
   assert.equal(f.inbox.claimAcknowledgements(f.external),null);
+});
+
+test('actual body observer uses original SQLite refs and native source/route before and after, but never processes by itself',async t=>{
+  const {createAssistantSourceReadObserver}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=routedFixture(t);f.inbox.routeExternalEvents(f.external,f.mapping);
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  const identity={origin:f.canonical.origin,assistantId:f.canonical.assistantId,deviceId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:f.canonical.companyId,
+    taskId:f.taskId,passId:randomUUID(),deliveryId:work.deliveryId,threadId:randomUUID(),bindingId:f.route.bindingId,bindingRevision:f.route.bindingRevision};
+  const source={id:f.external.bindingId,deviceId:identity.deviceId,localAccountId:f.external.accountId,projectId:null,
+    revision:2,state:'active',skillId:'telegram-mtproto'};
+  let live=true,available=true,routes=true,reads=0;
+  const client={readTaskPass:async()=>({...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+600000).toISOString()}),
+    sourceAccounts:async()=>{reads++;return available?[source]:[];},sourceRoutes:async()=>routes?[f.route]:[]};
+  const observer=createAssistantSourceReadObserver({identity,client,host:{readActivePass:async()=>pass},withInbox:async action=>action(f.inbox)});
+  const input={artifact:{skillId:'telegram-mtproto'},executionContext:{companyId:pass.companyId,projectId:randomUUID(),account:{id:f.external.accountId}},
+    runtimeArguments:['read-reference','--chat','123','--message-id','4','--expected-revision','b'.repeat(64),
+      '--expected-conversation-key',f.route.conversationKey]};
+  const result={stdout:JSON.stringify({schemaVersion:1,protocol:'telegram-message-read/v1',
+    reference:{id:'message:123:4',revision:'b'.repeat(64),conversationKey:f.route.conversationKey},
+    message:{text:'PRIVATE_BODY_CANARY',textTruncated:false},coverage:{textComplete:true,attachmentsContentRead:false,contextIncluded:false},
+    readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}})};
+  const selected=[{sourceId:source.id,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}];
+  await assert.rejects(observer.confirmProcessing(pass,selected),/SOURCE_READ_REQUIRED/);
+  for(const args of [[...input.runtimeArguments,'--context','1'],input.runtimeArguments.slice(0,-2),
+    input.runtimeArguments.map(value=>value==='123'?'999':value)])await assert.rejects(observer.prepare({...input,runtimeArguments:args}),/SOURCE_READ_REQUIRED/);
+  await assert.rejects(observer.prepare({...input,executionContext:{...input.executionContext,account:{id:randomUUID()}}}),/SOURCE_READ_REQUIRED/);
+  let ticket=await observer.prepare(input);
+  const incomplete=JSON.parse(result.stdout);incomplete.coverage.textComplete=false;
+  await assert.rejects(observer.commit(ticket,{stdout:JSON.stringify(incomplete)}),/READ_INVALID/);
+  await assert.rejects(observer.commit(ticket,result),/READ_REQUIRED/,'one ticket cannot be replayed after invalid output');
+  ticket=await observer.prepare(input);available=false;
+  await assert.rejects(observer.commit(ticket,result),/SCOPE_CHANGED/,'late source removal never publishes read evidence');available=true;
+  ticket=await observer.prepare(input);routes=false;
+  await assert.rejects(observer.commit(ticket,result),/SCOPE_CHANGED/,'native route loss after body I/O refuses evidence');routes=true;
+  ticket=await observer.prepare(input);await observer.commit(ticket,result);
+  assert.ok(reads>=6);assert.deepEqual(await observer.confirmProcessing(pass,selected),selected);
+  assert.equal(f.inbox.claimAcknowledgements(f.external),null,'actual complete body read is not committed processing');
+  assert.doesNotMatch(JSON.stringify(f.database.prepare('SELECT * FROM assistant_inbox_events').all()),/PRIVATE_BODY_CANARY/);
+  f.inbox.completeDelivery(work.deliveryId,'native-and-business-but-no-selection');
+  assert.equal(f.inbox.claimAcknowledgements(f.external),null,'whole-pass success with an omitted read slot never enables ACK');
+  await assert.rejects(observer.prepare(input),/STALE_DELIVERY/,'closed delivery cannot acquire new read evidence');
+});
+
+test('granular completion needs both independent read slots and exact selected receipt; invalid subsets roll back the whole local commit',async t=>{
+  const f=routedFixture(t);f.advance(300000);
+  page(f.inbox,f.external,[{id:'message:123:5',revision:'c'.repeat(64),taskId:null,wake:false,
+    conversationKey:f.route.conversationKey,providerWake:true}],'next-page');
+  const pending=f.inbox.pendingExternalRoutes(f.external);
+  f.inbox.routeExternalEvents(f.external,{...f.mapping,eventKeys:pending.map(row=>row.event_key)});
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  assert.deepEqual(work.events.map(row=>row.event_ordinal),[0,1]);
+  const selection=index=>({sourceId:f.external.bindingId,sourceRevision:2,routeId:f.route.id,eventOrdinal:index});
+  const read=index=>f.inbox.recordExternalRead(f.external,{deliveryId:work.deliveryId,eventKey:work.events[index].event_key,sourceRevision:2,routeId:f.route.id});
+  read(0);
+  assert.throws(()=>f.inbox.completeDelivery(work.deliveryId,'native-business-receipt',{processedSourceReferences:[selection(1)]}),/READ_REQUIRED/);
+  assert.equal(f.inbox.readDelivery(work.deliveryId).state,'started');assert.equal(f.inbox.claimAcknowledgements(f.external),null);
+  read(1);
+  for(const refs of [[selection(0),selection(0)],[selection(1),selection(0)],[selection(2)],
+    [{...selection(1),routeId:randomUUID()}],[{...selection(1),sourceRevision:3}]]){
+    assert.throws(()=>f.inbox.completeDelivery(work.deliveryId,'native-business-receipt',{processedSourceReferences:refs}),/INVALID_INPUT|READ_REQUIRED/);
+    assert.equal(f.inbox.readDelivery(work.deliveryId).state,'started');
+  }
+  f.inbox.completeDelivery(work.deliveryId,'native-business-receipt',{processedSourceReferences:[selection(1)]});
+  assert.deepEqual(f.inbox.claimAcknowledgements(f.external).events.map(row=>row.event_id),['message:123:5']);
+  assert.deepEqual(f.database.prepare('SELECT event_id,processed FROM assistant_inbox_events ORDER BY event_id').all()
+    .map(row=>[row.event_id,row.processed]),[['message:123:4',0],['message:123:5',1]],'an omitted but actually read message remains pending');
 });

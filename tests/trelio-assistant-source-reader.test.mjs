@@ -525,7 +525,17 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
   const taskHost={readIdentity:async()=>taskIdentity,readActivePass:async()=>pass};
   const taskStore={get:async slot=>slot.kind==='runtime'?runtime:{assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,credential,expiresAt:1}};
   const client={readTaskPass:async()=>({...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300000).toISOString()})};
-  const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,
+  let observedStarts=0,observedCompletions=0;
+  const tickets=new WeakSet();
+  const sourceReads={prepare:async input=>{
+    observedStarts++;assert.equal(input.artifact.skillId,'task-runtime-fixture');
+    assert.ok(input.artifact.parsedPackage.files.length);assert.equal(input.executionContext.codexThreadId,pass.threadId);
+    const ticket={};tickets.add(ticket);return ticket;
+  },commit:async(ticket,result)=>{
+    assert.ok(tickets.has(ticket));tickets.delete(ticket);observedCompletions++;
+    assert.equal(JSON.parse(result.stdout).result,'Прочитано','only complete native EOF reaches the observer');
+  }};
+  const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,sourceReads,
     lockDirectory:path.join(directory,'task-locks'),lock:(_file,action)=>action()});
   const sourceDir=path.join(directory,`task-package-${policyVersion}`);await fs.mkdir(sourceDir);
   await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:policyVersion,taskCommands:[['read'],['fail']],
@@ -578,6 +588,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     const failed=structuredClone(plan);failed.localAction.parameters.arguments=['fail'];
     await assert.rejects(run(failed),error=>!JSON.stringify(error).includes('PRIVATE_PROVIDER_ERROR'));
     assert.equal(await fs.readFile(calls,'utf8'),'111','a failed provider is not replayed');
+    assert.equal(observedStarts,3);assert.equal(observedCompletions,2,'failed native output never confirms a body read');
     denyNextLaunch=true;
     await assert.rejects(run(plan));assert.equal(await fs.readFile(calls,'utf8'),'111','late native refusal blocks cached execution');
     denyNextLaunch=false;live=false;

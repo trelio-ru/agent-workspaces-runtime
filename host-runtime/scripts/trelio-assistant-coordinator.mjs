@@ -435,7 +435,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // Only afterwards may the protected pass journal/key be released. If that
     // release fails, the next reconcile reads this completed row and receipt.
     inbox.completeDelivery(job.deliveryId,result.receipt,result.outcome?{
-      continuation:result.outcome.continuation,bindingState:binding.state}:null);
+      continuation:result.outcome.continuation,bindingState:binding.state,
+      ...(result.outcome.processedSourceReferences?{processedSourceReferences:result.outcome.processedSourceReferences}:{})}:null);
     if(result.outcome) await passHost.releasePass(result.outcome);
   };
   const reconcile = async signal => {
@@ -537,7 +538,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
             ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
               const source=JSON.parse(event.event_scope_json);
-              return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,provider:source.provider,
+              return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,routeId:event.route_id,eventOrdinal:event.event_ordinal,provider:source.provider,
                 accountId:source.accountId,eventId:event.event_id,eventRevision:event.event_revision,conversationKey:event.conversation_key};
             })}:{}),
             // Only current delivery refs enter stdin. Full answers are read

@@ -57,6 +57,22 @@ const MAX_PENDING = 10_000;
 const MAX_EVENTS = 50_000;
 const MAX_STREAMS = 10_000;
 
+/** Shared private/wire projection of a selected original delivery manifest.
+ * No provider ID/body/revision digest can enter a native processing receipt.
+ * This is transport validation only, never proof of reading or native ACL. */
+export const assistantSourceProcessingReferences=value=>{
+  if(!Array.isArray(value)||value.length>100)inputError();
+  let previous=-1;
+  return value.map(row=>{
+    object(row,['sourceId','sourceRevision','routeId','eventOrdinal']);
+    if(Object.keys(row).length!==4)inputError();
+    const eventOrdinal=integer(row.eventOrdinal,0,99);
+    if(eventOrdinal<=previous)inputError();previous=eventOrdinal;
+    return Object.freeze({sourceId:uuid(row.sourceId),sourceRevision:integer(row.sourceRevision,0,2_147_483_647),
+      routeId:uuid(row.routeId),eventOrdinal});
+  });
+};
+
 /**
  * The caller owns SQLite file/sidecar protection and lifecycle. Keeping the DB
  * injection explicit prevents importing this module from creating private state
@@ -233,7 +249,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     run("UPDATE assistant_inbox_deliveries SET state='uncertain' WHERE state='started' AND expires_at<=?", time());
   };
   const deliveryEvents=id=>all(`SELECT e.event_key,e.event_id,e.event_revision,e.wake,e.owner_question_id,
-    de.conversation_key,de.route_id,de.route_source_revision,s.scope_json AS event_scope_json
+    de.conversation_key,de.route_id,de.route_source_revision,de.event_ordinal,s.scope_json AS event_scope_json
     FROM assistant_inbox_events e JOIN assistant_inbox_sources s ON s.source_key=e.source_key
     JOIN assistant_inbox_delivery_events de ON de.event_key=e.event_key WHERE de.delivery_id=? ORDER BY coalesce(de.event_ordinal,e.rowid) LIMIT 100`,id);
   const assertExternalDeliverySnapshot=job=>{
@@ -572,6 +588,35 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run('UPDATE assistant_inbox_events SET read_delivery_id=? WHERE event_key=?',deliveryId,eventKey);
       });
     },
+    /** Protected task/observer lookup, not a model tool. Original slots are
+     * rechecked synchronously against current source/route/task generation.
+     * Keep read evidence independent from explicit committed processing. */
+    externalDeliveryReferences(pass,{selected=null,requireRead=false,allowTaskDone=false}={}){
+      const job=delivery(uuid(pass.deliveryId));
+      const canonical=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',job.source_key).scope_json);
+      const task=get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',job.source_key,job.task_id);
+      if(canonical.provider!=='trelio'||canonical.assistantId!==uuid(pass.assistantId)||canonical.companyId!==uuid(pass.companyId)
+        ||job.task_id!==uuid(pass.taskId)||job.kind!=='task'
+        ||job.state!=='started'||!job.native_started||job.expires_at<=time()
+        ||!(task?.state==='accepted'&&task.revision===job.task_revision&&task.authority_revision===pass.bindingRevision
+          ||allowTaskDone&&requireRead&&task?.state==='done'&&task.revision>=job.task_revision)
+        ||task.authority_binding_id!==uuid(pass.bindingId))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+      assertExternalDeliverySnapshot(job);
+      const refs=deliveryEvents(job.delivery_id).filter(row=>row.conversation_key).map(row=>{
+        const scope=JSON.parse(row.event_scope_json);
+        const live=get('SELECT read_delivery_id FROM assistant_inbox_events WHERE event_key=?',row.event_key);
+        return {...row,scope:scopeInputWithoutKey(scope),sourceId:scope.bindingId,sourceRevision:row.route_source_revision,
+          routeId:row.route_id,eventOrdinal:row.event_ordinal,read:live?.read_delivery_id===job.delivery_id};
+      });
+      const selection=selected===null?null:assistantSourceProcessingReferences(selected);
+      const result=selection===null?refs:selection.map(ref=>{
+        const row=refs.find(row=>row.eventOrdinal===ref.eventOrdinal&&row.sourceId===ref.sourceId
+          &&row.sourceRevision===ref.sourceRevision&&row.routeId===ref.routeId);
+        if(!row)fail('ASSISTANT_INBOX_STALE_DELIVERY');return row;
+      });
+      if(requireRead&&result.some(row=>!row.read))fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+      return result;
+    },
     /**
      * `authorize` MUST use fresh server/provider ACL, assistant lifecycle and
      * task-start approval. Local rows and this callback's return grant no rights.
@@ -632,7 +677,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // recovery cannot select a different set or loop on the same old page.
         for (const [ordinal,event] of events.entries()) run(`INSERT INTO assistant_inbox_delivery_events(delivery_id,event_key,conversation_key,route_id,route_source_revision,event_ordinal)
           VALUES (?,?,?,?,?,?)`,id,event.event_key,event.conversation_key,event.route_id,event.route_source_revision,ordinal);
-        return { deliveryId: id, taskId: task.task_id, scope: scopeInputWithoutKey(scope), events, kind };
+        return { deliveryId: id, taskId: task.task_id, scope: scopeInputWithoutKey(scope),
+          events:events.map((event,event_ordinal)=>({...event,event_ordinal})), kind };
       });
     },
     startDelivery(id) {
@@ -737,23 +783,43 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const row = delivery(id);
         if (row.state === 'complete' && row.external_receipt === receipt) return;
         if (row.state !== 'started' && row.state !== 'uncertain') fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        // Whole-pass completion and even an actual body read are insufficient:
+        // only explicit slots in the exact committed backend outcome count.
+        // Validate the original immutable snapshot and independent read slot
+        // before changing ANY event or calling the schedule callback.
+        const selected=assistantSourceProcessingReferences(completion?.processedSourceReferences??[]);
+        const selectedKeys=[];
+        for(const ref of selected){
+          const event=get(`SELECT e.*,de.route_id AS original_route_id,de.route_source_revision AS original_source_revision,
+            s.scope_json,s.configuration_revision,s.state AS source_state FROM assistant_inbox_delivery_events de
+            JOIN assistant_inbox_events e ON e.event_key=de.event_key JOIN assistant_inbox_sources s ON s.source_key=e.source_key
+            WHERE de.delivery_id=? AND de.event_ordinal=?`,id,ref.eventOrdinal);
+          if(!event||JSON.parse(event.scope_json).bindingId!==ref.sourceId||JSON.parse(event.scope_json).provider!=='telegram'
+            ||event.source_state!=='active'||event.configuration_revision!==ref.sourceRevision
+            ||event.original_route_id!==ref.routeId||event.original_source_revision!==ref.sourceRevision
+            ||event.route_id!==ref.routeId||event.route_source_revision!==ref.sourceRevision
+            ||event.task_id!==row.task_id||event.dispatch_source_key!==row.source_key||event.read_delivery_id!==id)
+            fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+          selectedKeys.push(event.event_key);
+        }
         // Exact positive native read-back can complete an uncertain turn. A
         // timeout or "chat exists" is insufficient evidence for this receipt.
         if (onDeliveryCompleted && row.kind !== 'provision') {
           const scope = scopeInputWithoutKey(JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?', row.source_key).scope_json));
-          const result = onDeliveryCompleted({ scope, taskId: row.task_id, deliveryId: id, receipt, completedAt: time(), scheduled: Boolean(row.scheduled), completion });
+          // Processing belongs to this inbox transaction, not the generic
+          // schedule continuation schema. Preserve every other field so its
+          // existing closed validator still rejects unexpected input.
+          const scheduleCompletion=completion===null?null:Object.fromEntries(Object.entries(completion)
+            .filter(([key])=>key!=='processedSourceReferences'));
+          const result = onDeliveryCompleted({ scope, taskId: row.task_id, deliveryId: id, receipt, completedAt: time(), scheduled: Boolean(row.scheduled), completion:scheduleCompletion });
           if (result && typeof result.then === 'function') fail('ASSISTANT_INBOX_ASYNC_COMPLETION');
         }
         run("UPDATE assistant_inbox_deliveries SET state='complete',external_receipt=? WHERE delivery_id=?", receipt, id);
-        // An external wake can reach the SAME task chat, but a native/business
-        // receipt alone is not evidence that the message body was actually read.
-        // Suppress duplicate unsolicited wakes while retaining unread work for
-        // later task cycles. Only the trusted exact read observer can supply the
-        // per-delivery evidence; until it is wired no external ACK is possible.
         run(`UPDATE assistant_inbox_events SET dispatched=1,processed=CASE WHEN
           source_key IN (SELECT source_key FROM assistant_inbox_sources WHERE json_extract(scope_json,'$.provider')='trelio')
-          OR read_delivery_id=? THEN 1 ELSE processed END
-          WHERE event_key IN (SELECT event_key FROM assistant_inbox_delivery_events WHERE delivery_id=?)`,id,id);
+          THEN 1 ELSE processed END
+          WHERE event_key IN (SELECT event_key FROM assistant_inbox_delivery_events WHERE delivery_id=?)`,id);
+        for(const key of selectedKeys)run('UPDATE assistant_inbox_events SET processed=1 WHERE event_key=?',key);
       });
     },
     /** Verified terminal non-acceptance, never a missing/slow lookup response. */

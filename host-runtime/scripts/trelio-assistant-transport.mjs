@@ -6,6 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
+import { assistantSourceProcessingReferences } from './trelio-assistant-inbox.mjs';
 
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -140,11 +141,16 @@ export const validateAssistantPassOutcome = (value, expected) => {
     if(value.schemaVersion!==1 || Object.keys(value).sort().join(',')!=='schemaVersion,state') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
     return {schemaVersion:1,state:'pending'};
   }
-  const keys=['schemaVersion','state','receiptId','continuation',...Object.keys(expected)].sort();
+  const hasProcessing=Object.hasOwn(value,'processedSourceReferences');
+  let processed;try{processed=assistantSourceProcessingReferences(hasProcessing?value.processedSourceReferences:[]);}
+  catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+  if(hasProcessing&&!processed.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  const keys=['schemaVersion','state','receiptId','continuation',...Object.keys(expected),...(hasProcessing?['processedSourceReferences']:[])].sort();
   if(value.schemaVersion!==1 || value.state!=='confirmed' || Object.keys(value).sort().join(',')!==keys.join(',')
     || Object.keys(expected).some(key=>value[key]!==expected[key])) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   let continuation;try{continuation=assistantPassContinuation(value.continuation);}catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
-  return {schemaVersion:1,state:'confirmed',receiptId:id(value.receiptId),...expected,continuation};
+  return {schemaVersion:1,state:'confirmed',receiptId:id(value.receiptId),...expected,continuation,
+    ...(hasProcessing?{processedSourceReferences:processed}:{})};
 };
 // These latches describe diagnostic obligations only, never task authority.
 // An unrelated plugin/network recovery must not forget login or hook review.
@@ -264,7 +270,7 @@ const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -285,6 +291,18 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
     kind:'digital_assistant',
+    async prepareSkillBodyRead(input){
+      await assertIdentity();
+      if(sourceReads)return sourceReads.prepare(input);
+      if(input.artifact?.skillId==='telegram-mtproto'&&input.runtimeArguments?.[0]==='read-reference')fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      return null;
+    },
+    async commitSkillBodyRead(ticket,result){
+      if(ticket===null)return;
+      await assertIdentity();
+      if(!sourceReads)fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      await sourceReads.commit(ticket,result);
+    },
     async resolveSkillRuntimeChat({companyId,runtimeSessionId}){
       await assertIdentity();
       if(companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -360,6 +378,96 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         url.pathname=rewritten;
         return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store'}};
       });
+    },
+  });
+};
+
+/** A trusted observer of the SAME signed task executor, not a second provider.
+ * Only an exact original queued read-reference can earn a private read slot.
+ * Native source/route/pass reads happen before AND after provider I/O; the
+ * actual account-scoped HMAC is checked by the signed provider before its body
+ * fetch. Successful EOF output is inspected in RAM and never persisted here.
+ * A read slot still is NOT a processing receipt or permission to issue ACK. */
+export const createAssistantSourceReadObserver=({identity,client,host,withInbox,signal,now=Date.now})=>{
+  if(typeof withInbox!=='function')fail('ASSISTANT_SOURCE_READ_REQUIRED');
+  const tickets=new WeakSet();
+  const current=async expected=>{
+    signal?.throwIfAborted();
+    const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(expected&&JSON.stringify(expected)!==JSON.stringify(pass))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+    const live=await client.readTaskPass({companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},signal);
+    if(live.state!=='leased'||['passId','deliveryId','threadId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
+      ||!Number.isFinite(Date.parse(live.leaseExpiresAt))||Date.parse(live.leaseExpiresAt)<=now())fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    return pass;
+  };
+  const authorize=async(pass,ref,{routeRequired=true}={})=>{
+    await current(pass);
+    const sources=await client.sourceAccounts(pass.companyId,signal);
+    const row=sources.find(row=>row.id===ref.sourceId);
+    if(!row||row.state!=='active'||row.deviceId!==identity.deviceId||row.revision!==ref.sourceRevision
+      ||row.skillId!=='telegram-mtproto'||row.localAccountId!==ref.scope.accountId)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+    if(!routeRequired)return row;
+    const routes=await client.sourceRoutes({companyId:pass.companyId,sourceId:row.id,sourceRevision:row.revision,
+      conversationKeys:[ref.conversation_key]},signal);
+    if(!routes.some(route=>route.id===ref.routeId&&route.bindingId===pass.bindingId&&route.bindingRevision===pass.bindingRevision
+      &&route.taskId===pass.taskId))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+    return row;
+  };
+  return Object.freeze({
+    async prepare({artifact,executionContext,runtimeArguments}){
+      if(artifact?.skillId!=='telegram-mtproto'||runtimeArguments?.[0]!=='read-reference')return null;
+      // This is an exact native protocol, not general option stripping. Extra,
+      // repeated or missing selectors cannot be interpreted as this body read.
+      if(runtimeArguments.length!==9)fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      const fields=new Map();
+      for(let i=1;i<runtimeArguments.length;i+=2){
+        const name=runtimeArguments[i];
+        if(!['--chat','--message-id','--expected-revision','--expected-conversation-key'].includes(name)||fields.has(name))fail('ASSISTANT_SOURCE_READ_REQUIRED');
+        fields.set(name,runtimeArguments[i+1]);
+      }
+      const eventId=`message:${fields.get('--chat')}:${fields.get('--message-id')}`;
+      const pass=await current();
+      if(executionContext?.companyId!==pass.companyId||!UUID.test(executionContext.account?.id??''))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+      const refs=await withInbox(inbox=>inbox.externalDeliveryReferences(pass));
+      const matched=refs.filter(row=>row.scope.provider==='telegram'&&row.scope.accountId===executionContext.account.id
+        &&row.event_id===eventId&&row.event_revision===fields.get('--expected-revision')
+        &&row.conversation_key===fields.get('--expected-conversation-key'));
+      if(matched.length!==1)fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      const ref=matched[0],source=await authorize(pass,ref);
+      if(source.projectId!==null&&executionContext.projectId!==source.projectId)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+      const ticket=Object.freeze({pass,ref});tickets.add(ticket);return ticket;
+    },
+    async commit(ticket,{stdout}){
+      if(!tickets.has(ticket))fail('ASSISTANT_SOURCE_READ_REQUIRED');tickets.delete(ticket);
+      let value;try{value=JSON.parse(stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+      const {pass,ref}=ticket;
+      if(!object(value)||value.schemaVersion!==1||value.protocol!=='telegram-message-read/v1'
+        ||value.reference?.id!==ref.event_id||value.reference?.revision!==ref.event_revision
+        ||value.reference?.conversationKey!==ref.conversation_key||!object(value.message)||value.message.textTruncated!==false
+        ||!object(value.coverage)||value.coverage.textComplete!==true||value.coverage.attachmentsContentRead!==false
+        ||value.coverage.contextIncluded!==false||value.readState?.mode!=='history-only'||value.readState.marksRead!==false
+        ||value.readState.readReceiptsSent!==false||value.readState.viewsRegistered!==false)fail('ASSISTANT_SOURCE_READ_INVALID');
+      await authorize(pass,ref);
+      await withInbox(inbox=>{
+        // Repeat the immutable local snapshot after asynchronous native reads.
+        const rows=inbox.externalDeliveryReferences(pass,{selected:[{sourceId:ref.sourceId,sourceRevision:ref.sourceRevision,
+          routeId:ref.routeId,eventOrdinal:ref.eventOrdinal}]});
+        if(rows.length!==1||rows[0].event_key!==ref.event_key)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+        inbox.recordExternalRead(ref.scope,{deliveryId:pass.deliveryId,eventKey:ref.event_key,
+          sourceRevision:ref.sourceRevision,routeId:ref.routeId});
+      });
+    },
+    async confirmProcessing(pass,selected){
+      // Called only by the observed hook immediately before its same-session
+      // signature. The model may select semantic work, never assert a read.
+      const refs=await withInbox(inbox=>inbox.externalDeliveryReferences(pass,{selected,requireRead:true,allowTaskDone:true}));
+      // The task may have become done after the actual body read. This
+      // signature proves that read, not permission: native completion checks
+      // the exact stored route/task/source again in its closing transaction.
+      // Do not grant a new read or resurrect a done routing inventory here.
+      for(const ref of refs)await authorize(pass,ref,{routeRequired:false});
+      await withInbox(inbox=>inbox.externalDeliveryReferences(pass,{selected,requireRead:true,allowTaskDone:true}));
+      return selected;
     },
   });
 };
@@ -646,7 +754,7 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
 ]);
 /** Hook-owned admission fields never belong to the model's tool arguments.
  * Keep the live backend validators as the wire authority, while removing only
- * those two root fields from model discovery. PreToolUse still injects them
+ * these root fields from model discovery. PreToolUse still injects them
  * into the raw call before the backend's mandatory validation/admission.
  * No domain schema, scope or permission is inferred/copied by this projection.
  */
@@ -661,7 +769,7 @@ export const assistantModelInputSchema = source => {
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    for(const key of ['taskPass','runtimeSessionProof']){
+    for(const key of ['taskPass','runtimeSessionProof','sourceProcessingProof']){
       if(object(node.properties))delete node.properties[key];
       if(Array.isArray(node.required))node.required=node.required.filter(value=>value!==key);
     }
@@ -861,6 +969,22 @@ export const assistantWorkspaceConcreteRequest = (method, pathname) => {
                 operation: assistantWorkspaceOperation(method, pattern), proofTool: assistantWorkspaceProofTool(method, pattern) };
     }
     throw assistantWorkspacePolicyDenied();
+};
+/** One portable serializer for the existing observed runtime signature engine.
+ * The host signs this ONLY after matching every selected slot to its exact
+ * successful native body read. Reuse the ordinary v1 proof/nonce/key; no new
+ * credential or signer is introduced. Bind the selected accepted material as
+ * well, so a proof cannot be moved to another pass, result or partial subset.
+ * Validation belongs to the native schema and the protected host boundary.
+ * Only this structural payload's digest may enter the nonce operation name. */
+export const assistantSourceProcessingProofPayload = (input) => JSON.stringify(["assistant-source-processing/v1", input.assistantId, input.deviceId,
+    input.companyId, input.taskId, input.passId, input.deliveryId, input.bindingId,
+    input.bindingRevision, input.threadId, input.clientRequestId, input.workspaceId,
+    input.workspaceHead, input.acceptedRunId, input.references.map(ref => [ref.sourceId, ref.sourceRevision, ref.routeId, ref.eventOrdinal])]);
+export const assistantSourceProcessingProofTool = (structuralManifestSha256) => {
+    if (!/^[0-9a-f]{64}$/u.test(structuralManifestSha256))
+        throw assistantWorkspacePolicyDenied();
+    return `assistant_source_processing_${structuralManifestSha256}`;
 };
 // END GENERATED ASSISTANT WORKSPACE POLICY
 

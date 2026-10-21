@@ -122,6 +122,25 @@ export const createProductionAssistantBackground = async () => {
   });
 };
 
+/** Reopen only the EXISTING same device inbox under the ordinary private
+ * opener. Hook/skill invocations never invent a DB or persist bodies/keys in a
+ * second read journal. SQLite transactions are short; native/provider I/O runs
+ * outside them, with another snapshot read afterwards. */
+const productionSourceReads=async({common,identity,client,host,signal})=>{
+  const [{openAssistantDatabase},{createAssistantInbox},{createAssistantSourceReadObserver}]=await Promise.all([
+    import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs'),import('./trelio-assistant-transport.mjs')]);
+  const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime',
+    identity.assistantId.toLowerCase(),identity.deviceId.toLowerCase());
+  const withInbox=async action=>{
+    signal?.throwIfAborted();
+    await common.assertPrivatePathKind(path.join(directory,'inbox.sqlite'),'file');
+    const opened=await openAssistantDatabase(directory);
+    try{return await action(createAssistantInbox({database:opened.database}));}
+    finally{await opened.close();}
+  };
+  return createAssistantSourceReadObserver({identity,client,host,withInbox,signal});
+};
+
 /** The host identity is selected by completed protected pairing, never tool
  * arguments or an inherited human thread. Every invocation gets its own native
  * ACL/DPAPI lifetime and the common non-sliding hook clock. */
@@ -138,7 +157,10 @@ export const createProductionAssistantHook = async () => {
   if (!identity) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
   if (identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
   const client = createAssistantDeviceClient({ ...identity, store, http: createAssistantHttp({ origin: identity.origin }) });
+  const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+  const reads=await productionSourceReads({common,identity,client,host:hostState,signal:runtimeHookSignal()});
   return createAssistantTaskHook({ identity, client, store, readActivePass: hostState.readActivePass,
+    confirmSourceProcessing:reads.confirmProcessing,
     lockDirectory: path.join(directory, 'runtime-locks') });
 };
 
@@ -160,7 +182,9 @@ export const withProductionAssistantWorkspace = async (action, {signal}={}) => {
     const identity=await host.readIdentity();
     if(!identity || identity.origin!=='https://trelio.ru')throw Object.assign(new Error(),{code:'ASSISTANT_HOST_STATE_INVALID'});
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,lockDirectory:path.join(directory,'runtime-locks')});
+    const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+    const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host}));
   },signal);
 };

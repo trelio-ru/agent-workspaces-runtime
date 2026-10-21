@@ -297,7 +297,15 @@ test('business outcome read is fixed, exact and strict; pending never implies fa
     value=bad;await assert.rejects(client.readBusinessOutcome(expected),/INVALID_RESPONSE/);
   }
   assert.equal(calls,6,'one request per explicit read; malformed outcomes do not cause a hidden retry');
-  await assert.rejects(client.readBusinessOutcome({...expected,assistantId:randomUUID()}),/INVALID_INPUT/);assert.equal(calls,6);
+  const ref={sourceId:randomUUID(),sourceRevision:2,routeId:randomUUID(),eventOrdinal:1};
+  value={...good,processedSourceReferences:[ref]};
+  assert.deepEqual(await client.readBusinessOutcome(expected),value);
+  for(const processedSourceReferences of [[],[ref,ref],[{...ref,eventOrdinal:100}],[{...ref,messageId:'PRIVATE'}],
+    [{...ref,eventOrdinal:2},ref]]){
+    value={...good,processedSourceReferences};await assert.rejects(client.readBusinessOutcome(expected),/INVALID_RESPONSE/);
+  }
+  assert.equal(calls,12,'no hidden retries while validating granular committed processing');
+  await assert.rejects(client.readBusinessOutcome({...expected,assistantId:randomUUID()}),/INVALID_INPUT/);assert.equal(calls,12);
 });
 
 
@@ -489,8 +497,8 @@ test('self-repair proxies the dedicated live schema and exact immutable intent w
 });
 
 test('managed schema fields are hidden in root alternatives while nested business fields and original validators remain intact',()=>{
-  const business={type:'object',properties:{taskPass:{type:'string'},runtimeSessionProof:{type:'string'}},required:['taskPass','runtimeSessionProof']};
-  const branch={type:'object',properties:{taskPass:{type:'object'},runtimeSessionProof:{type:'object'},parameters:{oneOf:[business]}},required:['taskPass','runtimeSessionProof','parameters'],additionalProperties:false};
+  const business={type:'object',properties:{taskPass:{type:'string'},runtimeSessionProof:{type:'string'},sourceProcessingProof:{type:'string'}},required:['taskPass','runtimeSessionProof','sourceProcessingProof']};
+  const branch={type:'object',properties:{taskPass:{type:'object'},runtimeSessionProof:{type:'object'},sourceProcessingProof:{type:'object'},parameters:{oneOf:[business]}},required:['taskPass','runtimeSessionProof','sourceProcessingProof','parameters'],additionalProperties:false};
   const source={type:'object',allOf:[{anyOf:[branch,{oneOf:[branch]}]}],$defs:{business}};
   const before=structuredClone(source),result=assistantModelInputSchema(source);
   assert.deepEqual(source,before,'projection must never edit the actual wire validators');

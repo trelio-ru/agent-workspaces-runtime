@@ -23,7 +23,7 @@ export const validateAssistantActivePass=(value,identity)=>{
 };
 
 export const createAssistantTaskHook=({identity,client,store,readActivePass,lockDirectory,
-  observe=detectAgentRuntimeAttestation,lock=withRuntimeStateLock,now=Date.now})=>{
+  confirmSourceProcessing=null,observe=detectAgentRuntimeAttestation,lock=withRuntimeStateLock,now=Date.now})=>{
   if(!uuid.test(identity?.assistantId??'') || !uuid.test(identity?.deviceId??'') || !path.isAbsolute(lockDirectory??'')
     || !store || !client || typeof readActivePass!=='function') fail('ASSISTANT_HOOK_SETUP_REQUIRED');
   return async (event,toolName)=>{
@@ -62,6 +62,8 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
         ? {hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:TRELIO_COMPACTION_RECOVERY_CONTEXT}} : {};
       if(event.hook_event_name!=='PreToolUse' || !/^[a-z][a-z0-9_]{0,159}$/u.test(toolName??'')) fail('ASSISTANT_HOOK_INVALID_INPUT');
       if(!event.tool_input || Object.getPrototypeOf(event.tool_input)!==Object.prototype) fail('ASSISTANT_HOOK_INVALID_INPUT');
+      const supplied=structuredClone(event.tool_input);
+      delete supplied.sourceProcessingProof;
       const observation=await observe({hookInput:event});assertRuntimeHookBudget();
       if(observation?.schemaVersion!==1 || observation.clientFamily!=='codex' || observation.source!=='codex_hook'
         || observation.evidenceLevel!=='local_observed' || !observation.modelId) fail('ASSISTANT_HOOK_OBSERVATION_REQUIRED');
@@ -94,7 +96,30 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       assertRuntimeHookBudget();
       const latest=validateAssistantActivePass(await readActivePass(),identity);
       if(JSON.stringify(latest)!==JSON.stringify(pass)) fail('ASSISTANT_HOOK_TASK_MISMATCH');
-      return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow',updatedInput:{...event.tool_input,
+      let sourceProcessingProof;
+      if(toolName==='complete_assistant_pass'){
+        const [{assistantSourceProcessingReferences},{assistantSourceProcessingProofPayload,assistantSourceProcessingProofTool}]=await Promise.all([
+          import('./trelio-assistant-inbox.mjs'),import('./trelio-assistant-transport.mjs')]);
+        const selected=assistantSourceProcessingReferences(supplied.processedSourceReferences??[]);
+        if(selected.length){
+          if(supplied.noChange!==false||!uuid.test(supplied.clientRequestId??'')||!uuid.test(supplied.workspaceId??'')
+            ||!uuid.test(supplied.acceptedRunId??'')||!(/^[0-9a-f]{40,64}$/u).test(supplied.workspaceHead??'')
+            ||typeof confirmSourceProcessing!=='function')fail('ASSISTANT_SOURCE_READ_REQUIRED');
+          // Actual read slots come from the SAME protected SQLite snapshot,
+          // independently of the model's explicit semantic selection. Fresh
+          // source/pass checks never infer processing from a native turn.
+          await confirmSourceProcessing(pass,selected);assertRuntimeHookBudget();
+          const current=validateAssistantActivePass(await readActivePass(),identity);
+          if(JSON.stringify(current)!==JSON.stringify(pass))fail('ASSISTANT_HOOK_TASK_MISMATCH');
+          supplied.processedSourceReferences=selected;
+          const manifest=assistantSourceProcessingProofPayload({...pass,clientRequestId:supplied.clientRequestId,
+            workspaceId:supplied.workspaceId,workspaceHead:supplied.workspaceHead,acceptedRunId:supplied.acceptedRunId,references:selected});
+          sourceProcessingProof=buildRuntimeSessionProof({state,toolName:assistantSourceProcessingProofTool(
+            crypto.createHash('sha256').update(manifest).digest('hex')),now:new Date(now())});
+        }
+      }
+      return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow',updatedInput:{...supplied,
+        ...(sourceProcessingProof?{sourceProcessingProof}:{}),
         taskPass:locator,runtimeSessionProof:buildRuntimeSessionProof({state,toolName,now:new Date(now())})}}};
     });
   };

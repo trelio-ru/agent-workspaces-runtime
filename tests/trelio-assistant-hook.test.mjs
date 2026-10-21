@@ -132,3 +132,34 @@ test('an exhausted common hook deadline blocks the first private read',async()=>
     error=>error.diagnosticCode==='TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED');
   assert.equal(reads,0);assert.equal(f.calls(),0);
 });
+
+test('completion signs only an independently confirmed original selection with the same observed key, never model proof',async()=>{
+  const {assistantSourceProcessingProofPayload,assistantSourceProcessingProofTool}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=fixture(),selected=[{sourceId:crypto.randomUUID(),sourceRevision:3,routeId:crypto.randomUUID(),eventOrdinal:4}];
+  let confirmed=0,allowed=true;
+  const hook=createAssistantTaskHook({...f.options,confirmSourceProcessing:async(pass,refs)=>{
+    confirmed++;assert.deepEqual(pass,f.pass);assert.deepEqual(refs,selected);
+    if(!allowed)throw Object.assign(new Error(),{code:'ASSISTANT_INBOX_SOURCE_READ_REQUIRED'});
+  }});
+  const fields={clientRequestId:crypto.randomUUID(),workspaceId:crypto.randomUUID(),workspaceHead:'a'.repeat(40),
+    acceptedRunId:crypto.randomUUID(),noChange:false,processedSourceReferences:selected,sourceProcessingProof:{signature:'FORGED'}};
+  const event={...f.event(),tool_input:fields};
+  const output=await hook(event,'complete_assistant_pass'),normal=verifyProof(f,output,'complete_assistant_pass');
+  const input=output.hookSpecificOutput.updatedInput,proof=input.sourceProcessingProof;
+  assert.equal(proof.runtimeSessionId,normal.runtimeSessionId);assert.notEqual(proof.nonce,normal.nonce);
+  const [spki]=[...f.records.entries()].find(([,row])=>row.runtimeSessionId===normal.runtimeSessionId);
+  const key=crypto.createPublicKey({key:Buffer.from(spki,'base64url'),format:'der',type:'spki'});
+  const verify=selection=>{
+    const manifest=assistantSourceProcessingProofPayload({...f.pass,...fields,references:selection});
+    const operation=assistantSourceProcessingProofTool(crypto.createHash('sha256').update(manifest).digest('hex'));
+    return crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,operation,proof.issuedAt,proof.nonce].join('\n')),
+      key,Buffer.from(proof.signature,'base64url'));
+  };
+  assert.equal(verify(selected),true);assert.equal(verify([{...selected[0],eventOrdinal:5}]),false);
+  assert.equal(confirmed,1);assert.ok(!JSON.stringify(input).includes('FORGED'));
+  allowed=false;await assert.rejects(hook(event,'complete_assistant_pass'),error=>error.code==='ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+  await assert.rejects(hook({...event,tool_input:{...fields,noChange:true}},'complete_assistant_pass'),/SOURCE_READ_REQUIRED/);
+  const empty=await hook({...event,tool_input:{...fields,processedSourceReferences:[]}},'complete_assistant_pass');
+  assert.equal(empty.hookSpecificOutput.updatedInput.sourceProcessingProof,undefined);
+  const read=await hook(event,'get_task');assert.equal(read.hookSpecificOutput.updatedInput.sourceProcessingProof,undefined);
+});

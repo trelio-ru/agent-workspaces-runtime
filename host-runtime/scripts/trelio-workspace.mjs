@@ -8407,6 +8407,12 @@ const skillCommand = async (
     if (live.artifact.id !== artifactForCache.id || live.artifact.packageSha256 !== artifactForCache.packageSha256)
       throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
   }
+  // Observe an exact queued body through the SAME signed process/account
+  // engine. The private profile validates native source/task routing before
+  // launch and after complete successful pipes; no provider output is saved
+  // or promoted to processing merely because the command returned zero.
+  const bodyRead = assistant && typeof profile.prepareSkillBodyRead === 'function'
+    ? await profile.prepareSkillBodyRead({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
   const executed = await runMaterializedAgentSkill({
     artifact: artifactForCache,
     runtimeDirectory,
@@ -8420,6 +8426,7 @@ const skillCommand = async (
       projectId, skillId, releaseId, runtimeSessionId,
     }) : null,
   });
+  if (bodyRead !== null) await profile.commitSkillBodyRead(bodyRead,executed);
   // In-process assistant composition must not inherit the provider's OS fd1:
   // it would bypass the bridge's bounded result/visual projection. The SAME
   // native executor captures its pipes and hands bytes back to that projector.
