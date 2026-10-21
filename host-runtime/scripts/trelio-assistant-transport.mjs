@@ -491,6 +491,10 @@ export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
   'ask_assistant_owner', 'request_assistant_action', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
+  // Native server cancellation needs no local file/CLI adapter. Its live
+  // dedicated schema and pass/own-Run checks remain backend authority; adding
+  // this name never opens cancel/restore in the local Workspace dispatcher.
+  'cancel_agent_workspace_run',
   "update_task_due_date", "update_task_assignee", "set_task_participants", "update_task_custom_field",
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",

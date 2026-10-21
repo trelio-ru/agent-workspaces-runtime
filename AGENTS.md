@@ -482,3 +482,7 @@ publication tooling также остаются вне этого публичн
 - Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Assistant owner actions: live sealed intent and persisted decision; never text-as-approval. See [contract](docs/assistant-scheduler.md#exact-owner-action-client).
 - Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery).
+- Own abandoned Workspace cancellation is a server-only dedicated MCP call with
+  the live native schema. No local cancel/restore alias, cleanup, human flag or
+  automatic retry; accepted history, goal and cycle are retained. See the
+  [MCP contract](docs/assistant-scheduler.md#assistant-read-mcp-proxy).

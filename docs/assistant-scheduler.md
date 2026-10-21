@@ -488,6 +488,15 @@ native membership/project ACL, published-only authority and the assistant's own
 personal skill rules. Unsupported dedicated execution does not permit a human
 bridge, OAuth or provider fallback.
 
+`cancel_agent_workspace_run` is a server-only native cancellation, exposed only
+when the dedicated backend advertises its live schema. The host forwards one
+exact Run/reason intent with hook-owned admission, without a human flag, local
+command, file deletion or automatic retry. The backend restricts it to this
+assistant's own unaccepted Run in the current pass's canonical task. A matching
+native receipt fences that Run; it does not finish the task goal or disable its
+cycle. Accepted history and useful local work remain available for recovery.
+Cancel/restore stay closed in the local Workspace continuation and HTTP profile.
+
 The host only applies a closed transport capability allowlist; it does not copy
 schemas, widen authority or expose unknown/new server tools. Setup tools remain
 available before pairing. A successful finish emits `tools/list_changed` so the

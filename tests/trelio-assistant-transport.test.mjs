@@ -312,6 +312,7 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
     ask_assistant_owner:{options:{type:'array',items:{type:'string'},minItems:2,maxItems:8}},
     create_task_relation:{targetTaskId:{type:'string'},relationType:{type:'string'}},
     delete_task_relation:{relationId:{type:'string'}},
+    cancel_agent_workspace_run:{runId:{type:'string',format:'uuid'},reason:{type:'string',minLength:1,maxLength:2000}},
   };
   const calls=[];let failed=false;
   const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest:async(input)=>{
@@ -342,10 +343,17 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   await client.callTool('ask_assistant_owner',question);assert.deepEqual(calls.at(-1),{name:'ask_assistant_owner',arguments:question});
   const relation={...proof,clientRequestId:randomUUID(),targetTaskId:randomUUID(),relationType:'Needs coordination'};
   await client.callTool('create_task_relation',relation);assert.deepEqual(calls.at(-1),{name:'create_task_relation',arguments:relation});
+  const cancellation={...proof,runId:randomUUID(),reason:'Abandoned preparation; accepted goal retained'};
+  await client.callTool('cancel_agent_workspace_run',cancellation);
+  assert.deepEqual(calls.at(-1),{name:'cancel_agent_workspace_run',arguments:cancellation});
   const removal={...proof,clientRequestId:randomUUID(),relationId:randomUUID()};failed=true;
   const before=calls.length;await assert.rejects(client.callTool('delete_task_relation',removal),/MCP_UNAVAILABLE/);
   assert.equal(calls.length,before+1,'uncertain mutation must never be repeated by the host');
   assert.deepEqual(calls.at(-1),{name:'delete_task_relation',arguments:removal});
+  const beforeCancel=calls.length;
+  await assert.rejects(client.callTool('cancel_agent_workspace_run',cancellation),/MCP_UNAVAILABLE/);
+  assert.equal(calls.length,beforeCancel+1,'an uncertain cancellation needs native read-back, never a host retry');
+  assert.deepEqual(calls.at(-1),{name:'cancel_agent_workspace_run',arguments:cancellation});
 });
 
 test('managed schema fields are hidden in root alternatives while nested business fields and original validators remain intact',()=>{
