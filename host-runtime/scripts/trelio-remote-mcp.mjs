@@ -6952,8 +6952,9 @@ export const createGigaCodeMcpHandler = ({
               resource: GIGACODE_CONFIG.endpoint, useSupportedScopes: true, maxExpiresIn: 366 * 24 * 60 * 60,
             }));
             // Persist and independently read back before calling it connected.
-            // Failed/ambiguous storage keeps the old record; it never writes a
-            // plaintext token file or retries the OAuth exchange automatically.
+            // Failed/ambiguous storage does not confirm the new session. The
+            // in-memory record stays unchanged; no plaintext token file or
+            // automatic repeat of the OAuth exchange is permitted.
             await vault.write(GIGACODE_ORIGIN, null, session);
             const stored = validate(await vault.read(GIGACODE_ORIGIN, null));
             if (!stored || stored.accessToken !== session.accessToken) throw new Error("TRELIO_GIGACODE_STORE_FAILED");

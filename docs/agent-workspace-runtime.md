@@ -2030,7 +2030,9 @@ exact port/path/Host/state и issuer; DCR, arbitrary URL и client secret отс
 Запись проверяется read-back. Совместимое обновление переиспользует вход;
 expired session либо явный reconnect/реальный OAuth challenge требует consent.
 `reauthorize=true` не удаляет соединение и не отзывает чужие grants.
-Токены и callback URL не появляются в MCP, config, argv, env или plaintext-файлах.
+Relay не передаёт token или authorization code в MCP, config, argv или env
+и не записывает их в plaintext-файлы. Browser handoff содержит только обычный
+authorization URL с public client, PKCE challenge и state.
 Штатный GigaCode token store не читается и не заполняется.
 
 После consent relay присылает `notifications/tools/list_changed` и актуальную
