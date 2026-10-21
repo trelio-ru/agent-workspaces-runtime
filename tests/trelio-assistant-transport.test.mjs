@@ -100,6 +100,70 @@ test('malformed, ambiguous or unavailable owner bindings never become an empty i
   assert.ok(!ASSISTANT_MCP_TOOLS.includes('get_assistant_owner_identities'));
 });
 
+test('source configuration uses one fixed device GET and returns immutable scoped refs, never a login claim', async () => {
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID();
+  const slot={origin,kind:'device',id:assistantId},store=memoryStore(),credential=`tda_${'s'.repeat(43)}`;
+  await store.put(slot,{assistantId,deviceId,credential,expiresAt:1});
+  const row={id:randomUUID(),companyId,deviceId,localAccountId:randomUUID(),projectId:null,
+    skillId:'telegram-mtproto',state:'active',revision:0,executionVerified:false};
+  const wire={schemaVersion:1,assistantUserId:assistantId,deviceId,companyId,
+    sources:[{...row,label:'PRIVATE_LABEL',selectors:{chat:'PRIVATE_CHAT'}}],private:'PRIVATE_EXTRA'};
+  let calls=0;
+  const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;assert.equal(url,`${origin}/api/digital-assistants/runtime/source-skills/accounts?companyId=${companyId}`);
+    assert.equal(options.method,'GET');assert.equal(options.body,undefined);assert.equal(options.headers['content-type'],undefined);
+    assert.equal(options.headers.authorization,`Bearer ${credential}`);assert.equal(options.credentials,'omit');
+    assert.equal(options.redirect,'error');assert.equal(options.cache,'no-store');assert.ok(options.signal);
+    return new Response(JSON.stringify(wire),{headers:{'content-type':'application/json'}});
+  }});
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
+  const result=await client.sourceAccounts(companyId.toUpperCase(),new AbortController().signal);
+  assert.deepEqual(result,[row]);assert.ok(Object.isFrozen(result));assert.ok(Object.isFrozen(result[0]));
+  assert.throws(()=>{result[0].state='revoked';},TypeError);assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+  // A fresh, identity-bound empty list is real absence. It cannot be supplied
+  // by a failed request, another company's response or stale admission cache.
+  wire.sources=[];assert.deepEqual(await client.sourceAccounts(companyId),[]);assert.equal(calls,2);
+  assert.equal(result[0].state,'active');
+  for(const bad of [{companyId,selector:'x'},{companyId:'bad'},undefined])
+    await assert.rejects(http('sourceAccounts',bad,credential),/INVALID_INPUT/);
+  assert.equal(calls,2,'bad queries never reach fetch');
+  let reads=0;
+  const invalid=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>{reads++;}},http});
+  await assert.rejects(invalid.sourceAccounts('bad'),/INVALID_INPUT/);assert.equal(reads,0);
+});
+
+test('source config rejects scope/protocol/duplicate errors and never maps refusals to an empty list', async () => {
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'u'.repeat(43)}`,expiresAt:1});
+  const row={id:randomUUID(),companyId,deviceId,localAccountId:randomUUID(),projectId:randomUUID(),
+    skillId:'email-imap-smtp',state:'paused',revision:2,executionVerified:false};
+  const valid={schemaVersion:1,assistantUserId:assistantId,companyId,deviceId,sources:[row]};
+  let response=valid,calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async()=>{
+    calls++;if(response instanceof Error)throw response;return response;
+  }});
+  const malformed=[null,{}, {...valid,schemaVersion:2},
+    ...['assistantUserId','deviceId','companyId'].map(key=>({...valid,[key]:randomUUID(),sources:[]})),
+    {...valid,sources:null},{...valid,sources:Array.from({length:129},()=>({...row,id:randomUUID()}))},
+    {...valid,sources:[row,{...row,id:row.id.toUpperCase()}]},
+    ...['id','companyId','deviceId','localAccountId','projectId'].map(key=>({...valid,sources:[{...row,[key]:'bad'}]})),
+    ...['companyId','deviceId'].map(key=>({...valid,sources:[{...row,[key]:randomUUID()}]})),
+    ...[true,undefined,'false'].map(executionVerified=>({...valid,sources:[{...row,executionVerified}]})),
+    ...[-1,1.5,2_147_483_648].map(revision=>({...valid,sources:[{...row,revision}]})),
+    {...valid,sources:[{...row,skillId:'arbitrary-provider'}]},{...valid,sources:[{...row,state:'ready'}]},
+  ];
+  for(response of malformed)await assert.rejects(client.sourceAccounts(companyId),error=>error.code==='ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  for(const [code,status] of [['ASSISTANT_ACCESS_DENIED',403],['ASSISTANT_DEVICE_REQUIRED',401],['ASSISTANT_TRANSPORT_REJECTED',404],['ASSISTANT_TRANSPORT_UNAVAILABLE',null]]){
+    response=new AssistantTransportError(code,status);
+    await assert.rejects(client.sourceAccounts(companyId),error=>error===response);
+  }
+  assert.equal(calls,malformed.length+4,'no hidden retry or human auth/account fallback');
+  response={...valid,sources:['active','paused','revoked'].map((state,index)=>({...row,id:randomUUID(),state,revision:index}))};
+  assert.equal((await client.sourceAccounts(companyId)).length,3,'desired states remain separate from verified execution');
+  const {ASSISTANT_MCP_TOOLS}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  assert.ok(!ASSISTANT_MCP_TOOLS.includes('sourceAccounts'),'host-private discovery is not a model tool');
+});
+
 test('pairing persists verifier before I/O, handles pending and erases it after protected device save', async () => {
   const origin='https://assistant.test',enrollmentId=randomUUID(),pairingId=randomUUID(),assistantUserId=randomUUID(),deviceId=randomUUID();
   const store=memoryStore(); let exchanges=0,seenVerifier;

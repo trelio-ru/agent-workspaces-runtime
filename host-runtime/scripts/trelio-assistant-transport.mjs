@@ -102,6 +102,34 @@ export const projectAssistantOwnerIdentities = (value, assistantId) => {
   return Object.freeze({ schemaVersion:1, assistantUserId:assistantId, ownerUserId,
     bindingRevision:value.bindingRevision, identities:Object.freeze(identities) });
 };
+
+/** Desired source configuration is not a provider grant or evidence of login.
+ * Bind even an empty response to the exact device/company before it could be
+ * used as an inventory. Never retain private labels, selectors or credentials
+ * from an extended server response, and never interpret an error as absence. */
+const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyId }) => {
+  const invalid = () => fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  const responseId = candidate => {
+    if (typeof candidate !== 'string' || !UUID.test(candidate)) invalid();
+    return candidate.toLowerCase();
+  };
+  if (!object(value) || value.schemaVersion !== 1
+    || responseId(value.assistantUserId) !== assistantId || responseId(value.deviceId) !== deviceId
+    || responseId(value.companyId) !== companyId || !Array.isArray(value.sources) || value.sources.length > 128) invalid();
+  const seen = new Set();
+  return Object.freeze(value.sources.map(row => {
+    if (!object(row) || responseId(row.companyId) !== companyId || responseId(row.deviceId) !== deviceId
+      || !['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)
+      || !['active','paused','revoked'].includes(row.state) || row.executionVerified !== false
+      || !Number.isSafeInteger(row.revision) || row.revision < 0 || row.revision > 2_147_483_647) invalid();
+    const sourceId = responseId(row.id);
+    if (seen.has(sourceId)) invalid();
+    seen.add(sourceId);
+    return Object.freeze({ id:sourceId, companyId, deviceId, localAccountId:responseId(row.localAccountId),
+      projectId:row.projectId === null ? null : responseId(row.projectId), skillId:row.skillId,
+      state:row.state, revision:row.revision, executionVerified:false });
+  }));
+};
 export const validateAssistantPassOutcome = (value, expected) => {
   if(!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(value.state==='pending') {
@@ -141,6 +169,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['healthRead',['GET','/runtime/health']], ['healthReport',['POST','/runtime/health']],
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['ownerIdentities',['GET','/runtime/owner-identities']],
+    ['sourceAccounts',['GET','/runtime/source-skills/accounts']],
     ['tasks',['POST','/runtime/tasks']], ['task',['POST','/runtime/task']],
     ['claim',['POST','/runtime/task/claim']],
     ['poll',['POST','/runtime/notifications/poll']], ['ack',['POST','/runtime/notifications/ack']],
@@ -155,10 +184,18 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     // These two public routes use the enrollment's S256 verifier, never an
     // owner bearer. All runtime operations require the separate device token.
     if (['pair','exchange'].includes(operation) ? credential !== null : credential === null) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+    // This sole GET query has a closed structural schema. The caller cannot
+    // choose an endpoint, append selectors or smuggle a request body to fetch.
+    let query = '';
+    if (operation === 'sourceAccounts') {
+      if (!object(body) || Object.keys(body).join(',') !== 'companyId') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      query = `?${new URLSearchParams({ companyId:id(body.companyId) })}`;
+      body = undefined;
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetchImpl(`${origin}/api/digital-assistants${route[1]}`, {
+      const response = await fetchImpl(`${origin}/api/digital-assistants${route[1]}${query}`, {
         method: route[0], redirect: 'error', credentials: 'omit', cache: 'no-store',
         signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
         headers: { accept: 'application/json', ...(body === undefined ? {} : { 'content-type': 'application/json' }),
@@ -324,6 +361,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // admission cache nor a previously matched username authorizes routing.
       // No task pass, current model, human cookie or owner OAuth is involved.
       return projectAssistantOwnerIdentities(await call('ownerIdentities',undefined,signal),assistantId);
+    },
+    async sourceAccounts(companyId, signal) {
+      // Validate input before private credential I/O. Read fresh every time;
+      // no model turn, task pass, account import/setup or provider launch here.
+      companyId = id(companyId);
+      return projectAssistantSourceAccounts(await call('sourceAccounts',{companyId},signal),{assistantId,deviceId,companyId});
     },
     async readHealth(signal) {
       const value=await call('healthRead',undefined,signal),current=healthState(value);

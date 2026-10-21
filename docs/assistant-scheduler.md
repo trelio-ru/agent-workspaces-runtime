@@ -271,6 +271,19 @@ monitoring, synthesize a task pass or reuse a human OAuth session.
 
 ### Model-free source reader
 
+`createAssistantDeviceClient.sourceAccounts(companyId)` reads desired source
+references through fixed GET
+`/api/digital-assistants/runtime/source-skills/accounts?companyId=UUID`. It uses
+the existing protected device slot, not a task pass or human OAuth. A fresh
+schema-v1 envelope must match assistant/device/company even when empty; at most
+128 structural rows are projected into immutable refs. Unknown fields are
+dropped, duplicate IDs/malformed scope/false readiness claims are refused, and
+errors remain errors rather than an empty authoritative inventory. `active` is
+owner intent; `executionVerified` must be false. This discovery does not create
+local accounts, import sessions, register queue sources, poll providers, dispatch
+chats or ACK messages. Owner device onboarding and production orchestration
+remain separate gates; no model tool or timer is added by this client.
+
 `readAssistantSourceMonitor` composes the same package resolution validator,
 Ed25519/digest/file-inventory verifier, executable cache, explicit bound local
 account selector and materialized Node/Python executor as ordinary skills. It

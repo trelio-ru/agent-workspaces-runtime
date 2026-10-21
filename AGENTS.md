@@ -387,6 +387,8 @@ publication tooling также остаются вне этого публичн
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).
 - Source owner identity uses fresh native bindings, never usernames or a task grant: [contract](docs/assistant-scheduler.md#owner-identity-metadata-for-source-routing).
 - Model-free source reads reuse common signature/cache/account execution under a fresh fixed device HTTP profile; no human admission cache, task pass, ACK or cursor reset. [Contract](docs/assistant-scheduler.md#model-free-source-reader).
+  Fixed device discovery returns scoped desired refs only, never login/readiness
+  evidence; failed/foreign/malformed inventories are not empty configurations.
   Source/task profiles share the managed device account namespace; neither imports
   the human catalogue nor mutates owner setup or lists unbound company labels.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
