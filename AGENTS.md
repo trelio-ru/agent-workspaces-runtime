@@ -376,7 +376,7 @@ publication tooling также остаются вне этого публичн
   stdout/stderr или private paths; отказ не превращается в пустой импорт.
   Windows gate проверяет настоящий публичный Python provider как read-only input.
   Monitor fixtures создают собственную real Python installation в native fixed
-  root на hosted Windows, а не зависят от toolcache/PATH; bounded cleanup retry
+  root на hosted Windows в обеих Node lanes через общий CI helper, а не зависят от toolcache/PATH; bounded cleanup retry
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
