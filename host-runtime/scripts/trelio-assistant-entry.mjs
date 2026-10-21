@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
-import { createAssistantSetup } from './trelio-assistant-setup.mjs';
+import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
 
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
 const enrollment = { type: 'string', pattern: UUID };
@@ -20,13 +20,26 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
     inputSchema: schema({ enrollmentId: enrollment }) },
   { name: 'get_assistant_setup_status', description: 'Read local setup state and, for a paired device, verify live server contact. Does not imply task execution or background service readiness.',
     inputSchema: schema({ enrollmentId: enrollment }), annotations: { readOnlyHint: true, idempotentHint: true } },
+  { name: 'install_assistant_background', description: 'Register the paired assistant supervisor for this Windows user at sign-in. Requires an explicit setup request. No automatic logon, saved password, elevation, Codex restart or readiness assertion. Does not start it now.',
+    inputSchema: schema({}), annotations: { idempotentHint: true } },
+  { name: 'get_assistant_background_status', description: 'Read back this paired Windows user\'s exact Task Scheduler registration and OS running state. Does not prove business readiness, source delivery or a working desktop.',
+    inputSchema: schema({}), annotations: { readOnlyHint: true, idempotentHint: true } },
+  { name: 'start_assistant_background', description: 'Start the exact registered paired Windows supervisor after setup. Reuses an already running instance. Native task/pass/owner/model/hook admission still gates every business action; registration or OS running state is not a successful pilot.',
+    inputSchema: schema({}), annotations: { idempotentHint: true } },
 ]);
-const codes = new Set(['begin_assistant_setup', 'finish_assistant_setup', 'get_assistant_setup_status']);
+const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
+const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
 const safeError = error => assistantHealthFailure(error) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
 export const callAssistantSetupTool = async (setup, name, args) => {
   if (!codes.has(name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
+  if (Object.hasOwn(backgroundTools, name)) {
+    if (!args || Object.getPrototypeOf(args) !== Object.prototype || Object.keys(args).length !== 0) {
+      throw Object.assign(new Error(), { code: 'ASSISTANT_SETUP_INVALID_INPUT' });
+    }
+    return setup.background(backgroundTools[name]);
+  }
   const expected = name === 'begin_assistant_setup' ? ['enrollmentId', 'deviceName'] : ['enrollmentId'];
   if (!args || Object.getPrototypeOf(args) !== Object.prototype
     || Object.keys(args).length !== expected.length || Object.keys(args).some(key => !expected.includes(key))
@@ -54,12 +67,24 @@ export const createProductionAssistantSetup = async () => {
   const setup = createAssistantSetup({ origin, store, http: createAssistantHttp({ origin }) });
   // As in the common bridge, share one native worker only inside this tool
   // invocation. A long-lived MCP must not retain its ACL results or pipes.
-  return Object.fromEntries(Object.entries(setup).map(([name, action]) => [name,
+  return { ...Object.fromEntries(Object.entries(setup).map(([name, action]) => [name,
     (...args) => withPrivateProcessSession(async () => {
       const result = await action(...args);
       if (result.state === 'paired') await hostState.saveIdentity({ origin, assistantId: result.assistantId, deviceId: result.deviceId });
       return result;
-    })]));
+    })])), background: async operation => (await createProductionAssistantBackground())(operation) };
+};
+
+/** OS registration is composed only after an explicit setup call, never from
+ * schema discovery or a task pass. The machine identity is the protected local
+ * pairing; the model cannot choose a principal, executable or assistant UUID. */
+export const createProductionAssistantBackground = async () => {
+  const signal = AbortSignal.timeout(45_000);
+  return createAssistantWindowsBackground({
+    signal,
+    readIdentity: () => productionContext(client => client.identity, { signal }),
+    verifyContact: () => productionContext(client => client.heartbeat(), { signal }),
+  });
 };
 
 /** The host identity is selected by completed protected pairing, never tool
@@ -273,7 +298,13 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
 };
 
 export const runAssistantEntry = async (args, options = {}) => {
-  if (args.length !== 1 || !['mcp', 'hook', 'request', 'background', 'workspace'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
+  if (args.length !== 1 || !['mcp', 'hook', 'request', 'background', 'workspace',
+    'background-install', 'background-status', 'background-start', 'background-remove'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
+  if (args[0].startsWith('background-')) {
+    const manage = await (options.createBackground ?? createProductionAssistantBackground)();
+    (options.output ?? process.stdout).write(JSON.stringify(await manage(args[0].slice('background-'.length))) + '\n');
+    return;
+  }
   if (args[0] === 'workspace') return runAssistantWorkspaceWorker(options);
   if (args[0] === 'mcp') return runAssistantSetupMcp(options);
   if (args[0] === 'background') return (options.runBackground ?? runAssistantBackground)(options);
@@ -442,7 +473,7 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   });
 };
 
-const productionContext = async action => {
+const productionContext = async (action, { signal } = {}) => {
   const [{createAssistantPrivateStore},{createAssistantHostState},{createAssistantDeviceClient,createAssistantHttp},common,
     {withPrivateProcessSession}]=await Promise.all([
     import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-transport.mjs'),
@@ -456,7 +487,7 @@ const productionContext = async action => {
     if(!identity)return null;
     if(identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
     return action(createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})}),host);
-  },AbortSignal.timeout(45_000));
+  }, signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000));
 };
 
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
@@ -906,12 +937,15 @@ export const runAssistantWorkspaceWorker = async ({input=process.stdin,output=pr
 };
 
 if (isDirectModuleInvocation(import.meta.url)) {
-  runAssistantEntry(process.argv.slice(2)).catch(() => {
+  runAssistantEntry(process.argv.slice(2)).catch(error => {
     if (process.argv[2] === 'hook') {
       // Preserve the common JSON-deny/exit-0 contract across Windows shells.
       // Broken input cannot silently turn a protected hook into permission.
       process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse',
         permissionDecision: 'deny', permissionDecisionReason: 'ASSISTANT_HOOK_UNAVAILABLE' } }) + '\n');
-    } else { process.stderr.write('ASSISTANT_ENTRY_UNAVAILABLE\n'); process.exitCode = 1; }
+    } else {
+      process.stderr.write((process.argv[2]?.startsWith('background-') ? safeError(error) : 'ASSISTANT_ENTRY_UNAVAILABLE') + '\n');
+      process.exitCode = 1;
+    }
   });
 }

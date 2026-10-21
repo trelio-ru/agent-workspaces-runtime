@@ -32,7 +32,7 @@ test("host runtime keeps one stable three-mode entrypoint", () => {
 });
 
 test("assistant bridge profile selects its own entrypoint and rejects unknown commands before spawn", () => {
-  for (const command of ["mcp", "hook", "request", "background"]) {
+  for (const command of ["mcp", "hook", "request", "background", "background-install", "background-status", "background-start", "background-remove"]) {
     const invocation = resolveHostRuntimeInvocation(["bridge", "assistant", command]);
     assert.equal(invocation.profile, "assistant");
     assert.equal(path.basename(invocation.entrypointPath), "trelio-assistant-entry.mjs");
@@ -75,7 +75,7 @@ test("actual runtime assistant MCP discovers setup and broken hooks deny without
   const messages = mcp.stdout.trim().split("\n").map(JSON.parse);
   assert.equal(messages[0].result.serverInfo.name, "trelio-assistant");
   assert.deepEqual(messages[1].result.tools.map(tool => tool.name),
-    ["begin_assistant_setup", "finish_assistant_setup", "get_assistant_setup_status"]);
+    ["begin_assistant_setup", "finish_assistant_setup", "get_assistant_setup_status", "install_assistant_background", "get_assistant_background_status", "start_assistant_background"]);
   const hook = spawnSync(process.execPath, [entry, "bridge", "assistant", "hook"], { env, input: "invalid", encoding: "utf8", timeout: 20_000 });
   assert.equal(hook.status, 0, hook.stderr);
   assert.equal(JSON.parse(hook.stdout).hookSpecificOutput.permissionDecision, "deny");

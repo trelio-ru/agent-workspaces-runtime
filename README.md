@@ -595,3 +595,6 @@ Package builder требует metadata с SHA исходника, размер�
 [Scheduler and native adapter contract](docs/assistant-scheduler.md) describes
 cyclic task scheduling, atomic inbox completion and exact native Codex read-back.
 These components do not install or activate an autonomous assistant by themselves.
+Explicit [Windows autostart](docs/assistant-scheduler.md#per-user-windows-autostart)
+setup registers the paired user's supervisor and reads its actual OS state;
+it does not provide automatic logon or establish business readiness.

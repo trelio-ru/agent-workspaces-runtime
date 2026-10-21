@@ -341,10 +341,57 @@ business tool or replaces a chat. Temporary source polling failure does not
 independently cancel/repeat native work, and an unresolved failure is preserved
 when the pass settles. Raw errors/content are not supervisor output.
 
-This entry is not installed by import or pairing. OS registration, actual
-next-run read-back, desktop availability and owner onboarding remain separate
-release gates; no existing pilot machine or user configuration is changed by
-these source changes. Automatic restart of Codex remains backlog-only.
+This entry is not installed by import or pairing. Explicit Windows registration
+is described below; actual next-run read-back, desktop availability and owner
+onboarding remain separate release gates. No existing pilot machine or user
+configuration is changed by these source changes. Automatic restart of Codex
+remains backlog-only.
+
+### Per-user Windows autostart
+
+`install_assistant_background`, `get_assistant_background_status` and
+`start_assistant_background` are local setup tools with empty strict input
+objects. They derive identity from completed protected pairing, the exact
+currently loaded plugin loader and Node executable. No model argument selects
+a user, command, task name, assistant or credential. Install/start verify live
+device contact and repeat local identity after it; status remains usable during
+a network outage. Other platforms return an explicit unsupported code.
+
+Registration uses the local Task Scheduler COM API through constant,
+profile-free noninteractive Windows PowerShell. Bounded UTF-8 JSON stdin carries
+only public registration metadata; code is constant and no shell interpolation,
+credential, private-worker pipe or raw OS error is exposed. It does not perform
+ACL/DPAPI work, change policy or run the supervisor as SYSTEM. Existing common
+private runtime and every business authority check remain unchanged.
+
+The deterministic task belongs to the current Windows SID with least privilege
+and `InteractiveToken`. A single logon trigger waits 15 seconds; unlimited task
+duration, IgnoreNew, battery continuation and three one-minute crash restarts
+are read back from the actual native definition. No saved password, automatic
+sign-in, privilege escalation or Codex restart is configured. After reboot the
+user must sign into Windows; a disconnected RDP session and a user logoff are
+different lifecycle events. GUI availability still requires its own test.
+See [Microsoft logon type](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-logontype-principaltype-element)
+and [logon triggers](https://learn.microsoft.com/en-us/windows/win32/taskschd/logontrigger).
+
+Install registers without starting now; start is a separate exact operation.
+Reinstall reads back the existing identity/principal/action/trigger/settings;
+a different definition conflicts rather than being overwritten. Concurrent
+creation uses TASK_CREATE, never TASK_CREATE_OR_UPDATE. Start reuses a running
+or queued instance with native IgnoreNew as the race guard. The explicit
+`bridge assistant background-install|background-status|background-start` CLI
+uses the same implementation. Owner cleanup via `background-remove` requires
+that exact matching task to be idle; a busy/queued pass is never killed or
+unregistered, and an ambiguous OS operation is not retried automatically.
+
+Status distinguishes not_installed/registered/queued/running from business
+readiness and always reports `businessReady:false`. OS running state is not
+proof of backend admission, source delivery, a native task outcome, working
+desktop or actual next cyclic run. The coordinator retains its independent
+full-readiness gate. Hosted Windows tests register a disposable UUID-scoped
+task, reread and deduplicate it, refuse a replacement device, execute a tiny
+native Node fixture and remove it after completion. They never touch an
+assistant machine or claim the full Windows business pilot has passed.
 
 ## Dedicated plugin entry and setup
 
@@ -355,7 +402,8 @@ human bridge, config migration, credential access or cache maintenance. Hook
 startup retains the common non-sliding clock and never consumes a human Run cwd.
 
 Before enrollment, the stdio surface exposes begin/finish/status with a non-authorizing
-enrollment UUID. It composes the existing protected S256 journal, OS private store
+enrollment UUID and the local Windows setup tools above. Discovery does not
+register or start an OS task. Pairing composes the existing protected S256 journal, OS private store
 and fixed HTTPS client, under one invocation-local Windows native worker. No
 human OAuth/client configuration, owner browser login or credential-valued MCP
 arguments exist. Unpaired discovery does not load private credentials. After pairing,
@@ -366,7 +414,8 @@ An already completed pairing is read back privately and checked by live heartbea
 retrying the setup tool never repeats the one-use exchange. An uncertain exchange
 survives restart as recovery_required. Setup output distinguishes paired/contact
 from business readiness. Task-pass admission and the installed background service
-remain required; the current setup profile does not claim or start them. The assistant hook composes the ordinary observer, proof serializer, state lock
+remain required; the local setup profile never claims business readiness from
+registration/contact. The assistant hook composes the ordinary observer, proof serializer, state lock
 and invocation-private deadline. Without a live exact pass it denies task calls
 with a closed reason and JSON-deny/exit-0, including malformed input on Windows shells.
 

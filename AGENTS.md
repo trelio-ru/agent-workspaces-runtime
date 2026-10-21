@@ -380,6 +380,11 @@ publication tooling также остаются вне этого публичн
   invocations per call. Supervisor updates only between cycles; full backend
   readiness gates business work. Task folders use compact full-identity hashes; prototype writable roots require review. OS installation and Windows E2E remain explicit
   gates: [contract](docs/assistant-scheduler.md#protected-background-host-composition).
+- Explicit Windows autostart uses current paired identity/SID, least-privilege
+  InteractiveToken and exact native Task Scheduler read-back. No saved password,
+  autologon, force overwrite, active-pass termination or readiness inference.
+  Constant public-metadata PowerShell is separate from native ACL/DPAPI.
+  [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
 
 ## Граница plugin/runtime
 

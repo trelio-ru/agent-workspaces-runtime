@@ -64,7 +64,7 @@ test('actual stdio frames discover setup without auth I/O and reject unknown fie
     createMcp:async()=>null,createSetup:async()=>{created++;return {status:async()=>{reads++;return {state:'not_started'};}};}});
   const messages=raw.trim().split('\n').map(JSON.parse);
   assert.equal(messages.length,5);
-  assert.equal(messages[1].result.tools.length,3);
+  assert.equal(messages[1].result.tools.length,6);
   assert.equal(messages[2].result.structuredContent.code,'ASSISTANT_CAPABILITY_UNAVAILABLE');
   assert.equal(messages[3].result.structuredContent.code,'ASSISTANT_SETUP_INVALID_INPUT');
   assert.deepEqual(messages[4].result.structuredContent,{state:'not_started'});
@@ -108,7 +108,7 @@ test('stdio discovers live backend read schemas, notifies after pairing and keep
     }}:null});
   const messages=raw.trim().split('\n').map(JSON.parse);
   assert.equal(messages[0].result.capabilities.tools.listChanged,true);
-  assert.equal(messages[1].result.tools.length,3);
+  assert.equal(messages[1].result.tools.length,6);
   assert.equal(messages[3].method,'notifications/tools/list_changed');
   assert.deepEqual(messages[4].result.tools.at(-1),tool);
   assert.equal(messages[5].result.content[0].text,'ordinary task content');

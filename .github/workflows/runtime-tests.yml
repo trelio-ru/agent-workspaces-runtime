@@ -147,6 +147,8 @@ jobs:
           architecture: arm64
       - name: Verify native ARM64 ACL and DPAPI
         run: node tests/trelio-windows-native-private.test.mjs
+      - name: Verify native ARM64 assistant autostart
+        run: node tests/trelio-assistant-windows-background.test.mjs
 
   git-main-guard:
     if: github.event_name == 'pull_request'
@@ -243,6 +245,7 @@ jobs:
           node tests/trelio-assistant-transport.test.mjs
           node tests/trelio-assistant-source-reader.test.mjs
           node tests/trelio-assistant-setup.test.mjs
+          node tests/trelio-assistant-windows-background.test.mjs
           node tests/trelio-assistant-maintenance.test.mjs
           node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
@@ -367,6 +370,7 @@ jobs:
           node tests/trelio-assistant-transport.test.mjs
           node tests/trelio-assistant-source-reader.test.mjs
           node tests/trelio-assistant-setup.test.mjs
+          node tests/trelio-assistant-windows-background.test.mjs
           node tests/trelio-assistant-maintenance.test.mjs
           node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
