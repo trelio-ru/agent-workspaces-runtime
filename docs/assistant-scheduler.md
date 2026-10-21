@@ -367,6 +367,20 @@ configure or clear hook/ChatGPT login latches. This dynamic signed-worker tool
 uses the normal wait envelope and does not change the stable six-method setup
 ABI. Actual background next-run/processing/ACK and Windows E2E remain independent.
 
+Production source polling also reads the native per-source diagnostic CAS before
+its signed provider read, then reports exactly one closed result to the existing
+account incident mechanism. Source revision and health CAS are independent of
+SQLite cursor state and device-wide login/hooks. A late registration change
+cannot report recovery. Monitor gap/scope/setup failures use closed codes only;
+network/prose never guesses invalid credentials. A failed diagnostic read skips
+the report; a lost/failed report never retries the provider, discards a committed
+page, resets a position or marks messages read. Each call re-enters the same
+protected device invocation, fixed HTTPS transport and original poll deadline.
+Owner bell/messenger delivery is server-owned; local callback emission alone is
+not notification evidence. Ready describes the checked source metadata read,
+not routed/processed/acknowledged messages or whole product readiness.
+
+
 Arbitrary task-skill arguments require `trelio-assistant-execution.json` in the
 SAME verified signed package file inventory. Its v1 object has exactly
 `schemaVersion:1` and `taskCommands`: 1–64 unique literal positional prefixes,

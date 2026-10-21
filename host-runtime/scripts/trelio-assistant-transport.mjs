@@ -155,6 +155,14 @@ const healthState = value => {
     || value.latchedCodes.some(code=>!['codex_auth_required','hook_review_required'].includes(code))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {revision:revision(value.revision),code:value.code,generation:revision(value.generation),latchedCodes:[...value.latchedCodes]};
 };
+const sourceHealthCodes=Object.freeze(['ready','setup_required','authentication_required','scope_changed','history_gap','read_failed']);
+const sourceHealthState=value=>{
+  if(!object(value)||!['not_checked',...sourceHealthCodes].includes(value.code)
+    || value.lastCheckedAt!==null && (typeof value.lastCheckedAt!=='string'||!Number.isFinite(Date.parse(value.lastCheckedAt)))
+    || (value.code==='not_checked')!==(value.lastCheckedAt===null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return Object.freeze({revision:revision(value.revision),sourceRevision:revision(value.sourceRevision),
+    generation:revision(value.generation),code:value.code,lastCheckedAt:value.lastCheckedAt});
+};
 const originOf = origin => {
   let url; try { url = new URL(origin); } catch { fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); }
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
@@ -174,6 +182,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['ownerIdentities',['GET','/runtime/owner-identities']],
     ['sourceAccounts',['GET','/runtime/source-skills/accounts']],
+    ['sourceHealthRead',['GET','/runtime/source-skills/health']],['sourceHealthReport',['POST','/runtime/source-skills/health']],
     ['tasks',['POST','/runtime/tasks']], ['task',['POST','/runtime/task']],
     ['claim',['POST','/runtime/task/claim']],
     ['poll',['POST','/runtime/notifications/poll']], ['ack',['POST','/runtime/notifications/ack']],
@@ -195,6 +204,10 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
       if (!object(body) || Object.keys(body).join(',') !== 'companyId') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       query = `?${new URLSearchParams({ companyId:id(body.companyId) })}`;
       body = undefined;
+    }
+    if(operation==='sourceHealthRead'){
+      if(!object(body)||Object.keys(body).sort().join(',')!=='companyId,sourceId')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      query=`?${new URLSearchParams({companyId:id(body.companyId),sourceId:id(body.sourceId)})}`;body=undefined;
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -371,6 +384,22 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // no model turn, task pass, account import/setup or provider launch here.
       companyId = id(companyId);
       return projectAssistantSourceAccounts(await call('sourceAccounts',{companyId},signal),{assistantId,deviceId,companyId});
+    },
+    async readSourceHealth(companyId,sourceId,signal){
+      companyId=id(companyId);sourceId=id(sourceId);
+      return sourceHealthState(await call('sourceHealthRead',{companyId,sourceId},signal));
+    },
+    async reportSourceHealth(input,signal){
+      if(!object(input)||Object.keys(input).sort().join(',')!=='clientRequestId,code,companyId,expectedRevision,sourceId,sourceRevision'
+        || !sourceHealthCodes.includes(input.code)
+        || !Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
+        || !Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0||input.expectedRevision>2_000_000_000)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={companyId:id(input.companyId),sourceId:id(input.sourceId),sourceRevision:revision(input.sourceRevision),
+        expectedRevision:revision(input.expectedRevision),clientRequestId:id(input.clientRequestId),code:input.code};
+      const result=sourceHealthState(await call('sourceHealthReport',body,signal));
+      if(result.revision!==body.expectedRevision+1||result.sourceRevision!==body.sourceRevision||result.code!==body.code)
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return result;
     },
     async readHealth(signal) {
       const value=await call('healthRead',undefined,signal),current=healthState(value);

@@ -3,7 +3,7 @@
 import { createAssistantInbox } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
-import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration } from './trelio-assistant-transport.mjs';
+import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -11,7 +11,7 @@ export class AssistantCoordinatorError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
 }
 const fail = code => { throw new AssistantCoordinatorError(code); };
-const errorCode = error => typeof error?.code === 'string' && /^ASSISTANT_[A-Z_]{1,100}$/u.test(error.code)
+const errorCode = error => typeof error?.code === 'string' && (/^ASSISTANT_[A-Z_]{1,100}$/u.test(error.code)||ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error.code))
   ? error.code : 'ASSISTANT_COORDINATOR_UNAVAILABLE';
 const safeError = error => new AssistantCoordinatorError(errorCode(error), Number.isInteger(error?.status)?error.status:null);
 const sameSource = (a,b) => ['origin','assistantId','companyId','provider','accountId','bindingId'].every(key => a[key] === b[key]);
@@ -24,10 +24,11 @@ const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:ide
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, readSourceMonitor = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, readSourceMonitor = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+  if(sourceHealth!==null&&(!sourceHealth||typeof sourceHealth.read!=='function'||typeof sourceHealth.report!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(readSourceMonitor!==null && (typeof readSourceMonitor!=='function' || typeof client.sourceAccounts!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   const schedule = createAssistantScheduler({database,now});
   const inbox = createAssistantInbox({database,now,onDeliveryCompleted:schedule.completeInsideInboxTransaction});
@@ -164,9 +165,26 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // One page per source per coordinator tick: a large backlog cannot occupy
     // the worker indefinitely before another company or native task gets time.
     lease();const poll=inbox.claimPoll(source);if(!poll)return;
+    let observation=null;
+    // Capture the native CAS BEFORE reading the provider. A later report uses
+    // that exact snapshot once; report failures never replay a provider read or
+    // overwrite its committed page/outcome. Nothing is inferred from prose.
+    const report=async code=>{
+      if(!observation||!code)return;
+      try{await sourceHealth.report(row,{expectedRevision:observation.revision,sourceRevision:row.revision,
+        clientRequestId:randomUUID(),code},signal);}
+      catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
+    };
     try{
       const current=await client.sourceAccounts(row.companyId,signal);lease();
       if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      if(sourceHealth)try{
+        const snapshot=await sourceHealth.read(row,signal);lease();
+        if(snapshot?.sourceRevision!==row.revision||!Number.isSafeInteger(snapshot.revision)||snapshot.revision<0)
+          fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+        observation=snapshot;
+      }catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
+      lease(); // Diagnostic failure cannot hide expiry of the original poll lease.
       // MAX requires an exact native conversation selector. The current
       // registration has none; guessing/opening a default chat is forbidden.
       if(row.skillId==='max-web')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
@@ -184,10 +202,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // body read, native mapping and committed processing remain required.
       inbox.commitPage(source,{...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
         events:result.events.map(({id,revision})=>({id,revision,taskId:null,wake:false}))});
+      await report('ready');
     }catch(error){
       // Read-only recovery retains both position and queued events. Neither
       // a provider gap nor changed owner configuration resets the source.
-      inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000});throw error;
+      inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000});
+      const code=error?.code;
+      const reason=code==='ASSISTANT_COORDINATOR_SOURCE_CHANGED'?null:
+        ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'].includes(code)?'setup_required':
+        /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:SCOPE_CHANGED|UIDVALIDITY_CHANGED)$/u.test(code??'')?'scope_changed':
+        /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||code==='ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT'?'history_gap':'read_failed';
+      await report(reason);throw error;
     }
   };
   const reportSchedules = async signal => {

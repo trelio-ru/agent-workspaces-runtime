@@ -785,3 +785,38 @@ test('MCP original download is hidden without a trusted materializer and returns
   failDownload=true;await assert.rejects(client.callTool('download_attachment',{attachmentId:randomUUID()}),/SOURCE_CHANGED/);
   assert.equal(calls,2);assert.equal(materializations,2,'uncertain binary read has no automatic replay');
 });
+
+
+test('source diagnostics are fixed device-only structural calls, strict before private I/O and without retries',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID();
+  const store=memoryStore(),credential=`tda_${'h'.repeat(43)}`;let calls=0;
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  const valid={revision:0,sourceRevision:2,generation:0,code:'not_checked',lastCheckedAt:null};let output=valid;
+  const bodies=[];
+  const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;assert.equal(options.credentials,'omit');assert.equal(options.redirect,'error');assert.equal(options.cache,'no-store');
+    assert.equal(options.headers.authorization,`Bearer ${credential}`);
+    if(options.method==='GET'){
+      assert.equal(url,`${origin}/api/digital-assistants/runtime/source-skills/health?companyId=${companyId}&sourceId=${sourceId}`);
+      assert.equal(options.body,undefined);
+    }else{assert.equal(url,`${origin}/api/digital-assistants/runtime/source-skills/health`);bodies.push(JSON.parse(options.body));}
+    if(output instanceof Error)throw output;
+    return new Response(JSON.stringify({...output,body:'PRIVATE_PROVIDER_BODY'}),{headers:{'content-type':'application/json'}});
+  }});
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
+  assert.deepEqual(await client.readSourceHealth(companyId,sourceId),valid);
+  const input={companyId,sourceId,sourceRevision:2,expectedRevision:0,clientRequestId:randomUUID(),code:'ready'};
+  output={...valid,revision:1,code:'ready',lastCheckedAt:'2026-01-01T00:00:00Z'};
+  assert.deepEqual(await client.reportSourceHealth(input),output);assert.deepEqual(bodies,[input]);
+  const before=calls;
+  for(const extra of [{message:'PRIVATE'},{cursor:'PRIVATE'},{code:'authenticated'},{sourceRevision:-1}])
+    await assert.rejects(client.reportSourceHealth({...input,...extra}),/INVALID_INPUT/);
+  await assert.rejects(client.readSourceHealth('bad',sourceId),/INVALID_INPUT/);assert.equal(calls,before);
+  for(output of [{...valid,code:'unknown'},{...valid,code:'ready'},{...valid,lastCheckedAt:'2026-01-01T00:00:00Z'},
+    {...valid,sourceRevision:-1},{...valid,revision:NaN}])await assert.rejects(client.readSourceHealth(companyId,sourceId),/INVALID_RESPONSE/);
+  output={...valid,revision:9,code:'ready',lastCheckedAt:'2026-01-01T00:00:00Z'};
+  await assert.rejects(client.reportSourceHealth(input),/INVALID_RESPONSE/);
+  const count=calls;output=new Error('PRIVATE_TRANSPORT');
+  await assert.rejects(client.reportSourceHealth(input),error=>error.code==='ASSISTANT_TRANSPORT_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
+  assert.equal(calls,count+1,'unknown report outcome is never retried');
+});

@@ -408,6 +408,8 @@ publication tooling также остаются вне этого публичн
   Email incoming verification reuses one passive signed read and the same
   registration recheck as polling; it never commits its baseline/cursor or
   proves SMTP/background readiness. Source reasons remain closed/typed.
+  Poll diagnostics use native per-source revision/CAS and shared account notices;
+  reporting failure never replays work or changes committed inbox positions.
   Protected email setup needs a separate native owner opt-in; fixed browser-only
   capture reuses the same account/process engine and original human-input budget.
   It never accepts credentials/terminal args or upgrades passive reader limits.

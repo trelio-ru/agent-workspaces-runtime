@@ -242,10 +242,18 @@ test('production host composes real SQLite, fresh private calls and the native a
   const taskConfig=path.join(os.tmpdir(),'synthetic-assistant-host-'+randomUUID());
   let businessReady=false,starts=0,contextCalls=0,databaseClosed=0,reported=0;
   let currentIdentity=identity;
-  const sourceId=randomUUID(),sourceAccountId=randomUUID();let sourceInventories=0,sourcePolls=0;
+  const sourceId=randomUUID(),sourceAccountId=randomUUID();let sourceInventories=0,sourcePolls=0,sourceHealthReads=0;const sourceReports=[];
   const client={identity,heartbeat:async()=>({}),companies:async()=>[{companyId,memberId}],
     sourceAccounts:async selected=>{sourceInventories++;assert.equal(selected,companyId);return [{id:sourceId,companyId,deviceId:identity.deviceId,
       localAccountId:sourceAccountId,projectId:null,skillId:'email-imap-smtp',state:'active',revision:0,executionVerified:false}];},
+    readSourceHealth:async(company,source)=>{
+      sourceHealthReads++;assert.equal(company,companyId);assert.equal(source,sourceId);assert.equal(sourcePolls,0);
+      return {revision:0,sourceRevision:0,code:'not_checked'};
+    },reportSourceHealth:async input=>{
+      assert.equal(sourcePolls,1);sourceReports.push(input);assert.equal(input.sourceId,sourceId);
+      assert.equal(input.companyId,companyId);assert.equal(input.expectedRevision,0);assert.equal(input.sourceRevision,0);
+      assert.equal(input.code,'ready');return {revision:1,sourceRevision:0,code:'ready'};
+    },reportHealth:async()=>assert.fail('source observation cannot clear global health'),
     tasks:async()=>({bindings:[{id:bindingId,taskId,state:'accepted',revision:0}],nextCursor:null}),
     task:async()=>({id:bindingId,taskId,state:'accepted',revision:0,execution,hostState:'this_device'}),
     poll:async()=>({events:[],nextCursor:'0',hasMore:false}),
@@ -273,6 +281,7 @@ test('production host composes real SQLite, fresh private calls and the native a
   try {
     await host.coordinator.pollOnce();
     assert.equal(sourcePolls,1);assert.equal(sourceInventories,3,'source inventory and both sides of the read re-enter the protected context');
+    assert.equal(sourceHealthReads,1);assert.equal(sourceReports.length,1,'production composition reports a native source result in a new private invocation');
     await assert.rejects(host.coordinator.workOnce(),error=>error.code==='ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     assert.equal(starts,0,'a running source poll and configured native adapter do not enable model work');
     businessReady=true;

@@ -387,7 +387,7 @@ test('Trelio inventory and notification ACK do not revoke or poll external provi
 // The real coordinator and SQLite are used here. Provider I/O is the same
 // trusted injected boundary as the native notification client above; synthetic
 // private text is a canary that must never become queue data or a task wake.
-const externalFixture=async t=>{
+const externalFixture=async (t,{sourceHealth=null}={})=>{
   const f=fixture(t);await f.coordinator.close();
   const row={id:randomUUID(),companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:randomUUID(),projectId:null,
     skillId:'telegram-mtproto',state:'active',revision:0,executionVerified:false};
@@ -398,7 +398,7 @@ const externalFixture=async t=>{
     if(inventoryFailure)throw Object.assign(new Error('PRIVATE_SOURCE_ERROR'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
     return structuredClone(rows);
   };
-  const options={...f.options,readSourceMonitor:async(source,signal)=>{reads++;return read(source,signal);}};
+  const options={...f.options,sourceHealth,readSourceMonitor:async(source,signal)=>{reads++;return read(source,signal);}};
   let coordinator=createAssistantCoordinator(options);
   const inbox=createAssistantInbox({database:f.database,now:f.options.now});
   const scope=()=>({origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,
@@ -502,5 +502,41 @@ test('MAX source does not guess a conversation and one busy source cannot consum
     f.read(async()=>({events:[],nextCursor:'end',hasMore:false}));
     await f.coordinator.pollOnce();assert.equal(f.reads(),8);
     assert.equal(rows.filter(row=>f.inbox.status({...f.scope(),accountId:row.localAccountId,bindingId:row.id}).cursorRevision>0).length,6);
+  }finally{await f.coordinator.close();}
+});
+
+
+test('source health snapshots precede provider reads; reports never replay work, lose positions or clear global health',async t=>{
+  let revision=0,readFailure=false,reportFailure=false,phase='idle';const reports=[];
+  const sourceHealth={read:async row=>{
+    phase='snapshot';if(readFailure)throw Object.assign(new Error('PRIVATE_HEALTH'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    return {revision,sourceRevision:row.revision,code:'not_checked'};
+  },report:async(row,value)=>{
+    assert.equal(value.expectedRevision,revision);assert.equal(value.sourceRevision,row.revision);
+    assert.equal(phase,'provider');reports.push({...value,sourceId:row.id});
+    if(reportFailure)throw Object.assign(new Error('PRIVATE_REPORT'),{code:'ASSISTANT_SOURCE_HEALTH_CHANGED'});
+    revision++;
+  }};
+  const f=await externalFixture(t,{sourceHealth});
+  try{
+    f.read(async()=>{assert.equal(phase,'snapshot');phase='provider';return {events:[],nextCursor:'baseline',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(reports.length,1);assert.equal(reports[0].code,'ready');
+    f.advance(300000);reportFailure=true;
+    f.read(async()=>{phase='provider';throw Object.assign(new Error('PRIVATE_PROVIDER'),{code:'EMAIL_MONITOR_GAP'});});
+    await f.coordinator.pollOnce();assert.equal(reports.length,2);assert.equal(reports[1].code,'history_gap');
+    assert.equal(f.reads(),2);assert.equal(f.position(),'baseline');
+    assert.ok(f.notifications.some(value=>value.code==='EMAIL_MONITOR_GAP'),'original provider reason survives diagnostic failure');
+    f.advance(300000);f.read(async()=>{phase='provider';return {events:[{id:'mail:1',revision:'1'}],nextCursor:'committed',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.reads(),3);assert.equal(f.position(),'committed');
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+    assert.equal(f.counts().acks,0);assert.equal(reports[2].code,'ready');
+    // Failure to read diagnostic CAS cannot block or duplicate the independent
+    // signed reader. It also cannot synthesize a blind write from revision=0.
+    f.advance(300000);readFailure=true;
+    await f.coordinator.pollOnce();assert.equal(f.reads(),4);assert.equal(reports.length,3);
+    readFailure=false;reportFailure=false;f.advance(300000);
+    f.read(async()=>{phase='provider';f.row.state='paused';f.row.revision++;return {events:[],nextCursor:'late',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(reports.length,3,'late owner change never reports recovery');
+    assert.equal(f.position(),'committed');assert.ok(!JSON.stringify(f.notifications).includes('PRIVATE'));
   }finally{await f.coordinator.close();}
 });
