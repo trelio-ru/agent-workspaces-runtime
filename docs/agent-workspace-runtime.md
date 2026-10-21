@@ -2048,7 +2048,8 @@ OAuth profile доказывает выбранный consent channel, не ис
 с регистрацией profile предшествует relay rollout. Foreign imported hook
 при настоящем `GIGACODE_PROJECT_DIR` ничего не регистрирует и не подписывает;
 обнаружение attestation возвращает unknown/other даже с inherited Codex/Claude
-variables. Hook trust не автоматизируется. Native relay не читает Codex config.
+variables. Hook trust не автоматизируется. Relay и local skills server не читают
+Codex config: exact native manifest отключает startup-миграцию чужого клиента.
 
 Diagnostics/onboarding используют реальный `clientKind=gigacode`, exact loaded
 `gigacode-extension.json`, общий folder planner/apply, Git isolation, CAS,

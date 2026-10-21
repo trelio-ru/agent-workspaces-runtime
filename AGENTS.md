@@ -93,7 +93,7 @@ publication tooling также остаются вне этого публичн
   config, даже если процесс унаследовал CODEX_*; это не OAuth admission.
 - GigaCode Desktop на macOS использует fixed native MCP relay внутри signed
   `mcp gigacode`, без CLI-лицензии и foreign hooks. Auth, text delivery и общий
-  folder planner – [контракт](docs/agent-workspace-runtime.md#gigacode-desktop).
+  folder planner и изоляция обоих MCP – [контракт](docs/agent-workspace-runtime.md#gigacode-desktop).
 - Generic диагностика учитывает реальный clientKind и выбранный permanent root.
   Routing recovery сначала повторяет protected read в том же чате после restart;
   при необходимом новом чате сохраняется выбранная папка без требования проекта.
