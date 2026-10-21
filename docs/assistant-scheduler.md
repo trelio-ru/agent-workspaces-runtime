@@ -356,14 +356,27 @@ Provider authors classify their own real parser leaves; the generic host has no
 provider command map, regex/glob, option-skipping or second executor. Unknown or
 missing policy fails closed; unsigned resolve metadata/model flags cannot opt in.
 
+Version 2 retains the same prefix list and requires one additional
+`deniedOptions` field: 1–32 unique literal long options matching
+`--[a-z][a-z0-9-]{0,63}`. The SAME shared guard rejects a token equal to one of
+them or beginning with its `=` form, before account/bootstrap/interpreter I/O.
+It does not skip option values or reinterpret the provider parser. Provider
+review must account for aliases/abbreviations; an undeclared synonym is not
+magically blocked. A forbidden-looking data value fails closed as well.
+Version 1 stays exact and never silently ignores a v2 restriction field;
+unknown versions fail. Human CLI and fixed native source profiles are unchanged.
+This closes real provider-owned overrides such as MAX `read --chrome PATH`
+without a generic host provider map or second command executor.
+
 The shared `skillCommand` checks after package verification but BEFORE managed
 account selection/import. It removes only the host's strict local-account
 selector, then compares literal leading tokens. The shared materialized executor
 checks again before interpreter/bootstrap/provider I/O. Native host account
 commands retain their independent existing gates. Human calls retain the old
 CLI; fixed source monitor/setup keep their separate exact native admissions.
-The composition fixture executes a real signed Node provider, verifies approved
-task work, and proves forbidden setup/policy/ACK/import commands never launch it.
+The composition fixture executes real signed v1/v2 Node providers, verifies
+approved task work, and proves forbidden setup/policy/ACK/import commands and
+v2 executable/time overrides never launch them.
 
 This is restriction, not business permission: send/reply still require the
 existing task/operator/owner authority and provider guards. Exact source ACK

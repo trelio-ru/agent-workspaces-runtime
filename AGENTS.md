@@ -389,6 +389,8 @@ publication tooling также остаются вне этого публичн
   no human cache/import/setup fallback. [Contract](docs/assistant-scheduler.md#shared-task-skill-execution).
   Task commands additionally require provider-owned signed command prefixes;
   legacy/missing policy fails before account/bootstrap and again at execution.
+  Policy v2 also rejects signed denied options (token/equals forms); no host
+  provider map or model-selected executable/window/time override is introduced.
   This restriction never authorizes sending, source ACK or owner setup.
 
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).

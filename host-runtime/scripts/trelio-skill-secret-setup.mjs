@@ -21,7 +21,9 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
   let policy;
   try { policy = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(files[0].bytes)); }
   catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
-  if (!exactKeys(policy, ['schemaVersion', 'taskCommands']) || policy.schemaVersion !== 1
+  const version = policy?.schemaVersion;
+  if (![1,2].includes(version)
+    || !exactKeys(policy, version === 2 ? ['schemaVersion', 'taskCommands', 'deniedOptions'] : ['schemaVersion', 'taskCommands'])
     || !Array.isArray(policy.taskCommands) || !policy.taskCommands.length || policy.taskCommands.length > 64)
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
   const seen = new Set();
@@ -31,10 +33,21 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
       || seen.has(JSON.stringify(prefix))) fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
     seen.add(JSON.stringify(prefix));
   }
+  const deniedOptions = version === 2 ? policy.deniedOptions : [];
+  if (version === 2 && (!Array.isArray(deniedOptions) || !deniedOptions.length || deniedOptions.length > 32
+    || new Set(deniedOptions).size !== deniedOptions.length
+    || deniedOptions.some(option => typeof option !== 'string' || !/^--[a-z][a-z0-9-]{0,63}$/u.test(option))))
+    fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
   // Literal positional tokens only. No regex/glob, shell expansion, substring
   // matching, option skipping or parser abbreviation can broaden a prefix.
   // Provider arguments after it retain their existing strict native parser.
   if (!Array.isArray(runtimeArguments) || runtimeArguments.some(arg => typeof arg !== 'string')
+    // A reviewed provider may have a legitimate human executable/window/budget
+    // override (e.g. MAX --chrome). Its signed restriction, not a host-owned
+    // provider map, closes both token spellings before any account/bootstrap.
+    // Providers must review their native parser aliases/abbreviations too;
+    // literal deny cannot promise to classify an undeclared synonym.
+    || runtimeArguments.some(arg => deniedOptions.some(option => arg === option || arg.startsWith(`${option}=`)))
     || !policy.taskCommands.some(prefix => prefix.every((token, index) => runtimeArguments[index] === token)))
     fail('ASSISTANT_SKILL_COMMAND_DENIED');
 };

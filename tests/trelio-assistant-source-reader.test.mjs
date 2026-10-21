@@ -356,7 +356,7 @@ test('email/MAX wire projections discard content and cannot promote a sender to 
   }
 });
 
-test('task skills use the SAME signed package, native command and process engine with fresh pass admission',async()=>{
+for (const policyVersion of [1,2]) test(`task skills use the SAME signed package, native command and process engine with fresh pass admission (policy v${policyVersion})`,async()=>{
   const {createAssistantWorkspaceProfile}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const taskIdentity={schemaVersion:1,origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
@@ -371,9 +371,10 @@ test('task skills use the SAME signed package, native command and process engine
   const client={readTaskPass:async()=>({...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300000).toISOString()})};
   const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,
     lockDirectory:path.join(directory,'task-locks'),lock:(_file,action)=>action()});
-  const sourceDir=path.join(directory,'task-package');await fs.mkdir(sourceDir);
-  await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:1,taskCommands:[['read'],['fail']]}));
-  const calls=path.join(directory,'task-native-calls');
+  const sourceDir=path.join(directory,`task-package-${policyVersion}`);await fs.mkdir(sourceDir);
+  await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:policyVersion,taskCommands:[['read'],['fail']],
+    ...(policyVersion===2?{deniedOptions:['--chrome','--timeout-ms']}: {})}));
+  const calls=path.join(directory,`task-native-calls-${policyVersion}`);
   // This executes a real signed Node provider through runWorkspaceCommand.
   // The fixture must not inherit the source reader's chat or any human token.
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
@@ -431,6 +432,12 @@ test('task skills use the SAME signed package, native command and process engine
       await assert.rejects(run(denied),error=>error.code==='ASSISTANT_SKILL_COMMAND_DENIED'
         && !JSON.stringify(error).includes('PRIVATE_SETUP_CANARY'));
       assert.equal(await fs.readFile(calls,'utf8'),'111','forbidden command must not launch the signed provider');
+    }
+    if(policyVersion===2)for(const args of [['read','--chrome','/PRIVATE_EXECUTABLE'],['read','--chrome=/PRIVATE_EXECUTABLE'],
+      ['read','--timeout-ms','600000']]) {
+      const denied=structuredClone(plan);denied.localAction.parameters.arguments=args;
+      await assert.rejects(run(denied),{code:'ASSISTANT_SKILL_COMMAND_DENIED'});
+      assert.equal(await fs.readFile(calls,'utf8'),'111','signed options are checked before the provider can use them');
     }
     // The same policy is checked inside the common process engine, before
     // interpreter/path access; a caller cannot skip skillCommand's early guard.

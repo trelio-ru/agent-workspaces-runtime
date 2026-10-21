@@ -26,6 +26,22 @@ test('assistant command policy is signed bytes only, exact positional prefixes a
       {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
 });
 
+test('v2 signed option restrictions close native overrides without changing v1', () => {
+  const policy = {schemaVersion:2,taskCommands:[['read']],deniedOptions:['--chrome','--timeout-ms']};
+  const packaged = value => ({files:[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(value))}]});
+  assert.doesNotThrow(()=>assertAssistantTaskSkillCommand(packaged(policy),['read','--chat','123']));
+  for(const option of policy.deniedOptions)for(const args of [['read',option,'PRIVATE_VALUE'],['read',`${option}=PRIVATE_VALUE`]])
+    assert.throws(()=>assertAssistantTaskSkillCommand(packaged(policy),args),error=>error.code==='ASSISTANT_SKILL_COMMAND_DENIED'
+      && !error.message.includes('PRIVATE_VALUE'));
+  for(const deniedOptions of [[],['--chrome','--chrome'],['--chrome=*'],['-c'],['--Chrome'],Array(33).fill('--chrome'),null])
+    assert.throws(()=>assertAssistantTaskSkillCommand(packaged({...policy,deniedOptions}),['read']),
+      {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
+  assert.throws(()=>assertAssistantTaskSkillCommand(packaged({...policy,schemaVersion:3}),['read']),
+    {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'});
+  assert.throws(()=>assertAssistantTaskSkillCommand(packaged({...policy,schemaVersion:1}),['read']),
+    {code:'ASSISTANT_SKILL_COMMAND_POLICY_INVALID'},'v1 does not ignore an unrecognized restriction field');
+});
+
 test("setup declaration permits only complete signed argument vectors", () => {
   assert.deepEqual(readSkillSecretSetupCommand(packageWith([command]), ["configure"]), command);
   assert.equal(readSkillSecretSetupCommand(packageWith([command]), ["configure", "--export"]), null);
