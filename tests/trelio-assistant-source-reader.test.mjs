@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource}=
+const {createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -25,8 +25,11 @@ const store={get:async slot=>{
   reads++;assert.deepEqual(slot,{origin,kind:'device',id:assistantId});
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
-let setupFixture=null;
+let setupFixture=null,ackFixture=null;
 const admission=()=>{
+  if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:'telegram',
+    protocol:'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',acknowledgement:ackFixture.admission};
   const max=scope.skillId==='max-web',email=scope.skillId==='email-imap-smtp',operation=setupFixture?.operation;
   const interactive=['configure','login'].includes(operation);
   return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:max?'max':email?'email':'telegram',
@@ -75,7 +78,7 @@ globalThis.fetch=async(url,options)=>{
   if(url.pathname===`${prefix}/resolve`){
     resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null,
       ...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
-        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{})});
+        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{})});
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
   assert.equal(url.pathname,`${prefix}/package`);downloadCalls++;
@@ -724,4 +727,112 @@ test('native account-scoped conversation keys survive the private projection, wh
   assert.equal(project(mapped).events[0].conversationKey,key);assert.ok(!JSON.stringify(project(mapped)).includes('PRIVATE'));
   for(const conversationKey of ['',null,'message:123','telegram-conversation/v1.'+'A'.repeat(64),`https://other.test/${key}`])
     assert.throws(()=>project({...mapped,events:[{...event,conversationKey}]}),/INVALID_RESPONSE/);
+});
+
+
+test('native committed ACK admission reuses signed account/child execution and fences once at final spawn',async t=>{
+  t.after(()=>{ackFixture=null;resolveOverride=null;setupFixture=null;});
+  const accountId=randomUUID(),sourceId=randomUUID(),routeId=randomUUID(),receiptIds=[randomUUID(),randomUUID()].sort();
+  const source={...scope,id:sourceId,deviceId,localAccountId:accountId,state:'active',revision:0};
+  const references=receiptIds.map((receiptId,index)=>({eventKey:String(index+1).repeat(64),id:`message:123:${index+4}`,revision:(index?'b':'a').repeat(64),
+    conversationKey:'telegram-conversation/v1.'+'f'.repeat(64),routeId,eventOrdinal:0,receiptId,taskId:randomUUID()}));
+  ackFixture={intent:{sourceId,sourceRevision:0,receipts:receiptIds.map(receiptId=>({receiptId,eventOrdinals:[0]}))},admission:{schemaVersion:1,
+    sourceId,sourceRevision:0,localAccountId:accountId,slots:receiptIds.map(receiptId=>({receiptId,routeId,eventOrdinal:0}))}};
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId:null}),io:{
+    ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
+    checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  await catalogue.change({operation:'create',id:accountId,name:'Synthetic ACK',expectedRevision:(await catalogue.list()).revision});
+  const sourceDir=path.join(directory,'ack-package'),fence=path.join(directory,'ack-fence'),marker=path.join(directory,'ack-child');
+  await fs.mkdir(sourceDir);
+  const build=async({failed=false,verifyOnly=false}={})=>{
+    const output=failed?{ok:false,error:'PRIVATE_PROVIDER_ERROR',code:'TELEGRAM_ACK_RANGE_INCOMPLETE',
+      details:{writeAttempted:false,writeOutcome:'not_attempted',automaticRetryAllowed:false}}:
+      {ok:true,schemaVersion:1,protocol:'telegram-message-ack/v1',reference:{...references[1],chatId:'123',messageId:'5'},
+        readState:{acknowledged:true,writeAttempted:!verifyOnly,writeOutcome:verifyOnly?'not_attempted':'confirmed',
+          automaticRetryAllowed:false,viewsRegistered:false,verifyOnly,snapshotAtomic:false}};
+    await fs.writeFile(path.join(sourceDir,'main.mjs'),`import fs from 'node:fs';import assert from 'node:assert/strict';
+      assert.equal(fs.readFileSync(${JSON.stringify(fence)},'utf8'),'DURABLE');
+      assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+      assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+      assert.deepEqual(process.argv.slice(2),['ack-reference','--chat','123','--message-id','5','--expected-revision',${JSON.stringify(references[1].revision)},
+        '--expected-conversation-key',${JSON.stringify(references[0].conversationKey)},...${JSON.stringify(verifyOnly?[]:['--covered-reference','4:'+references[0].revision,'--covered-reference','5:'+references[1].revision])},${JSON.stringify(verifyOnly?'--verify-only':'--confirm')}]);
+      let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
+      fs.appendFileSync(${JSON.stringify(marker)},'1');
+      ${failed?'process.stderr':'process.stdout'}.write(JSON.stringify(${JSON.stringify(output)}));process.exitCode=${failed?2:0};`);
+    artifactId=randomUUID();releaseId=randomUUID();
+    packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
+      entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  };
+  const client={identity,sourceAccounts:async()=>[source]};let started=0,checked=0;
+  const invoke=(verifyOnly=false)=>acknowledgeAssistantSource({identity,host,store,client,source,references,verifyOnly,
+    assertReferences:()=>{checked++;},beforeInvoke:()=>{started++;return fs.writeFile(fence,'DURABLE');}});
+  await build();const before=resolveCalls;
+  assert.deepEqual(await invoke(),{acknowledged:true,notAttempted:false,code:null});
+  assert.equal(started,1);assert.equal(resolveCalls,before+2,'ACK is reauthorized after materialization');assert.ok(checked>=3);
+  assert.equal(await fs.readFile(marker,'utf8'),'1');
+  await build({verifyOnly:true});assert.deepEqual(await invoke(true),{acknowledged:true,notAttempted:true,code:null});
+  await build({failed:true});assert.deepEqual(await invoke(),{acknowledged:false,notAttempted:true,code:'TELEGRAM_ACK_RANGE_INCOMPLETE'},
+    'complete bounded native stderr can prove no attempt without exposing error prose');
+  const count=await fs.readFile(marker,'utf8'),fences=started;
+  resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),
+    acknowledgement:{...ackFixture.admission,slots:ackFixture.admission.slots.map(row=>({...row,routeId:randomUUID()}))}}}));
+  await assert.rejects(invoke(),/INVALID_RESPONSE/);assert.equal(started,fences);assert.equal(await fs.readFile(marker,'utf8'),count);
+  resolveOverride=null;let resolves=0;
+  resolveOverride=()=>++resolves===1?new Response(JSON.stringify(resolution())):new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED'}),{status:403});
+  await assert.rejects(invoke());assert.equal(resolves,2);assert.equal(started,fences);assert.equal(await fs.readFile(marker,'utf8'),count);
+  resolveOverride=null;
+  for(const referencesOverride of [[{...references[0],id:'message:999:5'},references[0]],[{...references[0],body:'PRIVATE'}]])
+    await assert.rejects(acknowledgeAssistantSource({identity,host,store,client,source,references:referencesOverride,verifyOnly:false,
+      assertReferences:()=>{},beforeInvoke:()=>assert.fail('invalid refs reached the write fence')}));
+});
+
+test('ACK projection refuses partial/mismatched/native-uncertain claims and never reflects provider prose',()=>{
+  const target={id:'message:123:5',revision:'a'.repeat(64),conversationKey:'telegram-conversation/v1.'+'f'.repeat(64),chatId:'123',messageId:'5'};
+  const raw={ok:true,schemaVersion:1,protocol:'telegram-message-ack/v1',reference:target,readState:{acknowledged:true,writeAttempted:true,
+    writeOutcome:'confirmed',automaticRetryAllowed:false,viewsRegistered:false,verifyOnly:false,snapshotAtomic:false}};
+  const project=(value,verifyOnly=false,exitCode=0)=>projectAssistantSourceAcknowledgement({exitCode,stdout:JSON.stringify(value)},{target,verifyOnly});
+  for(const value of [{...raw,reference:{...target,revision:'b'.repeat(64)}},{...raw,readState:{...raw.readState,writeOutcome:'unknown'}},
+    {...raw,readState:{...raw.readState,acknowledged:false}},{...raw,readState:{...raw.readState,viewsRegistered:true}}])
+    assert.throws(()=>project(value),/INVALID_RESPONSE/);
+  assert.throws(()=>project(raw,true),/INVALID_RESPONSE/);
+  const error={ok:false,error:'PRIVATE_RAW_ERROR',code:'TELEGRAM_ACK_OUTCOME_UNKNOWN',details:{writeAttempted:true,writeOutcome:'unknown',automaticRetryAllowed:false}};
+  assert.deepEqual(project(error,false,2),{acknowledged:false,notAttempted:false,code:error.code});
+  assert.throws(()=>project({...error,details:{...error.details,writeOutcome:'not_attempted'}},false,2),/INVALID_RESPONSE/);
+});
+
+
+test('derived ACK profile preserves short original grant budget and one-use spawn without borrowing setup/task permission',async t=>{
+  t.after(()=>{ackFixture=null;resolveOverride=null;});
+  const accountId=randomUUID(),sourceId=randomUUID(),receiptId=randomUUID(),routeId=randomUUID();
+  const intent={sourceId,sourceRevision:0,receipts:[{receiptId,eventOrdinals:[0]}]};
+  ackFixture={intent,admission:{schemaVersion:1,sourceId,sourceRevision:0,localAccountId:accountId,slots:[{receiptId,routeId,eventOrdinal:0}]}};
+  const args=['ack-reference','--chat','123','--message-id','5','--expected-revision','a'.repeat(64),
+    '--expected-conversation-key','telegram-conversation/v1.'+'f'.repeat(64),'--confirm'];
+  let time=0,starts=0;
+  const make=()=>createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceAcknowledgement:intent,
+    acknowledgementExecution:{accountId,runtimeArguments:args,slots:ackFixture.admission.slots,beforeInvoke:()=>{starts++;}},
+    monotonic:()=>time,startedAt:0});
+  const profile=await make();
+  const token=await profile.requireToken(origin);
+  await profile.prepareRequest({origin,token,pathname:prefix+'/resolve',options:{method:'POST',body:JSON.stringify({...scope,
+    expectedReleaseId:null,sourceAcknowledgement:intent})},buildHeaders:()=>new Headers()});
+  const raw=resolution();raw.sourceAdmission.expiresAt='2026-10-21T00:00:02.000Z';
+  const normalized=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
+  await profile.bindResolution(normalized,raw.sourceAdmission);
+  assert.equal(await profile.remainingMs(),2000);
+  const context={companyId,projectId:null,releaseId:normalized.releaseId,account:{id:accountId},localIdentity:{memberId,connectionId:null}};
+  for(const changed of [['ack-reference','--confirm'],[...args,'--arbitrary-script'],['monitor']])
+    await assert.rejects(profile.authorizeSourceAcknowledgement({artifact:normalized.artifact,executionContext:context,runtimeArguments:changed}),/ACK_REQUIRED/);
+  assert.equal(starts,0);
+  const request={artifact:normalized.artifact,executionContext:context,runtimeArguments:args};
+  assert.equal(await profile.authorizeSourceAcknowledgement(request),2000);
+  await assert.rejects(profile.authorizeSourceAcknowledgement(request),/ACK_REQUIRED/);
+  time=2000;await assert.rejects(profile.startSourceAcknowledgement(),/DEADLINE/);assert.equal(starts,0);
+  time=0;profile.close();await assert.rejects(profile.startSourceAcknowledgement(),/DEADLINE/);
+  const passive=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  await assert.rejects(passive.authorizeSourceAcknowledgement(request),/ACK_REQUIRED/);passive.close();
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceAcknowledgement:intent,
+    accountSetup:{sourceId,expectedRevision:0}}),/INVALID_INPUT/);
 });

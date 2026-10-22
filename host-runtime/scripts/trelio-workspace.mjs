@@ -7753,17 +7753,21 @@ export const runMaterializedAgentSkill = async ({
   // belong to its reviewed signed implementation, not this string check.
   const taskCapture = captureMode === 'assistant_task';
   const sourceSetupCapture = captureMode === 'assistant_source_setup';
+  const sourceAckCapture = captureMode === 'assistant_source_ack';
   const profile = currentWorkspaceExecutionProfile();
-  if (!['monitor','assistant_task','assistant_source_setup'].includes(captureMode)
+  if (!['monitor','assistant_task','assistant_source_setup','assistant_source_ack'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
     || sourceSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
       || typeof profile.authorizeInteractiveSourceSetup !== 'function'
       || typeof profile.assertInteractiveSourceSetupCurrent !== 'function')
+    || sourceAckCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
+      || typeof profile.authorizeSourceAcknowledgement !== 'function'
+      || typeof profile.startSourceAcknowledgement !== 'function')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && runtimeArguments[0] !== 'monitor'
-    || runtimeArguments.length > (taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
+    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && !sourceAckCapture && runtimeArguments[0] !== 'monitor'
+    || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture ? 10 * 60_000 : 180_000)
     || signal !== null && !(signal instanceof AbortSignal))) {
@@ -7788,6 +7792,12 @@ export const runMaterializedAgentSkill = async ({
   // Defense in the shared executor, before interpreter discovery, provider
   // credentials or native bootstrap. Source setup has its own exact one-use
   // native admission; it cannot select this task capture mode.
+  if (sourceAckCapture) {
+    const remaining = await profile.authorizeSourceAcknowledgement({artifact,executionContext,runtimeArguments});
+    if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 60000)
+      throw Object.assign(new Error('Invalid acknowledgement budget.'), {code:'ASSISTANT_SOURCE_ACK_REQUIRED'});
+    timeoutMs = Math.min(timeoutMs,remaining);
+  }
   if (taskCapture) assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments);
   const entrypointPath = path.join(
     runtimeDirectory,
@@ -7841,13 +7851,22 @@ export const runMaterializedAgentSkill = async ({
     // neither inherited stdio nor a provider-created prompt can stall the host.
     const budget = Math.min(timeoutMs,
       browserSessionDeadlineAt > 0 ? browserSessionDeadlineAt - runtimeStartedAt : Infinity);
-    const remaining = budget - (performance.now() - runtimeStartedClock);
+    let remaining = budget - (performance.now() - runtimeStartedClock);
     if (signal?.aborted) {
       throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Чтение навыка отменено.',
         { operation: 'skill_run', causeCode: 'ABORT_ERR' });
     }
     if (remaining <= 0) {
       throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED', 'Истёк срок фонового чтения навыка.', { operation: 'skill_run' });
+    }
+    // The source adapter's original durable attempt is written only here,
+    // after native bootstrap, immediately before ONE provider child. Failure
+    // after this callback is conservatively reconciled; never replay a write.
+    if (sourceAckCapture) {
+      await profile.startSourceAcknowledgement();
+      remaining = budget - (performance.now() - runtimeStartedClock);
+      if (signal?.aborted || remaining <= 0) throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED',
+        'Истёк срок native ACK.', {operation:'skill_run'});
     }
     let result;
     try {
@@ -7875,7 +7894,10 @@ export const runMaterializedAgentSkill = async ({
       // Decode only after the pipe is complete. Chunk-level toString() can
       // corrupt a multibyte character; replacement decoding could turn an
       // invalid native ID/checkpoint into a different valid JSON reference.
-      const stdout = new TextDecoder('utf-8', { fatal: true }).decode(result.stdout);
+      // Only this private native-ACK profile consumes the reviewed provider's
+      // failure DTO from stderr. No stderr is added to normal/task responses,
+      // errors or diagnostics; the adapter projects closed fields immediately.
+      const stdout = new TextDecoder('utf-8', { fatal: true }).decode(sourceAckCapture && result.exitCode !== 0 ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.

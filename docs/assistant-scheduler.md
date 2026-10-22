@@ -472,6 +472,13 @@ accepts only the reviewed Telegram, IMAP email and MAX monitor protocols. The
 provider retains its APIs, credential/session storage, selectors and passive
 read guards. No provider implementation or credential is copied into the host.
 
+Production Telegram read acknowledgement is a separate internal profile on that
+SAME materialization/account/process path, not a monitor or task permission.
+It derives native admission from explicitly committed source receipt slots,
+persists the original private ACK attempt at final spawn and reconciles unknown
+outcomes without another write. Provider-native contiguous-range proof remains
+independent. See [the inbox contract](assistant-inbox.md#production-telegram-acknowledgement).
+
 Source polling and task execution resolve the same assistant/device account
 catalogue through the common account engine. Company/member bindings are still
 checked by that catalogue. A source never imports/selects the interactive human's

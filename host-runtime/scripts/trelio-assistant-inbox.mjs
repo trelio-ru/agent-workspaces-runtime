@@ -17,8 +17,9 @@ const object = (value, keys) => {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype
     || Object.keys(value).some(key => !keys.includes(key))) inputError();
 };
+const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const uuid = value => {
-  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) inputError();
+  if (typeof value !== 'string' || !UUID.test(value)) inputError();
   return value.toLowerCase();
 };
 const opaque = (value, limit = 256) => {
@@ -835,6 +836,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run("UPDATE assistant_inbox_deliveries SET state='not_accepted',external_receipt=? WHERE delivery_id=?", receipt, id);
       });
     },
+    /** Pure due discovery avoids native/source I/O for an empty ACK queue.
+     * Global original row order lets a bounded coordinator choose old work
+     * across companies; retries retain their original per-event backoff. */
+    externalAcknowledgementDue(scopeInput){
+      const scope=scopeOf(scopeInput);if(scope.provider==='trelio')inputError();
+      if(source(scope).state!=='active')return null;
+      const row=get(`SELECT e.rowid AS ordinal FROM assistant_inbox_events e
+        JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
+        WHERE e.source_key=? AND e.acked=0 AND e.processed=1 AND t.state IN ('accepted','done')
+        AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 1`,scope.key,time(),time());
+      return row?.ordinal??null;
+    },
     /** Read acknowledgements are separate bounded outbox operations. */
     claimAcknowledgements(scopeInput) {
       const scope = scopeOf(scopeInput);
@@ -847,20 +860,52 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // processing before even offering an external ACK. The provider adapter
         // must still verify actual content-read evidence and exact revision;
         // neither this SQL flag nor a generic completion boolean grants that.
-        const candidates = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id,e.ack_started FROM assistant_inbox_events e
+        const candidates = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id,e.ack_started,e.ack_attempt_token,e.conversation_key FROM assistant_inbox_events e
           JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
-          WHERE e.source_key=? AND e.acked=0 AND t.state='accepted'
+          WHERE e.source_key=? AND e.acked=0 AND (t.state='accepted' OR (?!='trelio' AND t.state='done'))
           AND (?='trelio' OR e.processed=1)
-          AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_started,e.rowid LIMIT 100`, scope.key, scope.provider, time(), time());
+          AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_started,e.rowid LIMIT 100`, scope.key, scope.provider, scope.provider, time(), time());
         if (!candidates.length) return null;
         // Never mix a fresh provider attempt with recovery from an old one.
         // An expired ACK lease is NOT evidence that a mutation did not happen.
         const reconcileOnly=scope.provider!=='trelio' && candidates[0].ack_started===1;
-        const events=candidates.filter(row=>scope.provider==='trelio'||row.ack_started===Number(reconcileOnly))
-          .map(({ack_started,...row})=>row);
+        // ONE new range write belongs to ONE exact conversation. Old uncertain
+        // attempts retain their original membership, even if an older host
+        // mixed conversations; that entire group is read-back only. Never let
+        // one chat's positive result complete another chat's write token.
+        const events=candidates.filter(row=>scope.provider==='trelio'||row.ack_started===Number(reconcileOnly)
+          && (reconcileOnly?row.ack_attempt_token===candidates[0].ack_attempt_token:row.conversation_key===candidates[0].conversation_key))
+          .map(({event_key,event_id,event_revision,task_id})=>({event_key,event_id,event_revision,task_id}));
         const token = randomUUID();
         for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=? WHERE event_key=?', token, time() + LEASE_MS, event.event_key);
         return { token, events, ...(scope.provider==='trelio'?{}:{reconcileOnly}) };
+      });
+    },
+    /** Private adapter lookup, not a model/tool read or write grant. Reuse the
+     * original native-read delivery and its committed backend receipt; a local
+     * processed bit alone supplies neither provenance nor external authority.
+     * No body or second receipt journal is introduced. Native admission checks
+     * current task/assignment/route/material again before provider invocation. */
+    externalAcknowledgementReferences(scopeInput,{token,sourceRevision}) {
+      const scope=scopeOf(scopeInput);uuid(token);integer(sourceRevision,0,2_147_483_647);
+      if(scope.provider!=='telegram')inputError();
+      if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
+      const rows=all(`SELECT e.*,de.event_ordinal,de.route_id AS original_route_id,
+        de.route_source_revision AS original_source_revision,d.state AS delivery_state,d.external_receipt
+        FROM assistant_inbox_events e JOIN assistant_inbox_delivery_events de
+          ON de.event_key=e.event_key AND de.delivery_id=e.read_delivery_id
+        JOIN assistant_inbox_deliveries d ON d.delivery_id=de.delivery_id
+        WHERE e.source_key=? AND e.ack_token=? AND e.acked=0 ORDER BY e.rowid`,scope.key,token);
+      const expected=get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token).total;
+      if(!rows.length||rows.length!==expected||rows.length>100)fail('ASSISTANT_INBOX_STALE_ACK');
+      return rows.map(row=>{
+        const parts=typeof row.external_receipt==='string'?row.external_receipt.split(':'):[];
+        if(row.processed!==1||row.ack_expires_at<=time()||row.delivery_state!=='complete'||!row.conversation_key
+          ||row.route_source_revision!==sourceRevision||row.original_source_revision!==sourceRevision
+          ||row.route_id!==row.original_route_id||parts.length!==5||parts[0]!=='assistant'||parts[2]!=='codex'
+          ||!UUID.test(parts[1])||!UUID.test(parts[3])||!UUID.test(parts[4]))fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+        return {eventKey:row.event_key,id:row.event_id,revision:row.event_revision,conversationKey:row.conversation_key,
+          routeId:row.route_id,eventOrdinal:row.event_ordinal,receiptId:parts[1],taskId:row.task_id};
       });
     },
     /** Host-only fence immediately BEFORE the one native provider invocation.

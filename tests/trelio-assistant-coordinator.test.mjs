@@ -387,7 +387,7 @@ test('Trelio inventory and notification ACK do not revoke or poll external provi
 // The real coordinator and SQLite are used here. Provider I/O is the same
 // trusted injected boundary as the native notification client above; synthetic
 // private text is a canary that must never become queue data or a task wake.
-const externalFixture=async (t,{sourceHealth=null}={})=>{
+const externalFixture=async (t,{sourceHealth=null,acknowledgeSource=null}={})=>{
   const f=fixture(t);await f.coordinator.close();
   const row={id:randomUUID(),companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:randomUUID(),projectId:null,
     skillId:'telegram-mtproto',state:'active',revision:0,executionVerified:false};
@@ -398,7 +398,7 @@ const externalFixture=async (t,{sourceHealth=null}={})=>{
     if(inventoryFailure)throw Object.assign(new Error('PRIVATE_SOURCE_ERROR'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
     return structuredClone(rows);
   };
-  const options={...f.options,sourceHealth,readSourceMonitor:async(source,signal)=>{reads++;return read(source,signal);}};
+  const options={...f.options,sourceHealth,acknowledgeSource,readSourceMonitor:async(source,signal)=>{reads++;return read(source,signal);}};
   let coordinator=createAssistantCoordinator(options);
   const inbox=createAssistantInbox({database:f.database,now:f.options.now});
   const scope=()=>({origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,
@@ -704,5 +704,86 @@ test('routing outage cannot roll back a committed provider page or become author
     assert.equal(f.position(),'retained');assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,1);
     assert.equal(await f.coordinator.workOnce(),null);assert.equal(f.inbox.claimAcknowledgements(f.scope()),null);
     assert.ok(!JSON.stringify(f.notifications).includes('PRIVATE_BODY'));
+  }finally{await f.coordinator.close();}
+});
+
+
+test('production composition ACK waits for exact read and committed selection; a lost write resumes read-only in the same inbox',async t=>{
+  let mode='unknown',calls=[],f;
+  const acknowledgeSource=async input=>{
+    calls.push(input.verifyOnly);input.assertReferences();input.beforeInvoke();
+    assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'durable fence precedes ONE native invocation');
+    assert.equal(input.references.length,1);assert.equal(input.references[0].id,'message:123:1');
+    if(mode==='unknown')throw Object.assign(new Error('PRIVATE_PROVIDER_LOST'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
+    return {acknowledged:mode==='confirmed',notAttempted:true,code:null};
+  };
+  f=await externalFixture(t,{acknowledgeSource});
+  const key='telegram-conversation/v1.'+'a'.repeat(64),route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,
+    conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
+  f.options.client.sourceRoutes=async()=>[route];
+  const outcome=f.options.client.readBusinessOutcome;let selected=false;
+  f.options.client.readBusinessOutcome=async input=>({...await outcome(input),...(selected?{
+    processedSourceReferences:[{sourceId:f.row.id,sourceRevision:0,routeId:route.id,eventOrdinal:0}]}:{})});
+  f.options.native.run=async(input,options)=>{
+    options.startInvocation();const ref=input.taskContext.sourceReferences[0];
+    const event=f.database.prepare('SELECT event_key FROM assistant_inbox_events WHERE event_id=?').get(ref.eventId);
+    f.inbox.recordExternalRead(f.scope(),{deliveryId:input.deliveryId,eventKey:event.event_key,sourceRevision:0,routeId:route.id});
+    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
+  };
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    const thread=f.coordinator.status()[0].threadId;
+    f.read(async()=>({baselineOnly:false,nextCursor:'message',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
+      events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+    f.advance(300000);await f.coordinator.pollOnce();assert.deepEqual(calls,[]);
+    await f.coordinator.workOnce();await f.coordinator.pollOnce();assert.deepEqual(calls,[],'body read with omitted processing is never ACK eligible');
+    selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();
+    assert.deepEqual(calls,[false]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,0);
+    await f.restart();mode='not-read';f.advance(300001);await f.coordinator.pollOnce();assert.deepEqual(calls,[false,true]);
+    assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'a verify-only no-write result never clears the older unknown write');
+    f.authority.state='done';f.authority.revision++;mode='confirmed';f.advance(300001);await f.coordinator.pollOnce();
+    assert.deepEqual(calls,[false,true,true]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,1);
+    assert.equal(f.coordinator.status()[0].threadId,thread);assert.equal(f.counts().provisions,1);assert.equal(f.counts().acks,0,'native Trelio ACK never receives Telegram IDs');
+    assert.ok(!JSON.stringify(f.notifications).includes('PRIVATE_PROVIDER'));
+  }finally{await f.coordinator.close();}
+});
+
+
+test('one positive conversation never completes a legacy mixed uncertain ACK token',async t=>{
+  let f,allRead=false,calls=0;
+  const acknowledgeSource=async input=>{
+    calls++;assert.equal(input.verifyOnly,true);input.assertReferences();input.beforeInvoke();
+    return {acknowledged:allRead||input.references[0].id==='message:123:1',notAttempted:true,code:null};
+  };
+  f=await externalFixture(t,{acknowledgeSource});
+  const keys=['a','b'].map(n=>'telegram-conversation/v1.'+n.repeat(64));
+  const routes=keys.map(conversationKey=>({id:randomUUID(),sourceId:f.row.id,sourceRevision:0,conversationKey,
+    bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId}));
+  f.options.client.sourceRoutes=async()=>routes;
+  const outcome=f.options.client.readBusinessOutcome;
+  f.options.client.readBusinessOutcome=async input=>({...await outcome(input),processedSourceReferences:routes.map((route,eventOrdinal)=>({
+    sourceId:f.row.id,sourceRevision:0,routeId:route.id,eventOrdinal}))});
+  f.options.native.run=async(input,options)=>{
+    options.startInvocation();for(const ref of input.taskContext.sourceReferences){
+      const event=f.database.prepare('SELECT event_key FROM assistant_inbox_events WHERE event_id=?').get(ref.eventId);
+      f.inbox.recordExternalRead(f.scope(),{deliveryId:input.deliveryId,eventKey:event.event_key,sourceRevision:0,routeId:ref.routeId});
+    }
+    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
+  };
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    f.read(async()=>({baselineOnly:false,nextCursor:'mixed',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
+      events:keys.map((conversationKey,index)=>({id:`message:${123+index}:1`,revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey}))}));
+    f.advance(300000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    const first=f.inbox.claimAcknowledgements(f.scope());f.inbox.startExternalAcknowledgements(f.scope(),first.token);
+    const second=f.inbox.claimAcknowledgements(f.scope());assert.equal(second.events.length,1);
+    // Reconstruct an older persisted attempt that could contain both chats.
+    // New claims above are one conversation; only migration/recovery sees this.
+    f.database.prepare('UPDATE assistant_inbox_events SET ack_token=?,ack_attempt_token=?,ack_started=1').run(first.token,first.token);
+    f.advance(120001);await f.coordinator.pollOnce();assert.equal(calls,2);
+    assert.equal(f.database.prepare('SELECT sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+    allRead=true;f.advance(300001);await f.coordinator.pollOnce();assert.equal(calls,4);
+    assert.equal(f.database.prepare('SELECT sum(acked) AS n FROM assistant_inbox_events').get().n,2);
+    assert.equal(f.counts().provisions,1);
   }finally{await f.coordinator.close();}
 });

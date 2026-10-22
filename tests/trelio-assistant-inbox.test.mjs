@@ -701,3 +701,48 @@ test('granular completion needs both independent read slots and exact selected r
   assert.deepEqual(f.database.prepare('SELECT event_id,processed FROM assistant_inbox_events ORDER BY event_id').all()
     .map(row=>[row.event_id,row.processed]),[['message:123:4',0],['message:123:5',1]],'an omitted but actually read message remains pending');
 });
+
+
+test('ACK references require original read plus committed receipt; done permits historical ACK, never a new delivery',async t=>{
+  const f=routedFixture(t);f.inbox.routeExternalEvents(f.external,f.mapping);
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  f.inbox.recordExternalRead(f.external,{deliveryId:work.deliveryId,eventKey:f.pending[0].event_key,sourceRevision:2,routeId:f.route.id});
+  assert.equal(f.inbox.externalAcknowledgementDue(f.external),null);
+  const receiptId=randomUUID(),receipt=`assistant:${receiptId}:codex:${randomUUID()}:${randomUUID()}`;
+  f.inbox.completeDelivery(work.deliveryId,receipt,{processedSourceReferences:[{sourceId:f.external.bindingId,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}]});
+  const state=f.inbox.taskState(f.external,f.taskId);
+  f.inbox.applyTaskState(f.external,{taskId:f.taskId,state:'done',expectedRevision:state.revision,authority:{...state.authority,revision:state.authority.revision+1}});
+  assert.ok(f.inbox.externalAcknowledgementDue(f.external)>0);
+  const ack=f.inbox.claimAcknowledgements(f.external);
+  const refs=f.inbox.externalAcknowledgementReferences(f.external,{token:ack.token,sourceRevision:2});
+  assert.deepEqual(refs,[{eventKey:f.pending[0].event_key,id:'message:123:4',revision:'b'.repeat(64),
+    conversationKey:f.route.conversationKey,routeId:f.route.id,eventOrdinal:0,receiptId,taskId:f.taskId}]);
+  assert.throws(()=>f.inbox.externalAcknowledgementReferences(f.external,{token:ack.token,sourceRevision:3}),/CONFLICT/);
+  f.database.prepare('UPDATE assistant_inbox_events SET read_delivery_id=NULL').run();
+  assert.throws(()=>f.inbox.externalAcknowledgementReferences(f.external,{token:ack.token,sourceRevision:2}),/STALE_ACK/);
+  f.database.prepare('UPDATE assistant_inbox_events SET read_delivery_id=?').run(work.deliveryId);
+  f.database.prepare('UPDATE assistant_inbox_deliveries SET external_receipt=?').run('model-said-processed');
+  assert.throws(()=>f.inbox.externalAcknowledgementReferences(f.external,{token:ack.token,sourceRevision:2}),/READ_REQUIRED/);
+  f.database.prepare('UPDATE assistant_inbox_deliveries SET external_receipt=?').run(receipt);
+  f.inbox.startExternalAcknowledgements(f.external,ack.token);f.inbox.completeAcknowledgements(f.external,ack.token);
+  assert.equal(f.inbox.externalAcknowledgementDue(f.external),null);
+});
+
+test('new external tokens cover one conversation; legacy mixed attempts retain membership and are verify-only',t=>{
+  const {inbox,database,advance}=memory(t),source={...scope(),provider:'telegram'},task=randomUUID();inbox.register(source);accept(inbox,source,task);
+  const key=n=>'telegram-conversation/v1.'+n.repeat(64);
+  page(inbox,source,[{...event(null,false),id:'message:123:4',conversationKey:key('a'),providerWake:true},
+    {...event(null,false),id:'message:124:5',conversationKey:key('b'),providerWake:true}]);
+  const keys=database.prepare('SELECT event_key FROM assistant_inbox_events').all().map(row=>row.event_key);
+  inbox.routeEvents(source,{eventKeys:keys,taskId:task});fixtureProcessed(database);
+  const first=inbox.claimAcknowledgements(source);assert.equal(first.events.length,1);
+  inbox.startExternalAcknowledgements(source,first.token);
+  const second=inbox.claimAcknowledgements(source);assert.equal(second.events.length,1);
+  assert.notEqual(first.events[0].event_id,second.events[0].event_id);
+  // This is the original state an older host could persist. Recovery must not
+  // split or write it, nor let one chat's positive read-back complete both.
+  database.prepare('UPDATE assistant_inbox_events SET ack_token=?,ack_attempt_token=?,ack_started=1').run(first.token,first.token);
+  advance(120001);
+  const recovery=inbox.claimAcknowledgements(source);assert.equal(recovery.reconcileOnly,true);assert.equal(recovery.events.length,2);
+  assert.throws(()=>inbox.startExternalAcknowledgements(source,recovery.token),/STALE_ACK/);
+});

@@ -665,9 +665,15 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       const current=runtimeHookSignal(),combined=signal?AbortSignal.any([signal,current]):current;
       return readAssistantSourceMonitor({identity:stableIdentity,host,store,source,signal:combined});
     }));
+    const acknowledgeSource=dependencies.acknowledgeSource??((input,signal)=>invoke(async(live,host,store)=>{
+      const {acknowledgeAssistantSource}=await import('./trelio-assistant-transport.mjs');
+      const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+      const current=runtimeHookSignal(),combined=signal?AbortSignal.any([signal,current]):current;
+      return acknowledgeAssistantSource({identity:stableIdentity,host,store,client:live,...input,signal:combined});
+    }));
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
-      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,acknowledgeSource,
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
         report:(row,observation,signal)=>invoke(live=>live.reportSourceHealth({companyId:row.companyId,sourceId:row.id,...observation},signal))},
       native:{...observedNative,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},

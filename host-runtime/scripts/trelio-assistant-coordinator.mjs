@@ -24,12 +24,13 @@ const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:ide
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, readSourceMonitor = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(sourceHealth!==null&&(!sourceHealth||typeof sourceHealth.read!=='function'||typeof sourceHealth.report!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(readSourceMonitor!==null && (typeof readSourceMonitor!=='function' || typeof client.sourceAccounts!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+  if(acknowledgeSource!==null && (typeof acknowledgeSource!=='function'||typeof client.sourceAccounts!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   const schedule = createAssistantScheduler({database,now});
   const inbox = createAssistantInbox({database,now,onDeliveryCompleted:schedule.completeInsideInboxTransaction});
   const identity = client.identity;
@@ -307,6 +308,42 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
     }
   };
+  const acknowledgeExternalSource=async(row,signal)=>{
+    const source=externalSourceFor(identity,row);
+    const current=await client.sourceAccounts(row.companyId,signal);lease();
+    if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    const ack=inbox.claimAcknowledgements(source);if(!ack)return;
+    try{
+      const read=()=>inbox.externalAcknowledgementReferences(source,{token:ack.token,sourceRevision:row.revision});
+      const references=read(),snapshot=JSON.stringify(references),groups=new Map();
+      for(const ref of references){
+        if(!groups.has(ref.conversationKey))groups.set(ref.conversationKey,[]);groups.get(ref.conversationKey).push(ref);
+      }
+      if(!ack.reconcileOnly&&groups.size!==1)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      const assertReferences=()=>{lease();if(JSON.stringify(read())!==snapshot)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');};
+      // A legacy uncertain token may span several conversations. All are
+      // verified read-only; no one positive chat can complete the whole token.
+      // Fresh tokens are already one conversation before their write fence.
+      for(const selected of groups.values()){
+        const result=await acknowledgeSource({source:row,references:selected,verifyOnly:ack.reconcileOnly,assertReferences,
+          beforeInvoke:()=>{assertReferences();if(!ack.reconcileOnly)inbox.startExternalAcknowledgements(source,ack.token);}},signal);
+        assertReferences();
+        if(!result||typeof result.acknowledged!=='boolean'||typeof result.notAttempted!=='boolean')fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+        if(!result.acknowledged){
+          inbox.deferExternalAcknowledgements(source,{token:ack.token,retryAfterMs:300_000,
+            notAttempted:!ack.reconcileOnly&&result.notAttempted});
+          if(result.code)emit(errorCode(result));return;
+        }
+      }
+      inbox.completeAcknowledgements(source,ack.token);
+    }catch(error){
+      // A failed/native-unknown write never clears the original attempt bit.
+      // Expiry/pause may already have invalidated this lease; retain that exact
+      // fence and let a future current source do read-only reconciliation.
+      try{inbox.deferExternalAcknowledgements(source,{token:ack.token,retryAfterMs:300_000});}catch{}
+      throw error;
+    }
+  };
   const reportSchedules = async signal => {
     for(const plan of schedule.list()) {
       if(inbox.status(plan.source).state!=='active') continue;
@@ -390,6 +427,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           catch{/* A changed/paused source cannot receive this old local backoff. */}
           emit(errorCode(error));
         }
+      }
+      const acknowledgementDue=acknowledgeSource?[...externalRegistrations.values()].flatMap(row=>{
+        if(row.skillId!=='telegram-mtproto')return [];
+        const ordinal=inbox.externalAcknowledgementDue(externalSourceFor(identity,row));return ordinal===null?[]:[{row,ordinal}];
+      }).sort((a,b)=>a.ordinal-b.ordinal).slice(0,4):[];
+      for(const {row} of acknowledgementDue){
+        try{await acknowledgeExternalSource(row,signal);}catch(error){emit(errorCode(error));}
       }
       await reportSchedules(signal);
       return true;

@@ -151,8 +151,62 @@ marked uncertain without adopting their old token as new no-write evidence.
 Their next claim is read-only. Trelio leases remain unchanged. Unknown schemas
 remain closed. Tests cover actual SQLite restart, late completion, no-write
 recovery, mixed batches, source pause and real prior-schema migration. This is
-the durable lifecycle boundary for the production adapter; it does NOT itself
-wire provider ACK execution, native read proofs or business readiness.
+the durable lifecycle boundary reused by the production adapter below; its
+bits alone never grant provider execution or business readiness.
+
+## Production Telegram acknowledgement
+
+The background coordinator composes `acknowledgeAssistantSource` through the
+same protected device invocation, signed package verifier/cache, managed account
+catalogue and native process engine. It does not copy a provider, vault or human
+session. Model/task skill commands still cannot execute ACK. The internal
+`assistant_source_ack` capture mode consumes an exact one-use native profile;
+the mode string, a local processed flag and public package bytes grant nothing.
+
+Before claiming write authority the adapter recovers only ORIGINAL processed
+slots with independent `read_delivery_id`, immutable delivery snapshots and the
+completed native `assistant:<receipt>:codex:<thread>:<turn>` receipt in this SAME
+SQLite inbox. No second receipt database or body storage is added. The fixed
+source resolve endpoint receives source UUID/revision plus committed receipt UUID
+and original ordinals, never provider IDs, conversation keys, semantic hashes or
+message bodies. Native current write/device/source/owner/project/task/assignment
+checks and nonretired material remain mandatory, including for historical done
+tasks. A done receipt does not authorize a new pass or new body read.
+
+Materialization is followed by fresh native admission under the ORIGINAL bounded
+monotonic clock; no cached package or renewed profile extends it. The same account
+selector verifies company/member/device bindings. After interpreter/environment
+preparation, immediately before ONE child spawn, the executor calls the private
+profile's final identity/deadline/source reread and persists the original ACK
+attempt. A failure after that boundary is uncertain even if no child response
+arrives. No mutation retry is hidden in this executor.
+
+Fresh tokens contain ONE conversation before a write starts. Legacy uncertain
+tokens retain their original membership and may contain several conversations:
+every group is verified read-only and ALL must be positive before completing the
+token. A verify-only no-write result cannot erase uncertainty about an earlier
+write. Current source configuration, original private refs and lease are checked
+again after the provider result. Lost/expired/paused results retain their fence.
+Only the exact original attempt with a complete validated native no-write result
+may return to fresh eligibility; failures receive bounded five-minute backoff.
+
+The signed Telegram provider additionally proves actual private account/key,
+exact current message revisions and the ENTIRE contiguous native unread range.
+An omitted/unprocessed earlier message prevents the range ACK. Several committed
+task receipts may cover one range; historical edits remain references and cannot
+override the provider's current revision. Complete bounded success DTO or native
+nonzero-exit error DTO is privately projected to closed counters/codes; stderr,
+error prose and provider envelopes never enter logs, model output or SQLite.
+Timeout/overflow/partial pipes never count as no-write evidence.
+
+Pure inbox due discovery avoids source I/O for an empty ACK queue. At most four
+oldest due source queues run per coordinator tick; failures retain their own
+backoff and do not stop other companies. Tests exercise synthetic signed native
+children and real SQLite read → explicit processing → unknown ACK → restart →
+read-only reconciliation, including mixed legacy conversations. These are not a
+live Windows/provider business E2E or evidence of installation; owner-visible
+uncertain-ACK recovery and the remaining full product gates keep
+`businessReady=false`.
 
 ## Coordinator projection and schema v2
 
