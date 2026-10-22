@@ -305,8 +305,11 @@ const readManagedBinding = (text) => {
   const projectLines = [...block.matchAll(/^Работа ограничена проектом «(.+)» \(`([a-z0-9_-]+)`\)\.$/gmu)];
   // A malformed project line must never silently widen a project binding to
   // company scope. Count the recognized prefixes as well as exact valid lines.
-  const companyPrefixes = [...block.matchAll(/^[\t ]*(?:Папка привязана к компании |Эта обычная локальная папка задаёт Trelio-контекст компании |Эта рабочая папка связана с компанией Trelio )/gmu)];
-  const projectPrefixes = [...block.matchAll(/^[\t ]*Работа ограничена проектом /gmu)];
+  // Recognize the declaration prefix even when its separator is damaged.
+  // Otherwise a missing space before «project» could silently remove the
+  // project restriction while leaving a valid company line behind.
+  const companyPrefixes = [...block.matchAll(/^[\t ]*(?:Папка привязана к компании|Эта обычная локальная папка задаёт Trelio-контекст компании|Эта рабочая папка связана с компанией Trelio)/gmu)];
+  const projectPrefixes = [...block.matchAll(/^[\t ]*Работа ограничена проектом/gmu)];
   if (allCompanyLines.length !== 1 || companyPrefixes.length !== allCompanyLines.length
     || projectLines.length > 1 || projectPrefixes.length !== projectLines.length) {
     throw new TrelioFolderOnboardingError(

@@ -172,6 +172,8 @@ test("legacy scope parsing rejects mixed, duplicated and malformed declarations 
     [legacy.replace("test-company", "invalid.company"), ""],
     [legacy, 'Работа ограничена проектом «Проект» (`invalid.project`).'],
     [legacy, ' Работа ограничена проектом «Проект» (`work-project`).'],
+    [legacy, 'Работа ограничена проектом«Проект» (`work-project`).'],
+    [legacy + '\n' + canonical.replace('компании «', 'компании«'), ""],
     [legacy, 'Работа ограничена проектом «Проект» (`work-project`).\nРабота ограничена проектом «Другой» (`other`).'],
   ]) {
     const root = await makeRoot();
