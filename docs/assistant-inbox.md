@@ -204,9 +204,26 @@ oldest due source queues run per coordinator tick; failures retain their own
 backoff and do not stop other companies. Tests exercise synthetic signed native
 children and real SQLite read → explicit processing → unknown ACK → restart →
 read-only reconciliation, including mixed legacy conversations. These are not a
-live Windows/provider business E2E or evidence of installation; owner-visible
-uncertain-ACK recovery and the remaining full product gates keep
-`businessReady=false`.
+live Windows/provider business E2E or evidence of installation; the remaining
+full product gates keep `businessReady=false`.
+
+The production coordinator reports ACK diagnostics through the SAME native
+source-health CAS/account bell/SSE/linked messenger FIFO as passive reads. Optional
+`phase=acknowledgement` carries only `ready`, `acknowledgement_uncertain` or
+`acknowledgement_blocked`. The backend retains independent read/ACK components;
+a successful poll cannot hide an unresolved write and a positive ACK cannot hide
+a reading failure. No body, provider ID, raw error or new notification engine is
+introduced. Unknown writes notify immediately; a known blockage gets five minutes.
+
+The snapshot precedes provider work. Reporting failure/CAS conflict neither
+replays the provider nor changes its original queue fence. Diagnostics aggregate
+ALL conversations in the SAME durable journal: one positive token cannot clear
+another uncertain attempt. A later normal poll can reconcile a lost health report
+from current-generation durably completed rows without another provider call.
+An empty/new source supplies no recovery evidence. Source-generation changes
+never turn old positive rows into new success or erase an old unknown attempt.
+These diagnostic facts grant no ACK/retry/owner consent. Old-generation admission
+failure still needs explicit recovery; no reset/adoption or forced replay exists.
 
 ## Coordinator projection and schema v2
 

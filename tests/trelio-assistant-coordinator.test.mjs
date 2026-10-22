@@ -710,6 +710,17 @@ test('routing outage cannot roll back a committed provider page or become author
 
 test('production composition ACK waits for exact read and committed selection; a lost write resumes read-only in the same inbox',async t=>{
   let mode='unknown',calls=[],f;
+  let healthRevision=0,healthRead='ready',healthAck='ready',reportFailure=false,healthReadFailure=false;const healthReports=[];
+  const sourceHealth={read:async row=>{
+    if(healthReadFailure)throw Object.assign(new Error('PRIVATE_HEALTH_READ'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    return {revision:healthRevision,sourceRevision:row.revision};
+  },report:async(row,value)=>{
+    assert.equal(value.expectedRevision,healthRevision);assert.equal(value.sourceRevision,row.revision);
+    healthReports.push({...value});
+    if(value.phase==='acknowledgement')healthAck=value.code;else healthRead=value.code;
+    healthRevision++;
+    if(reportFailure&&value.phase==='acknowledgement')throw Object.assign(new Error('PRIVATE_HEALTH_LOST'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  }};
   const acknowledgeSource=async input=>{
     calls.push(input.verifyOnly);input.assertReferences();input.beforeInvoke();
     assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'durable fence precedes ONE native invocation');
@@ -717,7 +728,7 @@ test('production composition ACK waits for exact read and committed selection; a
     if(mode==='unknown')throw Object.assign(new Error('PRIVATE_PROVIDER_LOST'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
     return {acknowledged:mode==='confirmed',notAttempted:true,code:null};
   };
-  f=await externalFixture(t,{acknowledgeSource});
+  f=await externalFixture(t,{acknowledgeSource,sourceHealth});
   const key='telegram-conversation/v1.'+'a'.repeat(64),route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,
     conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
   f.options.client.sourceRoutes=async()=>[route];
@@ -739,11 +750,19 @@ test('production composition ACK waits for exact read and committed selection; a
     await f.coordinator.workOnce();await f.coordinator.pollOnce();assert.deepEqual(calls,[],'body read with omitted processing is never ACK eligible');
     selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();
     assert.deepEqual(calls,[false]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,0);
-    await f.restart();mode='not-read';f.advance(300001);await f.coordinator.pollOnce();assert.deepEqual(calls,[false,true]);
+    assert.equal(healthAck,'acknowledgement_uncertain');assert.equal(healthRead,'ready');
+    await f.restart();mode='not-read';healthReadFailure=true;f.advance(300001);await f.coordinator.pollOnce();assert.deepEqual(calls,[false,true]);
+    assert.equal(healthAck,'acknowledgement_uncertain','passive success and verify-only false cannot clear the unknown write');
     assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'a verify-only no-write result never clears the older unknown write');
-    f.authority.state='done';f.authority.revision++;mode='confirmed';f.advance(300001);await f.coordinator.pollOnce();
+    healthReadFailure=false;f.authority.state='done';f.authority.revision++;mode='confirmed';reportFailure=true;f.advance(300001);await f.coordinator.pollOnce();
     assert.deepEqual(calls,[false,true,true]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,1);
     assert.equal(f.coordinator.status()[0].threadId,thread);assert.equal(f.counts().provisions,1);assert.equal(f.counts().acks,0,'native Trelio ACK never receives Telegram IDs');
+    assert.equal(healthAck,'ready');const reported=healthReports.length;
+    await f.restart();reportFailure=false;f.advance(300001);await f.coordinator.pollOnce();
+    assert.deepEqual(calls,[false,true,true],'reconciling a lost diagnostic never repeats the provider action');
+    assert.ok(healthReports.slice(reported).some(value=>value.phase==='acknowledgement'&&value.code==='ready'),
+      'positive completion in the SAME journal survives restart even when no ACK remains due');
+    assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE'));
     assert.ok(!JSON.stringify(f.notifications).includes('PRIVATE_PROVIDER'));
   }finally{await f.coordinator.close();}
 });
@@ -751,11 +770,15 @@ test('production composition ACK waits for exact read and committed selection; a
 
 test('one positive conversation never completes a legacy mixed uncertain ACK token',async t=>{
   let f,allRead=false,calls=0;
+  let healthRevision=0;const observations=[];
+  const sourceHealth={read:async row=>({revision:healthRevision,sourceRevision:row.revision}),report:async(_row,value)=>{
+    assert.equal(value.expectedRevision,healthRevision++);if(value.phase)observations.push(value.code);
+  }};
   const acknowledgeSource=async input=>{
     calls++;assert.equal(input.verifyOnly,true);input.assertReferences();input.beforeInvoke();
     return {acknowledged:allRead||input.references[0].id==='message:123:1',notAttempted:true,code:null};
   };
-  f=await externalFixture(t,{acknowledgeSource});
+  f=await externalFixture(t,{acknowledgeSource,sourceHealth});
   const keys=['a','b'].map(n=>'telegram-conversation/v1.'+n.repeat(64));
   const routes=keys.map(conversationKey=>({id:randomUUID(),sourceId:f.row.id,sourceRevision:0,conversationKey,
     bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId}));
@@ -782,8 +805,10 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
     f.database.prepare('UPDATE assistant_inbox_events SET ack_token=?,ack_attempt_token=?,ack_started=1').run(first.token,first.token);
     f.advance(120001);await f.coordinator.pollOnce();assert.equal(calls,2);
     assert.equal(f.database.prepare('SELECT sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+    assert.equal(observations.at(-1),'acknowledgement_uncertain');assert.ok(!observations.includes('ready'));
     allRead=true;f.advance(300001);await f.coordinator.pollOnce();assert.equal(calls,4);
     assert.equal(f.database.prepare('SELECT sum(acked) AS n FROM assistant_inbox_events').get().n,2);
+    assert.equal(observations.at(-1),'ready','only ALL original conversations being positive can clear the source incident');
     assert.equal(f.counts().provisions,1);
   }finally{await f.coordinator.close();}
 });

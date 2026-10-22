@@ -897,8 +897,16 @@ test('source diagnostics are fixed device-only structural calls, strict before p
   const input={companyId,sourceId,sourceRevision:2,expectedRevision:0,clientRequestId:randomUUID(),code:'ready'};
   output={...valid,revision:1,code:'ready',lastCheckedAt:'2026-01-01T00:00:00Z'};
   assert.deepEqual(await client.reportSourceHealth(input),output);assert.deepEqual(bodies,[input]);
+  const acknowledgement={...input,phase:'acknowledgement',code:'acknowledgement_uncertain'};
+  output={...output,code:'acknowledgement_uncertain'};
+  assert.deepEqual(await client.reportSourceHealth(acknowledgement),output);
+  assert.deepEqual(bodies[1],acknowledgement);
+  assert.deepEqual(await client.reportSourceHealth(input),output,'healthy reading preserves native ACK diagnostic');
+  output={...output,code:'read_failed'};
+  assert.deepEqual(await client.reportSourceHealth({...acknowledgement,code:'ready'}),output,'ACK success preserves native read failure');
   const before=calls;
-  for(const extra of [{message:'PRIVATE'},{cursor:'PRIVATE'},{code:'authenticated'},{sourceRevision:-1}])
+  for(const extra of [{message:'PRIVATE'},{cursor:'PRIVATE'},{code:'authenticated'},{sourceRevision:-1},
+    {code:'acknowledgement_uncertain'},{phase:undefined},{phase:'provider'},{phase:'acknowledgement',code:'read_failed'}])
     await assert.rejects(client.reportSourceHealth({...input,...extra}),/INVALID_INPUT/);
   await assert.rejects(client.readSourceHealth('bad',sourceId),/INVALID_INPUT/);assert.equal(calls,before);
   for(output of [{...valid,code:'unknown'},{...valid,code:'ready'},{...valid,lastCheckedAt:'2026-01-01T00:00:00Z'},

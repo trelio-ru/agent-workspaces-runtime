@@ -30,6 +30,9 @@ publication tooling также остаются вне этого публичн
   External ACK attempts are durably fenced before provider invocation; expiry,
   restart or source resume permit read-only reconciliation, never blind write
   replay. A no-write result may release only its own exact attempt token.
+  Source READ/ACK diagnostics share the native health/owner notice engine;
+  healthy polling cannot erase uncertainty. Aggregate the SAME durable ACK
+  journal across conversations; an empty source is never recovery evidence.
   Production Telegram ACK reuses the SAME signed/account/process path and native
   committed receipt admission, with the original inbox fence at final spawn.
   Fresh tokens cover one conversation; legacy mixed tokens need ALL read-backs.

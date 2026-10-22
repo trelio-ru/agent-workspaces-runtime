@@ -478,6 +478,10 @@ It derives native admission from explicitly committed source receipt slots,
 persists the original private ACK attempt at final spawn and reconciles unknown
 outcomes without another write. Provider-native contiguous-range proof remains
 independent. See [the inbox contract](assistant-inbox.md#production-telegram-acknowledgement).
+The same native source-health/account notice path reports independent closed
+READ/ACK observations. Unknown writes remain visible across healthy polling;
+diagnostic/report failure never retries the provider or drops its durable fence.
+Recovery uses positive current-generation journal evidence, never an empty queue.
 
 Source polling and task execution resolve the same assistant/device account
 catalogue through the common account engine. Company/member bindings are still
@@ -536,12 +540,16 @@ row checks, pause/revocation and restart deduplication are described in
 credential store or model polling turn is added. Calls re-enter device identity
 and propagate the common private invocation's narrower cancellation boundary.
 
-External references stay unrouted/non-waking/unacknowledged. Unknown conversations
-are never assigned to a convenient task/company, and sender metadata is not a
-direct-owner command. MAX selector onboarding, Telegram channel/deletion streams,
-owner-visible source recovery, exact content reads/mapping, committed processing
-and native ACK remain required before full product readiness. A failed/gapped
-source retains its position and cannot manufacture a successful empty page.
+New references enter unrouted/non-waking/unacknowledged. A known Telegram
+conversation follows its exact fresh native route into the canonical task chat;
+body-read evidence and explicit committed selection remain independent of wake.
+Unknown conversations are never assigned to a convenient task/company, and
+sender metadata is not a direct-owner command. Telegram child streams/deletions,
+exact reads/processing/native ACK and source-health reports compose the SAME
+queue and signed engines. They do not close unknown-conversation/verified-owner
+intake, MAX selector onboarding, other-provider processing/ACK, old-generation
+recovery or the live Windows business E2E gates. A failed/gapped source retains
+its position and cannot manufacture a successful empty page.
 
 ## Protected background host composition
 

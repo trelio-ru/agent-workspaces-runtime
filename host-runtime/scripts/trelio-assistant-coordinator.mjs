@@ -187,6 +187,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         id,result.nextCursor])).digest('hex')};
     });
   };
+  // Report an ACK observation independently of passive reading. The SAME
+  // journal supplies only closed facts: no queue bit grants provider execution.
+  // Report/CAS failures do not replay work or discard its original fence; a
+  // later poll can reconcile a durably confirmed completion after a lost report.
+  const observeAcknowledgementHealth=async(row,signal,observation=null)=>{
+    if(!sourceHealth||row.skillId!=='telegram-mtproto')return;
+    try{
+      const code=inbox.externalAcknowledgementHealth(externalSourceFor(identity,row));if(code===null)return;
+      const snapshot=observation??await sourceHealth.read(row,signal);lease();
+      if(snapshot?.sourceRevision!==row.revision||!Number.isSafeInteger(snapshot.revision)||snapshot.revision<0)
+        fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      await sourceHealth.report(row,{expectedRevision:snapshot.revision,sourceRevision:row.revision,
+        clientRequestId:randomUUID(),code,phase:'acknowledgement'},signal);lease();
+    }catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
+  };
   const pollExternalSource=async(row,signal,streamId=null)=>{
     const source=externalSourceFor(identity,row);
     // One page per source per coordinator tick: a large backlog cannot occupy
@@ -252,6 +267,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // history/login failure. Only all committed stream generations being
       // caught up permits the existing native source health to recover.
       if(!inbox.hasPendingStreams(source))await report('ready');
+      await observeAcknowledgementHealth(row,signal);
     }catch(error){
       // Read-only recovery retains both position and queued events. Neither
       // a provider gap nor changed owner configuration resets the source.
@@ -262,7 +278,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'].includes(code)?'setup_required':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:SCOPE_CHANGED|UIDVALIDITY_CHANGED)$/u.test(code??'')?'scope_changed':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||['ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT','ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED','ASSISTANT_INBOX_REFERENCE_AMBIGUOUS'].includes(code)?'history_gap':'read_failed';
-      await report(reason);throw error;
+      await report(reason);await observeAcknowledgementHealth(row,signal);throw error;
     }
   };
   const canonicalSourceFor=companyId=>{
@@ -313,6 +329,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const current=await client.sourceAccounts(row.companyId,signal);lease();
     if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
     const ack=inbox.claimAcknowledgements(source);if(!ack)return;
+    // Capture CAS before native work, independently of whether it can report.
+    // Missing diagnostics cannot block or duplicate an admitted provider action.
+    let observation=null;
+    if(sourceHealth)try{
+      const snapshot=await sourceHealth.read(row,signal);lease();
+      if(snapshot?.sourceRevision!==row.revision||!Number.isSafeInteger(snapshot.revision)||snapshot.revision<0)
+        fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      observation=snapshot;
+    }catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
     try{
       const read=()=>inbox.externalAcknowledgementReferences(source,{token:ack.token,sourceRevision:row.revision});
       const references=read(),snapshot=JSON.stringify(references),groups=new Map();
@@ -342,6 +367,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // fence and let a future current source do read-only reconciliation.
       try{inbox.deferExternalAcknowledgements(source,{token:ack.token,retryAfterMs:300_000});}catch{}
       throw error;
+    }finally{
+      // Even failed/unknown writes have a durable diagnostic, while successful
+      // polling has no authority to erase it. With no initial CAS, do not invent
+      // revision zero or report from a stale pre-provider observation.
+      if(observation)await observeAcknowledgementHealth(row,signal,observation);
     }
   };
   const reportSchedules = async signal => {

@@ -848,6 +848,22 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 1`,scope.key,time(),time());
       return row?.ordinal??null;
     },
+    /** Diagnostic projection of the SAME durable ACK journal, not permission
+     * to read/write a provider. Do not clear another conversation's unknown
+     * attempt after one positive token. A successful complete survives report
+     * failure/restart and can reconcile its native notice on a later poll.
+     * An empty/new source supplies NO success evidence. Old generation fences
+     * remain visible; only current-generation confirmed rows witness recovery. */
+    externalAcknowledgementHealth(scopeInput){
+      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();
+      const current=activeSource(scope);
+      const row=get(`SELECT
+        sum(CASE WHEN acked=0 AND ack_started=1 THEN 1 ELSE 0 END) AS uncertain,
+        sum(CASE WHEN acked=0 AND ack_retry_at>0 THEN 1 ELSE 0 END) AS blocked,
+        sum(CASE WHEN acked=1 AND route_source_revision=? THEN 1 ELSE 0 END) AS confirmed
+        FROM assistant_inbox_events WHERE source_key=?`,current.configuration_revision,scope.key);
+      return row.uncertain>0?'acknowledgement_uncertain':row.blocked>0?'acknowledgement_blocked':row.confirmed>0?'ready':null;
+    },
     /** Read acknowledgements are separate bounded outbox operations. */
     claimAcknowledgements(scopeInput) {
       const scope = scopeOf(scopeInput);

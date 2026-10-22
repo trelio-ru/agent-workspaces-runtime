@@ -746,3 +746,24 @@ test('new external tokens cover one conversation; legacy mixed attempts retain m
   const recovery=inbox.claimAcknowledgements(source);assert.equal(recovery.reconcileOnly,true);assert.equal(recovery.events.length,2);
   assert.throws(()=>inbox.startExternalAcknowledgements(source,recovery.token),/STALE_ACK/);
 });
+
+test('ACK diagnostic uses durable attempts across conversations and restarts, never an empty queue as recovery',async t=>{
+  const f=routedFixture(t);assert.equal(f.inbox.externalAcknowledgementHealth(f.external),null);
+  assert.throws(()=>f.inbox.externalAcknowledgementHealth(f.canonical),/INVALID_INPUT/);
+  f.inbox.routeExternalEvents(f.external,f.mapping);
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  f.inbox.recordExternalRead(f.external,{deliveryId:work.deliveryId,eventKey:f.pending[0].event_key,sourceRevision:2,routeId:f.route.id});
+  f.inbox.completeDelivery(work.deliveryId,`assistant:${randomUUID()}:codex:${randomUUID()}:${randomUUID()}`,{
+    processedSourceReferences:[{sourceId:f.external.bindingId,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}]});
+  let ack=f.inbox.claimAcknowledgements(f.external);assert.equal(f.inbox.externalAcknowledgementHealth(f.external),null,'a claim is not an attempt');
+  f.inbox.startExternalAcknowledgements(f.external,ack.token);
+  assert.equal(f.inbox.externalAcknowledgementHealth(f.external),'acknowledgement_uncertain');
+  f.inbox.deferExternalAcknowledgements(f.external,{token:ack.token,retryAfterMs:300_000,notAttempted:true});
+  assert.equal(f.inbox.externalAcknowledgementHealth(f.external),'acknowledgement_blocked');
+  f.advance(300001);ack=f.inbox.claimAcknowledgements(f.external);f.inbox.startExternalAcknowledgements(f.external,ack.token);
+  f.inbox.completeAcknowledgements(f.external,ack.token);assert.equal(f.inbox.externalAcknowledgementHealth(f.external),'ready');
+  const recovered=createAssistantInbox({database:f.database});
+  assert.equal(recovered.externalAcknowledgementHealth(f.external),'ready','durable positive result survives a lost native health report');
+  f.inbox.observeExternalSourceRevision(f.external,3);
+  assert.equal(f.inbox.externalAcknowledgementHealth(f.external),null,'old-generation success never claims fresh source recovery');
+});

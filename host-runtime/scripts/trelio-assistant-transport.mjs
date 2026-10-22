@@ -162,8 +162,9 @@ const healthState = value => {
   return {revision:revision(value.revision),code:value.code,generation:revision(value.generation),latchedCodes:[...value.latchedCodes]};
 };
 const sourceHealthCodes=Object.freeze(['ready','setup_required','authentication_required','scope_changed','history_gap','read_failed']);
+const sourceAcknowledgementHealthCodes=Object.freeze(['ready','acknowledgement_uncertain','acknowledgement_blocked']);
 const sourceHealthState=value=>{
-  if(!object(value)||!['not_checked',...sourceHealthCodes].includes(value.code)
+  if(!object(value)||!['not_checked',...sourceHealthCodes,...sourceAcknowledgementHealthCodes].includes(value.code)
     || value.lastCheckedAt!==null && (typeof value.lastCheckedAt!=='string'||!Number.isFinite(Date.parse(value.lastCheckedAt)))
     || (value.code==='not_checked')!==(value.lastCheckedAt===null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return Object.freeze({revision:revision(value.revision),sourceRevision:revision(value.sourceRevision),
@@ -536,14 +537,20 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       return sourceHealthState(await call('sourceHealthRead',{companyId,sourceId},signal));
     },
     async reportSourceHealth(input,signal){
-      if(!object(input)||Object.keys(input).sort().join(',')!=='clientRequestId,code,companyId,expectedRevision,sourceId,sourceRevision'
-        || !sourceHealthCodes.includes(input.code)
+      if(!object(input)||Object.keys(input).filter(key=>key!=='phase').sort().join(',')!=='clientRequestId,code,companyId,expectedRevision,sourceId,sourceRevision'
+        || Object.hasOwn(input,'phase')&&input.phase!=='acknowledgement'
+        || !(input.phase?sourceAcknowledgementHealthCodes:sourceHealthCodes).includes(input.code)
         || !Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
         || !Number.isSafeInteger(input.expectedRevision)||input.expectedRevision<0||input.expectedRevision>2_000_000_000)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const body={companyId:id(input.companyId),sourceId:id(input.sourceId),sourceRevision:revision(input.sourceRevision),
-        expectedRevision:revision(input.expectedRevision),clientRequestId:id(input.clientRequestId),code:input.code};
+        expectedRevision:revision(input.expectedRevision),clientRequestId:id(input.clientRequestId),code:input.code,
+        ...(input.phase?{phase:input.phase}:{})};
       const result=sourceHealthState(await call('sourceHealthReport',body,signal));
-      if(result.revision!==body.expectedRevision+1||result.sourceRevision!==body.sourceRevision||result.code!==body.code)
+      // The native row retains independent READ/ACK observations. Its effective
+      // reason may still describe the OTHER boundary after this report, so code
+      // equality would turn a valid CAS write into a false transport failure.
+      // This projection is diagnostic, never an ACK receipt or write admission.
+      if(result.revision!==body.expectedRevision+1||result.sourceRevision!==body.sourceRevision||result.code==='not_checked')
         fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return result;
     },
