@@ -1,4 +1,3 @@
-import { validVisualArguments } from './trelio-visual-commands.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
@@ -10,7 +9,7 @@ import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivat
 import { prepareVisualPrivateDirectory, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
-import { visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
+import { validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { normalizeVisualAuthentication, visualAuthenticationFingerprint } from './trelio-visual-auth.mjs';

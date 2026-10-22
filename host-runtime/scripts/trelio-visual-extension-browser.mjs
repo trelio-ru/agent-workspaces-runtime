@@ -1,4 +1,3 @@
-import { validVisualArguments } from './trelio-visual-commands.mjs';
 import { createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
 import { installTextObserver, validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import fs from 'node:fs/promises';
@@ -11,10 +10,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter, visualAttachmentRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
-import { installVisualAuthentication } from './trelio-visual-auth-adapter.mjs';
-import { normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-auth.mjs';
+import { installVisualAuthentication, normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-auth.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
-import { visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
+import { validVisualArguments, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
