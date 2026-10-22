@@ -94,6 +94,7 @@ test('native local form stays keyboard accessible at 1440, 390 and 320px; POST p
   const submissions = []; const server = http.createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const input = definition();
+    input.sections[0].fields[0].help += ' SYNTHETIC_LONG_HELP_' + 'x'.repeat(200);
     if (request.method === 'POST') { submissions.push(new URLSearchParams(Buffer.concat(chunks).toString())); input.notice = { tone: 'error', text: 'Синтетическая ошибка. Повторите ввод' }; }
     response.writeHead(request.method === 'POST' ? 400 : 200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': LOCAL_FORM_CSP }).end(renderLocalFormPage(input));
   });
