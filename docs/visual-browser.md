@@ -524,6 +524,11 @@ ready, explicit logout без восстановления входа и crash �
 сравнивает OS foreground до/после каждого действия, без activate/restore tricks.
 Native OS vault и detached worker проходят отдельно. CI обязателен на macOS,
 Windows x64/ARM64 и desktop Linux; local VM не заменяет hosted gate.
+Linux CI заменяет только Azure HTTP entry в mirror list hosted runner на
+официальный HTTPS archive. Оба APT installer, включая Playwright, используют
+20-секундный network timeout и один retry; ошибка index refresh и общий
+10-минутный deadline подготовки завершают gate ошибкой, не пропускают fixtures.
+Проверка подписей APT и production OS policy не меняются.
 Detached session/authentication fixtures сохраняют исходный assertion при ошибке shutdown и всегда
 закрывают свой HTTP listener и keyring handle. Если claim не снят, private
 профиль не удаляется. Закрытые fixture stages различают ожидание input/manual,

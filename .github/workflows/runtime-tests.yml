@@ -54,7 +54,18 @@ jobs:
           npm ci --prefix host-runtime/scripts/visual-browser-dependencies --ignore-scripts --no-audit --no-fund
       - name: Install Linux desktop and native credential service
         if: runner.os == 'Linux'
+        timeout-minutes: 10
         run: |
+          # The hosted image's Azure HTTP mirror can stall before falling back
+          # to the working official HTTPS archive. Change only that exact CI
+          # mirror entry; keep normal signed APT metadata/package verification.
+          if test -f /etc/apt/apt-mirrors.txt; then
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+          fi
+          # Playwright's install-deps invokes APT again, so the same bounded
+          # network policy must cover both installers. A failed index refresh
+          # fails this gate instead of silently continuing with stale indexes.
+          printf '%s\n' 'Acquire::Retries "1";' 'Acquire::http::Timeout "20";' 'Acquire::https::Timeout "20";' 'APT::Update::Error-Mode "any";' | sudo tee /etc/apt/apt.conf.d/99trelio-ci-network >/dev/null
           sudo apt-get update
           sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0 xvfb apparmor
           sudo node host-runtime/scripts/visual-browser-dependencies/node_modules/playwright-core/cli.js install-deps chromium

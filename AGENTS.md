@@ -316,6 +316,8 @@ publication tooling также остаются вне этого публичн
   waiting; never retry failed writes, ACL checks or browser/credential input.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
+  Linux CI APT preparation использует bounded HTTPS mirror recovery, не skip
+  native fixtures; [контракт](docs/visual-browser.md#проверки-и-текущие-границы).
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
   crash не доказывает save/login. Native OS tests обязательны.
   macOS protected-session CLI/worker проверяет library-validation policy своего Node. При несовместимом
