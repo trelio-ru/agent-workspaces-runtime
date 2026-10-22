@@ -12,6 +12,39 @@ import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bo
 import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-node.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
   processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
+import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
+
+test('native Windows characterizes atomic descriptor publication while the original reader is open', {
+  skip: process.platform !== 'win32' || process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 20000,
+}, async t => {
+  // The detached parent's startup poll reads this SAME private writer's file.
+  // Keep one ordinary native read handle open deliberately, rather than infer
+  // Windows sharing semantics from an intermittent startup failure. These are
+  // disposable structural counters, never a real owner/bearer/credential.
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-owner-publish-fixture-'));
+  const file = path.join(directory, 'owner.json');
+  let reader, blocked = null;
+  try {
+    await writePrivateJsonFile(file, { version: 1 });
+    reader = await fs.open(file, 'r');
+    try { await writePrivateJsonFile(file, { version: 2 }); }
+    catch (error) {
+      blocked = { code: error.code, syscall: error.syscall };
+      // A native refusal is characterized, not swallowed as a successful write.
+      // Every other failure remains a hard error without exposing raw paths.
+      assert.deepEqual(blocked, { code: 'EPERM', syscall: 'rename' });
+      assert.deepEqual(await readPrivateJsonFile(file), { version: 1 });
+    }
+    assert.deepEqual(JSON.parse(await reader.readFile('utf8')), { version: 1 });
+    await reader.close(); reader = null;
+    await writePrivateJsonFile(file, { version: 2 });
+    assert.deepEqual(await readPrivateJsonFile(file), { version: 2 });
+    t.diagnostic(JSON.stringify({ publicationWithReader: blocked ? 'rename_access_denied' : 'published' }));
+  } finally {
+    await reader?.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('synthetic startup evidence retains closed native failure categories and drops arbitrary error/owner data',async()=>{
   const source=await fs.readFile(new URL('../host-runtime/scripts/trelio-visual-worker.mjs',import.meta.url),'utf8');
@@ -35,6 +68,16 @@ test('synthetic startup evidence retains closed native failure categories and dr
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
   assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'startup_failed',process:{
     failureCode:'TRELIO_WINDOWS_PRIVATE_ACL_FAILED',operation:'windows_acl.dacl_write',causeCode:'EACCES'}});
+  scope.input={stage:'startup_failed',startupPhase:'owner_publish',error:{
+    syscall:'rename',path:'PRIVATE PATH',dest:'PRIVATE DESTINATION',message:'PRIVATE ERROR'}};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.deepEqual(snapshots.at(-1).evidence.at(-1),{
+    stage:'startup_failed',startupPhase:'owner_publish',ioOperation:'rename'});
+  for(const [startupPhase,syscall] of [['owner_publish','PRIVATE SYSCALL'],['browser','rename']]) {
+    scope.input={stage:'startup_failed',startupPhase,error:{syscall,message:'PRIVATE ERROR'}};
+    vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+    assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'startup_failed',startupPhase});
+  }
   scope.fixtureOnly=false;const count=snapshots.length;
   vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
   assert.equal(snapshots.length,count,'ordinary production never writes fixture evidence');
