@@ -241,10 +241,10 @@ export const createForwardingAssistantMcp = async () => {
     async callTool(name,args,signal) {
       const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:args},{signal});
       if(name!=='continue_assistant_workspace_action' || result?.isError)return result;
-      // These are native metadata/preparation operations, not local command
+      // These are native metadata/preparation/creation receipts, not local command
       // plans. The next returned secret_browser_fill continuation executes in
       // the SAME isolated Workspace worker; no second browser executor exists.
-      if(['secret_list','secret_browser_prepare'].includes(args?.operation))return result;
+      if(['secret_list','secret_browser_prepare','secret_create'].includes(args?.operation))return result;
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}

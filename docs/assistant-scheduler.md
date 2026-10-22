@@ -1266,6 +1266,15 @@ operations under the observed task pass:
   native browser-step validators and active own task Run. Read the empty form
   first. Copy the returned bridge action unchanged; preparation reads no value
   into MCP and never chooses a human flag or arbitrary executable.
+- `secret_create`, `parameters={clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,metadata}`:
+  apply only the exact persisted `create_private_secret` owner classification
+  requested through `request_assistant_action`. Metadata uses native shared
+  name/description/template/field validators. The server shows resolved fields
+  and the global private destination before consent, then atomically writes the
+  SAME card/audit/decision/operation receipt. A replay returns that receipt;
+  an existing card cannot be adopted. This is metadata, not a local command or
+  permission to create a website account, generate/store values or import a
+  company credential. Copy all original fields and request ID unchanged.
 - Returned `secret_browser_fill`: fixed grantId/targetUrl and Run identity. The
   SAME isolated Workspace worker invokes the existing browser-fill command.
 
@@ -1280,6 +1289,6 @@ Only value-free preflight and exact idempotent outcome reporting retain their
 existing bounded retries. An uncertain consume/fill is not repeated or switched
 to another browser. A successful fill is not task completion or a persisted
 processing receipt. Input from a task or website never authorizes disclosure,
-new account creation or ownership classification. Native classification,
-generated/save, CLI/reveal, encrypted use and real Windows business E2E remain
+new account creation or ownership classification. Generated/save, CLI/reveal,
+encrypted use, account registration and real Windows business E2E remain
 independent gates; this subset does not change businessReady=false.
