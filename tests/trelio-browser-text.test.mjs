@@ -7,6 +7,29 @@ import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { TEXT_KIND, validateTextResult } from '../host-runtime/scripts/trelio-browser-text.mjs';
 const sample = () => ({ kind: TEXT_KIND, state: 'ready', reason: 'none', sessionId: '12345678-1234-4234-8234-123456789012', frameId: '12345678-1234-4234-8234-123456789013', width: 1440, height: 1000, scroll: { up: false, down: true, left: false, right: false }, title: 'Fixture', text: 'Объявление', controls: [{ role: 'button', label: 'Найти', x: 200, y: 100 }], nextOffset: null, scanLimited: false });
+
+// Synthetic published-document markup, not a copy of any provider page. The
+// same native reader must distinguish static read-only blocks from disabled
+// form fields and non-editable islands that still belong to an active draft.
+const readonlyDocumentFixture = () => `
+  <article>
+    <h2 contenteditable="false">READONLY_DOCUMENT_HEADING</h2>
+    <div contenteditable="false"><p>READONLY_PARAGRAPH_START <b>выделенный текст</b></p></div>
+    <table><tr><th contenteditable="false">READONLY_TABLE_HEADER</th><td><div contenteditable="false">READONLY_TABLE_CELL</div></td></tr></table>
+    <p contenteditable="FALSE">READONLY_CASE_INSENSITIVE</p>
+    <div contenteditable="false">${'Часть длинной опубликованной статьи. '.repeat(450)} READONLY_DOCUMENT_END</div>
+  </article>
+  <div contenteditable="true">TRUE_EDITOR_SECRET <span contenteditable="false">FALSE_ISLAND_SECRET</span></div>
+  <div contenteditable>EMPTY_EDITOR_SECRET</div>
+  <div contenteditable="inherit">UNKNOWN_EDITOR_SECRET</div>
+  <div contenteditable="plaintext-only"><span contenteditable="false">PLAINTEXT_ISLAND_SECRET</span></div>
+  <div contenteditable="false" role="textbox" aria-readonly="true">READONLY_TEXTBOX_SECRET</div>
+  <div contenteditable="false" role="TEXTBOX" aria-disabled="true">READONLY_UPPER_TEXTBOX_SECRET</div>
+  <div role="textbox"><p contenteditable="false">TEXTBOX_ISLAND_SECRET</p></div>
+  <form><div contenteditable="false">READONLY_FORM_SECRET</div></form>
+  <label>Безопасная подпись<input><span contenteditable="false">READONLY_LABEL_SECRET</span></label>
+  <div hidden contenteditable="false">READONLY_HIDDEN_SECRET</div>
+  <div style="opacity:0" contenteditable="false">READONLY_INVISIBLE_SECRET</div>`;
 test('text projection rejects extra data, excessive content and invalid coordinates', () => {
   assert.equal(validateTextResult(sample()).kind, TEXT_KIND);
   for (const change of [{ html: '<div>' }, { text: 'a'.repeat(6001) }, { controls: [{ ...sample().controls[0], x: 1440 }] }, { controls: [{ ...sample().controls[0], value: 'SECRET' }] }, { scanLimited: 'false' }, { nextOffset: -1 }, { sessionId: 'invalid' }]) assert.throws(() => validateTextResult({ ...sample(), ...change }), /VISUAL_RESULT_INVALID/);
@@ -39,7 +62,7 @@ test('both closed variants cross MCP; default image mode rejects text commands b
   assert.deepEqual(visualExtensionManifest(['https://example.test/*'], 1234, 'text').content_scripts[0].js, ['link-router.js', 'authentication.js', 'text-observer.js']);
 });
 
-test('native fixed text reader: labels, Unicode input, links, paging, secrets, stale frame and manual gate', { skip: process.env.TRELIO_TEXT_NATIVE_TEST !== '1', timeout: 120_000 }, async () => {
+test('native fixed text reader: read-only documents, paging, secrets, stale frame and manual gate', { skip: process.env.TRELIO_TEXT_NATIVE_TEST !== '1', timeout: 120_000 }, async () => {
   const directory = new URL('../host-runtime/scripts/', import.meta.url);
   const fixture = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-text-fixture-')));
   let received, window;
@@ -47,7 +70,7 @@ test('native fixed text reader: labels, Unicode input, links, paging, secrets, s
     const url = new URL(req.url, 'http://127.0.0.1');
     if (url.pathname === '/submitted') received = url.searchParams.get('q');
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.end(`<!doctype html><title>Синтетическое объявление</title><body style="font:20px sans-serif"><h1>Объявление для проверки</h1><form action="/submitted"><input name="q" placeholder="Поиск" value="INPUT_SECRET"><button>Найти</button></form><a target="_blank" href="/detail">Подробности</a><div hidden>HIDDEN_SECRET</div><script>const secret='SCRIPT_SECRET';</script><label>Комментарий<textarea>TEXTAREA_SECRET</textarea></label><div contenteditable="plaintext-only" role="textbox" aria-label="Текст сообщения">DRAFT_SECRET</div><input type="password" hidden value="HIDDEN_PASSWORD_SECRET">${url.pathname === '/password' ? '<input type="password" value="PASSWORD_SECRET">' : ''}${url.pathname === '/otp' ? '<input autocomplete="ONE-TIME-CODE" value="OTP_SECRET">' : ''}<p>Редкая фраза: проверка фильтра</p>${url.pathname === '/long' ? '<div>' + 'Длинное описание '.repeat(800) + '</div>' : ''}${Array.from({ length: 200 }, (_, i) => `<p>Строка ${i} – ${'Описание услуги '.repeat(5)}</p>`).join('')}</body>`);
+    res.end(`<!doctype html><title>Синтетическое объявление</title><body style="font:20px sans-serif"><h1>Объявление для проверки</h1><form action="/submitted"><input name="q" placeholder="Поиск" value="INPUT_SECRET"><button>Найти</button></form><a target="_blank" href="/detail">Подробности</a><div hidden>HIDDEN_SECRET</div><script>const secret='SCRIPT_SECRET';</script><label>Комментарий<textarea>TEXTAREA_SECRET</textarea></label><div contenteditable="plaintext-only" role="textbox" aria-label="Текст сообщения">DRAFT_SECRET</div><input type="password" hidden value="HIDDEN_PASSWORD_SECRET">${url.pathname === '/password' ? '<input type="password" value="PASSWORD_SECRET">' : ''}${url.pathname === '/otp' ? '<input autocomplete="ONE-TIME-CODE" value="OTP_SECRET">' : ''}${url.pathname === '/readonly' ? readonlyDocumentFixture() : ''}<p>Редкая фраза: проверка фильтра</p>${url.pathname === '/long' ? '<div>' + 'Длинное описание '.repeat(800) + '</div>' : ''}${Array.from({ length: 200 }, (_, i) => `<p>Строка ${i} – ${'Описание услуги '.repeat(5)}</p>`).join('')}</body>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -101,6 +124,23 @@ test('native fixed text reader: labels, Unicode input, links, paging, secrets, s
     frame = ready(await browser.call('read-text', { offset: 6000, includeControls: false }));
     assert.match(frame.text, /Длинное описание/);
     assert.equal(frame.scanLimited, false, 'a long single text node remains pageable instead of losing its suffix');
+    // Read the whole rendered document in ordinary 6000-character pages. No
+    // screenshot, page script, scrolling or model-supplied selector is used.
+    frame = ready(await browser.call('navigate', { url: `${origin}/readonly` }));
+    let documentText = '', pages = 0, offset = 0;
+    do {
+      frame = ready(await browser.call('read-text', { offset, includeControls: false }));
+      assert.equal(frame.scanLimited, false);
+      assert.doesNotMatch(JSON.stringify(frame), /[A-Z_]+_SECRET/);
+      documentText += frame.text;
+      assert.ok(++pages < 20, 'bounded pagination must make forward progress');
+      if (frame.nextOffset !== null) assert.ok(frame.nextOffset > offset);
+      offset = frame.nextOffset;
+    } while (offset !== null);
+    assert.ok(pages > 2, 'the read-only article must span several real text pages');
+    for (const marker of ['READONLY_DOCUMENT_HEADING', 'READONLY_PARAGRAPH_START', 'выделенный текст', 'READONLY_TABLE_HEADER', 'READONLY_TABLE_CELL', 'READONLY_CASE_INSENSITIVE', 'READONLY_DOCUMENT_END']) assert.ok(documentText.includes(marker), `missing ${marker}`);
+    assert.equal((documentText.match(/READONLY_DOCUMENT_END/gu) || []).length, 1);
+    assert.ok(documentText.indexOf('READONLY_TABLE_HEADER') < documentText.indexOf('READONLY_TABLE_CELL'));
     assert.equal((await browser.call('navigate', { url: 'https://example.com/' })).reason, 'navigation_blocked');
     assert.equal((await browser.call('navigate', { url: `${origin}/password` })).reason, 'manual_control_active');
     assert.equal((await browser.call('read-text')).reason, 'manual_control_active');

@@ -13,6 +13,17 @@ export function installTextObserver() {
     }
     return !element.getClientRects().length;
   };
+  const privateText = element => {
+    // Published rich-text documents can keep contenteditable="false" on every
+    // paragraph, heading and table cell. That explicit read-only attribute is
+    // not an input value. Keep every other editable declaration fail-closed,
+    // including invalid/inherited values and false islands in a live editor.
+    // A role=textbox stays a field even when it is disabled or read-only.
+    if (element.closest('script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false" i]),[role~="textbox" i]')) return true;
+    // A disabled rich-text field or its wrapping label must not become a
+    // document merely because a form switched its editor to read-only.
+    return Boolean(element.closest('[contenteditable="false" i]') && element.closest('form,label'));
+  };
   const fieldLabel = element => {
     const label = element.labels?.[0];
     if (!label) return '';
@@ -41,7 +52,7 @@ export function installTextObserver() {
     for (let node; (node = walker.nextNode());) {
       if (++visited > 20_000 || characters >= 100_000) { scanLimited = true; break; }
       const parent = node.parentElement;
-      if (!parent || parent.closest('script,style,noscript,template,textarea,select,option,[contenteditable],[role="textbox"]') || hidden(parent)) continue;
+      if (!parent || privateText(parent) || hidden(parent)) continue;
       // Keep long rendered nodes pageable; cap only the total scan, not an
       // arbitrary per-node prefix that would silently lose an ad description.
       const remaining = 100_000 - characters;

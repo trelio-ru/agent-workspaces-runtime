@@ -341,6 +341,9 @@ publication tooling также остаются вне этого публичн
   [контракту](docs/visual-browser.md#текстовый-режим). Default image-only не
   расширяется автоматически. Fixed isolated reader не выдаёт HTML/JS, input
   values, cookies/storage или произвольный DOM; оба MCP variants проверяются.
+  Явные contenteditable=false документы читаются вне form/label; editable-
+  предки, false-вставки в редакторе и ARIA textboxes остаются закрытыми.
+  Полнота bounded rendered text проверяется пагинацией, не скриншотами.
   Один completion-based pacing controller живёт в browser worker: те же 2–15с
   от готового результата, что в поисковых навыках, с зачётом размышлений.
   Учёт пяти вкладок включает blank/login popups, не сбрасывается tool calls

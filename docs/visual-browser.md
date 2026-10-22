@@ -47,7 +47,12 @@ private owner; живой worker другого режима нельзя пер
 `read-text` принимает literal query до 120 символов, offset 0..100000 и
 includeControls. Это не selector, script, HTML, AX или атрибутный inventory.
 Фиксированный isolated reader пропускает скрытые узлы, scripts/styles/templates,
-input values, textarea/select/contenteditable contents. Rendered password/OTP
+input values, textarea/select, ARIA textboxes и редактируемые блоки. Явный
+`contenteditable="false"` вне form/label и любого редактируемого/textbox-предка
+читается как обычный документ: включая абзацы, заголовки и ячейки таблиц.
+Read-only textbox, false-вставка в редакторе, неизвестное editable-значение,
+скрытый текст и поля формы остаются закрытыми. Проверка labels по-прежнему
+пропускает всё содержимое contenteditable, включая false. Rendered password/OTP
 закрывает наблюдение. Во время manual phase закрыты также agent input и снимки.
 Чтение не прокручивает и не фокусирует страницу. Same-document и main-frame
 navigation во время extraction запрещают выдачу старого token.
