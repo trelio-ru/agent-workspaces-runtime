@@ -631,3 +631,7 @@ publication tooling также остаются вне этого публичн
   No human profile, CLI/reveal or uncertain fill replay. Sealed empty-card receipts
   remain metadata; no account/credential creation. Metadata operations
   return before the local executor: [contract](docs/assistant-scheduler.md#private-secret-browser-use).
+
+- Saving rate-limit fixtures budget all sequential CLI calls plus setup/cleanup
+  separately; each original process deadline and no-duplicate assertion remains
+  enforced. Diagnose timeout with closed stage/counters, never private output.

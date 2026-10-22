@@ -10188,9 +10188,15 @@ test("bridge self-revokes an exchanged server session when private-file persiste
   }
 });
 
+// Three sequential native CLI commands retain their original 8-second process
+// deadlines. The outer fixture must also cover its own Git/server setup and
+// cleanup. A 15-second aggregate can cancel healthy Windows commands before
+// their individual deadlines; hosted neighbouring fixtures already took 13–15s.
+// This fixture-only budget changes no production deadline, retry or assertion.
+const savingRateLimitCommandTimeoutMs = 8_000;
 test("bridge draft and finish survive explicit 429 at every saving stage without duplicate writes", {
-  timeout: 15_000,
-}, async () => {
+  timeout: 3 * savingRateLimitCommandTimeoutMs + 10_000,
+}, async (t) => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-submit-test-"));
   const homeDirectory = path.join(temporaryDirectory, "home");
   // HOME alone does not isolate Windows: its bridge uses LOCALAPPDATA.
@@ -10220,6 +10226,7 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
   const refusedBodies = new Map();
   const committedStages = new Map();
   let serverError = null;
+  let fixtureStage = "setup";
 
   const server = createServer(async (request, response) => {
     try {
@@ -10388,13 +10395,15 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
       "utf8",
     );
 
+    fixtureStage = "draft";
     const savedDraft = await execFileAsync(process.execPath, [bridgePath, "checkpoint", "--type", "draft",
       "--summary", "Подготовлен переносимый external object."], {
-      cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000,
+      cwd: workspaceDirectory, encoding: "utf8", timeout: savingRateLimitCommandTimeoutMs,
       env: childEnvironment,
     });
     assert.match(savedDraft.stdout, /Checkpoint сохранён/u);
 
+    fixtureStage = "finish";
     const submitted = await execFileAsync(
       process.execPath,
       [
@@ -10412,15 +10421,16 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
       {
         cwd: workspaceDirectory,
         encoding: "utf8",
-        timeout: 8_000,
+        timeout: savingRateLimitCommandTimeoutMs,
         env: childEnvironment,
       },
     );
 
     assert.match(submitted.stdout, /Статус: принят автоматически/);
     const acceptedRequestCount = seenRequests.length;
+    fixtureStage = "accepted-readback";
     const repeatedFinish = await execFileAsync(process.execPath, [bridgePath, "finish", "--summary", "Повтор"], {
-      cwd: workspaceDirectory, encoding: "utf8", timeout: 8_000, env: childEnvironment,
+      cwd: workspaceDirectory, encoding: "utf8", timeout: savingRateLimitCommandTimeoutMs, env: childEnvironment,
     });
     assert.match(repeatedFinish.stdout, /Run уже принят/u);
     assert.equal(seenRequests.length, acceptedRequestCount, "accepted finish must not upload or checkpoint again");
@@ -10463,6 +10473,9 @@ test("bridge draft and finish survive explicit 429 at every saving stage without
     );
     assert.deepEqual(await readFile(path.join(objectDirectory, "archive.bin")), binaryBytes);
   } finally {
+    // Closed stages/counters only, never credentials, paths or child output.
+    t.diagnostic(JSON.stringify({ fixtureStage, registerAttempts, uploadAttempts,
+      stages: Object.fromEntries(attemptsByStage) }));
     await new Promise((resolve) => server.close(resolve));
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
