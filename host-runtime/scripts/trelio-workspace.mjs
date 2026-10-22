@@ -16828,6 +16828,10 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     throw new Error("Текущая папка не содержит активный Trelio Agent Run.");
   }
 
+  const profile=currentWorkspaceExecutionProfile();
+  if(profile && typeof profile.resolveSecretBrowserStorage!=='function')denyWorkspaceExecutionProfile();
+  const browserStorage=profile ? await profile.resolveSecretBrowserStorage({configDirectory:CONFIG_DIRECTORY,grantId,runId:metadata.runId})
+    : {directory:path.join(SECRET_BROWSER_DIRECTORY,'native'),profileDirectory:SECRET_BROWSER_PROFILE_DIRECTORY};
   const browserMode = normalizeSecretBrowserMode(options.browser);
   let browserContext;
   // GET не содержит value/ciphertext, не claim-ит grant и безопасен для
@@ -16851,8 +16855,8 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     context: browserContext,
     targetUrl,
     mode: browserMode,
-    directory: path.join(SECRET_BROWSER_DIRECTORY, "native"),
-    profileDirectory: SECRET_BROWSER_PROFILE_DIRECTORY,
+    directory: browserStorage.directory,
+    profileDirectory: browserStorage.profileDirectory,
     ensurePrivateDirectory,
   });
   try {
@@ -16892,7 +16896,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
         targetOrigin: payload.targetOrigin,
         targetUrlSha256: payload.targetUrlSha256,
         browserSteps: payload.browserSteps,
-        profileDirectory: SECRET_BROWSER_PROFILE_DIRECTORY,
+        profileDirectory: browserStorage.profileDirectory,
         ensurePrivateDirectory,
       });
       localResult = result;

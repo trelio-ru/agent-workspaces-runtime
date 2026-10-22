@@ -738,7 +738,7 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../ho
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null}={}) => {
+const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=null}={}) => {
   const identity={schemaVersion:1,origin:encryptedTool?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
@@ -755,7 +755,7 @@ const workspaceProfileFixture = async ({encryptedTool=null}={}) => {
   const descriptor=encryptedTool?{schemaVersion:1,nativeTool:encryptedTool,arguments:encryptedTool==='get_task_sections'
     ? {...locator,sections:['comments']} : locator,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
     assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'}:null;
-  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,
+  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,secretBrowserFill,
     lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
   return {identity,pass,keys,store,credential,runtime,profile,descriptor,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
@@ -1197,4 +1197,51 @@ test('source routing uses fixed device HTTP and projects only exact requested op
   output=new Error('PRIVATE_HTTP');const count=calls;
   await assert.rejects(client.sourceRoutes(input),error=>error.code==='ASSISTANT_TRANSPORT_UNAVAILABLE'&&!error.message.includes('PRIVATE'));
   assert.equal(calls,count+1,'failed lookup is not retried or converted to an empty routing inventory');
+});
+
+
+test('private browser profile admits only its original grant and Run, signs fresh native proofs and isolates fallback storage',async()=>{
+  const binding={grantId:randomUUID(),runId:randomUUID(),workspaceId:randomUUID()};
+  const f=await workspaceProfileFixture({secretBrowserFill:binding});
+  const token=await f.profile.requireToken(f.identity.origin),base=`/api/agent-secrets/checkout-grants/${binding.grantId}`;
+  let privateReads=0;
+  const get=f.store.get;f.store.get=async scope=>{privateReads++;return get(scope);};
+  const buildHeaders=(_token,input)=>new Headers(input);
+  const prepare=(pathname,options={},origin=f.identity.origin)=>f.profile.prepareRequest({origin,token,pathname,options,buildHeaders});
+  for(const [pathname,options,origin] of [
+    [`${base}/browser-fill-context?runId=${randomUUID()}`,{}],
+    [`${base}/browser-fill-context?runId=${binding.runId}&runId=${binding.runId}`,{}],
+    [`/api/agent-secrets/checkout-grants/${randomUUID()}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId})}],
+    [`${base}/consume`,{method:'POST',body:JSON.stringify({runId:randomUUID()})}],
+    [`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId,value:'MUST_NOT_DELIVER'})}],
+    [`${base}/consume?retry=1`,{method:'POST',body:JSON.stringify({runId:binding.runId})}],
+    [`${base}/value`,{}],['/api/agent-secrets/generated-save-context',{}],
+    [`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId})},'https://other.test'],
+  ])await assert.rejects(prepare(pathname,options,origin),/ORIGIN_DENIED/);
+  assert.equal(privateReads,0,'an unknown Secret path/body/Run is denied before credential or signer I/O');
+  const nonces=new Set();
+  for(const [suffix,method,body,tool] of [
+    [`/browser-fill-context?runId=${binding.runId}`,'GET',undefined,'assistant_secret_browser_context'],
+    ['/consume','POST',{runId:binding.runId},'assistant_secret_browser_consume'],
+    ['/browser-fill-outcome','POST',{runId:binding.runId,outcome:'succeeded'},'assistant_secret_browser_outcome'],
+  ]){
+    const result=await prepare(base+suffix,{method,...(body?{body:JSON.stringify(body)}:{}),headers:{cookie:'MUST_NOT_FORWARD',authorization:'Bearer HUMAN'}});
+    assert.equal(result.url.origin,f.identity.origin);assert.equal(result.url.pathname,base+suffix.split('?')[0]);
+    assert.equal(result.headers.get('authorization'),`Bearer ${f.credential}`);assert.equal(result.headers.get('cookie'),null);
+    assert.deepEqual(JSON.parse(result.headers.get('x-trelio-assistant-pass')),{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId});
+    const proof=JSON.parse(result.headers.get('x-trelio-assistant-proof'));
+    assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
+      f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);
+    assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
+    assert.equal(result.options.credentials,'omit');assert.equal(result.options.redirect,'error');
+  }
+  const storage=await f.profile.resolveSecretBrowserStorage({configDirectory:os.tmpdir(),grantId:binding.grantId,runId:binding.runId});
+  assert.ok(storage.profileDirectory.includes('secret-browser'));assert.ok(storage.profileDirectory.includes('digital-assistants'));
+  assert.notEqual(storage.profileDirectory,path.join(os.tmpdir(),'secret-browser','profile'));
+  await assert.rejects(f.profile.resolveSecretBrowserStorage({configDirectory:os.tmpdir(),grantId:randomUUID(),runId:binding.runId}));
+  const ordinary=await workspaceProfileFixture();
+  await assert.rejects(ordinary.profile.resolveSecretBrowserStorage({configDirectory:os.tmpdir(),...binding}));
+  f.close();const before=privateReads;
+  await assert.rejects(prepare(`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId})}),/REVIEW_REQUIRED/);
+  assert.equal(privateReads,before,'closed pass never reads the private device or signer');
 });

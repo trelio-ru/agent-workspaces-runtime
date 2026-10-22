@@ -172,7 +172,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,secretBrowserFill=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -188,7 +188,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,secretBrowserFill,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent}));
   },signal);
@@ -241,6 +241,10 @@ export const createForwardingAssistantMcp = async () => {
     async callTool(name,args,signal) {
       const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:args},{signal});
       if(name!=='continue_assistant_workspace_action' || result?.isError)return result;
+      // These are native metadata/preparation operations, not local command
+      // plans. The next returned secret_browser_fill continuation executes in
+      // the SAME isolated Workspace worker; no second browser executor exists.
+      if(['secret_list','secret_browser_prepare'].includes(args?.operation))return result;
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}
@@ -895,11 +899,13 @@ export const validateAssistantWorkspacePlan = async raw => {
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
-  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run'].includes(action.operation)
+  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run','secret_browser_fill'].includes(action.operation)
     || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
     || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
     || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
     || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  if(action.operation==='secret_browser_fill' && (!action.parameters
+    || Object.keys(action.parameters).sort().join(',')!=='grantId,targetUrl'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
   const invocation=buildTrelioWorkspaceActionInvocation(action);
   if(action.operation==='skill_run'){
@@ -1116,7 +1122,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       if(error?.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && nativeReason)error.reason=nativeReason;
       throw error;
     }
-  });
+  },{secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
+    ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null});
 };
 
 export const runAssistantWorkspaceWorker = async ({input=process.stdin,output=process.stdout,executePlan=executeAssistantWorkspacePlan}={}) => {

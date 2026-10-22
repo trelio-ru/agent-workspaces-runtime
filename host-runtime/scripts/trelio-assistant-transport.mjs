@@ -360,7 +360,7 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,secretBrowserFill=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -375,6 +375,13 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   // scopes ONE invocation of the shared reader, not a reusable company route.
   const encryptedRead=encryptedTaskRead===null?null:await validateAssistantEncryptedTaskRead({
     descriptor:encryptedTaskRead,identity,pass});
+  // A native plan narrows this invocation to ONE prepared private grant.
+  // Structural IDs alone do not authorize it: every HTTP request still repeats
+  // the native grant/holder/pass/device/Run checks before value delivery.
+  if(secretBrowserFill!==null && (!object(secretBrowserFill)
+    || Object.keys(secretBrowserFill).sort().join(',')!=='grantId,runId,workspaceId'
+    || Object.values(secretBrowserFill).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const privateFill=secretBrowserFill===null?null:Object.freeze({...secretBrowserFill});
   let managedEncryptionDevice=null;
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
@@ -434,6 +441,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await assertIdentity();
       return assistantSkillCatalogueDirectory(configDirectory,identity);
     },
+    async resolveSecretBrowserStorage({configDirectory,grantId,runId}){
+      if(!privateFill || privateFill.grantId!==grantId || privateFill.runId!==runId
+        || !path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertIdentity();
+      // Reuse the SAME native/owned browser implementation, but never borrow
+      // its ordinary human fallback profile or another assistant/task's state.
+      const root=path.join(assistantTaskStorageDirectory(configDirectory,{...identity,companyId:pass.companyId,taskId:pass.taskId}),'secret-browser');
+      return {directory:path.join(root,'native'),profileDirectory:path.join(root,'profile')};
+    },
     async resolveInspectionDirectory(configDirectory){
       // Accepted files are shared company content, but the accompanying
       // personal profile belongs to this exact assistant/device/task. Never
@@ -466,6 +482,22 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // general human payload resolver stay closed in a task invocation.
         rewritten='/api/digital-assistants/runtime/encryption/runtime';
         route={proofTool:'assistant_workspace_data_plane_read'};encryptionRuntime=true;
+      }else if(privateFill && requestOrigin===identity.origin
+        && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateFill.grantId}/`)){
+        const base=`/api/agent-secrets/checkout-grants/${privateFill.grantId}`;
+        if(method==='GET' && url.pathname===base+'/browser-fill-context' && options.body===undefined
+          && [...url.searchParams.keys()].length===1 && url.searchParams.get('runId')===privateFill.runId){
+          route={proofTool:'assistant_secret_browser_context'};
+        }else if(method==='POST' && !url.search && ['/consume','/browser-fill-outcome'].some(suffix=>url.pathname===base+suffix)){
+          let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+          const outcome=url.pathname.endsWith('/browser-fill-outcome');
+          if(!object(input) || input.runId!==privateFill.runId
+            || Object.keys(input).some(key=>!(outcome?['runId','outcome','reasonCode']:['runId']).includes(key))
+            || outcome && (typeof input.outcome!=='string' || input.outcome.length>32
+              || input.reasonCode!==undefined && (typeof input.reasonCode!=='string' || input.reasonCode.length>64)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          route={proofTool:outcome?'assistant_secret_browser_outcome':'assistant_secret_browser_consume'};
+        }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=url.pathname;
       }else if(requestOrigin===identity.origin && (url.pathname==='/api/agent-skills/runtime/resolve' && method==='POST'
         || url.pathname==='/api/agent-skills/runtime/package' && method==='GET')){
         // The signed-skill engine is shared. Only its two existing read

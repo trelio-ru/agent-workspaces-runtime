@@ -612,3 +612,8 @@ publication tooling также остаются вне этого публичн
   retire evidence, safe accepted correction, exact file verification and record
   the correction before a valid business outcome. No local history reset or
   replay; source/correction never complete the goal. Same MCP contract.
+
+- Private Secret browser plans reuse the SAME one-use/native browser engine,
+  with original grant/pass/device/Run binding and isolated fallback storage.
+  No human profile, CLI/reveal or uncertain fill replay. Metadata operations
+  return before the local executor: [contract](docs/assistant-scheduler.md#private-secret-browser-use).

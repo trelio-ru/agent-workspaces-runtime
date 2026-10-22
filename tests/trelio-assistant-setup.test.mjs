@@ -657,3 +657,20 @@ test('MAX setup and verification use distinct routes and wait budgets with no fa
     assert.equal(calls,1);assert.equal(contexts,1);assert.ok(reports.every(v=>v.clearedReason===undefined));
   }
 });
+
+
+test('private browser continuation reuses the exact common invocation and refuses browser/executable overrides',async()=>{
+  const {validateAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const base=workspacePlan(),grantId=randomUUID(),targetUrl='https://example.invalid/login';
+  const raw={...base,localAction:{schemaVersion:1,operation:'secret_browser_fill',
+    runIdentity:{workspaceId:base.localAction.parameters.workspaceId,runId:base.localAction.parameters.runId},parameters:{grantId,targetUrl}}};
+  const plan=await validateAssistantWorkspacePlan(raw);
+  assert.equal(plan.localAction.operation,'secret_browser_fill');
+  assert.deepEqual(plan.runIdentity,raw.localAction.runIdentity);
+  for(const extra of [{browser:'chrome'},{executable:'other'},{arguments:[]},{directory:'/foreign'}]){
+    await assert.rejects(validateAssistantWorkspacePlan({...raw,localAction:{...raw.localAction,parameters:{grantId,targetUrl,...extra}}}));
+  }
+  for(const target of ['http://example.invalid/login','https://user:password@example.invalid/login']){
+    await assert.rejects(validateAssistantWorkspacePlan({...raw,localAction:{...raw.localAction,parameters:{grantId,targetUrl:target}}}));
+  }
+});

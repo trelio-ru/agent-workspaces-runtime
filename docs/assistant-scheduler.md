@@ -1249,3 +1249,37 @@ the existing scheduler and commits in that SAME inbox transaction. Task command
 policy still forbids provider ACK. Production original-fenced ACK/read-back,
 unknown conversation intake and real Windows E2E remain required before
 activation. These changes do not enable `businessReady` or prove Windows acceptance. See [schema v6](assistant-inbox.md#known-conversation-dispatch-schema-v6).
+
+### Private Secret browser use
+
+An owner-configured private card uses the SAME card/version/keyring/grant/audit
+and protected browser-fill engines as an ordinary Secret. Only authorization
+and fallback-storage scope differ. No new MCP method, executor, vault, human
+OAuth/session import or plugin restart is introduced.
+
+The existing `continue_assistant_workspace_action` accepts native metadata
+operations under the observed task pass:
+
+- `secret_list`, `parameters={offset?,limit?}`: the assistant's own value-free
+  pool, filtered before paging. This returns metadata directly, not a local plan.
+- `secret_browser_prepare`, `parameters={secretId,runId,steps}`: the ordinary
+  native browser-step validators and active own task Run. Read the empty form
+  first. Copy the returned bridge action unchanged; preparation reads no value
+  into MCP and never chooses a human flag or arbitrary executable.
+- Returned `secret_browser_fill`: fixed grantId/targetUrl and Run identity. The
+  SAME isolated Workspace worker invokes the existing browser-fill command.
+
+The internal HTTP profile admits only that original grant/Run's existing
+preflight, consume and outcome paths. Native one-use proofs, current company
+model/ACL/scopes and pass/device/Run locks apply through commit; no extra URL,
+body field or other Secret route can forward the device credential. Values
+remain in the protected browser process. Its owned fallback profile is isolated
+by assistant/device/task; it never opens the ordinary human fallback profile.
+
+Only value-free preflight and exact idempotent outcome reporting retain their
+existing bounded retries. An uncertain consume/fill is not repeated or switched
+to another browser. A successful fill is not task completion or a persisted
+processing receipt. Input from a task or website never authorizes disclosure,
+new account creation or ownership classification. Native classification,
+generated/save, CLI/reveal, encrypted use and real Windows business E2E remain
+independent gates; this subset does not change businessReady=false.
