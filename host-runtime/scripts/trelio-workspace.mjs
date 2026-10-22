@@ -6195,6 +6195,10 @@ export const hydrateAgentCompanyEncryptedJson = async ({
   token,
   companyEncryption,
   signal,
+  // Trusted native snapshot adapters may supply the exact bundled ciphertext.
+  // Decryption/field binding stay in this SAME hydrator; a restricted assistant
+  // must never gain the human company's general payload-resolve capability.
+  resolvePayloads,
 }) => {
   if (!companyEncryption) return value;
   const references = collectAgentEncryptedReferences(value);
@@ -6207,7 +6211,7 @@ export const hydrateAgentCompanyEncryptedJson = async ({
   // Company mirrors can contain thousands of protected leaves, so the bridge
   // batches exact ids without ever sending plaintext values or search terms.
   for (let offset = 0; offset < entityIds.length; offset += 250) {
-    const response = await readJsonResponse(await request(
+    const response = resolvePayloads ? await resolvePayloads(entityIds.slice(offset, offset + 250)) : await readJsonResponse(await request(
       resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
       token,
       "/api/agent-workspaces/encryption/payloads/resolve",

@@ -5518,7 +5518,7 @@ const getTaskSectionsFromMirror = (mirror, rawInput) => {
   };
 };
 
-const getTaskSectionsFromProvider = async ({
+export const getTaskSectionsFromProvider = async ({
   origin,
   token,
   companyEncryption,
@@ -5526,6 +5526,10 @@ const getTaskSectionsFromProvider = async ({
   rawInput,
   signal,
   fresh = false,
+  requestJson = async (pathname, body) => readJson(await request(origin, token, pathname, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
+  })),
+  hydrate = value => hydrateAgentCompanyEncryptedJson({ value, origin, token, companyEncryption, signal }),
 }) => {
   const record = fresh ? { projectSlug: rawInput.projectSlug, number: Number(rawInput.taskNumber) }
     : getTaskRecordFromMirror(mirror, rawInput);
@@ -5553,30 +5557,16 @@ const getTaskSectionsFromProvider = async ({
         limit: Math.max(1, Math.min(50, Math.trunc(Number(rawInput.commentsPage.limit) || 50))),
       }
     : undefined;
-  const response = await request(
-    origin,
-    token,
+  const rawProjection = await requestJson(
     `/api/agent-workspaces/company-context/${encodeURIComponent(mirror.company.slug)}`
       + `/tasks/${encodeURIComponent(record.projectSlug)}/${record.number}/sections/read`,
     {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
         ...(fresh ? {} : { expectedRevision: record.revisionToken }),
         sections,
         ...(commentsPage ? { commentsPage } : {}),
-      }),
-      signal,
     },
   );
-  const rawProjection = await readJson(response);
-  const projection = await hydrateAgentCompanyEncryptedJson({
-    value: rawProjection,
-    origin,
-    token,
-    companyEncryption,
-    signal,
-  });
+  const projection = await hydrate(rawProjection);
   return {
     schemaVersion: 3,
     locator: {

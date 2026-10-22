@@ -960,6 +960,33 @@ execution stays closed until its independent device data plane is implemented.
 
 ## Shared Workspace HTTP profile
 
+### Exact encrypted task reads
+
+The authenticated native refusal `ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED` carries
+only a closed `localRead` descriptor for `get_task`, instruction pages or selected
+sections. The SAME current signed MCP worker intercepts it under the original
+deadline; no new model tool, continuation, stable shell or restart is needed.
+Old workers retain an explicit refusal, never false loaded authority.
+
+The descriptor is matched to the protected assistant/device/company/task/pass.
+The common fixed origin allowlist admits the native-selected content origin
+only for its exact task POST read path. Key runtime GET stays on the canonical
+origin through the existing managed registry protocol; registration, grants,
+company mirrors and the general human payload resolver remain closed. Backend
+native MVCC/read ACL selects ciphertext refs, with a 4096-ref/32-MiB bound and
+fresh recipient-envelope/pass authority before send. No caller payload IDs,
+body, keys or proof appear in the descriptor.
+
+The common `ensureCompanyEncryptionContext` opens the SAME managed OS identity
+and existing company envelope. Its shared hydrator receives a trusted process-only
+resolver callback over that exact bundle: company/scope/epoch/entity AAD must
+match and missing/tampered bytes refuse. Core/page projection uses the SAME
+schema-v3 reader/result budget; sections use the SAME deferred-section builder.
+The live pass is checked again after local hydration. No content is saved in
+SQLite, a company mirror or a second cache/vault. Other encrypted Workspace
+writes/files/source/Secret/outcome adapters remain independently gated; this
+read subset does not establish `businessReady` or Windows business E2E.
+
 ### Managed encryption identity ownership
 
 The common `ensureCompanyEncryptionContext` chooses a managed profile's internal
@@ -978,8 +1005,8 @@ response reuses the same identity. Corrupt, partial or unavailable state does
 not regenerate keys. The random wrapping input never enters a form, model,
 environment, argv, file or HTTP request; the company scope private key is not
 persisted in this slot. No new vault, crypto implementation or content store
-is introduced. This is an identity prerequisite only: current backend route
-and content fences still refuse assistant encrypted execution. It neither
+is introduced. This is an identity prerequisite only: exact task reads need the
+separate native pass/recipient adapter above; other encrypted routes stay closed. It neither
 grants a company envelope nor establishes encrypted/business readiness.
 
 The current signed worker advertises `prepare_assistant_company_encryption` with
@@ -1008,8 +1035,8 @@ round-trip, never envelope presence alone. It never contains JWK, ciphertext,
 private/unlock material or a decrypted scope, and always returns
 `businessReady:false`. The ordinary company owner separately
 grants company-key access through the existing control plane; assistant ownership
-does not supply that role. Backend full encrypted task/source data-plane gates
-remain closed independently of this setup status.
+does not supply that role. Full encrypted task/source execution remains gated
+independently of this setup status and the read-only exact-task subset.
 
 | Local setup data | Plain company | Encrypted company |
 | --- | --- | --- |

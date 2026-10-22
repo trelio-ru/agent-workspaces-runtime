@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
-import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal } from '../host-runtime/scripts/trelio-company-encryption.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -738,8 +738,8 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../ho
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async () => {
-  const identity={schemaVersion:1,origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+const workspaceProfileFixture = async ({encryptedTool=null}={}) => {
+  const identity={schemaVersion:1,origin:encryptedTool?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
   const keys=generateKeyPairSync('ed25519'), store=memoryStore(), credential='tda_'+randomBytes(32).toString('base64url');
@@ -751,10 +751,37 @@ const workspaceProfileFixture = async () => {
   let active=pass, currentIdentity=identity, live=true, contacts=0;
   const host={readIdentity:async()=>currentIdentity,readActivePass:async()=>active};
   const client={readTaskPass:async()=>{contacts++;return {...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};}};
-  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
-  return {identity,pass,keys,store,credential,runtime,profile,contacts:()=>contacts,
+  const locator={companySlug:'encrypted',projectSlug:`e-${randomUUID()}`,taskNumber:30};
+  const descriptor=encryptedTool?{schemaVersion:1,nativeTool:encryptedTool,arguments:encryptedTool==='get_task_sections'
+    ? {...locator,sections:['comments']} : locator,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
+    assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'}:null;
+  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,
+    lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
+  return {identity,pass,keys,store,credential,runtime,profile,descriptor,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
 };
+
+test('native encrypted refusal is consumed once by the trusted materializer under the original MCP deadline',async()=>{
+  const f=await workspaceProfileFixture({encryptedTool:'get_task'});let writes=0,hydrations=0,mode='valid';
+  const descriptor=f.descriptor;
+  const base={...f.identity,store:f.store,httpRequest:async input=>{
+    const response=result=>({sessionId:'encrypted-read',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+    if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    assert.equal(input.payload.method,'tools/call');writes++;
+    return response({isError:true,content:[{type:'text',text:'ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED'}],
+      structuredContent:{code:'ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED',localRead:mode==='foreign'
+        ? {...descriptor,deviceId:randomUUID()}:mode==='origin'?{...descriptor,requestOrigin:'https://foreign.test'}:descriptor}});
+  }};
+  await assert.rejects(createAssistantMcpClient(base).callTool('get_task',{}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+  const client=createAssistantMcpClient({...base,materializeEncryptedTask:async({descriptor:received,signal})=>{
+    hydrations++;assert.deepEqual(received,descriptor);assert.ok(signal);signal.throwIfAborted();
+    return {structuredContent:{schemaVersion:3},content:[{type:'text',text:'hydrated'}]};
+  }});
+  assert.equal((await client.callTool('get_task',{})).content[0].text,'hydrated');
+  for(const failure of ['foreign','origin']){mode=failure;await assert.rejects(client.callTool('get_task',{}));}
+  assert.equal(writes,4,'one call per explicit request, no automatic MCP replay');assert.equal(hydrations,1);
+});
 
 test('managed encryption identity is scoped to the live pass and cannot select another company or human device', async()=>{
   const f=await workspaceProfileFixture();
@@ -768,6 +795,79 @@ test('managed encryption identity is scoped to the live pass and cannot select a
   assert.equal(again.fingerprint,device.fingerprint);
   f.close();
   await assert.rejects(select({origin:f.identity.origin,companyId:f.pass.companyId}),/PASS_REVIEW_REQUIRED/);
+});
+
+test('encrypted task reads compose the SAME managed keys, HPKE, native exact projection and selected ciphertext without a mirror',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  for(const nativeTool of ['get_task','get_task_sections']){
+    const f=await workspaceProfileFixture({encryptedTool:nativeTool});
+    const descriptor=f.profile.encryptedTaskRead,scopeId=randomUUID(),cryptoDeviceId=randomUUID();
+    const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
+    const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+    const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+    const aad={suite:'trelio-e2ee-v1',companyId:f.pass.companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:cryptoDeviceId};
+    const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+      plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+    const envelope={id:randomUUID(),...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+    const taskEntity=randomUUID(),projectId=descriptor.arguments.projectSlug.slice(2);
+    const rows=await Promise.all([taskEntity,projectId].map(async entityId=>{
+      const header={companyId:f.pass.companyId,scopeId,scopeEpoch:1,entityType:'task',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+      return {...header,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:header,
+        payload:{values:{title:'SYNTHETIC_TITLE',rules:'SYNTHETIC_RULE',comment:'SYNTHETIC_COMMENT',slug:'synthetic-project'}}})};
+    }));
+    const marker=field=>buildCompanyEncryptedTextMarker(taskEntity,field);
+    const company={id:f.pass.companyId,slug:'encrypted',name:'Synthetic'};
+    const project={id:projectId,slug:descriptor.arguments.projectSlug,name:'Synthetic project'};
+    const raw=nativeTool==='get_task_sections'?{taskRevision:{id:f.pass.taskId,updatedAt:null},sections:{comments:{comments:[{bodyText:marker('comment')}]}}}
+      : {schemaVersion:1,company,viewer:{memberId:randomUUID(),companyRole:'user'},viewerGroupIds:[],projects:[project],
+        tasks:[{id:f.pass.taskId,projectId,projectSlug:project.slug,number:30,revisionToken:'synthetic:1',
+          payload:{company,project,task:{id:f.pass.taskId,title:marker('title'),status:{code:'active',name:'Active'},participants:[],controls:[]}}}],
+        instructions:{company:{compiledMarkdown:marker('rules')},projects:[],userProfile:null},workspaces:[],workspaceEntries:[],contextDocuments:[]};
+    const previous=globalThis.fetch;let mode='valid',contentReads=0;const paths=[];
+    globalThis.fetch=async(url,options)=>{
+      url=new URL(url);paths.push(url.pathname);
+      assert.equal(options.headers.get('authorization'),`Bearer ${f.credential}`);
+      assert.equal(options.headers.get('cookie'),null);assert.equal(options.redirect,'error');
+      const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+      if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
+        assert.equal(url.origin,f.identity.origin);assert.equal(options.method??'GET','GET');
+        assert.equal(options.headers.get('x-trelio-assistant-encryption-protocol'),'1');
+        const found=url.searchParams.has('fingerprint');
+        const selected=structuredClone(envelope);if(mode==='recipient')selected.recipientId=randomUUID();
+        return json({state:'encrypted',suite:'trelio-e2ee-v1',company,viewer:{userId:f.identity.assistantId},
+          accessState:found?'ready':'device_required',device:found?{id:cryptoDeviceId,fingerprint:managed.fingerprint}:null,
+          scope:found?{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk}:null,envelope:found?selected:null});
+      }
+      assert.equal(url.origin,'https://e2ee.trelio.ru');assert.equal(options.method,'POST');contentReads++;
+      assert.equal(url.pathname,descriptor.paths[0].replace('/api/agent-workspaces','/api/digital-assistants/runtime/workspace'));
+      assert.equal(JSON.parse(options.body).recipientDeviceId,cryptoDeviceId);
+      const selected=structuredClone(rows);
+      if(mode==='aad')selected[0].aad.companyId=randomUUID();
+      if(mode==='ciphertext')selected[0].ciphertext='AAAA';
+      if(mode==='missing')selected.splice(0,1);
+      if(mode==='late-close')f.close();
+      return json({schemaVersion:1,context:raw,encryptedPayloads:selected});
+    };
+    const run=()=>withWorkspaceExecutionProfile(f.profile,()=>materializeAssistantEncryptedTask({origin:f.identity.origin,descriptor,
+      assertCurrent:f.profile.assertEncryptedTaskReadCurrent}));
+    try{
+      const result=await run();assert.notEqual(result.isError,true);
+      const rendered=JSON.stringify(result);
+      assert.match(rendered,nativeTool==='get_task'?/SYNTHETIC_TITLE/:/SYNTHETIC_COMMENT/);
+      if(nativeTool==='get_task')assert.match(rendered,/SYNTHETIC_RULE/);
+      assert.doesNotMatch(rendered,/~e1:|wrappedPrivateBundle|scopePrivateEncryptionJwk|hpkeEnc|ciphertextSha256/);
+      assert.equal(paths.some(path=>path.includes('manifest')||path.includes('payloads/resolve')),false);
+      for(const failure of ['aad','ciphertext','missing','recipient']){
+        mode=failure;const before=contentReads;await assert.rejects(run());
+        if(mode==='recipient')assert.equal(contentReads,before,'wrong envelope refuses before content I/O');
+      }
+      mode='late-close';await assert.rejects(run(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    }finally{globalThis.fetch=previous;}
+    await assert.rejects(validateAssistantEncryptedTaskRead({identity:f.identity,pass:f.pass,
+      descriptor:{...f.descriptor,passId:randomUUID()}}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+    await assert.rejects(validateAssistantEncryptedTaskRead({identity:f.identity,
+      descriptor:{...f.descriptor,requestOrigin:'https://arbitrary.test'}}),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+  }
 });
 
 test('common encryption refuses a managed profile without its own keys after native discovery and before a human unlock',async()=>{

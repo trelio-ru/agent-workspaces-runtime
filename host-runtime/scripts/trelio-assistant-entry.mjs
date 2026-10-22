@@ -172,7 +172,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -188,8 +188,9 @@ export const withProductionAssistantWorkspace = async (action, {signal}={}) => {
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,lockDirectory:path.join(directory,'runtime-locks')});
-    return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host}));
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,lockDirectory:path.join(directory,'runtime-locks')});
+    return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
+      encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent}));
   },signal);
 };
 
@@ -209,6 +210,14 @@ export const createProductionAssistantMcp = async () => {
   const identity = await host.readIdentity();
   if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
   return createAssistantMcpClient({ ...identity, store,
+    materializeEncryptedTask: ({descriptor,signal}) => withProductionAssistantWorkspace(async current => {
+      if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
+        throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+      }
+      const {materializeAssistantEncryptedTask}=await import('./trelio-assistant-transport.mjs');
+      return materializeAssistantEncryptedTask({origin:identity.origin,descriptor:current.encryptedTaskRead,signal,
+        assertCurrent:current.assertEncryptedTaskReadCurrent});
+    },{signal,encryptedTaskRead:descriptor}),
     materializeAttachment: ({result,attachmentId,signal}) => withProductionAssistantWorkspace(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});

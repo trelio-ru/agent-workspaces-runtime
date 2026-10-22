@@ -439,6 +439,9 @@ publication tooling также остаются вне этого публичн
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+  Exact encrypted task reads reuse the SAME schema-v3/MVCC reader and hydrator,
+  with native-selected ciphertext bundles only; no general payload resolver or
+  human key fallback. Other encrypted adapters retain their independent gates.
   Managed setup uses that SAME registration/read-back, OS store and local scope
   opening/TRELIOE1 self-test; key_verified grants no content execution. See
   [identity ownership](docs/assistant-scheduler.md#managed-encryption-identity-ownership).
