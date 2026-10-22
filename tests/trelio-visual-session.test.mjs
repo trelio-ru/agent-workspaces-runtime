@@ -5,10 +5,40 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import vm from 'node:vm';
 import { runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-node.mjs';
+import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
+  processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
+
+test('synthetic startup evidence retains closed native failure categories and drops arbitrary error/owner data',async()=>{
+  const source=await fs.readFile(new URL('../host-runtime/scripts/trelio-visual-worker.mjs',import.meta.url),'utf8');
+  const start=source.indexOf('function fixtureDiagnostic(value) {'),end=source.indexOf('\nasync function stop()',start);
+  assert.ok(start>=0&&end>start);
+  const snapshots=[];
+  const scope={fixtureOnly:true,fixtureEvidence:[],fixtureWrites:Promise.resolve(),
+    PROCESS_DIAGNOSTIC_CODES,ProcessDiagnosticError,parseProcessDiagnostic,processDiagnosticCauseCode,path,owner:{directory:os.tmpdir()},
+    writePrivateJsonFile:async(_file,value)=>snapshots.push(JSON.parse(JSON.stringify(value)))};
+  vm.createContext(scope);vm.runInContext(source.slice(start,end),scope);
+  scope.input={stage:'startup_failed',startupPhase:'owner_publish',failureCode:'TRELIO_WINDOWS_PRIVATE_ACL_FAILED',
+    causeCode:'EACCES',message:'SYNTHETIC PRIVATE MESSAGE',stack:'PRIVATE STACK',token:'PRIVATE BEARER',owner:{token:'PRIVATE'}};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.deepEqual(snapshots.at(-1),{evidence:[{stage:'startup_failed',startupPhase:'owner_publish',
+    failureCode:'TRELIO_WINDOWS_PRIVATE_ACL_FAILED',causeCode:'EACCES'}]});
+  scope.input={stage:'startup_failed',startupPhase:'PRIVATE',failureCode:'PRIVATE',causeCode:'PRIVATE'};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'startup_failed'});
+  scope.input={stage:'startup_failed',error:new ProcessDiagnosticError('TRELIO_WINDOWS_PRIVATE_ACL_FAILED',
+    'SYNTHETIC PRIVATE MESSAGE',{operation:'windows_acl.dacl_write',causeCode:'EACCES',path:'PRIVATE'})};
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.deepEqual(snapshots.at(-1).evidence.at(-1),{stage:'startup_failed',process:{
+    failureCode:'TRELIO_WINDOWS_PRIVATE_ACL_FAILED',operation:'windows_acl.dacl_write',causeCode:'EACCES'}});
+  scope.fixtureOnly=false;const count=snapshots.length;
+  vm.runInContext('fixtureDiagnostic(input)',scope);await scope.fixtureWrites;
+  assert.equal(snapshots.length,count,'ordinary production never writes fixture evidence');
+});
 
 const signingPolicy = compatible => ({ status: 0, stdout: compatible
   ? '<key>com.apple.security.cs.disable-library-validation</key>\n<true/>' : '',

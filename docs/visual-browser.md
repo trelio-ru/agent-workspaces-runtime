@@ -403,9 +403,14 @@ ready, explicit logout без восстановления входа и crash �
 Native OS vault и detached worker проходят отдельно. CI обязателен на macOS,
 Windows x64/ARM64 и desktop Linux; local VM не заменяет hosted gate.
 Detached session/authentication fixtures сохраняют исходный assertion при ошибке shutdown и всегда
-закрывает свой HTTP listener и keyring handle. Если claim не снят, private
+закрывают свой HTTP listener и keyring handle. Если claim не снят, private
 профиль не удаляется. Закрытые fixture stages различают ожидание input/manual,
 остановку browser, snapshot и снятие claim, без bearer/PID/path/native output.
+Ранний startup отказ дополнительно сохраняет только закрытый этап control/listen/
+owner publish/dependency/browser и разрешённые common process category/operation/
+timeout/errno. Используется общий diagnostic parser; Error message/stack и owner
+descriptor в этот файл не попадают. Это свидетельство причины, не разрешение
+повторить действие, продлить lease или убрать обязательный native gate.
 
 В maintainer live smoke 2026-10-19 через extension механизм открыты Avito и
 первое объявление, прочитано описание, выполнены scroll, русский поисковый

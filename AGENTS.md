@@ -272,6 +272,8 @@ publication tooling также остаются вне этого публичн
   Both detached session/authentication fixtures preserve the original assertion,
   always close their synthetic listener/keyring handle, and never erase an active
   claim/profile. Assertions never print the bearer-bearing owner descriptor.
+  Synthetic startup failures retain only closed startup phases and common native
+  process categories; messages/paths/owner data never enter fixture evidence.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.

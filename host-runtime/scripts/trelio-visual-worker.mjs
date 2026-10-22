@@ -8,6 +8,8 @@ import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { ExtensionVisualBrowser } from './trelio-visual-extension-browser.mjs';
 import { visualStatus } from './trelio-visual-result.mjs';
 import { createVisualControlServer } from './trelio-visual-session.mjs';
+import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
+  processDiagnosticCauseCode } from './trelio-process-diagnostics.mjs';
 
 // This is a host-owned entrypoint, not a provider-selectable executable. Only
 // the private descriptor path enters argv; token/session values stay in the
@@ -16,6 +18,7 @@ const file = process.argv[2];
 let engine, server, timer, owner, current = visualStatus('preparing'), stopping = false;
 const startupAbort = new AbortController();
 let startup;
+let startupPhase = 'owner_read';
 let fixtureOnly = false, fixtureWrites = Promise.resolve();
 const fixtureEvidence = [];
 function fixtureDiagnostic(value) {
@@ -31,6 +34,17 @@ function fixtureDiagnostic(value) {
   for (const key of ['exitCode', 'osCryptErrors', 'cookieErrors', 'sqliteErrors', 'networkSandboxErrors']) if (Number.isSafeInteger(value[key])) record[key] = value[key];
   if (['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV', null].includes(value.signal)) record.signal = value.signal;
   if (['accepted', 'refused', 'not_found', 'helper_failed'].includes(value.state)) record.state = value.state;
+  // Reuse the common closed subprocess categories. Never persist an Error,
+  // message, stack, filesystem path, descriptor or arbitrary cause string.
+  if (['owner_read','policy','control_server','control_listen','owner_publish','dependencies','browser'].includes(value.startupPhase)) record.startupPhase = value.startupPhase;
+  if (PROCESS_DIAGNOSTIC_CODES.includes(value.failureCode)) record.failureCode = value.failureCode;
+  if (value.causeCode === 'UNKNOWN' || processDiagnosticCauseCode({code:value.causeCode}) === value.causeCode) record.causeCode = value.causeCode;
+  if (value.error instanceof ProcessDiagnosticError) {
+    // The SAME canonical parser strips even a typed error's message before
+    // copying its allowed native operation/phase/timeout/cause dimensions.
+    const closed = parseProcessDiagnostic('Ошибка: ' + JSON.stringify(value.error.toJSON()));
+    if (closed) record.process = closed;
+  }
   fixtureEvidence.push(record); if (fixtureEvidence.length > 32) fixtureEvidence.shift();
   const snapshot = fixtureEvidence.slice();
   fixtureWrites = fixtureWrites.then(() => writePrivateJsonFile(path.join(owner.directory, 'fixture-diagnostic.json'), { evidence: snapshot })).catch(() => {});
@@ -59,6 +73,7 @@ async function stop() {
 try {
   owner = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
   if (owner.schemaVersion !== 1 || !/^[0-9a-f]{64}$/u.test(owner.token) || !Number.isSafeInteger(owner.deadlineAt) || owner.deadlineAt <= Date.now()) throw new Error('invalid_input');
+  startupPhase = 'policy';
   const policy = createVisualOriginPolicy(owner);
   fixtureOnly = policy.fixtureOnly === true;
   timer = setTimeout(() => { void stop(); }, owner.deadlineAt - Date.now());
@@ -79,10 +94,14 @@ try {
     if (!engine) return current;
     return engine.call(operation, args);
   }
+  startupPhase = 'control_server';
   server = createVisualControlServer({ token: owner.token, dispatch });
   server.requestTimeout = 55_000; server.headersTimeout = 5000;
+  startupPhase = 'control_listen';
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  startupPhase = 'owner_publish';
   await writePrivateJsonFile(file, { ...owner, pid: process.pid, port: server.address().port });
+  startupPhase = 'dependencies';
   fixtureDiagnostic({ stage: 'startup_dependencies' });
   startup = loadVisualDependencies({ signal: startupAbort.signal });
   const dependencies = await startup;
@@ -91,10 +110,12 @@ try {
   fixtureDiagnostic({ stage: 'startup_browser' });
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.
+  startupPhase = 'browser';
   engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, authentication: owner.authentication || null, observationMode: owner.observationMode || 'image', attachmentDownloads: owner.attachmentDownloads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   current = await engine.call(owner.operation, owner.args);
 } catch (error) {
-  fixtureDiagnostic({ stage: 'startup_failed' });
+  fixtureDiagnostic({ stage: 'startup_failed', startupPhase, error, failureCode:error.diagnosticCode,
+    causeCode:processDiagnosticCauseCode(error) });
   current = visualStatus('error', /^VISUAL_(?:BOOTSTRAP|DEPENDENCIES)/u.test(error.code || '') ? 'bootstrap_failed' : 'operation_failed');
   // Preserve a failed startup for an explicit close/status decision. Do not
   // retry installation, login or the initial action from another invocation.
