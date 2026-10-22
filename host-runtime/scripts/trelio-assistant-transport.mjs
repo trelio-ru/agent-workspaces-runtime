@@ -329,18 +329,29 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
       return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store',signal}};
     },
   });
-  const context=await common.withWorkspaceExecutionProfile(profile,async()=>common.ensureCompanyEncryptionContext({
-    origin,token:handle,company:{id:companyId,slug:companySlug},registrationOnly:true,
-    collectEncryptionKey:async()=>fail('ASSISTANT_WORKSPACE_PROFILE_DENIED'),
-  }));
+  const context=await common.withWorkspaceExecutionProfile(profile,async()=>{
+    const opened=await common.ensureCompanyEncryptionContext({
+      origin,token:handle,company:{id:companyId,slug:companySlug},allowPendingRegistration:true,
+      collectEncryptionKey:async()=>fail('ASSISTANT_WORKSPACE_PROFILE_DENIED'),
+    });
+    if(opened?.scopePrivateEncryptionKey){
+      // Envelope presence alone proves neither key opening nor a matching
+      // scope key. Reuse the ordinary 64-byte TRELIOE1 diagnostic; its exact
+      // private staging is removed before success and no business file exists.
+      await assertCurrent();
+      await common.runCompanyEncryptionSelfTest(opened);
+    }
+    return opened;
+  });
   await assertCurrent();
   if(context===null)return Object.freeze({schemaVersion:1,state:'not_required',companyId,businessReady:false});
   const runtime=context.runtime;
   if(runtime.company.id!==companyId||runtime.viewer?.userId!==assistantId||runtime.device?.fingerprint!==owned?.fingerprint
     ||!UUID.test(runtime.device?.id??'')||!['access_pending','ready'].includes(runtime.accessState))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-  // An envelope on the server is NOT verified/decrypted local scope access or
-  // encrypted business readiness. Do not pass the envelope/key/JWK into MCP.
-  return Object.freeze({schemaVersion:1,state:runtime.accessState==='ready'?'envelope_available':'awaiting_company_key',
+  // Only the completed common round-trip permits key_verified. This is local
+  // key readiness, never business execution or a reusable content capability.
+  // The envelope, opened key and private/JWK fields stay outside MCP/state.
+  return Object.freeze({schemaVersion:1,state:runtime.accessState==='ready'?'key_verified':'awaiting_company_key',
     companyId,cryptoDeviceId:runtime.device.id,fingerprint:owned.fingerprint,businessReady:false,
     settingsUrl:`${origin}/${encodeURIComponent(runtime.company.slug)}/settings/encryption/`});
 };

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID, randomBytes, generateKeyPairSync, verify } from 'node:crypto';
+import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto } from 'node:crypto';
+import fs from 'node:fs/promises';
 import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
-import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord } from '../host-runtime/scripts/trelio-company-encryption.mjs';
+import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -42,9 +43,8 @@ test('managed encryption enrollment uses common registration, persists before HT
     const found=registered&&url.searchParams.get('fingerprint')===registered.fingerprint;
     return json({state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'encrypted',name:'PUBLIC_NAME'},
       viewer:{userId:identity.assistantId},device:found?{id:cryptoDeviceId,fingerprint:registered.fingerprint}:null,
-      // A public envelope is not decrypted/verified by enrollment. If this mode
-      // fell through to scope-key opening, these deliberately invalid fixture
-      // bytes would fail, rather than silently granting business access.
+      // These invalid bytes used to be sufficient for envelope_available.
+      // Current setup must attempt real key opening and refuse them.
       scope:found?{id:randomUUID(),epoch:1}:null,envelope:envelopeAvailable?{ciphertext:'CIPHERTEXT_CANARY'}:null,
       accessState:found?envelopeAvailable?'ready':'access_pending':url.searchParams.has('fingerprint')?'registration_required':'device_required'});
   };
@@ -55,15 +55,88 @@ test('managed encryption enrollment uses common registration, persists before HT
     assert.equal(recovered.state,'awaiting_company_key');assert.equal(recovered.cryptoDeviceId,cryptoDeviceId);
     assert.equal(recovered.fingerprint,registered.fingerprint);assert.equal(recovered.businessReady,false);
     envelopeAvailable=true;
-    const current=await prepareAssistantCompanyEncryption(input);assert.equal(current.state,'envelope_available');
-    assert.doesNotMatch(JSON.stringify(current),/CIPHERTEXT_CANARY|private|trustedUnlockKey|wrapped|publicSigningJwk/);
-    assert.equal(current.businessReady,false);assert.equal(posts,1);
+    await assert.rejects(prepareAssistantCompanyEncryption(input));assert.equal(posts,1);
     available=false;const before=gets;
     await assert.rejects(prepareAssistantCompanyEncryption(input),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
     assert.equal(gets,before,'removed company authority fails before the encryption HTTP/key path');
     available=true;selectedIdentity={...identity,deviceId:randomUUID()};
     await assert.rejects(prepareAssistantCompanyEncryption(input),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
     assert.equal(posts,1);
+  }finally{globalThis.fetch=previousFetch;}
+});
+
+test('managed key readiness opens a real recipient envelope and verifies the common container without persisting scope keys',async()=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-key-readiness-'));
+  const previousTmp=Object.fromEntries(['TMPDIR','TMP','TEMP'].map(key=>[key,process.env[key]]));
+  for(const key of Object.keys(previousTmp))process.env[key]=root;
+  const identity={schemaVersion:1,origin:'https://key-ready.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID();
+  const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),store=memoryStore();
+  const keyPair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const scopePublicEncryptionJwk=await webcrypto.subtle.exportKey('jwk',keyPair.publicKey);
+  const scopePrivateEncryptionJwk=await webcrypto.subtle.exportKey('jwk',keyPair.privateKey);
+  await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},
+    {assistantId:identity.assistantId,deviceId:identity.deviceId,credential:`tda_${'k'.repeat(43)}`,expiresAt:1});
+  let registered=null,envelope=null,mode='valid',posts=0,available=true;
+  const input={identity,host:{readIdentity:async()=>identity},client:{companies:async()=>available?[{companyId,encryptionState:'encrypted'}]:[]},
+    store,companyId,companySlug:'encrypted',lockDirectory:root,lock:async(_file,action)=>action()};
+  const previousFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);assert.equal(url.origin,identity.origin);
+    const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/devices'){
+      posts++;registered=JSON.parse(options.body);
+      const aad={suite:'trelio-e2ee-v1',companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:cryptoDeviceId};
+      const plaintext=Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk}));
+      try{
+        const sealed=await hpkeSeal({recipientPublicEncryptionJwk:registered.publicEncryptionJwk,plaintext,aad});
+        envelope={recipientType:'agent_device',recipientId:cryptoDeviceId,scopeId,scopeEpoch:1,
+          hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+      }finally{plaintext.fill(0);}
+      return json({device:{id:cryptoDeviceId,fingerprint:registered.fingerprint}});
+    }
+    assert.equal(url.pathname,'/api/digital-assistants/runtime/encryption/runtime');
+    const found=registered&&url.searchParams.get('fingerprint')===registered.fingerprint;
+    let selected=found?structuredClone(envelope):null;
+    if(found&&mode==='recipient')selected.recipientId=randomUUID();
+    if(found&&mode==='epoch')selected.scopeEpoch=2;
+    if(found&&mode==='ciphertext'){
+      const bytes=Buffer.from(selected.ciphertext,'base64url');bytes[0]^=1;selected.ciphertext=bytes.toString('base64url');
+    }
+    if(found&&mode==='revoke')available=false;
+    return json({state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'encrypted',name:'PUBLIC'},
+      viewer:{userId:identity.assistantId},device:found?{id:cryptoDeviceId,fingerprint:registered.fingerprint}:null,
+      scope:found?{id:scopeId,epoch:1,publicEncryptionJwk:mode==='public_key'?registered.publicEncryptionJwk:scopePublicEncryptionJwk}:null,
+      envelope:selected,accessState:found?'ready':url.searchParams.has('fingerprint')?'registration_required':'device_required'});
+  };
+  try{
+    const ready=await prepareAssistantCompanyEncryption(input);
+    assert.equal(ready.state,'key_verified');assert.equal(ready.businessReady,false);assert.equal(posts,1);
+    assert.deepEqual(await fs.readdir(root),[],'the common self-test removes its exact private canary staging');
+    const persisted=await store.get({origin:identity.origin,kind:'company_encryption',id:companyId,deviceId:identity.deviceId});
+    for(const value of [ready,persisted]){
+      assert.equal(JSON.stringify(value).includes(scopePrivateEncryptionJwk.d),false,'scope private key never enters result or OS device slot');
+    }
+    for(mode of ['recipient','epoch','ciphertext','public_key','revoke']){
+      await assert.rejects(prepareAssistantCompanyEncryption(input));
+      assert.equal(posts,1,'malformed keys or revoked authority never reset/re-register the persisted device');
+      assert.deepEqual(await fs.readdir(root),[],'failed opening/self-test retains no canary files');
+    }
+  }finally{
+    globalThis.fetch=previousFetch;
+    for(const [key,value] of Object.entries(previousTmp)){if(value===undefined)delete process.env[key];else process.env[key]=value;}
+    await fs.rm(root,{recursive:true,force:true});
+  }
+});
+
+test('pending registration mode is not available to a human or a caller-provided setup flag',async()=>{
+  const previousFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async()=>{calls++;throw new Error('must not reach HTTP');};
+  try{
+    for(const options of [{allowPendingRegistration:true},{registrationOnly:true},{allowPendingRegistration:'yes'}]){
+      await assert.rejects(ensureCompanyEncryptionContext({origin:'https://key-ready.test',token:'synthetic',
+        company:{id:randomUUID(),slug:'encrypted'},...options}),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+    }
+    assert.equal(calls,0);
   }finally{globalThis.fetch=previousFetch;}
 });
 

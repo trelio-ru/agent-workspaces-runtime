@@ -148,6 +148,7 @@ test('managed encryption setup is a current-worker tool with exact company locat
   assert.ok(reports.every(row=>row.clearedReason===undefined),'public registration cannot prove hook trust or ChatGPT login');
   const before=contexts;
   for(const args of [{companyId,companySlug,ownerUserId:randomUUID()},{companyId,companySlug,registrationOnly:false},
+    {companyId,companySlug,allowPendingRegistration:true},
     {companyId,companySlug,origin:'https://foreign.test'},{companyId:'bad',companySlug},{companyId,companySlug:'bad\nslug'}])
     await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:args},dependencies),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
   assert.equal(contexts,before,'extra authorities and malformed input refuse before private I/O');

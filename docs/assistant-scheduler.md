@@ -988,9 +988,11 @@ catalogue, facade and native invocation; no stable shell/hook definition or Code
 restart is added. Exact input is validated before private context, and metadata
 success cannot clear hook-review or ChatGPT-login latches.
 
-The enrollment-only async profile reuses `ensureCompanyEncryptionContext` and
-its native public registration/signature/read-back, stopping BEFORE scope-key
-opening. The common workflow validates the selected company UUID and managed
+The managed setup async profile reuses `ensureCompanyEncryptionContext` and
+its native public registration/signature/read-back. Missing company access
+returns pending registration; a ready recipient envelope is opened by the SAME
+scope-key codec and checked with the SAME local TRELIOE1 round-trip self-test.
+The common workflow validates the selected company UUID and managed
 subject before key creation. Fresh protected host identity and device company
 inventory checks bracket private I/O and every request under one 25-second
 budget. Only `/encryption/runtime` GET and `/encryption/devices` POST are rewritten
@@ -1000,13 +1002,27 @@ alternate origin, arbitrary fingerprint or human credential is admitted.
 A lost registration response preserves the OS record; the next explicit attempt
 reads that SAME fingerprint before deciding whether native registration is
 needed. The setup result projects only public device ID/fingerprint, canonical
-settings link and `awaiting_company_key` or `envelope_available` (`not_required`
-for plain). It never contains JWK, ciphertext, private/unlock material or a
-decrypted scope, and always returns `businessReady:false`. Even a server envelope
-is not local verified/decrypted access. The ordinary company owner separately
+settings link and `awaiting_company_key` or `key_verified` (`not_required`
+for plain). `key_verified` requires actual key opening and successful container
+round-trip, never envelope presence alone. It never contains JWK, ciphertext,
+private/unlock material or a decrypted scope, and always returns
+`businessReady:false`. The ordinary company owner separately
 grants company-key access through the existing control plane; assistant ownership
 does not supply that role. Backend full encrypted task/source data-plane gates
 remain closed independently of this setup status.
+
+| Local setup data | Plain company | Encrypted company |
+| --- | --- | --- |
+| Device identity / recipient envelope | Existing public registration projection; no key needed | SAME protected OS identity and existing signed recipient envelope; no new vault or server route |
+| Opened company scope / self-test | Not created | Process-only SAME key codec; random 64-byte canary in the common owner-private temporary directory, exact cleanup before success; no company text or durable scope-key copy |
+| `key_verified` | Not emitted | Public current-check result only; no content, key bytes, task/source permission, health-latch recovery or business-readiness inference |
+
+The internal `allowPendingRegistration` option is restricted to this managed
+setup profile; no model/tool argument can select it. Ordinary human/task
+callers still require a ready key. All setup phases and final identity/company
+read-back share the original 25-second budget. Malformed/foreign envelopes,
+wrong scope keys, self-test failure and lost current authority fail closed;
+they neither reset the persisted device nor automatically repeat registration.
 
 Assistant Workspace execution is an internal async profile of the common
 `trelio-workspace.mjs` HTTP/auth primitives, not another Run/Git/storage engine.

@@ -5820,12 +5820,16 @@ export const ensureCompanyEncryptionContext = async ({
   company,
   collectEncryptionKey = collectCompanyEncryptionKeyThroughLoopback,
   registrationOnly = false,
+  allowPendingRegistration = false,
 }) => {
   const executionProfile = currentWorkspaceExecutionProfile();
   // Only the internal managed enrollment profile can stop at the public
   // registration boundary. A model flag, ordinary task profile or human caller
   // cannot turn this into a context/key-unlock bypass.
-  if (registrationOnly && executionProfile?.kind !== 'digital_assistant_enrollment') denyWorkspaceExecutionProfile();
+  if (typeof registrationOnly !== 'boolean' || typeof allowPendingRegistration !== 'boolean'
+    || (registrationOnly || allowPendingRegistration) && executionProfile?.kind !== 'digital_assistant_enrollment') {
+    denyWorkspaceExecutionProfile();
+  }
   const encryptedRequestOrigin = resolveEncryptedDataPlaneOrigin(origin, requestOrigin);
   const initialRuntime = await readCompanyEncryptionRuntime({
     origin: encryptedRequestOrigin,
@@ -5914,7 +5918,11 @@ export const ensureCompanyEncryptionContext = async ({
   // Enrollment needs the SAME registration/read-back without opening a scope
   // key. Even a ready envelope is not decrypted in this mode; the host projects
   // only public status, never this wire object, into the setup result.
-  if (registrationOnly) return { runtime };
+  // Managed setup must distinguish pending owner access from a usable key in
+  // one native registration/read-back. It may return pending, but a ready
+  // envelope still traverses the SAME recipient checks and key-opening code.
+  // Ordinary callers cannot opt out of the ready-key requirement this way.
+  if (registrationOnly || allowPendingRegistration && runtime.accessState === 'access_pending') return { runtime };
 
   if (runtime.accessState === "access_pending") {
     throw new Error(
