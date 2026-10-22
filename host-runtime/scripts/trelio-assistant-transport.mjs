@@ -285,12 +285,28 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     const current=await host.readIdentity();
     if(!same(current,expectedIdentity) || !same(validateAssistantActivePass(await host.readActivePass(),identity),pass)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   };
+  const assertLivePass=async signal=>{
+    await assertIdentity();
+    const live=await client.readTaskPass(locator,signal);
+    if(live.state!=='leased' || ['passId','threadId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
+      || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+  };
   await assertIdentity();
   // This opaque handle cannot reveal a credential through native metadata or
   // an accidental caller serialization. Only prepareRequest resolves auth.
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
     kind:'digital_assistant',
+    async resolveCompanyEncryptionDevice({origin:requestOrigin,companyId}){
+      // Local keys and their company envelopes belong to this exact managed
+      // device, never the ambient human's remembered encryption identity. The
+      // common native HTTP policy still decides whether encrypted transport is
+      // available; this private provider alone does not open any server route.
+      if(requestOrigin!==identity.origin || companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
+      return resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
+        lockDirectory,assertCurrent:()=>assertLivePass(),lock});
+    },
     async prepareSkillBodyRead(input){
       await assertIdentity();
       if(sourceReads)return sourceReads.prepare(input);
@@ -355,10 +371,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         route=assistantWorkspaceConcreteRequest(method,rewritten);
       }
       return lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
-        await assertIdentity();
-        const live=await client.readTaskPass(locator,options.signal);
-        if(live.state!=='leased' || ['passId','threadId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
-          || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        await assertLivePass(options.signal);
         const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
         const state=record?.state;
         if(record?.schemaVersion!==1 || record.ended || record.passId!==pass.passId || record.threadId!==pass.threadId

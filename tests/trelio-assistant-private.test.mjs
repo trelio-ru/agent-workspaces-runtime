@@ -3,8 +3,11 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
-import { createAssistantPrivateStore, openAssistantDatabase } from '../host-runtime/scripts/trelio-assistant-private.mjs';
+import { randomUUID, randomBytes } from 'node:crypto';
+import { createAssistantPrivateStore, openAssistantDatabase,
+  resolveAssistantCompanyEncryptionDevice } from '../host-runtime/scripts/trelio-assistant-private.mjs';
+import { hpkeSeal, hpkeOpen, signCompanyEncryptionRecord, verifyCompanyEncryptionRecord,
+  buildAgentDeviceRegistrationRecord } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 test('private credential slots isolate origin, assistant and purpose; no plaintext Windows fallback', async () => {
   const disk = new Map(), key = { origin: 'https://assistant.test', kind: 'device', id: randomUUID() };
@@ -44,6 +47,73 @@ test('macOS uses a separate Keychain namespace; unsupported hosts cannot store a
   assert.match([...values.keys()][0],/^ru\.trelio\.digital-assistant\.v1:[a-f0-9]{64}$/u);
   assert.deepEqual(await store.get(key),{ verifier:'fixture-only' }); await store.remove(key); assert.equal(await store.get(key),null);
   await assert.rejects(createAssistantPrivateStore({ directory:path.resolve(os.tmpdir(),'assistant-private-fixture'),platform:'linux' }).put(key,{}),/PLATFORM_UNSUPPORTED/);
+});
+
+test('company encryption slots retain separate OS identities for two devices and preserve old token slots', async () => {
+  const values=new Map(),serviceKeys=[];
+  const store=createAssistantPrivateStore({directory:path.resolve(os.tmpdir(),'assistant-key-scope-fixture'),platform:'darwin',primitives:{
+    ensurePrivateDirectory:async()=>{},
+    getMacosPrivateKeychainValue:async(service,account)=>values.get(`${service}:${account}`)??null,
+    setMacosPrivateKeychainValue:async(service,account,value)=>{serviceKeys.push(`${service}:${account}`);values.set(`${service}:${account}`,value);},
+  }});
+  const key={origin:'https://assistant.test',kind:'company_encryption',id:randomUUID(),deviceId:randomUUID()};
+  await store.put(key,{wrapped:'synthetic ciphertext'});
+  for(const other of [{...key,deviceId:randomUUID()},{...key,id:randomUUID()},
+    {...key,origin:'https://other.test'},{origin:key.origin,kind:'device',id:key.id}])assert.equal(await store.get(other),null);
+  assert.deepEqual(await store.get(key),{wrapped:'synthetic ciphertext'});
+  await assert.rejects(store.get({...key,deviceId:undefined}),/PRIVATE_INVALID_INPUT/);
+  await assert.rejects(store.get({...key,kind:'runtime'}),/PRIVATE_INVALID_INPUT/);
+  assert.equal(serviceKeys.length,1);
+});
+
+test('concurrent encryption preparation and restart reuse one common device and real HPKE/signatures', {timeout:60000}, async t => {
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-crypto-lock-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID();
+  const entries=new Map();let writes=0,checks=0;
+  const store={get:async key=>structuredClone(entries.get(JSON.stringify(key))??null),
+    put:async(key,value)=>{writes++;entries.set(JSON.stringify(key),structuredClone(value));}};
+  const options={identity,companyId,store,lockDirectory:path.join(directory,'locks'),assertCurrent:async()=>{checks++;}};
+  const prepared=await Promise.all(Array.from({length:3},()=>resolveAssistantCompanyEncryptionDevice(options)));
+  assert.equal(new Set(prepared.map(device=>device.fingerprint)).size,1);assert.equal(writes,1);
+  const reopened=await resolveAssistantCompanyEncryptionDevice({...options});
+  assert.equal(reopened.fingerprint,prepared[0].fingerprint);assert.equal(writes,1);assert.ok(checks>=12);
+  const registration=buildAgentDeviceRegistrationRecord({companyId,userId:identity.assistantId,...reopened});
+  const signature=await signCompanyEncryptionRecord(reopened.privateKeys.signingPrivateKey,registration);
+  assert.equal(await verifyCompanyEncryptionRecord(reopened.publicSigningJwk,registration,signature),true);
+  const secret=randomBytes(64),aad={purpose:'synthetic company envelope',companyId};
+  const sealed=await hpkeSeal({recipientPublicEncryptionJwk:reopened.publicEncryptionJwk,plaintext:secret,aad});
+  const opened=await hpkeOpen({recipientPrivateKey:reopened.privateKeys.encryptionPrivateKey,
+    recipientPrivateJwk:reopened.privateBundle.encryptionPrivateJwk,envelope:sealed,aad});
+  assert.deepEqual(Buffer.from(opened),secret);secret.fill(0);Buffer.from(opened).fill(0);
+  const saved=[...entries.values()][0];
+  assert.equal(saved.companyId,companyId);assert.equal(saved.deviceId,identity.deviceId);
+  assert.equal(saved.record.companyId,companyId);
+  assert.equal(JSON.stringify(saved).includes(reopened.privateBundle.signingPrivateJwk.d),false);
+  assert.deepEqual(await fs.readdir(options.lockDirectory),[], 'no key or second journal is written beside the common lock');
+});
+
+test('foreign, corrupt or unavailable encryption state never regenerates or falls back to human identity', async () => {
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID();
+  let saved=null,writes=0,live=true;
+  const store={get:async()=>structuredClone(saved),put:async(_key,value)=>{saved=structuredClone(value);writes++;}};
+  const options={identity,companyId,store,lockDirectory:path.resolve(os.tmpdir(),'assistant-crypto-fixture'),
+    lock:(_name,action)=>action(),assertCurrent:async()=>{if(!live)throw new Error('PRIVATE revoked device');}};
+  await resolveAssistantCompanyEncryptionDevice(options);assert.equal(writes,1);
+  const original=structuredClone(saved);
+  for(const mutate of [entry=>{entry.deviceId=randomUUID();},entry=>{entry.assistantId=randomUUID();},
+    entry=>{entry.companyId=randomUUID();},entry=>{entry.record.companyId=randomUUID();},
+    entry=>{entry.record.wrappedPrivateBundle.ciphertext='invalid';}]){
+    saved=structuredClone(original);mutate(saved);
+    await assert.rejects(resolveAssistantCompanyEncryptionDevice(options),error=>/^ASSISTANT_PRIVATE_/u.test(error.code)&&!error.message.includes('PRIVATE revoked'));
+    assert.equal(writes,1);
+  }
+  saved=structuredClone(original);live=false;
+  await assert.rejects(resolveAssistantCompanyEncryptionDevice(options),/PRIVATE_UNAVAILABLE/);assert.equal(writes,1);
+  live=true;
+  await assert.rejects(resolveAssistantCompanyEncryptionDevice({...options,store:{...store,get:async()=>{throw new Error('RAW KEYRING OUTPUT');}}}),
+    error=>error.code==='ASSISTANT_PRIVATE_UNAVAILABLE'&&!error.message.includes('RAW'));
+  assert.deepEqual(saved,original);assert.equal(writes,1);
 });
 
 test('real SQLite private opener survives restart and rejects symlinks without repairing them', async t => {

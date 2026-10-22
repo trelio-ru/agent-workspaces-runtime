@@ -583,7 +583,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { request as nativeWorkspaceRequest, requireToken as nativeWorkspaceToken } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
-import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
+  ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
 const workspaceProfileFixture = async () => {
   const identity={schemaVersion:1,origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
@@ -602,6 +603,33 @@ const workspaceProfileFixture = async () => {
   return {identity,pass,keys,store,credential,runtime,profile,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
 };
+
+test('managed encryption identity is scoped to the live pass and cannot select another company or human device', async()=>{
+  const f=await workspaceProfileFixture();
+  const select=scope=>f.profile.resolveCompanyEncryptionDevice(scope);
+  await assert.rejects(select({origin:'https://other.test',companyId:f.pass.companyId}),/BINDING_CHANGED/);
+  await assert.rejects(select({origin:f.identity.origin,companyId:randomUUID()}),/BINDING_CHANGED/);
+  assert.equal(f.contacts(),0,'foreign selection fails before a native request or key access');
+  const device=await select({origin:f.identity.origin,companyId:f.pass.companyId});
+  assert.ok(device.privateKeys.signingPrivateKey);
+  const again=await select({origin:f.identity.origin,companyId:f.pass.companyId});
+  assert.equal(again.fingerprint,device.fingerprint);
+  f.close();
+  await assert.rejects(select({origin:f.identity.origin,companyId:f.pass.companyId}),/PASS_REVIEW_REQUIRED/);
+});
+
+test('common encryption refuses profiles without their own key provider before HTTP or the human unlock form',async()=>{
+  const original=globalThis.fetch;let requests=0,forms=0;
+  globalThis.fetch=async()=>{requests++;throw new Error('unexpected network');};
+  try{
+    const profile={requireToken:async()=>({}),prepareRequest:async()=>{throw new Error('unexpected request');}};
+    await withWorkspaceExecutionProfile(profile,()=>assert.rejects(ensureCompanyEncryptionContext({
+      origin:'https://assistant.test',token:{},company:{slug:'synthetic'},
+      collectEncryptionKey:async()=>{forms++;throw new Error('human form must not open');},
+    }),error=>error.code==='ASSISTANT_WORKSPACE_PROFILE_DENIED'));
+    assert.equal(requests,0);assert.equal(forms,0);
+  }finally{globalThis.fetch=original;}
+});
 
 test('assistant profile reuses the native HTTP engine with private auth and one-use operation proofs',async()=>{
   const f=await workspaceProfileFixture(), originalFetch=globalThis.fetch, seen=[];

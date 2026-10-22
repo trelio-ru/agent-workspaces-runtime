@@ -952,6 +952,28 @@ execution stays closed until its independent device data plane is implemented.
 
 ## Shared Workspace HTTP profile
 
+### Managed encryption identity ownership
+
+The common `ensureCompanyEncryptionContext` chooses a managed profile's internal
+identity provider before any human remembered-device file or unlock form. A
+profile without that provider, an ended async profile, a foreign origin/company
+or a closed native task pass refuses; no human identity import/fallback occurs.
+The selected identity uses the SAME P-256, device wrapping and unlock codecs.
+Its wrapped record and derived unlock key are one entry of the existing assistant
+Keychain/CurrentUser-DPAPI store, with an additional purpose bound to the exact
+origin, enrolled device and company. Assistant UUID is checked inside that
+protected entry. Existing device/pairing/pass/runtime slot keys stay unchanged.
+
+The common private lock serializes first creation. OS write plus exact read-back
+precedes exposing the public fingerprint to registration, so a restart/lost
+response reuses the same identity. Corrupt, partial or unavailable state does
+not regenerate keys. The random wrapping input never enters a form, model,
+environment, argv, file or HTTP request; the company scope private key is not
+persisted in this slot. No new vault, crypto implementation or content store
+is introduced. This is an identity prerequisite only: current backend route
+and content fences still refuse assistant encrypted execution. It neither
+grants a company envelope nor establishes encrypted/business readiness.
+
 Assistant Workspace execution is an internal async profile of the common
 `trelio-workspace.mjs` HTTP/auth primitives, not another Run/Git/storage engine.
 The production wrapper resolves the actual protected host identity, active pass,

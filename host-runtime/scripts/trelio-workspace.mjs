@@ -5820,6 +5820,13 @@ export const ensureCompanyEncryptionContext = async ({
   company,
   collectEncryptionKey = collectCompanyEncryptionKeyThroughLoopback,
 }) => {
+  const executionProfile = currentWorkspaceExecutionProfile();
+  // A managed profile must choose its own protected identity provider BEFORE
+  // any human remembered-device/form path is reachable. Older/source profiles
+  // without that capability refuse; they cannot borrow the OS user's keys.
+  if (executionProfile && typeof executionProfile.resolveCompanyEncryptionDevice !== 'function') {
+    denyWorkspaceExecutionProfile();
+  }
   const encryptedRequestOrigin = resolveEncryptedDataPlaneOrigin(origin, requestOrigin);
   const initialRuntime = await readCompanyEncryptionRuntime({
     origin: encryptedRequestOrigin,
@@ -5833,10 +5840,21 @@ export const ensureCompanyEncryptionContext = async ({
     throw new Error("Trelio не вернул пользователя для локального encryption device.");
   }
 
-  let { paths, device } = await loadRememberedCompanyEncryptionDevice({
-    origin,
-    companyId: initialRuntime.company.id,
-  });
+  let paths, device;
+  if (executionProfile) {
+    device = await executionProfile.resolveCompanyEncryptionDevice({
+      origin, companyId: initialRuntime.company.id,
+    });
+    // Explicitly refuse an incomplete managed provider. Falling through to
+    // the ordinary remembered file/form here would cross device ownership.
+    if (!device?.privateKeys?.signingPrivateKey || !device?.privateKeys?.encryptionPrivateKey) {
+      denyWorkspaceExecutionProfile();
+    }
+  } else {
+    ({ paths, device } = await loadRememberedCompanyEncryptionDevice({
+      origin, companyId: initialRuntime.company.id,
+    }));
+  }
 
   if (!device) {
     let encryptionSecret = await collectEncryptionKey({
