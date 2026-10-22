@@ -2353,6 +2353,13 @@ export const collectCredentialThroughLoopback = async (
     setupTimeoutMs = CREDENTIAL_SETUP_TIMEOUT_MS,
     doctorCredential = doctorWithCredential,
     persistCredential = savePersonalCredential,
+    // Trusted host adapters may reuse the SAME loopback guards and lifecycle
+    // for a multi-field local form. These callbacks are not MCP arguments;
+    // neither its URL nor submitted fields are returned to a caller/model.
+    renderForm = renderCredentialPage,
+    parseSubmission = form => String(form.get("credential") || "").trim(),
+    successMessage = "Remote MCP подключён. Эту вкладку можно закрыть.",
+    allowCancel = false,
     onListening = () => {},
     signal,
   } = {},
@@ -2364,6 +2371,7 @@ export const collectCredentialThroughLoopback = async (
   let expectedPort = 0;
   let credentialSubmissionInFlight = false;
   let credentialStored = false;
+  let formWasOpened = false;
   let markFormOpened;
   const formOpened = new Promise((resolve) => {
     markFormOpened = resolve;
@@ -2421,10 +2429,10 @@ export const collectCredentialThroughLoopback = async (
         && exactLoopbackTarget
         && requestUrl.searchParams.get("nonce") === nonce
       ) {
-        writeLoopbackHtml(outgoing, 200, renderCredentialPage({ resolved, nonce }));
+        writeLoopbackHtml(outgoing, 200, renderForm({ resolved, nonce }));
         // Resolve only after the exact nonce has selected the protected page.
         // Merely opening another loopback tab must never count as delivery.
-        markFormOpened();
+        formWasOpened = true; markFormOpened();
         return;
       }
       if (requestUrl.pathname !== "/credential") {
@@ -2448,7 +2456,7 @@ export const collectCredentialThroughLoopback = async (
       }
 
       const form = new URLSearchParams(await readLimitedRequestBody(incoming));
-      if (form.get("nonce") !== nonce) {
+      if (form.get("nonce") !== nonce || !formWasOpened) {
         rejectCredentialRequest(incoming, outgoing, requestUrl, { drainBody: false });
         return;
       }
@@ -2460,10 +2468,17 @@ export const collectCredentialThroughLoopback = async (
         );
         return;
       }
-      const credential = String(form.get("credential") || "").trim();
+      if (allowCancel && form.get("decision") === "cancel") {
+        credentialStored = true;
+        writeLoopbackHtml(outgoing, 200, "<!doctype html><meta charset=utf-8><p>Настройка отменена. Эту вкладку можно закрыть.</p>", {
+          onFinished: () => fail(new RemoteMcpHostError("PROTECTED_FORM_CANCELLED", "Настройка отменена.")),
+        });
+        return;
+      }
       credentialSubmissionInFlight = true;
 
       try {
+        const credential = parseSubmission(form);
         await doctorCredential(resolved, credential, { signal });
         // A cancelled tool call must never turn a completed remote doctor into
         // a late local secret write after Codex has already abandoned the call.
@@ -2478,7 +2493,7 @@ export const collectCredentialThroughLoopback = async (
           return;
         }
         credentialSubmissionInFlight = false;
-        writeLoopbackHtml(outgoing, 400, renderCredentialPage({
+        writeLoopbackHtml(outgoing, 400, renderForm({
           resolved,
           nonce,
           errorMessage: error instanceof Error
@@ -2491,7 +2506,7 @@ export const collectCredentialThroughLoopback = async (
       writeLoopbackHtml(
         outgoing,
         200,
-        "<!doctype html><meta charset=utf-8><title>Подключено</title><p>Remote MCP подключён. Эту вкладку можно закрыть.</p>",
+        `<!doctype html><meta charset=utf-8><title>Сохранено</title><p>${escapeHtml(successMessage)}</p>`,
         { onFinished: finish },
       );
     } catch (error) {

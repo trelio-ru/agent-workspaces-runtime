@@ -1,3 +1,4 @@
+import { validVisualArguments } from './trelio-visual-commands.mjs';
 import { createBrowserRequestPacing, createBrowserTabBudget } from './trelio-browser-policy.mjs';
 import { installTextObserver, validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import fs from 'node:fs/promises';
@@ -10,6 +11,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter, visualAttachmentRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
+import { installVisualAuthentication } from './trelio-visual-auth-adapter.mjs';
+import { normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-auth.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
 import { visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
@@ -31,7 +34,7 @@ export function visualExtensionManifest(matches, port, observationMode = 'image'
   return { manifest_version: 3, name: 'Trelio Visual Browser', version: '0.1.0', key: PUBLIC_KEY,
     permissions: ['debugger', 'tabs', 'cookies', 'declarativeNetRequest', 'webRequest'], host_permissions: [...new Set([...matches, 'http://127.0.0.1/*'])],
     content_security_policy: { extension_pages: `script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:${port}` },
-    background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js', ...(observationMode === 'text' ? ['text-observer.js'] : [])], run_at: 'document_start', world: 'ISOLATED' }, ...(attachmentDownloads ? [{ matches, js: ['attachment-router.js'], run_at: 'document_start', world: 'MAIN' }] : [])],
+    background: { service_worker: 'worker.js' }, content_scripts: [{ matches, js: ['link-router.js', 'authentication.js', ...(observationMode === 'text' ? ['text-observer.js'] : [])], run_at: 'document_start', world: 'ISOLATED' }, ...(attachmentDownloads ? [{ matches, js: ['attachment-router.js'], run_at: 'document_start', world: 'MAIN' }] : [])],
   };
 }
 
@@ -48,8 +51,6 @@ export function visualNativeLogEvidence(text) {
   }
   return counts;
 }
-const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
-const validArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768;
 
 /** Private bounded delivery, independent of auth snapshots and browser close.
  * No server filename/path, raw HTTP header or URL becomes a local path. Fresh
@@ -102,17 +103,19 @@ export class ExtensionVisualBrowser {
   #cookies; #sessionCookies = []; #authHandshake = false; #authSnapshotReady = false;
   #replaceSessionCookies = false;
   #windowsClosed = false;
-  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
+  #credentialSetup; #setupReason;
+  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, authentication = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
     if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
     Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads });
+    this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.testNativeLogging = Boolean(testDiagnostics) && testNativeLogging;
     this.sessionId = crypto.randomUUID();
     this.#deadline = setTimeout(() => { void this.close().catch(() => this.abort()); }, lease.deadlineAt - Date.now());
     this.#deadline.unref();
   }
-  #status(reason = 'none') { return visualStatus(this.#state, this.#terminal || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved }); }
+  #status(reason = 'none') { return visualStatus(this.#state, this.#terminal || this.#setupReason || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved }); }
   async #start(url, manual) {
     if (this.#child) return;
     this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false; this.#authHandshake = false; this.#authSnapshotReady = false; this.#windowsClosed = false;
@@ -173,13 +176,16 @@ export class ExtensionVisualBrowser {
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
     const matches = [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, fixtureOnly: this.policy.fixtureOnly };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     // Only the ephemeral transport token is materialized here. Cookie values
     // stay in host/extension RAM and the AEAD snapshot, never in worker source.
     await fs.writeFile(path.join(extension, 'worker.js'), `(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify({ origins: this.origins, domains: this.domains })}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, { mode: 0o600 });
     await fs.writeFile(path.join(extension, 'link-router.js'), `(${visualLinkRouter.toString()})();`, { mode: 0o600 });
+    // Only the value-free signed recipe is materialized; credentials never
+    // enter extension resources, process environment or command-line arguments.
+    await fs.writeFile(path.join(extension, 'authentication.js'), `(${installVisualAuthentication.toString()})(${JSON.stringify(this.authentication)});`, { mode: 0o600 });
     if (this.attachmentDownloads) await fs.writeFile(path.join(extension, 'attachment-router.js'), `(${visualAttachmentRouter.toString()})();`, { mode: 0o600 });
     if (this.observationMode === 'text') await fs.writeFile(path.join(extension, 'text-observer.js'), `(${installTextObserver.toString()})();`, { mode: 0o600 });
     const executable = await ensureVisualChromium(this.dependencies, { signal: this.#launchAbort.signal });
@@ -323,13 +329,51 @@ export class ExtensionVisualBrowser {
     if (operation === 'download-attachment' && !this.attachmentDownloads) return Promise.resolve(visualStatus('error', 'invalid_input'));
     if (operation === 'submit') {
       const { action, ...input } = args || {};
-      if (!['navigate', 'click', 'key'].includes(action) || (action === 'key' && input.key !== 'Enter') || !validArguments(action, input)) return Promise.resolve(visualStatus('error', 'invalid_input'));
+      if (!['navigate', 'click', 'key'].includes(action) || (action === 'key' && input.key !== 'Enter') || !validVisualArguments(action, input)) return Promise.resolve(visualStatus('error', 'invalid_input'));
     }
-    if (!validArguments(operation, args)) return Promise.resolve(visualStatus('error', 'invalid_input'));
+    if (!validVisualArguments(operation, args)) return Promise.resolve(visualStatus('error', 'invalid_input'));
     if (operation === 'status') return Promise.resolve(this.#status());
     const result = this.#tail.then(async () => {
       if (this.#closed || Date.now() >= this.lease.deadlineAt) return visualStatus('error', 'lease_expired');
       if (this.#terminal) return this.#status();
+      if (['credentials-setup', 'credentials-status', 'credentials-forget', 'authenticate'].includes(operation) && !this.authentication) return visualStatus('error', 'invalid_input');
+      if (this.#credentialSetup) return this.#status();
+      if (operation === 'credentials-setup') {
+        this.#state = 'manual_input_required'; this.#setupReason = 'authentication_setup_required';
+        // Detached status/wait observes the actual persisted completion. It
+        // never needs a mandatory chat acknowledgement or returns secret data.
+        this.#credentialSetup = configureVisualAuthentication({ store: this.store, definition: this.authentication, signal: this.#launchAbort.signal, setupTimeoutMs: Math.max(1, this.lease.deadlineAt - Date.now()) })
+          .then(() => { this.#state = 'saved_unverified'; this.#setupReason = undefined; })
+          .catch(error => {
+            this.#state = 'error';
+            this.#setupReason = error.code === 'PROTECTED_FORM_CANCELLED' ? 'authentication_cancelled'
+              : error.code === 'REMOTE_MCP_CREDENTIAL_SETUP_TIMEOUT' ? 'authentication_timeout'
+                : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable'
+                  : 'authentication_setup_failed';
+          })
+          .finally(() => { this.#credentialSetup = undefined; });
+        return this.#status();
+      }
+      this.#setupReason = undefined;
+      if (operation === 'credentials-status') return visualStatus(await hasVisualAuthenticationCredentials(this.store, this.authentication) ? 'saved_unverified' : 'not_configured');
+      if (operation === 'credentials-forget') { await this.store.forgetCredentials(); return visualStatus('not_configured'); }
+      if (operation === 'authenticate') {
+        if (!this.#child) return visualStatus('error', 'session_closed');
+        if (this.#manual) return this.#status('manual_control_active');
+        await this.#send('authentication-start');
+        let result;
+        try {
+          result = await authenticateVisualBrowser({ store: this.store, definition: this.authentication, send: (op, input) => this.#send(op, input), active: () => { if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired'); } });
+        } catch (error) {
+          result = { state: 'manual_input_required', reason: ['authentication_setup_required', 'lease_expired'].includes(error.code) ? error.code : 'authentication_unknown' };
+        }
+        // Uncertain input retains the observation gate. Only verified success
+        // or an explicit human handoff can release this browser again.
+        this.#manual = result.state !== 'saved_unverified';
+        await this.#send('authentication-end', { success: !this.#manual });
+        this.#state = result.state;
+        return visualStatus(result.state, result.reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
+      }
       if (operation === 'ready') return this.#manual ? this.#finishManual() : this.#status();
       if (operation === 'show-login') { if (this.#manual && this.#child) await this.#send('manual'); return this.#status(); }
       if (operation === 'setup' || operation === 'navigate') this.policy.navigate(args.url);
@@ -360,7 +404,7 @@ export class ExtensionVisualBrowser {
     });
     this.#tail = result.catch(() => {});
     return result.catch(error => {
-      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'storage_unavailable'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
+      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'storage_unavailable', 'authentication_setup_required'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
       if (this.#state === 'preparing') { this.#state = 'error'; this.#terminal = reason; }
       return visualStatus('error', reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
     });
@@ -369,6 +413,7 @@ export class ExtensionVisualBrowser {
     if (this.#closed) return; this.#closed = true; clearTimeout(this.#deadline);
     this.#launchAbort.abort();
     await this.#tail;
+    await this.#credentialSetup;
     // A window-close completion can have started outside the command queue.
     // Join it before cleanup so expiry/close cannot race a second save/remove.
     await this.#finishing?.catch(() => {});

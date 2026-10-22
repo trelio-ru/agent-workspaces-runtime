@@ -18,11 +18,17 @@ test('native OS vault retains a synthetic encrypted snapshot after key buffers c
   const store = make();
   try {
     await store.write({ schemaVersion: 1, cookies: [{ name: 'fixture', value: 'SYNTHETIC_ONLY' }], origins: [] });
+    await store.writeCredentials({ login: 'SYNTHETIC_LOGIN', password: 'SYNTHETIC_PASSWORD', totp: 'SYNTHETIC_SEED' });
     store.close();
     const next = make();
     try {
       assert.equal((await next.read()).cookies[0].value, 'SYNTHETIC_ONLY');
       assert.doesNotMatch(await fs.readFile(next.file, 'utf8'), /SYNTHETIC_ONLY/);
+      assert.equal((await next.readCredentials()).password, 'SYNTHETIC_PASSWORD');
+      assert.doesNotMatch(await fs.readFile(next.credentialsFile, 'utf8'), /SYNTHETIC/);
+      await next.forgetCredentials();
+      assert.equal(await next.readCredentials(), null);
+      assert.equal((await next.read()).cookies[0].value, 'SYNTHETIC_ONLY', 'forgetting a credential retains authenticated session');
     } finally { next.close(); }
   } finally { await store.remove(); await fs.rm(directory, { recursive: true, force: true }); }
 });

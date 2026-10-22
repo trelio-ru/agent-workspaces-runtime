@@ -246,6 +246,79 @@ HTTP/другой browser transport не является fallback.
 
 ## Локальное хранение и ручной вход
 
+<a id="protected-authentication"></a>
+
+### Защищённый автоматический вход
+
+`VISUAL_AUTHENTICATION_API === 'trelio.protected-browser-auth/v1'` в модуле
+`TRELIO_VISUAL_SESSION_MODULE_URL` подтверждает поддержку исходного API.
+Отсутствующий export в старом опубликованном host – недостающая возможность,
+а не запрет автовхода. Source не является публикацией runtime.
+
+Подписанный provider передаёт в `runVisualSession` optional `authentication`.
+Default `null` сохраняет ручной setup. Значения credentials, selectors и рецепт
+не принимаются из CLI/MCP либо веб-страницы. Пример value-free recipe:
+
+```js
+authentication: {
+  steps: [
+    { id: 'password', origin: 'https://auth.example.test',
+      challenge: '#login-form', fields: { login: '#login', password: '#password' },
+      submit: '#login-submit', manual: ['#captcha'] },
+    { id: 'totp', origin: 'https://auth.example.test',
+      challenge: '#authenticator-code-form', fields: { totp: '#code' },
+      submit: '#code-submit' },
+  ],
+  success: [{ origin: 'https://app.example.test', selector: '#account-menu' }],
+}
+```
+
+Каждый origin входит в explicit `origins` signed provider; wildcard `domains`
+не разрешает secret delivery. Не более восьми шагов/success selectors и 16 KiB
+на рецепт; field selectors уникальны и ограничены 512 символами. TOTP selector
+может быть массивом из шести/восьми ячеек. `submit: null` явно означает native
+автоотправку при вводе; host не добавляет click. Provider обязан проверить,
+что TOTP challenge действительно означает код аутентификатора, а не SMS/push.
+Форма должна отправлять POST в тот же exact origin и собственную вкладку;
+неоднозначные/hidden/disabled/readonly fields, CAPTCHA и неизвестный challenge
+останавливают процедуру. Generic host не распознаёт смысл любого сайта.
+
+Новые public operations принимают только `{}`:
+
+- `credentials-setup` открывает существующий guarded loopback collector с
+  логином, паролем и optional TOTP seed. `status`/`wait` наблюдают persisted
+  result; повторная команда не открывает вторую pending-форму. Значения не
+  предзаполняются и не возвращаются модели. Cancel/timeout/close прекращают
+  ввод, прежняя запись сохраняется. Есть явное предупреждение про совместное
+  хранение пароля/второго фактора и необязательность seed.
+- `credentials-status` возвращает только наличие пригодной записи, без значений.
+- `authenticate` выполняется после перехода в текущую owned вкладку входа.
+  Success probe используется первым; рабочая сессия не требует нового входа.
+  Иначе host приватно читает credentials, генерирует код существующим TOTP
+  generator и вводит только в bound top-frame document. Seed/OS key никогда
+  не передаются extension. Во время ввода картинки, rendered text и обычный
+  input заблокированы. Authenticated state возвращает `saved_unverified` без
+  контента: бизнес-readiness отдельно проверяет provider.
+- `credentials-forget` только по прямой просьбе удаляет credentials выбранного
+  аккаунта, сохраняя browser session и OS key. `disconnect` удаляет обе записи.
+
+Credentials хранятся в `credentials.enc` с AES-256-GCM и отдельным purpose/AAD,
+вне профиля/Workspace/cache/package; OS-backed key и account scope общие с
+`state.enc`. Изменившийся recipe fingerprint требует явной локальной замены,
+не переносит секрет на новый адрес. Credentials-only account тоже сохраняет
+запрет замены потерянного OS key. Секреты не входят в extension source, argv,
+environment, screenshots, MCP, telemetry или логи.
+
+Attempt fence записывается до первого ввода и до каждого следующего шага.
+Один шаг не отправляется повторно; потерянный ответ, crash, навигация и новый
+CLI/worker не снимают pending fence. Успешная процедура сохраняет complete;
+неопределённый результат требует ручной помощи. CAPTCHA, SMS/push и TOTP без
+seed остаются ручными, без угадывания поля/метода или попыток обхода проверки.
+Исходная absolute lease, live account/company claim и независимое согласование
+внешних бизнес-действий сохраняются. Новый recipe не реализует fresh OS unlock
+для финансово чувствительного provider: его усиленный native gate остаётся
+обязательным до использования generic API.
+
 Во время работы owned профиль существует на диске в частном каталоге с native
 owner/ACL guards. Это обычный профиль Chromium, а не in-memory incognito.
 После нормальной остановки выбранные auth stores упаковываются в bounded

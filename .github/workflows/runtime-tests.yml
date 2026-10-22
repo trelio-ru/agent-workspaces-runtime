@@ -83,6 +83,7 @@ jobs:
         run: |
           node tests/trelio-visual-native-store.test.mjs
           node tests/trelio-visual-store.test.mjs
+          node tests/trelio-visual-auth.test.mjs
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
           node tests/trelio-visual-attachments.test.mjs
@@ -104,6 +105,7 @@ jobs:
             for file in native-store store transport profile cookie-state browser link-router extension-worker extension-browser session; do
               xvfb-run -a node "tests/trelio-visual-${file}.test.mjs"
             done
+            xvfb-run -a node tests/trelio-visual-auth.test.mjs
             xvfb-run -a node tests/trelio-browser-text.test.mjs
             node tests/trelio-browser-tab-budget.test.mjs
             node tests/trelio-browser-request-pacing.test.mjs
@@ -218,6 +220,7 @@ jobs:
           node tests/trelio-browser-session.test.mjs
           node tests/trelio-browser-http.test.mjs
           node tests/trelio-visual-store.test.mjs
+          node tests/trelio-visual-auth.test.mjs
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
           node tests/trelio-visual-attachments.test.mjs

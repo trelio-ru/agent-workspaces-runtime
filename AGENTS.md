@@ -241,6 +241,9 @@ publication tooling также остаются вне этого публичн
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
+  Protected automatic sign-in uses signed recipes and host-owned encrypted
+  credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
+  Missing API support is a runtime capability gap, not a ban on automatic login.
   image-only MCP по умолчанию с явным text opt-in, managed Chromium с private live profile и AEAD snapshot
   после нормальной остановки, native OS keyring, company/member claim и
   непродлеваемая lease. Собственный capture удаляет bounded ancillary iCCP без

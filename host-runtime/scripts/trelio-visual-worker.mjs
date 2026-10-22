@@ -44,13 +44,13 @@ async function stop() {
   try { await startup?.catch(() => {}); await engine?.close(); }
   finally {
     server?.close();
-    const latest = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
+    const latest = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
     if (latest.token === owner.token) { await fs.unlink(file); await fs.rmdir(path.dirname(file)); }
     process.exit(0);
   }
 }
 try {
-  owner = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
+  owner = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
   if (owner.schemaVersion !== 1 || !/^[0-9a-f]{64}$/u.test(owner.token) || !Number.isSafeInteger(owner.deadlineAt) || owner.deadlineAt <= Date.now()) throw new Error('invalid_input');
   const policy = createVisualOriginPolicy(owner);
   fixtureOnly = policy.fixtureOnly === true;
@@ -84,7 +84,7 @@ try {
   fixtureDiagnostic({ stage: 'startup_browser' });
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.
-  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, observationMode: owner.observationMode || 'image', attachmentDownloads: owner.attachmentDownloads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
+  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, authentication: owner.authentication || null, observationMode: owner.observationMode || 'image', attachmentDownloads: owner.attachmentDownloads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   current = await engine.call(owner.operation, owner.args);
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed' });

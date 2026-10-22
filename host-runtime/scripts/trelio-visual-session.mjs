@@ -1,3 +1,4 @@
+import { validVisualArguments } from './trelio-visual-commands.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import http from 'node:http';
@@ -12,6 +13,8 @@ import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
+import { normalizeVisualAuthentication, visualAuthenticationFingerprint } from './trelio-visual-auth.mjs';
+export { VISUAL_AUTHENTICATION_API } from './trelio-visual-auth.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -59,10 +62,13 @@ async function request(owner, operation, args) {
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, authentication = null, env = process.env, fixture }) {
   if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads)) return visualStatus('error', 'invalid_input');
+  if (['wait', 'close', 'disconnect'].includes(operation) ? !args || Object.keys(args).length : !validVisualArguments(operation, args)) return visualStatus('error', 'invalid_input');
   const binding = visualSessionBinding(env);
   const policy = createVisualOriginPolicy({ origins, domains, allowLoopback: Boolean(fixture) });
+  authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
+  const authenticationFingerprint = authentication ? visualAuthenticationFingerprint(authentication) : null;
   if (!args || typeof args !== 'object' || Array.isArray(args) || Buffer.byteLength(JSON.stringify(args)) > 32_768) return visualStatus('error', 'invalid_input');
   if (operation === 'navigate' || operation === 'setup') {
     if (typeof args.url !== 'string' || args.url.length > 4096) return visualStatus('error', 'invalid_input');
@@ -79,7 +85,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   try { await assertPrivatePathKind(active, 'directory'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   let owner;
-  try { owner = await readPrivateJsonFile(file, { maximumBytes: 16_384 }); }
+  try { owner = await readPrivateJsonFile(file, { maximumBytes: 65_536 }); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (owner && Object.keys(owner).length) {
     if (!validOwner(owner, binding)) return busy();
@@ -97,7 +103,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
       try {
         await prepareVisualPrivateDirectory(recovery);
         if ((await fs.readdir(active)).sort().join() !== 'owner.json,recovery') return busy();
-        const current = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
+        const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
         if (current.token !== owner.token || current.pid !== owner.pid) return busy();
         const abandoned = `${active}.${crypto.randomUUID()}.closed`;
         await fs.rename(active, abandoned); moved = true;
@@ -113,6 +119,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     // reuse an older live worker with a different content-disclosure mode.
     // Cleanup/status remain available so the exact owner can finish it safely.
     if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+    if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
     // Do not slide the original deadline when another CLI invocation arrives.
     if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
     if (Number.isInteger(owner.port) && owner.port > 0 && owner.port < 65536) {
@@ -120,7 +127,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
         if (operation !== 'disconnect') return await request(owner, operation, args);
         await request(owner, 'close', {});
         for (let i = 0; i < 150; i++) {
-          const next = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
+          const next = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
           if (!Object.keys(next).length) { owner = null; break; }
           if (next.token !== owner.token) return busy();
           await sleep(100);
@@ -152,7 +159,8 @@ export async function runVisualSession({ origins, domains = [], operation, args 
       return error.code === 'ENOENT' ? visualStatus('not_configured') : visualStatus('error', 'storage_unavailable');
     }
   }
-  if (!['setup', 'navigate'].includes(operation)) return visualStatus('error', 'session_closed');
+  if (!['setup', 'navigate', 'credentials-setup', 'credentials-status', 'credentials-forget'].includes(operation)) return visualStatus('error', 'session_closed');
+  if (operation.startsWith('credentials-') && !authentication) return visualStatus('error', 'invalid_input');
   let workerExecutable;
   try { workerExecutable = resolveVisualWorkerNode(); }
   catch { return visualStatus('error', 'bootstrap_failed'); }
@@ -165,7 +173,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   owner = {
     schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
     pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-    origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads,
+    origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, authentication, authenticationFingerprint,
     ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
   };
   await writePrivateJsonFile(file, owner);
@@ -180,11 +188,11 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   for (let attempt = 0; attempt < 20; attempt++) {
     await sleep(100);
     if (spawnError) {
-      const current = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
+      const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
       if (current.token === owner.token) { await fs.unlink(file); await fs.rmdir(active); }
       return visualStatus('error', 'operation_failed');
     }
-    const next = await readPrivateJsonFile(file, { maximumBytes: 16_384 });
+    const next = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
     if (next.token !== owner.token) return busy();
     if (next.port) return visualStatus('preparing');
   }

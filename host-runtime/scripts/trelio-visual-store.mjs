@@ -4,6 +4,7 @@ import path from 'node:path';
 import { ensurePrivateDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind } from './trelio-workspace.mjs';
 
 const FORMAT = 'trelio.protected-browser-state/v1';
+const CREDENTIAL_FORMAT = 'trelio.protected-browser-credentials/v1';
 const MAX_STATE = 16 * 1024 * 1024;
 const invalid = code => Object.assign(new Error(code), { code });
 
@@ -71,6 +72,7 @@ export class ProtectedVisualStore {
     this.scope = scope;
     this.directory = path.join(directory, 'visual-browser', scope);
     this.file = path.join(this.directory, 'state.enc');
+    this.credentialsFile = path.join(this.directory, 'credentials.enc');
     this.#entry = new AsyncEntry('trelio.visual-browser.v1', scope, { linux: { store: 'secret-service' } });
   }
 
@@ -115,17 +117,17 @@ export class ProtectedVisualStore {
     } catch { throw invalid('VISUAL_STORAGE_UNAVAILABLE'); }
   }
 
-  async read() {
+  async #readRecord(file, format) {
     await this.init();
-    const envelope = await readPrivateJsonFile(this.file, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
+    const envelope = await readPrivateJsonFile(file, { maximumBytes: Math.ceil(MAX_STATE * 1.5) });
     if (Object.keys(envelope).length === 0) return null;
     let plain;
     try {
-      if (envelope.format !== FORMAT || envelope.scope !== this.scope || Object.keys(envelope).sort().join() !== 'data,format,iv,scope,tag') throw invalid('VISUAL_STORAGE_CORRUPT');
+      if (envelope.format !== format || envelope.scope !== this.scope || Object.keys(envelope).sort().join() !== 'data,format,iv,scope,tag') throw invalid('VISUAL_STORAGE_CORRUPT');
       const iv = Buffer.from(envelope.iv, 'base64'), tag = Buffer.from(envelope.tag, 'base64');
       if (iv.length !== 12 || tag.length !== 16) throw invalid('VISUAL_STORAGE_CORRUPT');
       const decipher = crypto.createDecipheriv('aes-256-gcm', await this.#keyBytes(false), iv);
-      decipher.setAAD(Buffer.from(`${FORMAT}/${this.scope}`));
+      decipher.setAAD(Buffer.from(`${format}/${this.scope}`));
       decipher.setAuthTag(tag);
       plain = Buffer.concat([decipher.update(Buffer.from(envelope.data, 'base64')), decipher.final()]);
       if (plain.length > MAX_STATE) throw invalid('VISUAL_STORAGE_CORRUPT');
@@ -136,28 +138,47 @@ export class ProtectedVisualStore {
     } finally { plain?.fill(0); }
   }
 
+  read() { return this.#readRecord(this.file, FORMAT); }
+  readCredentials() { return this.#readRecord(this.credentialsFile, CREDENTIAL_FORMAT); }
+
+  async #hasEncryptedRecord() {
+    // A credentials-only account already owns a key. Losing that key must not
+    // silently create a replacement merely because no browser snapshot exists.
+    const exists = await Promise.all([this.file, this.credentialsFile].map(file => fs.lstat(file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })));
+    return exists.some(Boolean);
+  }
+
   async prepare() {
     // Verify the native vault before opening a human login window. A missing
     // desktop Secret Service must not be discovered only after somebody has
     // entered their password. Existing ciphertext never permits key replacement.
     await this.init();
-    const exists = await fs.lstat(this.file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+    const exists = await this.#hasEncryptedRecord();
     await this.#keyBytes(!exists);
   }
 
-  async write(value) {
+  async #writeRecord(file, format, value) {
     await this.init();
     // A damaged/missing OS key must never be replaced merely because a caller
     // wants to save new data over an existing encrypted session.
-    const exists = await fs.lstat(this.file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+    const exists = await this.#hasEncryptedRecord();
     const plain = Buffer.from(JSON.stringify(value));
     try {
       if (plain.length > MAX_STATE) throw invalid('VISUAL_STORAGE_TOO_LARGE');
       const iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', await this.#keyBytes(!exists), iv);
-      cipher.setAAD(Buffer.from(`${FORMAT}/${this.scope}`));
+      cipher.setAAD(Buffer.from(`${format}/${this.scope}`));
       const data = Buffer.concat([cipher.update(plain), cipher.final()]);
-      await writePrivateJsonFile(this.file, { format: FORMAT, scope: this.scope, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') });
+      await writePrivateJsonFile(file, { format, scope: this.scope, iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') });
     } finally { plain.fill(0); }
+  }
+
+  write(value) { return this.#writeRecord(this.file, FORMAT, value); }
+  writeCredentials(value) { return this.#writeRecord(this.credentialsFile, CREDENTIAL_FORMAT, value); }
+  async forgetCredentials() {
+    await this.init();
+    // Keep the OS key and the independently reusable browser session intact.
+    try { await assertPrivatePathKind(this.credentialsFile, 'file'); await fs.unlink(this.credentialsFile); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
 
   // Used only for a user's explicit disconnect, or a newly created synthetic
@@ -166,6 +187,7 @@ export class ProtectedVisualStore {
     await this.init();
     await this.#entry.deleteCredential(AbortSignal.timeout(15_000));
     await fs.rm(this.file, { force: true });
+    await fs.rm(this.credentialsFile, { force: true });
     this.close();
   }
   close() { this.#key?.fill(0); this.#key = undefined; }

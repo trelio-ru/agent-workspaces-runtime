@@ -31,9 +31,9 @@ export function installTextObserver() {
     if (sender.id !== chrome.runtime.id || message?.kind !== 'read_rendered_text') return;
     const { query = '', offset = 0, includeControls = true } = message;
     if (typeof query !== 'string' || query.length > 120 || typeof includeControls !== 'boolean' || !Number.isInteger(offset) || offset < 0 || offset > 100_000) return respond({ error: 'invalid_input' });
-    // Authentication must remain a human step even outside the host's manual
-    // phase. Omit every input value; refuse the whole observation if a rendered
-    // password/OTP control is present. A hidden template must not block reading.
+    // Credentials never become a model observation. A trusted host may handle
+    // automatic authentication privately; the model still cannot inspect its
+    // password/OTP form. A hidden template must not block ordinary reading.
     if ([...document.querySelectorAll('input[type="password"],input[autocomplete="one-time-code" i]')].some(node => !hidden(node))) return respond({ error: 'manual_control_active' });
     const lines = [], needle = query.toLocaleLowerCase();
     let visited = 0, characters = 0, scanLimited = false;

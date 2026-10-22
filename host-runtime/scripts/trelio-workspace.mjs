@@ -16062,7 +16062,7 @@ const readSingleAgentSecretTotpParameter = (uri, name) => {
   return values[0] ?? null;
 };
 
-const parseAgentSecretTotpValue = (rawValue) => {
+export const parseAgentSecretTotpValue = (rawValue) => {
   const value = rawValue.trim();
   if (!value || value.length > AGENT_SECRET_TOTP_MAX_VALUE_LENGTH) {
     throw new Error("Значение TOTP пустое или слишком длинное.");
@@ -16140,7 +16140,7 @@ const parseAgentSecretTotpValue = (rawValue) => {
 // Для company E2EE одноразовый код вычисляется после локального открытия
 // ciphertext. Raw Base32 сохраняет legacy defaults, а otpauth-ссылка переносит
 // алгоритм, длину и период; исходное значение сервер не получает.
-const deriveAgentSecretTotp = (value, nowMs = Date.now()) => {
+export const deriveAgentSecretTotp = (value, nowMs = Date.now()) => {
   const config = parseAgentSecretTotpValue(value);
   const counter = Math.floor(nowMs / (config.periodSeconds * 1000));
   const message = Buffer.alloc(8);

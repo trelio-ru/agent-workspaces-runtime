@@ -35,8 +35,8 @@ test('both closed variants cross MCP; default image mode rejects text commands b
   const browser = new ExtensionVisualBrowser({ policy: {}, store: { close() {} }, lease: { deadlineAt: Date.now() + 1000 } });
   try { for (const op of ['read-text', 'submit', 'request-ready']) assert.equal((await browser.call(op)).reason, 'invalid_input'); }
   finally { await browser.close(); }
-  assert.deepEqual(visualExtensionManifest(['https://example.test/*'], 1234).content_scripts[0].js, ['link-router.js']);
-  assert.deepEqual(visualExtensionManifest(['https://example.test/*'], 1234, 'text').content_scripts[0].js, ['link-router.js', 'text-observer.js']);
+  assert.deepEqual(visualExtensionManifest(['https://example.test/*'], 1234).content_scripts[0].js, ['link-router.js', 'authentication.js']);
+  assert.deepEqual(visualExtensionManifest(['https://example.test/*'], 1234, 'text').content_scripts[0].js, ['link-router.js', 'authentication.js', 'text-observer.js']);
 });
 
 test('native fixed text reader: labels, Unicode input, links, paging, secrets, stale frame and manual gate', { skip: process.env.TRELIO_TEXT_NATIVE_TEST !== '1', timeout: 120_000 }, async () => {

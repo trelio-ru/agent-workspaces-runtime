@@ -29,6 +29,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const tabBudget = createTabBudget();
   let observedFrameId, navigationGeneration = 0;
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
+  let authenticating = false;
   let bootstrapState = 'pending', bootstrapStage = 'policy', stopping = false;
   let authReady, authStarted = false, authRestored = false, authInitialising = false, authFrozen = false, authTimer;
   const authJar = new Map(), authChanges = [];
@@ -272,6 +273,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     allowedNavigation(tab.url);
     return tab;
   }
+  async function credentialGuard(tabId) {
+    const value = await chrome.tabs.sendMessage(tabId, { kind: 'authentication-guard' }, { frameId: 0 });
+    if (value?.blocked !== false) throw Error('manual_control_active');
+  }
   async function captureImageValue() {
     frame = undefined;
     let tab = await selected();
@@ -290,6 +295,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const tree = await command(tab.id, 'Page.getFrameTree');
     if (tree.frameTree.frame.url?.startsWith('chrome-error://')) throw Error('document_blocked');
     if (tree.frameTree.frame.mimeType !== 'text/html') throw Error('document_blocked');
+    await credentialGuard(tab.id);
     const metrics = await command(tab.id, 'Page.getLayoutMetrics');
     const viewport = metrics.cssLayoutViewport, content = metrics.cssContentSize;
     let scale = Math.min(1, 1440 / viewport.clientWidth);
@@ -301,6 +307,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       const view = new DataView(header.buffer);
       const width = view.getUint32(16), height = view.getUint32(20);
       if (width <= 1920 && height <= 1440) {
+        await credentialGuard(tab.id);
         const frameId = crypto.randomUUID();
         frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
         return { state: 'ready', frameId, width, height, scroll: { up: viewport.pageY > 1, down: viewport.pageY + viewport.clientHeight < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + viewport.clientWidth < content.x + content.width - 1 }, image: { mimeType: 'image/png', data: result.data } };
@@ -383,6 +390,28 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
+    if (['authentication-start', 'authentication-probe', 'authentication-fill', 'authentication-end'].includes(op)) {
+      if (!config.authentication) throw Error('invalid_input');
+      if (op === 'authentication-start') {
+        if (manual || authenticating) throw Error('manual_control_active');
+        authenticating = true; frame = undefined; observedFrameId = undefined;
+        return { state: 'connected' };
+      }
+      if (!authenticating) throw Error('invalid_input');
+      await guardUpdate;
+      if (guardFailed) throw Error('document_blocked');
+      const tab = await selected(); allowedNavigation(tab.url);
+      if (documentFailures.has(tab.id) || httpFailures.has(tab.id)) throw Error('document_blocked');
+      if (op === 'authentication-end') {
+        const verified = args.success === true && (await chrome.tabs.sendMessage(tab.id, { kind: 'authentication-probe' }, { frameId: 0 }))?.state === 'success';
+        authenticating = false; manual = !verified; frame = undefined;
+        if (args.success === true && !verified) throw Error('manual_control_active');
+        return { state: verified ? 'saved_unverified' : 'manual_input_required' };
+      }
+      // Fixed top-frame messages, never arbitrary DOM/evaluate/CDP. Values
+      // stay in this private channel; the public call API has no such aliases.
+      return chrome.tabs.sendMessage(tab.id, { kind: op, ...(op === 'authentication-fill' ? args : {}) }, { frameId: 0 });
+    }
     if (op === 'manual') {
       manual = true; frame = undefined;
       for (const tabId of attached) await chrome.debugger.detach({ tabId }).catch(() => {});
@@ -407,7 +436,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       for (const id of [...ownedWindows]) await chrome.windows.remove(id);
       return { state: 'closed' };
     }
-    if (manual) throw Error('manual_control_active');
+    if (manual || authenticating) throw Error('manual_control_active');
     await guardUpdate;
     if (guardFailed) throw Error('document_blocked');
     if (op === 'navigate') {
@@ -447,6 +476,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const f = frame;
     if (!f || f.frameId !== args.frameId || Date.now() - f.at > 60_000) throw Error('stale_frame');
     const tab = await chrome.tabs.get(f.tabId); allowedNavigation(tab.url);
+    await credentialGuard(tab.id);
     frame = undefined; // consume before any input, including an unknown outcome
     const integer = (v, low, high) => Number.isInteger(v) && v >= low && v <= high;
     if (['click', 'scroll', 'download-attachment'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
