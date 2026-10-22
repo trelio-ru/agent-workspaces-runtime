@@ -172,7 +172,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,secretBrowserFill=null,secretGeneration=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -188,7 +188,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,secretBrowserFill,secretGeneration,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,secretBrowserFill,secretGeneration,secretSkill,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
@@ -900,13 +900,21 @@ export const validateAssistantWorkspacePlan = async raw => {
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
-  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run','secret_browser_fill','secret_generate'].includes(action.operation)
+  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run','secret_browser_fill','secret_generate','secret_skill_run'].includes(action.operation)
     || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
     || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
     || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
     || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(action.operation==='secret_browser_fill' && (!action.parameters
     || Object.keys(action.parameters).sort().join(',')!=='grantId,targetUrl'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  if(action.operation==='secret_skill_run' && (!action.parameters
+    || Object.keys(action.parameters).sort().join(',')!=='companySlug,environmentVariable,fieldKey,grantId,skill'
+    || typeof action.parameters.companySlug!=='string' || !/^[a-z0-9][a-z0-9_-]{0,159}$/u.test(action.parameters.companySlug)
+    || !new RegExp(UUID,'u').test(action.parameters.grantId??'')
+    || !/^[a-z][a-z0-9_]{0,63}$/u.test(action.parameters.fieldKey??'')
+    || !/^TRELIO_[A-Z0-9_]{1,100}$/u.test(action.parameters.environmentVariable??'')
+    || action.parameters.skill?.companyId!==snapshot.scope.companyId
+    || !new RegExp(UUID,'u').test(action.parameters.skill?.runtimeSessionId??'')))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(action.operation==='secret_generate'){
     if(!action.parameters || Object.keys(action.parameters).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId'
       || ['clientRequestId','ownerDecisionId','runId'].some(key=>!new RegExp(UUID,'u').test(action.parameters[key]??''))
@@ -1071,9 +1079,10 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
         : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     }
-    if(plan.localAction.operation==='open' || skill) {
+    if(plan.localAction.operation==='open' || skill || plan.localAction.operation==='secret_skill_run') {
       const runtime=await store.get({origin:identity.origin,kind:'runtime',id:active.passId});
-      if(runtime?.ended || runtime?.state?.runtimeSessionId!==plan.localAction.parameters.runtimeSessionId)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+      const selected=plan.localAction.operation==='secret_skill_run'?plan.localAction.parameters.skill.runtimeSessionId:plan.localAction.parameters.runtimeSessionId;
+      if(runtime?.ended || runtime?.state?.runtimeSessionId!==selected)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
     }
     const config=common.resolveWorkspaceBridgeConfigDirectory();
     if(!inspecting)await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan));
@@ -1141,6 +1150,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     }
   },{secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
     ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null,
+    secretSkill:plan.localAction.operation==='secret_skill_run'
+      ? {...plan.localAction.parameters,...plan.runIdentity}:null,
     secretGeneration:plan.localAction.operation==='secret_generate'?{...plan.localAction.parameters,workspaceId:plan.runIdentity.workspaceId}:null});
 };
 

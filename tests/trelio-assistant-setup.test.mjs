@@ -676,6 +676,22 @@ test('private browser continuation reuses the exact common invocation and refuse
 });
 
 
+test('private credential setup composes the common reserved executable and binds the original Run',async()=>{
+  const {validateAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const base=workspacePlan(),runId=base.localAction.parameters.runId,workspaceId=base.localAction.parameters.workspaceId;
+  const parameters={grantId:randomUUID(),companySlug:'fixture',fieldKey:'password',environmentVariable:'TRELIO_SERVICE_PASSWORD',
+    skill:{companyId:base.scope.companyId,skillId:'synthetic-private',releaseId:randomUUID(),
+      runtimeSessionId:randomUUID(),arguments:['login']}};
+  const raw={...base,localAction:{schemaVersion:1,operation:'secret_skill_run',runIdentity:{runId,workspaceId},parameters}};
+  const plan=await validateAssistantWorkspacePlan(raw);
+  assert.equal(plan.invocation.argumentsList[0],'secret');
+  assert.deepEqual(plan.invocation.argumentsList.slice(4,8),['--','trelio-workspace','skill','run']);
+  assert.deepEqual(plan.runIdentity,{workspaceId,runId});
+  for(const extra of [{value:'PRIVATE'},{executable:'powershell'},{directory:'/foreign'},{deliveryMode:'file'},
+    {environmentVariable:'NODE_OPTIONS'},{skill:{...parameters.skill,companyId:randomUUID()}}])
+    await assert.rejects(validateAssistantWorkspacePlan({...raw,localAction:{...raw.localAction,parameters:{...parameters,...extra}}}));
+});
+
 test('private generation accepts only structural sealed coordinates in its SAME Workspace worker plan',async()=>{
   const {validateAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const base=workspacePlan(),runId=base.localAction.parameters.runId,workspaceId=base.localAction.parameters.workspaceId;

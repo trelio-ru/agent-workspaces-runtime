@@ -641,7 +641,10 @@ publication tooling также остаются вне этого публичн
 
 - Private Secret browser plans reuse the SAME one-use/native browser engine,
   with original grant/pass/device/Run binding and isolated fallback storage.
-  No human profile, CLI/reveal or uncertain fill replay. Sealed empty-card receipts
+  No human profile, arbitrary CLI/reveal or uncertain fill replay. Signed v2
+  private authentication reuses the same Run grant/package/account/process engine;
+  exact auth-only argv/env, late one-use consume, all provider output discarded.
+  Sealed empty-card receipts
   remain metadata. Separately reviewed NEW password generation reuses the same
   HMAC/fingerprint/keyring writer, original pass/Run and protected device material;
   no human intent flags, new vault, account signup or existing-card adoption. Metadata operations

@@ -200,6 +200,7 @@ const TRELIO_WORKSPACE_ACTION_OPERATIONS = new Set([
   "skill_pack",
   "skill_run",
   "secret_exec",
+  "secret_skill_run",
   "secret_browser_fill",
   "secret_set_file",
 ]);
@@ -228,6 +229,7 @@ const TRELIO_WORKSPACE_ACTION_CWD_OPERATIONS = new Set([
   "finish",
   "submit",
   "secret_exec",
+  "secret_skill_run",
   "secret_browser_fill",
   "secret_set_file",
 ]);
@@ -9849,6 +9851,13 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput) => {
         allowEmptyValues: true,
       }),
     );
+  } else if (operation === "secret_skill_run") {
+    assertWorkspaceActionKeys(parameters, new Set(["grantId", "companySlug", "fieldKey", "environmentVariable", "skill"]));
+    // A dedicated plan composes the EXISTING reserved secret-exec -> signed
+    // skill-run handoff. It cannot choose another executable or raw shell.
+    const skill = buildTrelioWorkspaceActionInvocation({ schemaVersion: 1, operation: "skill_run", parameters: parameters.skill });
+    argumentsList = ["secret", "exec", "--grant", normalizeWorkspaceActionUuid(parameters.grantId, "parameters.grantId"),
+      "--", "trelio-workspace", ...skill.argumentsList];
   } else if (operation === "secret_exec") {
     assertWorkspaceActionKeys(parameters, new Set(["grantId", "executable", "arguments"]));
     argumentsList = [

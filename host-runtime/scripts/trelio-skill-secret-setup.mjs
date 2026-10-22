@@ -59,12 +59,14 @@ export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) => 
   if (file.bytes.length > 16 * 1024 || !parsedPackage.capabilities.includes("secret-checkout")) throw invalid();
   let descriptor;
   try { descriptor = JSON.parse(file.bytes.toString("utf8")); } catch { throw invalid(); }
-  if (!exactKeys(descriptor, ["schemaVersion", "commands"]) || descriptor.schemaVersion !== 1
+  if (!exactKeys(descriptor, ["schemaVersion", "commands"]) || ![1,2].includes(descriptor.schemaVersion)
     || !Array.isArray(descriptor.commands) || !descriptor.commands.length || descriptor.commands.length > 8) throw invalid();
   const ids = new Set();
   const argumentSets = new Set();
   for (const command of descriptor.commands) {
-    if (!exactKeys(command, ["id", "arguments", "bindingKey", "fieldKey", "environmentVariable"])
+    if (!exactKeys(command, ["id", "arguments", "bindingKey", "fieldKey", "environmentVariable",
+      ...(descriptor.schemaVersion===2?["purpose"]:[])])
+      || descriptor.schemaVersion===2 && command.purpose!=="authenticate"
       || typeof command.id !== "string" || !/^[a-z][a-z0-9-]{0,47}$/u.test(command.id)
       || !Array.isArray(command.arguments) || !command.arguments.length || command.arguments.length > 8
       || command.arguments.some((arg) => typeof arg !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/u.test(arg))

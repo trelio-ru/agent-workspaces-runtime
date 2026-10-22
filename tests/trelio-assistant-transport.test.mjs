@@ -738,7 +738,7 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../ho
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=null,secretGeneration=null}={}) => {
+const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
   const identity={schemaVersion:1,origin:encryptedTool?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
@@ -756,6 +756,7 @@ const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=nul
     ? {...locator,sections:['comments']} : locator,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
     assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'}:null;
   const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,secretBrowserFill,secretGeneration,
+    secretSkill:typeof secretSkill==='function'?secretSkill({pass,runtime}):secretSkill,
     lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
   return {identity,pass,keys,store,credential,runtime,profile,descriptor,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
@@ -1246,6 +1247,71 @@ test('private browser profile admits only its original grant and Run, signs fres
   assert.equal(privateReads,before,'closed pass never reads the private device or signer');
 });
 
+
+test('private signed authentication binds one grant, exact skill vector and fresh device proofs without human fallback',async()=>{
+  const {buildTrelioWorkspaceActionInvocation}=await import('../host-runtime/scripts/trelio-local-context.mjs');
+  let binding;
+  const f=await workspaceProfileFixture({secretSkill:({pass,runtime})=>(binding={
+    grantId:randomUUID(),runId:randomUUID(),workspaceId:randomUUID(),companySlug:'fixture',fieldKey:'password',environmentVariable:'TRELIO_SERVICE_PASSWORD',
+    skill:{companyId:pass.companyId,skillId:'synthetic-private',releaseId:randomUUID(),
+      runtimeSessionId:runtime.state.runtimeSessionId,arguments:['login']},
+  })});
+  const nativeEncryption=await f.profile.prepareRequest({origin:f.identity.origin,token:await f.profile.requireToken(f.identity.origin),
+    pathname:'/api/agent-workspaces/encryption/runtime?companySlug=fixture',options:{},buildHeaders:()=>new Headers()});
+  assert.equal(nativeEncryption.url.pathname,'/api/digital-assistants/runtime/encryption/runtime');
+  for(const query of ['companySlug=foreign','companySlug=fixture&fingerprint=forged','companySlug=fixture&companySlug=fixture'])
+    await assert.rejects(f.profile.prepareRequest({origin:f.identity.origin,token:await f.profile.requireToken(f.identity.origin),
+      pathname:'/api/agent-workspaces/encryption/runtime?'+query,options:{},buildHeaders:()=>new Headers()}));
+  const expected=buildTrelioWorkspaceActionInvocation({schemaVersion:1,operation:'skill_run',parameters:binding.skill});
+  const commandArguments=['trelio-workspace',...expected.argumentsList];
+  assert.deepEqual(await f.profile.authorizePrivateSkillCheckout({grantId:binding.grantId,runId:binding.runId,commandArguments}),
+    {fieldKey:'password',environmentVariable:'TRELIO_SERVICE_PASSWORD'});
+  for(const change of [{grantId:randomUUID()},{runId:randomUUID()},{commandArguments:['powershell','-Command','write-output']},
+    {commandArguments:[...commandArguments,'--export']}])
+    await assert.rejects(f.profile.authorizePrivateSkillCheckout({grantId:binding.grantId,runId:binding.runId,commandArguments,...change}));
+  const token=await f.profile.requireToken(f.identity.origin),base=`/api/agent-secrets/checkout-grants/${binding.grantId}`;
+  let reads=0;const get=f.store.get;f.store.get=async input=>{reads++;return get(input);};
+  const prepare=(pathname,options={})=>f.profile.prepareRequest({origin:f.identity.origin,token,pathname,options,buildHeaders:(_token,input)=>new Headers(input)});
+  for(const [pathname,options] of [
+    [`${base}/browser-fill-context?runId=${binding.runId}`,{}],
+    [`${base}/browser-fill-context?runId=${binding.runId}&purpose=signed_skill&purpose=signed_skill`,{}],
+    [`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId})}],
+    [`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId,purpose:'signed_skill',ownerApproved:true})}],
+    [`${base}/browser-fill-outcome`,{method:'POST',body:JSON.stringify({runId:binding.runId,purpose:'signed_skill'})}],
+    ['/api/agent-skills/runtime/setup-secret',{method:'POST',body:'{}'}],
+  ])await assert.rejects(prepare(pathname,options));
+  assert.equal(reads,0,'unsupported fields/routes fail before signer/credential reads');
+  const nonces=new Set();
+  for(const [pathname,options,tool] of [
+    [`${base}/browser-fill-context?runId=${binding.runId}&purpose=signed_skill`,{},'assistant_secret_skill_context'],
+    [`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId,purpose:'signed_skill'})},'assistant_secret_skill_consume'],
+    ['/api/agent-skills/runtime/resolve',{method:'POST',body:JSON.stringify({companyId:binding.skill.companyId,
+      skillId:binding.skill.skillId,expectedReleaseId:binding.skill.releaseId})},'assistant-skill:resolve'],
+  ]){
+    const selected=await prepare(pathname,{...options,headers:{authorization:'Bearer HUMAN',cookie:'HUMAN',
+      'x-trelio-assistant-secret-checkout':'FORGED'}});
+    const proof=JSON.parse(selected.headers.get('x-trelio-assistant-proof'));
+    assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
+      f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);
+    assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
+    assert.equal(selected.headers.get('authorization'),`Bearer ${f.credential}`);assert.equal(selected.headers.get('cookie'),null);
+    assert.equal(selected.headers.get('x-trelio-assistant-secret-checkout'),tool==='assistant-skill:resolve'
+      ? JSON.stringify({grantId:binding.grantId,runId:binding.runId}) : null);
+  }
+  const old=reads;
+  await assert.rejects(prepare('/api/agent-skills/runtime/resolve',{method:'POST',body:JSON.stringify({
+    companyId:binding.skill.companyId,skillId:'another-skill',expectedReleaseId:binding.skill.releaseId})}));
+  assert.equal(reads,old);
+  const ordinary=await workspaceProfileFixture();
+  await assert.rejects(ordinary.profile.authorizePrivateSkillCheckout({grantId:binding.grantId,runId:binding.runId,commandArguments}));
+  const ordinaryToken=await ordinary.profile.requireToken(ordinary.identity.origin);
+  const unbound=await ordinary.profile.prepareRequest({origin:ordinary.identity.origin,token:ordinaryToken,
+    pathname:'/api/agent-skills/runtime/resolve',options:{method:'POST',body:JSON.stringify({companyId:ordinary.pass.companyId}),
+      headers:{'x-trelio-assistant-secret-checkout':'FORGED'}},buildHeaders:(_token,input)=>new Headers(input)});
+  assert.equal(unbound.headers.get('x-trelio-assistant-secret-checkout'),null);
+  f.close();
+  await assert.rejects(f.profile.authorizePrivateSkillCheckout({grantId:binding.grantId,runId:binding.runId,commandArguments}),/REVIEW_REQUIRED/);
+});
 
 test('private generation composes native sealed preflight, SAME protected key/password engine and one write without value output',async()=>{
   const common=await import('../host-runtime/scripts/trelio-workspace.mjs');

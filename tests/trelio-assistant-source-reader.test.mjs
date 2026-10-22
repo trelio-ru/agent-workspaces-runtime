@@ -757,6 +757,90 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
   }finally{globalThis.fetch=savedFetch;}
 });
 
+test('private authentication composes the real Run CLI, signed package and one-use checkout without returning provider output',async()=>{
+  const {createAssistantWorkspaceProfile,assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const taskIdentity={schemaVersion:1,origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+  const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
+    expiresAt:new Date(Date.now()+300000).toISOString(),privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
+    observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}}};
+  const taskHost={readIdentity:async()=>taskIdentity,readActivePass:async()=>pass};
+  const taskStore={get:async slot=>slot.kind==='runtime'?runtime:{assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,credential,expiresAt:1}};
+  const client={readTaskPass:async()=>({...pass,state:'leased',leaseExpiresAt:new Date(Date.now()+300000).toISOString()})};
+  const runId=randomUUID(),workspaceId=randomUUID(),grantId=randomUUID(),secretId=randomUUID(),currentRelease=randomUUID(),currentArtifact=randomUUID();
+  const skill={companyId:pass.companyId,skillId:'private-auth-fixture',releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['authenticate']};
+  const binding={grantId,runId,workspaceId,companySlug:'fixture',fieldKey:'value',environmentVariable:'TRELIO_TEST_AUTH_TOKEN',skill};
+  const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,secretSkill:binding,
+    sourceReads:{prepare:async()=>assert.fail('authentication is never business body evidence')},
+    lockDirectory:path.join(directory,'private-auth-locks'),lock:(_file,action)=>action()});
+  const root=path.join(assistantTaskStorageDirectory(engine.resolveWorkspaceBridgeConfigDirectory(),{...taskIdentity,companyId:pass.companyId,taskId:pass.taskId}),'workspaces',workspaceId);
+  const cwd=path.join(root,'workspace');await engine.ensurePrivateDirectory(cwd);
+  await engine.writePrivateJsonFile(path.join(root,'.trelio-run.json'),{schemaVersion:3,origin:taskIdentity.origin,runId,workspaceId,workspaceDirectory:cwd,
+    company:{id:pass.companyId,slug:'fixture'},encryption:{enabled:false}});
+  const sourceDir=path.join(directory,'private-auth-package');await fs.mkdir(sourceDir);
+  const marker=path.join(directory,'private-auth-child'),value='DISPOSABLE_PRIVATE_AUTH_CANARY';
+  await fs.writeFile(path.join(sourceDir,'trelio-secret-setup.json'),JSON.stringify({schemaVersion:2,commands:[{
+    id:'authenticate',purpose:'authenticate',arguments:skill.arguments,bindingKey:'service_token',fieldKey:binding.fieldKey,environmentVariable:binding.environmentVariable}]}));
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),['authenticate']);assert.equal(process.env.CODEX_THREAD_ID,${JSON.stringify(pass.threadId)});
+    assert.equal(process.env.TRELIO_TEST_AUTH_TOKEN,${JSON.stringify(value)});assert.equal(process.env.TRELIO_MCP_ACCESS_TOKEN,undefined);
+    let stdin='';for await(const c of process.stdin)stdin+=c;assert.equal(stdin,'');
+    fs.appendFileSync(${JSON.stringify(marker)},'1');console.log(process.env.TRELIO_TEST_AUTH_TOKEN,Buffer.from(process.env.TRELIO_TEST_AUTH_TOKEN).toString('base64'));
+    console.error('PRIVATE_PROVIDER_DIAGNOSTIC');`);
+  const bytes=await engine.buildAgentSkillPackage({skillId:skill.skillId,runtimeVersion:'1.0.0',sourceDirectory:sourceDir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','secret-checkout']});
+  const packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({companyId:pass.companyId,skillId:skill.skillId,expectedReleaseId:currentRelease,artifactId:currentArtifact});
+  const dto={releaseId:currentRelease,company:{id:pass.companyId,slug:'fixture',name:'Fixture'},
+    localIdentity:{companyId:pass.companyId,projectId:null,skillId:skill.skillId,memberId:randomUUID(),connectionId:null},companyConnection:null,
+    trust:{level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null},packageUrl,
+    artifact:{id:currentArtifact,skillId:skill.skillId,runtimeVersion:'1.0.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
+      packageSha256:createHash('sha256').update(bytes).digest('hex'),packageSizeBytes:bytes.length,packageSignature:sign(null,bytes,privateKey).toString('base64'),
+      signingKeyId:'private-auth-test',signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1',manifest:{}}};
+  const metadata={grantId,runId,secretId,secretVersion:1,storageMode:'trelio',deliveryMode:'env',executable:'trelio-workspace',fieldKeys:['value'],
+    environmentVariable:binding.environmentVariable,expiresAt:new Date(Date.now()+300000).toISOString()};
+  const rules='# Synthetic platform rules\n',sha256=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
+  let consumed=0,resolutions=0,lateRefusal=false,encrypted=false,fetchFailure;const savedFetch=globalThis.fetch,nonces=new Set();
+  const fixtureFetch=async(url,options)=>{
+    assert.equal(url.origin,taskIdentity.origin);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
+    const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
+    if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-compatibility')return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{
+      status:options.headers.get('x-trelio-agent-rules-sha256')===sha256?'current':'update_required',revisionId,version:1,sha256,rulesMarkdown:rules}}));
+    if(url.pathname===`/api/digital-assistants/runtime/workspace/workspaces/${workspaceId}/runs/${runId}`)return new Response(JSON.stringify({run:{id:runId,workspaceId}}));
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
+      assert.equal(url.searchParams.get('companySlug'),'fixture');assert.equal(options.headers.get('x-trelio-assistant-encryption-protocol'),'1');
+      return new Response(JSON.stringify({suite:'trelio-e2ee-v1',state:encrypted?'encrypted':'plain',
+        company:{id:pass.companyId,slug:'fixture'},viewer:{userId:taskIdentity.assistantId}}));}
+    if(url.pathname===`/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context`){
+      assert.equal(url.searchParams.get('purpose'),'signed_skill');return new Response(JSON.stringify(metadata));}
+    if(url.pathname==='/api/agent-skills/runtime/resolve'){
+      resolutions++;assert.deepEqual(JSON.parse(options.headers.get('x-trelio-assistant-secret-checkout')),{grantId,runId});
+      if(lateRefusal && resolutions%2===0)return new Response(JSON.stringify({code:'ASSISTANT_OWNER_PAUSED',message:'private'}),{status:409});
+      return new Response(JSON.stringify(dto));}
+    if(url.pathname==='/api/agent-skills/runtime/package')return new Response(bytes);
+    assert.equal(url.pathname,`/api/agent-secrets/checkout-grants/${grantId}/consume`);
+    assert.deepEqual(JSON.parse(options.body),{runId,purpose:'signed_skill'});assert.equal(consumed,0,'the existing one-use native grant cannot replay');consumed++;
+    return new Response(JSON.stringify({...metadata,environmentVariables:null,values:{value}}));
+  };
+  globalThis.fetch=async(...args)=>{try{return await fixtureFetch(...args);}catch(error){fetchFailure=error;throw error;}};
+  const plan={prepared:true,scope:{assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
+    localAction:{schemaVersion:1,operation:'secret_skill_run',runIdentity:{runId,workspaceId},parameters:{grantId,companySlug:binding.companySlug,fieldKey:binding.fieldKey,environmentVariable:binding.environmentVariable,skill}}};
+  let bridgeFailure;
+  const run=async()=>{bridgeFailure=null;try{return await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{
+    withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost}),loadCommon:async()=>({...engine,
+      runWorkspaceCommand:async(...args)=>{try{return await engine.runWorkspaceCommand(...args);}catch(error){bridgeFailure=error;throw error;}}}),
+  }));}catch(error){throw bridgeFailure??error;}};
+  try{
+    // A native refusal after signature/cache preparation must precede consume.
+    encrypted=true;await assert.rejects(run());assert.equal(consumed,0);assert.equal(resolutions,0,'encrypted mode cannot reach package/value preparation');encrypted=false;
+    lateRefusal=true;await assert.rejects(run());assert.equal(fetchFailure,undefined);assert.equal(consumed,0);await assert.rejects(fs.readFile(marker),{code:'ENOENT'});
+    lateRefusal=false;const result=await run();assert.equal(consumed,1);assert.equal(await fs.readFile(marker,'utf8'),'1');
+    assert.deepEqual(JSON.parse(result.stdout),{schemaVersion:1,state:'command_completed',verificationRequired:true});
+    assert.doesNotMatch(JSON.stringify(result),/DISPOSABLE_PRIVATE|PRIVATE_PROVIDER|RElTUE9TQUJM/);
+  }finally{globalThis.fetch=savedFetch;}
+});
+
 // Exercises the production signed loader/catalogue and native child, not an
 // injected success function. All paths/accounts/provider output are synthetic.
 test('MAX handoff is never login proof; independent short probe rechecks native registration and drops private diagnostics',async t=>{

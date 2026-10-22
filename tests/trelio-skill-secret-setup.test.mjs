@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import {randomUUID} from "node:crypto";
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
 
 const command = { id: "configure", arguments: ["configure"], bindingKey: "service_token",
@@ -46,6 +50,11 @@ test("setup declaration permits only complete signed argument vectors", () => {
   assert.deepEqual(readSkillSecretSetupCommand(packageWith([command]), ["configure"]), command);
   assert.equal(readSkillSecretSetupCommand(packageWith([command]), ["configure", "--export"]), null);
   assert.equal(readSkillSecretSetupCommand(packageWith([command]), ["query"]), null);
+  const authentication={...command,purpose:"authenticate"};
+  assert.deepEqual(readSkillSecretSetupCommand(packageWith([authentication],{schemaVersion:2}),["configure"]),authentication);
+  for(const invalid of [packageWith([authentication]),packageWith([command],{schemaVersion:2}),
+    packageWith([{...authentication,purpose:"create_account"}],{schemaVersion:2})])
+    assert.throws(()=>readSkillSecretSetupCommand(invalid,["configure"]));
   for (const descriptor of [
     packageWith([command, command]), packageWith([command], { wildcard: true }),
     packageWith([{ ...command, arguments: ["configure", "*"] }]),
@@ -54,6 +63,43 @@ test("setup declaration permits only complete signed argument vectors", () => {
     packageWith([{ ...command, environmentVariable: "TRELIO_ORIGIN" }]),
     { ...packageWith([command]), capabilities: [] },
   ]) assert.throws(() => readSkillSecretSetupCommand(descriptor, ["configure"]));
+});
+
+test("private authentication reuses the real signed child engine and never returns credential-bearing output",async()=>{
+  const {withWorkspaceExecutionProfile,runMaterializedAgentSkill}=await import("../host-runtime/scripts/trelio-workspace.mjs");
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),"private-skill-child-"));
+  const value="DISPOSABLE-PRIVATE-FIELD-CANARY",auth={...command,purpose:"authenticate"};
+  const parsed={...packageWith([auth],{schemaVersion:2}),entrypoint:{path:"main.mjs",interpreter:"node"}};
+  const artifact={skillId:"synthetic-private-auth",runtimeVersion:"1.0.0",parsedPackage:parsed};
+  const executionContext={companyId:randomUUID(),projectId:null,releaseId:randomUUID(),runtimeSessionId:randomUUID()};
+  // The child deliberately echoes both raw and encoded forms. Output filtering
+  // must not rely on substring redaction or a provider promise about its logs.
+  await fs.writeFile(path.join(directory,"main.mjs"),"const value=process.env.TRELIO_TEST_SETUP_TOKEN; if(!value)process.exit(9); console.log(value,Buffer.from(value).toString('base64'));");
+  let consumed=0;
+  const profile={kind:"digital_assistant",requireToken:async()=>({}),prepareRequest:async()=>assert.fail("unexpected native HTTP"),
+    resolveSkillRuntimeChat:async()=>randomUUID(),authorizePrivateSkillCheckout:async()=>({})};
+  const input={artifact,runtimeDirectory:directory,runtimeArguments:["configure"],executionContext,
+    captureOutput:true,captureMode:"assistant_task",privateSecretSetup:{fieldKey:"value",environmentVariable:auth.environmentVariable},
+    prepareSetupEnvironment:async()=>{consumed++;return {[auth.environmentVariable]:value};}};
+  try{
+    await withWorkspaceExecutionProfile(profile,async()=>{
+      const result=await runMaterializedAgentSkill(input);
+      assert.deepEqual(JSON.parse(result.stdout),{schemaVersion:1,state:"command_completed",verificationRequired:true});
+      assert.equal(consumed,1);assert.ok(!JSON.stringify(result).includes(value));
+      assert.ok(!JSON.stringify(result).includes(Buffer.from(value).toString("base64")));
+      const before=consumed;
+      for(const change of [
+        {runtimeArguments:["configure","--export"]},
+        {privateSecretSetup:{fieldKey:"other",environmentVariable:auth.environmentVariable}},
+        {privateSecretSetup:{fieldKey:"value",environmentVariable:"NODE_OPTIONS"}},
+        {artifact:{...artifact,parsedPackage:{...parsed,files:packageWith([command]).files}}},
+        {captureMode:"monitor",runtimeArguments:["monitor"]},
+      ])await assert.rejects(runMaterializedAgentSkill({...input,...change}));
+      assert.equal(consumed,before,"an invalid declaration/mode never consumes the private field");
+      // Setup still cannot acquire this path through the ordinary task caller.
+      await assert.rejects(runMaterializedAgentSkill({...input,privateSecretSetup:null,prepareSetupEnvironment:null}));
+    });
+  }finally{await fs.rm(directory,{recursive:true,force:true});}
 });
 
 test("setup delivery rejects changed identity/config/env and never retries or leaks an error value", async () => {

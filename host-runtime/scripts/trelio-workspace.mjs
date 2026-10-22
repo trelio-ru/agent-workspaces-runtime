@@ -8124,6 +8124,7 @@ export const runMaterializedAgentSkill = async ({
   grantedEnvironment = {},
   grantedStdin = null,
   prepareSetupEnvironment = null,
+  privateSecretSetup = null,
   captureOutput = false,
   captureExitCode = false,
   captureMode = 'monitor',
@@ -8146,6 +8147,11 @@ export const runMaterializedAgentSkill = async ({
   const sourceSetupCapture = captureMode === 'assistant_source_setup';
   const sourceAckCapture = captureMode === 'assistant_source_ack';
   const profile = currentWorkspaceExecutionProfile();
+  const privateSetup = privateSecretSetup !== null;
+  if(privateSetup && (!taskCapture || profile?.kind!=='digital_assistant'
+    || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
+    || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
+    throw Object.assign(new Error('Private setup requires its exact task profile.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
   if (!['monitor','assistant_task','assistant_source_setup','assistant_source_ack'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
@@ -8159,7 +8165,7 @@ export const runMaterializedAgentSkill = async ({
     || captureExitCode && !captureOutput
     || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && !sourceAckCapture && runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
-    || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null
+    || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture ? 10 * 60_000 : 180_000)
     || signal !== null && !(signal instanceof AbortSignal))) {
     throw Object.assign(new Error('Invalid private monitor invocation.'), { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
@@ -8189,7 +8195,18 @@ export const runMaterializedAgentSkill = async ({
       throw Object.assign(new Error('Invalid acknowledgement budget.'), {code:'ASSISTANT_SOURCE_ACK_REQUIRED'});
     timeoutMs = Math.min(timeoutMs,remaining);
   }
-  if (taskCapture) assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments);
+  if (taskCapture) {
+    if(privateSetup){
+      const command=readSkillSecretSetupCommand(artifact.parsedPackage,runtimeArguments);
+      if(command?.purpose!=='authenticate' || command.fieldKey!==privateSecretSetup.fieldKey
+        || command.environmentVariable!==privateSecretSetup.environmentVariable)
+        throw Object.assign(new Error('Use exact signed authentication setup.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
+      // Validate the SAME environment filter BEFORE consuming the one-use
+      // grant. This placeholder has no credential and never reaches a child.
+      buildAgentSkillRuntimeEnvironment({artifact,runtimeDirectory,executionContext,
+        grantedEnvironment:{[privateSecretSetup.environmentVariable]:'protected-preflight'},now:runtimeStartedAt});
+    }else assertAssistantTaskSkillCommand(artifact.parsedPackage, runtimeArguments);
+  }
   const entrypointPath = path.join(
     runtimeDirectory,
     ...artifact.parsedPackage.entrypoint.path.split("/"),
@@ -8220,6 +8237,8 @@ export const runMaterializedAgentSkill = async ({
 
   // Resolve the interpreter before delivering a value; setup is authorized
   // immediately before spawn and cannot reuse a previous invocation's secret.
+  if(privateSetup && (signal?.aborted || performance.now()-runtimeStartedClock>=timeoutMs))
+    throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED','Private setup expired before checkout.',{operation:'skill_run'});
   if (prepareSetupEnvironment) grantedEnvironment = await prepareSetupEnvironment();
   const runtimeEnvironment = buildAgentSkillRuntimeEnvironment({
     artifact,
@@ -8288,7 +8307,12 @@ export const runMaterializedAgentSkill = async ({
       // Only this private native-ACK profile consumes the reviewed provider's
       // failure DTO from stderr. No stderr is added to normal/task responses,
       // errors or diagnostics; the adapter projects closed fields immediately.
-      const stdout = new TextDecoder('utf-8', { fatal: true }).decode(sourceAckCapture && result.exitCode !== 0 ? result.stderr : result.stdout);
+      // A credential setup is deliberately output-free: even a reviewed
+      // provider could echo/encode the granted value. Do not project its text,
+      // image or stderr to the model. A separate native auth probe must verify
+      // login; process success alone neither proves login nor completes work.
+      const stdout = privateSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
+        : new TextDecoder('utf-8', { fatal: true }).decode(sourceAckCapture && result.exitCode !== 0 ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.
@@ -8638,7 +8662,7 @@ const skillCommand = async (
   origin,
   options,
   positional,
-  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false } = {},
+  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null } = {},
 ) => {
   const skillSubcommand = positional[0];
 
@@ -8766,15 +8790,18 @@ const skillCommand = async (
     runtimeDirectory = materialized.runtimeDirectory;
   }
 
-  if (assistant && !parseAccountCommand(positional.slice(1))) {
+  const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
+  if(privateSecretSetup && (!assistant || setupCommand?.purpose!=='authenticate'
+    || setupCommand.fieldKey!==privateSecretSetup.fieldKey || setupCommand.environmentVariable!==privateSecretSetup.environmentVariable))
+    throw Object.assign(new Error('Use exact signed authentication setup.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
+  if (assistant && !privateSecretSetup && !parseAccountCommand(positional.slice(1))) {
     // Check before prepareSkillAccount: catalogue import/selection is I/O too.
     // Only the existing host selector is removed, by its strict shared parser.
     const providerArguments = artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
       ? splitAccountArguments(positional.slice(1)).providerArguments : positional.slice(1);
     assertAssistantTaskSkillCommand(artifactForCache.parsedPackage, providerArguments);
   }
-  const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
-  if (assistant && setupCommand) throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+  if (assistant && setupCommand && !privateSecretSetup) throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
   if (setupCommand && (Object.keys(grantedEnvironment).length || grantedStdin !== null)) {
     throw new Error("Команда настройки использует собственную signed-доставку. Запустите её через runtimeExecution без checkout grant.");
   }
@@ -8824,7 +8851,7 @@ const skillCommand = async (
   // engine. The private profile validates native source/task routing before
   // launch and after complete successful pipes; no provider output is saved
   // or promoted to processing merely because the command returned zero.
-  const bodyRead = assistant && typeof profile.prepareSkillBodyRead === 'function'
+  const bodyRead = assistant && !privateSecretSetup && typeof profile.prepareSkillBodyRead === 'function'
     ? await profile.prepareSkillBodyRead({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
   const executed = await runMaterializedAgentSkill({
     artifact: artifactForCache,
@@ -8834,7 +8861,8 @@ const skillCommand = async (
     grantedEnvironment,
     grantedStdin,
     ...(assistant ? {captureOutput:true,captureMode:'assistant_task',timeoutMs:180_000} : {}),
-    prepareSetupEnvironment: setupCommand ? () => deliverSkillSetupEnvironment({
+    privateSecretSetup: privateSecretSetup ? {fieldKey:privateSecretSetup.fieldKey,environmentVariable:privateSecretSetup.environmentVariable} : null,
+    prepareSetupEnvironment: privateSecretSetup ? privateSecretSetup.prepareEnvironment : setupCommand ? () => deliverSkillSetupEnvironment({
       request, origin, token, command: setupCommand, resolution, companyId,
       projectId, skillId, releaseId, runtimeSessionId,
     }) : null,
@@ -16727,6 +16755,45 @@ const executeSecretCheckout = async (options, positional) => withRun(async ({
 
   if (!metadata.runId) {
     throw new Error("Текущая папка не содержит активный Trelio Agent Run.");
+  }
+  const profile=currentWorkspaceExecutionProfile();
+  if(profile?.kind==='digital_assistant'){
+    if(typeof profile.authorizePrivateSkillCheckout!=='function')denyWorkspaceExecutionProfile();
+    const binding=await profile.authorizePrivateSkillCheckout({grantId,runId:metadata.runId,commandArguments});
+    const query=new URLSearchParams({runId:metadata.runId,purpose:'signed_skill'});
+    const before=await (await request(workspaceOrigin,token,
+      `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?${query}`)).json();
+    const expectedKeys=['grantId','runId','secretId','secretVersion','storageMode','deliveryMode','executable','fieldKeys','environmentVariable','expiresAt'];
+    if(!hasExactJsonKeys(before,expectedKeys) || before.grantId!==grantId || before.runId!==metadata.runId
+      || !UUID_PATTERN.test(before.secretId??'') || !Number.isSafeInteger(before.secretVersion) || before.secretVersion<1
+      || before.storageMode!=='trelio' || before.deliveryMode!=='env' || before.executable!=='trelio-workspace'
+      || before.environmentVariable!==binding.environmentVariable || !Array.isArray(before.fieldKeys)
+      || before.fieldKeys.length!==1 || before.fieldKeys[0]!==binding.fieldKey
+      || !Number.isFinite(Date.parse(before.expiresAt)) || Date.parse(before.expiresAt)<=Date.now())
+      throw Object.assign(new Error('Private setup binding changed.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
+    const parsed=parseArguments(commandArguments.slice(1));
+    if(commandArguments[0]!=='trelio-workspace' || parsed.command!=='skill' || parsed.positional[0]!=='run')
+      denyWorkspaceExecutionProfile();
+    let attempted=false;
+    await skillCommand(workspaceOrigin,parsed.options,parsed.positional,{privateSecretSetup:{
+      ...binding,async prepareEnvironment(){
+        if(attempted)denyWorkspaceExecutionProfile();attempted=true;
+        await profile.authorizePrivateSkillCheckout({grantId,runId:metadata.runId,commandArguments});
+        const response=await request(workspaceOrigin,token,`/api/agent-secrets/checkout-grants/${grantId}/consume`,{
+          method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({runId:metadata.runId,purpose:'signed_skill'}),
+        });
+        const payload=await response.json();
+        if(['grantId','runId','secretId','secretVersion','storageMode','deliveryMode','executable','environmentVariable']
+          .some(key=>payload[key]!==before[key]) || JSON.stringify(payload.fieldKeys)!==JSON.stringify(before.fieldKeys)
+          || payload.environmentVariables!==null)throw Object.assign(new Error('Private setup binding changed.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
+        const values=await resolveCheckoutSecretValues(payload,null),value=values[binding.fieldKey];
+        if(typeof value!=='string' || !value.length || Buffer.byteLength(value)>65536 || value.includes('\0'))
+          throw Object.assign(new Error('Private setup value is unavailable.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
+        await profile.authorizePrivateSkillCheckout({grantId,runId:metadata.runId,commandArguments});
+        return {[binding.environmentVariable]:value};
+      },
+    }});
+    return;
   }
 
   // Endpoint атомарно учитывает текущее использование grant. Обычные Agent

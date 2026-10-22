@@ -360,7 +360,7 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,secretBrowserFill=null,secretGeneration=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -387,6 +387,22 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     || ['clientRequestId','ownerDecisionId','runId','workspaceId'].some(key=>!uuid.test(secretGeneration[key]??''))
     || typeof secretGeneration.expectedTaskUpdatedAt!=='string' || !Number.isFinite(Date.parse(secretGeneration.expectedTaskUpdatedAt))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateGeneration=secretGeneration===null?null:Object.freeze({...secretGeneration});
+  if(secretSkill!==null && (!object(secretSkill)
+    || Object.keys(secretSkill).sort().join(',')!=='companySlug,environmentVariable,fieldKey,grantId,runId,skill,workspaceId'
+    || !/^[a-z0-9][a-z0-9_-]{0,159}$/u.test(secretSkill.companySlug??'')
+    || ['grantId','runId','workspaceId'].some(key=>!uuid.test(secretSkill[key]??''))
+    || !/^[a-z][a-z0-9_]{0,63}$/u.test(secretSkill.fieldKey??'')
+    || !/^TRELIO_[A-Z0-9_]{1,100}$/u.test(secretSkill.environmentVariable??'')
+    || !object(secretSkill.skill)))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const privateSkill=secretSkill===null?null:structuredClone(secretSkill);
+  if(privateSkill){
+    const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
+    buildTrelioWorkspaceActionInvocation({schemaVersion:1,operation:'skill_run',parameters:privateSkill.skill});
+    if(privateSkill.skill.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    Object.freeze(privateSkill.skill.arguments);Object.freeze(privateSkill.skill);Object.freeze(privateSkill);
+  }
+  if([privateFill,privateGeneration,privateSkill,encryptedRead].filter(Boolean).length>1)
+    fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   let managedEncryptionDevice=null;
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
@@ -458,6 +474,16 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         finally {key.fill(0);}
       });
     },
+    async authorizePrivateSkillCheckout({grantId,runId,commandArguments}){
+      if(!privateSkill || privateSkill.grantId!==grantId || privateSkill.runId!==runId)
+        fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
+      const expected=buildTrelioWorkspaceActionInvocation({schemaVersion:1,operation:'skill_run',parameters:privateSkill.skill});
+      if(JSON.stringify(commandArguments)!==JSON.stringify(['trelio-workspace',...expected.argumentsList]))
+        fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass();
+      return Object.freeze({fieldKey:privateSkill.fieldKey,environmentVariable:privateSkill.environmentVariable});
+    },
     async resolveSecretBrowserStorage({configDirectory,grantId,runId}){
       if(!privateFill || privateFill.grantId!==grantId || privateFill.runId!==runId
         || !path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -489,14 +515,17 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(url.origin!==requestOrigin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();
       let rewritten,route,encryptionRuntime=false;
-      if(encryptedRead && method==='GET' && requestOrigin===identity.origin
+      if((encryptedRead || privateSkill) && method==='GET' && requestOrigin===identity.origin
         && url.pathname==='/api/agent-workspaces/encryption/runtime' && options.body===undefined){
         const keys=[...url.searchParams.keys()];
         if(new Set(keys).size!==keys.length || keys.some(key=>!['companySlug','fingerprint'].includes(key))
-          || url.searchParams.get('companySlug')!==encryptedRead.companySlug
+          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill.companySlug)
+          || privateSkill && url.searchParams.has('fingerprint')
           || url.searchParams.has('fingerprint') && url.searchParams.get('fingerprint')!==managedEncryptionDevice?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
-        // SAME model-free managed registry reader. Registration/grants and the
-        // general human payload resolver stay closed in a task invocation.
+        // SAME native registry reader. A private authentication invocation may
+        // discover only its server-bound company's current encryption state.
+        // Common withRun compares company ID and rejects encrypted use before
+        // consuming any field; registration/grants/key fallback stay closed.
         rewritten='/api/digital-assistants/runtime/encryption/runtime';
         route={proofTool:'assistant_workspace_data_plane_read'};encryptionRuntime=true;
       }else if(privateGeneration && requestOrigin===identity.origin
@@ -535,6 +564,20 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           route={proofTool:outcome?'assistant_secret_browser_outcome':'assistant_secret_browser_consume'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
+      }else if(privateSkill && requestOrigin===identity.origin
+        && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateSkill.grantId}/`)){
+        const base=`/api/agent-secrets/checkout-grants/${privateSkill.grantId}`;
+        if(method==='GET' && url.pathname===base+'/browser-fill-context' && options.body===undefined
+          && [...url.searchParams.keys()].length===2 && new Set(url.searchParams.keys()).size===2
+          && url.searchParams.get('runId')===privateSkill.runId && url.searchParams.get('purpose')==='signed_skill'){
+          route={proofTool:'assistant_secret_skill_context'};
+        }else if(method==='POST' && !url.search && url.pathname===base+'/consume'){
+          let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+          if(!object(input) || Object.keys(input).sort().join(',')!=='purpose,runId'
+            || input.runId!==privateSkill.runId || input.purpose!=='signed_skill')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          route={proofTool:'assistant_secret_skill_consume'};
+        }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=url.pathname;
       }else if(requestOrigin===identity.origin && (url.pathname==='/api/agent-skills/runtime/resolve' && method==='POST'
         || url.pathname==='/api/agent-skills/runtime/package' && method==='GET')){
         // The signed-skill engine is shared. Only its two existing read
@@ -544,6 +587,8 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         try{input=method==='GET'?Object.fromEntries(url.searchParams):JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
         if(!object(input) || input.companyId!==pass.companyId
           || method==='GET' && new Set(url.searchParams.keys()).size!==[...url.searchParams.keys()].length)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        if(privateSkill && (input.skillId!==privateSkill.skill.skillId || input.expectedReleaseId!==privateSkill.skill.releaseId
+          || (input.projectId??null)!==(privateSkill.skill.projectId??null)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
         route={proofTool:method==='POST'?'assistant-skill:resolve':'assistant-skill:package'};
       }else{
@@ -570,6 +615,9 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // overwrite any untrusted values from an initial header collection.
         const headers=buildHeaders(null,options.headers??{});
         headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
+        headers.delete('x-trelio-assistant-secret-checkout');
+        if(privateSkill && route.proofTool.startsWith('assistant-skill:'))headers.set('x-trelio-assistant-secret-checkout',
+          JSON.stringify({grantId:privateSkill.grantId,runId:privateSkill.runId}));
         headers.set('x-trelio-assistant-pass',JSON.stringify(locator));
         headers.set('x-trelio-assistant-proof',JSON.stringify(proof));
         if(encryptionRuntime)headers.set('x-trelio-assistant-encryption-protocol','1');

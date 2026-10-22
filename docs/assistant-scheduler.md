@@ -1277,6 +1277,21 @@ operations under the observed task pass:
   company credential. Copy all original fields and request ID unchanged.
 - Returned `secret_browser_fill`: fixed grantId/targetUrl and Run identity. The
   SAME isolated Workspace worker invokes the existing browser-fill command.
+- Native `get_agent_skill` advertises private authentication templates only from
+  the SAME signed `trelio-secret-setup.json` v2 with `purpose=authenticate`.
+  `secret_skill_prepare` returns exact `secret_skill_run` with original native
+  grant/Run/company slug/skill/field/env. Legacy v1 and task command prefixes
+  cannot authorize this use. Only public/platform-verified packages without
+  company Secret bindings are eligible. The SAME `secret exec` reserved
+  `trelio-workspace skill run` path reuses signature/cache/account/interpreter
+  and process preparation; native resolution is repeated before one late
+  consume. The company encryption registry is readable only for the returned
+  slug, with exact native assistant identity/company ID checks; encrypted mode
+  never reaches values/provider/key fallback. One field lives in RAM and the
+  child-only environment, never shell/stdin/file/argv. Provider stdout/stderr
+  are discarded entirely, not substring-redacted. Its structural
+  `command_completed, verificationRequired:true` receipt requires an independent
+  native login probe; it does not process a message or finish a business goal.
 - `secret_generate`, `parameters={clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId}`,
   with the original Run identity: a DIFFERENT sealed `create_private_secret`
   intent includes native metadata, `runId` and password-only `generatedFields`.
@@ -1298,13 +1313,13 @@ The internal HTTP profile admits only that original grant/Run's existing
 preflight, consume/outcome or sealed generation context/write paths. Native one-use proofs, current company
 model/ACL/scopes and pass/device/Run locks apply through commit; no extra URL,
 body field or other Secret route can forward the device credential. Values
-remain in the protected browser process. Its owned fallback profile is isolated
+remain in the protected browser/provider process. Its owned fallback profile is isolated
 by assistant/device/task; it never opens the ordinary human fallback profile.
 
 Only value-free preflight and exact idempotent outcome reporting retain their
 existing bounded retries. An uncertain consume/fill is not repeated or switched
 to another browser. A successful fill is not task completion or a persisted
 processing receipt. Input from a task or website never authorizes disclosure,
-new account creation or ownership classification. Existing-card generation/rotation, CLI/reveal,
+new account creation or ownership classification. Existing-card generation/rotation, arbitrary CLI/reveal,
 encrypted use, account registration and real Windows business E2E remain
 independent gates; this subset does not change businessReady=false.
