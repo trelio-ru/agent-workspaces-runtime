@@ -441,6 +441,8 @@ publication tooling также остаются вне этого публичн
   its structural login, never owner identity/streams/processing readiness.
   Login never proves owner identity, enables intake/ACK or clears hook trust.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
+  Independent task creation uses the SAME proxy/native creator with a sealed
+  owner decision and project ACL; no inherited pass/chat/route or sender proof.
 
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
 - Native account preflight diagnoses login only from explicit missing auth, not

@@ -442,6 +442,54 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   assert.deepEqual(calls.at(-1),{name:'cancel_agent_workspace_run',arguments:cancellation});
 });
 
+test('independent task creation uses live native schemas and one immutable owner-reviewed intent', async () => {
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'q'.repeat(43)}`,expiresAt:1});
+  const properties={title:{type:'string',maxLength:1024},statusCode:{type:'string'},
+    assigneeMemberIds:{type:'array',items:{type:'string',format:'uuid'},maxItems:200},
+    ownerDecisionId:{type:'string',format:'uuid'},clientRequestId:{type:'string',format:'uuid'},
+    expectedTaskUpdatedAt:{type:'string'}};
+  const wireSchema={type:'object',properties:{...properties,taskPass:{type:'object'},runtimeSessionProof:{type:'object'}},
+    required:[...Object.keys(properties),'taskPass','runtimeSessionProof'],additionalProperties:false};
+  const calls=[];let enabled=true,uncertain=false;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest:async input=>{
+    const response=result=>({sessionId:'fixture-session',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE')return response({});
+    if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='notifications/initialized')return response({});
+    if(input.payload.method==='tools/list')return response({tools:[
+      {name:'get_assistant_status',description:'Native status',inputSchema:{type:'object'}},
+      ...(enabled?[
+        {name:'get_task_create_meta',description:'Fresh native project metadata',inputSchema:{type:'object',properties:{taskPass:{},runtimeSessionProof:{}},required:['taskPass','runtimeSessionProof'],additionalProperties:false}},
+        {name:'create_task',description:'Exact owner-reviewed native creation',inputSchema:wireSchema},
+      ]:[]),
+      {name:'create_task_as_owner',description:'Unreviewed capability',inputSchema:{type:'object'}},
+    ]});
+    assert.equal(input.payload.method,'tools/call');calls.push(structuredClone(input.payload.params));
+    if(uncertain)throw new Error('private ambiguous native response');
+    return response({content:[{type:'text',text:'Native receipt'}],structuredContent:{task:{id:randomUUID()}}});
+  }});
+  const tools=await client.listTools();
+  assert.equal(tools.find(tool=>tool.name==='get_task_create_meta').annotations.readOnlyHint,true);
+  const create=tools.find(tool=>tool.name==='create_task');assert.equal(create.annotations.readOnlyHint,false);
+  assert.deepEqual(create.inputSchema,{type:'object',properties,required:Object.keys(properties),additionalProperties:false});
+  assert.ok(!tools.some(tool=>tool.name==='create_task_as_owner'));
+  const proof={taskPass:{passId:randomUUID()},runtimeSessionProof:{signature:'observed-hook'}};
+  await client.callTool('get_task_create_meta',proof);
+  assert.deepEqual(calls.at(-1),{name:'get_task_create_meta',arguments:proof},'no guessed company/project locator or human credentials');
+  const intent={...proof,title:'Owner-approved follow-up',statusCode:'queue',assigneeMemberIds:[randomUUID()],
+    ownerDecisionId:randomUUID(),clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  const expected=structuredClone(intent),pending=client.callTool('create_task',intent);
+  intent.title='substituted after invocation';intent.assigneeMemberIds.length=0;await pending;
+  assert.deepEqual(calls.at(-1),{name:'create_task',arguments:expected},'native owner decision/fields remain unchanged through asynchronous transport');
+  uncertain=true;const before=calls.length;
+  await assert.rejects(client.callTool('create_task',expected),error=>error.code==='ASSISTANT_MCP_UNAVAILABLE');
+  assert.equal(calls.length,before+1,'unknown creation result requires native receipt read-back, never a second host attempt');
+  assert.deepEqual(calls.at(-1),{name:'create_task',arguments:expected});
+  enabled=false;
+  assert.deepEqual((await client.listTools()).map(tool=>tool.name),['get_assistant_status'],'older backend is not supplemented with copied/default schemas');
+});
+
 test('self-repair proxies the dedicated live schema and exact immutable intent without exposing generic restore',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'p'.repeat(43)}`,expiresAt:1});

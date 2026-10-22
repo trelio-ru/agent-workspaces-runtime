@@ -731,7 +731,7 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
 /** The backend owns these schemas and business authorization. This closed host
  * capability list is only a transport boundary: unknown/new server tools are
  * not exposed until the host can execute them. No input schema is copied here. */
-export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "download_attachment", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
+export const ASSISTANT_MCP_READ_TOOLS = Object.freeze(["get_assistant_status", "download_attachment", "get_task_create_meta", "get_task", "get_task_sections", "get_task_instruction_page", "prepare_assistant_workspace_read", "get_assistant_owner_question", "search_agent_guidance", "get_agent_skill", "get_agent_procedure"]);
 // Names only: the backend supplies current schemas and exact task/action
 // authority. No human assertion, owner decision or company role is synthesized.
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
@@ -747,6 +747,10 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
   // retirement/restore under the current pass; this name grants no generic
   // history restore, filesystem reset or second mutation attempt.
   'repair_assistant_workspace_result',
+  // An independent task still needs the backend's exact sealed owner decision
+  // and both actors' native project-create ACL. This is the SAME generic
+  // transport: no client-side creator, owner assertion or new task-pass binding.
+  'create_task',
   "update_task_due_date", "update_task_assignee", "set_task_participants", "update_task_custom_field",
   "create_comment", "update_comment", "update_task_title", "update_task_description", "update_task_urgency", "update_task_status",
   "create_task_control", "update_task_control", "clear_task_control", "create_checklist", "update_checklist",

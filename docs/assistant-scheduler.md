@@ -900,6 +900,15 @@ unchanged. The backend retains source-file ACL, validation, action policy and
 receipt authority. The host does not fetch file bytes, select an answer or create
 its own domain schema; the owner UI always supplies the free-text Other option.
 
+Independent `create_task` and fresh `get_task_create_meta` use that SAME proxy
+and the backend's current schemas. The metadata target is the protected pass's
+project; creation needs an exact persisted owner decision, explicit status and
+executor/participant sets, plus BOTH actors' native project-create ACL. Ordinary
+task-only edit access does not grant project creation. The host neither creates
+a second task service nor synthesizes human flags/owner commands or external
+sender proof. The new task does not inherit a pass, chat, source route or cycle.
+An older backend simply omits these names from its live catalogue.
+
 Each action still uses observed task-pass proof, native task permissions, snapshot
 CAS and a durable request UUID. The shared backend transaction commits effects
 and receipt together, then releases deferred messenger copies. A lost response
