@@ -260,6 +260,12 @@ publication tooling также остаются вне этого публичн
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
   Missing API support is a runtime capability gap, not a ban on automatic login.
+  Signed authentication `follow` transitions use the additive
+  `trelio.protected-browser-auth-transitions/v1` capability: exact same-origin
+  anchor/path, no fields/values/popups/downloads or visible password/OTP.
+  The SAME private attempt fences the click before dispatch; lost response,
+  loop or restart never replay it or the password. Provider selectors stay
+  outside generic host; pure and native browser guards are mandatory.
   image-only MCP по умолчанию с явным text opt-in, managed Chromium с private live profile и AEAD snapshot
   после нормальной остановки, native OS keyring, company/member claim и
   непродлеваемая lease. Собственный capture удаляет bounded ancillary iCCP без

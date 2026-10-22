@@ -265,6 +265,9 @@ authentication: {
     { id: 'password', origin: 'https://auth.example.test',
       challenge: '#login-form', fields: { login: '#login', password: '#password' },
       submit: '#login-submit', manual: ['#captcha'] },
+    { id: 'choose-authenticator', origin: 'https://auth.example.test',
+      challenge: '#method-choice', action: 'follow',
+      target: 'a#use-authenticator', path: '/authenticator', manual: ['#captcha'] },
     { id: 'totp', origin: 'https://auth.example.test',
       challenge: '#authenticator-code-form', fields: { totp: '#code' },
       submit: '#code-submit' },
@@ -282,6 +285,38 @@ authentication: {
 Форма должна отправлять POST в тот же exact origin и собственную вкладку;
 неоднозначные/hidden/disabled/readonly fields, CAPTCHA и неизвестный challenge
 останавливают процедуру. Generic host не распознаёт смысл любого сайта.
+
+Переход между формами требует дополнительный export
+`VISUAL_AUTHENTICATION_TRANSITIONS_API === 'trelio.protected-browser-auth-transitions/v1'`.
+Provider проверяет его до использования `action: 'follow'`; исходный v1 API
+сам по себе не подтверждает эту возможность. Legacy field-only рецепты
+сохраняют прежнюю нормализацию и fingerprint.
+
+`follow` – value-free шаг того же signed recipe и той же private attempt.
+В нём нет fields/submit или значений: только exact origin, unique visible
+challenge/target, signed exact pathname и optional manual selectors. Host
+следует одному HTML anchor в top frame, только в тот же origin/path и `_self`.
+SSO query остаётся в ссылке на стороне сайта и не возвращается модели.
+Downloads, popup targets, чужой origin, другой path, credentials в URL,
+fragment, неоднозначный/скрытый target, CAPTCHA и видимый password/OTP
+останавливают переход. Только навигационные ссылки: кнопки и отправка форм
+не входят в этот контракт. Подписанный provider отвечает за проверку смысла
+ссылки на реальном сайте; host не определяет по тексту любой безопасный вход.
+
+Владелец алгоритма – generic host; provider задаёт проверяемые условия и
+направление. Host пишет fence перед переходом, повторно проверяет document
+token, origin/challenge/target и расходует document-local шаг до единственного
+click. Пароль → выбор метода → TOTP продолжаются под исходным deadline,
+с одной attempt ID и без снятия manual/image gate. Потерянный ответ, возврат
+на прежний экран или restart не повторяют ссылку и предыдущую форму.
+Переходы учитываются в общем лимите восьми шагов и 16 KiB; рецепт требует
+хотя бы одного credential шага, отдельного click runner не создаётся.
+
+Pure tests проверяют recipe bounds, old fingerprint shape, одну попытку,
+отсутствие values в transition, lost response/loop/restart и pending fence.
+Native Chromium fixture проверяет полный password → choice → TOTP проход,
+а также foreign/path/popup/download/hidden/ambiguous/sensitive/CAPTCHA отказы.
+Provider-specific селекторы, решения и личные данные в host не добавляются.
 
 Новые public operations принимают только `{}`:
 

@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser } from '../host-runtime/scripts/trelio-visual-session.mjs';
+import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser, VISUAL_AUTHENTICATION_TRANSITIONS_API } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { deriveAgentSecretTotp } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
@@ -20,6 +20,12 @@ const recipe = origin => ({ steps: [
   { id: 'totp', origin, challenge: '#totp-form', fields: { totp: '#totp' }, submit: '#submit-totp' },
 ], success: [{ origin, selector: '#account' }] });
 const definition = origin => normalizeVisualAuthentication(recipe(origin), { origins: [origin], fixtureOnly: origin.startsWith('http://127.0.0.1:') });
+const withTransition = origin => {
+  const value = recipe(origin);
+  value.steps.splice(1, 0, { id: 'choose-authenticator', origin, challenge: '#method-choice',
+    action: 'follow', target: '#choose-authenticator', path: '/totp-entry', manual: ['#captcha'] });
+  return normalizeVisualAuthentication(value, { origins: [origin], fixtureOnly: origin.startsWith('http://127.0.0.1:') });
+};
 const credential = def => ({ schemaVersion: 1, fingerprint: visualAuthenticationFingerprint(def), login: 'SYNTHETIC_LOGIN', password: 'SYNTHETIC_PASSWORD', totp: seed, attempt: null });
 function memoryStore(def) {
   let saved = credential(def), snapshot;
@@ -39,6 +45,64 @@ test('signed authentication recipe pins exact origins and rejects unknown instru
 test('TOTP reuses the existing private generator and RFC vectors, not a seed delivered to the browser', () => {
   assert.equal(deriveAgentSecretTotp(seed, 59000), '287082');
   assert.equal(deriveAgentSecretTotp(`otpauth://totp/Fixture?secret=${seed}&digits=8`, 59000), '94287082');
+});
+
+test('signed transitions are bounded exact-path anchors and preserve legacy recipe shapes', () => {
+  const origin = 'https://auth.example.test', def = withTransition(origin), step = def.steps[1];
+  assert.equal(VISUAL_AUTHENTICATION_TRANSITIONS_API, 'trelio.protected-browser-auth-transitions/v1');
+  assert.equal(step.action, 'follow'); assert.equal(step.path, '/totp-entry');
+  assert.equal(Object.hasOwn(definition(origin).steps[0], 'action'), false, 'legacy credentials retain their normalized fingerprint');
+  // Golden fingerprint from the published field-only v1 implementation.
+  // Adding optional transitions must not invalidate existing users' vaults.
+  assert.equal(visualAuthenticationFingerprint(definition(origin)), 'a4952e064d09a964d908203d11fbf120690a662d69f11d740a5da95ac3958887');
+  for (const patch of [{ fields: { password: '#password' } }, { values: { code: 'not-allowed' } },
+    { action: 'click' }, { target: '' }, { origin: 'https://foreign.example.test' },
+    ...['//foreign.example.test/path', '/totp?code=anything', '/totp#fragment', '/a/../totp', '/with space', '/a\\b'].map(path => ({ path }))]) {
+    const changed = { ...def, steps: [def.steps[0], { ...step, ...patch }, def.steps[2]] };
+    assert.throws(() => normalizeVisualAuthentication(changed, { origins: [origin] }));
+  }
+  assert.throws(() => normalizeVisualAuthentication({ ...def, steps: [step] }, { origins: [origin] }), { code: 'invalid_input' });
+});
+
+test('password, signed transition and TOTP share one private attempt without exposing values on navigation', async () => {
+  const def = withTransition('https://auth.example.test'), store = memoryStore(def), dispatched = [];
+  let attemptId;
+  const result = await authenticateVisualBrowser({ definition: def, store, active() {}, now: () => 60000, wait: async () => {},
+    send: async (operation, args) => {
+      if (operation === 'authentication-probe') return dispatched.length === 3 ? { state: 'success' }
+        : { state: 'challenge', stepId: def.steps[dispatched.length].id, documentId: randomUUID() };
+      assert.equal(store.saved.attempt.state, 'pending');
+      attemptId ||= store.saved.attempt.id; assert.equal(store.saved.attempt.id, attemptId);
+      assert.ok(store.saved.attempt.steps.includes(args.stepId));
+      if (args.stepId === 'choose-authenticator') {
+        assert.equal(operation, 'authentication-follow');
+        assert.deepEqual(Object.keys(args).sort(), ['documentId', 'stepId']);
+        assert.doesNotMatch(JSON.stringify(args), /SYNTHETIC|GEZDGNBV|values|totp-entry/);
+      } else assert.equal(operation, 'authentication-fill');
+      dispatched.push(args.stepId); return { state: 'submitted' };
+    } });
+  assert.deepEqual(dispatched, ['password', 'choose-authenticator', 'totp']);
+  assert.equal(store.saved.attempt.state, 'complete');
+  assert.deepEqual(result, { state: 'saved_unverified', reason: 'none' });
+});
+
+test('lost transition, same-page loop and restart never repeat the click or earlier password', async () => {
+  const def = withTransition('https://auth.example.test');
+  for (const lost of [false, true]) {
+    const store = memoryStore(def); let clicks = 0, clock = 60000;
+    const run = () => authenticateVisualBrowser({ definition: def, store, active() {}, now: () => clock,
+      wait: async ms => { clock += ms; }, send: async operation => {
+        if (operation === 'authentication-probe') return { state: 'challenge', stepId: 'choose-authenticator', documentId: randomUUID() };
+        assert.equal(operation, 'authentication-follow'); clicks++;
+        assert.ok(store.saved.attempt.steps.includes('choose-authenticator'));
+        if (lost) throw Error('synthetic lost navigation response');
+        return { state: 'submitted' };
+      } });
+    if (lost) await assert.rejects(run());
+    else assert.equal((await run()).reason, 'authentication_unknown');
+    await assert.rejects(run(), { code: 'authentication_unknown' });
+    assert.equal(clicks, 1);
+  }
 });
 
 test('automatic password and TOTP input persist fences before dispatch, return only a status and never replay a lost result', async () => {
@@ -95,7 +159,7 @@ test('credential management rejects value-bearing arguments before identity, sta
 });
 
 test('one guarded local form saves the whole bundle, rejects injected fields, supports cancel and never returns values', async () => {
-  const def = definition('https://auth.example.test'); let saved, calls = 0;
+  const def = withTransition('https://auth.example.test'); let saved, calls = 0;
   const store = { async prepare() {}, async writeCredentials(value) { saved = structuredClone(value); } };
   const openBrowserFn = async raw => {
     calls++; const url = new URL(raw), response = await fetch(url), html = await response.text();
@@ -142,13 +206,16 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   // must fail normally rather than leave this test process alive indefinitely.
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-auth-native-')));
-  let passwordSubmits = 0, codeSubmits = 0;
+  let passwordSubmits = 0, codeSubmits = 0, methodFollows = 0;
+  const methodChoice = (href = '/totp-entry', extra = '') => `<!doctype html><section id="method-choice"><a id="choose-authenticator" href="${href}">Use authenticator</a>${extra}</section>`;
+  const totpForm = '<!doctype html><form id="totp-form" method="post" action="/code"><input id="totp" name="totp" autocomplete="one-time-code"><button id="submit-totp">Sign in</button></form>';
   const server = http.createServer(async (req, res) => {
     const body = []; for await (const chunk of req) body.push(chunk);
     const form = new URLSearchParams(Buffer.concat(body).toString());
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     if (req.url.startsWith('/password') && req.method === 'POST') {
       passwordSubmits++; assert.equal(form.get('login'), 'SYNTHETIC_LOGIN'); assert.equal(form.get('password'), 'SYNTHETIC_PASSWORD');
+      if (req.url.includes('follow')) { res.end(methodChoice()); return; }
       res.end(req.url.includes('segmented') ? '<!doctype html><form id="totp-form" method="post" action="/code" oninput="if([...this.elements].every(e=>e.value.length===1))this.requestSubmit()">' + Array.from({ length: 6 }, (_, i) => `<input id="d${i}" name="d${i}" maxlength="1" autocomplete="one-time-code">`).join('') + '</form>' : '<!doctype html><form id="totp-form" method="post" action="/code"><input id="totp" name="totp" autocomplete="one-time-code"><button id="submit-totp">Sign in</button></form>'); return;
     }
     if (req.url === '/code' && req.method === 'POST') {
@@ -157,7 +224,21 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       res.setHeader('Set-Cookie', 'auth_fixture=SYNTHETIC_AUTH; HttpOnly; Path=/; SameSite=Strict'); res.end('<!doctype html><h1 id="account">Synthetic account</h1>'); return;
     }
     if (req.url === '/sms') { res.end('<!doctype html><form id="sms-form" method="post"><input autocomplete="one-time-code"></form>'); return; }
-    res.end(req.headers.cookie?.includes('auth_fixture=') ? '<!doctype html><h1 id="account">Synthetic account</h1>' : `<!doctype html><form id="password-form" method="post" action="${req.url === '/unsafe' ? 'https://evil.example.test/' : '/password' + (req.url.includes('segmented') ? '?segmented' : '')}"><input id="login" name="login"><input id="password" name="password" type="password">${req.url === '/ambiguous' ? '<input id="password" type="password">' : ''}<button id="submit-password">Continue</button></form>`);
+    if (req.url === '/totp-entry') { methodFollows++; res.end(totpForm); return; }
+    if (req.url.startsWith('/follow-')) {
+      const variants = {
+        '/follow-unsafe': methodChoice('https://foreign.example.test/totp-entry'),
+        '/follow-path': methodChoice('/different-path'),
+        '/follow-popup': methodChoice().replace('href=', 'target="_blank" href='),
+        '/follow-download': methodChoice().replace('href=', 'download href='),
+        '/follow-hidden': methodChoice().replace('id="choose-authenticator"', 'id="choose-authenticator" hidden'),
+        '/follow-ambiguous': methodChoice('/totp-entry', '<a id="choose-authenticator" href="/totp-entry">Duplicate</a>'),
+        '/follow-sensitive': methodChoice('/totp-entry', '<input type="password">'),
+        '/follow-captcha': methodChoice('/totp-entry', '<div id="captcha">Manual verification</div>'),
+      };
+      res.end(variants[req.url]); return;
+    }
+    res.end(req.headers.cookie?.includes('auth_fixture=') ? '<!doctype html><h1 id="account">Synthetic account</h1>' : `<!doctype html><form id="password-form" method="post" action="${req.url === '/unsafe' ? 'https://evil.example.test/' : '/password' + (req.url.includes('segmented') ? '?segmented' : req.url === '/with-follow' ? '?follow' : '')}"><input id="login" name="login"><input id="password" name="password" type="password">${req.url === '/ambiguous' ? '<input id="password" type="password">' : ''}<button id="submit-password">Continue</button></form>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
@@ -181,13 +262,28 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     await browser.call('navigate', { url: `${origin}/segmented` });
     assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
     assert.equal(passwordSubmits, 2); assert.equal(codeSubmits, 2, 'auto-submit OTP has no additional click/submission');
+    await browser.close();
+    activeDef = withTransition(origin); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
+    await browser.call('navigate', { url: `${origin}/with-follow` });
+    assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
+    assert.equal(passwordSubmits, 3); assert.equal(methodFollows, 1); assert.equal(codeSubmits, 3);
+    await browser.close();
+    for (const route of ['/follow-unsafe', '/follow-path', '/follow-popup', '/follow-download', '/follow-hidden', '/follow-ambiguous', '/follow-sensitive', '/follow-captcha']) {
+      activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
+      await browser.call('navigate', { url: origin + route });
+      assert.equal((await browser.call('authenticate')).state, 'manual_input_required', route);
+      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+      assert.equal(methodFollows, 1, 'an unsafe/ambiguous transition never follows its link');
+      assert.equal(passwordSubmits, 3); assert.equal(codeSubmits, 3);
+      await browser.close();
+    }
     await browser.close(); activeDef = def;
     for (const route of ['/unsafe', '/ambiguous', '/sms']) {
       activeStore = memoryStore(def); activeStore.directory = directory; browser = make();
       await browser.call('navigate', { url: origin + route });
       assert.equal((await browser.call('authenticate')).state, 'manual_input_required');
       assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
-      assert.equal(passwordSubmits, 2); assert.equal(codeSubmits, 2, 'untrusted form/SMS never receives stored credentials or TOTP');
+      assert.equal(passwordSubmits, 3); assert.equal(codeSubmits, 3, 'untrusted form/SMS never receives stored credentials or TOTP');
       await browser.close();
     }
   } finally {

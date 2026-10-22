@@ -390,7 +390,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     if (op === 'snapshot-session-auth') return { state: 'saved_unverified', cookies: await refreshAuth() };
     if (op === 'heartbeat') return { state: manual ? 'manual_input_required' : 'connected' };
-    if (['authentication-start', 'authentication-probe', 'authentication-fill', 'authentication-end'].includes(op)) {
+    if (['authentication-start', 'authentication-probe', 'authentication-fill', 'authentication-follow', 'authentication-end'].includes(op)) {
       if (!config.authentication) throw Error('invalid_input');
       if (op === 'authentication-start') {
         if (manual || authenticating) throw Error('manual_control_active');
@@ -410,7 +410,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       }
       // Fixed top-frame messages, never arbitrary DOM/evaluate/CDP. Values
       // stay in this private channel; the public call API has no such aliases.
-      return chrome.tabs.sendMessage(tab.id, { kind: op, ...(op === 'authentication-fill' ? args : {}) }, { frameId: 0 });
+      return chrome.tabs.sendMessage(tab.id, { kind: op, ...(['authentication-fill', 'authentication-follow'].includes(op) ? args : {}) }, { frameId: 0 });
     }
     if (op === 'manual') {
       manual = true; frame = undefined;

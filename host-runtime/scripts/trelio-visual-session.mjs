@@ -225,6 +225,10 @@ export function createVisualControlServer({ token, dispatch }) {
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
+// Additive capability: legacy v1 recipes keep their exact normalization and
+// credential fingerprint. A provider must check this export before declaring
+// value-free navigation between private credential forms.
+export const VISUAL_AUTHENTICATION_TRANSITIONS_API = 'trelio.protected-browser-auth-transitions/v1';
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const selector = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
 const id = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,47}$/u.test(value);
@@ -246,6 +250,19 @@ export function normalizeVisualAuthentication(value, policy) {
     return raw;
   };
   const steps = value.steps.map(step => {
+    if (step?.action === 'follow') {
+      if (!exact(step, ['id', 'origin', 'challenge', 'action', 'target', 'path', 'manual'])
+        || !id(step.id) || !selector(step.challenge) || !selector(step.target)
+        || typeof step.path !== 'string' || step.path.length > 1024
+        || !step.path.startsWith('/') || step.path.startsWith('//') || /[\x00-\x20\x7f?#\\]/u.test(step.path)) fail('invalid_input');
+      const boundOrigin = origin(step.origin), destination = new URL(step.path, boundOrigin);
+      // An exact pathname is signed, while opaque SSO query parameters stay
+      // in the provider-owned link and never enter model-facing observations.
+      if (destination.origin !== boundOrigin || destination.pathname !== step.path) fail('invalid_input');
+      const manual = step.manual ?? [];
+      if (!Array.isArray(manual) || manual.length > 8 || !manual.every(selector)) fail('invalid_input');
+      return { id: step.id, origin: boundOrigin, challenge: step.challenge, action: 'follow', target: step.target, path: step.path, manual: manual.slice() };
+    }
     if (!exact(step, ['id', 'origin', 'challenge', 'fields', 'submit', 'manual']) || !id(step.id) || !selector(step.challenge) || (step.submit !== null && !selector(step.submit)) || !exact(step.fields, ['login', 'password', 'totp']) || !Object.keys(step.fields).length) fail('invalid_input');
     const fields = {};
     for (const key of ['login', 'password', 'totp']) if (Object.hasOwn(step.fields, key)) {
@@ -259,6 +276,9 @@ export function normalizeVisualAuthentication(value, policy) {
     if (!Array.isArray(manual) || manual.length > 8 || !manual.every(selector)) fail('invalid_input');
     return { id: step.id, origin: origin(step.origin), challenge: step.challenge, fields, submit: step.submit, manual: manual.slice() };
   });
+  // This private API is for a credential workflow, not an arbitrary signed
+  // click runner. Transitions never create a credential-free execution mode.
+  if (steps.every(step => step.action === 'follow')) fail('invalid_input');
   if (new Set(steps.map(step => step.id)).size !== steps.length) fail('invalid_input');
   const success = value.success.map(item => {
     if (!exact(item, ['origin', 'selector']) || !selector(item.selector)) fail('invalid_input');
@@ -272,7 +292,7 @@ export const visualAuthenticationFingerprint = definition => crypto.createHash('
 function validateCredentials(value, definition) {
   if (!exact(value, ['schemaVersion', 'fingerprint', 'login', 'password', 'totp', 'attempt']) || value.schemaVersion !== 1 || value.fingerprint !== visualAuthenticationFingerprint(definition)) fail('authentication_setup_required');
   for (const field of ['login', 'password', 'totp']) if (typeof value[field] !== 'string' || Buffer.byteLength(value[field]) > 4096 || /[\x00\r\n]/u.test(value[field])) fail('authentication_setup_required');
-  const uses = field => definition.steps.some(step => Object.hasOwn(step.fields, field));
+  const uses = field => definition.steps.some(step => step.fields && Object.hasOwn(step.fields, field));
   if ((uses('login') && !value.login) || (uses('password') && !value.password)) fail('authentication_setup_required');
   if (value.totp) {
     let parsed;
@@ -298,7 +318,7 @@ export async function hasVisualAuthenticationCredentials(store, definition) {
 export async function configureVisualAuthentication({ store, definition, signal, openBrowserFn, handoffTimeoutMs, setupTimeoutMs }) {
   await store.prepare();
   const fingerprint = visualAuthenticationFingerprint(definition);
-  const uses = field => definition.steps.some(step => Object.hasOwn(step.fields, field));
+  const uses = field => definition.steps.some(step => step.fields && Object.hasOwn(step.fields, field));
   const field = (name, label, help) => ({ name, label, type: name === 'login' ? 'text' : 'password', maxLength: 4096, required: name !== 'totp', ...(help ? { help } : {}) });
   await collectCredentialThroughLoopback('https://trelio.ru', {}, {
     signal, ...(openBrowserFn ? { openBrowserFn } : {}), ...(handoffTimeoutMs ? { handoffTimeoutMs } : {}), ...(setupTimeoutMs ? { setupTimeoutMs } : {}), allowCancel: true,
@@ -367,6 +387,15 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
       }
       const step = definition.steps.find(item => item.id === probe.stepId);
       if (probe.state === 'challenge' && step && !attempt.steps.includes(step.id)) {
+        if (step.action === 'follow') {
+          // Fence this value-free input in the SAME durable attempt before
+          // dispatch. A lost click response cannot replay this transition or
+          // restart the earlier password step in another invocation.
+          attempt.steps.push(step.id); await store.writeCredentials(credentials); active();
+          const value = await send('authentication-follow', { stepId: step.id, documentId: probe.documentId });
+          if (!exact(value, ['state']) || value.state !== 'submitted') fail('authentication_unknown');
+          await wait(200); active(); probe = await observe(); continue;
+        }
         if (step.fields.totp && credentials.totp) {
           const parsed = parseAgentSecretTotpValue(credentials.totp);
           const remaining = parsed.periodSeconds * 1000 - now() % (parsed.periodSeconds * 1000); parsed.secret.fill(0);
@@ -422,6 +451,18 @@ export function installVisualAuthentication(definition) {
   const sensitive = () => [...document.querySelectorAll('input[type="password"],input[autocomplete="one-time-code" i]')].some(visible);
   const challenge = step => {
     if (location.origin !== step.origin || !unique(step.challenge) || step.manual.some(selector => [...document.querySelectorAll(selector)].some(visible))) return null;
+    if (step.action === 'follow') {
+      // Do not navigate away from a live password/OTP form. This operation
+      // follows one observed same-origin anchor in its existing top frame;
+      // forms, popup targets, downloads and arbitrary buttons are unsupported.
+      if (sensitive()) return null;
+      const target = unique(step.target);
+      if (!(target instanceof HTMLAnchorElement) || target.hasAttribute('download')
+        || (target.target && target.target !== '_self')) return null;
+      const url = new URL(target.href, location.href);
+      if (url.origin !== step.origin || url.pathname !== step.path || url.username || url.password || url.hash) return null;
+      return { target };
+    }
     const submit = step.submit === null ? null : unique(step.submit);
     if (step.submit !== null && (!(submit instanceof HTMLButtonElement || submit instanceof HTMLInputElement) || submit.disabled)) return null;
     const fields = [];
@@ -449,9 +490,22 @@ export function installVisualAuthentication(definition) {
       if (message?.kind === 'authentication-guard') { respond({ blocked: sensitive() || Boolean(definition?.steps.some(step => challenge(step))) }); return; }
       if (!definition) return;
       if (message?.kind === 'authentication-probe') { respond(probe()); return; }
+      if (message?.kind === 'authentication-follow') {
+        const current = probe(), step = definition.steps.find(step => step.id === message.stepId);
+        if (!step || step.action !== 'follow' || current.state !== 'challenge'
+          || current.stepId !== step.id || message.documentId !== documentId || spent.has(step.id)
+          || Object.hasOwn(message, 'values')) throw Error();
+        const controls = challenge(step);
+        if (!controls) throw Error();
+        // Burn the document-local token before the provider's event handler
+        // runs. Recheck the target immediately before the single click.
+        spent.add(step.id);
+        if (!controls.target.isConnected || challenge(step)?.target !== controls.target) throw Error();
+        controls.target.click(); respond({ state: 'submitted' }); return;
+      }
       if (message?.kind !== 'authentication-fill') return;
       const current = probe(), step = definition.steps.find(item => item.id === message.stepId);
-      if (!step || current.state !== 'challenge' || current.stepId !== step.id || message.documentId !== documentId || spent.has(step.id) || !message.values || Object.keys(message.values).sort().join() !== Object.keys(step.fields).sort().join()) throw Error();
+      if (!step || step.action === 'follow' || current.state !== 'challenge' || current.stepId !== step.id || message.documentId !== documentId || spent.has(step.id) || !message.values || Object.keys(message.values).sort().join() !== Object.keys(step.fields).sort().join()) throw Error();
       for (const [key, value] of Object.entries(message.values)) if (typeof value !== 'string' || !value || value.length > 4096 || (key === 'totp' && !/^\d{6}(?:\d{2})?$/u.test(value))) throw Error();
       const controls = challenge(step);
       if (!controls) throw Error();
