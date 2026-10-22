@@ -27,8 +27,8 @@ const store={get:async slot=>{
 }};
 let setupFixture=null,ackFixture=null;
 const admission=()=>{
-  if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:'telegram',
-    protocol:'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+  if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':'telegram',
+    protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',acknowledgement:ackFixture.admission};
   const max=scope.skillId==='max-web',email=scope.skillId==='email-imap-smtp',operation=setupFixture?.operation;
   const interactive=['configure','login'].includes(operation);
@@ -410,7 +410,7 @@ test('email incoming verification reuses one signed passive read, drops its curs
   const baseline={schemaVersion:1,baselineOnly:true,events:[],nextCursor:'PRIVATE_CURSOR',hasMore:false,
     coverage:{historicalBackfill:false,bodyContentRead:false},readState:{readReceiptsSent:false}};
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
-    assert.deepEqual(process.argv.slice(2),['monitor','--limit','100']);
+    assert.deepEqual(process.argv.slice(2),['monitor','--conversation-references','--limit','20']);
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(row.localAccountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);let input='';for await(const c of process.stdin)input+=c;assert.equal(input,'');
     fs.appendFileSync(${JSON.stringify(marker)},'1');
@@ -512,6 +512,14 @@ test('email/MAX wire projections discard content and cannot promote a sender to 
     assert.throws(()=>run({...raw,readState:{readReceiptsSent:true}}),/INVALID_RESPONSE/);
     if(skillId==='max-web')assert.throws(()=>run({...raw,events:[{...raw.events[0],senderUserId:'owner',senderNamespace:'username'}]}),/INVALID_RESPONSE/);
     assert.throws(()=>run({...raw,events:[],coverage:{historicalBackfill:false}}),/INVALID_RESPONSE/);
+    if(skillId==='email-imap-smtp'){
+      const key='email-conversation/v1.'+'f'.repeat(64),mapped={...raw,coverage:{...raw.coverage,conversationHeadersRead:true},
+        events:[{...raw.events[0],conversationKey:key}]};
+      assert.equal(run(mapped).events[0].conversationKey,key);
+      assert.throws(()=>run({...mapped,coverage:{...mapped.coverage,conversationHeadersRead:false}}),/INVALID_RESPONSE/);
+      assert.throws(()=>run({...mapped,events:[{...mapped.events[0],conversationKey:key.replace('email-','telegram-')}]}),/INVALID_RESPONSE/);
+      assert.doesNotMatch(JSON.stringify(run(mapped)),/PRIVATE/);
+    }
   }
 });
 
@@ -811,6 +819,68 @@ test('ACK projection refuses partial/mismatched/native-uncertain claims and neve
   const error={ok:false,error:'PRIVATE_RAW_ERROR',code:'TELEGRAM_ACK_OUTCOME_UNKNOWN',details:{writeAttempted:true,writeOutcome:'unknown',automaticRetryAllowed:false}};
   assert.deepEqual(project(error,false,2),{acknowledged:false,notAttempted:false,code:error.code});
   assert.throws(()=>project({...error,details:{...error.details,writeOutcome:'not_attempted'}},false,2),/INVALID_RESPONSE/);
+});
+
+test('signed email ACK consumes one original UID/hash and native committed slot; lost outcomes never become a retry',async t=>{
+  const savedScope={...scope};
+  t.after(()=>{Object.assign(scope,savedScope);ackFixture=null;resolveOverride=null;});
+  scope.skillId='email-imap-smtp';
+  const accountId=randomUUID(),sourceId=randomUUID(),routeId=randomUUID(),receiptId=randomUUID();
+  const source={...scope,id:sourceId,deviceId,localAccountId:accountId,state:'active',revision:0};
+  const ref={eventKey:'a'.repeat(64),id:'uid:17:11',revision:'b'.repeat(64),originalSha256:'c'.repeat(64),
+    conversationKey:'email-conversation/v1.'+'d'.repeat(64),routeId,eventOrdinal:2,receiptId,taskId:randomUUID()};
+  ackFixture={intent:{sourceId,sourceRevision:0,receipts:[{receiptId,eventOrdinals:[2]}]},admission:{schemaVersion:1,
+    sourceId,sourceRevision:0,localAccountId:accountId,slots:[{receiptId,routeId,eventOrdinal:2}]}};
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId:null}),io:{
+    ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
+    checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  await catalogue.change({operation:'create',id:accountId,name:'Synthetic exact email ACK',expectedRevision:(await catalogue.list()).revision});
+  const sourceDir=path.join(directory,'email-ack-package'),marker=path.join(directory,'email-ack-native'),fence=path.join(directory,'email-ack-fence');
+  await fs.mkdir(sourceDir);
+  const raw=(verifyOnly=false)=>({schemaVersion:1,protocol:'email-read-state/v1',
+    reference:{id:ref.id,revision:ref.revision},originalSha256:ref.originalSha256,
+    readState:{verified:true,seen:true,writeAttempted:!verifyOnly,automaticRetryAllowed:false,readReceiptsSent:false}});
+  const build=async({verifyOnly=false,error=null}={})=>{
+    const args=['ack-reference','--uid','11','--uid-validity','17','--expected-revision',ref.revision,
+      '--expected-original-sha256',ref.originalSha256,verifyOnly?'--verify-only':'--confirm'];
+    await fs.writeFile(path.join(sourceDir,'main.mjs'),`import fs from 'node:fs';import assert from 'node:assert/strict';
+      assert.equal(fs.readFileSync(${JSON.stringify(fence)},'utf8'),'DURABLE');
+      assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});
+      assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+      assert.equal(process.env.CODEX_THREAD_ID,undefined);let input='';for await(const c of process.stdin)input+=c;assert.equal(input,'');
+      fs.appendFileSync(${JSON.stringify(marker)},'1');${error?'process.stderr':'process.stdout'}.write(${JSON.stringify(JSON.stringify(error??raw(verifyOnly)))});
+      process.exitCode=${error?2:0};`);
+    artifactId=randomUUID();releaseId=randomUUID();
+    packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
+      entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  };
+  const client={identity,sourceAccounts:async()=>[source]};let starts=0;
+  const invoke=async(verifyOnly=false)=>{
+    if(verifyOnly){ackFixture.intent.verifyOnly=true;ackFixture.admission.verifyOnly=true;}
+    else{delete ackFixture.intent.verifyOnly;delete ackFixture.admission.verifyOnly;}
+    return acknowledgeAssistantSource({identity,host,store,client,source,references:[ref],verifyOnly,
+      assertReferences:()=>{},beforeInvoke:async()=>{starts++;await fs.writeFile(fence,'DURABLE');}});
+  };
+  await build();const before=resolveCalls;
+  assert.deepEqual(await invoke(),{acknowledged:true,notAttempted:false,code:null});assert.equal(resolveCalls,before+2);assert.equal(starts,1);
+  await build({verifyOnly:true});assert.deepEqual(await invoke(true),{acknowledged:true,notAttempted:true,code:null});
+  const unknown={ok:false,error:'PRIVATE_EMAIL_ACK',code:'EMAIL_ACK_UNVERIFIED',
+    readState:{verified:false,writeAttempted:true,writeOutcome:'unknown',automaticRetryAllowed:false}};
+  await build({error:unknown});assert.deepEqual(await invoke(),{acknowledged:false,notAttempted:false,code:unknown.code});
+  const calls=await fs.readFile(marker,'utf8'),fences=starts;
+  resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),protocol:'telegram-message-ack/v1'}}));
+  await assert.rejects(invoke(),/INVALID_RESPONSE/);assert.equal(starts,fences);assert.equal(await fs.readFile(marker,'utf8'),calls);
+  resolveOverride=null;
+  for(const refs of [[{...ref,originalSha256:null}],[ref,{...ref,eventKey:'e'.repeat(64)}],[{...ref,body:'PRIVATE'}]])
+    await assert.rejects(acknowledgeAssistantSource({identity,host,store,client,source,references:refs,verifyOnly:false,
+      assertReferences:()=>{},beforeInvoke:()=>assert.fail('bad refs reached native spawn')}));
+  const project=(value,verifyOnly=false)=>projectAssistantSourceAcknowledgement({exitCode:0,stdout:JSON.stringify(value)},
+    {target:{...ref,uid:'11',uidValidity:'17'},verifyOnly});
+  for(const value of [{...raw(),originalSha256:'e'.repeat(64)},{...raw(),reference:{...raw().reference,id:'uid:18:11'}},
+    {...raw(),readState:{...raw().readState,readReceiptsSent:true}}])assert.throws(()=>project(value),/INVALID_RESPONSE/);
+  assert.throws(()=>project(raw(),true),/INVALID_RESPONSE/);
 });
 
 

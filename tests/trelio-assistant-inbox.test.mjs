@@ -27,6 +27,7 @@ const authorized = async () => true;
 const removeRoutingColumns = database => {
   database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision');
   database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only');
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256');
   database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN configuration_revision');
   for(const name of ['conversation_key','provider_wake','dispatch_source_key','route_id','route_source_revision','route_checked_at','dispatched','read_delivery_id'])
     database.exec(`ALTER TABLE assistant_inbox_events DROP COLUMN ${name}`);
@@ -270,7 +271,7 @@ test('v2 SQLite upgrade preserves question-free events, leases and cursors; ques
   removeRoutingColumns(database);
   database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=2');
   const inbox = createAssistantInbox({ database, now: () => 1_000_000 });
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 7);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 8);
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.incompleteDeliveries()[0].deliveryId, first.deliveryId);
   assert.equal(inbox.incompleteDeliveries()[0].events[0].owner_question_id, null);
@@ -391,7 +392,7 @@ test('v4 ACK upgrade preserves cursors, streams and legacy uncertainty without c
   removeRoutingColumns(database);
   database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=4');
   const upgraded=createAssistantInbox({database,now:()=>3_000_000});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,8);
   assert.deepEqual(database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n,streamCount);
   const recovered=upgraded.claimAcknowledgements(external);assert.equal(recovered.reconcileOnly,true);
@@ -488,23 +489,100 @@ test('v3 to v4 stream upgrade preserves source cursors and started delivery ambi
   removeRoutingColumns(database);
   database.exec('DROP TABLE assistant_inbox_streams; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=3');
   const upgraded=createAssistantInbox({database});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,8);
   assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'existing-cursor');
   assert.equal(await upgraded.claimDelivery({authorize:authorized}),null);
 });
 
-const routedFixture=t=>{
-  const f=memory(t),canonical=scope(),external={...canonical,provider:'telegram',accountId:randomUUID(),bindingId:randomUUID()},taskId=randomUUID();
-  const bindingId=randomUUID(),conversationKey=`telegram-conversation/v1.${'a'.repeat(64)}`;
+const routedFixture=(t,provider='telegram')=>{
+  const f=memory(t),canonical=scope(),external={...canonical,provider,accountId:randomUUID(),bindingId:randomUUID()},taskId=randomUUID();
+  const bindingId=randomUUID(),conversationKey=`${provider}-conversation/v1.${'a'.repeat(64)}`;
   const route={id:randomUUID(),sourceId:external.bindingId,sourceRevision:2,conversationKey,bindingId,bindingRevision:4,taskId};
   f.inbox.register(canonical);f.inbox.register(external);f.inbox.observeExternalSourceRevision(external,2);
   f.inbox.applyTaskState(canonical,{taskId,state:'accepted',expectedRevision:0,authority:{bindingId,revision:4}});
-  page(f.inbox,external,[{id:'message:123:4',revision:'b'.repeat(64),taskId:null,wake:false,conversationKey,providerWake:true}]);
+  page(f.inbox,external,[{id:provider==='email'?'uid:17:11':'message:123:4',revision:'b'.repeat(64),taskId:null,wake:false,conversationKey,providerWake:true}]);
   const pending=f.inbox.pendingExternalRoutes(external);
   const mapping={canonicalSource:canonical,sourceRevision:2,eventKeys:pending.map(row=>row.event_key),routes:[route]};
   return {...f,canonical,external,taskId,route,pending,mapping};
 };
+
+test('email exact original bytes survive read/processing/restart; one UID ACK cannot cover another in its thread',async t=>{
+  const {createAssistantSourceReadObserver}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=routedFixture(t,'email');f.inbox.routeExternalEvents(f.external,f.mapping);
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  const identity={origin:f.canonical.origin,assistantId:f.canonical.assistantId,deviceId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:f.canonical.companyId,
+    taskId:f.taskId,passId:randomUUID(),deliveryId:work.deliveryId,threadId:randomUUID(),bindingId:f.route.bindingId,bindingRevision:f.route.bindingRevision};
+  const source={id:f.external.bindingId,deviceId:identity.deviceId,localAccountId:f.external.accountId,projectId:null,
+    revision:2,state:'active',skillId:'email-imap-smtp'};
+  let sourceLive=true;
+  const client={readTaskPass:async()=>({...pass,state:'leased',leaseExpiresAt:new Date(Date.now()+600000).toISOString()}),
+    sourceAccounts:async()=>sourceLive?[source]:[],sourceRoutes:async()=>[f.route]};
+  const observer=createAssistantSourceReadObserver({identity,client,host:{readActivePass:async()=>pass},withInbox:async action=>action(f.inbox)});
+  const input={artifact:{skillId:'email-imap-smtp'},executionContext:{companyId:pass.companyId,projectId:null,account:{id:f.external.accountId}},
+    runtimeArguments:['read-reference','--uid','11','--uid-validity','17','--expected-revision','b'.repeat(64),
+      '--expected-conversation-key',f.route.conversationKey]};
+  const raw={schemaVersion:1,protocol:'email-message-read/v1',reference:{id:'uid:17:11',uid:'11',uidValidity:'17',
+    revision:'b'.repeat(64),conversationKey:f.route.conversationKey},originalSha256:'f'.repeat(64),
+    message:{body:'PRIVATE_EMAIL_BODY'},coverage:{textComplete:true,attachmentsContentRead:false,otherMessagesIncluded:false},
+    readState:{marksRead:false,readReceiptsSent:false}};
+  const result={stdout:JSON.stringify(raw)},selected=[{sourceId:source.id,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}];
+  for(const extra of [{coverage:{...raw.coverage,textComplete:false}},{originalSha256:null},
+    {reference:{...raw.reference,uidValidity:'18'}},{readState:{...raw.readState,marksRead:true}}]){
+    const ticket=await observer.prepare(input);
+    await assert.rejects(observer.commit(ticket,{stdout:JSON.stringify({...raw,...extra})}),/READ_INVALID/);
+  }
+  let ticket=await observer.prepare(input);sourceLive=false;
+  await assert.rejects(observer.commit(ticket,result),/SCOPE_CHANGED/);sourceLive=true;
+  ticket=await observer.prepare(input);await observer.commit(ticket,result);
+  assert.deepEqual(await observer.confirmProcessing(pass,selected),selected);
+  assert.equal(f.inbox.claimAcknowledgements(f.external),null,'even independently read bytes need committed material processing');
+  ticket=await observer.prepare(input);
+  await assert.rejects(observer.commit(ticket,{stdout:JSON.stringify({...raw,originalSha256:'e'.repeat(64)})}),/EVENT_CHANGED/,
+    'same UID/UIDVALIDITY cannot silently switch independently observed original bytes');
+  const receiptId=randomUUID(),nativeReceipt=`assistant:${receiptId}:codex:${pass.threadId}:${randomUUID()}`;
+  f.inbox.completeDelivery(work.deliveryId,nativeReceipt,{processedSourceReferences:selected});
+  const reopened=createAssistantInbox({database:f.database,now:()=>1_000_000}),ack=reopened.claimAcknowledgements(f.external);
+  const refs=reopened.externalAcknowledgementReferences(f.external,{token:ack.token,sourceRevision:2});
+  assert.equal(refs[0].originalSha256,raw.originalSha256);assert.equal(refs[0].receiptId,receiptId);
+  assert.doesNotMatch(JSON.stringify(f.database.prepare('SELECT * FROM assistant_inbox_events').all()),/PRIVATE_EMAIL_BODY/);
+  reopened.startExternalAcknowledgements(f.external,ack.token);reopened.deferExternalAcknowledgements(f.external,{token:ack.token,retryAfterMs:30000});
+  f.advance(150000);
+  const recovery=f.inbox.claimAcknowledgements(f.external);assert.equal(recovery.reconcileOnly,true);
+  assert.equal(f.inbox.externalAcknowledgementReferences(f.external,{token:recovery.token,sourceRevision:2,verifyOnly:true})[0].originalSha256,raw.originalSha256);
+});
+
+test('actual v7 upgrade retains unknown ACK/source positions and never manufactures original-byte read evidence',t=>{
+  const f=routedFixture(t);
+  f.database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256; UPDATE assistant_inbox_meta SET version=7');
+  const before=f.database.prepare('SELECT * FROM assistant_inbox_events').get(),sources=f.database.prepare('SELECT * FROM assistant_inbox_sources').all();
+  createAssistantInbox({database:f.database});
+  const after=f.database.prepare('SELECT * FROM assistant_inbox_events').get();
+  assert.equal(after.read_original_sha256,null);delete after.read_original_sha256;assert.deepEqual(after,before);
+  assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_sources').all(),sources);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,8);
+});
+
+test('two committed email UIDs in one conversation get separate fresh attempts and independent uncertain recovery',async t=>{
+  const f=routedFixture(t,'email');f.advance(300000);
+  page(f.inbox,f.external,[{id:'uid:17:12',revision:'c'.repeat(64),taskId:null,wake:false,
+    conversationKey:f.route.conversationKey,providerWake:true}],'second');
+  f.inbox.routeExternalEvents(f.external,{...f.mapping,eventKeys:f.inbox.pendingExternalRoutes(f.external).map(row=>row.event_key)});
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  for(const event of work.events)f.inbox.recordExternalRead(f.external,{deliveryId:work.deliveryId,eventKey:event.event_key,
+    sourceRevision:2,routeId:f.route.id,originalSha256:'f'.repeat(64)});
+  const selected=work.events.map(event=>({sourceId:f.external.bindingId,sourceRevision:2,routeId:f.route.id,eventOrdinal:event.event_ordinal}));
+  f.inbox.completeDelivery(work.deliveryId,`assistant:${randomUUID()}:codex:${randomUUID()}:${randomUUID()}`,{processedSourceReferences:selected});
+  const first=f.inbox.claimAcknowledgements(f.external);assert.equal(first.events.length,1);assert.equal(first.events[0].event_id,'uid:17:11');
+  f.inbox.startExternalAcknowledgements(f.external,first.token);
+  f.inbox.deferExternalAcknowledgements(f.external,{token:first.token,retryAfterMs:30000});
+  const second=f.inbox.claimAcknowledgements(f.external);assert.equal(second.events.length,1);assert.equal(second.events[0].event_id,'uid:17:12');
+  f.inbox.startExternalAcknowledgements(f.external,second.token);f.inbox.completeAcknowledgements(f.external,second.token);
+  assert.equal(f.inbox.externalAcknowledgementHealth(f.external),'acknowledgement_uncertain','positive sibling Seen cannot erase the first unknown write');
+  f.advance(30001);const recovery=f.inbox.claimAcknowledgements(f.external);
+  assert.equal(recovery.reconcileOnly,true);assert.deepEqual(recovery.events.map(row=>row.event_id),['uid:17:11']);
+});
 
 test('known external refs wake the canonical task, never process/ACK from a native receipt alone',async t=>{
   const f=routedFixture(t);assert.equal(await f.inbox.claimDelivery({authorize:authorized}),null);
@@ -565,7 +643,7 @@ test('true v5 upgrade retains cursors and uncertain delivery/ACK fences without 
   const positions=f.database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all();
   removeRoutingColumns(f.database);f.database.exec('UPDATE assistant_inbox_meta SET version=5');
   const upgraded=createAssistantInbox({database:f.database,now:()=>1_000_000});
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,8);
   assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.deepEqual(f.database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
   assert.deepEqual(upgraded.pendingExternalRoutes(f.external),[]);
@@ -767,11 +845,11 @@ for(const started of [false,true])test(`resumed source reconciles an original ${
 test('actual v6 upgrade preserves all source/event/cursor/delivery state without inventing verification', t=>{
   const f=routedFixture(t);
   const tables=['sources','events','tasks','deliveries','delivery_events','streams'];
-  f.database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; UPDATE assistant_inbox_meta SET version=6');
+  f.database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256; UPDATE assistant_inbox_meta SET version=6');
   const snapshot=()=>Object.fromEntries(tables.map(name=>[name,f.database.prepare(`SELECT * FROM assistant_inbox_${name}`).all()
-    .map(row=>Object.fromEntries(Object.entries(row).filter(([key])=>!['ack_verified_revision','ack_verify_only'].includes(key))))]));
+    .map(row=>Object.fromEntries(Object.entries(row).filter(([key])=>!['ack_verified_revision','ack_verify_only','read_original_sha256'].includes(key))))]));
   const before=snapshot();createAssistantInbox({database:f.database,now:()=>1_000_000});
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,8);
   assert.deepEqual(snapshot(),before);
   assert.ok(f.database.prepare('SELECT ack_verified_revision FROM assistant_inbox_sources').all().every(row=>row.ack_verified_revision===null));
 });

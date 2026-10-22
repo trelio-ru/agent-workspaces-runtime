@@ -192,7 +192,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   // Report/CAS failures do not replay work or discard its original fence; a
   // later poll can reconcile a durably confirmed completion after a lost report.
   const observeAcknowledgementHealth=async(row,signal,observation=null)=>{
-    if(!sourceHealth||row.skillId!=='telegram-mtproto')return;
+    if(!sourceHealth||!['telegram-mtproto','email-imap-smtp'].includes(row.skillId))return;
     try{
       const code=inbox.externalAcknowledgementHealth(externalSourceFor(identity,row));if(code===null)return;
       const snapshot=observation??await sourceHealth.read(row,signal);lease();
@@ -260,7 +260,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // body read, native mapping and committed processing remain required.
       const page={...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
         events:[...result.events,...deletions].map(({id,revision,conversationKey,kind,outgoing})=>({id,revision,taskId:null,wake:false,
-          ...(conversationKey?{conversationKey,providerWake:kind!=='delete' && outgoing===false}:{})}))};
+          ...(conversationKey?{conversationKey,providerWake:row.skillId==='email-imap-smtp'||kind!=='delete' && outgoing===false}:{})}))};
       if(streamId===null)inbox.commitPage(source,{...page,streams});
       else inbox.commitStreamPage(source,{...page,streamId});
       // An unrelated successful account/page cannot hide an outstanding child
@@ -288,7 +288,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return sources[0].scope;
   };
   const routeExternalSource=async(row,signal,pending=inbox.pendingExternalRoutes(externalSourceFor(identity,row)))=>{
-    if(row.skillId!=='telegram-mtproto'||typeof client.sourceRoutes!=='function')return;
+    if(!['telegram-mtproto','email-imap-smtp'].includes(row.skillId)||typeof client.sourceRoutes!=='function')return;
     const source=externalSourceFor(identity,row);
     if(!pending.length)return;
     const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
@@ -314,7 +314,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const rows=await client.sourceAccounts(job.scope.companyId,signal);lease();
     for(const sourceId of new Set(external.map(event=>JSON.parse(event.event_scope_json).bindingId))){
       const events=external.filter(event=>JSON.parse(event.event_scope_json).bindingId===sourceId),row=rows.find(value=>value.id===sourceId);
-      if(!row||row.state!=='active'||row.skillId!=='telegram-mtproto'
+      if(!row||row.state!=='active'||!['telegram-mtproto','email-imap-smtp'].includes(row.skillId)
         ||events.some(event=>!sameSource(externalSourceFor(identity,row),JSON.parse(event.event_scope_json))
           ||event.route_source_revision!==row.revision||!event.conversation_key))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
       const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
@@ -342,7 +342,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const read=()=>inbox.externalAcknowledgementReferences(source,{token:ack.token,sourceRevision:row.revision,verifyOnly:ack.reconcileOnly});
       const references=read(),snapshot=JSON.stringify(references),groups=new Map();
       for(const ref of references){
-        if(!groups.has(ref.conversationKey))groups.set(ref.conversationKey,[]);groups.get(ref.conversationKey).push(ref);
+        // Email ACK is exact-UID, never a whole thread/range write. Fresh
+        // leases contain one UID; legacy unknown groups verify every UID.
+        const key=source.provider==='email'?ref.eventKey:ref.conversationKey;
+        if(!groups.has(key))groups.set(key,[]);groups.get(key).push(ref);
       }
       if(!ack.reconcileOnly&&groups.size!==1)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
       const assertReferences=()=>{lease();if(JSON.stringify(read())!==snapshot)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');};
@@ -448,7 +451,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Routing is its own native read. A failed lookup neither rolls back an
       // already committed provider page nor masquerades as an empty inventory.
       const routingDue=[...externalRegistrations.values()].flatMap(row=>{
-        if(row.skillId!=='telegram-mtproto'||inbox.status(externalSourceFor(identity,row)).state!=='active')return [];
+        if(!['telegram-mtproto','email-imap-smtp'].includes(row.skillId)||inbox.status(externalSourceFor(identity,row)).state!=='active')return [];
         const pending=inbox.pendingExternalRoutes(externalSourceFor(identity,row));return pending.length?[{row,pending}]:[];
       }).sort((a,b)=>a.pending[0].route_checked_at-b.pending[0].route_checked_at||a.row.id.localeCompare(b.row.id)).slice(0,4);
       for(const {row,pending} of routingDue){
@@ -459,7 +462,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }
       }
       const acknowledgementDue=acknowledgeSource?[...externalRegistrations.values()].flatMap(row=>{
-        if(row.skillId!=='telegram-mtproto')return [];
+        if(!['telegram-mtproto','email-imap-smtp'].includes(row.skillId))return [];
         const ordinal=inbox.externalAcknowledgementDue(externalSourceFor(identity,row));return ordinal===null?[]:[{row,ordinal}];
       }).sort((a,b)=>a.ordinal-b.ordinal).slice(0,4):[];
       for(const {row} of acknowledgementDue){

@@ -116,7 +116,7 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   const taskId = randomUUID(); inbox.register(source); inbox.applyTaskState(source, { taskId, state: 'paused', expectedRevision: 0 });
   inbox.commitPage(source, { ...inbox.claimPoll(source), nextCursor: 'old-position', hasMore: false, events: [] });
   // Materialize the actual old schema, not a current table with a v1 marker.
-  db.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only');
+  db.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256');
   db.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN configuration_revision');
   for(const name of ['conversation_key','provider_wake','dispatch_source_key','route_id','route_source_revision','route_checked_at','dispatched','read_delivery_id'])
     db.exec(`ALTER TABLE assistant_inbox_events DROP COLUMN ${name}`);
@@ -125,5 +125,5 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   inbox = createAssistantInbox({ database: db });
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.taskState(source, taskId).state, 'paused');
-  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 7);
+  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 8);
 });

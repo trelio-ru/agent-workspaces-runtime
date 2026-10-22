@@ -395,13 +395,16 @@ pause/resume retire pending routes/read evidence without resetting any account o
 child-stream cursor, uncertain native turn or original ACK-attempt fence.
 
 A signed Telegram monitor may supply its opaque domain-separated account HMAC.
+Reviewed email releases may supply their scoped untrusted-threading-header hash.
+Email hints are not HMACs, sender/owner proof or independent task authority; a
+native accepted route and current audience/task/source checks remain mandatory.
 Older providers remain passive and non-routable. A newer verified replay may fill
 legacy ABSENCE once, without changing initial mapping/wake or granting processing;
 a known key cannot change. An older replay cannot erase the newer capability.
 `pendingExternalRoutes` scans bounded oldest unchecked refs with a durable
 five-minute cadence. Only a successful exact native lookup selects current
 accepted task bindings on this device. Failure is an error, never authoritative
-absence. Native lookup receives HMACs only, not provider IDs or bodies.
+absence. Native lookup receives opaque hints only, not provider IDs or bodies.
 
 `routeExternalEvents` validates the complete source/assistant/company partition,
 current native configuration revision and exact already accepted canonical task
@@ -455,3 +458,47 @@ ACK fences. Additional real SQLite/coordinator tests cover one permanent chat,
 unknown/outgoing refs, bounded immutable native locators, source/route revocation,
 no repeat wake, unread retention and refusal before the one-use native start.
 They do not claim a real Telegram/Windows business E2E or production ACK.
+
+## Exact email processing and ACK (schema v8)
+
+The SAME source reader requests `monitor --conversation-references` only from
+reviewed signed email releases >=2.6.5. Older releases retain passive non-routable
+polling; no message topic, address, body or guessed owner identity enters SQLite.
+The bounded twenty-UID page charges header reads to the original source deadline.
+A successful header projection is required before accepting a conversation key;
+malformed/cross-provider keys fail before the page/cursor commit. No initial
+unread backfill or cursor reset is implied by enabling this newer protocol.
+
+Known incoming INBOX conversations use the SAME native route lookup, canonical
+task/permanent chat, pre-start snapshot fences and explicit original processing
+slots as Telegram. Unknown conversations stay unrouted, non-waking and unacked;
+email never authorizes new task creation. A scoped hash of untrusted References
+or Message-ID is only a routing hint, not verified sender/owner authority.
+
+The SAME signed task executor observes exact `read-reference --uid UID
+--uid-validity VALIDITY --expected-revision REV --expected-conversation-key KEY`.
+Only full text coverage, no other messages/read-state changes, matching original
+account/key/UID/namespace/revision and a full RFC822 SHA-256 earn a private read
+slot after fresh native pass/source/route and original SQLite checks. Schema v8
+adds only nullable `read_original_sha256` to that SAME private event journal;
+no body, headers, credential or second vault/outbox. A changed digest at the
+same UID/UIDVALIDITY is refused rather than silently replacing observed bytes.
+The additive v7 upgrade preserves all positions, leases and unknown attempts
+and never invents a hash/read proof from legacy processing or ACK bits.
+
+Explicit selected reads plus native accepted material still precede processing.
+The native manifest carries the SAME source/route/ordinal references, never the
+provider UID, body or original hash. The background adapter derives its native
+ACK admission from that committed receipt and passes the private original hash
+only to the SAME signed account/process engine's existing IMAP ACK primitive.
+The one fresh attempt covers exactly one UID, not its whole conversation. Lost
+outcomes keep their original durable fence and permit only EXAMINE/PEEK/FLAGS
+read-back of ALL original UIDs. Confirmed Seen on a sibling never completes
+another UID. Source pause/resume remains historical verify-only, without revived
+routes, new writes, human credentials or fresh inferred processing.
+
+This host flow requires the matching dedicated native email route/receipt/ACK
+admission and a newly published reviewed provider version. Neither is fabricated
+from a local flag. Real Windows business E2E, initial email backlog, unknown
+conversation intake, encrypted execution and the other full product gates remain
+required; `businessReady` stays false and no installation is performed here.

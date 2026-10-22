@@ -31,6 +31,12 @@ const integer = (value, min, max) => {
   return value;
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+/** Provider-owned opaque routing hints, never sender or task authority. Email
+ * uses a scoped hash of untrusted threading headers; Telegram uses its native
+ * account HMAC. Keep prefixes bound to the source even though both are opaque. */
+export const assistantConversationKeyMatches=(provider,value)=>typeof value==='string'
+  && ['telegram','email'].includes(provider)
+  && new RegExp(`^${provider}-conversation/v1\\.[0-9a-f]{64}$`,'u').test(value);
 const scopeOf = value => {
   object(value, ['origin', 'assistantId', 'companyId', 'provider', 'accountId', 'bindingId']);
   let origin;
@@ -45,7 +51,7 @@ const eventOf = value => {
   object(value, ['id', 'revision', 'taskId', 'wake', 'ownerQuestionId', 'conversationKey', 'providerWake']);
   if (typeof value.wake !== 'boolean' || value.ownerQuestionId !== undefined && (!value.wake || value.taskId === null)) inputError();
   if(value.conversationKey!==undefined && (typeof value.conversationKey!=='string'
-    || !/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(value.conversationKey)
+    || !['telegram','email'].some(provider=>assistantConversationKeyMatches(provider,value.conversationKey))
     || value.taskId!==null || value.wake || typeof value.providerWake!=='boolean')
     || value.providerWake!==undefined && value.conversationKey===undefined)inputError();
   return { ownerQuestionId: value.ownerQuestionId === undefined ? null : uuid(value.ownerQuestionId), id: opaque(value.id), revision: opaque(value.revision, 128),
@@ -98,7 +104,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -193,7 +199,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN ack_verify_only INTEGER NOT NULL DEFAULT 0 CHECK(ack_verify_only IN (0,1))');
       run('UPDATE assistant_inbox_meta SET version=7');
     }
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (7)');
+    if(!versions.length||versions[0].version<8){
+      // The SAME private journal retains only the exact original RFC822 digest
+      // earned by a trusted full-body read. It is not body text, a new vault or
+      // native processing authority. Legacy processed/ACK bits invent no hash.
+      db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN read_original_sha256 TEXT CHECK(read_original_sha256 IS NULL OR (length(read_original_sha256)=64 AND read_original_sha256 NOT GLOB \'*[^0-9a-f]*\'))');
+      run('UPDATE assistant_inbox_meta SET version=8');
+    }
+    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (8)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -223,13 +236,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     let added=0;
     for(const event of page){
       const key=digest([scope.key,event.id,event.revision]);
-      if(event.conversationKey && scope.provider!=='telegram')inputError();
+      if(event.conversationKey && !assistantConversationKeyMatches(scope.provider,event.conversationKey))inputError();
       const existing=get('SELECT original_task_id,wake,owner_question_id,conversation_key,provider_wake FROM assistant_inbox_events WHERE event_key=?',key);
       if(existing){
         if(existing.original_task_id!==event.taskId || existing.wake!==Number(event.wake)
           || existing.owner_question_id!==event.ownerQuestionId)fail('ASSISTANT_INBOX_EVENT_CHANGED');
-        if(event.conversationKey===null && scope.provider==='telegram')continue; // Never erase a newer capability on legacy replay.
-        if(existing.conversation_key===null && event.conversationKey && scope.provider==='telegram'){
+        if(event.conversationKey===null && ['telegram','email'].includes(scope.provider))continue; // Never erase a newer hint on legacy replay.
+        if(existing.conversation_key===null && event.conversationKey && ['telegram','email'].includes(scope.provider)){
           // A verified newer provider may enrich legacy ABSENCE once. This
           // adds no route/read/processed/ACK authority and never revives an
           // already handled event. A known key can never be replaced later.
@@ -511,13 +524,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       return all('SELECT event_key,event_id,event_revision FROM assistant_inbox_events WHERE source_key=? AND task_id IS NULL ORDER BY rowid LIMIT 100', scope.key);
     },
     pendingExternalRoutes(scopeInput){
-      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();activeSource(scope);
+      const scope=scopeOf(scopeInput);if(!['telegram','email'].includes(scope.provider))inputError();activeSource(scope);
       return all(`SELECT event_key,event_id,event_revision,conversation_key,task_id,route_id,route_source_revision,route_checked_at
         FROM assistant_inbox_events WHERE source_key=? AND processed=0 AND conversation_key IS NOT NULL
         AND (route_checked_at=0 OR route_checked_at<=?) ORDER BY route_checked_at,rowid LIMIT 100`,scope.key,Math.max(0,time()-300_000));
     },
     deferExternalRouting(scopeInput,{sourceRevision,eventKeys}){
-      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();integer(sourceRevision,0,2_147_483_647);
+      const scope=scopeOf(scopeInput);if(!['telegram','email'].includes(scope.provider))inputError();integer(sourceRevision,0,2_147_483_647);
       if(!Array.isArray(eventKeys)||!eventKeys.length||eventKeys.length>100||new Set(eventKeys).size!==eventKeys.length
         ||eventKeys.some(key=>typeof key!=='string'||!/^[0-9a-f]{64}$/u.test(key)))inputError();
       return transaction(()=>{
@@ -531,15 +544,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     },
     routeExternalEvents(scopeInput,{canonicalSource,sourceRevision,eventKeys,routes}){
       const scope=scopeOf(scopeInput),canonical=scopeOf(canonicalSource);
-      if(scope.provider!=='telegram'||canonical.provider!=='trelio'
+      if(!['telegram','email'].includes(scope.provider)||canonical.provider!=='trelio'
         ||['origin','assistantId','companyId'].some(key=>scope[key]!==canonical[key])
         ||!Array.isArray(routes)||routes.length>100||!Array.isArray(eventKeys)||!eventKeys.length||eventKeys.length>100
         ||eventKeys.some(key=>typeof key!=='string'||!/^[a-f0-9]{64}$/u.test(key))||new Set(eventKeys).size!==eventKeys.length)inputError();
       integer(sourceRevision,0,2_147_483_647);
       const projected=routes.map(row=>{
         object(row,['id','sourceId','sourceRevision','conversationKey','bindingId','bindingRevision','taskId']);
-        if(row.sourceId!==scope.bindingId||row.sourceRevision!==sourceRevision||typeof row.conversationKey!=='string'
-          ||!/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(row.conversationKey))inputError();
+        if(row.sourceId!==scope.bindingId||row.sourceRevision!==sourceRevision
+          ||!assistantConversationKeyMatches(scope.provider,row.conversationKey))inputError();
         return {...row,id:uuid(row.id),taskId:uuid(row.taskId),bindingId:uuid(row.bindingId),bindingRevision:integer(row.bindingRevision,0,2_147_483_647)};
       });
       if(new Set(projected.map(row=>row.conversationKey)).size!==projected.length)inputError();
@@ -582,8 +595,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * account/key/ref/revision before calling. This ledger only binds that
      * evidence to the current durable delivery; native business completion is
      * still required, and no message body is accepted or saved here. */
-    recordExternalRead(scopeInput,{deliveryId,eventKey,sourceRevision,routeId}){
-      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();
+    recordExternalRead(scopeInput,{deliveryId,eventKey,sourceRevision,routeId,originalSha256=null}){
+      const scope=scopeOf(scopeInput);if(!['telegram','email'].includes(scope.provider))inputError();
+      if(scope.provider==='email'?!/^[0-9a-f]{64}$/u.test(originalSha256??''):originalSha256!==null)inputError();
       deliveryId=uuid(deliveryId);routeId=uuid(routeId);integer(sourceRevision,0,2_147_483_647);
       if(typeof eventKey!=='string'||!/^[0-9a-f]{64}$/u.test(eventKey))inputError();
       return transaction(()=>{
@@ -595,7 +609,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           ||!event?.conversation_key||event.route_id!==routeId||event.route_source_revision!==sourceRevision
           ||event.original_route_id!==routeId||event.original_source_revision!==sourceRevision
           ||event.dispatch_source_key!==job.source_key||event.task_id!==job.task_id)fail('ASSISTANT_INBOX_STALE_DELIVERY');
-        run('UPDATE assistant_inbox_events SET read_delivery_id=? WHERE event_key=?',deliveryId,eventKey);
+        // IMAP identity revisions bind UID/UIDVALIDITY, not mutable RFC822
+        // bytes. Never replace independently observed bytes at that same ref.
+        if(originalSha256!==null&&event.read_original_sha256!==null&&event.read_original_sha256!==originalSha256)
+          fail('ASSISTANT_INBOX_EVENT_CHANGED');
+        run('UPDATE assistant_inbox_events SET read_delivery_id=?,read_original_sha256=? WHERE event_key=?',deliveryId,originalSha256,eventKey);
       });
     },
     /** Protected task/observer lookup, not a model tool. Original slots are
@@ -614,9 +632,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       assertExternalDeliverySnapshot(job);
       const refs=deliveryEvents(job.delivery_id).filter(row=>row.conversation_key).map(row=>{
         const scope=JSON.parse(row.event_scope_json);
-        const live=get('SELECT read_delivery_id FROM assistant_inbox_events WHERE event_key=?',row.event_key);
+        const live=get('SELECT read_delivery_id,read_original_sha256 FROM assistant_inbox_events WHERE event_key=?',row.event_key);
         return {...row,scope:scopeInputWithoutKey(scope),sourceId:scope.bindingId,sourceRevision:row.route_source_revision,
-          routeId:row.route_id,eventOrdinal:row.event_ordinal,read:live?.read_delivery_id===job.delivery_id};
+          routeId:row.route_id,eventOrdinal:row.event_ordinal,read:live?.read_delivery_id===job.delivery_id
+            &&(scope.provider!=='email'||/^[0-9a-f]{64}$/u.test(live.read_original_sha256??''))};
       });
       const selection=selected===null?null:assistantSourceProcessingReferences(selected);
       const result=selection===null?refs:selection.map(ref=>{
@@ -804,7 +823,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
             s.scope_json,s.configuration_revision,s.state AS source_state FROM assistant_inbox_delivery_events de
             JOIN assistant_inbox_events e ON e.event_key=de.event_key JOIN assistant_inbox_sources s ON s.source_key=e.source_key
             WHERE de.delivery_id=? AND de.event_ordinal=?`,id,ref.eventOrdinal);
-          if(!event||JSON.parse(event.scope_json).bindingId!==ref.sourceId||JSON.parse(event.scope_json).provider!=='telegram'
+          if(!event||JSON.parse(event.scope_json).bindingId!==ref.sourceId||!['telegram','email'].includes(JSON.parse(event.scope_json).provider)
+            ||JSON.parse(event.scope_json).provider==='email'&&!/^[0-9a-f]{64}$/u.test(event.read_original_sha256??'')
             ||event.source_state!=='active'||event.configuration_revision!==ref.sourceRevision
             ||event.original_route_id!==ref.routeId||event.original_source_revision!==ref.sourceRevision
             ||event.route_id!==ref.routeId||event.route_source_revision!==ref.sourceRevision
@@ -864,7 +884,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * An empty/new source supplies NO success evidence. Old generation fences
      * remain visible; only current-generation confirmed rows witness recovery. */
     externalAcknowledgementHealth(scopeInput){
-      const scope=scopeOf(scopeInput);if(scope.provider!=='telegram')inputError();
+      const scope=scopeOf(scopeInput);if(!['telegram','email'].includes(scope.provider))inputError();
       const current=activeSource(scope);
       const row=get(`SELECT
         sum(CASE WHEN acked=0 AND ack_started=1 THEN 1 ELSE 0 END) AS uncertain,
@@ -926,7 +946,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // one chat's positive result complete another chat's write token.
         const events=candidates.filter(row=>scope.provider==='trelio'||readBack(row)===reconcileOnly
           &&row.ack_started===candidates[0].ack_started
-          && (candidates[0].ack_started===1?row.ack_attempt_token===candidates[0].ack_attempt_token:row.conversation_key===candidates[0].conversation_key))
+          && (candidates[0].ack_started===1?row.ack_attempt_token===candidates[0].ack_attempt_token
+            :scope.provider==='email'?row.event_key===candidates[0].event_key:row.conversation_key===candidates[0].conversation_key))
           .map(({event_key,event_id,event_revision,task_id})=>({event_key,event_id,event_revision,task_id}));
         const token = randomUUID();
         for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=?,ack_verify_only=? WHERE event_key=?', token, time() + LEASE_MS, Number(reconcileOnly), event.event_key);
@@ -940,7 +961,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * current task/assignment/route/material again before provider invocation. */
     externalAcknowledgementReferences(scopeInput,{token,sourceRevision,verifyOnly=false}) {
       const scope=scopeOf(scopeInput);uuid(token);integer(sourceRevision,0,2_147_483_647);
-      if(scope.provider!=='telegram'||typeof verifyOnly!=='boolean')inputError();
+      if(!['telegram','email'].includes(scope.provider)||typeof verifyOnly!=='boolean')inputError();
       if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
       const rows=all(`SELECT e.*,de.event_ordinal,de.route_id AS original_route_id,
         de.route_source_revision AS original_source_revision,d.state AS delivery_state,d.external_receipt
@@ -952,7 +973,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(!rows.length||rows.length!==expected||rows.length>100)fail('ASSISTANT_INBOX_STALE_ACK');
       return rows.map(row=>{
         const parts=typeof row.external_receipt==='string'?row.external_receipt.split(':'):[];
-        if(row.processed!==1||row.ack_expires_at<=time()||row.delivery_state!=='complete'||!row.conversation_key
+        if(row.processed!==1||row.ack_expires_at<=time()||row.delivery_state!=='complete'
+          ||!assistantConversationKeyMatches(scope.provider,row.conversation_key)
+          ||scope.provider==='email'&&!/^[0-9a-f]{64}$/u.test(row.read_original_sha256??'')
           ||row.route_source_revision!==row.original_source_revision
           // The durable lease mode, not a caller boolean, selects historical
           // read-back. Resume never adopts an old route for a new write or
@@ -964,7 +987,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           ||row.route_id!==row.original_route_id||parts.length!==5||parts[0]!=='assistant'||parts[2]!=='codex'
           ||!UUID.test(parts[1])||!UUID.test(parts[3])||!UUID.test(parts[4]))fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
         return {eventKey:row.event_key,id:row.event_id,revision:row.event_revision,conversationKey:row.conversation_key,
-          routeId:row.route_id,eventOrdinal:row.event_ordinal,receiptId:parts[1],taskId:row.task_id};
+          routeId:row.route_id,eventOrdinal:row.event_ordinal,receiptId:parts[1],taskId:row.task_id,
+          ...(scope.provider==='email'?{originalSha256:row.read_original_sha256}:{})};
       });
     },
     /** Host-only fence immediately BEFORE the one native provider invocation.

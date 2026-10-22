@@ -33,12 +33,15 @@ publication tooling также остаются вне этого публичн
   Source READ/ACK diagnostics share the native health/owner notice engine;
   healthy polling cannot erase uncertainty. Aggregate the SAME durable ACK
   journal across conversations; an empty source is never recovery evidence.
-  Production Telegram ACK reuses the SAME signed/account/process path and native
+  Production Telegram/email ACK reuses the SAME signed/account/process path and native
   committed receipt admission, with the original inbox fence at final spawn.
   Fresh tokens cover one conversation; legacy mixed tokens need ALL read-backs.
   Source resume grants only read-back of historical processed slots; schema v7
   seals that lease mode and records current positive verification in the SAME
   journal. It never revives routes or turns unknown/old success into a write.
+  Email routing hashes untrusted threading headers, never owner identity. The
+  SAME journal v8 binds exact full RFC822 SHA to the independent read slot; one
+  UID per fresh ACK, all original UIDs on unknown read-back, never a thread STORE.
   SQLite хранит только bounded structural refs; child stream hints/cursors
   commit in that SAME journal, never as guessed task/ACK authority. Final
   streams sleep until a new native hint; new hints cannot be consumed by an

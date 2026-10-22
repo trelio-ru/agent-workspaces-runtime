@@ -639,8 +639,9 @@ test('a legacy baseline or changed owner registration cannot advance a channel c
   }finally{await f.coordinator.close();}
 });
 
-test('native known-conversation routing wakes only the existing canonical task chat and never ACKs an unread body',async t=>{
-  const f=await externalFixture(t),key=`telegram-conversation/v1.${'a'.repeat(64)}`,unknown=`telegram-conversation/v1.${'b'.repeat(64)}`;
+for(const provider of ['telegram','email'])test(`${provider} native routes reuse the canonical task chat and never ACK an unread body`,async t=>{
+  const f=await externalFixture(t),key=`${provider}-conversation/v1.${'a'.repeat(64)}`,unknown=`${provider}-conversation/v1.${'b'.repeat(64)}`;
+  if(provider==='email')f.row.skillId='email-imap-smtp';
   const route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
   let routingCalls=0;
   f.options.client.sourceRoutes=async input=>{
@@ -652,9 +653,9 @@ test('native known-conversation routing wakes only the existing canonical task c
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
     const threadId=f.coordinator.status()[0].threadId;
     f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'messages',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],events:[
-      {id:'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key},
-      {id:'message:124:1',revision:'d'.repeat(64),kind:'new',outgoing:false,conversationKey:unknown},
-      {id:'message:123:2',revision:'e'.repeat(64),kind:'new',outgoing:true,conversationKey:key}]}));
+      {id:provider==='email'?'uid:17:11':'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key},
+      {id:provider==='email'?'uid:17:12':'message:124:1',revision:'d'.repeat(64),kind:'new',outgoing:false,conversationKey:unknown},
+      {id:provider==='email'?'uid:17:13':'message:123:2',revision:'e'.repeat(64),kind:'new',outgoing:true,conversationKey:key}]}));
     f.advance(300_000);await f.coordinator.pollOnce();
     let runs=0;
     f.options.native.run=async(input,options)=>{
@@ -708,7 +709,7 @@ test('routing outage cannot roll back a committed provider page or become author
 });
 
 
-test('production composition ACK waits for exact read and committed selection; a lost write resumes read-only in the same inbox',async t=>{
+for(const provider of ['telegram','email'])test(`${provider} committed processing ACK survives a lost write with read-only recovery`,async t=>{
   let mode='unknown',calls=[],f;
   let healthRevision=0,healthRead='ready',healthAck='ready',reportFailure=false,healthReadFailure=false;const healthReports=[];
   const sourceHealth={read:async row=>{
@@ -724,12 +725,13 @@ test('production composition ACK waits for exact read and committed selection; a
   const acknowledgeSource=async input=>{
     calls.push(input.verifyOnly);input.assertReferences();input.beforeInvoke();
     assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'durable fence precedes ONE native invocation');
-    assert.equal(input.references.length,1);assert.equal(input.references[0].id,'message:123:1');
+    assert.equal(input.references.length,1);assert.equal(input.references[0].id,provider==='email'?'uid:17:11':'message:123:1');
+    if(provider==='email')assert.equal(input.references[0].originalSha256,'f'.repeat(64));
     if(mode==='unknown')throw Object.assign(new Error('PRIVATE_PROVIDER_LOST'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
     return {acknowledged:mode==='confirmed',notAttempted:true,code:null};
   };
-  f=await externalFixture(t,{acknowledgeSource,sourceHealth});
-  const key='telegram-conversation/v1.'+'a'.repeat(64),route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,
+  f=await externalFixture(t,{acknowledgeSource,sourceHealth});if(provider==='email')f.row.skillId='email-imap-smtp';
+  const key=provider+'-conversation/v1.'+'a'.repeat(64),route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,
     conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
   f.options.client.sourceRoutes=async()=>[route];
   const outcome=f.options.client.readBusinessOutcome;let selected=false;
@@ -738,14 +740,14 @@ test('production composition ACK waits for exact read and committed selection; a
   f.options.native.run=async(input,options)=>{
     options.startInvocation();const ref=input.taskContext.sourceReferences[0];
     const event=f.database.prepare('SELECT event_key FROM assistant_inbox_events WHERE event_id=?').get(ref.eventId);
-    f.inbox.recordExternalRead(f.scope(),{deliveryId:input.deliveryId,eventKey:event.event_key,sourceRevision:0,routeId:route.id});
+    f.inbox.recordExternalRead(f.scope(),{deliveryId:input.deliveryId,eventKey:event.event_key,sourceRevision:0,routeId:route.id,...(provider==='email'?{originalSha256:'f'.repeat(64)}:{})});
     const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
   };
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
     const thread=f.coordinator.status()[0].threadId;
     f.read(async()=>({baselineOnly:false,nextCursor:'message',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
-      events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+      events:[{id:provider==='email'?'uid:17:11':'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
     f.advance(300000);await f.coordinator.pollOnce();assert.deepEqual(calls,[]);
     await f.coordinator.workOnce();await f.coordinator.pollOnce();assert.deepEqual(calls,[],'body read with omitted processing is never ACK eligible');
     selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();

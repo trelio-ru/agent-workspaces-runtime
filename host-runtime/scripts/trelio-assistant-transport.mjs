@@ -6,7 +6,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
-import { assistantSourceProcessingReferences } from './trelio-assistant-inbox.mjs';
+import { assistantSourceProcessingReferences, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -389,7 +389,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     async prepareSkillBodyRead(input){
       await assertIdentity();
       if(sourceReads)return sourceReads.prepare(input);
-      if(input.artifact?.skillId==='telegram-mtproto'&&input.runtimeArguments?.[0]==='read-reference')fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      if(['telegram-mtproto','email-imap-smtp'].includes(input.artifact?.skillId)&&input.runtimeArguments?.[0]==='read-reference')fail('ASSISTANT_SOURCE_READ_REQUIRED');
       return null;
     },
     async commitSkillBodyRead(ticket,result){
@@ -497,7 +497,8 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
     const sources=await client.sourceAccounts(pass.companyId,signal);
     const row=sources.find(row=>row.id===ref.sourceId);
     if(!row||row.state!=='active'||row.deviceId!==identity.deviceId||row.revision!==ref.sourceRevision
-      ||row.skillId!=='telegram-mtproto'||row.localAccountId!==ref.scope.accountId)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
+      ||row.skillId!==({telegram:'telegram-mtproto',email:'email-imap-smtp'}[ref.scope.provider])
+      ||row.localAccountId!==ref.scope.accountId)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
     if(!routeRequired)return row;
     const routes=await client.sourceRoutes({companyId:pass.companyId,sourceId:row.id,sourceRevision:row.revision,
       conversationKeys:[ref.conversation_key]},signal);
@@ -507,21 +508,24 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
   };
   return Object.freeze({
     async prepare({artifact,executionContext,runtimeArguments}){
-      if(artifact?.skillId!=='telegram-mtproto'||runtimeArguments?.[0]!=='read-reference')return null;
+      if(!['telegram-mtproto','email-imap-smtp'].includes(artifact?.skillId)||runtimeArguments?.[0]!=='read-reference')return null;
+      const email=artifact.skillId==='email-imap-smtp',provider=email?'email':'telegram';
       // This is an exact native protocol, not general option stripping. Extra,
       // repeated or missing selectors cannot be interpreted as this body read.
       if(runtimeArguments.length!==9)fail('ASSISTANT_SOURCE_READ_REQUIRED');
       const fields=new Map();
       for(let i=1;i<runtimeArguments.length;i+=2){
         const name=runtimeArguments[i];
-        if(!['--chat','--message-id','--expected-revision','--expected-conversation-key'].includes(name)||fields.has(name))fail('ASSISTANT_SOURCE_READ_REQUIRED');
+        if(!(email?['--uid','--uid-validity','--expected-revision','--expected-conversation-key']
+          :['--chat','--message-id','--expected-revision','--expected-conversation-key']).includes(name)||fields.has(name))fail('ASSISTANT_SOURCE_READ_REQUIRED');
         fields.set(name,runtimeArguments[i+1]);
       }
-      const eventId=`message:${fields.get('--chat')}:${fields.get('--message-id')}`;
+      const eventId=email?`uid:${fields.get('--uid-validity')}:${fields.get('--uid')}`
+        :`message:${fields.get('--chat')}:${fields.get('--message-id')}`;
       const pass=await current();
       if(executionContext?.companyId!==pass.companyId||!UUID.test(executionContext.account?.id??''))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
       const refs=await withInbox(inbox=>inbox.externalDeliveryReferences(pass));
-      const matched=refs.filter(row=>row.scope.provider==='telegram'&&row.scope.accountId===executionContext.account.id
+      const matched=refs.filter(row=>row.scope.provider===provider&&row.scope.accountId===executionContext.account.id
         &&row.event_id===eventId&&row.event_revision===fields.get('--expected-revision')
         &&row.conversation_key===fields.get('--expected-conversation-key'));
       if(matched.length!==1)fail('ASSISTANT_SOURCE_READ_REQUIRED');
@@ -533,12 +537,16 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
       if(!tickets.has(ticket))fail('ASSISTANT_SOURCE_READ_REQUIRED');tickets.delete(ticket);
       let value;try{value=JSON.parse(stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
       const {pass,ref}=ticket;
-      if(!object(value)||value.schemaVersion!==1||value.protocol!=='telegram-message-read/v1'
+      const email=ref.scope.provider==='email';
+      if(!object(value)||value.schemaVersion!==1||value.protocol!==(email?'email-message-read/v1':'telegram-message-read/v1')
         ||value.reference?.id!==ref.event_id||value.reference?.revision!==ref.event_revision
-        ||value.reference?.conversationKey!==ref.conversation_key||!object(value.message)||value.message.textTruncated!==false
+        ||value.reference?.conversationKey!==ref.conversation_key||!object(value.message)
         ||!object(value.coverage)||value.coverage.textComplete!==true||value.coverage.attachmentsContentRead!==false
-        ||value.coverage.contextIncluded!==false||value.readState?.mode!=='history-only'||value.readState.marksRead!==false
-        ||value.readState.readReceiptsSent!==false||value.readState.viewsRegistered!==false)fail('ASSISTANT_SOURCE_READ_INVALID');
+        ||value.readState?.marksRead!==false||value.readState.readReceiptsSent!==false
+        ||(email?typeof value.message.body!=='string'||value.coverage.otherMessagesIncluded!==false||!/^[0-9a-f]{64}$/u.test(value.originalSha256??'')
+          ||ref.event_id!==`uid:${value.reference.uidValidity}:${value.reference.uid}`
+          :value.message.textTruncated!==false||value.coverage.contextIncluded!==false
+            ||value.readState.mode!=='history-only'||value.readState.viewsRegistered!==false))fail('ASSISTANT_SOURCE_READ_INVALID');
       await authorize(pass,ref);
       await withInbox(inbox=>{
         // Repeat the immutable local snapshot after asynchronous native reads.
@@ -546,7 +554,7 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
           routeId:ref.routeId,eventOrdinal:ref.eventOrdinal}]});
         if(rows.length!==1||rows[0].event_key!==ref.event_key)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
         inbox.recordExternalRead(ref.scope,{deliveryId:pass.deliveryId,eventKey:ref.event_key,
-          sourceRevision:ref.sourceRevision,routeId:ref.routeId});
+          sourceRevision:ref.sourceRevision,routeId:ref.routeId,...(email?{originalSha256:value.originalSha256}:{})});
       });
     },
     async confirmProcessing(pass,selected){
@@ -590,7 +598,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // Only opaque provider/account HMACs cross this fixed boundary. The
       // native server rechecks owner/source/task/device authority on EVERY read;
       // an old SQLite mapping or a model-authored key never grants body access.
-      const key=value=>typeof value==='string' && /^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(value);
+      const key=value=>['telegram','email'].some(provider=>assistantConversationKeyMatches(provider,value));
       if(!object(input)||Object.keys(input).sort().join(',')!=='companyId,conversationKeys,sourceId,sourceRevision'
         ||!Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
         || !Array.isArray(input.conversationKeys)||!input.conversationKeys.length||input.conversationKeys.length>100
@@ -1148,7 +1156,18 @@ const normalizeAssistantSourceAcknowledgement=input=>{
   return Object.freeze({sourceId:id(input.sourceId),sourceRevision:input.sourceRevision,receipts:Object.freeze(receipts),
     ...(input.verifyOnly?{verifyOnly:true}:{})});
 };
-const validateAssistantAcknowledgementArguments=args=>{
+const validateAssistantAcknowledgementArguments=(args,skillId)=>{
+  if(skillId==='email-imap-smtp'){
+    // Exactly one UID, bound to independently read full RFC822 bytes. No
+    // folder/account override, range, SMTP or model approval flag is accepted.
+    if(!Array.isArray(args)||args.length!==10||args[0]!=='ack-reference'
+      ||args[1]!=='--uid'||args[3]!=='--uid-validity'
+      ||[args[2],args[4]].some(value=>!/^\d{1,10}$/u.test(value??'')||Number(value)<1||Number(value)>4294967295)
+      ||args[5]!=='--expected-revision'||!/^[0-9a-f]{64}$/u.test(args[6]??'')
+      ||args[7]!=='--expected-original-sha256'||!/^[0-9a-f]{64}$/u.test(args[8]??'')
+      ||!['--confirm','--verify-only'].includes(args[9]))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    return [...args];
+  }
   if(!Array.isArray(args)||args.length<10||args.length>210||args[0]!=='ack-reference'
     ||args[1]!=='--chat'||!/^-?[1-9]\d{0,18}$/u.test(args[2]??'')||args[3]!=='--message-id'
     ||!/^\d{1,10}$/u.test(args[4]??'')||Number(args[4])<1||Number(args[4])>=2**31-1
@@ -1180,11 +1199,11 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   }
   if(sourceAcknowledgement!==null){
     sourceAcknowledgement=normalizeAssistantSourceAcknowledgement(sourceAcknowledgement);
-    if(accountSetup!==null||scope.skillId!=='telegram-mtproto'||!object(acknowledgementExecution)
+    if(accountSetup!==null||!['telegram-mtproto','email-imap-smtp'].includes(scope.skillId)||!object(acknowledgementExecution)
       ||Object.keys(acknowledgementExecution).sort().join(',')!=='accountId,beforeInvoke,runtimeArguments,slots'
       ||typeof acknowledgementExecution.beforeInvoke!=='function')fail('ASSISTANT_SOURCE_INVALID_INPUT');
     acknowledgementExecution=Object.freeze({accountId:id(acknowledgementExecution.accountId),
-      runtimeArguments:Object.freeze(validateAssistantAcknowledgementArguments(acknowledgementExecution.runtimeArguments)),
+      runtimeArguments:Object.freeze(validateAssistantAcknowledgementArguments(acknowledgementExecution.runtimeArguments,scope.skillId)),
       slots:Object.freeze((()=>{
         const rows=acknowledgementExecution.slots;
         if(!Array.isArray(rows)||rows.length!==sourceAcknowledgement.receipts.reduce((n,row)=>n+row.eventOrdinals.length,0)
@@ -1319,7 +1338,8 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(sourceAcknowledgement?'telegram-message-ack/v1':setupCommand?interactiveProtocol:protocol.protocol)
+        || admission.provider!==protocol.provider || admission.protocol!==(sourceAcknowledgement
+          ?(scope.skillId==='email-imap-smtp'?'email-read-state/v1':'telegram-message-ack/v1'):setupCommand?interactiveProtocol:protocol.protocol)
         || admission.command!==(sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
@@ -1386,6 +1406,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
     || Buffer.byteLength(result.stdout,'utf8')>1024*1024 || !Object.hasOwn(SOURCE_PROTOCOLS,skillId))invalid();
   let raw;try{raw=JSON.parse(result.stdout);}catch{invalid();}
   if(!object(raw))invalid();
+
   if(result.exitCode!==0){
     const prefix={ 'telegram-mtproto':'TELEGRAM','email-imap-smtp':'EMAIL','max-web':'MAX' }[skillId];
     const allowed=ASSISTANT_SOURCE_MONITOR_ERROR_CODES.filter(code=>code.startsWith(`${prefix}_MONITOR_`));
@@ -1421,7 +1442,10 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
     if(skillId==='email-imap-smtp'){
       if(row.kind!=='new' || !positive(row.uid) || !positive(row.uidValidity)
         || row.id!==`uid:${row.uidValidity}:${row.uid}` || raw.coverage.bodyContentRead!==false)invalid();
-      return {id:row.id,revision:row.revision,kind:row.kind,uid:row.uid,uidValidity:row.uidValidity};
+      if(row.conversationKey!==undefined&&(!assistantConversationKeyMatches('email',row.conversationKey)
+        ||raw.coverage.conversationHeadersRead!==true))invalid();
+      return {id:row.id,revision:row.revision,kind:row.kind,uid:row.uid,uidValidity:row.uidValidity,
+        ...(row.conversationKey===undefined?{}:{conversationKey:row.conversationKey})};
     }
     if(!ref(row.chatId) || !ref(row.messageId))invalid();
     const event={id:row.id,revision:row.revision,kind:row.kind,chatId:row.chatId,messageId:row.messageId};
@@ -1708,7 +1732,11 @@ export const readAssistantSourceMonitor = async ({identity,host,store,source,sig
         companyConnection:resolution.companyConnection};
       const args=['monitor','--local-account',accountId,...(chat===null?[]:['--chat',chat]),
         ...(folder===null?[]:['--folder',folder]),...(cursor===null?[]:['--cursor',cursor]),
-        ...(initialUnread?['--unread-backfill']:[]),...(initialAccountCursor===null?[]:['--initial-account-cursor',initialAccountCursor]),'--limit','100'];
+        ...(initialUnread?['--unread-backfill']:[]),...(initialAccountCursor===null?[]:['--initial-account-cursor',initialAccountCursor]),
+        // Existing providers keep their passive ABI. Only a reviewed newer
+        // signed email release is asked for bounded threading-header refs.
+        ...(scope.skillId==='email-imap-smtp'&&engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.6.5')
+          ?['--conversation-references']:[]),'--limit',scope.skillId==='email-imap-smtp'?'20':'100'];
       const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
         runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
       if(selected.handled || selected.account?.id!==accountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
@@ -1736,6 +1764,25 @@ export const projectAssistantSourceAcknowledgement=(result,{target,verifyOnly})=
     ||Buffer.byteLength(result.stdout)>1024*1024||typeof verifyOnly!=='boolean')invalid();
   let raw;try{raw=JSON.parse(result.stdout);}catch{invalid();}
   if(!object(raw))invalid();
+  if(target.uid!==undefined){
+    // This projection consumes a complete SAME-provider result privately.
+    // Seen is per UID; no thread/range acknowledgement or sender proof exists.
+    if(result.exitCode!==0){
+      const codes=['EMAIL_ACK_CHANGED','EMAIL_ACK_POLICY_DENIED','EMAIL_ACK_UNAVAILABLE','EMAIL_ACK_UNVERIFIED'];
+      const state=raw.readState;
+      if(raw.ok!==false||!codes.includes(raw.code)||!object(state)||state.verified!==false
+        ||typeof state.writeAttempted!=='boolean'||state.automaticRetryAllowed!==false
+        ||state.writeOutcome!==(state.writeAttempted?'unknown':'not_attempted'))invalid();
+      return {acknowledged:false,notAttempted:!state.writeAttempted,code:raw.code};
+    }
+    const state=raw.readState,ref=raw.reference;
+    if(raw.schemaVersion!==1||raw.protocol!=='email-read-state/v1'||!object(ref)||!object(state)
+      ||ref.id!==target.id||ref.revision!==target.revision||raw.originalSha256!==target.originalSha256
+      ||state.verified!==true||typeof state.seen!=='boolean'||typeof state.writeAttempted!=='boolean'
+      ||state.automaticRetryAllowed!==false||state.readReceiptsSent!==false
+      ||verifyOnly&&state.writeAttempted||state.writeAttempted&&!state.seen)invalid();
+    return {acknowledged:state.seen,notAttempted:!state.writeAttempted,code:null};
+  }
   if(result.exitCode!==0){
     const codes=['TELEGRAM_ACK_RANGE_INCOMPLETE','TELEGRAM_ACK_RANGE_UNSUPPORTED','TELEGRAM_ACK_UNAVAILABLE',
       'TELEGRAM_ACK_OUTCOME_UNKNOWN','TELEGRAM_REFERENCE_CHANGED','TELEGRAM_REFERENCE_SCOPE_CHANGED'];
@@ -1762,17 +1809,23 @@ export const projectAssistantSourceAcknowledgement=(result,{target,verifyOnly})=
  * the provider's exact account/key/revision and contiguous-range verification. */
 export const acknowledgeAssistantSource=async({identity,host,store,client,source,references,verifyOnly,
   assertReferences,beforeInvoke,signal})=>{
-  if(!source||source.skillId!=='telegram-mtproto'||source.state!=='active'||typeof verifyOnly!=='boolean'
+  if(!source||!['telegram-mtproto','email-imap-smtp'].includes(source.skillId)||source.state!=='active'||typeof verifyOnly!=='boolean'
     ||typeof assertReferences!=='function'||typeof beforeInvoke!=='function'||!client||typeof client.sourceAccounts!=='function'
     ||['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity?.[key])
     ||!Array.isArray(references)||!references.length||references.length>100)fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  const email=source.skillId==='email-imap-smtp';
+  if(email&&references.length!==1)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const refs=references.map(ref=>{
-    if(!object(ref)||Object.keys(ref).sort().join(',')!=='conversationKey,eventKey,eventOrdinal,id,receiptId,revision,routeId,taskId'
+    if(!object(ref)||Object.keys(ref).sort().join(',')!==(email
+      ?'conversationKey,eventKey,eventOrdinal,id,originalSha256,receiptId,revision,routeId,taskId'
+      :'conversationKey,eventKey,eventOrdinal,id,receiptId,revision,routeId,taskId')
       ||!/^[0-9a-f]{64}$/u.test(ref.eventKey??'')||!/^[0-9a-f]{64}$/u.test(ref.revision??'')
-      ||!/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(ref.conversationKey??''))fail('ASSISTANT_SOURCE_INVALID_INPUT');
-    const match=/^message:(-?[1-9]\d{0,18}):([1-9]\d{0,9})$/u.exec(ref.id??'');
-    if(!match||Number(match[2])>=2**31-1)fail('ASSISTANT_SOURCE_INVALID_INPUT');
-    return {...ref,receiptId:id(ref.receiptId),routeId:id(ref.routeId),taskId:id(ref.taskId),chatId:match[1],messageId:match[2]};
+      ||!assistantConversationKeyMatches(email?'email':'telegram',ref.conversationKey))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    const match=(email?/^uid:([1-9]\d{0,9}):([1-9]\d{0,9})$/u:/^message:(-?[1-9]\d{0,18}):([1-9]\d{0,9})$/u).exec(ref.id??'');
+    if(!match||(email?[match[1],match[2]].some(value=>Number(value)>4294967295)||!/^[0-9a-f]{64}$/u.test(ref.originalSha256??'')
+      :Number(match[2])>=2**31-1))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    return {...ref,receiptId:id(ref.receiptId),routeId:id(ref.routeId),taskId:id(ref.taskId),
+      ...(email?{uidValidity:match[1],uid:match[2]}:{chatId:match[1],messageId:match[2]})};
   });
   if(new Set(refs.map(ref=>ref.eventKey)).size!==refs.length||refs.some(ref=>ref.chatId!==refs[0].chatId
     ||ref.conversationKey!==refs[0].conversationKey))fail('ASSISTANT_SOURCE_INVALID_INPUT');
@@ -1785,7 +1838,9 @@ export const acknowledgeAssistantSource=async({identity,host,store,client,source
   const intent=normalizeAssistantSourceAcknowledgement({sourceId:source.id,sourceRevision:source.revision,
     receipts:[...receipts].map(([receiptId,eventOrdinals])=>({receiptId,eventOrdinals:eventOrdinals.sort((a,b)=>a-b)})),
     ...(verifyOnly?{verifyOnly:true}:{})});
-  const runtimeArguments=['ack-reference','--chat',target.chatId,'--message-id',target.messageId,'--expected-revision',target.revision,
+  const runtimeArguments=email?['ack-reference','--uid',target.uid,'--uid-validity',target.uidValidity,'--expected-revision',target.revision,
+    '--expected-original-sha256',target.originalSha256,verifyOnly?'--verify-only':'--confirm']
+    :['ack-reference','--chat',target.chatId,'--message-id',target.messageId,'--expected-revision',target.revision,
     '--expected-conversation-key',target.conversationKey,...(verifyOnly?[]:covered.flatMap(ref=>['--covered-reference',`${ref.messageId}:${ref.revision}`])),
     verifyOnly?'--verify-only':'--confirm'];
   const fresh=async()=>{
