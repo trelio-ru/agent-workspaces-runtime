@@ -2359,6 +2359,7 @@ export const collectCredentialThroughLoopback = async (
     renderForm = renderCredentialPage,
     parseSubmission = form => String(form.get("credential") || "").trim(),
     successMessage = "Remote MCP подключён. Эту вкладку можно закрыть.",
+    successTitle = "Подключено",
     allowCancel = false,
     onListening = () => {},
     signal,
@@ -2506,7 +2507,7 @@ export const collectCredentialThroughLoopback = async (
       writeLoopbackHtml(
         outgoing,
         200,
-        `<!doctype html><meta charset=utf-8><title>Сохранено</title><p>${escapeHtml(successMessage)}</p>`,
+        `<!doctype html><meta charset=utf-8><title>${escapeHtml(successTitle)}</title><p>${escapeHtml(successMessage)}</p>`,
         { onFinished: finish },
       );
     } catch (error) {

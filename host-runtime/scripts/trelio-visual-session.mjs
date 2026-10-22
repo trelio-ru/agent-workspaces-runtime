@@ -312,6 +312,7 @@ export async function configureVisualAuthentication({ store, definition, signal,
     doctorCredential: async () => {},
     persistCredential: async (_origin, _resolved, credentials) => { signal?.throwIfAborted(); await store.writeCredentials(credentials); },
     successMessage: 'Данные входа зашифрованы и сохранены на устройстве. Эту вкладку можно закрыть.',
+    successTitle: 'Сохранено',
   });
 }
 

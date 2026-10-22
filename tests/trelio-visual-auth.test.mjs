@@ -105,7 +105,8 @@ test('one guarded local form saves the whole bundle, rejects injected fields, su
     const post = body => fetch(`${url.origin}/credential`, { method: 'POST', headers: { origin: url.origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
     assert.equal((await post({ ...fields, unexpected: 'not allowed' })).status, 400);
     assert.equal(saved, undefined);
-    assert.equal((await post(fields)).status, 200);
+    const savedResponse = await post(fields);
+    assert.equal(savedResponse.status, 200); assert.match(await savedResponse.text(), /<title>Сохранено<\/title>/);
   };
   assert.equal(await configureVisualAuthentication({ store, definition: def, openBrowserFn, setupTimeoutMs: 2000 }), undefined);
   assert.equal(saved.password, 'SYNTHETIC_PASSWORD'); assert.equal(saved.totp, seed); assert.equal(calls, 1);
