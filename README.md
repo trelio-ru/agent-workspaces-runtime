@@ -329,6 +329,9 @@ C++ helper не запускает PowerShell/CLR, не требует комп�
 пользователя и не меняет code page. Отсутствующий или запрещённый executable
 завершается fail-closed без shell fallback. Legacy PowerShell builder остаётся
 только для явно вызванных compatibility/fault-injection tests.
+Interoperability gate запускает этот же native helper под исходным hook deadline;
+legacy PowerShell проверяет совместимость DPAPI bytes вне hook. Медленная readiness
+и непродлеваемый общий срок независимо проверяются protocol fixtures на всех OS.
 Фиксированный ASCII-протокол передаёт id, kind и base64 данные; readiness
 подтверждается до передачи первого запроса. DPAPI CurrentUser получает
 origin-bound entropy и bytes только через anonymous pipes; buffers очищаются,

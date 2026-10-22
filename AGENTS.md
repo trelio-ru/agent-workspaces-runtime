@@ -153,6 +153,9 @@ publication tooling также остаются вне этого публичн
   CLR, local compile и fallback. Hosted MSVC собирает x64/ia32/arm64; source SHA,
   PE machine и binary hashes проверяются до упаковки. Tag использует только
   exact PR-tested artifact; обычная учётная запись и ARM64 проверяются отдельно.
+  Hook interoperability gate использует этот же native worker под исходным
+  deadline; legacy PowerShell служит только внешней проверкой DPAPI bytes.
+  Медленная readiness и общий deadline проверяются отдельными protocol fixtures.
 - ACL worker использует собственные pipes без shell/CLR и смены code page. Запрос ждёт readiness под исходным deadline;
   startup/dispatch различаются, readiness не является подтверждением ACL.
 - Штатная Windows-диагностика запускает read-only readiness worker до чтения

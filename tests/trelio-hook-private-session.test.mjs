@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   assertRuntimeHookBudget, buildPrivateAclWorkerScript, createPrivateAclWorker, privateProcessOptions,
   runtimeHookSignal, scopedPrivateAclWorker, withRuntimeHookPrivateSession, withRuntimeHookStage, withPrivateProcessSession,
+  windowsPrivateWorkerOptions,
 } from "../host-runtime/scripts/trelio-hook-private-session.mjs";
 import {
   hardenWindowsPrivatePath, resolveWindowsPowerShellExecutable, WINDOWS_PRIVATE_ACL_SCRIPT,
@@ -395,7 +396,7 @@ for (const response of ['bad-json-with-synthetic-secret', '{"id":"1","ok":false,
   });
 }
 
-test("Windows slow cold startup shares ACL and legacy-compatible DPAPI under the unchanged hook deadline", {
+test("Windows production native worker shares ACL and legacy-compatible DPAPI under the unchanged hook deadline", {
   skip: process.platform !== "win32",
 }, async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trelio-slow-private-worker-"));
@@ -417,14 +418,26 @@ test("Windows slow cold startup shares ACL and legacy-compatible DPAPI under the
   const legacy = await runLegacy('protect',value);
   let currentCiphertext;
   let starts = 0;
+  const children = [];
   try {
     await withRuntimeHookPrivateSession(22_000, async () => {
-      const worker = scopedPrivateAclWorker({ executable:resolveWindowsPowerShellExecutable(), aclScript:WINDOWS_PRIVATE_ACL_SCRIPT,
+      // Exercise the actual production executable, not the retired PowerShell
+      // IPC implementation with an artificial 13-second sleep. That old setup
+      // mixed host CLR startup/ACL name resolution with the transport deadline
+      // and could exhaust 22 seconds before reaching DPAPI. Delayed readiness
+      // and the non-sliding global budget are independently covered above on
+      // every OS; compatibility below still uses REAL legacy CurrentUser DPAPI
+      // on both sides of the current native implementation.
+      const nativeOptions = windowsPrivateWorkerOptions();
+      const worker = scopedPrivateAclWorker({ ...nativeOptions,
         spawnProcess: (program,args,options) => {
           starts++;
-          const script = '[Threading.Thread]::Sleep(13000)\nfunction Add-Type { throw "Unexpected module dependency" }\n'
-            + Buffer.from(args.at(-1),'base64').toString('utf16le');
-          return spawn(program,[...args.slice(0,-1),Buffer.from(script,'utf16le').toString('base64')],options);
+          assert.equal(program, nativeOptions.executable);
+          assert.deepEqual(args, []);
+          assert.equal(options.shell, false);
+          const child = spawn(program, args, options);
+          children.push(child);
+          return child;
         } });
       await hardenWindowsPrivatePath(root,"directory");
       assert.equal(await unprotectWindowsBridgeSessionToken(origin,legacy),value);
@@ -436,7 +449,10 @@ test("Windows slow cold startup shares ACL and legacy-compatible DPAPI under the
       assert.equal(starts,1);
     });
     assert.equal(await runLegacy('unprotect',currentCiphertext),value);
-  } finally { await rm(root,{recursive:true,force:true}); }
+  } finally {
+    await assertStopped({ children });
+    await rm(root,{recursive:true,force:true});
+  }
 });
 
 
