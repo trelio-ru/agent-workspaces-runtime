@@ -473,6 +473,10 @@ publication tooling также остаются вне этого публичн
   Exact encrypted task reads reuse the SAME schema-v3/MVCC reader and hydrator,
   with native-selected ciphertext bundles only; no general payload resolver or
   human key fallback. Other encrypted adapters retain their independent gates.
+  Accepted inspection reuses the SAME readonly Git/container cache with fresh
+  native snapshot and final managed pass/envelope read-back; only exact pinned
+  snapshot/bundle reads open. Child fixtures require an executed-flow sentinel,
+  never inherited NODE_TEST_CONTEXT plus exit 0 as proof.
   Managed setup uses that SAME registration/read-back, OS store and local scope
   opening/TRELIOE1 self-test; key_verified grants no content execution. See
   [identity ownership](docs/assistant-scheduler.md#managed-encryption-identity-ownership).

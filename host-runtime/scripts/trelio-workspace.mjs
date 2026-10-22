@@ -12907,6 +12907,7 @@ const materializeWorkspaceInspection = async ({
   workspaceId,
   rawSnapshot,
   companyEncryption,
+  resolvePayloads,
 }) => {
   const { acceptedHead } = validateWorkspaceReadSnapshot(rawSnapshot, workspaceId);
   const snapshot = await hydrateAgentCompanyEncryptedJson({
@@ -12914,6 +12915,7 @@ const materializeWorkspaceInspection = async ({
     origin,
     token,
     companyEncryption,
+    resolvePayloads,
   });
   validateWorkspaceReadSnapshot(snapshot, workspaceId);
   const inspectionDirectory = await resolveWorkspaceInspectionDirectory();
@@ -13130,13 +13132,25 @@ const inspectWorkspace = async (origin, options) => {
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const rawSnapshot = await readJsonResponse(await request(
+      // A dedicated accepted-read profile may open its OWN managed envelope
+      // before fetching authority. This is the same inspector/materializer,
+      // not a second Git/crypto executor. Plain/human profiles retain their
+      // existing request/initialization order and general payload resolver.
+      const inspectionProfile=currentWorkspaceExecutionProfile();
+      const preparedEncryption=await inspectionProfile?.prepareWorkspaceInspection?.({origin,workspaceId,requestOrigin:workspaceOrigin});
+      const snapshotHttpResponse = await request(
         workspaceOrigin,
         token,
         `/api/agent-workspaces/workspaces/${workspaceId}/read-snapshot`,
-      ));
+      );
+      const snapshotResponse=inspectionProfile?.readWorkspaceInspectionResponse
+        ? await inspectionProfile.readWorkspaceInspectionResponse(snapshotHttpResponse) : await readJsonResponse(snapshotHttpResponse);
+      const rawSnapshot=inspectionProfile?.unwrapWorkspaceInspectionSnapshot
+        ? await inspectionProfile.unwrapWorkspaceInspectionSnapshot(snapshotResponse) : snapshotResponse;
       const { company } = validateWorkspaceReadSnapshot(rawSnapshot, workspaceId);
-      const companyEncryption = await ensureCompanyEncryptionContext({
+      if(preparedEncryption && (preparedEncryption.runtime.company.id!==company.id
+        || preparedEncryption.runtime.company.slug!==company.slug))denyWorkspaceExecutionProfile();
+      const companyEncryption = preparedEncryption ?? await ensureCompanyEncryptionContext({
         origin,
         requestOrigin: workspaceOrigin,
         token,
@@ -13148,7 +13162,11 @@ const inspectWorkspace = async (origin, options) => {
         workspaceId,
         rawSnapshot,
         companyEncryption,
+        ...(inspectionProfile?.resolveWorkspaceInspectionPayloads ? {
+          resolvePayloads:ids=>inspectionProfile.resolveWorkspaceInspectionPayloads(ids),
+        } : {}),
       }));
+      await inspectionProfile?.assertWorkspaceInspectionCurrent?.();
       process.stdout.write(`${inspection.workspaceDirectory}\n`);
       return;
     } catch (error) {

@@ -987,6 +987,33 @@ SQLite, a company mirror or a second cache/vault. Other encrypted Workspace
 writes/files/source/Secret/outcome adapters remain independently gated; this
 read subset does not establish `businessReady` or Windows business E2E.
 
+### Encrypted accepted Workspace inspection
+
+Only native `prepare_assistant_workspace_read` / continuation `inspect` may
+carry `encryptedInspection`: exact company/Workspace UUID, slug and selected
+data-plane origin, checked against the original protected pass. No model
+permission flag, write scope, Run/lease, human credential or key is added.
+The SAME common inspector prepares its own managed company envelope, reads the
+native authority snapshot and downloads the pinned immutable encrypted bundle.
+Only its two exact GET/HEAD paths may use the alternate origin; managed key
+control stays canonical. Traversal, duplicate/extra query, caller recipient,
+unreviewed paths, history and writes are refused before private HTTP.
+
+Task and Workspace snapshot readers share the 32-MiB streaming decoder and
+4096-ref company/scope/epoch/entity-bound map. The SAME field hydrator, HPKE,
+TRELIOE1/chain reader, Git validator and read-only accepted cache reconstruct
+materials inside the existing assistant/device/task namespace. Every reuse
+still reads fresh native authority and verifies exact head/files. The final
+live pass and managed recipient-envelope identity are checked again after
+local work, before publishing the directory. No general payload resolver,
+second cache/vault or encrypted write/source/Secret/outcome permission follows.
+Unsupported old workers refuse rather than report loaded authority; neither
+key setup nor this read establishes `businessReady` or Windows business E2E.
+
+The composition fixture runs real Git/container/HPKE/cache inside an isolated
+child HOME and requires an explicit end-of-flow sentinel. It removes inherited
+`NODE_TEST_CONTEXT`; a nested runner exit 0 alone cannot prove execution.
+
 ### Managed encryption identity ownership
 
 The common `ensureCompanyEncryptionContext` chooses a managed profile's internal

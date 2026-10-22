@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto } from 'node:crypto';
+import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
-import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker } from '../host-runtime/scripts/trelio-company-encryption.mjs';
+import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker,
+  encryptFileToCompanyContainer } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -738,8 +739,8 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../ho
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
-  const identity={schemaVersion:1,origin:encryptedTool?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
+  const identity={schemaVersion:1,origin:encryptedTool||encryptedInspection?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
   const keys=generateKeyPairSync('ed25519'), store=memoryStore(), credential='tda_'+randomBytes(32).toString('base64url');
@@ -755,10 +756,11 @@ const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=nul
   const descriptor=encryptedTool?{schemaVersion:1,nativeTool:encryptedTool,arguments:encryptedTool==='get_task_sections'
     ? {...locator,sections:['comments']} : locator,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
     assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'}:null;
-  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,secretBrowserFill,secretGeneration,
+  const inspectionDescriptor=encryptedInspection?{schemaVersion:1,companyId:pass.companyId,companySlug:'encrypted',workspaceId:randomUUID(),requestOrigin:'https://e2ee.trelio.ru'}:null;
+  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,encryptedInspection:inspectionDescriptor,secretBrowserFill,secretGeneration,
     secretSkill:typeof secretSkill==='function'?secretSkill({pass,runtime}):secretSkill,
     lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
-  return {identity,pass,keys,store,credential,runtime,profile,descriptor,contacts:()=>contacts,
+  return {identity,pass,keys,store,credential,runtime,profile,descriptor,inspectionDescriptor,host,client,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
 };
 
@@ -869,6 +871,111 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
     await assert.rejects(validateAssistantEncryptedTaskRead({identity:f.identity,
       descriptor:{...f.descriptor,requestOrigin:'https://arbitrary.test'}}),{code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
   }
+});
+
+test('encrypted accepted Workspace inspector composes real Git, managed HPKE, native ciphertext and the SAME readonly cache',async()=>{
+  // An actual isolated child is necessary: the common module captures its
+  // private config root at import time. Never write synthetic authority/cache
+  // into the developer's real HOME or share a human remembered-key profile.
+  if(process.env.TRELIO_ASSISTANT_INSPECTION_FIXTURE!=='1'){
+    const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-inspect-process-'));
+    const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{fileURLToPath}=await import('node:url');
+    // NODE_TEST_CONTEXT belongs to the outer runner. Inheriting it makes a
+    // nested --test process suppress its runner, so exit 0 alone is no proof
+    // that the isolated composition executed. Require an end-of-flow sentinel.
+    const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'AppData','Local'),
+      TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_INSPECTION_FIXTURE:'1'};
+    delete childEnv.NODE_TEST_CONTEXT;
+    try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted accepted Workspace inspector',fileURLToPath(import.meta.url)],{
+      env:childEnv,timeout:30000,maxBuffer:1024*1024});
+      assert.match(result.stdout,/ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED/u);
+    }finally{
+      const writable=async directory=>{await fs.chmod(directory,0o700);for(const entry of await fs.readdir(directory,{withFileTypes:true})){
+        const item=path.join(directory,entry.name);if(entry.isDirectory())await writable(item);else if(!entry.isSymbolicLink())await fs.chmod(item,0o600);}};
+      await writable(root);await fs.rm(root,{recursive:true,force:true});
+    }
+    return;
+  }
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture({encryptedInspection:true}),descriptor=f.inspectionDescriptor;
+  const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),revisionId=randomUUID(),entityId=randomUUID();
+  const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
+  const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+  const aad={suite:'trelio-e2ee-v1',companyId:f.pass.companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:cryptoDeviceId};
+  const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+    plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+  const envelope={id:randomUUID(),...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+  const root=path.join(os.homedir(),'git-fixture');await fs.mkdir(root);
+  const git=args=>common.runGit(args,{cwd:root});
+  await git(['init','--initial-branch=main']);await git(['config','user.name','Synthetic']);await git(['config','user.email','test@trelio.invalid']);
+  await fs.writeFile(path.join(root,'result.md'),'SELECTED_ACCEPTED_FILE');await git(['add','--all']);
+  await git(['-c','commit.gpgsign=false','commit','-m','Synthetic accepted tree']);
+  const head=(await git(['rev-parse','HEAD'])).stdout.trim(),bundle=path.join(os.homedir(),'accepted.bundle'),cipher=path.join(os.homedir(),'accepted.trelioe1');
+  await git(['bundle','create',bundle,'refs/heads/main']);
+  await encryptFileToCompanyContainer({sourcePath:bundle,destinationPath:cipher,scopePublicEncryptionJwk:publicJwk,
+    originalName:'workspace.bundle',mimeType:'application/vnd.git.bundle',aad:{companyId:f.pass.companyId,scopeId,scopeEpoch:1,
+      entityType:'agent_workspace_revision',entityId:descriptor.workspaceId,entityRevision:1,schemaVersion:1}});
+  const bytes=await fs.readFile(cipher),digest=value=>createHash('sha256').update(value).digest('hex');
+  const header={companyId:f.pass.companyId,scopeId,scopeEpoch:1,entityType:'task',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+  const payload={...header,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:header,
+    payload:{values:{rules:'SELECTED_ASSISTANT_RULES',profile:'SELECTED_ASSISTANT_PROFILE'}}})};
+  const rulesMarkdown='Synthetic global platform rules\n',rulesSha=digest(rulesMarkdown),rulesId=randomUUID();
+  const company={id:f.pass.companyId,slug:'encrypted',name:'Synthetic'};
+  const snapshot={schemaVersion:1,workspace:{id:descriptor.workspaceId,scopeType:'task',scopeKey:`task:${f.pass.taskId}`,acceptedHead:head},company,
+    encryption:{state:'encrypted'},agentInstructionsSnapshot:{schemaVersion:2,platform:{revisionId:rulesId,version:1,sha256:rulesSha,rulesMarkdown},
+      company:null,project:null,compiledMarkdown:buildCompanyEncryptedTextMarker(entityId,'rules')},
+    userProfileSnapshot:{schemaVersion:1,profile:{revisionId:randomUUID(),version:1},compiledMarkdown:buildCompanyEncryptedTextMarker(entityId,'profile')}};
+  const savedFetch=globalThis.fetch;let downloads=0,mode='valid';const requests=[];
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);requests.push(url.pathname);assert.equal(options.headers.get('authorization'),`Bearer ${f.credential}`);
+    assert.equal(options.headers.get('cookie'),null);assert.equal(options.redirect,'error');
+    const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+    if(url.pathname.endsWith('/bridge-compatibility'))return json({supported:true,minimumVersion:'0.0.0',agentRules:{
+      status:options.headers.get('x-trelio-agent-rules-sha256')===rulesSha?'current':'update_required',revisionId:rulesId,version:1,sha256:rulesSha,rulesMarkdown}});
+    if(url.pathname.endsWith('/bridge-routing'))return json({schemaVersion:1,company,encryptionState:'encrypted',encryptedDataPlaneOrigin:descriptor.requestOrigin});
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
+      assert.equal(url.origin,f.identity.origin,'managed key control plane is canonical, never a content fallback');
+      const found=url.searchParams.has('fingerprint');
+      return json({state:'encrypted',suite:'trelio-e2ee-v1',company,viewer:{userId:f.identity.assistantId},
+        accessState:found?'ready':'device_required',device:found?{id:cryptoDeviceId,fingerprint:managed.fingerprint}:null,
+        scope:found?{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk}:null,envelope:found?envelope:null});
+    }
+    assert.equal(url.origin,descriptor.requestOrigin);assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),cryptoDeviceId);
+    if(url.pathname.endsWith('/read-snapshot')){
+      if(mode==='invalid-utf8')return new Response(Buffer.from([0xff]));
+      if(mode==='oversized')return new Response('{}',{headers:{'content-length':String(32*1024*1024+1)}});
+      const body=structuredClone(snapshot);if(mode==='foreign')body.workspace.scopeKey=`task:${randomUUID()}`;
+      return json({schemaVersion:1,context:body,encryptedPayloads:mode==='missing'?[]:[payload]});
+    }
+    assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/workspaces/${descriptor.workspaceId}/encrypted-bundle`);
+    assert.equal(url.searchParams.get('head'),head);downloads++;
+    if(mode==='late-close')f.close();
+    return new Response(bytes,{headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':descriptor.workspaceId,'x-trelio-accepted-head':head,
+      'x-trelio-encrypted-revision-id':revisionId,'x-trelio-scope-id':scopeId,'x-trelio-scope-epoch':'1','x-trelio-ciphertext-sha256':digest(bytes)}});
+  };
+  const plan={prepared:true,scope:{assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId},
+    encryptedInspection:descriptor,localAction:{schemaVersion:1,operation:'inspect',parameters:{workspaceId:descriptor.workspaceId}}};
+  const run=()=>common.withWorkspaceExecutionProfile(f.profile,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action(f)}));
+  try{
+    const result=await run(),directory=result.stdout.trim(),context=path.join(path.dirname(directory),'context');
+    assert.equal(await fs.readFile(path.join(directory,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');
+    assert.equal(await fs.readFile(path.join(context,'agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
+    assert.match(await fs.readFile(path.join(context,'user-profile.md'),'utf8'),/SELECTED_ASSISTANT_PROFILE/);
+    assert.equal(JSON.parse(await fs.readFile(path.join(context,'index.json'),'utf8')).mode,'read_only_accepted_workspace');
+    assert.ok(directory.includes(path.join('digital-assistants','tasks')));assert.equal(downloads,1);
+    if(process.platform!=='win32')assert.equal((await fs.stat(directory)).mode&0o222,0);
+    await run();assert.equal(downloads,1,'fresh native authority can reuse only the same verified local bytes');
+    for(const failure of ['foreign','missing','invalid-utf8','oversized']){mode=failure;await assert.rejects(run());assert.equal(downloads,1);}
+    assert.ok(!requests.some(value=>value.includes('payloads/resolve')||value.includes('/runs/')));
+    // Revoke during a fresh ciphertext read, after a previously legitimate
+    // cache has been removed. Local materialization cannot publish success.
+    mode='late-close';
+    const file=path.join(directory,'result.md');if(process.platform!=='win32')await fs.chmod(file,0o600);
+    await fs.writeFile(file,'tampered');await assert.rejects(run());
+    console.log('ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED');
+  }finally{globalThis.fetch=savedFetch;}
 });
 
 test('common encryption refuses a managed profile without its own keys after native discovery and before a human unlock',async()=>{
