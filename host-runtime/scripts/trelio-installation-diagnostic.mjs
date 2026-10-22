@@ -12,12 +12,15 @@ import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPA
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
+const requiresClientRestart = (requiredActions) => requiredActions.some((action) => (
+  action.restartRequired === true || action.plan?.restartRequired === true
+));
+
 export const buildTrelioConnectionRecovery = (publicService, requiredActions = []) => ({
   state: ["available", "recovered"].includes(publicService?.state)
     ? "verify_current_client_tools" : "public_service_not_confirmed",
   connectionRetried: false,
-  restartRequired: requiredActions.some((action) => action.restartRequired === true
-    || action.plan?.restartRequired === true),
+  restartRequired: requiresClientRestart(requiredActions),
   instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema нет, используй штатный reconnect только при наличии такой функции клиента, затем проверь доступ снова; не придумывай команды. Не повторяй doctor как reconnect и не объявляй старый 5xx текущей ошибкой. Нет matching evidence или exact requiredAction – не советуй restart/new chat, login, pairing или переустановку. Сохрани конкретный client tool-exposure blocker; отсутствие функции reconnect не доказывает необходимость restart.",
 });
 
@@ -45,15 +48,21 @@ const requireEnum = (value, allowed, fieldName) => {
 
 /**
  * These are native-client recovery instructions, never a runtime repair action.
- * Archiving unloads an idle Codex thread, but the same operation can delete its
- * associated automation. This stdio process sees neither the owner's complete
- * scheduler inventory nor its current thread activity, so even a healthy doctor
- * must not turn missing local files into permission to archive. In particular,
- * no executable archive arguments are returned for a model to apply blindly.
+ * The installed Codex plugin toggle reloads the owning process's configuration;
+ * editing config from this separate stdio host would not perform that reload.
+ * Keep the UI step with the client/user, preserve the same chat and schedules,
+ * and never present toggling as a substitute for a required process restart.
+ * Archive is excluded entirely: it can delete a chat's associated automation.
  */
-const buildCodexMcpRecoveryInspection = () => ({
+const buildCodexMcpRecoveryInspection = (restartRequired) => ({
   state: "client_preflight_required",
   connectionRetried: false,
+  restartRequired,
+  userOptions: restartRequired
+    ? ["fully_quit_and_reopen_application"]
+    : ["toggle_trelio_plugin", "fully_quit_and_reopen_application"],
+  archiveRecoveryAllowed: false,
+  appliesTo: "diagnosed_stale_or_failed_mcp_connection",
   preferred: {
     method: "config/mcpServer/reload",
     owner: "existing_codex_app_server",
@@ -62,22 +71,23 @@ const buildCodexMcpRecoveryInspection = () => ({
     instructions: "Только через доступный штатный API текущего owner. Новый codex app-server не обновляет подключение старого процесса; private IPC, правка приложения и повторный OAuth ради reload запрещены.",
   },
   sameThreadFallback: {
-    method: "archive_unarchive_open_same_thread",
-    automaticArchiveAllowed: false,
-    requiredTargetStatus: "idle",
-    requiredExecutor: "different_chat",
-    linkedSchedules: "unknown",
-    unknownSchedulesBlockArchive: true,
-    clientTools: ["set_thread_archived", "navigate_to_codex_page"],
-    instructions: "Это потенциально разрушительный fallback, не обычный reconnect. Архивирование может удалить связанные расписания; возврат чата их не восстанавливает. Не архивируй автоматически, из самого чата, при active/waiting работе либо неизвестном наличии расписаний. Отсутствие automation.toml не доказывает отсутствие расписания. Нужны проверка штатным клиентом и отдельное явное решение пользователя для точного простаивающего чата после раскрытия последствий. Любое связанное расписание или предупреждение об удалении блокирует путь: отменить, без удаления/пересоздания расписаний. Для разрешённого чата из другого чата: сохранить ID/название/project/cwd/закрепление и порядок; архивировать, сразу вернуть тот же ID даже при ошибке проверки, восстановить размещение, открыть. Не создавать копию и не посылать сообщения без отдельного разрешения.",
+    method: "toggle_trelio_plugin",
+    state: restartRequired ? "not_applicable" : "client_action_required",
+    automatic: false,
+    instructions: "При подтверждённом зависшем/неудачном MCP startup предложи два варианта: выключить и включить сам плагин Trelio Agent Workspaces в настройках Codex/ChatGPT → Плагины либо полностью выйти из приложения и открыть его снова. Сначала предложи переключение плагина как вариант без полного выхода. Нужен переключатель всего плагина, не отдельного MCP-сервера; дождись выключения, затем включения и вернись в прежний чат. Шаг выполняет пользователь либо доступный штатный client tool; local runtime не автоматизирует UI и не редактирует config ради имитации reload. Если переключателя нет или проверка после переключения не прошла, используй полный выход. Exact requiredAction с restartRequired=true требует полного выхода: переключение его не заменяет. Не удаляй/переустанавливай плагин, не меняй OAuth, pairing или hook trust.",
+  },
+  restartAlternative: {
+    method: "fully_quit_and_reopen_application",
+    automatic: false,
+    instructions: "Полностью завершить Codex/ChatGPT обычной командой выхода, открыть заново и вернуться в тот же чат. Закрытие окна или создание нового чата в прежнем процессе не являются полным выходом. Предложи этот вариант при подтверждённом stale/failed MCP либо обязательном process restart; не повторяй уже выполненный restart без нового evidence и не завершай процессы автоматически.",
   },
   verification: {
-    checks: ["same_thread_and_placement_restored", "fresh_mcp_starting_then_ready", "safe_direct_read_in_target_thread"],
-    instructions: "Отдельно сообщи результат каждого шага. ready не доказывает выдачу инструментов модели: итоговый direct read выполняется в целевом чате с прежними ACL/proof/E2EE. Не объявляй всю проверку успешной по одному ready.",
+    checks: ["same_thread_preserved", "linked_schedules_preserved", "fresh_mcp_starting_then_ready", "safe_direct_read_in_target_thread"],
+    instructions: "После выбранного варианта вернись в тот же чат, проверь direct schema и одно безопасное обычное чтение с прежними ACL/proof/E2EE. ready подтверждает соединение, но не выдачу инструментов модели. Чат не архивировать, расписания не удалять/переносить/пересоздавать: unarchive их не восстанавливает. Не посылай сообщение в другой чат без отдельного разрешения и не повторяй mutation. Неизвестную проверку обозначь not_checked.",
   },
 });
 
-const buildClientInspection = (clientKind, intent) => (
+const buildClientInspection = (clientKind, intent, requiredActions) => (
   clientKind === "codex"
     ? {
         // These are expected client capabilities, not observations made by
@@ -97,7 +107,7 @@ const buildClientInspection = (clientKind, intent) => (
           checks: ["loaded_definition", "current_definition_trust_and_enabled", "effective_hooks_and_managed_only_policy", "pretooluse_started_and_completed"],
           instructions: "Сопоставь текущий чат и call_id с владеющим App Server, его версией, effective config и hook events. Версия CLI из PATH и новый дочерний codex.exe не доказывают версию/перезапуск owner. Имя dispatch из журнала не является tool_name hook; не выводи ошибку matcher из их различия. Если клиент не раскрывает эти сведения, сохрани unknown, без изменения trust/config/OAuth.",
         },
-        ...(intent === "diagnostics" ? { mcpRecovery: buildCodexMcpRecoveryInspection() } : {}),
+        ...(intent === "diagnostics" ? { mcpRecovery: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions)) } : {}),
         pluginInventory: {
           command: "codex plugin list --json",
           proves: ["installed_plugin_version", "plugin_enabled_state"],
@@ -414,7 +424,7 @@ export const buildTrelioInstallationDiagnostic = ({
             : {}),
         }
       : null,
-    clientInspection: buildClientInspection(clientKind, intent),
+    clientInspection: buildClientInspection(clientKind, intent, requiredActions),
     requiredActions,
     warnings,
     ...(intent === "diagnostics" ? {

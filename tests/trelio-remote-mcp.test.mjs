@@ -3081,7 +3081,7 @@ test("Codex diagnostics keep direct model tool exposure unverified despite ready
   assert.equal(payload.requiredActions.length, 0, "Expected direct routing does not authorize config or credential repair.");
 });
 
-test("Codex recovery stays non-executable when linked schedules and native client capabilities are unknown", async () => {
+test("Codex recovery offers plugin toggle or full exit without archive or executable client actions", async () => {
   const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
     clientKind: "codex", intent: "diagnostics",
   }, {
@@ -3100,22 +3100,27 @@ test("Codex recovery stays non-executable when linked schedules and native clien
   assert.equal(recovery.preferred.availability, "not_checked");
   assert.equal(recovery.preferred.owner, "existing_codex_app_server");
   assert.equal(recovery.preferred.scope, "loaded_threads");
+  assert.equal(recovery.restartRequired, false);
+  assert.deepEqual(recovery.userOptions, ["toggle_trelio_plugin", "fully_quit_and_reopen_application"]);
+  assert.equal(recovery.archiveRecoveryAllowed, false);
+  assert.equal(recovery.appliesTo, "diagnosed_stale_or_failed_mcp_connection");
   const fallback = recovery.sameThreadFallback;
-  assert.equal(fallback.automaticArchiveAllowed, false);
-  assert.equal(fallback.requiredTargetStatus, "idle");
-  assert.equal(fallback.requiredExecutor, "different_chat");
-  assert.equal(fallback.linkedSchedules, "unknown");
-  assert.equal(fallback.unknownSchedulesBlockArchive, true);
-  assert.deepEqual(fallback.clientTools, ["set_thread_archived", "navigate_to_codex_page"]);
-  assert.match(fallback.instructions, /возврат чата их не восстанавливает/u);
-  assert.match(fallback.instructions, /предупреждение об удалении блокирует/u);
-  assert.match(fallback.instructions, /без удаления\/пересоздания расписаний/u);
-  assert.match(fallback.instructions, /даже при ошибке проверки/u);
-  assert.match(recovery.verification.instructions, /ready не доказывает/u);
+  assert.equal(fallback.method, "toggle_trelio_plugin");
+  assert.equal(fallback.state, "client_action_required");
+  assert.equal(fallback.automatic, false);
+  assert.match(fallback.instructions, /сам плагин Trelio Agent Workspaces/u);
+  assert.match(fallback.instructions, /не отдельного MCP-сервера/u);
+  assert.equal(recovery.restartAlternative.method, "fully_quit_and_reopen_application");
+  assert.equal(recovery.restartAlternative.automatic, false);
+  assert.match(recovery.restartAlternative.instructions, /Закрытие окна/u);
+  assert.match(recovery.verification.instructions, /не выдачу инструментов модели/u);
+  assert.match(recovery.verification.instructions, /Чат не архивировать/u);
+  assert.ok(recovery.verification.checks.includes("linked_schedules_preserved"));
   assert.ok(recovery.verification.checks.includes("safe_direct_read_in_target_thread"));
-  // A plan must not smuggle an archive mutation into the existing automatic
-  // repair channel. Native-client facts are still unknown, not negative.
+  // Neither user-facing choice may become an automatic mutation or an archive
+  // recipe. This host has no public control channel to the loaded Codex owner.
   assert.equal(payload.requiredActions.length, 0);
+  assert.doesNotMatch(JSON.stringify(recovery), /archive_unarchive|set_thread_archived|navigate_to_codex_page/u);
   assert.doesNotMatch(JSON.stringify(recovery), /"(?:arguments|argumentsAfterConfirmation|targetThreadId|confirmed)":/u);
 });
 
@@ -3160,6 +3165,10 @@ test("missing direct routing is diagnosed from the real config and offered as a 
     assert.equal(action.apply.toolName, "apply_codex_trelio_hook_routing");
     assert.equal(action.apply.argumentsAfterConfirmation.planHash, action.plan.planHash);
     assert.equal(action.plan.restartRequired, true);
+    assert.equal(payload.clientInspection.mcpRecovery.restartRequired, true);
+    assert.deepEqual(payload.clientInspection.mcpRecovery.userOptions, ["fully_quit_and_reopen_application"]);
+    assert.equal(payload.clientInspection.mcpRecovery.sameThreadFallback.state, "not_applicable",
+      "A plugin toggle cannot replace the required process restart after a routing repair.");
     assert.match(action.plan.verification, /вернитесь в этот же чат/u);
     assert.equal(payload.readiness.checks.oauth, "not_checked");
     assert.equal(payload.readiness.checks.protectedContext, "not_checked");
