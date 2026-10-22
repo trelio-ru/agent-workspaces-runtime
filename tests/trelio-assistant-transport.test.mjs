@@ -1,13 +1,92 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, randomBytes, generateKeyPairSync, verify } from 'node:crypto';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
   return { get:async input=>structuredClone(values.get(key(input))??null),
     put:async(input,value)=>values.set(key(input),structuredClone(value)),remove:async input=>values.delete(key(input)) };
 };
+
+test('managed encryption enrollment uses common registration, persists before HTTP and recovers a lost response without a second registration',async()=>{
+  const identity={schemaVersion:1,origin:'https://enrollment.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID();
+  const store=memoryStore(),credential=`tda_${'e'.repeat(43)}`,cryptoDeviceId=randomUUID();
+  await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{assistantId:identity.assistantId,deviceId:identity.deviceId,credential,expiresAt:1});
+  let selectedIdentity=identity,available=true,registered=null,loseResponse=true,envelopeAvailable=false,posts=0,gets=0;
+  const input={identity,host:{readIdentity:async()=>selectedIdentity},client:{companies:async()=>available?[{companyId,encryptionState:'encrypted'}]:[]},
+    store,companyId,companySlug:'encrypted',lockDirectory:os.tmpdir(),lock:async(_file,action)=>action()};
+  const previousFetch=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);assert.equal(url.origin,identity.origin);
+    assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');assert.equal(options.cache,'no-store');
+    assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
+    assert.equal(options.headers.get('x-trelio-assistant-encryption-protocol'),'1');
+    assert.equal(options.headers.get('cookie'),null);assert.equal(options.headers.get('x-trelio-assistant-proof'),null);
+    const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/devices'){
+      assert.equal(options.method,'POST');posts++;
+      const body=JSON.parse(options.body);
+      const persisted=await store.get({origin:identity.origin,kind:'company_encryption',id:companyId,deviceId:identity.deviceId});
+      assert.equal(persisted.record.fingerprint,body.fingerprint,'OS store read-back precedes exposing the fingerprint');
+      assert.equal(await verifyCompanyEncryptionRecord(body.publicSigningJwk,buildAgentDeviceRegistrationRecord({companyId,
+        userId:identity.assistantId,...body}),body.registrationSignature),true,'the SAME native registration carries a real P-256 proof');
+      assert.doesNotMatch(options.body,/trustedUnlockKey|wrappedPrivateBundle|privateKeys|encryptionSecret/);
+      registered=body;
+      if(loseResponse){loseResponse=false;throw new Error('synthetic response lost after commit');}
+      return json({device:{id:cryptoDeviceId,fingerprint:body.fingerprint}});
+    }
+    assert.equal(url.pathname,'/api/digital-assistants/runtime/encryption/runtime');gets++;
+    assert.equal(url.searchParams.get('companySlug'),'encrypted');
+    const found=registered&&url.searchParams.get('fingerprint')===registered.fingerprint;
+    return json({state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'encrypted',name:'PUBLIC_NAME'},
+      viewer:{userId:identity.assistantId},device:found?{id:cryptoDeviceId,fingerprint:registered.fingerprint}:null,
+      // A public envelope is not decrypted/verified by enrollment. If this mode
+      // fell through to scope-key opening, these deliberately invalid fixture
+      // bytes would fail, rather than silently granting business access.
+      scope:found?{id:randomUUID(),epoch:1}:null,envelope:envelopeAvailable?{ciphertext:'CIPHERTEXT_CANARY'}:null,
+      accessState:found?envelopeAvailable?'ready':'access_pending':url.searchParams.has('fingerprint')?'registration_required':'device_required'});
+  };
+  try{
+    await assert.rejects(prepareAssistantCompanyEncryption(input));assert.equal(posts,1);
+    const recovered=await prepareAssistantCompanyEncryption(input);
+    assert.equal(posts,1,'read-back of the SAME persisted fingerprint avoids mutation replay after a lost response');
+    assert.equal(recovered.state,'awaiting_company_key');assert.equal(recovered.cryptoDeviceId,cryptoDeviceId);
+    assert.equal(recovered.fingerprint,registered.fingerprint);assert.equal(recovered.businessReady,false);
+    envelopeAvailable=true;
+    const current=await prepareAssistantCompanyEncryption(input);assert.equal(current.state,'envelope_available');
+    assert.doesNotMatch(JSON.stringify(current),/CIPHERTEXT_CANARY|private|trustedUnlockKey|wrapped|publicSigningJwk/);
+    assert.equal(current.businessReady,false);assert.equal(posts,1);
+    available=false;const before=gets;
+    await assert.rejects(prepareAssistantCompanyEncryption(input),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+    assert.equal(gets,before,'removed company authority fails before the encryption HTTP/key path');
+    available=true;selectedIdentity={...identity,deviceId:randomUUID()};
+    await assert.rejects(prepareAssistantCompanyEncryption(input),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+    assert.equal(posts,1);
+  }finally{globalThis.fetch=previousFetch;}
+});
+
+test('enrollment refuses a foreign company/viewer before creating a managed key and never opens a human form',async()=>{
+  const identity={schemaVersion:1,origin:'https://enrollment-denial.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID();
+  const store=memoryStore();await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},
+    {assistantId:identity.assistantId,deviceId:identity.deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
+  const input={identity,host:{readIdentity:async()=>identity},client:{companies:async()=>[{companyId,encryptionState:'encrypted'}]},
+    store,companyId,companySlug:'encrypted',lockDirectory:os.tmpdir(),lock:async(_file,action)=>action()};
+  const previousFetch=globalThis.fetch;let mismatch='company',calls=0;
+  globalThis.fetch=async()=>{calls++;return new Response(JSON.stringify({state:'encrypted',suite:'trelio-e2ee-v1',
+    company:{id:mismatch==='company'?randomUUID():companyId,slug:'encrypted'},viewer:{userId:mismatch==='viewer'?randomUUID():identity.assistantId}}),
+    {headers:{'content-type':'application/json'}});};
+  try{
+    for(mismatch of ['company','viewer']){
+      await assert.rejects(prepareAssistantCompanyEncryption(input),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+      assert.equal(await store.get({origin:identity.origin,kind:'company_encryption',id:companyId,deviceId:identity.deviceId}),null);
+    }
+    assert.equal(calls,2);
+    for(const bad of [{companyId:'not-a-uuid'},{companySlug:'bad\nslug'},{companySlug:''}])await assert.rejects(prepareAssistantCompanyEncryption({...input,...bad}),{code:'ASSISTANT_TRANSPORT_INVALID_INPUT'});
+    assert.equal(calls,2,'invalid input does not reach HTTP');
+  }finally{globalThis.fetch=previousFetch;}
+});
 test('fixed HTTPS requests omit cookies, refuse redirects and redact raw failures', async () => {
   let count=0;
   const http=createAssistantHttp({ origin:'https://assistant.test',fetchImpl:async(url,options)=>{

@@ -5819,14 +5819,23 @@ export const ensureCompanyEncryptionContext = async ({
   token,
   company,
   collectEncryptionKey = collectCompanyEncryptionKeyThroughLoopback,
+  registrationOnly = false,
 }) => {
   const executionProfile = currentWorkspaceExecutionProfile();
+  // Only the internal managed enrollment profile can stop at the public
+  // registration boundary. A model flag, ordinary task profile or human caller
+  // cannot turn this into a context/key-unlock bypass.
+  if (registrationOnly && executionProfile?.kind !== 'digital_assistant_enrollment') denyWorkspaceExecutionProfile();
   const encryptedRequestOrigin = resolveEncryptedDataPlaneOrigin(origin, requestOrigin);
   const initialRuntime = await readCompanyEncryptionRuntime({
     origin: encryptedRequestOrigin,
     token,
     companySlug: company.slug,
   });
+  if (company.id && initialRuntime.company.id !== company.id) denyWorkspaceExecutionProfile();
+  if (executionProfile?.companyEncryptionUserId && initialRuntime.viewer?.userId !== executionProfile.companyEncryptionUserId) {
+    denyWorkspaceExecutionProfile();
+  }
 
   if (initialRuntime.state === "plain") return null;
   assertEncryptedCompanyRuntimeState(initialRuntime);
@@ -5901,6 +5910,11 @@ export const ensureCompanyEncryptionContext = async ({
     });
     assertEncryptedCompanyRuntimeState(runtime);
   }
+
+  // Enrollment needs the SAME registration/read-back without opening a scope
+  // key. Even a ready envelope is not decrypted in this mode; the host projects
+  // only public status, never this wire object, into the setup result.
+  if (registrationOnly) return { runtime };
 
   if (runtime.accessState === "access_pending") {
     throw new Error(

@@ -982,6 +982,32 @@ is introduced. This is an identity prerequisite only: current backend route
 and content fences still refuse assistant encrypted execution. It neither
 grants a company envelope nor establishes encrypted/business readiness.
 
+The current signed worker advertises `prepare_assistant_company_encryption` with
+only `companyId` and `companySlug`. Like source setup it uses the existing dynamic
+catalogue, facade and native invocation; no stable shell/hook definition or Codex
+restart is added. Exact input is validated before private context, and metadata
+success cannot clear hook-review or ChatGPT-login latches.
+
+The enrollment-only async profile reuses `ensureCompanyEncryptionContext` and
+its native public registration/signature/read-back, stopping BEFORE scope-key
+opening. The common workflow validates the selected company UUID and managed
+subject before key creation. Fresh protected host identity and device company
+inventory checks bracket private I/O and every request under one 25-second
+budget. Only `/encryption/runtime` GET and `/encryption/devices` POST are rewritten
+to the fixed dedicated enrollment routes; no payload/file/Secret/grant path,
+alternate origin, arbitrary fingerprint or human credential is admitted.
+
+A lost registration response preserves the OS record; the next explicit attempt
+reads that SAME fingerprint before deciding whether native registration is
+needed. The setup result projects only public device ID/fingerprint, canonical
+settings link and `awaiting_company_key` or `envelope_available` (`not_required`
+for plain). It never contains JWK, ciphertext, private/unlock material or a
+decrypted scope, and always returns `businessReady:false`. Even a server envelope
+is not local verified/decrypted access. The ordinary company owner separately
+grants company-key access through the existing control plane; assistant ownership
+does not supply that role. Backend full encrypted task/source data-plane gates
+remain closed independently of this setup status.
+
 Assistant Workspace execution is an internal async profile of the common
 `trelio-workspace.mjs` HTTP/auth primitives, not another Run/Git/storage engine.
 The production wrapper resolves the actual protected host identity, active pass,

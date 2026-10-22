@@ -34,7 +34,11 @@ export const ASSISTANT_MAX_SETUP_TOOL=Object.freeze({name:'configure_assistant_m
 export const ASSISTANT_MAX_VERIFY_TOOL=Object.freeze({name:'verify_assistant_max_source',
   description:'After the MAX local login handoff, run one fresh native structural home probe for the same owner-enabled source. Does not reopen login, read message bodies, register streams, advance queues, ACK messages or prove owner identity/background readiness.',
   inputSchema:schema({companyId:enrollment,sourceId:enrollment}),annotations:{readOnlyHint:true,idempotentHint:true}});
+export const ASSISTANT_ENCRYPTION_SETUP_TOOL=Object.freeze({name:'prepare_assistant_company_encryption',
+  description:'Register this managed device public P-256 key for one exact company through the SAME native encryption workflow. Private material remains in the existing protected OS store. Returns public registration/envelope status only; the company owner must separately grant access. No scope-key decryption, human identity, task/source execution or business-readiness claim. After an uncertain result read back the same identity; never reset or replace it.',
+  inputSchema:schema({companyId:enrollment,companySlug:{type:'string',minLength:1,maxLength:120}}),annotations:{idempotentHint:true}});
 const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name];
+const hostSetupToolNames=()=>[...sourceToolNames(),ASSISTANT_ENCRYPTION_SETUP_TOOL.name];
 const interactiveSourceTool=name=>[ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name].includes(name);
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
@@ -43,9 +47,9 @@ const sourceSetupArguments=args=>{
   return {companyId:args.companyId,sourceId:args.sourceId};
 };
 export const assistantWorkerToolCatalogue=tools=>{
-  if(!Array.isArray(tools)||tools.some(tool=>sourceToolNames().includes(tool?.name)))
+  if(!Array.isArray(tools)||tools.some(tool=>hostSetupToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
-  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL];
+  return [...tools,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL];
 };
 export const ASSISTANT_SETUP_TOOLS = Object.freeze([
   { name: 'begin_assistant_setup', description: 'Begin protected computer enrollment using the owner-provided locator. Returns a pairing code for review on the owner device, never credentials.',
@@ -304,7 +308,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
       try {
         // Validate before touching private storage. Unknown tools cannot cause
         // an auth read or be delegated to another MCP implementation.
-        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name) || sourceToolNames().includes(message.params?.name)
+        if (ASSISTANT_MCP_TOOLS.includes(message.params?.name) || hostSetupToolNames().includes(message.params?.name)
           || createMcp===createForwardingAssistantMcp && !codes.has(message.params?.name)
             && /^[a-z][a-z0-9_]{0,99}$/u.test(message.params?.name ?? '')) {
           if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
@@ -397,7 +401,7 @@ export const runAssistantEntry = async (args, options = {}) => {
   const assistantTool = /^(?:mcp__)?trelio[-_]assistant__|^mcp__plugin_trelio-digital-assistant_trelio-assistant__|^(?:mcp[:./-])?trelio-assistant[:./-]/u.test(tool);
   let decision = {};
   if (event.hook_event_name === 'PreToolUse' && assistantTool && !codes.has(name)
-    && !sourceToolNames().includes(name) && name !== 'get_assistant_status') {
+    && !hostSetupToolNames().includes(name) && name !== 'get_assistant_status') {
     const { withRuntimeHookPrivateSession } = await import('./trelio-hook-private-session.mjs');
     const { resolveRuntimeHookStartedAt, runtimeHookRemainingMilliseconds } = await import('./trelio-runtime-session-limits.mjs');
     try {
@@ -473,7 +477,7 @@ export const assistantHealthCompatibility = (state, versions) => {
 export const assistantHealthyBoundary = (current,request) => ({code:'ready',
   ...((current.code==='hook_review_required' || current.latchedCodes?.includes('hook_review_required'))
     && request.operation==='call' && request.name!=='get_assistant_status'
-    && !sourceToolNames().includes(request.name) ? {clearedReason:'hook_review_required'} : {}),
+    && !hostSetupToolNames().includes(request.name) ? {clearedReason:'hook_review_required'} : {}),
 });
 
 export const maintainAssistantHost = async ({client,probe,update,versions,signal}) => {
@@ -777,6 +781,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
+  prepareEncryption=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantCompanyEncryption(input),
   configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
   configureTelegramSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantTelegramSource(input),
   configureMaxSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantMaxSource(input),
@@ -814,9 +819,16 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
   const interactiveSourceSetup=sourceSetup&&interactiveSourceTool(request.name);
   const sourceVerification=sourceSetup&&[ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name].includes(request.name);
+  const encryptionSetup=request.operation==='call'&&request.name===ASSISTANT_ENCRYPTION_SETUP_TOOL.name;
+  const encryptionArguments=encryptionSetup?request.arguments:null;
+  if(encryptionSetup&&(!encryptionArguments||Object.getPrototypeOf(encryptionArguments)!==Object.prototype
+    ||Object.keys(encryptionArguments).sort().join(',')!=='companyId,companySlug'
+    ||!new RegExp(UUID,'u').test(encryptionArguments.companyId??'')||typeof encryptionArguments.companySlug!=='string'
+    ||!encryptionArguments.companySlug.length||encryptionArguments.companySlug.length>120
+    ||/[\x00-\x20\x7f]/u.test(encryptionArguments.companySlug)))fail('ASSISTANT_SETUP_INVALID_INPUT');
   const sourceArguments=sourceSetup?sourceSetupArguments(request.arguments):null;
   if((interactiveSourceSetup||sourceVerification)&&sourceArguments.sourceId===null)fail('ASSISTANT_SETUP_INVALID_INPUT');
-  if(request.operation==='call' && !sourceSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(request.operation==='call' && !sourceSetup && !encryptionSetup && !ASSISTANT_MCP_TOOLS.includes(request.name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   return context(async (client,host,store)=>{
     const current=await client.readHealth();
     const blocked=assistantHealthCompatibility(current,versions());
@@ -828,7 +840,12 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
     if(!proxy)return request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED');
     try {
       let result;
-      if(sourceSetup){
+      if(encryptionSetup){
+        try{
+          const value=await prepareEncryption({identity:client.identity,client,host,store,...encryptionArguments});
+          result={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+        }catch(error){const code=safeError(error);result={isError:true,content:[{type:'text',text:code}],structuredContent:{code}};}
+      }else if(sourceSetup){
         try{
           const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
           const value=sourceVerification?await(request.name===ASSISTANT_MAX_VERIFY_TOOL.name?verifyMaxSource:verifySource)({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):

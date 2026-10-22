@@ -267,6 +267,84 @@ const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, st
   return secret.credential;
 };
 
+/** Public-key onboarding through the SAME company-encryption workflow. This
+ * narrow async profile has TWO fixed endpoints only, no task pass/model proof,
+ * payload/Workspace/Secret route, owner OAuth, scope-key grant or decryption.
+ * Native company membership/MCP/module/device fences remain server authority. */
+export const prepareAssistantCompanyEncryption = async ({identity,host,client,store,companyId,companySlug,signal,
+  lockDirectory,lock=withRuntimeStateLock}) => {
+  companyId=id(companyId);
+  if(typeof companySlug!=='string'||!companySlug.length||companySlug.length>120||companySlug.trim()!==companySlug
+    ||/[\x00-\x20\x7f]/u.test(companySlug)||!identity
+    ||typeof host?.readIdentity!=='function'||typeof client?.companies!=='function')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+  const common=await import('./trelio-workspace.mjs');
+  lockDirectory??=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','encryption-locks');
+  if(!path.isAbsolute(lockDirectory))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+  // All inventory, key-store and HTTP phases share ONE budget; progress and
+  // repeated read-only checks never extend the caller's request deadline.
+  const budget=AbortSignal.timeout(25_000);signal=signal?AbortSignal.any([signal,budget]):budget;
+  const origin=originOf(identity.origin),assistantId=id(identity.assistantId),deviceId=id(identity.deviceId);
+  const expected={schemaVersion:1,origin,assistantId,deviceId};
+  const assertCurrent=async()=>{
+    signal?.throwIfAborted();
+    if(JSON.stringify(await host.readIdentity())!==JSON.stringify(expected))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const companies=await client.companies(signal),company=companies.find(row=>row.companyId===companyId);
+    if(!company||!['plain','encrypted'].includes(company.encryptionState??'plain'))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    return company;
+  };
+  await assertCurrent();
+  const handle=Object.freeze(Object.create(null));let owned=null;
+  const profile=Object.freeze({kind:'digital_assistant_enrollment',companyEncryptionUserId:assistantId,
+    async requireToken(requestOrigin){if(requestOrigin!==origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');await assertCurrent();return handle;},
+    async resolveCompanyEncryptionDevice({origin:requestOrigin,companyId:requestedCompany}){
+      if(requestOrigin!==origin||requestedCompany!==companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
+      owned=await resolveAssistantCompanyEncryptionDevice({identity:expected,companyId,store,lockDirectory,lock,assertCurrent});
+      return owned;
+    },
+    async prepareRequest({origin:requestOrigin,token,pathname,options,buildHeaders}){
+      if(requestOrigin!==origin||token!==handle||typeof pathname!=='string'||typeof buildHeaders!=='function')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      let url;try{url=new URL(pathname,origin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+      if(url.origin!==origin||url.hash||url.pathname!==pathname.split('?')[0])fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      const method=String(options.method??'GET').toUpperCase();let suffix;
+      if(method==='GET'&&url.pathname==='/api/agent-workspaces/encryption/runtime'&&options.body===undefined){
+        const keys=[...url.searchParams.keys()];
+        if(new Set(keys).size!==keys.length||keys.some(key=>!['companySlug','fingerprint'].includes(key))
+          ||url.searchParams.get('companySlug')!==companySlug
+          ||url.searchParams.has('fingerprint')&&url.searchParams.get('fingerprint')!==owned?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        suffix='/runtime';
+      }else if(method==='POST'&&url.pathname==='/api/agent-workspaces/encryption/devices'&&!url.search){
+        let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+        if(!owned||!object(input)||input.companySlug!==companySlug||input.fingerprint!==owned.fingerprint
+          ||JSON.stringify(input.publicEncryptionJwk)!==JSON.stringify(owned.publicEncryptionJwk)
+          ||JSON.stringify(input.publicSigningJwk)!==JSON.stringify(owned.publicSigningJwk))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        suffix='/devices';
+      }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      await assertCurrent();
+      const headers=buildHeaders(null,options.headers??{});
+      for(const key of ['cookie','cookie2','proxy-authorization','x-trelio-assistant-pass','x-trelio-assistant-proof'])headers.delete(key);
+      headers.set('x-trelio-assistant-encryption-protocol','1');
+      headers.set('authorization',`Bearer ${await loadAssistantDeviceCredential({...expected,store})}`);
+      await assertCurrent();url.pathname='/api/digital-assistants/runtime/encryption'+suffix;
+      return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store',signal}};
+    },
+  });
+  const context=await common.withWorkspaceExecutionProfile(profile,async()=>common.ensureCompanyEncryptionContext({
+    origin,token:handle,company:{id:companyId,slug:companySlug},registrationOnly:true,
+    collectEncryptionKey:async()=>fail('ASSISTANT_WORKSPACE_PROFILE_DENIED'),
+  }));
+  await assertCurrent();
+  if(context===null)return Object.freeze({schemaVersion:1,state:'not_required',companyId,businessReady:false});
+  const runtime=context.runtime;
+  if(runtime.company.id!==companyId||runtime.viewer?.userId!==assistantId||runtime.device?.fingerprint!==owned?.fingerprint
+    ||!UUID.test(runtime.device?.id??'')||!['access_pending','ready'].includes(runtime.accessState))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  // An envelope on the server is NOT verified/decrypted local scope access or
+  // encrypted business readiness. Do not pass the envelope/key/JWK into MCP.
+  return Object.freeze({schemaVersion:1,state:runtime.accessState==='ready'?'envelope_available':'awaiting_company_key',
+    companyId,cryptoDeviceId:runtime.device.id,fingerprint:owned.fingerprint,businessReady:false,
+    settingsUrl:`${origin}/${encodeURIComponent(runtime.company.slug)}/settings/encryption/`});
+};
+
 /** Internal composition of native Workspace transport. Device credentials
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */

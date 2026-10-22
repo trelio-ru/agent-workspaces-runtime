@@ -428,6 +428,9 @@ publication tooling также остаются вне этого публичн
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+  Managed key enrollment uses that SAME encryption registration/read-back and OS
+  store through two fixed native device routes; no scope unlock or grant. See
+  [identity ownership](docs/assistant-scheduler.md#managed-encryption-identity-ownership).
 - Managed encryption identities use the SAME crypto codecs and assistant OS store,
   isolated by device/company; no human remembered-key fallback. An identity is
   not an envelope grant or encrypted readiness. [Contract](docs/assistant-scheduler.md#managed-encryption-identity-ownership).

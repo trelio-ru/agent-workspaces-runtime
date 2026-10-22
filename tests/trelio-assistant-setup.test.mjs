@@ -7,7 +7,7 @@ import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
   const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
@@ -97,7 +97,7 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
       return {sourceId,state:'prepared',loginVerified:false};
     }};
   const tools=await executeAssistantRuntimeRequest({operation:'list'},dependencies);
-  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL],'the current worker owns source discovery');
+  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL],'the current worker owns setup discovery');
   const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
   const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
@@ -123,12 +123,34 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
 
 test('assistant hook permits setup and blocks task tools without an installed host profile', async () => {
   for(const tool of ['mcp__trelio_assistant__get_task','mcp__plugin_trelio-digital-assistant_trelio-assistant__clear_task_control',
-    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source','mcp__trelio_assistant__configure_assistant_telegram_source','mcp__trelio_assistant__configure_assistant_max_source','mcp__trelio_assistant__verify_assistant_max_source']){
+    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source','mcp__trelio_assistant__configure_assistant_telegram_source','mcp__trelio_assistant__configure_assistant_max_source','mcp__trelio_assistant__verify_assistant_max_source','mcp__trelio_assistant__prepare_assistant_company_encryption']){
     const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
     await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output,createHook:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});}});
     const result=JSON.parse(raw);
-    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source','configure_assistant_telegram_source','configure_assistant_max_source','verify_assistant_max_source'].some(name=>tool.endsWith(name))?undefined:'deny');
+    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source','configure_assistant_telegram_source','configure_assistant_max_source','verify_assistant_max_source','prepare_assistant_company_encryption'].some(name=>tool.endsWith(name))?undefined:'deny');
   }
+});
+
+test('managed encryption setup is a current-worker tool with exact company locators and no hook/login recovery claim',async()=>{
+  const companyId=randomUUID(),companySlug='managed-encrypted';let contexts=0,calls=0;
+  const reports=[],identity={origin:'https://enrollment.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const client={identity,readHealth:async()=>({revision:0,code:'hook_review_required',latchedCodes:['hook_review_required'],
+    compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),reportHealth:async value=>reports.push(value)};
+  const dependencies={context:async action=>{contexts++;return action(client,{},{});},
+    proxyFor:async()=>({listTools:async()=>[],callTool:async()=>assert.fail('enrollment must not borrow task/human MCP')}),
+    versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),prepareEncryption:async input=>{
+      calls++;assert.equal(input.identity,identity);assert.equal(input.companyId,companyId);assert.equal(input.companySlug,companySlug);
+      return {schemaVersion:1,state:'awaiting_company_key',companyId,businessReady:false};
+    }};
+  const request={operation:'call',name:ASSISTANT_ENCRYPTION_SETUP_TOOL.name,arguments:{companyId,companySlug}};
+  const result=await executeAssistantRuntimeRequest(request,dependencies);
+  assert.equal(result.structuredContent.state,'awaiting_company_key');assert.equal(calls,1);
+  assert.ok(reports.every(row=>row.clearedReason===undefined),'public registration cannot prove hook trust or ChatGPT login');
+  const before=contexts;
+  for(const args of [{companyId,companySlug,ownerUserId:randomUUID()},{companyId,companySlug,registrationOnly:false},
+    {companyId,companySlug,origin:'https://foreign.test'},{companyId:'bad',companySlug},{companyId,companySlug:'bad\nslug'}])
+    await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:args},dependencies),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
+  assert.equal(contexts,before,'extra authorities and malformed input refuse before private I/O');
 });
 
 test('email setup routes only exact locators under its private wait envelope and never clears hook trust',async()=>{
