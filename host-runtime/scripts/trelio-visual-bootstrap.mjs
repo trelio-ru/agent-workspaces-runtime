@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { readFile, copyFile, lstat, mkdtemp, rename, rm, access } from 'node:fs/promises';
+import { readFile, copyFile, lstat, mkdtemp, rename, rm, access, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { browserCacheHome, resolveNpmInvocation } from './trelio-browser-session.mjs';
 import { ensurePrivateDirectory } from './trelio-workspace.mjs';
@@ -79,7 +79,7 @@ export async function loadVisualDependencies({ root = path.join(browserCacheHome
   return { chromium, AsyncEntry, WebSocketServer, root, engines, cli: path.join(root, 'node_modules', 'playwright-core', 'cli.js') };
 }
 
-export async function prepareVisualPrivateDirectory(directory) {
+async function assertVisualDirectoryAncestors(directory) {
   // Reject a redirected ancestor before creating anything. Only our own final
   // directory is hardened; shared parents such as ~/.cache retain their ACL.
   let cursor = directory;
@@ -88,7 +88,20 @@ export async function prepareVisualPrivateDirectory(directory) {
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
   }
+}
+
+export async function prepareVisualPrivateDirectory(directory) {
+  await assertVisualDirectoryAncestors(directory);
   await ensurePrivateDirectory(directory);
+}
+
+/** An empty lock root has no private contents yet. Its existing PID-owned
+ * mutex must serialize DACL hardening before publishing its owner record;
+ * contenders only inspect ancestor kinds and create the empty directory.
+ * This is not a weaker private-file validator or a provider-facing option. */
+export async function prepareVisualLockRoot(directory) {
+  await assertVisualDirectoryAncestors(directory);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
 }
 
 export async function ensureVisualChromium(dependencies, { signal } = {}) {

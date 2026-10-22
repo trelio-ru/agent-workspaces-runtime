@@ -7,7 +7,8 @@ import { ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { ExtensionVisualBrowser } from './trelio-visual-extension-browser.mjs';
 import { visualStatus } from './trelio-visual-result.mjs';
-import { createVisualControlServer } from './trelio-visual-session.mjs';
+import { createVisualControlServer, withVisualOwnerFileLock, readVisualOwner,
+  publishVisualWorkerOwner } from './trelio-visual-session.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
   processDiagnosticCauseCode } from './trelio-process-diagnostics.mjs';
 
@@ -69,8 +70,10 @@ async function stop() {
   finally {
     server?.close();
     fixtureDiagnostic({ stage: 'shutdown_claim' });
-    const latest = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
-    if (latest.token === owner.token) { await fs.unlink(file); await fs.rmdir(path.dirname(file)); }
+    await withVisualOwnerFileLock(file, async () => {
+      const latest = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+      if (latest.token === owner.token) { await fs.unlink(file); await fs.rmdir(path.dirname(file)); }
+    });
     fixtureDiagnostic({ stage: 'shutdown_complete' });
     // Fixture-only evidence must settle before process.exit; production has
     // no diagnostic writer and retains the same shutdown/watchdog budget.
@@ -79,7 +82,7 @@ async function stop() {
   }
 }
 try {
-  owner = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+  owner = await readVisualOwner(file);
   if (owner.schemaVersion !== 1 || !/^[0-9a-f]{64}$/u.test(owner.token) || !Number.isSafeInteger(owner.deadlineAt) || owner.deadlineAt <= Date.now()) throw new Error('invalid_input');
   startupPhase = 'policy';
   const policy = createVisualOriginPolicy(owner);
@@ -112,7 +115,7 @@ try {
   startupPhase = 'control_listen';
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   startupPhase = 'owner_publish';
-  await writePrivateJsonFile(file, { ...owner, pid: process.pid, port: server.address().port });
+  await publishVisualWorkerOwner(file, owner, { pid: process.pid, port: server.address().port });
   startupPhase = 'dependencies';
   fixtureDiagnostic({ stage: 'startup_dependencies' });
   startup = loadVisualDependencies({ signal: startupAbort.signal });

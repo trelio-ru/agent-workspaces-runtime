@@ -499,6 +499,16 @@ application/json, loopback Host и random bearer token из owner-checked privat
 file; web Origin отклоняется. Ввод/ответ ограничены; wait не больше 30 секунд.
 Private transport commands не становятся публичными aliases API.
 
+Чтение и публикация малого `owner.json` используют тот же PID/nonce private mutex,
+что защищает читателей mirror. Его пустой root находится вне `active`; живая
+приостановленная операция не теряет lock по возрасту. Он защищает только descriptor I/O и cleanup, не browser/network
+действия: Windows может отклонить atomic replacement при открытом reader handle.
+После ожидания worker сверяет полный исходный claim и прежнюю absolute lease,
+затем записывает PID/port один раз. Mutex не даёт права принять чужой claim,
+повторить failed write/ACL/input, продлить lease или заново запустить browser.
+Native Windows fixture отдельно характеризует обычный открытый read handle;
+serialized regression проверяет paused live owner, ожидание, conflicts и отсутствие нового журнала.
+
 Cleanup удаляет только exact собственный claim; encrypted snapshot сохраняется.
 Dead-claim recovery не убивает PID из файла и не удаляет неизвестные каталоги.
 Watchdog может завершить только созданный текущим worker ChildProcess.

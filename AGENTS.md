@@ -306,6 +306,10 @@ publication tooling также остаются вне этого публичн
   Owner-publication failures also retain an allowlisted filesystem syscall;
   authentication fixtures retain only closed reasons and synthetic effect counts.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
+  Detached owner descriptor I/O/cleanup share the SAME PID/nonce private mutex
+  as mirror readers; no age-based eviction of a live/paused holder. Its empty root
+  stays outside the claim. Recheck complete original ownership/lease after
+  waiting; never retry failed writes, ACL checks or browser/credential input.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.

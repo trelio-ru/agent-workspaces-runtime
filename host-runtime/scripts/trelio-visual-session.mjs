@@ -7,18 +7,57 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind, renderLocalFormPage, parseAgentSecretTotpValue, deriveAgentSecretTotp } from './trelio-workspace.mjs';
-import { prepareVisualPrivateDirectory, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
+import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
+import { withMirrorRetentionLock } from './trelio-mirror-retention.mjs';
 import { normalizeBrowserMailSpec, validateBrowserMailJournal } from './trelio-browser-session.mjs';
 export { BROWSER_MAIL_AUTH_API } from './trelio-browser-session.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const busy = () => visualStatus('error', 'session_busy');
+
+/** Serialize ONLY the small owner descriptor, never browser/network work.
+ * Windows MoveFileEx can refuse replacement while a reader has the original
+ * file open, despite delete sharing. The parent startup poll and child publish
+ * must therefore share the SAME PID-owned private directory mutex used by
+ * mirror readers. Age cannot evict a paused live reader. Its empty root is
+ * outside `active`, so recovery/shutdown can remove that exact claim directory.
+ * No failed write, ACL operation, browser action or credential input is retried.
+ */
+export async function withVisualOwnerFileLock(file, action) {
+  if (!path.isAbsolute(file) || path.basename(file) !== 'owner.json'
+      || path.basename(path.dirname(file)) !== 'active' || typeof action !== 'function') {
+    throw new Error('VISUAL_IDENTITY_INVALID');
+  }
+  const root = path.join(path.dirname(path.dirname(file)), 'owner-control');
+  await prepareVisualLockRoot(root);
+  let entered = false;
+  const result = await withMirrorRetentionLock(root, async () => {
+    entered = true;
+    return action();
+  }, { waitMs: 5000 });
+  // Busy is a refusal, never an empty descriptor or permission to rerun work.
+  if (!entered) throw new Error('VISUAL_OWNER_BUSY');
+  return result;
+}
+export const readVisualOwner = file => withVisualOwnerFileLock(file,
+  () => readPrivateJsonFile(file, { maximumBytes: 65_536 }));
+
+export const publishVisualWorkerOwner = (file, original, update) => withVisualOwnerFileLock(file, async () => {
+  const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+  // The mutex does not confer ownership. Recheck the COMPLETE original claim
+  // and its absolute lease after waiting, immediately before the one write.
+  if (hash(current) !== hash(original) || Object.hasOwn(original, 'port') || original.deadlineAt <= Date.now()
+      || !Number.isSafeInteger(update.pid) || update.pid <= 0
+      || !Number.isInteger(update.port) || update.port < 1 || update.port > 65535
+      || Object.keys(update).sort().join() !== 'pid,port') throw new Error('VISUAL_IDENTITY_INVALID');
+  await writePrivateJsonFile(file, { ...original, pid: update.pid, port: update.port });
+});
 
 /** This binding is supplied by the verified package host, never CLI arguments. */
 export function visualSessionBinding(env = process.env) {
@@ -85,7 +124,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   try { await assertPrivatePathKind(active, 'directory'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   let owner;
-  try { owner = await readPrivateJsonFile(file, { maximumBytes: 65_536 }); }
+  try { owner = await readVisualOwner(file); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (owner && Object.keys(owner).length) {
     if (!validOwner(owner, binding)) return busy();
@@ -103,12 +142,16 @@ export async function runVisualSession({ origins, domains = [], operation, args 
       try {
         await prepareVisualPrivateDirectory(recovery);
         if ((await fs.readdir(active)).sort().join() !== 'owner.json,recovery') return busy();
-        const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
-        if (current.token !== owner.token || current.pid !== owner.pid) return busy();
-        const abandoned = `${active}.${crypto.randomUUID()}.closed`;
-        await fs.rename(active, abandoned); moved = true;
-        await fs.unlink(path.join(abandoned, 'owner.json'));
-        await fs.rmdir(path.join(abandoned, 'recovery')); await fs.rmdir(abandoned);
+        const recovered = await withVisualOwnerFileLock(file, async () => {
+          const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+          if (current.token !== owner.token || current.pid !== owner.pid) return false;
+          const abandoned = `${active}.${crypto.randomUUID()}.closed`;
+          await fs.rename(active, abandoned); moved = true;
+          await fs.unlink(path.join(abandoned, 'owner.json'));
+          await fs.rmdir(path.join(abandoned, 'recovery')); await fs.rmdir(abandoned);
+          return true;
+        });
+        if (!recovered) return busy();
       } finally { if (!moved) await fs.rmdir(recovery); }
       owner = null;
     }
@@ -127,7 +170,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
         if (operation !== 'disconnect') return await request(owner, operation, args);
         await request(owner, 'close', {});
         for (let i = 0; i < 150; i++) {
-          const next = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+          const next = await readVisualOwner(file);
           if (!Object.keys(next).length) { owner = null; break; }
           if (next.token !== owner.token) return busy();
           await sleep(100);
@@ -177,7 +220,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
     ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
   };
-  await writePrivateJsonFile(file, owner);
+  await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
   const child = spawn(workerExecutable, [fileURLToPath(new URL('./trelio-visual-worker.mjs', import.meta.url)), file], {
     detached: true, shell: false, windowsHide: true, stdio: 'ignore', env: visualChildEnvironment(),
   });
@@ -189,11 +232,13 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   for (let attempt = 0; attempt < 20; attempt++) {
     await sleep(100);
     if (spawnError) {
-      const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
-      if (current.token === owner.token) { await fs.unlink(file); await fs.rmdir(active); }
+      await withVisualOwnerFileLock(file, async () => {
+        const current = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+        if (current.token === owner.token) { await fs.unlink(file); await fs.rmdir(active); }
+      });
       return visualStatus('error', 'operation_failed');
     }
-    const next = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
+    const next = await readVisualOwner(file);
     if (next.token !== owner.token) return busy();
     if (next.port) return visualStatus('preparing');
   }

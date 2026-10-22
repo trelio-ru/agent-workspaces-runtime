@@ -6,13 +6,84 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
-import { runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
+import { runVisualSession, withVisualOwnerFileLock, readVisualOwner,
+  publishVisualWorkerOwner } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-node.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
   processDiagnosticCauseCode } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { readPrivateJsonFile, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
+
+test('an unsafe owner mutex root refuses before its operation without replacing the existing entry', async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-owner-unsafe-test-')));
+  const file = path.join(directory, 'active', 'owner.json'), root = path.join(directory, 'owner-control');
+  let entered = false;
+  try {
+    await fs.writeFile(root, 'synthetic existing entry', { mode: 0o600 });
+    await assert.rejects(withVisualOwnerFileLock(file, () => { entered = true; }), /VISUAL_STORAGE_UNSAFE/);
+    assert.equal(entered, false);
+    assert.equal(await fs.readFile(root, 'utf8'), 'synthetic existing entry');
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+test('owner publication waits for the original reader, rechecks the claim and never changes its lease', { timeout: 60000 }, async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-owner-mutex-test-')));
+  const active = path.join(directory, 'active'), file = path.join(active, 'owner.json');
+  await fs.mkdir(active, { mode: 0o700 });
+  const owner = { schemaVersion: 1, token: 'a'.repeat(64), bindingHash: 'b'.repeat(64),
+    scope: 'c'.repeat(64), pid: process.pid, deadlineAt: Date.now() + 120000 };
+  let releaseReader, signalReader, rejectReader, reader;
+  const held = new Promise(resolve => { releaseReader = resolve; });
+  const opened = new Promise((resolve, reject) => { signalReader = resolve; rejectReader = reject; });
+  let reading, publishing;
+  try {
+    await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, owner));
+    await assert.rejects(publishVisualWorkerOwner(file, owner, { pid: process.pid, port: 12345,
+      deadlineAt: Date.now() + 240000 }), /VISUAL_IDENTITY_INVALID/);
+    assert.deepEqual(await readVisualOwner(file), owner, 'publication cannot accept a lease override');
+    reading = withVisualOwnerFileLock(file, async () => {
+      reader = await fs.open(file, 'r');
+      signalReader();
+      try {
+        await held;
+        assert.deepEqual(JSON.parse(await reader.readFile('utf8')), owner);
+      } finally { await reader.close(); reader = null; }
+    });
+    // Fail the original test normally if native preparation fails before the
+    // handoff; do not leave a never-resolved startup barrier/owned directory.
+    reading.catch(rejectReader);
+    await opened;
+    // A suspended/slow LIVE reader must not be evicted by an age-based stale
+    // lock timeout. Reuse the existing PID/nonce mutex's native guarantee.
+    const old = new Date(0);
+    await fs.utimes(path.join(directory, 'owner-control', 'retention.lock'), old, old);
+    let settled = false;
+    publishing = publishVisualWorkerOwner(file, owner, { pid: process.pid, port: 12345 })
+      .finally(() => { settled = true; });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(settled, false, 'publication cannot overlap an open participating read handle');
+    releaseReader(); await reading; await publishing;
+    const published = { ...owner, pid: process.pid, port: 12345 };
+    assert.deepEqual(await readVisualOwner(file), published);
+    await assert.rejects(publishVisualWorkerOwner(file, published, { pid: process.pid, port: 12346 }), /VISUAL_IDENTITY_INVALID/,
+      'a published descriptor cannot become a fresh publication baseline');
+    // A replacement identity is a conflict, never a new baseline for retry.
+    await assert.rejects(publishVisualWorkerOwner(file, owner, { pid: process.pid, port: 12346 }), /VISUAL_IDENTITY_INVALID/);
+    assert.deepEqual(await readVisualOwner(file), published);
+    const expired = { ...owner, deadlineAt: Date.now() - 1 };
+    await withVisualOwnerFileLock(file, () => writePrivateJsonFile(file, expired));
+    await assert.rejects(publishVisualWorkerOwner(file, expired, { pid: process.pid, port: 12345 }), /VISUAL_IDENTITY_INVALID/);
+    assert.deepEqual(await readVisualOwner(file), expired);
+    assert.deepEqual((await fs.readdir(directory)).sort(), ['active', 'owner-control']);
+    assert.deepEqual(await fs.readdir(path.join(directory, 'owner-control')), [],
+      'the shared mutex leaves no second journal or persistent ownership record');
+  } finally {
+    releaseReader(); await reading?.catch(() => {}); await publishing?.catch(() => {});
+    await reader?.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('native Windows characterizes atomic descriptor publication while the original reader is open', {
   skip: process.platform !== 'win32' || process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 20000,
