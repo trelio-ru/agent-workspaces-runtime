@@ -52,7 +52,7 @@ test("only the exact native Antigravity manifest selects local text compatibilit
     assert.equal(await resolveLocalMcpTextCompatibility(environment), false);
     await fs.rm(path.join(root, "plugin.json"));
     await fs.writeFile(path.join(root, "gigacode-extension.json"), JSON.stringify({ name: "trelio-agent-workspaces", version: "3.2.3" }));
-    assert.equal(await resolveLocalMcpTextCompatibility(environment), true);
+    assert.equal(await resolveLocalMcpTextCompatibility(environment), false);
     await fs.writeFile(path.join(root, "gigacode-extension.json"), JSON.stringify({ name: "other" }));
     assert.equal(await resolveLocalMcpTextCompatibility(environment), false);
     await fs.rm(path.join(root, "gigacode-extension.json"));

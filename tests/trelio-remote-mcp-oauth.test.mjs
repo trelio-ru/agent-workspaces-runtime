@@ -55,60 +55,6 @@ const assertListenerClosed = async (callback) => {
   });
 };
 
-test("existing provider DCR accepts an intentionally scope-free signed declaration", async () => {
-  const session = await connectRemoteMcpOAuth({ ...callbackConfig, authentication: { scopes: [] } }, {
-    httpJson: createOAuthTransport(() => ({ statusCode: 200,
-      body: { token_type: "Bearer", access_token: "synthetic-empty-scope-token", expires_in: 3600 } })),
-    openBrowserFn: async url => {
-      const authorize = new URL(url);
-      assert.equal(authorize.searchParams.get("scope"), "");
-      const callback = new URL(authorize.searchParams.get("redirect_uri"));
-      callback.searchParams.set("state", authorize.searchParams.get("state"));
-      callback.searchParams.set("code", "synthetic-code");
-      assert.equal(await requestCallback(callback), 200);
-    },
-  });
-  assert.equal(session.clientId, "synthetic-client");
-});
-
-test("fixed native PKCE uses live scopes, exact resource and a distinct client without DCR", async () => {
-  let callback;
-  let authorization;
-  let exchanges = 0;
-  const clientId = "synthetic-native-client";
-  const resource = `${issuer}/mcp`;
-  const session = await connectRemoteMcpOAuth(callbackConfig, {
-    fixedClientId: clientId, resource, useSupportedScopes: true, maxExpiresIn: 366 * 86400,
-    httpJson: async (url, request) => {
-      if (url.endsWith("/.well-known/oauth-authorization-server")) return { statusCode: 200, body: {
-        issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
-        registration_endpoint: `${issuer}/register`, scopes_supported: ["synthetic:live"], code_challenge_methods_supported: ["S256"],
-      } };
-      assert.equal(url, `${issuer}/token`, "fixed profile must not register another client");
-      exchanges++;
-      const body = new URLSearchParams(request.body);
-      assert.equal(body.get("client_id"), clientId);
-      assert.equal(body.get("resource"), resource);
-      assert.equal(body.get("redirect_uri"), callback.origin + callback.pathname);
-      assert.equal(createHash("sha256").update(body.get("code_verifier")).digest("base64url"), authorization.searchParams.get("code_challenge"));
-      return { statusCode: 200, body: { token_type: "Bearer", access_token: "synthetic-native-token", expires_in: 365 * 86400, scope: "synthetic:live" } };
-    },
-    openBrowserFn: async url => {
-      authorization = new URL(url);
-      assert.equal(authorization.searchParams.get("scope"), "synthetic:live");
-      assert.equal(authorization.searchParams.get("resource"), resource);
-      callback = new URL(authorization.searchParams.get("redirect_uri"));
-      callback.searchParams.set("state", authorization.searchParams.get("state"));
-      callback.searchParams.set("code", "synthetic-code");
-      assert.equal(await requestCallback(callback), 200);
-    },
-  });
-  assert.equal(session.clientId, clientId);
-  assert.equal(exchanges, 1);
-  assert.ok(session.expiresAt > Date.now() + 364 * 86400000);
-  await assertListenerClosed(callback);
-});
-
 test("OAuth opener failure and cancellation close the exact loopback listener", async (t) => {
   for (const cancel of [false, true]) {
     await t.test(cancel ? "cancel during browser handoff" : "opener failure", async () => {

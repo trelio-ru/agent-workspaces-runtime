@@ -79,7 +79,7 @@ const runSecretTool = (mode, account, value = null) => new Promise((resolve, rej
   child.stdin.end(value === null ? "" : value);
 });
 
-export const createOAuthSessionVault = ({
+export const createRemoteMcpOAuthVault = ({
   platform = process.platform,
   credentialFile,
   keychain = {
@@ -92,18 +92,15 @@ export const createOAuthSessionVault = ({
     unprotect: unprotectWindowsBridgeSessionToken,
   },
   linuxSecretTool = runSecretTool,
-  keychainService = KEYCHAIN_SERVICE,
-  accountForSession = sessionAccount,
-  fingerprintForSession = resolved => resolved.remoteMcp.configFingerprint,
 } = {}) => {
   if (!credentialFile) throw new TypeError("OAuth credentialFile is required.");
   const file = path.join(path.dirname(credentialFile), "oauth-session.json");
 
   const read = async (origin, resolved) => {
-    const account = accountForSession(origin, resolved);
+    const account = sessionAccount(origin, resolved);
     let serialized = null;
     if (platform === "darwin") {
-      serialized = await keychain.read(keychainService, account);
+      serialized = await keychain.read(KEYCHAIN_SERVICE, account);
     } else if (platform === "win32") {
       const stored = await readPrivateJsonFile(file);
       if (stored?.account === account && typeof stored.ciphertext === "string") {
@@ -136,23 +133,23 @@ export const createOAuthSessionVault = ({
     ) {
       throw new Error("Сохранённая OAuth-сессия не совпала с текущим навыком.");
     }
-    if (record.fingerprint !== fingerprintForSession(resolved)) return null;
+    if (record.fingerprint !== resolved.remoteMcp.configFingerprint) return null;
     return record;
   };
 
   const write = async (origin, resolved, session) => {
-    const account = accountForSession(origin, resolved);
+    const account = sessionAccount(origin, resolved);
     const serialized = JSON.stringify({
       schemaVersion: 1,
       account,
-      fingerprint: fingerprintForSession(resolved),
+      fingerprint: resolved.remoteMcp.configFingerprint,
       ...session,
     });
     if (Buffer.byteLength(serialized, "utf8") > MAX_SESSION_BYTES) {
       throw new Error("OAuth-сессия превышает локальный лимит.");
     }
     if (platform === "darwin") {
-      await keychain.write(keychainService, account, serialized);
+      await keychain.write(KEYCHAIN_SERVICE, account, serialized);
     } else if (platform === "win32") {
       const ciphertext = await dpapi.protect(origin, serialized);
       await ensurePrivateDirectory(path.dirname(file));
@@ -172,10 +169,10 @@ export const createOAuthSessionVault = ({
   };
 
   const remove = async (origin, resolved) => {
-    const account = accountForSession(origin, resolved);
+    const account = sessionAccount(origin, resolved);
     if (platform === "darwin") {
-      const existed = Boolean(await keychain.read(keychainService, account));
-      if (existed) await keychain.remove(keychainService, account);
+      const existed = Boolean(await keychain.read(KEYCHAIN_SERVICE, account));
+      if (existed) await keychain.remove(KEYCHAIN_SERVICE, account);
       return existed;
     }
     if (platform === "win32") {
@@ -195,8 +192,3 @@ export const createOAuthSessionVault = ({
 
   return { read, write, remove };
 };
-
-// Retain the published skill-vault identity/layout. The native desktop relay
-// uses the same encrypted store primitives with its own fixed namespace;
-// neither profile supplies fake company/member/skill IDs to the other.
-export const createRemoteMcpOAuthVault = options => createOAuthSessionVault(options);

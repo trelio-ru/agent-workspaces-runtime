@@ -8,6 +8,31 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { createMcpStartupTrace } from "../host-runtime/scripts/trelio-mcp-startup-trace.mjs";
+import { detectAgentRuntimeAttestation } from "../host-runtime/scripts/trelio-runtime-attestation.mjs";
+
+test("removed MCP profiles fail before spawning a host or reading another client", async () => {
+  for (const args of [["gigacode"], ["gigacode", "--token"], ["unknown"]]) {
+    let spawned = false;
+    await assert.rejects(runHostRuntime({ rawArguments: ["mcp", ...args],
+      spawnProcess: () => { spawned = true; throw new Error("must not spawn"); },
+    }), /TRELIO_MCP_ARGUMENTS_UNSUPPORTED/);
+    assert.equal(spawned, false);
+  }
+});
+
+test("unsupported imported hooks cannot borrow Codex or Claude model evidence", async () => {
+  const observed = await detectAgentRuntimeAttestation({
+    hookInput: { session_id: "synthetic-session", model: "gpt-6.1-sol",
+      effort: { level: "ultra" }, transcript_path: "/must-not-read" },
+    environment: { GIGACODE_PROJECT_DIR: "/synthetic-root",
+      CODEX_THREAD_ID: "inherited", CLAUDE_CODE_ENTRYPOINT: "inherited" },
+  });
+  assert.equal(observed.clientFamily, "other");
+  assert.equal(observed.source, "unknown");
+  assert.equal(observed.evidenceLevel, "unavailable");
+  assert.equal(observed.modelId, null);
+  assert.equal(observed.effortLevel, null);
+});
 import { RUNTIME_HOOK_START_TIME_ENV } from "../host-runtime/scripts/trelio-runtime-session-limits.mjs";
 
 import {

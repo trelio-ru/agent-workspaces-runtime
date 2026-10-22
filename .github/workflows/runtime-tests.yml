@@ -251,7 +251,6 @@ jobs:
           node tests/trelio-assistant-maintenance.test.mjs
           node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
-          node tests/trelio-gigacode-mcp.test.mjs
           node tests/trelio-host-runtime-entry.test.mjs
           node tests/trelio-hook-signed-chain.test.mjs
           node tests/trelio-host-runtime-recovery.test.mjs
@@ -357,9 +356,6 @@ jobs:
 
       - name: Run Windows Antigravity native shell diagnostics
         run: node tests/trelio-antigravity.test.mjs
-
-      - name: Run desktop profile isolation and cancellation regressions
-        run: node tests/trelio-gigacode-mcp.test.mjs
 
       - name: Run Windows folder diagnostic and instruction refresh regressions
         run: node tests/trelio-folder-onboarding.test.mjs

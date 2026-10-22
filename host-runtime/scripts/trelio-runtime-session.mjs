@@ -1035,10 +1035,9 @@ const runHook = async () => {
   ) {
     throw new Error("Hook event is missing or unsupported.");
   }
-  // GigaCode imports Claude hook definitions but uses a separate server-owned
-  // OAuth consent profile. Foreign hooks must neither inspect Codex state nor
-  // register/sign an invented model observation. Returning no updatedInput
-  // leaves the native backend OAuth/company policy gate fully responsible.
+  // An unsupported client's imported hook must not inspect Codex state or
+  // register/sign a borrowed model observation. Keep this negative guard after
+  // removing its OAuth relay; no runtime proof is issued to the old install.
   if (process.env.GIGACODE_PROJECT_DIR) return 0;
   // Slow Node/import/stdin startup has already consumed the client's clock.
   // Giving runHook a fresh 22 seconds let the outer 30-second timer kill the

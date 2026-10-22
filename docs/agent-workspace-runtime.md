@@ -2011,58 +2011,14 @@ Explicit completion/status, dismissal, stale epoch и applying state имеют
 не переносит модели ref/revision bookkeeping. Feature negotiation additive:
 старый bridge не вызывает automatic staging; plugin shell/minimum не меняются.
 
-## GigaCode Desktop
+## Removed native clients
 
-На macOS native server `trelio` запускает прежний stable loader с аргументами
-`mcp gigacode`; `trelio-remote-skills` сохраняет обычный `mcp`. Plugin shell,
-manifest, approved hook definitions и minimum не меняются. Node >=22 берётся из
-проверенной установки; bundled Desktop Node допустим. Отдельная лицензия
-GigaCode CLI не требуется. Windows/Linux для этого relay явно unsupported,
-без plaintext fallback и заявления готовности по mock platform.
-
-Первый `tools/list` без входа возвращает только `connect_trelio_gigacode`.
-Этот tool открывает общий browser PKCE flow, но с фиксированным public client
-`trelio_gigacode_agent_workspaces_v1`, canonical `https://trelio.ru/mcp`,
-resource и live scopes из metadata. Listener принимает только IPv4 loopback,
-exact port/path/Host/state и issuer; DCR, arbitrary URL и client secret отсутствуют.
-Токен живёт в отдельном macOS Keychain namespace `ru.trelio.native-mcp-oauth.v1`,
-с account hash от origin/client; company/member/skill IDs не выдумываются.
-Запись проверяется read-back. Совместимое обновление переиспользует вход;
-expired session либо явный reconnect/реальный OAuth challenge требует consent.
-`reauthorize=true` не удаляет соединение и не отзывает чужие grants.
-Relay не передаёт token или authorization code в MCP, config, argv или env
-и не записывает их в plaintext-файлы. Browser handoff содержит только обычный
-authorization URL с public client, PKCE challenge и state.
-Штатный GigaCode token store не читается и не заполняется.
-
-После consent relay присылает `notifications/tools/list_changed` и актуальную
-native bootstrap instruction. Обычные tools/resources читаются из live Trelio;
-схемы, scope/ACL, provider selection, CAS и отдельные human decisions не
-дублируются. MCP Apps и server elicitation не заявлены: native backend выбирает
-guarded text review. Native errors/challenges и hidden `_meta` проходят без
-переписывания. Общий bounded HTTPS/SSE transport отправляет каждую операцию
-один раз; cancellation/EOF закрывают активные вызовы, потеря mutation-response
-не запускает повтор. Local errors содержат только closed code.
-
-OAuth profile доказывает выбранный consent channel, не исполняемый binary и
-не модель. Допуск `gigacode` проверяет существующий `otherClientsAction`
-(default deny в enforce); disabled сохраняет общую семантику. Backend rollout
-с регистрацией profile предшествует relay rollout. Foreign imported hook
-при настоящем `GIGACODE_PROJECT_DIR` ничего не регистрирует и не подписывает;
-обнаружение attestation возвращает unknown/other даже с inherited Codex/Claude
-variables. Hook trust не автоматизируется. Relay и local skills server не читают
-Codex config: exact native manifest отключает startup-миграцию чужого клиента.
-
-Diagnostics/onboarding используют реальный `clientKind=gigacode`, exact loaded
-`gigacode-extension.json`, общий folder planner/apply, Git isolation, CAS,
-rollback и read-back. GigaCode читает `AGENTS.md` напрямую; `CLAUDE.md` import
-не создаётся, override блокируется как неактивный. Клиент передаёт выбранную
-постоянную папку; process cwd не становится binding. Shared local text delivery
-выбирается тем же exact manifest: GigaCode 26.10.109 передаёт модели только
-`content`, поэтому JSON `structuredContent` добавляется после projection/hydration
-с прежним budget, без копирования `_meta`. Успех OAuth не доказывает folder,
-accepted Workspace read или save. Smoke читает существующий accepted Workspace
-без учебной задачи/Run и сохраняет `savingResults=not_checked`.
+The local MCP supports no client-specific subprofiles. An old `mcp gigacode`
+launch is rejected before bootstrap or credential access. GigaCode is not a
+diagnostics/onboarding client and its manifest does not select text delivery.
+Its imported hooks still cannot borrow Codex/Claude identity, and its old
+manifest never enables migration of another client's configuration. Backend
+retirement separately closes OAuth issuance, existing tokens and bridge grants.
 
 ## Antigravity native shell diagnostics
 

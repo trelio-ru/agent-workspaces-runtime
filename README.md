@@ -112,10 +112,8 @@ Backend и runtime обмениваются только typed actions. Command-
 ### Диагностика готовности
 
 Пользователь пишет «Проведи диагностику Trelio» в выбранной постоянной папке.
-Current runtime поддерживает Codex, Claude Code, Cursor, Antigravity и GigaCode.
-Native клиенты используют свой manifest/OAuth без Codex/Claude hooks и общий
-folder planner. GigaCode Desktop relay пока поддерживает только macOS:
-[`mcp gigacode`, вход и границы](docs/agent-workspace-runtime.md#gigacode-desktop).
+Current runtime поддерживает Codex, Claude Code, Cursor и Antigravity.
+Удалённые MCP subprofiles отклоняются до запуска: [контракт](docs/agent-workspace-runtime.md#removed-native-clients).
 Tool принимает `intent=diagnostics` и optional
 `folderOnboarding={folderPath}` из client-owned project context. Отсутствующий
 root не угадывается из process cwd; проверка папки остаётся `not_checked`.

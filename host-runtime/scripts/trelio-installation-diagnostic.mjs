@@ -21,7 +21,7 @@ export const buildTrelioConnectionRecovery = (publicService, requiredActions = [
   instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema нет, используй штатный reconnect только при наличии такой функции клиента, затем проверь доступ снова; не придумывай команды. Не повторяй doctor как reconnect и не объявляй старый 5xx текущей ошибкой. Нет matching evidence или exact requiredAction – не советуй restart/new chat, login, pairing или переустановку. Сохрани конкретный client tool-exposure blocker; отсутствие функции reconnect не доказывает необходимость restart.",
 });
 
-const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity", "gigacode"]);
+const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
 export class TrelioInstallationDiagnosticError extends Error {
@@ -73,9 +73,9 @@ const buildClientInspection = (clientKind) => (
           doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof", "current_chat_model_tool_exposure"],
         },
       }
-    : ["cursor", "antigravity", "gigacode"].includes(clientKind) ? {
+    : ["cursor", "antigravity"].includes(clientKind) ? {
         mcpInventory: {
-          surface: clientKind === "gigacode" ? "GigaCode Desktop MCP settings" : clientKind === "antigravity" ? "Antigravity Customizations" : "Cursor Plugins and MCP settings",
+          surface: clientKind === "antigravity" ? "Antigravity Customizations" : "Cursor Plugins and MCP settings",
           proves: ["remote_mcp_registration", "local_mcp_registration"],
           doesNotProve: ["oauth_bearer_usable"],
         },
@@ -215,9 +215,8 @@ const buildLocalSummary = (local, clientKind) => ({
       claudeVersion: local.plugin?.manifests?.claudeVersion ?? null,
       ...(clientKind === "cursor" ? { cursorVersion: local.plugin?.manifests?.cursorVersion ?? null } : {}),
       ...(clientKind === "antigravity" ? { antigravityVersion: local.plugin?.manifests?.antigravityVersion ?? null } : {}),
-      ...(clientKind === "gigacode" ? { gigacodeVersion: local.plugin?.manifests?.gigacodeVersion ?? null } : {}),
     },
-    hooks: ["cursor", "antigravity", "gigacode"].includes(clientKind) ? { status: "not_applicable" } : {
+    hooks: ["cursor", "antigravity"].includes(clientKind) ? { status: "not_applicable" } : {
       status: local.plugin?.hooks?.status ?? "unknown",
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
       toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
@@ -415,7 +414,7 @@ export const buildTrelioInstallationDiagnostic = ({
         nextTool: "list_companies",
         successProves: "oauth_bearer_usable_for_current_client_process",
       },
-      hook: ["cursor", "antigravity", "gigacode"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
+      hook: ["cursor", "antigravity"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
         nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",

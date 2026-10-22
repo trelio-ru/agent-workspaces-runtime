@@ -1009,7 +1009,7 @@ export const migrateCodexLegacyTrelioMcpForRuntime = async ({
     };
   }
   try {
-    // Native Antigravity/GigaCode installs have their own root manifest,
+    // Native/retired foreign installs have their own root manifest,
     // unlike the Codex/Claude multi-client shell. Inspect only that marker in
     // the exact loader-selected root: inherited CODEX_* variables must not
     // authorize editing another client's config. This only skips a local

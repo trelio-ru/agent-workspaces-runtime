@@ -113,9 +113,9 @@ publication tooling также остаются вне этого публичн
   Diagnostics принимает их реальные clientKind, пропускает foreign hooks; folder binding/refresh выполняет общий planner/apply; native shell проверяется только в exact loaded plugin root.
   Root-level native manifest исключает startup-миграцию Codex до чтения его
   config, даже если процесс унаследовал CODEX_*; это не OAuth admission.
-- GigaCode Desktop на macOS использует fixed native MCP relay внутри signed
-  `mcp gigacode`, без CLI-лицензии и foreign hooks. Auth, text delivery и общий
-  folder planner и изоляция обоих MCP – [контракт](docs/agent-workspace-runtime.md#gigacode-desktop).
+- Удалённые native clients не получают MCP subprofile или onboarding. Старые
+  manifests/hooks не дают заимствовать identity/config поддерживаемого клиента;
+  [контракт отказа](docs/agent-workspace-runtime.md#removed-native-clients).
 - Generic диагностика учитывает реальный clientKind и выбранный permanent root.
   Routing recovery сначала повторяет protected read в том же чате после restart;
   при необходимом новом чате сохраняется выбранная папка без требования проекта.
