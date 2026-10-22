@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser } from '../host-runtime/scripts/trelio-visual-auth.mjs';
+import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { deriveAgentSecretTotp } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';

@@ -10,7 +10,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from './trelio-visual-extension-worker.mjs';
 import { visualLinkRouter, visualAttachmentRouter } from './trelio-visual-link-router.mjs';
 import { visualCookieState } from './trelio-visual-cookie-state.mjs';
-import { installVisualAuthentication, normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-auth.mjs';
+import { installVisualAuthentication, normalizeVisualAuthentication, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials } from './trelio-visual-session.mjs';
 import { ensureVisualChromium, prepareVisualPrivateDirectory, visualChildEnvironment } from './trelio-visual-bootstrap.mjs';
 import { validVisualArguments, visualStatus, normalizeBrowserVisualResult, validateVisualResult, VISUAL_RESULT_KIND, BROWSER_FILE_KIND } from './trelio-visual-result.mjs';
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
