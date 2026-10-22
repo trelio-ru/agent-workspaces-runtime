@@ -99,7 +99,7 @@ test('native local form stays keyboard accessible at 1440, 390 and 320px; POST p
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const browser = await deps.chromium.launch({ executablePath, headless: true });
+  const browser = await deps.chromium.launch({ executablePath, headless: true, chromiumSandbox: true });
   try {
     for (const width of [1440, 390, 320]) {
       const page = await browser.newPage({ viewport: { width, height: width === 1440 ? 900 : 844 }, hasTouch: width !== 1440 });
