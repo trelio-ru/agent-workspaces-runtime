@@ -1703,6 +1703,26 @@ routing/config repair или несовместимого owner. Переклю�
 автоматически наблюдать owner toolset. Поэтому переход к диагностике задаётся
 общей инструкцией, а сбор фактов и guarded repair остаются алгоритмическими.
 
+Диагностика алгоритмически возвращает `liveVerification.read`: `readResult`
+всегда `not_checked`, `insufficientEvidence` включает пустой nested `ALL_TOOLS`,
+public availability, server ready и CLI inventory. Optional `readTarget` принимает
+только exact `companySlug`, optional `projectSlug` и положительный `taskNumber`
+с обязательным проектом. При известной задаче `nextCall` содержит `get_task`,
+иначе – `get_agent_instructions` для request scope или прежней привязки папки;
+без области – `list_companies`. Target не меняет folder scope/refresh plan.
+Неизвестные поля, модельные proof/result claims и target в onboarding отклоняются
+до probes. Полная небольшая schema публикуется в `tools/list`.
+
+При available/recovered и отсутствии блокирующего requiredAction state –
+`client_read_required`; иначе `nextCall=null`, с сохранением prerequisite/service
+причины. Отсутствие Git не блокирует обычное remote чтение. Исполняет следующий
+вызов клиент напрямую в текущем чате с обычными ACL/proof/E2EE; local MCP не
+становится proxy и не повторяет исходную mutation. Только фактический ответ
+либо точный native отказ проверяет чтение; doctor не принимает self-reported
+успех или недоступность. `list_companies` проверяет только OAuth, затем нужна
+exact область. Runtime не наблюдает и не гарантирует поведение модели, поэтому
+последний dispatch/evidence check остаётся клиенту. Повтор doctor его не заменяет.
+
 Local `diagnose_trelio_installation(intent=diagnostics)` принимает реальный
 `clientKind` (`codex|claude-code|cursor|antigravity`) и optional
 `folderOnboarding={folderPath}` из client-selected постоянной папки.
@@ -1727,7 +1747,15 @@ Codex/Claude hooks для native клиентов `not_applicable`; folder bindi
 
 Managed block извлекается только из единственной полной пары existing markers.
 Canonical company/project lines должны разбираться однозначно; malformed project
-не превращается в company scope. Exact block сравнивается с current signed
+не превращается в company scope. Reader `folder-managed-binding-sentences`
+также принимает две опубликованные прежние company sentences: «Эта рабочая
+папка связана с компанией Trelio…» и «Эта обычная локальная папка задаёт
+Trelio-контекст компании…» с exact name/slug и окончанием шаблона. Допустимы
+известный перенос строки и CRLF; parsing не меняет snapshot bytes. Смешанные,
+повторные или повреждённые scope declarations отклоняются, включая отступ перед
+project line. Диагностика готовит обычный same-scope refresh, выполняемый после
+protected read; company/project, personal bytes и CAS сохраняются.
+Exact block сравнивается с current signed
 template, существующая active override имеет приоритет. Без привязки diagnosis
 не выбирает компанию и не создаёт файл. При дельте `workingFolder.refresh`
 содержит exact existing `folder_onboarding_apply` action с текущим planHash,

@@ -285,19 +285,29 @@ const replaceManagedBlockAtEnd = (text, block, startMarker, endMarker) => {
 };
 
 // Diagnostics refresh an existing binding, not a newly selected scope. Parse
-// only the canonical scope lines inside one complete managed block; arbitrary
-// user instructions, folder names and similar slugs cannot select a company.
+// only explicit scope lines inside one complete managed block; arbitrary user
+// instructions, folder names and similar slugs cannot select a company.
 const readManagedBinding = (text) => {
   const ranges = findMarkerRanges(text, MANAGED_START, MANAGED_END);
   if (ranges.length === 0) return null;
-  const block = text.slice(ranges[0].start, ranges[0].end);
+  // Normalize CRLF for parsing only. CAS and the refresh writer still use the
+  // original snapshot, preserving every personal byte outside the block.
+  const block = text.slice(ranges[0].start, ranges[0].end).replaceAll("\r\n", "\n");
   const companyLines = [...block.matchAll(/^Папка привязана к компании «(.+)» \(`([a-z0-9_-]+)`\)\. Это контекст работы, а не привязка Git-репозитория\.$/gmu)];
+  // Legacy registry: folder-managed-binding-sentences. These exact published
+  // pre-runtime templates contain the same explicit company slug. Read them
+  // through the ordinary same-scope refresh; do not infer a scope from prose.
+  const legacyCompanyLines = [
+    ...block.matchAll(/^Эта обычная локальная папка задаёт Trelio-контекст компании «(.+)»(?:\n| )\(`([a-z0-9_-]+)`\) и не связывает с Trelio Git-репозиторий\.$/gmu),
+    ...block.matchAll(/^Эта рабочая папка связана с компанией Trelio «(.+)» \(`([a-z0-9_-]+)`\)\.$/gmu),
+  ];
+  const allCompanyLines = [...companyLines, ...legacyCompanyLines];
   const projectLines = [...block.matchAll(/^Работа ограничена проектом «(.+)» \(`([a-z0-9_-]+)`\)\.$/gmu)];
   // A malformed project line must never silently widen a project binding to
   // company scope. Count the recognized prefixes as well as exact valid lines.
-  const companyPrefixes = [...block.matchAll(/^Папка привязана к компании /gmu)];
-  const projectPrefixes = [...block.matchAll(/^Работа ограничена проектом /gmu)];
-  if (companyLines.length !== 1 || companyPrefixes.length !== companyLines.length
+  const companyPrefixes = [...block.matchAll(/^[\t ]*(?:Папка привязана к компании |Эта обычная локальная папка задаёт Trelio-контекст компании |Эта рабочая папка связана с компанией Trelio )/gmu)];
+  const projectPrefixes = [...block.matchAll(/^[\t ]*Работа ограничена проектом /gmu)];
+  if (allCompanyLines.length !== 1 || companyPrefixes.length !== allCompanyLines.length
     || projectLines.length > 1 || projectPrefixes.length !== projectLines.length) {
     throw new TrelioFolderOnboardingError(
       "TRELIO_FOLDER_ONBOARDING_BINDING_AMBIGUOUS",
@@ -306,7 +316,7 @@ const readManagedBinding = (text) => {
   }
   const decodeName = (value) => value.replace(/\\([\\`*_<>])/gu, "$1");
   return {
-    company: { name: decodeName(companyLines[0][1]), slug: companyLines[0][2] },
+    company: { name: decodeName(allCompanyLines[0][1]), slug: allCompanyLines[0][2] },
     ...(projectLines.length ? {
       project: { name: decodeName(projectLines[0][1]), slug: projectLines[0][2] },
     } : {}),

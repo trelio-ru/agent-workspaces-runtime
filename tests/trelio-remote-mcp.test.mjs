@@ -2811,6 +2811,10 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
     installationDiagnosticTool.inputSchema.properties.intent.enum,
     ["diagnostics", "onboarding", "folder_onboarding"],
   );
+  const readTargetSchema = installationDiagnosticTool.inputSchema.properties.readTarget;
+  assert.equal(readTargetSchema.additionalProperties, false);
+  assert.deepEqual(readTargetSchema.required, ["companySlug"]);
+  assert.deepEqual(Object.keys(readTargetSchema.properties), ["companySlug", "projectSlug", "taskNumber"]);
   assert.doesNotMatch(JSON.stringify(response), /personal-test-token/u);
 });
 
@@ -3055,6 +3059,112 @@ test("generic diagnostics return independent live checks and never claim write r
   }
   assert.match(payload.liveVerification.instructionRefresh.instructions, /unless the user forbids changes/u);
   assert.match(payload.liveVerification.instructionRefresh.instructions, /unchanged templates are a no-op/u);
+});
+
+test("diagnostics prepare an exact native read despite an independent folder blocker", async () => {
+  const readTarget = { companySlug: "known-company", projectSlug: "known-project", taskNumber: 73 };
+  const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics", readTarget,
+    folderOnboarding: { folderPath: "/client/folder" },
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    folderDiagnosticPrepare: async () => { throw Object.assign(new Error("private file bytes"), { code: "ENOENT" }); },
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.workingFolder.status, "blocked");
+  const read = payload.liveVerification.read;
+  assert.equal(read.state, "client_read_required");
+  assert.equal(read.readResult, "not_checked");
+  assert.equal(read.invocation, "direct");
+  assert.equal(read.namespace, "mcp__trelio");
+  assert.deepEqual(read.nextCall, { toolName: "get_task", arguments: readTarget });
+  assert.equal(read.targetSource, "request");
+  assert.ok(read.insufficientEvidence.includes("empty_nested_ALL_TOOLS"));
+  assert.equal(payload.readiness.checks.toolExposure, "not_checked");
+  assert.equal(payload.readiness.checks.protectedContext, "not_checked");
+  assert.doesNotMatch(JSON.stringify(payload), /private file bytes|runtimeSessionProof|knownInstructionLayerKeys/u);
+});
+
+test("diagnostic next read selects an existing scope or company discovery without executing a proxy", async () => {
+  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+    const scope = { companySlug: "company", projectSlug: "project" };
+    for (const workingFolder of [{ status: "ready", scope }, { status: "not_checked" }]) {
+      const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+        clientKind, intent: "diagnostics",
+      }, {
+        localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+        codexRoutingPlan: async () => ({ status: "ready" }),
+        folderDiagnosticPrepare: async () => workingFolder,
+      });
+      const payload = JSON.parse(result.content[0].text);
+      assert.deepEqual(payload.liveVerification.read.nextCall, workingFolder.scope
+        ? { toolName: "get_agent_instructions", arguments: scope }
+        : { toolName: "list_companies", arguments: {} });
+      assert.equal(payload.liveVerification.read.readResult, "not_checked");
+      assert.deepEqual(payload.workingFolder, workingFolder);
+    }
+  }
+});
+
+test("diagnostic read target cannot rebind the folder or masquerade as read evidence", async () => {
+  const folder = { status: "ready", scope: { companySlug: "folder-company" } };
+  const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics", readTarget: { companySlug: "request-company" },
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    folderDiagnosticPrepare: async () => folder,
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(payload.liveVerification.read.nextCall.arguments, { companySlug: "request-company" });
+  assert.deepEqual(payload.liveVerification.context.arguments, folder.scope);
+  assert.deepEqual(payload.workingFolder, folder);
+  for (const readTarget of [null, "company", [], {}, { companySlug: 123 },
+    { companySlug: "company", projectSlug: {} }, { companySlug: "https://private.example" },
+    { companySlug: "company", taskNumber: 73 }, { companySlug: "company", projectSlug: "project", taskNumber: -1 },
+    { companySlug: "company", readResult: "confirmed" }, { companySlug: "company", runtimeSessionProof: {} }]) {
+    await assert.rejects(handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+      clientKind: "codex", intent: "diagnostics", readTarget,
+    }, { localPrerequisiteDiagnosis: async () => assert.fail("invalid input must fail before probes") }),
+    { code: "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT" });
+  }
+  for (const intent of ["onboarding", "folder_onboarding"]) {
+    await assert.rejects(handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+      clientKind: "codex", intent, readTarget: { companySlug: "company" },
+      ...(intent === "folder_onboarding" ? { folderOnboarding: { folderPath: "/client/folder" } } : {}),
+    }), { code: "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT" });
+  }
+});
+
+test("diagnostic input failures retain their typed code through the actual MCP wire response", async () => {
+  for (const [intent, readTarget] of [["diagnostics", { companySlug: 123 }], ["onboarding", { companySlug: "company" }]]) {
+    const response = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 41, method: "tools/call", params: {
+      name: "diagnose_trelio_installation", arguments: { clientKind: "codex", intent, readTarget },
+    } });
+    assert.equal(response.result.isError, true);
+    const error = JSON.parse(response.result.content[0].text);
+    assert.equal(error.code, "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT");
+  }
+});
+
+test("diagnostic read plan preserves hook and service blockers without claiming a read failure", async () => {
+  for (const scenario of ["routing", "service", "git"]) {
+    const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+      clientKind: "codex", intent: "diagnostics", readTarget: { companySlug: "company" },
+    }, {
+      localPrerequisiteDiagnosis: async () => scenario === "git"
+        ? { ...readyLocalInstallationDiagnosis, git: { status: "missing" } } : readyLocalInstallationDiagnosis,
+      codexRoutingPlan: async () => scenario === "routing"
+        ? { status: "action_required", missingNamespaces: ["mcp__trelio"], restartRequired: true } : { status: "ready" },
+      publicServiceDiagnosis: async () => ({ state: scenario === "service" ? "unavailable" : "available", attempts: [] }),
+    });
+    const read = JSON.parse(result.content[0].text).liveVerification.read;
+    assert.equal(read.readResult, "not_checked");
+    assert.equal(read.state, scenario === "routing" ? "prerequisite_action_required"
+      : scenario === "service" ? "public_service_not_confirmed" : "client_read_required");
+    assert.equal(read.nextCall?.toolName ?? null, scenario === "git" ? "get_agent_instructions" : null);
+  }
 });
 
 test("Codex diagnostics keep direct model tool exposure unverified despite ready components and routing", async () => {

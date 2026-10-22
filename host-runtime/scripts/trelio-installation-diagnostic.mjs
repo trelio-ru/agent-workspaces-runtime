@@ -9,6 +9,7 @@
  */
 
 import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPACES } from "./trelio-codex-routing.mjs";
+import { buildDiagnosticReadVerification } from "./trelio-diagnostic-read-plan.mjs";
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
@@ -310,6 +311,7 @@ export const buildTrelioInstallationDiagnostic = ({
   codexLegacyMcpMigration = null,
   workingFolder = null,
   publicService = null,
+  readTarget = null,
 }) => {
   const clientKind = requireEnum(rawClientKind, CLIENT_KINDS, "clientKind");
   const intent = requireEnum(rawIntent, INTENTS, "intent");
@@ -445,6 +447,7 @@ export const buildTrelioInstallationDiagnostic = ({
     } : {}),
     liveVerification: {
       ...(intent === "diagnostics" ? {
+        read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions }),
         connectionRecovery: {
           ...buildTrelioConnectionRecovery(publicService, requiredActions),
           ...(clientKind === "codex" ? { clientInspection: "clientInspection.mcpRecovery" } : {}),

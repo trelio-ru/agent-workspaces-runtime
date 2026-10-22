@@ -89,7 +89,12 @@ Local MCP предоставляет read-only `diagnose_trelio_installation`: �
 host-owned doctor Node/Git/plugin/session/pairing с Codex direct-routing plan и
 возвращает ordered typed actions. Сам tool не устанавливает компоненты, не
 применяет direct-routing plan, не запускает login и не объявляет hook одобренным;
-OAuth и runtime proof подтверждаются отдельными live reads. До MCP initialize
+OAuth и runtime proof подтверждаются отдельными live reads. Для диагностики
+optional `readTarget={companySlug,projectSlug?,taskNumber?}` задаёт известную
+задачу/область. `liveVerification.read.nextCall` готовит одно обычное прямое чтение;
+пустой `ALL_TOOLS` не является отказом, фактический результат остаётся `not_checked`.
+Старые явные привязки папки обновляются тем же scope/CAS refresh после protected read.
+До MCP initialize
 Codex-host автоматически удаляет из пользовательского `config.toml` exact
 legacy-регистрацию `mcp_servers.trelio-mcp` вместе с её дочерними таблицами.
 Это product-owned migration без повторного подтверждения; остальные MCP server

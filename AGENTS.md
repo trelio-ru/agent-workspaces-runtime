@@ -114,6 +114,8 @@ publication tooling также остаются вне этого публичн
   бюджетные подсказки bundled skill относятся только к доступным nested tools.
   Missing direct schema сразу направляет в read-only диагностику по этому
   контракту; исправление предлагается по evidence с сохранением approval.
+  Diagnostic read plan выбирает exact следующий native read, но держит результат
+  not_checked до client response; request target не меняет folder scope.
   Public availability/recovery измеряется bounded anonymous probes; doctor
   не считается reconnect. Restart/new chat требует отдельного evidence.
   Stale MCP: предложи переключить сам плагин либо полностью выйти из приложения;

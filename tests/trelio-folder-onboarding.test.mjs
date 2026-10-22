@@ -122,6 +122,68 @@ test("diagnostics without the client root do not infer a working folder", async 
     { code: "TRELIO_FOLDER_ONBOARDING_INVALID_INPUT" });
 });
 
+// Published onboarding templates predating runtime-owned folder refresh.
+// Keep fictional names/slugs; production instruction files never become fixtures.
+const legacyCompanySentences = [
+  'Эта обычная локальная папка задаёт Trelio-контекст компании «Тестовая компания»\n(`test-company`) и не связывает с Trelio Git-репозиторий.',
+  'Эта обычная локальная папка задаёт Trelio-контекст компании «Тестовая компания» (`test-company`) и не связывает с Trelio Git-репозиторий.',
+  'Эта рабочая папка связана с компанией Trelio «Тестовая компания» (`test-company`).',
+];
+const legacyManagedBlock = (companySentence, projectSentence = "") => [
+  "<!-- trelio-agent-workspaces:start -->", "## Контекст Trelio", "",
+  companySentence, projectSentence, "Старый рабочий текст.", "<!-- trelio-agent-workspaces:end -->",
+].filter(Boolean).join("\n");
+
+for (const [index, sentence] of legacyCompanySentences.entries()) {
+  for (const projectBound of [false, true]) {
+    test(`legacy binding ${index}/${projectBound} refreshes the same scope with original personal bytes`, async () => {
+      const root = await makeRoot();
+      const target = path.join(root, "AGENTS.md");
+      const prefix = "# Personal  \r\n\r\n";
+      const suffix = "\r\n\r\nKeep this rule  \r\n";
+      const block = legacyManagedBlock(sentence, projectBound ? 'Работа ограничена проектом «Рабочий проект» (`work-project`).' : "")
+        .replaceAll("\n", "\r\n");
+      const before = prefix + block + suffix;
+      await fs.writeFile(target, before);
+      const diagnostic = await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex");
+      assert.equal(diagnostic.status, "refresh_available");
+      assert.deepEqual(diagnostic.scope, { companySlug: "test-company", ...(projectBound ? { projectSlug: "work-project" } : {}) });
+      assert.equal(diagnostic.refresh.after, "successful_protected_read_for_exact_scope");
+      assert.equal(await fs.readFile(target, "utf8"), before, "diagnosis itself stays read-only");
+      const parameters = diagnostic.refresh.action.arguments.parameters;
+      await assert.rejects(applyTrelioFolderOnboarding({ ...parameters, company: { name: "Other", slug: "other" } }),
+        { code: "TRELIO_FOLDER_ONBOARDING_BINDING_MISMATCH" });
+      await applyTrelioFolderOnboarding(parameters);
+      const after = await fs.readFile(target, "utf8");
+      assert.ok(after.startsWith(prefix));
+      assert.ok(after.endsWith(suffix));
+      assert.match(after, /Папка привязана к компании «Тестовая компания» \(`test-company`\)/u);
+      assert.equal((after.match(/Работа ограничена проектом/gu) ?? []).length, projectBound ? 1 : 0);
+      assert.equal((await prepareTrelioFolderDiagnostic({ folderPath: root }, "codex")).status, "ready");
+    });
+  }
+}
+
+test("legacy scope parsing rejects mixed, duplicated and malformed declarations without widening", async () => {
+  const canonical = 'Папка привязана к компании «Тестовая компания» (`test-company`). Это контекст работы, а не привязка Git-репозитория.';
+  const legacy = legacyCompanySentences[0];
+  for (const [company, project] of [
+    [legacy + "\n" + canonical, ""], [legacy + "\n" + legacy, ""],
+    [legacy.replace("test-company", "invalid.company"), ""],
+    [legacy, 'Работа ограничена проектом «Проект» (`invalid.project`).'],
+    [legacy, ' Работа ограничена проектом «Проект» (`work-project`).'],
+    [legacy, 'Работа ограничена проектом «Проект» (`work-project`).\nРабота ограничена проектом «Другой» (`other`).'],
+  ]) {
+    const root = await makeRoot();
+    const target = path.join(root, "AGENTS.md");
+    const before = legacyManagedBlock(company, project);
+    await fs.writeFile(target, before);
+    await assert.rejects(prepareTrelioFolderDiagnostic({ folderPath: root }, "codex"),
+      { code: "TRELIO_FOLDER_ONBOARDING_BINDING_AMBIGUOUS" });
+    assert.equal(await fs.readFile(target, "utf8"), before);
+  }
+});
+
 test("diagnostic refresh preserves personal instructions byte for byte and is idempotent", async () => {
   const root = await configuredRoot();
   const { current, outdated } = await makeTemplateOutdated(root);

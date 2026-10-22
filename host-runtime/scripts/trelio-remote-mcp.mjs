@@ -77,6 +77,7 @@ import {
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
 import { diagnosePublicTrelioService } from "./trelio-public-service-diagnostic.mjs";
+import { DiagnosticReadTargetError, normalizeDiagnosticReadTarget } from "./trelio-diagnostic-read-plan.mjs";
 import {
   TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
   TrelioInstallationDiagnosticError,
@@ -3883,6 +3884,17 @@ const LOCAL_TOOLS = [
         folderOnboarding: {
           type: "object",
         },
+        readTarget: {
+          type: "object",
+          description: "Next direct read.",
+          additionalProperties: false,
+          required: ["companySlug"],
+          properties: {
+            companySlug: { type: "string", pattern: "^[a-z0-9_-]{1,120}$" },
+            projectSlug: { type: "string", pattern: "^[a-z0-9_-]{1,120}$" },
+            taskNumber: { type: ["string", "integer"], description: "Requires projectSlug." },
+          },
+        },
       },
     },
     annotations: {
@@ -5778,17 +5790,21 @@ export const handleToolCall = async (
       !rawArguments
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
-      || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding"].includes(key))
+      || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding", "readTarget"].includes(key))
       || !["codex", "claude-code", "cursor", "antigravity"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
+      || (rawArguments.intent !== "diagnostics" && rawArguments.readTarget !== undefined)
     ) {
       throw new TrelioInstallationDiagnosticError(
         "TRELIO_INSTALLATION_DIAGNOSTIC_INVALID_INPUT",
         "Диагностика принимает clientKind/intent; folder_onboarding дополнительно требует folderOnboarding.",
       );
     }
+    // Validate the complete compact target before any local/public probes.
+    // It selects a read only; it is never merged into the folder refresh plan.
+    const readTarget = normalizeDiagnosticReadTarget(rawArguments.readTarget);
     if (folderOnboardingIntent) {
       const prepared = await folderOnboardingPrepare({
         ...rawArguments.folderOnboarding,
@@ -5854,6 +5870,7 @@ export const handleToolCall = async (
       codexLegacyMcpMigration,
       workingFolder,
       publicService,
+      readTarget,
     }));
   }
   if (COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(name)) {
@@ -6330,6 +6347,8 @@ const safeErrorPayload = (error) => {
       || error instanceof ProcessDiagnosticError
       || error instanceof HostRuntimeRecoveryError
       || error instanceof CodexRoutingConfigError
+      || error instanceof TrelioInstallationDiagnosticError
+      || error instanceof DiagnosticReadTargetError
       || (error instanceof TrelioApiError
         && error.statusCode === 409
         && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED")
