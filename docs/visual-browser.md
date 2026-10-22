@@ -402,7 +402,7 @@ ready, explicit logout без восстановления входа и crash �
 сравнивает OS foreground до/после каждого действия, без activate/restore tricks.
 Native OS vault и detached worker проходят отдельно. CI обязателен на macOS,
 Windows x64/ARM64 и desktop Linux; local VM не заменяет hosted gate.
-Detached fixture сохраняет исходный assertion при ошибке shutdown и всегда
+Detached session/authentication fixtures сохраняют исходный assertion при ошибке shutdown и всегда
 закрывает свой HTTP listener и keyring handle. Если claim не снят, private
 профиль не удаляется. Закрытые fixture stages различают ожидание input/manual,
 остановку browser, snapshot и снятие claim, без bearer/PID/path/native output.

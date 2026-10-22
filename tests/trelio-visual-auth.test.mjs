@@ -138,6 +138,9 @@ test('credential ciphertext survives restart, is separate from sessions and cann
 });
 
 test('native browser performs login and TOTP privately, gates images and reuses saved authenticated state', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180000 }, async () => {
+  // Preflight before allocating a listener: an absent exact native dependency
+  // must fail normally rather than leave this test process alive indefinitely.
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-auth-native-')));
   let passwordSubmits = 0, codeSubmits = 0;
   const server = http.createServer(async (req, res) => {
@@ -158,7 +161,6 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
-  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   let activeStore = store, activeDef = def;
   const make = () => new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
   let browser = make();
@@ -195,6 +197,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
 });
 
 test('detached authentication uses the same account vault, pins the recipe and exposes no credentials in its owner file', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180000 }, async () => {
+  const { AsyncEntry } = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-auth-worker-')));
   const server = http.createServer(async (req, res) => {
     const bytes = []; for await (const chunk of req) bytes.push(chunk);
@@ -208,7 +211,6 @@ test('detached authentication uses the same account vault, pins the recipe and e
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), start = Date.now();
   const accountId = randomUUID(), companyId = randomUUID(), memberId = randomUUID();
   const env = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-visual-auth', TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: accountId }), TRELIO_SKILL_COMPANY_ID: companyId, TRELIO_SKILL_MEMBER_ID: memberId, TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({ apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 150000 }), TRELIO_BROWSER_SESSION_STARTED_AT: String(start), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(start + 150000) };
-  const { AsyncEntry } = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const scope = visualStorageScope({ origin: 'https://example.test', skillId: env.TRELIO_SKILL_ID, accountId });
   const store = new ProtectedVisualStore({ directory, scope, AsyncEntry });
   const call = (operation, args = {}, authentication = def) => runVisualSession({ origins: [origin], authentication, operation, args, env, fixture: { directory } });
@@ -219,6 +221,8 @@ test('detached authentication uses the same account vault, pins the recipe and e
     }
     assert.fail('owned worker cleanup deadline');
   };
+  const diagnostic = () => fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => 'unavailable');
+  let failure;
   try {
     await store.writeCredentials(credential(def)); store.close();
     assert.equal((await call('navigate', { url: origin })).state, 'preparing');
@@ -227,18 +231,38 @@ test('detached authentication uses the same account vault, pins the recipe and e
       status = await call('status'); if (status.state !== 'preparing') break;
       await new Promise(resolve => setTimeout(resolve, 250));
     }
-    assert.equal(status.state, 'saved_unverified', status.reason);
+    assert.equal(status.state, 'saved_unverified', JSON.stringify({reason:status.reason,diagnostic:await diagnostic()}));
     const changed = recipe(origin); changed.steps[0].fields.password = '#different-password';
     assert.equal((await call('authenticate', {}, changed)).reason, 'observation_mode_mismatch');
     assert.equal((await call('authenticate')).state, 'saved_unverified');
     const owner = await fs.readFile(path.join(store.directory, 'active', 'owner.json'), 'utf8');
-    assert.doesNotMatch(owner, /SYNTHETIC_PASSWORD|SYNTHETIC_LOGIN|GEZDGNBV/);
+    // Do not let a failed assertion print owner.json: even this synthetic
+    // worker descriptor contains the private loopback control bearer.
+    assert.equal(/SYNTHETIC_PASSWORD|SYNTHETIC_LOGIN|GEZDGNBV/u.test(owner), false, 'owner metadata contains no credential values');
     assert.equal((await call('screenshot')).state, 'ready');
     await call('close'); await untilClosed();
     assert.equal((await store.readCredentials()).attempt.state, 'complete');
-  } finally {
-    await call('close').catch(() => {}); await untilClosed(); await store.remove();
-    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch(error) { failure=error; }
+  finally {
+    let stopped=false,evidence='';
+    try {
+      await call('close'); await untilClosed(); stopped=true; await store.remove();
+    } catch(error) {
+      // Preserve the FIRST native authentication assertion. Cleanup is not
+      // permission to erase an active profile, kill a disk PID or hide that
+      // error behind an untilClosed timeout. Same bounded cleanup budget.
+      failure ||= error;
+    } finally {
+      store.close();
+      server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));
+      if(failure)evidence=await diagnostic();
+      if(stopped)await fs.rm(directory,{recursive:true,force:true,maxRetries:10,retryDelay:200});
+    }
+    if(failure){
+      // The fixture writer accepts closed stages/counts only, never the
+      // credential bundle, owner descriptor, browser content or native stderr.
+      failure.message+=`; synthetic authentication worker evidence: ${evidence}`;
+      throw failure;
+    }
   }
 });
