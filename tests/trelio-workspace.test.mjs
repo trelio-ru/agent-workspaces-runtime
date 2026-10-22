@@ -3556,11 +3556,14 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       "--workspace",
       workspaceId,
     ];
+    // Portable-Run fixtures use a file credential and their own HTTP server.
+    // Cold compiling a Keychain helper inside each synthetic HOME is outside
+    // this workflow; dedicated native Keychain cases below enable/check it.
     const executionOptions = {
       cwd: temporaryDirectory,
       encoding: "utf8",
       timeout: 10_000,
-      env: { ...process.env, HOME: homeDirectory },
+      env: { ...process.env, HOME: homeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
     };
     const expectedWorkspaceDirectory = path.join(
       homeDirectory,
@@ -3570,7 +3573,11 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
     );
 
     const firstOpenPromise = execFileAsync(process.execPath, command, executionOptions);
-    await firstStartSeen;
+    // A child that fails before the synthetic server start must reject this
+    // fixture instead of leaving its barrier/server alive indefinitely.
+    await Promise.race([firstStartSeen, firstOpenPromise.then(() => {
+      throw new Error("Synthetic open completed before its start barrier");
+    })]);
     try {
       await assert.rejects(
         execFileAsync(process.execPath, command, executionOptions),
@@ -4008,7 +4015,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: temporaryDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: firstHomeDirectory },
+        env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
     const firstWorkspaceDirectory = path.join(firstRootDirectory, "workspace");
@@ -4033,7 +4040,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: firstWorkspaceDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: firstHomeDirectory },
+        env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
     assert.match(portableCheckpoint.stdout, /Draft snapshot сохранён/u);
@@ -4055,7 +4062,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
           cwd: firstWorkspaceDirectory,
           encoding: "utf8",
           timeout: 10_000,
-          env: { ...process.env, HOME: firstHomeDirectory },
+          env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
         },
       ),
       /нет новых изменений/u,
@@ -4082,7 +4089,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: firstWorkspaceDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: firstHomeDirectory },
+        env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
     assert.match(checkpointed.stdout, /Draft snapshot сохранён/u);
@@ -4110,7 +4117,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: temporaryDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: secondHomeDirectory },
+        env: { ...process.env, HOME: secondHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
 
@@ -4179,7 +4186,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: secondWorkspaceDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: secondHomeDirectory },
+        env: { ...process.env, HOME: secondHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
     const latestServerDraftHead = draftHead;
@@ -4202,7 +4209,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: temporaryDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: firstHomeDirectory },
+        env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     ).then(() => null, (error) => error);
     assert.ok(divergence, "diverged same-Run history must stop the original open");
@@ -4241,7 +4248,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         cwd: temporaryDirectory,
         encoding: "utf8",
         timeout: 10_000,
-        env: { ...process.env, HOME: firstHomeDirectory },
+        env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
       },
     );
     assert.equal(
