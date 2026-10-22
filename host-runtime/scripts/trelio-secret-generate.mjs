@@ -19,6 +19,7 @@ import {
 } from "./trelio-workspace.mjs";
 import {
   buildLocalAgentSecretWrite,
+  buildLocalSecretRequestFingerprint,
   normalizeAgentSecretNewCard,
 } from "./trelio-secret-chat.mjs";
 
@@ -174,8 +175,11 @@ export const generateDeterministicPassword = ({ key, seed, length }) => {
   }
 };
 
-export const buildGeneratedAgentSecretWrite = async ({ input, context, companyEncryption, token }) => {
-  const fields = input.newSecret?.fields ?? context.fields;
+export const normalizeGeneratedPasswordPolicy = (fields, generatedFields) => {
+  if (!Array.isArray(generatedFields) || generatedFields.length < 1 || generatedFields.length > 50
+    || generatedFields.some(field => !isRecord(field) || Object.keys(field).some(key => !["key", "generator", "length"].includes(key))
+      || !FIELD_KEY.test(field.key ?? "") || field.generator !== "password"
+      || !Number.isSafeInteger(field.length) || field.length < PASSWORD_LENGTH_MIN || field.length > PASSWORD_LENGTH_MAX)) invalid();
   if (
     !Array.isArray(fields) || fields.length < 1 || fields.length > 50
     || fields.some((field) => (
@@ -183,20 +187,30 @@ export const buildGeneratedAgentSecretWrite = async ({ input, context, companyEn
     ))
     || new Set(fields.map((field) => field.key)).size !== fields.length
   ) invalid();
-  const requested = new Map(input.generatedFields.map((field) => [field.key, field]));
+  const requested = new Map(generatedFields.map((field) => [field.key, field]));
   if (
-    requested.size !== input.generatedFields.length
-    || input.generatedFields.some((field) => !fields.some((candidate) => (
+    requested.size !== generatedFields.length
+    || generatedFields.some((field) => !fields.some((candidate) => (
       candidate.key === field.key && candidate.type === "password"
     )))
     || fields.some((field) => field.required && !requested.has(field.key))
   ) invalid();
 
+  return fields.flatMap(field => requested.has(field.key) ? [requested.get(field.key)] : []);
+};
+
+/** SAME HMAC password engine for human and managed-device callers. Binding is
+ * assembled by the admitted host, not a model-supplied seed/key or generator. */
+export const generateAgentSecretPasswordValues = ({ key, policy, seed }) => Object.fromEntries(policy.map(field => [field.key,
+  generateDeterministicPassword({ key, seed: `${seed}\0${field.key}\0${field.length}`, length: field.length })]));
+
+export const buildGeneratedAgentSecretWrite = async ({ input, context, companyEncryption, token }) => {
+  const fields = input.newSecret?.fields ?? context.fields;
+  const policy = normalizeGeneratedPasswordPolicy(fields, input.generatedFields);
   // Normalize generation order to the schema, so a semantically identical
   // retry does not change the derived bytes merely because JSON array order did.
-  const policy = fields.flatMap((field) => requested.has(field.key) ? [requested.get(field.key)] : []);
   const key = buildGenerationKey({ context, companyEncryption, token });
-  const values = {};
+  let values;
   try {
     const commonSeed = canonicalJson({
       companyId: context.companyId,
@@ -208,13 +222,7 @@ export const buildGeneratedAgentSecretWrite = async ({ input, context, companyEn
       newSecret: input.newSecret ?? null,
       policy,
     });
-    for (const field of policy) {
-      values[field.key] = generateDeterministicPassword({
-        key,
-        seed: `${commonSeed}\0${field.key}\0${field.length}`,
-        length: field.length,
-      });
-    }
+    values = generateAgentSecretPasswordValues({ key, policy, seed: commonSeed });
   } finally {
     key.fill(0);
   }
@@ -332,4 +340,50 @@ export const handleGeneratedAgentSecretSave = async (
         };
     return { isError: true, structuredContent: safe, content: [{ type: "text", text: safe.message }] };
   }
+};
+
+/** Managed generation reuses the SAME model-free generator/fingerprint and
+ * Secret writer. Only a native sealed create+generate decision admits this
+ * host callback. An opaque requireToken handle is never generation material.
+ * Preflight/read-back occurs BEFORE key access; uncertain write is not retried. */
+export const handleAssistantGeneratedPrivateSecret = async ({ origin, input, scope, token,
+  withGenerationKey, sendRequest = request }) => {
+  const receipt = result => {
+    if (!isRecord(result) || result.created !== true || result.secret?.id !== input.clientRequestId
+      || result.secret?.scopeType !== "assistant" || result.secret?.currentVersion !== 1 || result.secret?.hasValue !== true) invalid();
+    // Project only structural receipt fields even if a broken upstream ever
+    // adds a value/fingerprint to its response. Never echo a native object.
+    return { created: true, secret: { id: result.secret.id, scopeType: "assistant", currentVersion: 1, hasValue: true } };
+  };
+  const query = new URLSearchParams(input);
+  const context = await (await sendRequest(origin, token,
+    "/api/agent-secrets/generated-save-context?" + query)).json();
+  if (context?.completed === true) {
+    if (!isRecord(context.receipt) || Object.keys(context).sort().join(",") !== "completed,receipt") invalid();
+    return receipt(context.receipt);
+  }
+  if (!isRecord(context) || context.schemaVersion !== 1 || context.completed !== false
+    || context.secretId !== input.clientRequestId || context.runId !== input.runId
+    || ["assistantUserId", "deviceId", "companyId", "taskId"].some(key => context[key] !== scope[key])
+    || typeof withGenerationKey !== "function") invalid();
+  const policy = normalizeGeneratedPasswordPolicy(context.fields, context.generatedFields);
+  // The exact owner decision, assistant/device, company/task, original Run and
+  // schema all separate the existing protected device key's HMAC domain.
+  return withGenerationKey(async key => {
+    const binding = { ...scope, ...input, secretId: context.secretId, fields: context.fields, policy };
+    const values = generateAgentSecretPasswordValues({ key, policy, seed: canonicalJson(binding) });
+    const requestFingerprint = buildLocalSecretRequestFingerprint({ key, source: "assistant_generated", binding: { ...binding, values } });
+    try {
+      const result = await (await sendRequest(origin, token,
+        `/api/agent-secrets/secrets/${context.secretId}/value-from-bridge`, {
+          method: "PUT", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...input, expectedCurrentVersion: 0, requestFingerprint, values }),
+        })).json();
+      return receipt(result);
+    } finally {
+      // Like the ordinary human primitive, immutable JS strings live only in
+      // this protected invocation; no file, clipboard or model output is used.
+      for (const key of Object.keys(values)) delete values[key];
+    }
+  });
 };

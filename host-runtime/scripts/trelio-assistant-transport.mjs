@@ -360,7 +360,7 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,secretBrowserFill=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,secretBrowserFill=null,secretGeneration=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -382,6 +382,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     || Object.keys(secretBrowserFill).sort().join(',')!=='grantId,runId,workspaceId'
     || Object.values(secretBrowserFill).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateFill=secretBrowserFill===null?null:Object.freeze({...secretBrowserFill});
+  if(secretGeneration!==null && (!object(secretGeneration)
+    || Object.keys(secretGeneration).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId,workspaceId'
+    || ['clientRequestId','ownerDecisionId','runId','workspaceId'].some(key=>!uuid.test(secretGeneration[key]??''))
+    || typeof secretGeneration.expectedTaskUpdatedAt!=='string' || !Number.isFinite(Date.parse(secretGeneration.expectedTaskUpdatedAt))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const privateGeneration=secretGeneration===null?null:Object.freeze({...secretGeneration});
   let managedEncryptionDevice=null;
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
@@ -441,6 +446,18 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await assertIdentity();
       return assistantSkillCatalogueDirectory(configDirectory,identity);
     },
+    async withSecretGenerationKey(action){
+      if(!privateGeneration || typeof action!=='function')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass();
+      // SAME protected device credential, never the opaque requireToken handle
+      // or ambient human OAuth. The generator/fingerprint use their distinct
+      // domain and full reviewed binding. No extra key/vault slot is created.
+      return withCredential(async credential=>{
+        const key=Buffer.from(credential,'utf8');
+        try {const result=await action(key);await assertLivePass();return result;}
+        finally {key.fill(0);}
+      });
+    },
     async resolveSecretBrowserStorage({configDirectory,grantId,runId}){
       if(!privateFill || privateFill.grantId!==grantId || privateFill.runId!==runId
         || !path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -482,6 +499,26 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // general human payload resolver stay closed in a task invocation.
         rewritten='/api/digital-assistants/runtime/encryption/runtime';
         route={proofTool:'assistant_workspace_data_plane_read'};encryptionRuntime=true;
+      }else if(privateGeneration && requestOrigin===identity.origin
+        && (url.pathname==='/api/agent-secrets/generated-save-context'
+          || url.pathname===`/api/agent-secrets/secrets/${privateGeneration.clientRequestId}/value-from-bridge`)){
+        const expected={clientRequestId:privateGeneration.clientRequestId,ownerDecisionId:privateGeneration.ownerDecisionId,
+          expectedTaskUpdatedAt:privateGeneration.expectedTaskUpdatedAt,runId:privateGeneration.runId};
+        if(method==='GET' && url.pathname==='/api/agent-secrets/generated-save-context' && options.body===undefined
+          && [...url.searchParams.keys()].length===4 && new Set(url.searchParams.keys()).size===4
+          && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value)){
+          route={proofTool:'assistant_secret_generate_context'};
+        }else if(method==='PUT' && !url.search && url.pathname.endsWith('/value-from-bridge')){
+          let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+          if(!object(input) || Object.keys(input).sort().join(',')!=='clientRequestId,expectedCurrentVersion,expectedTaskUpdatedAt,ownerDecisionId,requestFingerprint,runId,values'
+            || !Object.entries(expected).every(([key,value])=>input[key]===value) || input.expectedCurrentVersion!==0
+            || !/^[a-f0-9]{64}$/u.test(input.requestFingerprint??'') || !object(input.values)
+            || Object.keys(input.values).length<1 || Object.keys(input.values).length>50
+            || Object.entries(input.values).some(([key,value])=>!/^[a-z][a-z0-9_]{0,63}$/u.test(key)
+              || typeof value!=='string' || value.length<16 || value.length>128))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          route={proofTool:'assistant_secret_generate_write'};
+        }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=url.pathname;
       }else if(privateFill && requestOrigin===identity.origin
         && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateFill.grantId}/`)){
         const base=`/api/agent-secrets/checkout-grants/${privateFill.grantId}`;

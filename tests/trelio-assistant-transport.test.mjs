@@ -738,7 +738,7 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile } from '../ho
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=null}={}) => {
+const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=null,secretGeneration=null}={}) => {
   const identity={schemaVersion:1,origin:encryptedTool?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
@@ -755,7 +755,7 @@ const workspaceProfileFixture = async ({encryptedTool=null,secretBrowserFill=nul
   const descriptor=encryptedTool?{schemaVersion:1,nativeTool:encryptedTool,arguments:encryptedTool==='get_task_sections'
     ? {...locator,sections:['comments']} : locator,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
     assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'}:null;
-  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,secretBrowserFill,
+  const profile=await createAssistantWorkspaceProfile({identity,store,host,client,encryptedTaskRead:descriptor,secretBrowserFill,secretGeneration,
     lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
   return {identity,pass,keys,store,credential,runtime,profile,descriptor,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
@@ -1244,4 +1244,55 @@ test('private browser profile admits only its original grant and Run, signs fres
   f.close();const before=privateReads;
   await assert.rejects(prepare(`${base}/consume`,{method:'POST',body:JSON.stringify({runId:binding.runId})}),/REVIEW_REQUIRED/);
   assert.equal(privateReads,before,'closed pass never reads the private device or signer');
+});
+
+
+test('private generation composes native sealed preflight, SAME protected key/password engine and one write without value output',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {handleAssistantGeneratedPrivateSecret}=await import('../host-runtime/scripts/trelio-secret-generate.mjs');
+  const input={runId:randomUUID(),clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  const descriptor={...input,workspaceId:randomUUID()},f=await workspaceProfileFixture({secretGeneration:descriptor});
+  const scope={assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.pass.companyId,taskId:f.pass.taskId};
+  const fields=[{key:'password',label:'Password',type:'password',required:true}];
+  const prepared={schemaVersion:1,completed:false,...scope,runId:input.runId,secretId:input.clientRequestId,fields,
+    generatedFields:[{key:'password',generator:'password',length:32}]};
+  const safe={created:true,secret:{id:input.clientRequestId,scopeType:'assistant',currentVersion:1,hasValue:true}};
+  let mode='pending',writes=0,keys=0,committed=false,original=null;
+  const prior=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);assert.equal(options.headers.get('authorization')===`Bearer ${f.credential}`,true);
+    const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));
+    const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
+    if(options.method===undefined||options.method==='GET'){
+      assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,'assistant_secret_generate_context',proof.issuedAt,proof.nonce].join('\n')),f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);
+      if(mode==='pending')return json({code:'ASSISTANT_OWNER_DECISION_REQUIRED'},403);
+      if(committed)return json({completed:true,receipt:{...safe,values:'MUST_NOT_OUTPUT'}});
+      if(mode==='foreign')return json({...prepared,companyId:randomUUID()});
+      if(mode==='revoked')f.close();
+      return json(prepared);
+    }
+    assert.equal(options.method,'PUT');assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,'assistant_secret_generate_write',proof.issuedAt,proof.nonce].join('\n')),f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);writes++;
+    const body=JSON.parse(options.body);
+    assert.equal(body.expectedCurrentVersion,0);assert.equal(body.clientRequestId,input.clientRequestId);
+    assert.equal(Object.keys(body.values).join(','),'password');assert.equal(body.values.password.length,32);
+    assert.equal(/^[a-f0-9]{64}$/u.test(body.requestFingerprint),true);
+    if(original)assert.equal(JSON.stringify(original)===JSON.stringify(body),true,'same native intent derives the same bytes');
+    original=body;
+    if(mode==='uncertain'){committed=true;throw new Error('Synthetic lost native response');}
+    return json({...safe,requestFingerprint:'MUST_NOT_OUTPUT',secret:{...safe.secret,values:'MUST_NOT_OUTPUT'}});
+  };
+  const invoke=()=>withWorkspaceExecutionProfile(f.profile,async()=>handleAssistantGeneratedPrivateSecret({
+    origin:f.identity.origin,input,scope,token:await common.requireToken(f.identity.origin),
+    withGenerationKey:action=>{keys++;return f.profile.withSecretGenerationKey(action);}}));
+  try{
+    await assert.rejects(invoke());assert.equal(keys,0);assert.equal(writes,0);
+    mode='foreign';await assert.rejects(invoke());assert.equal(keys,0);assert.equal(writes,0);
+    mode='valid';assert.deepEqual(await invoke(),safe);assert.equal(keys,1);assert.equal(writes,1);
+    assert.deepEqual(await invoke(),safe);assert.equal(writes,2,'separate explicit invocation, no hidden retry');
+    mode='uncertain';await assert.rejects(invoke());assert.equal(writes,3);
+    const before=keys;assert.deepEqual(await invoke(),safe);assert.equal(keys,before,'committed read-back precedes deriving material');assert.equal(writes,3);
+    committed=false;mode='revoked';await assert.rejects(invoke());assert.equal(writes,3,'revoked pass cannot reach value write');
+  }finally{globalThis.fetch=prior;}
+  const missing=await workspaceProfileFixture();
+  await assert.rejects(missing.profile.withSecretGenerationKey(()=>assert.fail('key leaked without native plan')));
 });

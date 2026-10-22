@@ -642,7 +642,9 @@ publication tooling также остаются вне этого публичн
 - Private Secret browser plans reuse the SAME one-use/native browser engine,
   with original grant/pass/device/Run binding and isolated fallback storage.
   No human profile, CLI/reveal or uncertain fill replay. Sealed empty-card receipts
-  remain metadata; no account/credential creation. Metadata operations
+  remain metadata. Separately reviewed NEW password generation reuses the same
+  HMAC/fingerprint/keyring writer, original pass/Run and protected device material;
+  no human intent flags, new vault, account signup or existing-card adoption. Metadata operations
   return before the local executor: [contract](docs/assistant-scheduler.md#private-secret-browser-use).
 
 - Saving rate-limit fixtures budget all sequential CLI calls plus setup/cleanup

@@ -1277,9 +1277,25 @@ operations under the observed task pass:
   company credential. Copy all original fields and request ID unchanged.
 - Returned `secret_browser_fill`: fixed grantId/targetUrl and Run identity. The
   SAME isolated Workspace worker invokes the existing browser-fill command.
+- `secret_generate`, `parameters={clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId}`,
+  with the original Run identity: a DIFFERENT sealed `create_private_secret`
+  intent includes native metadata, `runId` and password-only `generatedFields`.
+  Every required field must be generated (16–128 characters). The owner reviews
+  creation WITH generation; an empty-card decision cannot be upgraded.
+  The SAME Workspace worker checks the native/current materialized Run, then
+  uses host-only `generated-save-context` before accessing generation material.
+  Only this exact plan admits `value-from-bridge` for the original NEW card ID.
+  The SAME password/fingerprint primitive receives protected device material
+  through an internal callback, never the opaque token handle/human OAuth.
+  Its domain includes assistant/device/company/task/Run/decision/request/schema.
+  No extra master key, vault, credential files or human literal flag exists.
+  Card/version/audit/decision/receipt are one native commit; lost-result context
+  returns its safe receipt BEFORE generation. Other fingerprints conflict;
+  failed/uncertain write is never automatically retried. Receipt projection
+  excludes values/fingerprints even if an upstream object adds unexpected keys.
 
 The internal HTTP profile admits only that original grant/Run's existing
-preflight, consume and outcome paths. Native one-use proofs, current company
+preflight, consume/outcome or sealed generation context/write paths. Native one-use proofs, current company
 model/ACL/scopes and pass/device/Run locks apply through commit; no extra URL,
 body field or other Secret route can forward the device credential. Values
 remain in the protected browser process. Its owned fallback profile is isolated
@@ -1289,6 +1305,6 @@ Only value-free preflight and exact idempotent outcome reporting retain their
 existing bounded retries. An uncertain consume/fill is not repeated or switched
 to another browser. A successful fill is not task completion or a persisted
 processing receipt. Input from a task or website never authorizes disclosure,
-new account creation or ownership classification. Generated/save, CLI/reveal,
+new account creation or ownership classification. Existing-card generation/rotation, CLI/reveal,
 encrypted use, account registration and real Windows business E2E remain
 independent gates; this subset does not change businessReady=false.

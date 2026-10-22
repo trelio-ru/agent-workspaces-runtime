@@ -172,7 +172,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,secretBrowserFill=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,secretBrowserFill=null,secretGeneration=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -188,9 +188,10 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,secretBrowserFill,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,secretBrowserFill,secretGeneration,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
-      encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent}));
+      encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
+      withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
 };
 
@@ -899,13 +900,22 @@ export const validateAssistantWorkspacePlan = async raw => {
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
-  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run','secret_browser_fill'].includes(action.operation)
+  if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run','secret_browser_fill','secret_generate'].includes(action.operation)
     || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
     || action.parameters?.taskOutcome!==undefined && action.parameters.taskOutcome!=='no_status_change'
     || action.operation==='finish' && action.parameters?.taskOutcome!=='no_status_change'
     || Object.hasOwn(action.parameters??{},'nativeInput') || Object.hasOwn(action.parameters??{},'directory'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(action.operation==='secret_browser_fill' && (!action.parameters
     || Object.keys(action.parameters).sort().join(',')!=='grantId,targetUrl'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  if(action.operation==='secret_generate'){
+    if(!action.parameters || Object.keys(action.parameters).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId'
+      || ['clientRequestId','ownerDecisionId','runId'].some(key=>!new RegExp(UUID,'u').test(action.parameters[key]??''))
+      || !action.runIdentity || Object.keys(action.runIdentity).sort().join(',')!=='runId,workspaceId'
+      || Object.values(action.runIdentity).some(value=>!new RegExp(UUID,'u').test(value??''))
+      || action.parameters.runId!==action.runIdentity.runId || typeof action.parameters.expectedTaskUpdatedAt!=='string'
+      || !Number.isFinite(Date.parse(action.parameters.expectedTaskUpdatedAt)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    return {...snapshot,runIdentity:action.runIdentity,invocation:null};
+  }
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
   const invocation=buildTrelioWorkspaceActionInvocation(action);
   if(action.operation==='skill_run'){
@@ -1043,7 +1053,7 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
 export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProductionAssistantWorkspace,
   loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs')}={}) => {
   const plan=await validateAssistantWorkspacePlan(raw);
-  return withProfile(async({identity,client,store,host})=>{
+  return withProfile(async({identity,client,store,host,withSecretGenerationKey})=>{
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
     const active=validateAssistantActivePass(await host.readActivePass(),identity);
@@ -1074,6 +1084,13 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     if(!inspecting && !skill && plan.localAction.operation!=='open') {
       const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    }
+    if(plan.localAction.operation==='secret_generate'){
+      const {handleAssistantGeneratedPrivateSecret}=await import('./trelio-secret-generate.mjs');
+      const result=await handleAssistantGeneratedPrivateSecret({origin:identity.origin,token,input:plan.localAction.parameters,
+        scope:{assistantUserId:identity.assistantId,deviceId:identity.deviceId,companyId:active.companyId,taskId:active.taskId},
+        withGenerationKey:withSecretGenerationKey});
+      return {schemaVersion:1,operation:'secret_generate',stdout:JSON.stringify(result),stderr:''};
     }
     const action={...plan.localAction,parameters:{...plan.localAction.parameters,
       ...(plan.localAction.operation==='open'?{directory:root}:{}),
@@ -1123,7 +1140,8 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       throw error;
     }
   },{secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
-    ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null});
+    ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null,
+    secretGeneration:plan.localAction.operation==='secret_generate'?{...plan.localAction.parameters,workspaceId:plan.runIdentity.workspaceId}:null});
 };
 
 export const runAssistantWorkspaceWorker = async ({input=process.stdin,output=process.stdout,executePlan=executeAssistantWorkspacePlan}={}) => {

@@ -674,3 +674,16 @@ test('private browser continuation reuses the exact common invocation and refuse
     await assert.rejects(validateAssistantWorkspacePlan({...raw,localAction:{...raw.localAction,parameters:{grantId,targetUrl:target}}}));
   }
 });
+
+
+test('private generation accepts only structural sealed coordinates in its SAME Workspace worker plan',async()=>{
+  const {validateAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const base=workspacePlan(),runId=base.localAction.parameters.runId,workspaceId=base.localAction.parameters.workspaceId;
+  const parameters={runId,clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  const raw={...base,localAction:{schemaVersion:1,operation:'secret_generate',runIdentity:{runId,workspaceId},parameters}};
+  const value=await validateAssistantWorkspacePlan(raw);assert.equal(value.invocation,null);
+  for(const extra of [{values:{password:'PRIVATE'}},{token:'PRIVATE'},{key:'PRIVATE'},{metadata:{}},{generatedFields:[]},
+    {userExplicitlyRequestedGeneratedPersistentStorage:true},{runId:randomUUID()}]){
+    await assert.rejects(validateAssistantWorkspacePlan({...raw,localAction:{...raw.localAction,parameters:{...parameters,...extra}}}));
+  }
+});

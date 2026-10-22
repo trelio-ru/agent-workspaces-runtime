@@ -177,6 +177,15 @@ export const protectNewSecretMetadata = async (card, context, companyEncryption)
   };
 };
 
+/** Shared logical-write fingerprint before randomized encryption. The private
+ * key never leaves the caller; native assistant ownership supplies a different
+ * domain/binding without inventing human consent flags or a second codec. */
+export const buildLocalSecretRequestFingerprint = ({ key, source, binding }) => {
+  if (!Buffer.isBuffer(key) || !key.length || !["chat", "generated", "assistant_generated"].includes(source)) invalid();
+  return crypto.createHmac("sha256", key).update(`trelio:local-secret-${source}:v1\0`)
+    .update(canonicalJson(binding)).digest("hex");
+};
+
 export const buildLocalAgentSecretWrite = async ({
   input,
   context,
@@ -218,16 +227,12 @@ export const buildLocalAgentSecretWrite = async ({
   if (!key.length) invalid();
   let fingerprint;
   try {
-    fingerprint = crypto.createHmac("sha256", key)
-      // Domain separation prevents a generated request from colliding with a
-      // chat save even if all public coordinates and the resulting bytes match.
-      .update(`trelio:local-secret-${source}:v1\0`)
-      .update(canonicalJson({
-        companyId: context.companyId, memberId: context.companyMemberId,
-        requestId: input.clientRequestId, secretId: context.secretId,
-        runId: input.runId, expectedCurrentVersion: input.expectedCurrentVersion,
-        newSecret: input.newSecret ?? null, values,
-      })).digest("hex");
+    fingerprint = buildLocalSecretRequestFingerprint({ key, source, binding: {
+      companyId: context.companyId, memberId: context.companyMemberId,
+      requestId: input.clientRequestId, secretId: context.secretId,
+      runId: input.runId, expectedCurrentVersion: input.expectedCurrentVersion,
+      newSecret: input.newSecret ?? null, values,
+    } });
   } finally {
     key.fill(0);
   }
