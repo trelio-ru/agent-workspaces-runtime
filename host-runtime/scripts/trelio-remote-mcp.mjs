@@ -77,10 +77,10 @@ import {
   writePrivateJsonFile,
 } from "./trelio-workspace.mjs";
 import { diagnosePublicTrelioService } from "./trelio-public-service-diagnostic.mjs";
-import { DiagnosticReadTargetError, normalizeDiagnosticReadTarget } from "./trelio-diagnostic-read-plan.mjs";
 import {
   TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
   TrelioInstallationDiagnosticError,
+  normalizeDiagnosticReadTarget,
   buildTrelioInstallationDiagnostic,
 } from "./trelio-installation-diagnostic.mjs";
 import {
@@ -6348,7 +6348,6 @@ const safeErrorPayload = (error) => {
       || error instanceof HostRuntimeRecoveryError
       || error instanceof CodexRoutingConfigError
       || error instanceof TrelioInstallationDiagnosticError
-      || error instanceof DiagnosticReadTargetError
       || (error instanceof TrelioApiError
         && error.statusCode === 409
         && error.code === "LOCAL_CONTEXT_GENERATION_CHANGED")
