@@ -4598,12 +4598,6 @@ const AGENT_SKILL_DEVICE_CONSENT_CAPABILITIES = new Set([
   "secret-checkout",
 ]);
 
-const escapeAgentSkillConsentHtml = (value) => String(value ?? "")
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#39;");
 
 const normalizeConsentText = (value, maximumLength) => {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -4724,97 +4718,152 @@ const renderAgentSkillConsentCapability = (capability) => ({
   "secret-checkout": "Получение разрешённого Agent Secret",
 }[capability] || capability);
 
+/** Public presentation API for host and signed private skills. This lives in
+ * the already delivered bridge module: providers import the host-selected URL,
+ * not another bundled copy of the design system. Rendering grants no transport,
+ * credential, approval or session authority. The caller still owns those guards.
+ */
+export const LOCAL_FORM_API = "trelio.local-form/v1";
+export const LOCAL_FORM_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+const localFormEscape = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+const localFormInvalid = () => { throw Object.assign(new Error('Invalid local form definition'), { code: 'LOCAL_FORM_INVALID' }); };
+const localFormText = (value, limit = 16384) => {
+  if (typeof value !== 'string' || value.length > limit) localFormInvalid();
+  return localFormEscape(value);
+};
+const localFormKeys = (value, allowed) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !allowed.includes(key))) localFormInvalid();
+};
+
+// Offline projection of Trelio's Field/Button/Surface composition. It needs no
+// network, fonts, images, scripts or app session. Keep one style owner for every
+// local flow; caller-provided styles, scripts and raw HTML are not accepted.
+const LOCAL_FORM_STYLE = `
+:root{color-scheme:light;font:16px/1.5 Arial,sans-serif;--page:oklch(96.18% .0086 247.9);--panel:oklch(100% 0 0);--well:oklch(97.85% .0045 258.3);--text:oklch(24.49% .0388 264.4);--muted:oklch(54.44% .035 265.1);--line:oklch(88% .02 250 / .82);--focus:oklch(62% .19 254);--secondary:oklch(97% .01 250);--secondary-text:oklch(44.31% .1573 258.9);--secondary-line:oklch(86% .035 250)}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--text)}main{max-width:984px;padding:40px 32px 64px}h1{margin:0 0 24px;font-size:clamp(1.75rem,4vw,2.5rem);line-height:1.1;font-weight:700;overflow-wrap:anywhere}h2{margin:0 0 12px;font-size:1.125rem;line-height:1.35}p{margin:0 0 16px}a{color:var(--secondary-text);overflow-wrap:anywhere}a:hover{text-decoration-thickness:2px}.local-panel{background:var(--panel);border:1px solid var(--line);border-radius:22px;overflow:hidden}.local-section{padding:24px}.local-section+.local-section{border-top:1px solid var(--line)}.local-section>:last-child{margin-bottom:0}.local-fields{display:grid;gap:20px}.ui-field{display:grid;min-width:0;gap:6px}.ui-field__label{font-size:.875rem;font-weight:700;line-height:1.35}.ui-field__control{width:100%;min-width:0;min-height:44px;padding:10px 12px;border:1px solid var(--secondary-line);border-radius:12px;background:var(--well);color:var(--text);font:inherit;line-height:1.35}.ui-field__help,.ui-field__feedback{margin:0;font-size:.875rem;line-height:1.4;color:var(--muted)}.ui-field__feedback{color:oklch(50.54% .1905 27.5)}[aria-invalid=true]{border-color:oklch(84% .07 27);background:oklch(96.5% .02 27)}textarea{min-height:112px;resize:vertical}select{appearance:auto}.local-choice{display:flex;align-items:center;gap:12px;min-height:44px}.local-choice input{width:20px;min-height:20px;height:20px;appearance:auto;accent-color:var(--secondary-text)}.local-actions{display:flex;flex-wrap:wrap;gap:12px}.ui-button{display:inline-flex;align-items:center;justify-content:center;min-height:48px;max-width:100%;padding:12px 20px;border:1px solid transparent;border-radius:999px;font:inherit;font-weight:700;line-height:1.35;text-align:center;overflow-wrap:anywhere;cursor:pointer}.ui-button--primary{background:linear-gradient(oklch(56% .19 256),oklch(51.11% .1857 259.5));color:oklch(100% 0 0)}.ui-button--secondary{background:var(--secondary);color:var(--secondary-text);border-color:var(--secondary-line)}.ui-button:hover{filter:brightness(.96)}:where(input,textarea,button,a,[tabindex]):focus-visible{outline:3px solid var(--focus);outline-offset:3px}.ui-field__control:focus-visible{background:var(--panel)}:disabled{cursor:not-allowed;opacity:.6}.local-status{padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--well);margin-bottom:20px;overflow-wrap:anywhere}.local-status[data-tone=error]{color:oklch(50.54% .1905 27.5);background:oklch(96.5% .02 27);border-color:oklch(84% .07 27)}.local-status[data-tone=warning]{color:oklch(42% .1 80);background:oklch(96% .025 80);border-color:oklch(84% .06 80)}.local-status[data-tone=success]{color:oklch(48% .12 155);background:oklch(96% .025 155);border-color:oklch(84% .06 155)}.local-status p{margin:0}.local-rows{display:grid;grid-template-columns:minmax(120px,auto) minmax(0,1fr);gap:8px 20px;margin:0}.local-rows dt{color:var(--muted)}.local-rows dd{margin:0;overflow-wrap:anywhere}pre{margin:0;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--well);white-space:pre-wrap;overflow-wrap:anywhere}code{font-family:ui-monospace,monospace;font-size:.875rem}ul{margin:0;padding-left:24px}li+li{margin-top:6px}.local-qr{margin:0;max-width:320px}.local-qr svg{display:block;width:100%;height:auto;background:white}.local-qr figcaption{margin-top:12px;color:var(--muted);font-size:.875rem}.local-description{overflow-wrap:anywhere}
+@media(max-width:575.98px){main{padding:24px 16px 40px}.local-section{padding:20px 16px}.local-actions{flex-direction:column}.ui-button{width:100%}.local-rows{grid-template-columns:minmax(0,1fr);gap:4px}.local-rows dd+dt{margin-top:12px}}
+@media(forced-colors:active){.ui-button{border-color:ButtonText}.local-qr{forced-color-adjust:none}}
+`;
+
+/** QR is a bounded boolean module matrix generated privately by the provider.
+ * Never accept SVG/HTML, a remote image URL or an auth URI as markup. The fixed
+ * SVG builder preserves a four-module quiet zone and makes no resource request.
+ */
+const renderLocalFormQr = qr => {
+  localFormKeys(qr, ['matrix', 'label', 'help']);
+  const n = qr.matrix?.length;
+  if (!Array.isArray(qr.matrix) || n < 21 || n > 177 || (n - 21) % 4 || !qr.matrix.every(row => Array.isArray(row) && row.length === n && row.every(cell => typeof cell === 'boolean'))) localFormInvalid();
+  let modules = '';
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) if (qr.matrix[y][x]) modules += `M${x + 4} ${y + 4}h1v1h-1z`;
+  return `<figure class="local-qr"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n + 8} ${n + 8}" role="img" aria-labelledby="local-qr-label" shape-rendering="crispEdges"><title id="local-qr-label">${localFormText(qr.label, 512)}</title><path fill="white" d="M0 0h${n + 8}v${n + 8}H0z"/><path fill="black" d="${modules}"/></svg>${qr.help ? `<figcaption>${localFormText(qr.help)}</figcaption>` : ''}</figure>`;
+};
+
+/** Declarative HTML only. Text is escaped, secret fields have no prefill, and
+ * there is deliberately no generic JS/custom CSS/template slot. Native POST
+ * keeps the existing nonce, button value and browser validation behavior. This
+ * function neither reads input values nor stores drafts or verifies success.
+ */
+function renderLocalFormPageDefinition(spec) {
+  localFormKeys(spec, ['title', 'heading', 'description', 'notice', 'sections', 'form']);
+  if (Buffer.byteLength(JSON.stringify(spec)) > 524288) localFormInvalid();
+  const title = localFormText(spec.title, 512), heading = localFormText(spec.heading ?? spec.title, 512);
+  if (!Array.isArray(spec.sections) || spec.sections.length > 24) localFormInvalid();
+  const ids = new Set(); let qrCount = 0;
+  const status = notice => {
+    localFormKeys(notice, ['tone', 'text']);
+    if (!['info', 'pending', 'success', 'warning', 'error'].includes(notice.tone)) localFormInvalid();
+    return `<div class="local-status" data-tone="${notice.tone}" role="${notice.tone === 'error' ? 'alert' : 'status'}"${notice.tone === 'pending' ? ' aria-busy="true"' : ''}><p>${localFormText(notice.text)}</p></div>`;
+  };
+  const field = value => {
+    localFormKeys(value, ['name', 'label', 'type', 'help', 'error', 'required', 'minLength', 'maxLength', 'autocomplete', 'autofocus', 'disabled', 'options', 'accept']);
+    if (value.name === 'nonce' || !/^[a-z][a-z0-9_-]{0,63}$/i.test(value.name) || ids.has(value.name) || !['text', 'password', 'email', 'tel', 'url', 'number', 'textarea', 'select', 'checkbox', 'file'].includes(value.type)) localFormInvalid();
+    ids.add(value.name);
+    const id = `local-field-${value.name}`, described = [value.help && `${id}-help`, value.error && `${id}-error`].filter(Boolean).join(' ');
+    let attributes = ` id="${id}" name="${value.name}" class="ui-field__control" autocomplete="${localFormText(value.autocomplete ?? 'off', 64)}"`;
+    for (const key of ['required', 'autofocus', 'disabled']) { if (value[key] !== undefined && typeof value[key] !== 'boolean') localFormInvalid(); if (value[key]) attributes += ` ${key}`; }
+    for (const [key, attribute] of [['minLength', 'minlength'], ['maxLength', 'maxlength']]) if (value[key] !== undefined) { if (!Number.isInteger(value[key]) || value[key] < 0 || value[key] > 65536) localFormInvalid(); attributes += ` ${attribute}="${value[key]}"`; }
+    if (described) attributes += ` aria-describedby="${described}"`;
+    if (value.error) attributes += ' aria-invalid="true"';
+    let control;
+    if (value.type === 'select') {
+      if (!Array.isArray(value.options) || !value.options.length || value.options.length > 128) localFormInvalid();
+      control = `<select${attributes}>${value.options.map(option => { localFormKeys(option, ['label', 'value']); return `<option value="${localFormText(option.value, 256)}">${localFormText(option.label, 512)}</option>`; }).join('')}</select>`;
+    } else {
+      if (value.options !== undefined) localFormInvalid();
+      if (value.type === 'file' && spec.form?.encoding !== 'multipart') localFormInvalid();
+      if (value.accept !== undefined) { if (value.type !== 'file' || typeof value.accept !== 'string' || !/^[a-zA-Z0-9.*, /+-]{1,256}$/.test(value.accept)) localFormInvalid(); attributes += ` accept="${localFormEscape(value.accept)}"`; }
+      control = value.type === 'textarea' ? `<textarea${attributes}></textarea>` : `<input type="${value.type}"${attributes}>`;
+    }
+    const label = `<label class="ui-field__label" for="${id}">${localFormText(value.label, 512)}</label>`;
+    return `<div class="ui-field">${value.type === 'checkbox' ? `<div class="local-choice">${control}${label}</div>` : label + control}${value.help ? `<p class="ui-field__help" id="${id}-help">${localFormText(value.help)}</p>` : ''}${value.error ? `<p class="ui-field__feedback" id="${id}-error" role="alert">${localFormText(value.error)}</p>` : ''}</div>`;
+  };
+  const sections = spec.sections.map(section => {
+    localFormKeys(section, ['heading', 'paragraphs', 'items', 'rows', 'code', 'fields', 'links', 'qr', 'notice']);
+    const list = (value, render) => { if (value === undefined) return ''; if (!Array.isArray(value) || value.length > 64) localFormInvalid(); return value.map(render).join(''); };
+    if (section.qr && ++qrCount > 1) localFormInvalid();
+    return `<section class="local-section">${section.heading ? `<h2>${localFormText(section.heading, 512)}</h2>` : ''}${section.notice ? status(section.notice) : ''}${list(section.paragraphs, text => `<p>${localFormText(text)}</p>`)}${section.rows ? `<dl class="local-rows">${list(section.rows, row => { localFormKeys(row, ['label', 'value', 'code']); return `<dt>${localFormText(row.label, 512)}</dt><dd>${row.code ? '<code>' : ''}${localFormText(row.value)}${row.code ? '</code>' : ''}</dd>`; })}</dl>` : ''}${section.items ? `<ul>${list(section.items, text => `<li>${localFormText(text)}</li>`)}</ul>` : ''}${section.code !== undefined ? `<pre><code>${localFormText(section.code, 131072)}</code></pre>` : ''}${section.fields ? `<div class="local-fields">${list(section.fields, field)}</div>` : ''}${list(section.links, link => { localFormKeys(link, ['label', 'url']); const url = new URL(link.url); if (url.protocol !== 'https:' || url.username || url.password) localFormInvalid(); return `<p><a href="${localFormEscape(url.href)}" target="_blank" rel="noopener noreferrer">${localFormText(link.label, 512)}</a></p>`; })}${section.qr ? renderLocalFormQr(section.qr) : ''}</section>`;
+  }).join('');
+  let body = sections;
+  if (spec.form) {
+    const form = spec.form;
+    localFormKeys(form, ['action', 'nonce', 'actions', 'encoding']);
+    if ((form.encoding !== undefined && !['urlencoded', 'multipart'].includes(form.encoding)) || !/^\/[a-z][a-z0-9/-]{0,80}$/.test(form.action) || !Array.isArray(form.actions) || !form.actions.length || form.actions.length > 8) localFormInvalid();
+    const buttons = form.actions.map(action => {
+      localFormKeys(action, ['label', 'name', 'value', 'variant', 'formNoValidate', 'disabled']);
+      if (!['primary', 'secondary'].includes(action.variant ?? 'primary')) localFormInvalid();
+      if (action.name !== undefined && (ids.has(action.name) || action.name === 'nonce' || !/^[a-z][a-z0-9_-]{0,63}$/i.test(action.name))) localFormInvalid();
+      for (const key of ['formNoValidate', 'disabled']) if (action[key] !== undefined && typeof action[key] !== 'boolean') localFormInvalid();
+      return `<button class="ui-button ui-button--${action.variant ?? 'primary'}" type="submit"${action.name ? ` name="${action.name}" value="${localFormText(action.value, 256)}"` : ''}${action.formNoValidate ? ' formnovalidate' : ''}${action.disabled ? ' disabled' : ''}>${localFormText(action.label, 512)}</button>`;
+    }).join('');
+    body = `<form method="post" action="${form.action}"${form.encoding === 'multipart' ? ' enctype="multipart/form-data"' : ''} autocomplete="off"><input type="hidden" name="nonce" value="${localFormText(form.nonce, 256)}">${sections}<div class="local-section"><div class="local-actions">${buttons}</div></div></form>`;
+  } else if (ids.size) localFormInvalid();
+  return `<!doctype html><html lang="ru" data-trelio-local-form="v1"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${title}</title><style>${LOCAL_FORM_STYLE}</style></head><body><main><h1>${heading}</h1>${spec.description ? `<p class="local-description">${localFormText(spec.description)}</p>` : ''}${spec.notice ? status(spec.notice) : ''}<div class="local-panel">${body}</div></main></body></html>`;
+}
+
+export function renderLocalFormPage(spec) {
+  try { return renderLocalFormPageDefinition(spec); }
+  catch { localFormInvalid(); }
+}
+
+export const renderLocalFormMessage = (title, text, tone = 'info') => renderLocalFormPage({ title, sections: [{ notice: { tone, text } }] });
+
 export const renderAgentSkillDeviceConsentPage = ({ challenge, nonce }) => {
   const publisher = challenge.publication.publisher;
-  const capabilityItems = challenge.artifact.capabilities.length > 0
-    ? challenge.artifact.capabilities
-        .map((capability) => `<li>${escapeAgentSkillConsentHtml(renderAgentSkillConsentCapability(capability))}</li>`)
-        .join("")
-    : "<li>Дополнительные capabilities не заявлены</li>";
+  const capabilityItems = challenge.artifact.capabilities.length
+    ? challenge.artifact.capabilities.map(renderAgentSkillConsentCapability)
+    : ["Дополнительные capabilities не заявлены"];
   const changeItems = [
     `Пакет: ${challenge.changes.packageChanged ? "изменён" : "без изменений"}`,
     `Инструкция: ${challenge.changes.instructionsChanged ? "изменена" : "без изменений"}`,
-    challenge.changes.capabilitiesAdded.length > 0
-      ? `Добавлены права: ${challenge.changes.capabilitiesAdded.map(renderAgentSkillConsentCapability).join(", ")}`
-      : null,
-    challenge.changes.capabilitiesRemoved.length > 0
-      ? `Убраны права: ${challenge.changes.capabilitiesRemoved.map(renderAgentSkillConsentCapability).join(", ")}`
-      : null,
-  ].filter(Boolean).map((item) => `<li>${escapeAgentSkillConsentHtml(item)}</li>`).join("");
-  const previousVersion = challenge.changes.previousVersion
-    ? ` после v${escapeAgentSkillConsentHtml(challenge.changes.previousVersion)}`
-    : "";
-  const packageSizeMb = (challenge.artifact.packageSizeBytes / (1024 * 1024)).toFixed(2);
-
-  return `<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
-  <title>Установка навыка компании</title>
-  <style>
-    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f4f7fb; color: #172033; }
-    main { width: min(680px, calc(100% - 32px)); margin: 40px auto; background: #fff; border: 1px solid #dce3ef; border-radius: 18px; box-shadow: 0 16px 48px rgba(27, 43, 72, .14); overflow: hidden; }
-    header, section, form { padding: 22px 26px; }
-    header { background: #fff4e5; border-bottom: 1px solid #f0d4a7; }
-    h1 { margin: 0 0 8px; font-size: 24px; }
-    h2 { margin: 0 0 10px; font-size: 16px; }
-    p { margin: 7px 0; line-height: 1.5; }
-    section { border-bottom: 1px solid #e8edf5; }
-    dl { display: grid; grid-template-columns: minmax(130px, auto) 1fr; gap: 8px 16px; margin: 0; }
-    dt { color: #68758c; } dd { margin: 0; overflow-wrap: anywhere; }
-    ul { margin: 8px 0 0; padding-left: 22px; line-height: 1.5; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
-    .warning { color: #8a3d00; font-weight: 700; }
-    .actions { display: flex; gap: 12px; justify-content: flex-end; background: #f8faff; }
-    button { border-radius: 10px; padding: 11px 16px; font: inherit; font-weight: 700; cursor: pointer; }
-    .cancel { border: 1px solid #b8c3d4; background: #fff; color: #27354d; }
-    .accept { border: 1px solid #1768d1; background: #1768d1; color: #fff; }
-    @media (prefers-color-scheme: dark) {
-      body { background: #111827; color: #e8eef9; } main { background: #1b2433; border-color: #344158; } header { background: #3a2d1d; border-color: #6d522e; } section { border-color: #344158; } dt { color: #aeb9cc; } .actions { background: #151d2a; } .cancel { background: #1b2433; color: #e8eef9; border-color: #64718a; } .warning { color: #ffc675; }
-    }
-  </style>
-</head>
-<body>
-<main>
-  <header>
-    <h1>Навык не проверен Trelio</h1>
-    <p class="warning">Код загрузил администратор компании. Он будет запущен с правами вашей учётной записи ОС.</p>
-    <p>Подпись Trelio подтверждает, что пакет не изменился при доставке, но не означает, что Trelio проверил код.</p>
-  </header>
-  <section>
-    <h2>${escapeAgentSkillConsentHtml(challenge.skill.title)} · v${escapeAgentSkillConsentHtml(challenge.skill.version)}${previousVersion}</h2>
-    <dl>
-      <dt>Компания</dt><dd>${escapeAgentSkillConsentHtml(challenge.company.name)}</dd>
-      <dt>Опубликовал</dt><dd>${publisher ? `${escapeAgentSkillConsentHtml(publisher.displayName)} (@${escapeAgentSkillConsentHtml(publisher.username)})` : "Администратор компании"}</dd>
-      <dt>Что изменилось</dt><dd>${escapeAgentSkillConsentHtml(challenge.publication.summary)}</dd>
-      <dt>Причина</dt><dd>${escapeAgentSkillConsentHtml(challenge.publication.changeReason)}</dd>
-    </dl>
-  </section>
-  <section>
-    <h2>Изменения этой публикации</h2>
-    <ul>${changeItems}</ul>
-    <h2 style="margin-top:16px">Заявленные возможности</h2>
-    <ul>${capabilityItems}</ul>
-  </section>
-  <section>
-    <dl>
-      <dt>Runtime</dt><dd>${escapeAgentSkillConsentHtml(challenge.artifact.runtimeVersion)}</dd>
-      <dt>Размер</dt><dd>${escapeAgentSkillConsentHtml(packageSizeMb)} МБ</dd>
-      <dt>SHA-256 package</dt><dd><code>${escapeAgentSkillConsentHtml(challenge.artifact.packageSha256)}</code></dd>
-      <dt>SHA-256 инструкции</dt><dd><code>${escapeAgentSkillConsentHtml(challenge.artifact.instructionsSha256)}</code></dd>
-    </dl>
-  </section>
-  <form method="post" action="/decision" class="actions">
-    <input type="hidden" name="nonce" value="${escapeAgentSkillConsentHtml(nonce)}">
-    <button class="cancel" type="submit" name="decision" value="decline">Отмена</button>
-    <button class="accept" type="submit" name="decision" value="accept">Установить и запустить</button>
-  </form>
-</main>
-</body>
-</html>`;
+    challenge.changes.capabilitiesAdded.length ? `Добавлены права: ${challenge.changes.capabilitiesAdded.map(renderAgentSkillConsentCapability).join(", ")}` : null,
+    challenge.changes.capabilitiesRemoved.length ? `Убраны права: ${challenge.changes.capabilitiesRemoved.map(renderAgentSkillConsentCapability).join(", ")}` : null,
+  ].filter(Boolean);
+  const previousVersion = challenge.changes.previousVersion ? ` после v${challenge.changes.previousVersion}` : "";
+  return renderLocalFormPage({
+    title: "Установка навыка компании", heading: "Навык не проверен Trelio",
+    notice: { tone: "warning", text: "Код загрузил администратор компании. Он будет запущен с правами вашей учётной записи ОС." },
+    sections: [
+      { paragraphs: ["Подпись Trelio подтверждает, что пакет не изменился при доставке, но не означает, что Trelio проверил код."] },
+      { heading: `${challenge.skill.title} · v${challenge.skill.version}${previousVersion}`, rows: [
+        { label: "Компания", value: challenge.company.name },
+        { label: "Опубликовал", value: publisher ? `${publisher.displayName} (@${publisher.username})` : "Администратор компании" },
+        { label: "Что изменилось", value: challenge.publication.summary },
+        { label: "Причина", value: challenge.publication.changeReason },
+      ] },
+      { heading: "Изменения этой публикации", items: changeItems },
+      { heading: "Заявленные возможности", items: capabilityItems },
+      { rows: [
+        { label: "Runtime", value: challenge.artifact.runtimeVersion },
+        { label: "Размер", value: `${(challenge.artifact.packageSizeBytes / (1024 * 1024)).toFixed(2)} МБ` },
+        { label: "SHA-256 package", value: challenge.artifact.packageSha256, code: true },
+        { label: "SHA-256 инструкции", value: challenge.artifact.instructionsSha256, code: true },
+      ] },
+    ],
+    form: { action: "/decision", nonce, actions: [
+      { label: "Отмена", name: "decision", value: "decline", variant: "secondary" },
+      { label: "Установить и запустить", name: "decision", value: "accept" },
+    ] },
+  });
 };
 
 const readAgentSkillConsentBody = async (incoming) => {
@@ -4846,7 +4895,7 @@ const isAgentSkillConsentLoopbackAddress = (address) => (
 const writeAgentSkillConsentHtml = (outgoing, statusCode, html, onFinished) => {
   outgoing.writeHead(statusCode, {
     "cache-control": "no-store",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "content-security-policy": LOCAL_FORM_CSP,
     "content-type": "text/html; charset=utf-8",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
@@ -4951,7 +5000,7 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           403,
-          "<!doctype html><meta charset=utf-8><title>Запрос отклонён</title><p>Защитная проверка локальной формы не пройдена. Закройте вкладку и повторите запуск навыка.</p>",
+          renderLocalFormMessage("Запрос отклонён", "Защитная проверка локальной формы не пройдена. Закройте вкладку и повторите запуск навыка.", "error"),
         );
         return;
       }
@@ -4962,7 +5011,7 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           403,
-          "<!doctype html><meta charset=utf-8><title>Запрос отклонён</title><p>Одноразовое подтверждение недействительно. Закройте вкладку и повторите запуск навыка.</p>",
+          renderLocalFormMessage("Запрос отклонён", "Одноразовое подтверждение недействительно. Закройте вкладку и повторите запуск навыка.", "error"),
         );
         return;
       }
@@ -4977,7 +5026,7 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           403,
-          "<!doctype html><meta charset=utf-8><title>Запрос отклонён</title><p>Решение по этой одноразовой форме уже принято. Закройте вкладку и повторите запуск навыка.</p>",
+          renderLocalFormMessage("Запрос отклонён", "Решение по этой одноразовой форме уже принято. Закройте вкладку и повторите запуск навыка.", "error"),
         );
         return;
       }
@@ -4988,7 +5037,7 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           200,
-          "<!doctype html><meta charset=utf-8><title>Установка отменена</title><p>Навык не установлен. Эту вкладку можно закрыть.</p>",
+          renderLocalFormMessage("Установка отменена", "Навык не установлен. Эту вкладку можно закрыть.", "info"),
           () => fail(declinedError),
         );
         return;
@@ -5013,7 +5062,7 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           409,
-          "<!doctype html><meta charset=utf-8><title>Навык не установлен</title><p>Версия могла измениться или Trelio сейчас недоступен. Закройте вкладку, перечитайте текущую публикацию и повторите запуск.</p>",
+          renderLocalFormMessage("Навык не установлен", "Версия могла измениться или Trelio сейчас недоступен. Закройте вкладку, перечитайте текущую публикацию и повторите запуск.", "error"),
           () => fail(error),
         );
         return;
@@ -5022,7 +5071,7 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
       writeAgentSkillConsentHtml(
         outgoing,
         200,
-        "<!doctype html><meta charset=utf-8><title>Навык установлен</title><p>Эта версия разрешена на устройстве и будет запущена. Вкладку можно закрыть.</p>",
+        renderLocalFormMessage("Навык установлен", "Эта версия разрешена на устройстве и будет запущена. Вкладку можно закрыть.", "success"),
         () => complete(true),
       );
     } catch (error) {
@@ -5082,50 +5131,24 @@ export const collectAgentSkillDeviceConsentThroughLoopback = async ({
   }
 };
 
-export const renderCompanyEncryptionKeyPage = ({ companyName, nonce }) => `<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="referrer" content="no-referrer">
-  <title>Ключ шифрования Trelio</title>
-  <style>
-    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f4f7fb; color: #172033; }
-    main { width: min(560px, calc(100% - 32px)); margin: 40px auto; padding: 26px; box-sizing: border-box; background: #fff; border: 1px solid #dce3ef; border-radius: 18px; box-shadow: 0 16px 48px rgba(27, 43, 72, .14); }
-    h1 { margin: 0 0 10px; font-size: 24px; } p { line-height: 1.5; }
-    label { display: grid; gap: 7px; margin-top: 18px; font-weight: 700; }
-    input { box-sizing: border-box; width: 100%; padding: 12px; border: 1px solid #aebbd0; border-radius: 10px; font: inherit; }
-    small { display: block; margin-top: 10px; color: #68758c; line-height: 1.45; }
-    .actions { display: flex; gap: 12px; justify-content: flex-end; margin-top: 22px; }
-    button { border-radius: 10px; padding: 11px 16px; font: inherit; font-weight: 700; cursor: pointer; }
-    .cancel { border: 1px solid #b8c3d4; background: #fff; color: #27354d; }
-    .save { border: 1px solid #1768d1; background: #1768d1; color: #fff; }
-    @media (prefers-color-scheme: dark) { body { background: #111827; color: #e8eef9; } main { background: #1b2433; border-color: #344158; } input, .cancel { background: #111827; color: #e8eef9; border-color: #64718a; } small { color: #aeb9cc; } }
-  </style>
-</head>
-<body>
-<main>
-  <h1>Подключить Agent Workspaces</h1>
-  <p>Компания «${escapeAgentSkillConsentHtml(companyName)}» зашифрована. Введите ключ шифрования в этой локальной форме.</p>
-  <p>Фраза останется на компьютере и не попадёт в Trelio, командную строку, Workspace или логи.</p>
-  <form method="post" action="/unlock">
-    <input type="hidden" name="nonce" value="${escapeAgentSkillConsentHtml(nonce)}">
-    <label>Ключ шифрования
-      <input type="password" name="secret" minlength="12" maxlength="4096" autocomplete="new-password" required autofocus>
-    </label>
-    <label>Повторите ключ
-      <input type="password" name="confirmation" minlength="12" maxlength="4096" autocomplete="new-password" required>
-    </label>
-    <small>После подключения bridge сохранит только локально защищённый ключ устройства. Повторно вводить фразу на этом компьютере не понадобится.</small>
-    <div class="actions">
-      <button class="cancel" type="submit" name="decision" value="cancel">Отмена</button>
-      <button class="save" type="submit" name="decision" value="save">Сохранить на устройстве</button>
-    </div>
-  </form>
-</main>
-</body>
-</html>`;
+export const renderCompanyEncryptionKeyPage = ({ companyName, nonce }) => renderLocalFormPage({
+  title: "Ключ шифрования Trelio", heading: "Подключить Agent Workspaces",
+  sections: [
+    { paragraphs: [
+      `Компания «${companyName}» зашифрована. Введите ключ шифрования в этой локальной форме.`,
+      "Фраза останется на компьютере и не попадёт в Trelio, командную строку, Workspace или логи.",
+    ] },
+    { fields: [
+      { name: "secret", label: "Ключ шифрования", type: "password", minLength: 12, maxLength: 4096, autocomplete: "new-password", required: true, autofocus: true },
+      { name: "confirmation", label: "Повторите ключ", type: "password", minLength: 12, maxLength: 4096, autocomplete: "new-password", required: true,
+        help: "После подключения bridge сохранит только локально защищённый ключ устройства. Повторно вводить фразу на этом компьютере не понадобится." },
+    ] },
+  ],
+  form: { action: "/unlock", nonce, actions: [
+    { label: "Отмена", name: "decision", value: "cancel", variant: "secondary", formNoValidate: true },
+    { label: "Сохранить на устройстве", name: "decision", value: "save" },
+  ] },
+});
 
 /**
  * Collect the encryption key in an exact loopback-only form. The value is
@@ -5203,7 +5226,7 @@ export const collectCompanyEncryptionKeyThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           403,
-          "<!doctype html><meta charset=utf-8><title>Запрос отклонён</title><p>Защитная проверка локальной формы не пройдена.</p>",
+          renderLocalFormMessage("Запрос отклонён", "Защитная проверка локальной формы не пройдена.", "error"),
         );
         return;
       }
@@ -5217,7 +5240,7 @@ export const collectCompanyEncryptionKeyThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           403,
-          "<!doctype html><meta charset=utf-8><title>Запрос отклонён</title><p>Одноразовая локальная форма недействительна.</p>",
+          renderLocalFormMessage("Запрос отклонён", "Одноразовая локальная форма недействительна.", "error"),
         );
         return;
       }
@@ -5226,13 +5249,13 @@ export const collectCompanyEncryptionKeyThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           400,
-          "<!doctype html><meta charset=utf-8><title>Ключ не сохранён</title><p>Ключ должен содержать не меньше 12 символов, а оба значения должны совпадать. Закройте вкладку и повторите подключение.</p>",
+          renderLocalFormMessage("Ключ не сохранён", "Ключ должен содержать не меньше 12 символов, а оба значения должны совпадать. Закройте вкладку и повторите подключение.", "error"),
         );
         return;
       }
 
       if (settled) {
-        writeAgentSkillConsentHtml(outgoing, 403, "<!doctype html><p>Форма уже использована.</p>");
+        writeAgentSkillConsentHtml(outgoing, 403, renderLocalFormMessage("Форма уже использована", "Форма уже использована.", "error"));
         return;
       }
       settled = true;
@@ -5243,7 +5266,7 @@ export const collectCompanyEncryptionKeyThroughLoopback = async ({
         writeAgentSkillConsentHtml(
           outgoing,
           200,
-          "<!doctype html><meta charset=utf-8><title>Подключение отменено</title><p>Ключ не сохранён. Вкладку можно закрыть.</p>",
+          renderLocalFormMessage("Подключение отменено", "Ключ не сохранён. Вкладку можно закрыть.", "info"),
           () => fail(error),
         );
         return;
@@ -5252,7 +5275,7 @@ export const collectCompanyEncryptionKeyThroughLoopback = async ({
       writeAgentSkillConsentHtml(
         outgoing,
         200,
-        "<!doctype html><meta charset=utf-8><title>Устройство подготовлено</title><p>Ключ обрабатывается локально. Вкладку можно закрыть.</p>",
+        renderLocalFormMessage("Ключ получен", "Ключ обрабатывается локально. Подключение проверяется в приложении; вкладку можно закрыть.", "pending"),
         () => complete(secret),
       );
     } catch (error) {
@@ -7586,6 +7609,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
     TRELIO_BROWSER_SESSION_DEADLINE_AT: _staleBrowserSessionDeadlineAt,
     TRELIO_VISUAL_SESSION_MODULE_URL: _staleVisualSessionModuleUrl,
+    TRELIO_LOCAL_FORM_MODULE_URL: _staleLocalFormModuleUrl,
+    TRELIO_LOCAL_FORM_NODE_EXECUTABLE: _staleLocalFormNode,
     ...cleanEnvironment
   } = sanitizeAgentSkillInheritedEnvironment(inheritedEnvironment);
   const connectionConfigJson = executionContext.companyConnection
@@ -7640,6 +7665,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
         "TRELIO_CACHE_HOME",
         "TRELIO_CONFIG_HOME",
         "TRELIO_ORIGIN",
+        "TRELIO_LOCAL_FORM_MODULE_URL",
+        "TRELIO_LOCAL_FORM_NODE_EXECUTABLE",
       ].includes(key)
     );
     if (
@@ -7682,6 +7709,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
           TRELIO_SKILL_CONNECTION_CONFIG_JSON: connectionConfigJson,
         }
       : {}),
+    TRELIO_LOCAL_FORM_MODULE_URL: import.meta.url,
+    TRELIO_LOCAL_FORM_NODE_EXECUTABLE: process.execPath,
     // HTTP evidence is also available to native-supervised browser adapters
     // without a generic lifecycle descriptor. This grants no lease or policy;
     // inherited module URLs were stripped above and cannot select executable code.
@@ -17897,6 +17926,17 @@ const runEntrypoint = async () => {
   }
 };
 
-if (isDirectModuleInvocation(import.meta.url)) {
+if (isDirectModuleInvocation(import.meta.url) && process.argv[2] === "local-form-render") {
+  // Process-only protocol for non-JS skills. The parent must capture stdout in
+  // a private pipe and serve it to the human, never forward it to MCP/logs.
+  // No arguments, executable source, filesystem path or custom HTML is accepted.
+  (async () => {
+    if (process.argv.length !== 3) localFormInvalid();
+    const chunks = []; let bytes = 0;
+    for await (const chunk of process.stdin) { bytes += chunk.length; if (bytes > 524288) localFormInvalid(); chunks.push(chunk); }
+    const html = renderLocalFormPage(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    process.stdout.write(html);
+  })().catch(() => { process.stderr.write("LOCAL_FORM_INVALID\n"); process.exitCode = 1; });
+} else if (isDirectModuleInvocation(import.meta.url)) {
   runEntrypoint().catch((error) => fail(formatBridgeCommandError(error, process.argv[2])));
 }

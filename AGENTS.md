@@ -240,6 +240,8 @@ publication tooling также остаются вне этого публичн
   lifecycle и profile lock. Provider-specific navigation, selectors, read
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
+- Локальные формы и private skills используют общий [renderer](docs/local-forms.md):
+  декларативные поля/QR/status, без собственной HTML/CSS-копии и secret prefill.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).

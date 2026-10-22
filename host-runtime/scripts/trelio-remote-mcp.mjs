@@ -54,6 +54,7 @@ import {
 } from "./trelio-component-versions.mjs";
 
 import {
+  renderLocalFormPage, renderLocalFormMessage, LOCAL_FORM_CSP,
   AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION,
   AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES,
   AGENT_SKILL_MAX_PACKAGE_BYTES,
@@ -1993,50 +1994,21 @@ export const callRemoteTool = async (
   }
 };
 
-const escapeHtml = (value) => String(value ?? "")
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#39;");
 
-const renderCredentialPage = ({ resolved, nonce, errorMessage = "" }) => {
+export const renderCredentialPage = ({ resolved, nonce, errorMessage = "" }) => {
   const help = resolved.remoteMcp.config.credentialHelp;
-  return `<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Подключение ${escapeHtml(resolved.skill.title)}</title>
-  <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-    body { max-width: 42rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
-    form { display: grid; gap: 1rem; }
-    input, button { box-sizing: border-box; width: 100%; padding: .8rem; font: inherit; }
-    .muted { opacity: .72; }
-    .error { color: #b42318; }
-    .warning { padding: .75rem; border-radius: .5rem; background: #fff4cc; color: #5f4200; }
-  </style>
-</head>
-<body>
-  <h1>${escapeHtml(resolved.skill.title)}</h1>
-  <p class="muted">Credential сохраняется только на этом устройстве и не передаётся Trelio, агенту, чату или workspace.</p>
-  ${help ? `
-    <p>${escapeHtml(help.instructions)}</p>
-    <p><a href="${escapeHtml(help.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(help.label)}</a> · ${escapeHtml(new URL(help.url).hostname)}</p>
-  ` : ""}
-  ${errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : ""}
-  <form method="post" action="/credential" autocomplete="off">
-    <input type="hidden" name="nonce" value="${escapeHtml(nonce)}">
-    <label>
-      Personal Bearer PAT
-      <input type="password" name="credential" minlength="8" maxlength="${MAX_CREDENTIAL_BYTES}" required autocomplete="off" autofocus>
-    </label>
-    <p class="warning">Сохранять данные в браузере не нужно – подключение будет сохранено отдельно на этом устройстве. Если браузер предложит сохранить данные, выберите «Нет, спасибо».</p>
-    <button type="submit">Проверить и сохранить на устройстве</button>
-  </form>
-</body>
-</html>`;
+  return renderLocalFormPage({
+    title: `Подключение ${resolved.skill.title}`, heading: resolved.skill.title,
+    sections: [
+      { paragraphs: ["Credential сохраняется только на этом устройстве и не передаётся Trelio, агенту, чату или workspace."] },
+      ...(help ? [{ paragraphs: [help.instructions], links: [{ label: `${help.label} · ${new URL(help.url).hostname}`, url: help.url }] }] : []),
+      { ...(errorMessage ? { notice: { tone: "error", text: errorMessage } } : {}), fields: [
+        { name: "credential", label: "Personal Bearer PAT", type: "password", minLength: 8, maxLength: MAX_CREDENTIAL_BYTES, required: true, autofocus: true },
+      ] },
+      { notice: { tone: "warning", text: "Сохранять данные в браузере не нужно – подключение будет сохранено отдельно на этом устройстве. Если браузер предложит сохранить данные, выберите «Нет, спасибо»." } },
+    ],
+    form: { action: "/credential", nonce, actions: [{ label: "Проверить и сохранить на устройстве" }] },
+  });
 };
 
 const readLimitedRequestBody = async (incoming) => {
@@ -2063,7 +2035,7 @@ const writeLoopbackHtml = (outgoing, statusCode, html, { onFinished } = {}) => {
   outgoing.writeHead(statusCode, {
     "cache-control": "no-store",
     "connection": "close",
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "content-security-policy": LOCAL_FORM_CSP,
     "content-type": "text/html; charset=utf-8",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
@@ -2266,20 +2238,17 @@ export const confirmRemoteWriteAction = async (
         && requestUrl.searchParams.get("nonce") === nonce
         && exactTarget
       ) {
-        writeLoopbackHtml(outgoing, 200, `<!doctype html><html lang="ru"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Подтверждение Remote MCP</title>
-<style>body{font:16px/1.5 system-ui;max-width:48rem;margin:2rem auto;padding:0 1rem}
-pre{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #888;padding:1rem}
-button{font:inherit;padding:.7rem 1rem}</style>
-<h1>Подтвердить изменение</h1>
-<p>Навык: ${escapeHtml(resolved.skill.title)}</p>
-<p>Сервис: ${escapeHtml(new URL(resolved.remoteMcp.config.endpoint).hostname)}</p>
-<p>Инструмент: <strong>${escapeHtml(toolName)}</strong></p>
-<pre>${escapeHtml(argumentsText)}</pre>
-<form method="post" action="/decision"><input type="hidden" name="nonce" value="${escapeHtml(nonce)}">
-<button name="decision" value="approve" type="submit">Подтвердить это действие</button>
-<button name="decision" value="reject" type="submit">Отменить</button></form></html>`);
+        writeLoopbackHtml(outgoing, 200, renderLocalFormPage({
+          title: "Подтверждение Remote MCP", heading: "Подтвердить изменение",
+          sections: [
+            { rows: [{ label: "Навык", value: resolved.skill.title }, { label: "Сервис", value: new URL(resolved.remoteMcp.config.endpoint).hostname }, { label: "Инструмент", value: toolName }] },
+            { code: argumentsText },
+          ],
+          form: { action: "/decision", nonce, actions: [
+            { label: "Подтвердить это действие", name: "decision", value: "approve" },
+            { label: "Отменить", name: "decision", value: "reject", variant: "secondary" },
+          ] },
+        }));
         formOpened();
         return;
       }
@@ -2292,27 +2261,27 @@ button{font:inherit;padding:.7rem 1rem}</style>
         || !hasAuthorizedCredentialOrigin(incoming, expectedOrigin)
       ) {
         incoming.resume();
-        writeLoopbackHtml(outgoing, 403, "<!doctype html><meta charset=utf-8><p>Запрос отклонён</p>");
+        writeLoopbackHtml(outgoing, 403, renderLocalFormMessage("Запрос отклонён", "Запрос отклонён", "error"));
         return;
       }
       const form = new URLSearchParams(await readLimitedRequestBody(incoming));
       if (form.get("nonce") !== nonce || consumed) {
-        writeLoopbackHtml(outgoing, 403, "<!doctype html><meta charset=utf-8><p>Запрос отклонён</p>");
+        writeLoopbackHtml(outgoing, 403, renderLocalFormMessage("Запрос отклонён", "Запрос отклонён", "error"));
         return;
       }
       consumed = true;
       const approved = form.get("decision") === "approve";
       writeLoopbackHtml(outgoing, 200,
         approved
-          ? "<!doctype html><meta charset=utf-8><p>Действие подтверждено. Эту вкладку можно закрыть.</p>"
-          : "<!doctype html><meta charset=utf-8><p>Действие отменено. Эту вкладку можно закрыть.</p>",
+          ? renderLocalFormMessage("Действие подтверждено", "Действие подтверждено. Эту вкладку можно закрыть.", "success")
+          : renderLocalFormMessage("Действие отменено", "Действие отменено. Эту вкладку можно закрыть.", "info"),
         { onFinished: () => (approved ? accept() : reject(new RemoteMcpHostError(
           "REMOTE_MCP_WRITE_REJECTED",
           "Пользователь отменил действие Remote MCP.",
         ))) },
       );
     } catch {
-      if (!outgoing.headersSent) writeLoopbackHtml(outgoing, 400, "<!doctype html><meta charset=utf-8><p>Запрос отклонён</p>");
+      if (!outgoing.headersSent) writeLoopbackHtml(outgoing, 400, renderLocalFormMessage("Запрос отклонён", "Запрос отклонён", "error"));
     }
   });
   try {
@@ -2407,7 +2376,7 @@ export const collectCredentialThroughLoopback = async (
     writeLoopbackHtml(
       outgoing,
       403,
-      "<!doctype html><meta charset=utf-8><title>Запрос отклонён</title><p>Защитная проверка локальной формы не пройдена. Закройте вкладку и повторите подключение.</p>",
+      renderLocalFormMessage("Запрос отклонён", "Защитная проверка локальной формы не пройдена. Закройте вкладку и повторите подключение.", "error"),
     );
     fail(new RemoteMcpHostError(
       "REMOTE_MCP_CREDENTIAL_REQUEST_REJECTED",
@@ -2465,13 +2434,13 @@ export const collectCredentialThroughLoopback = async (
         writeLoopbackHtml(
           outgoing,
           409,
-          "<!doctype html><meta charset=utf-8><title>Запрос уже принят</title><p>Проверка credential уже выполняется. Эту вкладку можно закрыть.</p>",
+          renderLocalFormMessage("Запрос уже принят", "Проверка credential уже выполняется. Эту вкладку можно закрыть.", "info"),
         );
         return;
       }
       if (allowCancel && form.get("decision") === "cancel") {
         credentialStored = true;
-        writeLoopbackHtml(outgoing, 200, "<!doctype html><meta charset=utf-8><p>Настройка отменена. Эту вкладку можно закрыть.</p>", {
+        writeLoopbackHtml(outgoing, 200, renderLocalFormMessage("Настройка отменена", "Настройка отменена. Эту вкладку можно закрыть.", "info"), {
           onFinished: () => fail(new RemoteMcpHostError("PROTECTED_FORM_CANCELLED", "Настройка отменена.")),
         });
         return;
@@ -2507,7 +2476,7 @@ export const collectCredentialThroughLoopback = async (
       writeLoopbackHtml(
         outgoing,
         200,
-        `<!doctype html><meta charset=utf-8><title>${escapeHtml(successTitle)}</title><p>${escapeHtml(successMessage)}</p>`,
+        renderLocalFormMessage(successTitle, successMessage, "success"),
         { onFinished: finish },
       );
     } catch (error) {

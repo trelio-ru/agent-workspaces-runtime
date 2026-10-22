@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind, parseAgentSecretTotpValue, deriveAgentSecretTotp } from './trelio-workspace.mjs';
+import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind, renderLocalFormPage, parseAgentSecretTotpValue, deriveAgentSecretTotp } from './trelio-workspace.mjs';
 import { prepareVisualPrivateDirectory, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
 import { visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
@@ -228,7 +228,6 @@ export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const selector = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
 const id = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,47}$/u.test(value);
-const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
 /** A signed provider declares selectors once in source, not in CLI/MCP args.
  * Credentials bind to the complete normalized recipe, in addition to the
@@ -300,10 +299,25 @@ export async function configureVisualAuthentication({ store, definition, signal,
   await store.prepare();
   const fingerprint = visualAuthenticationFingerprint(definition);
   const uses = field => definition.steps.some(step => Object.hasOwn(step.fields, field));
-  const field = (key, label, help = '') => `<label for="${key}">${label}</label><input id="${key}" name="${key}" type="${key === 'login' ? 'text' : 'password'}" maxlength="4096" autocomplete="off" ${key !== 'totp' ? 'required' : ''}>${help ? `<p id="${key}-help">${help}</p>` : ''}`;
+  const field = (name, label, help) => ({ name, label, type: name === 'login' ? 'text' : 'password', maxLength: 4096, required: name !== 'totp', ...(help ? { help } : {}) });
   await collectCredentialThroughLoopback('https://trelio.ru', {}, {
     signal, ...(openBrowserFn ? { openBrowserFn } : {}), ...(handoffTimeoutMs ? { handoffTimeoutMs } : {}), ...(setupTimeoutMs ? { setupTimeoutMs } : {}), allowCancel: true,
-    renderForm: ({ nonce, errorMessage }) => `<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Данные входа</title><style>:root{color-scheme:light dark;font:16px/1.5 system-ui,sans-serif}body{max-width:38rem;margin:2rem auto;padding:0 1rem}form{display:grid;gap:.75rem}input,button{box-sizing:border-box;width:100%;min-height:44px;padding:.75rem;font:inherit}p{margin:.25rem 0 1rem}button:focus-visible,input:focus-visible{outline:3px solid #3984ff;outline-offset:3px}</style><h1>Данные входа</h1><p>Сохранение только на этом устройстве. Агент и Trelio не получат значения.</p><p>Адреса входа: ${escape([...new Set(definition.steps.map(step => step.origin))].join(', '))}</p>${errorMessage ? '<p role="alert">Проверьте поля. Данные не сохранены; повторите ввод или отмените настройку.</p>' : ''}<form method="post" action="/credential" autocomplete="off"><input type="hidden" name="nonce" value="${escape(nonce)}">${uses('login') ? field('login', 'Логин') : ''}${uses('password') ? field('password', 'Пароль') : ''}${uses('totp') ? field('totp', 'TOTP-секрет (необязательно)', 'Заранее включите TOTP у сервиса. Введите Base32-секрет или ссылку otpauth://totp, а не текущий код. Совместное хранение с паролем уменьшает независимость второго фактора. Можно оставить пустым и вводить код вручную.') : ''}<p>Сохранять данные в браузере не нужно – подключение будет сохранено отдельно на этом устройстве. Если браузер предложит сохранить данные, выберите «Нет, спасибо».</p><button name="decision" value="save" type="submit">Сохранить на устройстве</button><button name="decision" value="cancel" type="submit" formnovalidate>Отмена</button></form></html>`,
+    renderForm: ({ nonce, errorMessage }) => renderLocalFormPage({
+      title: 'Данные входа',
+      sections: [
+        { paragraphs: ['Сохранение только на этом устройстве. Агент и Trelio не получат значения.', `Адреса входа: ${[...new Set(definition.steps.map(step => step.origin))].join(', ')}`] },
+        { ...(errorMessage ? { notice: { tone: 'error', text: 'Проверьте поля. Данные не сохранены; повторите ввод или отмените настройку.' } } : {}), fields: [
+          ...(uses('login') ? [field('login', 'Логин')] : []),
+          ...(uses('password') ? [field('password', 'Пароль')] : []),
+          ...(uses('totp') ? [field('totp', 'TOTP-секрет (необязательно)', 'Заранее включите TOTP у сервиса. Введите Base32-секрет или ссылку otpauth://totp, а не текущий код. Совместное хранение с паролем уменьшает независимость второго фактора. Можно оставить пустым и вводить код вручную.')] : []),
+        ] },
+        { notice: { tone: 'warning', text: 'Сохранять данные в браузере не нужно – подключение будет сохранено отдельно на этом устройстве. Если браузер предложит сохранить данные, выберите «Нет, спасибо».' } },
+      ],
+      form: { action: '/credential', nonce, actions: [
+        { label: 'Сохранить на устройстве', name: 'decision', value: 'save' },
+        { label: 'Отмена', name: 'decision', value: 'cancel', variant: 'secondary', formNoValidate: true },
+      ] },
+    }),
     parseSubmission: form => {
       const allowed = ['nonce', 'decision', ...['login', 'password', 'totp'].filter(uses)];
       if ([...form.keys()].some(key => !allowed.includes(key) || form.getAll(key).length !== 1) || form.get('decision') !== 'save') fail('invalid_input');

@@ -8,7 +8,7 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import https from "node:https";
-import { openBrowser } from "./trelio-workspace.mjs";
+import { openBrowser, renderLocalFormMessage, LOCAL_FORM_CSP } from "./trelio-workspace.mjs";
 
 const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;
 const OAUTH_TIMEOUT_MS = 20_000;
@@ -269,9 +269,9 @@ const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, 
     outgoing.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'",
+      "content-security-policy": LOCAL_FORM_CSP,
       "referrer-policy": "no-referrer",
-    }).end("<!doctype html><meta charset=utf-8><title>Подключено</title><p>Remote MCP подключён. Эту вкладку можно закрыть.</p>");
+    }).end(renderLocalFormMessage("Авторизация получена", "Ответ сервиса получен. Подключение проверяется в приложении; эту вкладку можно закрыть.", "pending"));
     resolveCallback(code);
   });
   let timeout;
