@@ -499,6 +499,35 @@ routes, new writes, human credentials or fresh inferred processing.
 
 This host flow requires the matching dedicated native email route/receipt/ACK
 admission and a newly published reviewed provider version. Neither is fabricated
-from a local flag. Real Windows business E2E, initial email backlog, unknown
+from a local flag. Real Windows business E2E, unknown
 conversation intake, encrypted execution and the other full product gates remain
 required; `businessReady` stays false and no installation is performed here.
+
+### Initial unread email in the same stream journal
+
+For a NEW email source with no durable forward position, the SAME signed reader
+requires reviewed provider >=2.6.6 and opts into `monitor --unread-backfill`.
+Older packages refuse this initialization before account/provider launch with
+`ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED`; existing forward cursors retain
+their old passive path and are never reset or silently seeded after an upgrade.
+
+The initial native baseline returns its ordinary forward cursor and a separate
+bounded v2 initial-unread cursor. The SAME SQLite `commitPage` transaction stores
+the forward position plus one `email-initial-unread/v1` child stream with its
+ORIGINAL seed. No schema migration, second queue, message snapshot or credential
+store is introduced. Restart/conflict/full inbox retains both positions together.
+
+Child polls use their durable cursor or, only before the first page, that stored
+seed. They reuse the SAME signed account/process engine and the existing four
+oldest-due source/stream slots per tick across companies. Backlog pages cannot
+occupy the worker indefinitely or postpone the independent forward stream.
+Terminal history sleeps. Every read keeps the live source generation checks,
+original deadline, private path and native routing/processing/ACK boundaries.
+
+Wire validation keeps exact v1/v2 scope/UIDVALIDITY/ceiling bindings and progress;
+history refs lie inside the frozen original range. UNSEEN applies only to these
+historical pages. New forward UIDs remain independent of read flags, including
+messages read on another device. Historical flags are observed per page, not as
+an atomic snapshot at enrollment. Already-read/deleted old mail is not claimed
+as recovered. Body, address/subject, owner identity and guessed task mappings
+still do not enter SQLite, and history capture alone never marks mail read.

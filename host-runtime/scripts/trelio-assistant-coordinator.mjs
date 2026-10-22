@@ -20,6 +20,7 @@ const sourceFor = (identity,company) => ({ origin:identity.origin,assistantId:id
   provider:'trelio',accountId:company.memberId,bindingId:identity.deviceId });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const externalProviders=Object.freeze({'telegram-mtproto':'telegram','email-imap-smtp':'email','max-web':'max'});
+const EMAIL_INITIAL_UNREAD_STREAM='email-initial-unread/v1';
 const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:identity.assistantId,companyId:row.companyId,
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
 
@@ -231,8 +232,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // registration has none; guessing/opening a default chat is forbidden.
       if(row.skillId==='max-web')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(streamId!==null && poll.cursor===null && typeof poll.initialCursor!=='string')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      const email=row.skillId==='email-imap-smtp';
+      const initialEmail=email&&streamId===null&&poll.cursor===null;
+      if(email&&streamId!==null&&streamId!==EMAIL_INITIAL_UNREAD_STREAM)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      // The forward position and the original history seed share one journal
+      // commit. Only a never-started email source requests a new seed. Child
+      // pages use that ORIGINAL seed until their own first committed cursor;
+      // no restart, source resume or provider upgrade resets a forward cursor.
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
-        accountId:row.localAccountId,cursor:poll.cursor,...(streamId===null?{}:{chat:streamId,
+        accountId:row.localAccountId,cursor:email&&streamId!==null?poll.cursor??poll.initialCursor:poll.cursor,
+        ...(email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
           ...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})})},signal);lease();
       // A native Channel constructor supplies a positive channel ID, not an
       // untyped chat number. Apply Telethon's documented marked representation
@@ -247,9 +256,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         return {id:String(marked),revision:createHash('sha256').update(JSON.stringify(['telegram-channel-signal/v1',source,
           channelId,result.nextCursor])).digest('hex'),initialCursor:poll.cursor};
       });
-      if(streamId!==null && (row.skillId!=='telegram-mtproto' || result.baselineOnly!==false
-        || poll.cursor===null && result.initialAccountBackfill!==true
-        || (result.unresolvedDeletionIds??[]).length))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      if(initialEmail){
+        if(result.baselineOnly!==true||!Array.isArray(result.events)||result.events.length
+          ||typeof result.initialUnreadCursor!=='string'||!result.initialUnreadCursor.length
+          ||result.initialUnreadCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+        streams.push({id:EMAIL_INITIAL_UNREAD_STREAM,revision:createHash('sha256')
+          .update(JSON.stringify([EMAIL_INITIAL_UNREAD_STREAM,source,result.initialUnreadCursor])).digest('hex'),
+          initialCursor:result.initialUnreadCursor});
+      }else if(result.initialUnreadCursor!==undefined)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      if(streamId!==null && (result.baselineOnly!==false || (result.unresolvedDeletionIds??[]).length
+        || (email?result.initialUnreadBackfill!==true:row.skillId!=='telegram-mtproto'
+          || poll.cursor===null && result.initialAccountBackfill!==true)))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const deletions=resolveCloudDeletions(source,result);
       if(!Array.isArray(result.events)||result.events.length+deletions.length>100)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
       if(typeof result.nextCursor==='string' && result.nextCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT');
@@ -275,7 +292,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       else inbox.abandonStreamPoll(source,{streamId,token:poll.token,generation:poll.generation,retryAfterMs:300_000});
       const code=error?.code;
       const reason=code==='ASSISTANT_COORDINATOR_SOURCE_CHANGED'?null:
-        ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'].includes(code)?'setup_required':
+        ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED',
+          'ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED'].includes(code)?'setup_required':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:SCOPE_CHANGED|UIDVALIDITY_CHANGED)$/u.test(code??'')?'scope_changed':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||['ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT','ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED','ASSISTANT_INBOX_REFERENCE_AMBIGUOUS'].includes(code)?'history_gap':'read_failed';
       await report(reason);await observeAcknowledgementHealth(row,signal);throw error;

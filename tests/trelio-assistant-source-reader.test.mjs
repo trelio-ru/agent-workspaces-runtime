@@ -50,12 +50,12 @@ const page=()=>({schemaVersion:1,baselineOnly:false,events:[{...event,text:'PRIV
   readState:{readReceiptsSent:false,viewsRegistered:false}});
 const prefix='/api/digital-assistants/runtime/source-skills';
 const {privateKey,publicKey}=generateKeyPairSync('ed25519');
-let artifactId=randomUUID(),releaseId=randomUUID(),packageBytes=Buffer.from('{}');
+let artifactId=randomUUID(),releaseId=randomUUID(),packageBytes=Buffer.from('{}'),providerVersion='2.99.42';
 const payload=()=>({releaseId,company:{id:companyId,slug:'synthetic',name:'Synthetic'},
   localIdentity:{...scope,memberId,connectionId:null},companyConnection:null,
   trust:{level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null},
   packageUrl:`${prefix}/package?${new URLSearchParams({...scope,expectedReleaseId:releaseId,artifactId}).toString().replace('projectId=null&','')}`,
-  artifact:{id:artifactId,skillId:scope.skillId,runtimeVersion:'2.99.42',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
+  artifact:{id:artifactId,skillId:scope.skillId,runtimeVersion:providerVersion,packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
     packageSha256:createHash('sha256').update(packageBytes).digest('hex'),packageSizeBytes:packageBytes.length,
     packageSignature:sign(null,packageBytes,privateKey).toString('base64'),signingKeyId:'synthetic-test',
     signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1',manifest:{}},
@@ -437,6 +437,105 @@ test('email incoming verification reuses one signed passive read, drops its curs
   inventoryReads=0;await fs.writeFile(failure,'synthetic');
   await assert.rejects(verify(),error=>error.code==='EMAIL_MONITOR_UNAVAILABLE'&&!JSON.stringify(error).includes('PRIVATE_FAILURE'));
   assert.equal(await fs.readFile(marker,'utf8'),'111','failed verification never repeats configure or monitor');
+});
+
+// These are synthetic wire positions, not a substitute IMAP implementation.
+// The signed child separately verifies its exact arguments/account below.
+const emailPosition=(lastUid,{history=false,...overrides}={})=>Buffer.from(JSON.stringify({v:history?2:1,
+  ...(history?{mode:'initial_unread'}:{}),scope:'a'.repeat(64),uidValidity:42,lastUid,
+  ...(history?{throughUid:10}:{}),...overrides})).toString('base64url');
+const emailHistoryPage=(lastUid=5)=>({schemaVersion:1,baselineOnly:false,
+  events:[{id:`uid:42:${lastUid}`,revision:'b'.repeat(64),kind:'new',uid:String(lastUid),uidValidity:'42',text:'PRIVATE_BODY'}],
+  nextCursor:emailPosition(lastUid,{history:true}),hasMore:lastUid<10,
+  coverage:{historicalBackfill:true,initialUnreadOnly:true,snapshotAtomic:false,bodyContentRead:false,backfillThroughUid:'10'},
+  readState:{readReceiptsSent:false}});
+const emailInitialPage=()=>({schemaVersion:1,baselineOnly:true,events:[],nextCursor:emailPosition(10),
+  initialUnreadCursor:emailPosition(0,{history:true}),hasMore:false,
+  coverage:{historicalBackfill:false,initialUnreadBackfillAvailable:true,bodyContentRead:false},readState:{readReceiptsSent:false}});
+
+test('email initial unread projection binds the original finite range and rejects reseeding, false progress and content cursors',()=>{
+  const project=(value,cursor=null,extra={})=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify(value)},
+    {skillId:'email-imap-smtp',cursor,initialUnread:true,...extra});
+  assert.equal(project(emailInitialPage()).initialUnreadCursor,emailPosition(0,{history:true}));
+  assert.equal(project(emailHistoryPage(),emailPosition(0,{history:true})).initialUnreadBackfill,true);
+  assert.doesNotMatch(JSON.stringify(project(emailHistoryPage(),emailPosition(0,{history:true}))),/PRIVATE_BODY/);
+  assert.equal(project(emailHistoryPage(10),emailPosition(5,{history:true})).hasMore,false);
+  // An empty original folder is a finite completed history too, never a loop.
+  const empty=emailHistoryPage(0);empty.events=[];empty.hasMore=false;empty.coverage.backfillThroughUid='0';
+  empty.nextCursor=emailPosition(0,{history:true,throughUid:0});
+  assert.equal(project(empty,empty.nextCursor).hasMore,false);
+  for(const mutate of [
+    p=>delete p.initialUnreadCursor,p=>p.hasMore=true,p=>p.baselineOnly=false,
+    p=>p.initialUnreadCursor=emailPosition(1,{history:true}),
+    p=>p.initialUnreadCursor=emailPosition(0,{history:true,throughUid:11}),
+    p=>p.initialUnreadCursor=emailPosition(0,{history:true,scope:'c'.repeat(64)}),
+    p=>p.initialUnreadCursor=emailPosition(0,{history:true,uidValidity:43}),
+    p=>p.initialUnreadCursor=emailPosition(0,{history:true,body:'PRIVATE_BODY'}),
+    p=>p.nextCursor=emailPosition(10,{uidValidity:0}),
+  ]){const value=emailInitialPage();mutate(value);assert.throws(()=>project(value),/INVALID_RESPONSE/);}
+  for(const mutate of [
+    p=>p.nextCursor=emailPosition(5,{history:true,throughUid:11}),
+    p=>p.nextCursor=emailPosition(5,{history:true,scope:'c'.repeat(64)}),
+    p=>p.nextCursor=emailPosition(5,{history:true,uidValidity:43}),
+    p=>p.nextCursor=emailPosition(5,{history:true,mode:'forward'}),
+    p=>p.nextCursor=emailPosition(5,{history:true,credential:'PRIVATE_BODY'}),
+    p=>p.nextCursor=emailPosition(5,{history:true,lastUid:2**32}),
+    p=>p.nextCursor=emailPosition(0,{history:true}),p=>p.hasMore=false,
+    p=>p.initialUnreadCursor=emailPosition(0,{history:true}),
+    p=>p.coverage.initialUnreadBackfillAvailable=true,p=>p.coverage.backfillThroughUid='11',
+    p=>p.coverage.snapshotAtomic=true,p=>p.coverage.bodyContentRead=true,
+    p=>p.readState.readReceiptsSent=true,p=>p.events[0].uid='6',
+    p=>{p.events[0].uidValidity='43';p.events[0].id='uid:43:5';},
+  ]){const value=emailHistoryPage();mutate(value);assert.throws(()=>project(value,emailPosition(0,{history:true})),/INVALID_RESPONSE/);}
+  const behind=emailHistoryPage(3);assert.throws(()=>project(behind,emailPosition(5,{history:true})),/INVALID_RESPONSE/);
+  assert.throws(()=>project(emailInitialPage(),null,{initialUnread:false}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(emailInitialPage(),null,{chat:'123'}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(emailInitialPage(),null,{initialAccountCursor:previousCursor}),/INVALID_RESPONSE/);
+  assert.throws(()=>project(emailHistoryPage(),emailPosition(0)),/INVALID_RESPONSE/);
+});
+
+test('signed email child uses the same account/executor for finite initial history and refuses old capability before launch',async t=>{
+  const savedScope={...scope};
+  t.after(()=>{Object.assign(scope,savedScope);providerVersion='2.99.42';setupFixture=null;resolveOverride=null;});
+  scope.skillId='email-imap-smtp';
+  const accountId=randomUUID(),row={...scope,id:randomUUID(),deviceId,localAccountId:accountId,revision:0,state:'active',
+    provisionLocalAccount:true,executionVerified:false};
+  const sourceDir=path.join(directory,'email-initial-history'),marker=path.join(directory,'email-initial-child');
+  await fs.mkdir(sourceDir);
+  await fs.writeFile(path.join(sourceDir,'main.mjs'),`import fs from 'node:fs';import assert from 'node:assert/strict';
+    const args=process.argv.slice(2),initial=args.includes('--unread-backfill'),position=args.indexOf('--cursor');
+    const cursor=position<0?null:args[position+1];
+    assert.deepEqual(args,['monitor',...(cursor?['--cursor',cursor]:[]),...(initial?['--unread-backfill']:[]),
+      '--conversation-references','--limit','20']);
+    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    let input='';for await(const c of process.stdin)input+=c;assert.equal(input,'');fs.appendFileSync(${JSON.stringify(marker)},'1');
+    const out=initial?(cursor?${JSON.stringify(emailHistoryPage(10))}:${JSON.stringify(emailInitialPage())}):
+      {...${JSON.stringify(emailInitialPage())},baselineOnly:false,initialUnreadCursor:undefined,
+        coverage:{historicalBackfill:false,bodyContentRead:false}};
+    process.stdout.write(JSON.stringify(out));`);
+  const build=async version=>{providerVersion=version;artifactId=randomUUID();releaseId=randomUUID();
+    packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:version,sourceDirectory:sourceDir,
+      entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});};
+  await build('2.6.6');setupFixture=row;
+  await prepareAssistantSourceAccount({identity,host,store,client:{identity,sourceAccounts:async()=>[row]},companyId,sourceId:row.id});
+  setupFixture=null;
+  const invoke=(options={})=>readAssistantSourceMonitor({identity,host,store,source:{...scope,accountId,initialUnread:true,...options}});
+  const before=resolveCalls;
+  const baseline=await invoke();assert.equal(baseline.initialUnreadCursor,emailPosition(0,{history:true}));
+  const terminal=await invoke({cursor:baseline.initialUnreadCursor});assert.equal(terminal.hasMore,false);
+  assert.equal(terminal.events[0].id,'uid:42:10');assert.equal(resolveCalls-before,2,'each passive invocation resolves afresh, including verified cache hits');
+  assert.equal(await fs.readFile(marker,'utf8'),'11');
+  await build('2.6.5');
+  await assert.rejects(invoke(),{code:'ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED'});
+  await assert.rejects(invoke({accountId:randomUUID()}),{code:'ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED'});
+  assert.equal(await fs.readFile(marker,'utf8'),'11','unsupported history stops before account selection/provider launch');
+  assert.equal((await invoke({initialUnread:false,cursor:emailPosition(10)})).baselineOnly,false,'old forward-only accounts remain usable');
+  assert.equal(await fs.readFile(marker,'utf8'),'111');
+  const beforeInvalid=resolveCalls;
+  for(const options of [{chat:'123'},{initialAccountCursor:previousCursor},{cursor:emailPosition(0)},
+    {cursor:emailPosition(0,{history:true,secret:'PRIVATE'})}])await assert.rejects(invoke(options),/INVALID_INPUT/);
+  assert.equal(resolveCalls,beforeInvalid,'invalid mode/cursor is rejected before network or private account I/O');
 });
 
 test('structural projection rejects bad pages, scope swaps, receipts and gaps without losing the old cursor',()=>{

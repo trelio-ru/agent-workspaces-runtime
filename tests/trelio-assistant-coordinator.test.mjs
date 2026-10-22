@@ -392,7 +392,9 @@ const externalFixture=async (t,{sourceHealth=null,acknowledgeSource=null}={})=>{
   const row={id:randomUUID(),companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:randomUUID(),projectId:null,
     skillId:'telegram-mtproto',state:'active',revision:0,executionVerified:false};
   let rows=[row],inventoryFailure=false,read=async source=>({schemaVersion:1,baselineOnly:source.cursor===null,
-    events:[],nextCursor:'baseline',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}),reads=0;
+    events:[],nextCursor:'baseline',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
+    ...(source.skillId==='email-imap-smtp'&&source.initialUnread?
+      source.cursor===null?{initialUnreadCursor:'email-initial-seed'}:{initialUnreadBackfill:true}:{})}),reads=0;
   f.options.client.sourceAccounts=async companyId=>{
     assert.equal(companyId,f.companyId);
     if(inventoryFailure)throw Object.assign(new Error('PRIVATE_SOURCE_ERROR'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
@@ -428,6 +430,73 @@ test('native source refs poll every five minutes into durable unrouted SQLite re
   }finally{await f.coordinator.close();}
 });
 
+test('initial unread email keeps the original seed and independent forward position through real SQLite restart',async t=>{
+  const f=await externalFixture(t);f.row.skillId='email-imap-smtp';const requests=[];
+  f.read(async source=>{requests.push({...source});assert.equal(source.initialUnread,true);assert.equal(source.cursor,null);
+    return {baselineOnly:true,events:[],nextCursor:'forward-10',initialUnreadCursor:'history-0:10',hasMore:false};});
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    let stream=f.database.prepare('SELECT * FROM assistant_inbox_streams').get();
+    assert.equal(f.position(),'forward-10');assert.equal(stream.initial_cursor,'history-0:10');assert.equal(stream.cursor,null);
+    assert.equal(stream.stream_id,'email-initial-unread/v1');
+    await f.restart();
+    f.read(async source=>{requests.push({...source});assert.equal(source.initialUnread,true);assert.equal(source.cursor,'history-0:10');
+      assert.equal(source.chat,undefined);assert.equal(source.initialAccountCursor,undefined);
+      return {baselineOnly:false,initialUnreadBackfill:true,events:[{id:'uid:17:5',revision:'a'.repeat(64),body:'PRIVATE_BODY'}],
+        nextCursor:'history-5:10',hasMore:true};});
+    await f.coordinator.pollOnce();
+    assert.equal(f.position(),'forward-10');assert.equal(f.database.prepare('SELECT cursor FROM assistant_inbox_streams').get().cursor,'history-5:10');
+    await f.restart();f.advance(300000);
+    f.read(async source=>{requests.push({...source});
+      if(source.initialUnread){assert.equal(source.cursor,'history-5:10');return {baselineOnly:false,initialUnreadBackfill:true,
+        events:[{id:'uid:17:8',revision:'b'.repeat(64)}],nextCursor:'history-10:10',hasMore:false};}
+      assert.equal(source.cursor,'forward-10');return {baselineOnly:false,events:[{id:'uid:17:11',revision:'c'.repeat(64),subject:'PRIVATE_SUBJECT'}],
+        nextCursor:'forward-11',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.position(),'forward-11');
+    stream=f.database.prepare('SELECT * FROM assistant_inbox_streams').get();
+    assert.equal(stream.initial_cursor,'history-0:10');assert.equal(stream.completed_generation,stream.signal_generation);
+    assert.deepEqual(f.database.prepare('SELECT event_id,task_id,wake,processed,acked FROM assistant_inbox_events ORDER BY event_id').all().map(row=>({...row})),
+      ['uid:17:11','uid:17:5','uid:17:8'].map(event_id=>({event_id,task_id:null,wake:0,processed:0,acked:0})));
+    assert.equal(await f.coordinator.workOnce(),null);assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+    await f.restart();f.advance(300000);
+    f.read(async source=>{requests.push({...source});assert.equal(source.initialUnread,undefined);assert.equal(source.cursor,'forward-11');
+      return {baselineOnly:false,events:[{id:'uid:17:11',revision:'c'.repeat(64)}],nextCursor:'forward-11',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(requests.length,5,'a final historical stream stays asleep after restart');
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,3);
+    // An unexpected seed in a later forward response is not a reset command.
+    f.advance(300000);f.read(async()=>({baselineOnly:false,events:[],nextCursor:'lost',initialUnreadCursor:'replacement',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(f.position(),'forward-11');
+    assert.equal(f.database.prepare('SELECT initial_cursor FROM assistant_inbox_streams').get().initial_cursor,'history-0:10');
+    assert.ok(!JSON.stringify(f.database.prepare('SELECT * FROM assistant_inbox_events').all()).includes('PRIVATE'));
+  }finally{await f.coordinator.close();}
+});
+
+test('initial email seed and forward cursor roll back together on SQLite failure or a late source pause',async t=>{
+  const f=await externalFixture(t);f.row.skillId='email-imap-smtp';
+  f.read(async()=>({baselineOnly:true,events:[],nextCursor:'forward-10',initialUnreadCursor:'history-0:10',hasMore:false}));
+  try{
+    f.inbox.register(f.scope());
+    // Abort precisely after the stream INSERT. This proves both operations use
+    // the SAME SQLite transaction rather than two superficially adjacent writes.
+    const key=f.database.prepare('SELECT source_key FROM assistant_inbox_sources').get().source_key;
+    assert.match(key,/^[a-f0-9]{64}$/);
+    f.database.exec(`CREATE TEMP TRIGGER fail_email_baseline BEFORE UPDATE OF cursor ON assistant_inbox_sources
+      WHEN NEW.source_key='${key}' BEGIN SELECT RAISE(ABORT,'synthetic baseline failure'); END;`);
+    await f.coordinator.pollOnce();assert.equal(f.position(),null);
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n,0);
+    f.database.exec('DROP TRIGGER fail_email_baseline');f.advance(300000);
+    f.read(async()=>{f.row.state='paused';f.row.revision++;return {baselineOnly:true,events:[],nextCursor:'lost',
+      initialUnreadCursor:'lost-seed',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.position(),null);
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n,0);
+    f.row.state='active';f.row.revision++;f.advance(300000);
+    f.read(async()=>({baselineOnly:true,events:[],nextCursor:'forward-10',initialUnreadCursor:'history-0:10',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(f.position(),'forward-10');
+    assert.equal(f.database.prepare('SELECT initial_cursor FROM assistant_inbox_streams').get().initial_cursor,'history-0:10');
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+  }finally{await f.coordinator.close();}
+});
+
 test('failed source inventories retain positions and cannot revoke or continue polling stale registrations',async t=>{
   const f=await externalFixture(t);
   try{
@@ -452,10 +521,12 @@ test('an unavailable company source does not stop another company account from r
     assert.equal(company,companyB);return [second];
   };
   f.read(async source=>{assert.equal(source.companyId,companyB);assert.equal(source.accountId,second.localAccountId);
-    return {events:source.cursor===null?[]:[{id:'uid:2:3',revision:'a'.repeat(64),subject:'PRIVATE_SUBJECT'}],nextCursor:'mail-next',hasMore:false};});
+    return source.initialUnread?{baselineOnly:source.cursor===null,events:[],nextCursor:'mail-next',hasMore:false,
+      ...(source.cursor===null?{initialUnreadCursor:'mail-history'}:{initialUnreadBackfill:true})}:
+      {events:[{id:'uid:2:3',revision:'a'.repeat(64),subject:'PRIVATE_SUBJECT'}],nextCursor:'mail-next',hasMore:false};});
   try{
     await f.coordinator.pollOnce();assert.equal(f.reads(),1);
-    f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.reads(),2);
+    f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.reads(),3,'forward and the separate history stream both get bounded turns');
     const stored=f.database.prepare('SELECT e.event_id,e.task_id,e.wake,s.scope_json FROM assistant_inbox_events e JOIN assistant_inbox_sources s USING(source_key)').get();
     assert.equal(stored.event_id,'uid:2:3');assert.equal(stored.task_id,null);assert.equal(stored.wake,0);
     assert.equal(JSON.parse(stored.scope_json).companyId,companyB);assert.equal(f.counts().acks,0);
@@ -651,6 +722,7 @@ for(const provider of ['telegram','email'])test(`${provider} native routes reuse
   };
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    if(provider==='email')await f.coordinator.pollOnce(); // Complete the independently due empty initial history.
     const threadId=f.coordinator.status()[0].threadId;
     f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'messages',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],events:[
       {id:provider==='email'?'uid:17:11':'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key},
@@ -709,7 +781,9 @@ test('routing outage cannot roll back a committed provider page or become author
 });
 
 
-for(const provider of ['telegram','email'])test(`${provider} committed processing ACK survives a lost write with read-only recovery`,async t=>{
+for(const scenario of ['telegram','email','email-history'])test(`${scenario} committed processing ACK survives a lost write with read-only recovery`,async t=>{
+  const history=scenario==='email-history',provider=history?'email':scenario;
+  const eventId=provider==='email'?`uid:17:${history?5:11}`:'message:123:1';
   let mode='unknown',calls=[],f;
   let healthRevision=0,healthRead='ready',healthAck='ready',reportFailure=false,healthReadFailure=false;const healthReports=[];
   const sourceHealth={read:async row=>{
@@ -725,7 +799,7 @@ for(const provider of ['telegram','email'])test(`${provider} committed processin
   const acknowledgeSource=async input=>{
     calls.push(input.verifyOnly);input.assertReferences();input.beforeInvoke();
     assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'durable fence precedes ONE native invocation');
-    assert.equal(input.references.length,1);assert.equal(input.references[0].id,provider==='email'?'uid:17:11':'message:123:1');
+    assert.equal(input.references.length,1);assert.equal(input.references[0].id,eventId);
     if(provider==='email')assert.equal(input.references[0].originalSha256,'f'.repeat(64));
     if(mode==='unknown')throw Object.assign(new Error('PRIVATE_PROVIDER_LOST'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
     return {acknowledged:mode==='confirmed',notAttempted:true,code:null};
@@ -745,9 +819,11 @@ for(const provider of ['telegram','email'])test(`${provider} committed processin
   };
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    if(provider==='email'&&!history)await f.coordinator.pollOnce();
     const thread=f.coordinator.status()[0].threadId;
-    f.read(async()=>({baselineOnly:false,nextCursor:'message',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
-      events:[{id:provider==='email'?'uid:17:11':'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+    f.read(async source=>({baselineOnly:false,nextCursor:history&&source.initialUnread?'history-end':'message',hasMore:false,
+      ...(history&&source.initialUnread?{initialUnreadBackfill:true}:{}),channelsToSync:[],unresolvedDeletionIds:[],
+      events:history&&!source.initialUnread?[]:[{id:eventId,revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
     f.advance(300000);await f.coordinator.pollOnce();assert.deepEqual(calls,[]);
     await f.coordinator.workOnce();await f.coordinator.pollOnce();assert.deepEqual(calls,[],'body read with omitted processing is never ACK eligible');
     selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();

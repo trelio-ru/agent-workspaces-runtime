@@ -42,6 +42,8 @@ publication tooling также остаются вне этого публичн
   Email routing hashes untrusted threading headers, never owner identity. The
   SAME journal v8 binds exact full RFC822 SHA to the independent read slot; one
   UID per fresh ACK, all original UIDs on unknown read-back, never a thread STORE.
+  New email baselines atomically retain forward + original initial-unread stream
+  seeds in that SAME journal; fixed ceiling, no reset of existing positions.
   SQLite хранит только bounded structural refs; child stream hints/cursors
   commit in that SAME journal, never as guessed task/ACK authority. Final
   streams sleep until a new native hint; new hints cannot be consumed by an

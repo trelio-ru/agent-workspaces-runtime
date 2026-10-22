@@ -1142,6 +1142,21 @@ export const rethrowAssistantSourceError=(error,{signal,setup=false}={})=>{
 };
 const sourceCursor = (value,skillId) => typeof value==='string' && value.length<=16_384
   && (skillId==='telegram-mtproto' ? /^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/u : /^[A-Za-z0-9_-]+$/u).test(value);
+/** Wire metadata only, not another IMAP parser or source authority. The signed
+ * provider rechecks the real account/folder scope. This closed projection keeps
+ * arbitrary encoded text and a changed history ceiling out of the journal. */
+const emailMonitorPosition=(value,history)=>{
+  try{
+    if(!sourceCursor(value,'email-imap-smtp')||value.length>2048)return null;
+    const row=JSON.parse(Buffer.from(value,'base64url').toString('utf8'));
+    const keys=history?'lastUid,mode,scope,throughUid,uidValidity,v':'lastUid,scope,uidValidity,v';
+    const uid=(number,minimum)=>Number.isSafeInteger(number)&&number>=minimum&&number<2**32;
+    if(!object(row)||Object.keys(row).sort().join(',')!==keys||row.v!==(history?2:1)
+      ||typeof row.scope!=='string'||!/^[a-f0-9]{64}$/u.test(row.scope)||!uid(row.uidValidity,1)||!uid(row.lastUid,0)
+      ||history&&(row.mode!=='initial_unread'||!uid(row.throughUid,0)||row.lastUid>row.throughUid))return null;
+    return row;
+  }catch{return null;}
+};
 const sourceScope = input => {
   if(!object(input) || Object.keys(input).some(key=>!['companyId','projectId','skillId'].includes(key))
     || !Object.hasOwn(SOURCE_PROTOCOLS,input.skillId)) fail('ASSISTANT_SOURCE_INVALID_INPUT');
@@ -1433,13 +1448,33 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
   const backfill=raw.coverage?.historicalBackfill===true;
   const accountInterval=raw.coverage?.initialAccountInterval===true;
   const unreadInterval=raw.coverage?.initialUnreadOnly===true;
-  if(typeof initialUnread!=='boolean' || initialUnread && (skillId!=='telegram-mtproto' || !channel || cursor!==null)
+  const emailInitial=skillId==='email-imap-smtp'&&initialUnread;
+  let emailPrevious=null,emailNext=null;
+  if(typeof initialUnread!=='boolean')invalid();
+  if(emailInitial){
+    if(chat!==null||initialAccountCursor!==null||accountInterval)invalid();
+    if(cursor===null){
+      const forward=emailMonitorPosition(raw.nextCursor,false),seed=emailMonitorPosition(raw.initialUnreadCursor,true);
+      if(!forward||!seed||seed.scope!==forward.scope||seed.uidValidity!==forward.uidValidity
+        ||seed.lastUid!==0||seed.throughUid!==forward.lastUid||raw.coverage?.initialUnreadBackfillAvailable!==true
+        ||raw.hasMore!==false||backfill||unreadInterval)invalid();
+    }else{
+      emailPrevious=emailMonitorPosition(cursor,true);emailNext=emailMonitorPosition(raw.nextCursor,true);
+      if(!emailPrevious||!emailNext||emailNext.scope!==emailPrevious.scope||emailNext.uidValidity!==emailPrevious.uidValidity
+        ||emailNext.throughUid!==emailPrevious.throughUid||emailNext.lastUid<emailPrevious.lastUid
+        ||raw.hasMore!==(emailNext.lastUid<emailNext.throughUid)||raw.hasMore&&emailNext.lastUid===emailPrevious.lastUid
+        ||!backfill||!unreadInterval||raw.coverage?.snapshotAtomic!==false
+        ||raw.coverage.backfillThroughUid!==String(emailPrevious.throughUid)||raw.initialUnreadCursor!==undefined
+        ||raw.coverage.initialUnreadBackfillAvailable===true)invalid();
+    }
+  }else if(typeof raw.initialUnreadCursor!=='undefined'||raw.coverage?.initialUnreadBackfillAvailable===true)invalid();
+  if(!emailInitial&&(initialUnread && (skillId!=='telegram-mtproto' || !channel || cursor!==null)
     || initialAccountCursor!==null && (initialUnread || skillId!=='telegram-mtproto' || !channel || cursor!==null || !cursorRef(initialAccountCursor))
     || backfill && (skillId!=='telegram-mtproto' || !channel || accountInterval===unreadInterval
       || accountInterval && raw.coverage.earlierEditsIncluded!==false || raw.coverage.snapshotAtomic!==false || raw.hasMore!==true)
     || !backfill && (accountInterval||unreadInterval)
-    || initialUnread && (!backfill || !unreadInterval) || initialAccountCursor!==null && (!backfill || !accountInterval))invalid();
-  if(raw.schemaVersion!==1 || typeof raw.baselineOnly!=='boolean' || raw.baselineOnly!==(cursor===null && !initialUnread && initialAccountCursor===null)
+    || initialUnread && (!backfill || !unreadInterval) || initialAccountCursor!==null && (!backfill || !accountInterval)))invalid();
+  if(raw.schemaVersion!==1 || typeof raw.baselineOnly!=='boolean' || raw.baselineOnly!==(cursor===null && (!initialUnread||emailInitial) && initialAccountCursor===null)
     || !Array.isArray(raw.events) || raw.events.length>100 || raw.baselineOnly && raw.events.length
     || typeof raw.hasMore!=='boolean' || !cursorRef(raw.nextCursor)
     || !backfill && raw.coverage?.historicalBackfill!==false || raw.readState?.readReceiptsSent!==false)invalid();
@@ -1483,8 +1518,11 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
     }
     return event;
   });
+  if(emailPrevious&&events.some(row=>row.uidValidity!==String(emailPrevious.uidValidity)
+    ||BigInt(row.uid)<=BigInt(emailPrevious.lastUid)||BigInt(row.uid)>BigInt(emailNext.lastUid)))invalid();
   const page={schemaVersion:1,baselineOnly:raw.baselineOnly,events,nextCursor:raw.nextCursor,hasMore:raw.hasMore,
-    ...(backfill?{[accountInterval?'initialAccountBackfill':'initialUnreadBackfill']:true}:{})};
+    ...(backfill?{[accountInterval?'initialAccountBackfill':'initialUnreadBackfill']:true}:{}),
+    ...(emailInitial&&cursor===null?{initialUnreadCursor:raw.initialUnreadCursor}:{})};
   if(skillId==='telegram-mtproto'){
     const list=(value,validator)=>{
       if(!Array.isArray(value) || value.length>100 || value.some(item=>!validator(item)) || new Set(value).size!==value.length)invalid();
@@ -1731,7 +1769,9 @@ export const readAssistantSourceMonitor = async ({identity,host,store,source,sig
   const initialAccountCursor=source.initialAccountCursor??null;
   const channel=typeof chat==='string' && /^-[1-9]\d{0,18}$/u.test(chat)
     && BigInt(chat)<-1000000000000n && BigInt(chat)>-9223372036854775808n;
-  if(typeof initialUnread!=='boolean' || initialUnread && (scope.skillId!=='telegram-mtproto' || !channel || cursor!==null)
+  const emailInitial=scope.skillId==='email-imap-smtp'&&initialUnread;
+  if(typeof initialUnread!=='boolean' || initialUnread && !emailInitial && (scope.skillId!=='telegram-mtproto' || !channel || cursor!==null)
+    ||emailInitial&&(chat!==null||initialAccountCursor!==null||cursor!==null&&!emailMonitorPosition(cursor,true))
     || initialAccountCursor!==null && (initialUnread || scope.skillId!=='telegram-mtproto' || !channel || cursor!==null || !sourceCursor(initialAccountCursor,scope.skillId))
     || cursor!==null && !sourceCursor(cursor,scope.skillId)
     || scope.skillId==='telegram-mtproto' && (folder!==null || chat!==null && !/^-?[1-9]\d{0,18}$/u.test(chat))
@@ -1739,6 +1779,10 @@ export const readAssistantSourceMonitor = async ({identity,host,store,source,sig
     || scope.skillId==='email-imap-smtp' && (chat!==null || folder!==null && (typeof folder!=='string' || !folder.length || folder.length>256 || /[\x00-\x1f\x7f]/u.test(folder))))fail('ASSISTANT_SOURCE_INVALID_INPUT');
   try{
     return await withAssistantSourcePackage({identity,host,store,scope,signal},async({engine,profile,materialized,resolution,signal:combined})=>{
+      // A fresh source cannot durably claim a baseline while silently losing
+      // its historical unread seed. Existing forward positions are untouched.
+      if(emailInitial&&!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.6.6'))
+        fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
       const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,
         companyConnection:resolution.companyConnection};
       const args=['monitor','--local-account',accountId,...(chat===null?[]:['--chat',chat]),
