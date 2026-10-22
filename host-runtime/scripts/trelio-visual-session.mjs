@@ -13,8 +13,8 @@ import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
-import { normalizeBrowserMailSpec, validateBrowserMailJournal } from './trelio-browser-mail-auth.mjs';
-export { BROWSER_MAIL_AUTH_API } from './trelio-browser-mail-auth.mjs';
+import { normalizeBrowserMailSpec, validateBrowserMailJournal } from './trelio-browser-session.mjs';
+export { BROWSER_MAIL_AUTH_API } from './trelio-browser-session.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');

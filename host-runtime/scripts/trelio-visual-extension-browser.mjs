@@ -16,8 +16,8 @@ import { validVisualArguments, visualStatus, normalizeBrowserVisualResult, valid
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
-import { ProtectedBrowserMailAttempt } from './trelio-browser-mail-auth.mjs';
-import { acquireBrowserMailLock } from './trelio-browser-mail-lock.mjs';
+import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
+import { acquireBrowserMailLock } from './trelio-browser-session.mjs';
 
 // A public manifest identity fixes the extension Origin across private
 // profiles. This is not a credential/signing secret; the independent random

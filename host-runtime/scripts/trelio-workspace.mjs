@@ -8085,7 +8085,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_LOCAL_FORM_NODE_EXECUTABLE: process.execPath,
     // Public code location only. Private mail/browser admission is checked
     // again by this host bridge against the current bound actor and attempt.
-    TRELIO_BROWSER_MAIL_MODULE_URL: new URL('./trelio-browser-mail-bridge.mjs', import.meta.url).href,
+    TRELIO_BROWSER_MAIL_MODULE_URL: new URL('./trelio-browser-session.mjs', import.meta.url).href,
     // HTTP evidence is also available to native-supervised browser adapters
     // without a generic lifecycle descriptor. This grants no lease or policy;
     // inherited module URLs were stripped above and cannot select executable code.

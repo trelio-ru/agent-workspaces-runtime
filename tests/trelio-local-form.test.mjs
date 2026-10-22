@@ -85,7 +85,7 @@ test('signed skills receive only the current host form module and executable, ne
   const base = { artifact: { skillId: 'synthetic', runtimeVersion: '0.0.0', parsedPackage: { capabilities: [] } }, runtimeDirectory: '/synthetic/runtime', executionContext: { releaseId: 'synthetic-release', companyId: 'synthetic-company' }, inheritedEnvironment: { TRELIO_LOCAL_FORM_MODULE_URL: 'file:///untrusted.mjs', TRELIO_LOCAL_FORM_NODE_EXECUTABLE: '/untrusted/node', TRELIO_BROWSER_MAIL_MODULE_URL: 'file:///untrusted-mail.mjs' } };
   const env = buildAgentSkillRuntimeEnvironment(base);
   assert.equal(env.TRELIO_LOCAL_FORM_MODULE_URL, moduleUrl.href); assert.equal(env.TRELIO_LOCAL_FORM_NODE_EXECUTABLE, process.execPath);
-  assert.equal(env.TRELIO_BROWSER_MAIL_MODULE_URL, new URL('../host-runtime/scripts/trelio-browser-mail-bridge.mjs', import.meta.url).href);
+  assert.equal(env.TRELIO_BROWSER_MAIL_MODULE_URL, new URL('../host-runtime/scripts/trelio-browser-session.mjs', import.meta.url).href);
   for (const name of ['TRELIO_LOCAL_FORM_MODULE_URL', 'TRELIO_LOCAL_FORM_NODE_EXECUTABLE', 'TRELIO_BROWSER_MAIL_MODULE_URL']) assert.throws(() => buildAgentSkillRuntimeEnvironment({ ...base, grantedEnvironment: { [name]: 'SYNTHETIC_OVERRIDE' } }));
 });
 

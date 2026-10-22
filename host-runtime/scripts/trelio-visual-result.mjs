@@ -2,7 +2,7 @@ import { validateTextResult, TEXT_KIND } from './trelio-browser-text.mjs';
 import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import path from 'node:path';
-import { BROWSER_MAIL_REQUEST_KIND, parseBrowserMailHandle } from './trelio-browser-mail-auth.mjs';
+import { BROWSER_MAIL_REQUEST_KIND, parseBrowserMailHandle } from './trelio-browser-session.mjs';
 
 // A browser picture is a binary MCP block, never a base64 string in an ordinary
 // text result. This boundary is provider-neutral and accepts no page prose,

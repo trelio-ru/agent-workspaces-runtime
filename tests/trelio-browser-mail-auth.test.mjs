@@ -5,13 +5,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireBrowserMailLock } from '../host-runtime/scripts/trelio-browser-mail-lock.mjs';
+import { acquireBrowserMailLock } from '../host-runtime/scripts/trelio-browser-session.mjs';
 import { prepareVisualPrivateDirectory } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualControlServer } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { resolveWorkspaceBridgeConfigDirectory, writePrivateJsonFile } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { ProtectedBrowserMailAttempt, normalizeBrowserMailSpec, parseBrowserMailHandle,
-  browserMailActor } from '../host-runtime/scripts/trelio-browser-mail-auth.mjs';
+  browserMailActor } from '../host-runtime/scripts/trelio-browser-session.mjs';
 
 // Public synthetic identifiers and OTP only; never a provider's real mail,
 // sender, credentials, native state or private company content.
@@ -190,7 +190,7 @@ test('the actual Node private-stdin bridge preserves actor, does not start a bro
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   async function invoke(message, extraEnv = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [fileURLToPath(new URL('../host-runtime/scripts/trelio-browser-mail-bridge.mjs', import.meta.url))],
+      const child = spawn(process.execPath, [fileURLToPath(new URL('../host-runtime/scripts/trelio-browser-session.mjs', import.meta.url))],
         { env: { ...env, ...extraEnv }, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       const stdout = [], stderr = [];
       child.stdout.on('data', bytes => stdout.push(bytes)); child.stderr.on('data', bytes => stderr.push(bytes));
