@@ -410,13 +410,20 @@ export class ExtensionVisualBrowser {
   async close() {
     if (this.#closed) return; this.#closed = true; clearTimeout(this.#deadline);
     this.#launchAbort.abort();
+    this.testDiagnostics?.({ stage: 'close_queue' });
     await this.#tail;
     await this.#credentialSetup;
     // A window-close completion can have started outside the command queue.
     // Join it before cleanup so expiry/close cannot race a second save/remove.
+    this.testDiagnostics?.({ stage: 'close_manual' });
     await this.#finishing?.catch(() => {});
     this.#starting = true;
-    try { await this.#stopBrowser(); if (this.#terminal !== 'browser_process_lost') await this.#saveStopped(); }
+    try {
+      this.testDiagnostics?.({ stage: 'close_browser' });
+      await this.#stopBrowser();
+      this.testDiagnostics?.({ stage: 'close_snapshot' });
+      if (this.#terminal !== 'browser_process_lost') await this.#saveStopped();
+    }
     finally {
       // Failure to flush/stop must not leave this session's browser running.
       // Abort owns only our ChildProcess; it neither kills a PID from disk nor

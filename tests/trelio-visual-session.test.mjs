@@ -90,6 +90,7 @@ test('detached worker keeps its original lease and encrypted storage across shor
     }
     throw new Error('Synthetic worker did not close within cleanup deadline');
   };
+  let failure;
   try {
     assert.equal((await call('setup', { url: origin })).state, 'preparing');
     let status;
@@ -112,9 +113,29 @@ test('detached worker keeps its original lease and encrypted storage across shor
     // claim to disappear before removing this synthetic key and directory.
     await waitForClose();
     assert.ok(await store.read());
-  } finally {
-    await call('close').catch(() => {}); await waitForClose(); await store.remove();
-    await new Promise(resolve => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true });
+  } catch (error) { failure = error; }
+  finally {
+    let stopped = false, diagnostic = '';
+    try {
+      await call('close'); await waitForClose(); stopped = true; await store.remove();
+    } catch (error) {
+      // A failed shutdown must neither mask the ORIGINAL browser assertion nor
+      // leave this test's HTTP listener alive until the hosted job is killed.
+      // Keep the private directory/key if a worker still owns its claim: test
+      // cleanup is not permission to erase an active profile or kill a disk PID.
+      failure ||= error;
+    } finally {
+      store.close();
+      server.closeAllConnections();
+      await new Promise(resolve => server.close(resolve));
+      if (failure) diagnostic = await fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => '');
+      if (stopped) await fs.rm(directory, { recursive: true, force: true });
+    }
+    if (failure) {
+      // This synthetic worker writes only closed, allowlisted stages. Never
+      // dump owner.json: it includes the private control bearer token.
+      failure.message += `; synthetic worker evidence: ${diagnostic || 'unavailable'}`;
+      throw failure;
+    }
   }
 });

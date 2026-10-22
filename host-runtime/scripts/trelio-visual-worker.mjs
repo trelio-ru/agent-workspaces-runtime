@@ -24,18 +24,20 @@ function fixtureDiagnostic(value) {
   // native exception, browser output, URLs, tokens or cookie values. Preserve
   // a short chronological tail so a detached startup has the same closed
   // evidence as the in-process native fixture, including early browser exit.
-  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed'];
+  const stages = ['startup_dependencies', 'startup_browser', 'startup_failed', 'policy', 'policy_read', 'policy_write', 'window_inventory', 'auth', 'window', 'extension_not_ready', 'extension_not_connected', 'browser_exit', 'native_log', 'native_log_unavailable', 'windows_closed', 'browser_quit', 'browser_stop_timeout', 'close_queue', 'close_manual', 'close_browser', 'close_snapshot', 'shutdown_start', 'shutdown_claim', 'shutdown_complete'];
   if (!stages.includes(value.stage)) return;
   const record = { stage: value.stage };
   for (const key of ['sandboxUnavailable', 'displayUnavailable', 'extensionUnavailable']) if (typeof value[key] === 'boolean') record[key] = value[key];
   for (const key of ['exitCode', 'osCryptErrors', 'cookieErrors', 'sqliteErrors', 'networkSandboxErrors']) if (Number.isSafeInteger(value[key])) record[key] = value[key];
   if (['SIGKILL', 'SIGTERM', 'SIGTRAP', 'SIGABRT', 'SIGSEGV', null].includes(value.signal)) record.signal = value.signal;
+  if (['accepted', 'refused', 'not_found', 'helper_failed'].includes(value.state)) record.state = value.state;
   fixtureEvidence.push(record); if (fixtureEvidence.length > 32) fixtureEvidence.shift();
   const snapshot = fixtureEvidence.slice();
   fixtureWrites = fixtureWrites.then(() => writePrivateJsonFile(path.join(owner.directory, 'fixture-diagnostic.json'), { evidence: snapshot })).catch(() => {});
 }
 async function stop() {
   if (stopping) return; stopping = true; clearTimeout(timer);
+  fixtureDiagnostic({ stage: 'shutdown_start' });
   startupAbort.abort();
   // One bounded in-flight input may take 40s to fail; allow its graceful
   // cleanup and profile flush before the exact-child crash watchdog fires.
@@ -44,8 +46,13 @@ async function stop() {
   try { await startup?.catch(() => {}); await engine?.close(); }
   finally {
     server?.close();
+    fixtureDiagnostic({ stage: 'shutdown_claim' });
     const latest = await readPrivateJsonFile(file, { maximumBytes: 65_536 });
     if (latest.token === owner.token) { await fs.unlink(file); await fs.rmdir(path.dirname(file)); }
+    fixtureDiagnostic({ stage: 'shutdown_complete' });
+    // Fixture-only evidence must settle before process.exit; production has
+    // no diagnostic writer and retains the same shutdown/watchdog budget.
+    await fixtureWrites;
     process.exit(0);
   }
 }

@@ -266,6 +266,8 @@ publication tooling также остаются вне этого публичн
   Loopback transport permission отделён от origins/content matches; CSP connect
   ограничен exact private портом. Fixture log tails дают только закрытые счётчики;
   detached fixture сохраняет те же bounded stages в частный diagnostic-файл.
+  Failed detached cleanup preserves the original assertion, closes its synthetic
+  listener/keyring handle, and never erases an active private claim/profile.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
