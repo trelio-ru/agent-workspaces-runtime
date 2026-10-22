@@ -98,7 +98,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -184,7 +184,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ALTER TABLE assistant_inbox_delivery_events ADD COLUMN event_ordinal INTEGER CHECK(event_ordinal>=0 AND event_ordinal<100);`);
       run('UPDATE assistant_inbox_meta SET version=6');
     }
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (6)');
+    if(!versions.length||versions[0].version<7){
+      // A new native read-back may confirm an OLD uncertain route under the
+      // current source generation. Keep this closed verification revision in
+      // the SAME source journal so a lost health response is recoverable after
+      // restart. Migration never invents it from legacy processed/acked bits.
+      db.exec('ALTER TABLE assistant_inbox_sources ADD COLUMN ack_verified_revision INTEGER CHECK(ack_verified_revision>=0 AND ack_verified_revision<=2147483647)');
+      db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN ack_verify_only INTEGER NOT NULL DEFAULT 0 CHECK(ack_verify_only IN (0,1))');
+      run('UPDATE assistant_inbox_meta SET version=7');
+    }
+    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (7)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -310,7 +319,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // select the target again; unprocessed refs remain durable throughout.
         run(`UPDATE assistant_inbox_events SET dispatch_source_key=NULL,route_id=NULL,route_source_revision=NULL,
           read_delivery_id=NULL,task_id=NULL WHERE source_key=? AND processed=0`,scope.key);
-        run('UPDATE assistant_inbox_sources SET configuration_revision=? WHERE source_key=?',nativeRevision,scope.key);
+        run('UPDATE assistant_inbox_sources SET configuration_revision=?,ack_verified_revision=NULL WHERE source_key=?',nativeRevision,scope.key);
       });
     },
     /** One bounded poll per exact source binding; the host performs provider I/O. */
@@ -862,13 +871,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         sum(CASE WHEN acked=0 AND ack_retry_at>0 THEN 1 ELSE 0 END) AS blocked,
         sum(CASE WHEN acked=1 AND route_source_revision=? THEN 1 ELSE 0 END) AS confirmed
         FROM assistant_inbox_events WHERE source_key=?`,current.configuration_revision,scope.key);
-      return row.uncertain>0?'acknowledgement_uncertain':row.blocked>0?'acknowledgement_blocked':row.confirmed>0?'ready':null;
+      // A fresh native read-back of historical slots can confirm this current
+      // registration even though its immutable route remains older. The SAME
+      // completion transaction records that revision; prior-generation success
+      // or a lost uncommitted report never manufactures this evidence.
+      const currentReadBack=current.configuration_revision!==null&&current.ack_verified_revision===current.configuration_revision;
+      return row.uncertain>0?'acknowledgement_uncertain':row.blocked>0?'acknowledgement_blocked':row.confirmed>0||currentReadBack?'ready':null;
     },
     /** Read acknowledgements are separate bounded outbox operations. */
     claimAcknowledgements(scopeInput) {
       const scope = scopeOf(scopeInput);
       return transaction(() => {
-        activeSource(scope);
+        const current = activeSource(scope);
         // Unrouted events, owner-pending tasks and mere discovery are NOT read.
         // Durably accepted task inbox entries may be acknowledged even while
         // waiting for the next scheduled task pass; ordinary comments do not wake it.
@@ -876,24 +890,46 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // processing before even offering an external ACK. The provider adapter
         // must still verify actual content-read evidence and exact revision;
         // neither this SQL flag nor a generic completion boolean grants that.
-        const candidates = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id,e.ack_started,e.ack_attempt_token,e.conversation_key FROM assistant_inbox_events e
+        let candidates = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id,e.ack_started,e.ack_attempt_token,e.conversation_key,e.route_source_revision FROM assistant_inbox_events e
           JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
           WHERE e.source_key=? AND e.acked=0 AND (t.state='accepted' OR (?!='trelio' AND t.state='done'))
           AND (?='trelio' OR e.processed=1)
-          AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_started,e.rowid LIMIT 100`, scope.key, scope.provider, scope.provider, time(), time());
+          AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_retry_at,e.rowid LIMIT 100`, scope.key, scope.provider, scope.provider, time(), time());
+        // Rotate previously deferred conversations behind never-attempted work
+        // and earlier retries. At a five-minute tick, repeatedly picking the
+        // first row alone could otherwise starve every later conversation.
         if (!candidates.length) return null;
+        if(scope.provider!=='trelio'&&candidates[0].ack_started===1){
+          // Discovery's 100-row window may interleave another old attempt. Do
+          // not split the selected ORIGINAL attempt and positively complete a
+          // subset of its conversations. Unknown legacy groups above the wire
+          // bound remain fenced instead of silently truncating membership.
+          candidates=all(`SELECT e.*,t.state AS task_state FROM assistant_inbox_events e
+            LEFT JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
+            WHERE e.source_key=? AND e.acked=0 AND e.ack_started=1 AND e.ack_attempt_token IS ? ORDER BY e.rowid LIMIT 101`,scope.key,candidates[0].ack_attempt_token);
+          if(candidates.length>100)fail('ASSISTANT_INBOX_STALE_ACK');
+          if(candidates.some(row=>row.processed!==1||!['accepted','done'].includes(row.task_state)
+            ||row.ack_retry_at>time()||row.ack_token!==null&&row.ack_expires_at>time()))return null;
+        }
         // Never mix a fresh provider attempt with recovery from an old one.
         // An expired ACK lease is NOT evidence that a mutation did not happen.
-        const reconcileOnly=scope.provider!=='trelio' && candidates[0].ack_started===1;
+        // A never-started OLD generation is also read-back only: resume does
+        // not adopt that historical route for a new provider write. Its claim
+        // mode is persisted separately from ack_started, which must continue
+        // to describe only an actual prior invocation boundary.
+        const readBack=row=>row.ack_started===1||(current.configuration_revision!==null
+          &&row.route_source_revision!==current.configuration_revision);
+        const reconcileOnly=scope.provider!=='trelio'&&readBack(candidates[0]);
         // ONE new range write belongs to ONE exact conversation. Old uncertain
         // attempts retain their original membership, even if an older host
         // mixed conversations; that entire group is read-back only. Never let
         // one chat's positive result complete another chat's write token.
-        const events=candidates.filter(row=>scope.provider==='trelio'||row.ack_started===Number(reconcileOnly)
-          && (reconcileOnly?row.ack_attempt_token===candidates[0].ack_attempt_token:row.conversation_key===candidates[0].conversation_key))
+        const events=candidates.filter(row=>scope.provider==='trelio'||readBack(row)===reconcileOnly
+          &&row.ack_started===candidates[0].ack_started
+          && (candidates[0].ack_started===1?row.ack_attempt_token===candidates[0].ack_attempt_token:row.conversation_key===candidates[0].conversation_key))
           .map(({event_key,event_id,event_revision,task_id})=>({event_key,event_id,event_revision,task_id}));
         const token = randomUUID();
-        for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=? WHERE event_key=?', token, time() + LEASE_MS, event.event_key);
+        for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=?,ack_verify_only=? WHERE event_key=?', token, time() + LEASE_MS, Number(reconcileOnly), event.event_key);
         return { token, events, ...(scope.provider==='trelio'?{}:{reconcileOnly}) };
       });
     },
@@ -902,9 +938,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * processed bit alone supplies neither provenance nor external authority.
      * No body or second receipt journal is introduced. Native admission checks
      * current task/assignment/route/material again before provider invocation. */
-    externalAcknowledgementReferences(scopeInput,{token,sourceRevision}) {
+    externalAcknowledgementReferences(scopeInput,{token,sourceRevision,verifyOnly=false}) {
       const scope=scopeOf(scopeInput);uuid(token);integer(sourceRevision,0,2_147_483_647);
-      if(scope.provider!=='telegram')inputError();
+      if(scope.provider!=='telegram'||typeof verifyOnly!=='boolean')inputError();
       if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
       const rows=all(`SELECT e.*,de.event_ordinal,de.route_id AS original_route_id,
         de.route_source_revision AS original_source_revision,d.state AS delivery_state,d.external_receipt
@@ -917,7 +953,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       return rows.map(row=>{
         const parts=typeof row.external_receipt==='string'?row.external_receipt.split(':'):[];
         if(row.processed!==1||row.ack_expires_at<=time()||row.delivery_state!=='complete'||!row.conversation_key
-          ||row.route_source_revision!==sourceRevision||row.original_source_revision!==sourceRevision
+          ||row.route_source_revision!==row.original_source_revision
+          // The durable lease mode, not a caller boolean, selects historical
+          // read-back. Resume never adopts an old route for a new write or
+          // changes the original committed receipt slots.
+          ||row.ack_verify_only!==Number(verifyOnly)
+          ||(!verifyOnly&&row.original_source_revision!==sourceRevision)
+          ||(verifyOnly&&(!Number.isSafeInteger(row.original_source_revision)
+            ||row.original_source_revision<0||row.original_source_revision>sourceRevision))
           ||row.route_id!==row.original_route_id||parts.length!==5||parts[0]!=='assistant'||parts[2]!=='codex'
           ||!UUID.test(parts[1])||!UUID.test(parts[3])||!UUID.test(parts[4]))fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
         return {eventKey:row.event_key,id:row.event_id,revision:row.event_revision,conversationKey:row.conversation_key,
@@ -932,8 +975,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(scope.provider==='trelio')inputError();
       return transaction(()=>{
         activeSource(scope);
-        const rows=all('SELECT ack_started,processed,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
-        if(!rows.length || rows.some(row=>row.ack_started!==0 || row.processed!==1 || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
+        const rows=all('SELECT ack_started,ack_verify_only,processed,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
+        if(!rows.length || rows.some(row=>row.ack_started!==0 || row.ack_verify_only!==0 || row.processed!==1 || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET ack_started=1,ack_attempt_token=? WHERE source_key=? AND ack_token=? AND acked=0',token,scope.key,token);
       });
     },
@@ -958,14 +1001,21 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     completeAcknowledgements(scopeInput, token) {
       const scope = scopeOf(scopeInput); uuid(token);
       return transaction(() => {
-        activeSource(scope);
+        const current = activeSource(scope);
         // A token issued by an older worker before this source guard is not
         // upgraded into read evidence. Reject the entire batch, including mixed
         // processed/unprocessed rows, without clearing its ambiguous outcome.
-        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND (processed=0 OR ack_started=0)', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
-        const pending = get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND ack_expires_at>? AND acked=0', scope.key, token, time());
-        if (!pending.total) fail('ASSISTANT_INBOX_STALE_ACK');
+        // A current durable read-only lease may confirm a never-started old
+        // slot without inventing a provider-write attempt in ack_started.
+        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND (processed=0 OR (ack_started=0 AND ack_verify_only=0))', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
+        const pending = get('SELECT count(*) AS total,sum(CASE WHEN ack_expires_at>? THEN 0 ELSE 1 END) AS expired FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0', time(), scope.key, token);
+        if (!pending.total||pending.expired>0) fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET acked=1,ack_token=NULL,ack_expires_at=NULL WHERE source_key=? AND ack_token=?', scope.key, token);
+        // The trusted adapter calls this only after positive native read-back
+        // for EVERY conversation in this exact attempt. A source change has
+        // already invalidated its lease; no old worker can stamp a new revision.
+        if(scope.provider!=='trelio'&&current.configuration_revision!==null)
+          run('UPDATE assistant_inbox_sources SET ack_verified_revision=? WHERE source_key=?',current.configuration_revision,scope.key);
       });
     },
     status(scopeInput) {

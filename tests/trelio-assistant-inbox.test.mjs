@@ -22,9 +22,11 @@ function page(inbox, source, events, nextCursor = 'page-1', hasMore = false) {
 }
 const event = (taskId, wake = true, id = randomUUID()) => ({ id, revision: '1', taskId, wake });
 const authorized = async () => true;
-// Historical-schema fixtures remove the actual v6 columns before lowering the
+// Historical-schema fixtures remove the actual v6/v7 columns before lowering the
 // marker. A current table with an old marker is deliberately not a migration.
 const removeRoutingColumns = database => {
+  database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision');
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only');
   database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN configuration_revision');
   for(const name of ['conversation_key','provider_wake','dispatch_source_key','route_id','route_source_revision','route_checked_at','dispatched','read_delivery_id'])
     database.exec(`ALTER TABLE assistant_inbox_events DROP COLUMN ${name}`);
@@ -268,7 +270,7 @@ test('v2 SQLite upgrade preserves question-free events, leases and cursors; ques
   removeRoutingColumns(database);
   database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=2');
   const inbox = createAssistantInbox({ database, now: () => 1_000_000 });
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 6);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 7);
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.incompleteDeliveries()[0].deliveryId, first.deliveryId);
   assert.equal(inbox.incompleteDeliveries()[0].events[0].owner_question_id, null);
@@ -389,7 +391,7 @@ test('v4 ACK upgrade preserves cursors, streams and legacy uncertainty without c
   removeRoutingColumns(database);
   database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=4');
   const upgraded=createAssistantInbox({database,now:()=>3_000_000});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,6);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
   assert.deepEqual(database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n,streamCount);
   const recovered=upgraded.claimAcknowledgements(external);assert.equal(recovered.reconcileOnly,true);
@@ -486,7 +488,7 @@ test('v3 to v4 stream upgrade preserves source cursors and started delivery ambi
   removeRoutingColumns(database);
   database.exec('DROP TABLE assistant_inbox_streams; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; UPDATE assistant_inbox_meta SET version=3');
   const upgraded=createAssistantInbox({database});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,6);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
   assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'existing-cursor');
   assert.equal(await upgraded.claimDelivery({authorize:authorized}),null);
@@ -563,7 +565,7 @@ test('true v5 upgrade retains cursors and uncertain delivery/ACK fences without 
   const positions=f.database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all();
   removeRoutingColumns(f.database);f.database.exec('UPDATE assistant_inbox_meta SET version=5');
   const upgraded=createAssistantInbox({database:f.database,now:()=>1_000_000});
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,6);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
   assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.deepEqual(f.database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
   assert.deepEqual(upgraded.pendingExternalRoutes(f.external),[]);
@@ -728,6 +730,52 @@ test('ACK references require original read plus committed receipt; done permits 
   assert.equal(f.inbox.externalAcknowledgementDue(f.external),null);
 });
 
+for(const started of [false,true])test(`resumed source reconciles an original ${started?'uncertain':'unattempted'} ACK without reviving its route or replaying a write`, async t=>{
+  const f=routedFixture(t);f.inbox.routeExternalEvents(f.external,f.mapping);
+  const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
+  f.inbox.recordExternalRead(f.external,{deliveryId:work.deliveryId,eventKey:f.pending[0].event_key,sourceRevision:2,routeId:f.route.id});
+  f.inbox.completeDelivery(work.deliveryId,`assistant:${randomUUID()}:codex:${randomUUID()}:${randomUUID()}`,
+    {processedSourceReferences:[{sourceId:f.external.bindingId,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}]});
+  const first=f.inbox.claimAcknowledgements(f.external);
+  assert.throws(()=>f.inbox.externalAcknowledgementReferences(f.external,{token:first.token,sourceRevision:2,verifyOnly:true}),/READ_REQUIRED/,
+    'the historical branch is only an already-started attempt read-back');
+  if(started)f.inbox.startExternalAcknowledgements(f.external,first.token);
+  const original=f.inbox.externalAcknowledgementReferences(f.external,{token:first.token,sourceRevision:2});
+  f.inbox.setSourceState(f.external,{state:'paused',expectedRevision:0});
+  f.inbox.setSourceState(f.external,{state:'active',expectedRevision:1});
+  f.inbox.observeExternalSourceRevision(f.external,4);
+  assert.throws(()=>f.inbox.completeAcknowledgements(f.external,first.token),/STALE_ACK/);
+  const recovered=f.inbox.claimAcknowledgements(f.external);assert.equal(recovered.reconcileOnly,true);
+  assert.throws(()=>f.inbox.externalAcknowledgementReferences(f.external,{token:recovered.token,sourceRevision:4}),/READ_REQUIRED/);
+  assert.deepEqual(f.inbox.externalAcknowledgementReferences(f.external,{token:recovered.token,sourceRevision:4,verifyOnly:true}),original);
+  assert.throws(()=>f.inbox.startExternalAcknowledgements(f.external,recovered.token),/STALE_ACK/,'uncertain attempts never restart the write');
+  // The production adapter reaches this commit ONLY after positive native
+  // read-back for all groups; the queue itself is not a provider read proof.
+  f.inbox.completeAcknowledgements(f.external,recovered.token);
+  assert.equal(f.inbox.externalAcknowledgementHealth(f.external),'ready');
+  assert.equal(f.database.prepare('SELECT ack_verified_revision FROM assistant_inbox_sources WHERE configuration_revision=4').get().ack_verified_revision,4);
+  assert.equal(f.database.prepare('SELECT route_source_revision FROM assistant_inbox_events WHERE processed=1').get().route_source_revision,2);
+  assert.equal(f.inbox.externalAcknowledgementDue(f.external),null);
+  const reopened=createAssistantInbox({database:f.database,now:()=>1_000_000});
+  assert.equal(reopened.externalAcknowledgementDue(f.external),null);
+  assert.equal(reopened.externalAcknowledgementHealth(f.external),'ready','a lost owner-health report is recoverable without another provider invocation');
+  reopened.observeExternalSourceRevision(f.external,6);
+  assert.equal(reopened.externalAcknowledgementHealth(f.external),null,'an older successful read-back cannot clear a new generation');
+  assert.equal(f.database.prepare('SELECT ack_verified_revision FROM assistant_inbox_sources WHERE configuration_revision=6').get().ack_verified_revision,null);
+});
+
+test('actual v6 upgrade preserves all source/event/cursor/delivery state without inventing verification', t=>{
+  const f=routedFixture(t);
+  const tables=['sources','events','tasks','deliveries','delivery_events','streams'];
+  f.database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; UPDATE assistant_inbox_meta SET version=6');
+  const snapshot=()=>Object.fromEntries(tables.map(name=>[name,f.database.prepare(`SELECT * FROM assistant_inbox_${name}`).all()
+    .map(row=>Object.fromEntries(Object.entries(row).filter(([key])=>!['ack_verified_revision','ack_verify_only'].includes(key))))]));
+  const before=snapshot();createAssistantInbox({database:f.database,now:()=>1_000_000});
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,7);
+  assert.deepEqual(snapshot(),before);
+  assert.ok(f.database.prepare('SELECT ack_verified_revision FROM assistant_inbox_sources').all().every(row=>row.ack_verified_revision===null));
+});
+
 test('new external tokens cover one conversation; legacy mixed attempts retain membership and are verify-only',t=>{
   const {inbox,database,advance}=memory(t),source={...scope(),provider:'telegram'},task=randomUUID();inbox.register(source);accept(inbox,source,task);
   const key=n=>'telegram-conversation/v1.'+n.repeat(64);
@@ -745,6 +793,47 @@ test('new external tokens cover one conversation; legacy mixed attempts retain m
   advance(120001);
   const recovery=inbox.claimAcknowledgements(source);assert.equal(recovery.reconcileOnly,true);assert.equal(recovery.events.length,2);
   assert.throws(()=>inbox.startExternalAcknowledgements(source,recovery.token),/STALE_ACK/);
+});
+
+test('discovery bounds never split an interleaved original uncertain ACK attempt',t=>{
+  const {inbox,database,advance}=memory(t),source=scope({provider:'telegram'}),taskId=randomUUID();
+  inbox.register(source);accept(inbox,source,taskId);
+  page(inbox,source,Array.from({length:100},(_,index)=>event(taskId,true,`message:123:${index+1}`)),'first',true);
+  page(inbox,source,[event(taskId,true,'message:456:1')],'last');fixtureProcessed(database);
+  const selected=randomUUID(),other=randomUUID();
+  database.prepare('UPDATE assistant_inbox_events SET ack_started=1,ack_attempt_token=?').run(other);
+  database.prepare('UPDATE assistant_inbox_events SET ack_attempt_token=? WHERE event_id IN (?,?)').run(selected,'message:123:1','message:456:1');
+  const recovery=inbox.claimAcknowledgements(source);assert.equal(recovery.reconcileOnly,true);
+  assert.deepEqual(recovery.events.map(row=>row.event_id),['message:123:1','message:456:1']);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_events WHERE ack_attempt_token=? AND ack_token IS NULL').get(other).n,99);
+  assert.throws(()=>inbox.startExternalAcknowledgements(source,recovery.token),/STALE_ACK/);
+});
+
+test('one expired member rejects completion of the WHOLE ACK token without erasing its attempt fence',t=>{
+  const {inbox,database}=memory(t),source=scope({provider:'telegram'}),taskId=randomUUID();
+  inbox.register(source);accept(inbox,source,taskId);
+  page(inbox,source,[event(taskId,true,'message:123:1'),event(taskId,true,'message:123:2')]);fixtureProcessed(database);
+  const ack=inbox.claimAcknowledgements(source);assert.equal(ack.events.length,2);
+  inbox.startExternalAcknowledgements(source,ack.token);
+  database.prepare('UPDATE assistant_inbox_events SET ack_expires_at=0 WHERE event_id=?').run('message:123:1');
+  assert.throws(()=>inbox.completeAcknowledgements(source,ack.token),/STALE_ACK/);
+  assert.ok(database.prepare('SELECT acked,ack_started,ack_token FROM assistant_inbox_events').all()
+    .every(row=>row.acked===0&&row.ack_started===1&&row.ack_token===ack.token));
+});
+
+test('a repeatedly deferred first conversation does not starve later eligible ACK work',t=>{
+  const {inbox,database,advance}=memory(t),source=scope({provider:'telegram'}),taskId=randomUUID();
+  inbox.register(source);accept(inbox,source,taskId);
+  page(inbox,source,[{...event(null,false,'message:123:1'),conversationKey:'telegram-conversation/v1.'+'a'.repeat(64),providerWake:true},
+    {...event(null,false,'message:456:1'),conversationKey:'telegram-conversation/v1.'+'b'.repeat(64),providerWake:true}]);
+  inbox.routeEvents(source,{eventKeys:database.prepare('SELECT event_key FROM assistant_inbox_events').all().map(row=>row.event_key),taskId});
+  fixtureProcessed(database);
+  const first=inbox.claimAcknowledgements(source);assert.equal(first.events[0].event_id,'message:123:1');
+  inbox.deferExternalAcknowledgements(source,{token:first.token,retryAfterMs:300000});
+  advance(300001);
+  const second=inbox.claimAcknowledgements(source);assert.equal(second.events[0].event_id,'message:456:1');
+  inbox.deferExternalAcknowledgements(source,{token:second.token,retryAfterMs:300000});
+  assert.equal(inbox.claimAcknowledgements(source).events[0].event_id,'message:123:1');
 });
 
 test('ACK diagnostic uses durable attempts across conversations and restarts, never an empty queue as recovery',async t=>{

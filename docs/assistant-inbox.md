@@ -222,8 +222,37 @@ another uncertain attempt. A later normal poll can reconcile a lost health repor
 from current-generation durably completed rows without another provider call.
 An empty/new source supplies no recovery evidence. Source-generation changes
 never turn old positive rows into new success or erase an old unknown attempt.
-These diagnostic facts grant no ACK/retry/owner consent. Old-generation admission
-failure still needs explicit recovery; no reset/adoption or forced replay exists.
+These diagnostic facts grant no ACK/retry/owner consent. The SAME registration's
+pause/resume recovery is read-only as described below; replacement accounts or
+assignments still fail closed, without reset/adoption or forced replay.
+
+## Read-only recovery across source generations (schema v7)
+
+Pause/resume of the SAME immutable source/account registration does not revive
+historical routes or permit a new write using old processed slots. Such slots,
+including a never-started old attempt, receive a durable `ack_verify_only` lease;
+uncertain original attempts retain their original write fence and membership.
+The queue cannot upgrade that lease to a provider write. Original independent
+reads, completed native receipts and exact slot/route/binding remain mandatory.
+
+The dedicated native intent and response explicitly bind `verifyOnly:true`.
+The common signed execution profile rejects missing/mismatched mode and a
+`--confirm` substitution before account/provider work. Current active device,
+owner/source/project/task/assignment ACL and nonretired material still apply;
+pause, revoke or a replacement registration never adopts historical state.
+Negative/unknown read-back keeps the original fence and bounded backoff. Only
+positive native read-back of ALL groups may commit ACK completion.
+Due selection rotates ordinary deferred conversations by persisted retry time
+instead of restarting the first row at every five-minute check. Original
+uncertain groups remain indivisible, even across the discovery page boundary;
+oversized or not-yet-eligible legacy groups retain their fence.
+
+That SAME SQLite transaction records the current source verification revision
+in `ack_verified_revision`, so a lost owner-health response is recoverable after
+restart without another provider invocation. Source revision change invalidates
+this projection; old success cannot clear a new incident. The additive v6→v7
+upgrade preserves all prior rows/cursors/leases and invents no read verification
+or provider write attempt. No body, credentials or second journal is added.
 
 ## Coordinator projection and schema v2
 

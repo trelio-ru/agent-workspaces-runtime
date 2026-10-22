@@ -339,7 +339,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       observation=snapshot;
     }catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
     try{
-      const read=()=>inbox.externalAcknowledgementReferences(source,{token:ack.token,sourceRevision:row.revision});
+      const read=()=>inbox.externalAcknowledgementReferences(source,{token:ack.token,sourceRevision:row.revision,verifyOnly:ack.reconcileOnly});
       const references=read(),snapshot=JSON.stringify(references),groups=new Map();
       for(const ref of references){
         if(!groups.has(ref.conversationKey))groups.set(ref.conversationKey,[]);groups.get(ref.conversationKey).push(ref);

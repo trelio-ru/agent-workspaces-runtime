@@ -1054,7 +1054,8 @@ const sourceScope = input => {
 /** Structural selectors use the SAME committed native receipt/slot vocabulary.
  * They carry no provider key/ID/body into the backend, URL or a new grant store. */
 const normalizeAssistantSourceAcknowledgement=input=>{
-  if(!object(input)||Object.keys(input).sort().join(',')!=='receipts,sourceId,sourceRevision'
+  if(!object(input)||Object.keys(input).sort().join(',')!==(input.verifyOnly===undefined?'receipts,sourceId,sourceRevision':'receipts,sourceId,sourceRevision,verifyOnly')
+    ||input.verifyOnly!==undefined&&input.verifyOnly!==true
     ||!Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
     ||!Array.isArray(input.receipts)||!input.receipts.length||input.receipts.length>100)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const receipts=input.receipts.map(row=>{
@@ -1066,7 +1067,8 @@ const normalizeAssistantSourceAcknowledgement=input=>{
   }).sort((a,b)=>a.receiptId.localeCompare(b.receiptId));
   if(new Set(receipts.map(row=>row.receiptId)).size!==receipts.length||receipts.reduce((n,row)=>n+row.eventOrdinals.length,0)>100)
     fail('ASSISTANT_SOURCE_INVALID_INPUT');
-  return Object.freeze({sourceId:id(input.sourceId),sourceRevision:input.sourceRevision,receipts:Object.freeze(receipts)});
+  return Object.freeze({sourceId:id(input.sourceId),sourceRevision:input.sourceRevision,receipts:Object.freeze(receipts),
+    ...(input.verifyOnly?{verifyOnly:true}:{})});
 };
 const validateAssistantAcknowledgementArguments=args=>{
   if(!Array.isArray(args)||args.length<10||args.length>210||args[0]!=='ack-reference'
@@ -1114,6 +1116,8 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         return rows.map(row=>Object.freeze({...row}));
       })()),
       beforeInvoke:acknowledgementExecution.beforeInvoke});
+    if(sourceAcknowledgement.verifyOnly&&acknowledgementExecution.runtimeArguments.at(-1)!=='--verify-only')
+      fail('ASSISTANT_SOURCE_ACK_REQUIRED');
   }else if(acknowledgementExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
   // The closed setup operation also admits one independent MAX probe after
@@ -1194,7 +1198,8 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         ||(context.projectId??null)!==scope.projectId||context.releaseId!==acknowledgement.releaseId
         ||context.account?.id!==acknowledgementExecution.accountId||context.localIdentity?.memberId!==acknowledgement.memberId
         ||(context.localIdentity?.connectionId??null)!==acknowledgement.connectionId
-        ||JSON.stringify(runtimeArguments)!==JSON.stringify(acknowledgementExecution.runtimeArguments))fail('ASSISTANT_SOURCE_ACK_REQUIRED');
+        ||JSON.stringify(runtimeArguments)!==JSON.stringify(acknowledgementExecution.runtimeArguments)
+        ||acknowledgement.verifyOnly&&runtimeArguments.at(-1)!=='--verify-only')fail('ASSISTANT_SOURCE_ACK_REQUIRED');
       acknowledgementUsed=true;return Math.floor(Math.min(60000,budgetMs-(monotonic()-startedAt)));
     },
     async startSourceAcknowledgement(){
@@ -1259,7 +1264,9 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       if(sourceAcknowledgement){
         const approved=admission.acknowledgement;
         const wanted=sourceAcknowledgement.receipts.flatMap(row=>row.eventOrdinals.map(eventOrdinal=>({receiptId:row.receiptId,eventOrdinal})));
-        if(!object(approved)||Object.keys(approved).sort().join(',')!=='localAccountId,schemaVersion,slots,sourceId,sourceRevision'
+        if(!object(approved)||Object.keys(approved).sort().join(',')!==(sourceAcknowledgement.verifyOnly
+          ?'localAccountId,schemaVersion,slots,sourceId,sourceRevision,verifyOnly':'localAccountId,schemaVersion,slots,sourceId,sourceRevision')
+          ||approved.verifyOnly!==sourceAcknowledgement.verifyOnly
           ||approved.schemaVersion!==1||approved.sourceId!==sourceAcknowledgement.sourceId
           ||approved.sourceRevision!==sourceAcknowledgement.sourceRevision||approved.localAccountId!==acknowledgementExecution.accountId
           ||!Array.isArray(approved.slots)||approved.slots.length!==wanted.length
@@ -1268,7 +1275,8 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
             ||!acknowledgementExecution.slots.some(slot=>slot.receiptId===row.receiptId&&slot.routeId===row.routeId&&slot.eventOrdinal===row.eventOrdinal)))
           fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
         acknowledgement=Object.freeze({artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId),
-          memberId:id(resolution.localIdentity.memberId),connectionId:resolution.localIdentity.connectionId??null,slots:approved.slots});
+          memberId:id(resolution.localIdentity.memberId),connectionId:resolution.localIdentity.connectionId??null,slots:approved.slots,
+          ...(approved.verifyOnly?{verifyOnly:true}:{})});
       }else if(admission.acknowledgement!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
@@ -1697,7 +1705,8 @@ export const acknowledgeAssistantSource=async({identity,host,store,client,source
   const target=covered.at(-1),receipts=new Map();
   for(const ref of refs){if(!receipts.has(ref.receiptId))receipts.set(ref.receiptId,[]);receipts.get(ref.receiptId).push(ref.eventOrdinal);}
   const intent=normalizeAssistantSourceAcknowledgement({sourceId:source.id,sourceRevision:source.revision,
-    receipts:[...receipts].map(([receiptId,eventOrdinals])=>({receiptId,eventOrdinals:eventOrdinals.sort((a,b)=>a-b)}))});
+    receipts:[...receipts].map(([receiptId,eventOrdinals])=>({receiptId,eventOrdinals:eventOrdinals.sort((a,b)=>a-b)})),
+    ...(verifyOnly?{verifyOnly:true}:{})});
   const runtimeArguments=['ack-reference','--chat',target.chatId,'--message-id',target.messageId,'--expected-revision',target.revision,
     '--expected-conversation-key',target.conversationKey,...(verifyOnly?[]:covered.flatMap(ref=>['--covered-reference',`${ref.messageId}:${ref.revision}`])),
     verifyOnly?'--verify-only':'--confirm'];

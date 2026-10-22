@@ -36,6 +36,9 @@ publication tooling также остаются вне этого публичн
   Production Telegram ACK reuses the SAME signed/account/process path and native
   committed receipt admission, with the original inbox fence at final spawn.
   Fresh tokens cover one conversation; legacy mixed tokens need ALL read-backs.
+  Source resume grants only read-back of historical processed slots; schema v7
+  seals that lease mode and records current positive verification in the SAME
+  journal. It never revives routes or turns unknown/old success into a write.
   SQLite хранит только bounded structural refs; child stream hints/cursors
   commit in that SAME journal, never as guessed task/ACK authority. Final
   streams sleep until a new native hint; new hints cannot be consumed by an

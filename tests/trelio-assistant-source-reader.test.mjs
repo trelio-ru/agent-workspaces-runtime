@@ -766,13 +766,24 @@ test('native committed ACK admission reuses signed account/child execution and f
       entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
   };
   const client={identity,sourceAccounts:async()=>[source]};let started=0,checked=0;
-  const invoke=(verifyOnly=false)=>acknowledgeAssistantSource({identity,host,store,client,source,references,verifyOnly,
-    assertReferences:()=>{checked++;},beforeInvoke:()=>{started++;return fs.writeFile(fence,'DURABLE');}});
+  const invoke=(verifyOnly=false)=>{
+    // The synthetic native server echoes a READ-ONLY admission only when that
+    // exact narrowed intent was requested. It cannot silently drop the mode.
+    if(verifyOnly){ackFixture.intent.verifyOnly=true;ackFixture.admission.verifyOnly=true;}
+    else {delete ackFixture.intent.verifyOnly;delete ackFixture.admission.verifyOnly;}
+    return acknowledgeAssistantSource({identity,host,store,client,source,references,verifyOnly,
+      assertReferences:()=>{checked++;},beforeInvoke:()=>{started++;return fs.writeFile(fence,'DURABLE');}});
+  };
   await build();const before=resolveCalls;
   assert.deepEqual(await invoke(),{acknowledged:true,notAttempted:false,code:null});
   assert.equal(started,1);assert.equal(resolveCalls,before+2,'ACK is reauthorized after materialization');assert.ok(checked>=3);
   assert.equal(await fs.readFile(marker,'utf8'),'1');
   await build({verifyOnly:true});assert.deepEqual(await invoke(true),{acknowledged:true,notAttempted:true,code:null});
+  const beforeNarrowed=await fs.readFile(marker,'utf8'),beforeNarrowedFence=started;
+  resolveOverride=()=>{const raw=resolution();delete raw.sourceAdmission.acknowledgement.verifyOnly;return new Response(JSON.stringify(raw));};
+  await assert.rejects(invoke(true),/INVALID_RESPONSE/);
+  assert.equal(started,beforeNarrowedFence);assert.equal(await fs.readFile(marker,'utf8'),beforeNarrowed,'missing native read-only binding denies before final spawn');
+  resolveOverride=null;
   await build({failed:true});assert.deepEqual(await invoke(),{acknowledged:false,notAttempted:true,code:'TELEGRAM_ACK_RANGE_INCOMPLETE'},
     'complete bounded native stderr can prove no attempt without exposing error prose');
   const count=await fs.readFile(marker,'utf8'),fences=started;
@@ -833,6 +844,11 @@ test('derived ACK profile preserves short original grant budget and one-use spaw
   time=0;profile.close();await assert.rejects(profile.startSourceAcknowledgement(),/DEADLINE/);
   const passive=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
   await assert.rejects(passive.authorizeSourceAcknowledgement(request),/ACK_REQUIRED/);passive.close();
+  const beforeNarrowedReads=reads;
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceAcknowledgement:{...intent,verifyOnly:true},
+    acknowledgementExecution:{accountId,runtimeArguments:args,slots:ackFixture.admission.slots,beforeInvoke:()=>assert.fail('write substitution reached provider')}}),/ACK_REQUIRED/);
+  assert.equal(reads,beforeNarrowedReads,'a read-only native intent cannot select --confirm, even before private account access');
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceAcknowledgement:{...intent,verifyOnly:false}}),/INVALID_INPUT/);
   await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceAcknowledgement:intent,
     accountSetup:{sourceId,expectedRevision:0}}),/INVALID_INPUT/);
 });

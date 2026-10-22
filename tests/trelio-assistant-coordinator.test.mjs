@@ -751,11 +751,15 @@ test('production composition ACK waits for exact read and committed selection; a
     selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();
     assert.deepEqual(calls,[false]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,0);
     assert.equal(healthAck,'acknowledgement_uncertain');assert.equal(healthRead,'ready');
+    f.row.state='paused';f.row.revision=1;f.advance(300001);await f.coordinator.pollOnce();assert.deepEqual(calls,[false]);
+    f.row.state='active';f.row.revision=2;
     await f.restart();mode='not-read';healthReadFailure=true;f.advance(300001);await f.coordinator.pollOnce();assert.deepEqual(calls,[false,true]);
     assert.equal(healthAck,'acknowledgement_uncertain','passive success and verify-only false cannot clear the unknown write');
     assert.equal(f.database.prepare('SELECT ack_started FROM assistant_inbox_events').get().ack_started,1,'a verify-only no-write result never clears the older unknown write');
     healthReadFailure=false;f.authority.state='done';f.authority.revision++;mode='confirmed';reportFailure=true;f.advance(300001);await f.coordinator.pollOnce();
     assert.deepEqual(calls,[false,true,true]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,1);
+    assert.equal(f.database.prepare('SELECT route_source_revision FROM assistant_inbox_events').get().route_source_revision,0,'resume never revives the old route');
+    assert.equal(f.database.prepare('SELECT ack_verified_revision FROM assistant_inbox_sources WHERE configuration_revision=2').get().ack_verified_revision,2);
     assert.equal(f.coordinator.status()[0].threadId,thread);assert.equal(f.counts().provisions,1);assert.equal(f.counts().acks,0,'native Trelio ACK never receives Telegram IDs');
     assert.equal(healthAck,'ready');const reported=healthReports.length;
     await f.restart();reportFailure=false;f.advance(300001);await f.coordinator.pollOnce();
