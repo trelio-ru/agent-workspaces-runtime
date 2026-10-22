@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser, VISUAL_AUTHENTICATION_TRANSITIONS_API } from '../host-runtime/scripts/trelio-visual-session.mjs';
+import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials, VISUAL_AUTHENTICATION_TRANSITIONS_API, VISUAL_AUTHENTICATION_COMPATIBILITY_API } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { deriveAgentSecretTotp } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
@@ -31,6 +31,78 @@ function memoryStore(def) {
   let saved = credential(def), snapshot;
   return { async readCredentials() { return structuredClone(saved); }, async writeCredentials(value) { saved = structuredClone(value); }, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {}, get saved() { return structuredClone(saved); } };
 }
+
+// Synthetic provider update: no stored secret changes destination. Only a
+// factor tag and a non-secret step/success observation are added. Legacy proof
+// is an exact previous recipe, never a caller-provided hash exception.
+function compatibleDefinition(origin, previous = definition(origin)) {
+  const next = structuredClone(recipe(origin)); next.steps[1].factor = 'totp';
+  next.steps.push({ id: 'choose-email', origin, challenge: '#method-choice', action: 'follow',
+    target: '#choose-email', path: '/email', factor: 'email' });
+  next.success.push({ origin, selector: '#new-account' });
+  next.credentialCompatibility = { previousRecipes: [previous] };
+  return normalizeVisualAuthentication(next, { origins: [origin], fixtureOnly: origin.startsWith('http://127.0.0.1:') });
+}
+
+test('compatible signed legacy proof preserves credentials; status never rewrites ciphertext', async () => {
+  const origin = 'https://auth.example.test', old = definition(origin), next = compatibleDefinition(origin), store = memoryStore(old);
+  assert.equal(VISUAL_AUTHENTICATION_COMPATIBILITY_API, 'trelio.protected-browser-auth-compatibility/v1');
+  const before = store.saved;
+  assert.equal(await hasVisualAuthenticationCredentials(store, next), true);
+  assert.deepEqual(store.saved, before);
+  const noProof = { ...next }; delete noProof.credentialCompatibility;
+  await assert.rejects(hasVisualAuthenticationCredentials(store, noProof), { code: 'authentication_setup_required' });
+  let fills = 0;
+  const result = await authenticateVisualBrowser({ store, definition: next, active() {}, wait: async () => {},
+    send: async (op, args) => {
+      if (op === 'authentication-probe') return fills ? { state: 'success' } : { state: 'challenge', stepId: 'password', documentId: randomUUID() };
+      assert.equal(store.saved.schemaVersion, 2); assert.equal(store.saved.attempt.state, 'pending');
+      assert.equal(args.values.password, 'SYNTHETIC_PASSWORD'); fills++; return { state: 'submitted' };
+    } });
+  assert.equal(result.state, 'saved_unverified'); assert.equal(fills, 1);
+  assert.equal(store.saved.password, before.password); assert.equal(store.saved.totp, before.totp);
+  assert.equal(store.saved.fingerprint, visualAuthenticationFingerprint(next));
+  // A later v2 release needs no growing history of old recipes.
+  assert.equal(await hasVisualAuthenticationCredentials(store, noProof), true);
+});
+
+test('compatibility cannot change any reusable secret destination or form guard', async () => {
+  const origin = 'https://auth.example.test', old = definition(origin), store = memoryStore(old);
+  for (const patch of [{ origin: 'https://other.example.test' }, { challenge: '#other' },
+    { fields: { login: '#login', password: '#other' } }, { submit: '#other' }, { manual: ['#captcha'] }, { id: 'renamed-password' }]) {
+    const raw = structuredClone(recipe(origin)); Object.assign(raw.steps[0], patch);
+    raw.credentialCompatibility = { previousRecipes: [old] };
+    assert.throws(() => normalizeVisualAuthentication(raw, { origins: [origin, 'https://other.example.test'] }), { code: 'invalid_input' });
+  }
+  const next = compatibleDefinition(origin); next.steps[0].fields.password = ['#other'];
+  // This simulates an updated normalized v2 recipe, not just a legacy proof.
+  // The saved stable binding still rejects a changed destination.
+  let complete = false;
+  await authenticateVisualBrowser({ store, definition: old, active() {}, wait: async () => {}, send: async op => {
+    if (op === 'authentication-probe') return complete ? { state: 'success' } : { state: 'challenge', stepId: 'password', documentId: randomUUID() };
+    complete = true; return { state: 'submitted' };
+  } });
+  await assert.rejects(hasVisualAuthenticationCredentials(store, next), { code: 'authentication_setup_required' });
+  assert.throws(() => normalizeVisualAuthentication({ ...old, credentialCompatibility: { previousRecipes: [{ ...old, credentialCompatibility: {} }] } }, { origins: [origin] }));
+  assert.throws(() => normalizeVisualAuthentication({ ...old, credentialCompatibility: { previousRecipes: [old, old] } }, { origins: [origin] }));
+});
+
+test('compatible updates preserve pending input and unknown mail ACK without any write or replay', async () => {
+  const origin = 'https://auth.example.test', old = definition(origin), next = compatibleDefinition(origin);
+  for (const acknowledgement of [null, 'pending', 'unknown']) {
+    const store = memoryStore(old), saved = store.saved;
+    saved.attempt = { id: randomUUID(), state: acknowledgement ? 'complete' : 'pending', steps: ['password'] };
+    if (acknowledgement) saved.attempt.mail = { requestId: randomUUID(), requestedAt: 1, expiresAt: 1001,
+      mailAccountId: randomUUID(), state: 'failed', acknowledgement, reference: null, baseline: null };
+    await store.writeCredentials(saved);
+    assert.equal(await hasVisualAuthenticationCredentials(store, next), true);
+    await assert.rejects(authenticateVisualBrowser({ store, definition: next, active() {}, send: async op => {
+      assert.equal(op, 'authentication-probe', 'no fill/follow may occur');
+      return { state: 'challenge', stepId: 'password', documentId: randomUUID() };
+    } }), { code: 'authentication_unknown' });
+    assert.deepEqual(store.saved, saved, 'a recipe update cannot clear/rebind the historical fence');
+  }
+});
 
 test('signed authentication recipe pins exact origins and rejects unknown instructions/oversized data', () => {
   const origin = 'https://auth.example.test', def = definition(origin);
@@ -327,8 +399,11 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       fields: { emailOtp: '#mail-code' }, submit: '#submit-email',
       mail: { skillId: 'mail-fixture', sender: 'login@example.test', subjectIncludes: 'Sign in', bodyIncludes: 'Example account', digits: 6 } });
     mail.success = [{ origin, selector: '#mail-account' }];
+    mail.credentialCompatibility = { previousRecipes: [def] };
     activeDef = normalizeVisualAuthentication(mail, { origins: [origin], fixtureOnly: true });
-    activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
+    activeStore = memoryStore(def); activeStore.directory = directory; browser = make();
+    assert.equal((await browser.call('credentials-status')).state, 'saved_unverified');
+    assert.equal(activeStore.saved.schemaVersion, 1, 'status must not migrate the record');
     await browser.call('navigate', { url: `${origin}/mail-start` });
     await browser.call('authenticate-mail', { mailAccountId });
     let status;
@@ -355,6 +430,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     assert.equal((await browser.mailCall({ operation: 'record-ack', handle: status.handle, actor,
       payload: { seenVerified: true, writeAttempted: true } })).acknowledgement, 'complete');
     assert.equal(activeStore.saved.password, 'SYNTHETIC_PASSWORD', 'late mail ACK preserves the encrypted credential bundle');
+    assert.equal(activeStore.saved.schemaVersion, 2, 'legacy credentials migrate during the same native email attempt');
     assert.equal(activeStore.saved.attempt.mail.acknowledgement, 'complete');
     await assert.rejects(browser.mailCall({ operation: 'deliver', handle: status.handle, actor,
       payload: { code: '123456', reference } }));
@@ -377,7 +453,7 @@ test('detached authentication uses the same account vault, pins the recipe and e
     } else res.end('<!doctype html><form id="password-form" action="/login" method="post"><input id="login" name="login"><input id="password" name="password" type="password"><button id="submit-password">Continue</button></form>');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), start = Date.now();
+  const origin = `http://127.0.0.1:${server.address().port}`, legacy = definition(origin), def = compatibleDefinition(origin), start = Date.now();
   const accountId = randomUUID(), companyId = randomUUID(), memberId = randomUUID();
   const env = { TRELIO_ORIGIN: 'https://example.test', TRELIO_SKILL_ID: 'synthetic-visual-auth', TRELIO_SKILL_ACCOUNT_JSON: JSON.stringify({ id: accountId }), TRELIO_SKILL_COMPANY_ID: companyId, TRELIO_SKILL_MEMBER_ID: memberId, TRELIO_BROWSER_SESSION_POLICY_JSON: JSON.stringify({ apiVersion: 1, sessionClass: 'protected-snapshot', manualAssist: true, leaseMs: 150000 }), TRELIO_BROWSER_SESSION_STARTED_AT: String(start), TRELIO_BROWSER_SESSION_DEADLINE_AT: String(start + 150000) };
   const scope = visualStorageScope({ origin: 'https://example.test', skillId: env.TRELIO_SKILL_ID, accountId });
@@ -393,7 +469,7 @@ test('detached authentication uses the same account vault, pins the recipe and e
   const diagnostic = () => fs.readFile(path.join(directory, 'fixture-diagnostic.json'), 'utf8').catch(() => 'unavailable');
   let failure;
   try {
-    await store.writeCredentials(credential(def)); store.close();
+    await store.writeCredentials(credential(legacy)); store.close();
     assert.equal((await call('navigate', { url: origin })).state, 'preparing');
     let status;
     for (let i = 0; i < 100; i++) {
@@ -411,6 +487,7 @@ test('detached authentication uses the same account vault, pins the recipe and e
     assert.equal((await call('screenshot')).state, 'ready');
     await call('close'); await untilClosed();
     assert.equal((await store.readCredentials()).attempt.state, 'complete');
+    assert.equal((await store.readCredentials()).schemaVersion, 2, 'detached worker upgrades the real encrypted record without another form');
   } catch(error) { failure=error; }
   finally {
     let stopped=false,evidence='';

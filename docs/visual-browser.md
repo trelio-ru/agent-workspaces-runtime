@@ -388,10 +388,36 @@ STORE в том же encrypted attempt. Неизвестный исход даё
 код, resend, submit или STORE. Ошибка пометки не отменяет состоявшийся вход.
 Общий механизм не содержит URL/селекторов/семантики конкретного сервиса.
 
+#### Совместимые обновления recipe
+
+`VISUAL_AUTHENTICATION_COMPATIBILITY_API = trelio.protected-browser-auth-compatibility/v1`
+подтверждает автоматическую проверку совместимости. Host разделяет полный
+fingerprint исполняемого сценария и fingerprint доставки сохранённых секретов.
+Второй включает каждый точный шаг с login/password/TOTP: origin, ID, challenge,
+fields, submit, manual guards и порядок. Только factor-tag исключён. Добавление
+email/follow либо изменение признака успеха не требуют повторного ввода данных;
+изменение secret-bearing формы или адреса требует локального setup.
+
+Для старых записей v1 одного hash недостаточно, чтобы доказать прежние адреса.
+Signed provider может передать `credentialCompatibility: {previousRecipes: [...]}`
+с полными exact прежними recipe. Host нормализует их той же схемой, проверяет
+равенство контрактов доставки и совпадение с hash внутри зашифрованной записи.
+Не более четырёх уникальных recipe, без вложенных compatibility, под прежним
+общим лимитом 16 KiB. Hash-only exceptions, CLI/page evidence и guessed history
+не принимаются. Evidence не исполняется и не меняет полный executable fingerprint.
+
+Новые записи v2 содержат оба fingerprints; последующие совместимые версии
+не требуют накопления истории. `credentials-status` проверяет совместимость
+без записи. Upgrade выполняется в private копии, а сохраняется штатной
+записью новой попытки под existing account owner lock. Pending input и unknown/
+pending mail ACK проверяются ДО записи, остаются неизменными и блокируют replay.
+Изменение recipe не разрешает reset, resend, повтор submit/STORE или перенос
+записи в другой account/company/member. Старый live worker с другим полным
+fingerprint по-прежнему требует нормального close; snapshot сохраняется.
+
 Credentials хранятся в `credentials.enc` с AES-256-GCM и отдельным purpose/AAD,
 вне профиля/Workspace/cache/package; OS-backed key и account scope общие с
-`state.enc`. Изменившийся recipe fingerprint требует явной локальной замены,
-не переносит секрет на новый адрес. Credentials-only account тоже сохраняет
+`state.enc`. Совместимость не переносит секрет на новый адрес. Credentials-only account тоже сохраняет
 запрет замены потерянного OS key. Секреты не входят в extension source, argv,
 environment, screenshots, MCP, telemetry или логи.
 

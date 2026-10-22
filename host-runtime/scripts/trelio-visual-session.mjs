@@ -242,20 +242,21 @@ export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
 // value-free navigation between private credential forms.
 export const VISUAL_AUTHENTICATION_TRANSITIONS_API = 'trelio.protected-browser-auth-transitions/v1';
 export const VISUAL_AUTHENTICATION_SETUP_API = 'trelio.protected-browser-auth-setup/v1';
+export const VISUAL_AUTHENTICATION_COMPATIBILITY_API = 'trelio.protected-browser-auth-compatibility/v1';
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const selector = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
 const id = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,47}$/u.test(value);
 
 /** A signed provider declares selectors once in source, not in CLI/MCP args.
- * Credentials bind to the complete normalized recipe, in addition to the
- * account/skill/origin AEAD scope. A changed destination or form therefore
- * requires explicit local replacement instead of silently reusing a secret.
+ * Credential delivery binds exact secret-bearing forms independently of the
+ * executable recipe. Adding a non-secret factor must not discard a password;
+ * changing its destination, selectors or guards still requires local setup.
  * Wildcard navigation domains never authorize credential delivery origins.
  */
 export function normalizeVisualAuthentication(value, policy) {
   if (value === undefined || value === null) return null;
   if (Buffer.byteLength(JSON.stringify(value)) > 16_384) fail('invalid_input');
-  if (!exact(value, ['steps', 'success', 'setup']) || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 8 || !Array.isArray(value.success) || value.success.length < 1 || value.success.length > 8) fail('invalid_input');
+  if (!exact(value, ['steps', 'success', 'setup', 'credentialCompatibility']) || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 8 || !Array.isArray(value.success) || value.success.length < 1 || value.success.length > 8) fail('invalid_input');
   const origin = raw => {
     if (typeof raw !== 'string' || !policy.origins?.includes(raw)) fail('navigation_blocked');
     const url = new URL(raw);
@@ -321,16 +322,51 @@ export function normalizeVisualAuthentication(value, policy) {
       return { label: item.label, url: url.href };
     }) };
   }
-  return { steps, success, ...(setup ? { setup } : {}) };
+  const result = { steps, success, ...(setup ? { setup } : {}) };
+  if (value.credentialCompatibility !== undefined) {
+    // Old records contain only a full recipe hash, not enough information to
+    // infer a safe destination. The signed provider may carry exact previous
+    // recipes as evidence; a hash assertion alone is deliberately insufficient.
+    const compatibility = value.credentialCompatibility;
+    if (!exact(compatibility, ['previousRecipes']) || !Array.isArray(compatibility.previousRecipes)
+      || compatibility.previousRecipes.length < 1 || compatibility.previousRecipes.length > 4) fail('invalid_input');
+    const previousRecipes = compatibility.previousRecipes.map(previous => {
+      if (!exact(previous, ['steps', 'success', 'setup'])) fail('invalid_input');
+      const normalized = normalizeVisualAuthentication(previous, policy);
+      if (!normalized || credentialDeliveryFingerprint(normalized) !== credentialDeliveryFingerprint(result)) fail('invalid_input');
+      return normalized;
+    });
+    const fingerprints = previousRecipes.map(visualAuthenticationFingerprint);
+    if (new Set(fingerprints).size !== fingerprints.length) fail('invalid_input');
+    result.credentialCompatibility = { previousRecipes };
+  }
+  return result;
 }
 
 // Static setup copy cannot change credential destinations, invalidate a saved
 // login or clear an unknown-outcome fence. Legacy field/follow fingerprints
 // remain byte-identical; all executable recipe fields stay in this digest.
-export const visualAuthenticationFingerprint = ({ setup: _presentation, ...definition }) => crypto.createHash('sha256').update(JSON.stringify(definition)).digest('hex');
+export const visualAuthenticationFingerprint = ({ setup: _presentation, credentialCompatibility: _evidence, ...definition }) => crypto.createHash('sha256').update(JSON.stringify(definition)).digest('hex');
+
+/** Only delivery of reusable stored secrets belongs in this digest. Keep the
+ * entire exact secret-bearing step (including manual guards, submit and IDs),
+ * except the choice-of-factor tag: tagging an unchanged TOTP form or adding an
+ * email/follow step does not redirect any saved value. Order stays significant.
+ * OTP mail matchers never authorize delivery of login/password/TOTP material.
+ */
+function credentialDeliveryFingerprint(definition) {
+  return hash(definition.steps.filter(step => ['login', 'password', 'totp'].some(key => step.fields?.[key]))
+    .map(({ factor: _factor, ...step }) => step));
+}
 
 function validateCredentials(value, definition) {
-  if (!exact(value, ['schemaVersion', 'fingerprint', 'login', 'password', 'totp', 'attempt']) || value.schemaVersion !== 1 || value.fingerprint !== visualAuthenticationFingerprint(definition)) fail('authentication_setup_required');
+  if (!exact(value, ['schemaVersion', 'fingerprint', 'deliveryFingerprint', 'login', 'password', 'totp', 'attempt'])
+    || ![1, 2].includes(value.schemaVersion) || !/^[0-9a-f]{64}$/u.test(value.fingerprint)
+    || (value.schemaVersion === 1 ? Object.hasOwn(value, 'deliveryFingerprint') : !/^[0-9a-f]{64}$/u.test(value.deliveryFingerprint))) fail('authentication_setup_required');
+  const fingerprint = visualAuthenticationFingerprint(definition), deliveryFingerprint = credentialDeliveryFingerprint(definition);
+  const sameRecipe = value.fingerprint === fingerprint;
+  if (value.schemaVersion === 2 ? value.deliveryFingerprint !== deliveryFingerprint
+    : !sameRecipe && !definition.credentialCompatibility?.previousRecipes.some(previous => visualAuthenticationFingerprint(previous) === value.fingerprint)) fail('authentication_setup_required');
   for (const field of ['login', 'password', 'totp']) if (typeof value[field] !== 'string' || Buffer.byteLength(value[field]) > 4096 || /[\x00\r\n]/u.test(value[field])) fail('authentication_setup_required');
   const uses = field => definition.steps.some(step => step.fields && Object.hasOwn(step.fields, field));
   if ((uses('login') && !value.login) || (uses('password') && !value.password)) fail('authentication_setup_required');
@@ -340,8 +376,13 @@ function validateCredentials(value, definition) {
     catch { fail('authentication_setup_required'); }
     finally { parsed?.secret.fill(0); }
   }
-  if (value.attempt !== null && (!exact(value.attempt, ['id', 'state', 'steps', 'mail']) || !/^[0-9a-f-]{36}$/u.test(value.attempt.id) || !['pending', 'complete'].includes(value.attempt.state) || !Array.isArray(value.attempt.steps) || value.attempt.steps.length > 8 || !value.attempt.steps.every(key => definition.steps.some(step => step.id === key)))) fail('authentication_setup_required');
+  if (value.attempt !== null && (!exact(value.attempt, ['id', 'state', 'steps', 'mail']) || !/^[0-9a-f-]{36}$/u.test(value.attempt.id) || !['pending', 'complete'].includes(value.attempt.state) || !Array.isArray(value.attempt.steps) || value.attempt.steps.length > 8 || !value.attempt.steps.every(key => id(key) && (!sameRecipe || definition.steps.some(step => step.id === key))))) fail('authentication_setup_required');
   if (value.attempt && Object.hasOwn(value.attempt, 'mail')) validateBrowserMailJournal(value.attempt.mail);
+  // Read/status must not rewrite a record or race its ACK callback. Upgrade
+  // only this private in-memory copy. authenticate checks the original pending
+  // attempt/unknown ACK before its existing owner-serialized durable write;
+  // all fences are preserved byte-for-byte and never cleared by compatibility.
+  value.schemaVersion = 2; value.fingerprint = fingerprint; value.deliveryFingerprint = deliveryFingerprint;
   return value;
 }
 

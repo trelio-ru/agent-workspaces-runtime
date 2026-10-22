@@ -265,6 +265,10 @@ publication tooling также остаются вне этого публичн
   Signed setup guidance uses `trelio.protected-browser-auth-setup/v1` and the
   common local-form renderer. Static paragraphs/approved-origin links never
   change credential/fence fingerprints or trigger account-setting navigation.
+  Compatible authentication updates use `trelio.protected-browser-auth-compatibility/v1`:
+  bind reusable secrets to exact delivery forms; legacy migration requires full
+  signed previous recipes matching the encrypted hash, never a hash exception.
+  Status is read-only; pending input/unknown ACK fences survive without writes.
   Generic email OTP uses `trelio.protected-browser-mail-auth/v1`; provider
   matchers/selectors stay outside host. Capture native UID baseline BEFORE any
   mail-triggering input, serialize browser attempts per mail account, keep OTP
