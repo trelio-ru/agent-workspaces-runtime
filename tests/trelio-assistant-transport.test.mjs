@@ -618,16 +618,17 @@ test('managed encryption identity is scoped to the live pass and cannot select a
   await assert.rejects(select({origin:f.identity.origin,companyId:f.pass.companyId}),/PASS_REVIEW_REQUIRED/);
 });
 
-test('common encryption refuses profiles without their own key provider before HTTP or the human unlock form',async()=>{
+test('common encryption refuses a managed profile without its own keys after native discovery and before a human unlock',async()=>{
   const original=globalThis.fetch;let requests=0,forms=0;
-  globalThis.fetch=async()=>{requests++;throw new Error('unexpected network');};
+  globalThis.fetch=async()=>{requests++;return new Response(JSON.stringify({state:'encrypted',suite:'trelio-e2ee-v1',
+    company:{id:randomUUID(),slug:'synthetic'},viewer:{userId:randomUUID()}}),{headers:{'content-type':'application/json'}});};
   try{
-    const profile={requireToken:async()=>({}),prepareRequest:async()=>{throw new Error('unexpected request');}};
+    const profile={requireToken:async()=>({}),prepareRequest:async({origin,pathname,options})=>({url:new URL(pathname,origin),headers:new Headers(),options})};
     await withWorkspaceExecutionProfile(profile,()=>assert.rejects(ensureCompanyEncryptionContext({
       origin:'https://assistant.test',token:{},company:{slug:'synthetic'},
       collectEncryptionKey:async()=>{forms++;throw new Error('human form must not open');},
     }),error=>error.code==='ASSISTANT_WORKSPACE_PROFILE_DENIED'));
-    assert.equal(requests,0);assert.equal(forms,0);
+    assert.equal(requests,1);assert.equal(forms,0);
   }finally{globalThis.fetch=original;}
 });
 

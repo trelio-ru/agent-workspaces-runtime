@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm, symlink, readFile, copyFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, symlink, readFile, copyFile, readdir as fsReaddir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -11,8 +11,29 @@ import { createPrivateAclWorker, windowsPrivateWorkerOptions, scopedPrivateAclWo
 import { hardenWindowsPrivatePath, protectWindowsBridgeSessionToken, unprotectWindowsBridgeSessionToken,
   buildWindowsBridgeDpapiInvocation, resolveWindowsPowerShellExecutable } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { validateWindowsPrivateWorker } from '../scripts/validate-windows-private-worker.mjs';
+import { createAssistantPrivateStore, resolveAssistantCompanyEncryptionDevice } from '../host-runtime/scripts/trelio-assistant-private.mjs';
 
 const windows = {skip: process.platform !== 'win32'};
+test('managed company identity survives real CurrentUser DPAPI restart without plaintext key files', windows, async () => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'trelio-assistant-company-key-'));
+  const identity={origin:'https://fixture.invalid',assistantId:crypto.randomUUID(),deviceId:crypto.randomUUID()};
+  const companyId=crypto.randomUUID(),directory=path.join(root,'credentials');
+  const input={origin:identity.origin,kind:'company_encryption',id:companyId,deviceId:identity.deviceId};
+  const prepare=()=>withRuntimeHookPrivateSession(8_000,async()=>{
+    const store=createAssistantPrivateStore({directory});
+    const device=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
+      lockDirectory:path.join(root,'locks'),assertCurrent:async()=>{}});
+    const saved=await store.get(input);
+    // Assertions receive booleans, never a private JWK or derived unlock key.
+    const disk=await Promise.all((await fsReaddir(directory)).map(name=>readFile(path.join(directory,name),'utf8')));
+    assert.equal(disk.some(text=>text.includes(device.privateBundle.encryptionPrivateJwk.d)
+      ||text.includes(saved.trustedUnlockKey)),false,'OS-protected files contain no plaintext key');
+    assert.equal(await store.get({...input,deviceId:crypto.randomUUID()}),null);
+    return device.fingerprint;
+  });
+  try { assert.equal(await prepare(),await prepare()); }
+  finally { await rm(root,{recursive:true,force:true}); }
+});
 test('native package admission rejects changed source and binary bytes', async () => {
   const root=await mkdtemp(path.join(os.tmpdir(),'trelio-native-package-'));
   const sha=value=>crypto.createHash('sha256').update(value).digest('hex');

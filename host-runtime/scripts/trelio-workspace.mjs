@@ -5821,12 +5821,6 @@ export const ensureCompanyEncryptionContext = async ({
   collectEncryptionKey = collectCompanyEncryptionKeyThroughLoopback,
 }) => {
   const executionProfile = currentWorkspaceExecutionProfile();
-  // A managed profile must choose its own protected identity provider BEFORE
-  // any human remembered-device/form path is reachable. Older/source profiles
-  // without that capability refuse; they cannot borrow the OS user's keys.
-  if (executionProfile && typeof executionProfile.resolveCompanyEncryptionDevice !== 'function') {
-    denyWorkspaceExecutionProfile();
-  }
   const encryptedRequestOrigin = resolveEncryptedDataPlaneOrigin(origin, requestOrigin);
   const initialRuntime = await readCompanyEncryptionRuntime({
     origin: encryptedRequestOrigin,
@@ -5836,6 +5830,12 @@ export const ensureCompanyEncryptionContext = async ({
 
   if (initialRuntime.state === "plain") return null;
   assertEncryptedCompanyRuntimeState(initialRuntime);
+  // Plain-state discovery remains compatible with existing profiles. Only an
+  // encrypted company needs an identity, and that path must select its own
+  // provider BEFORE any human remembered-device/form access is reachable.
+  if (executionProfile && typeof executionProfile.resolveCompanyEncryptionDevice !== 'function') {
+    denyWorkspaceExecutionProfile();
+  }
   if (!initialRuntime.viewer?.userId) {
     throw new Error("Trelio не вернул пользователя для локального encryption device.");
   }
