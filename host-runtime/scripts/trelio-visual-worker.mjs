@@ -39,6 +39,14 @@ function fixtureDiagnostic(value) {
   if (['owner_read','policy','control_server','control_listen','owner_publish','dependencies','browser'].includes(value.startupPhase)) record.startupPhase = value.startupPhase;
   if (PROCESS_DIAGNOSTIC_CODES.includes(value.failureCode)) record.failureCode = value.failureCode;
   if (value.causeCode === 'UNKNOWN' || processDiagnosticCauseCode({code:value.causeCode}) === value.causeCode) record.causeCode = value.causeCode;
+  // Node's filesystem error includes private paths/message as well as a fixed
+  // syscall name. Retain ONLY the allowlisted operation for synthetic startup
+  // evidence: EPERM at owner publication must distinguish an atomic rename
+  // from opening a temporary file, without retrying any write or changing ACLs.
+  if (value.startupPhase === 'owner_publish'
+      && ['open', 'rename', 'lstat', 'stat', 'mkdir', 'unlink'].includes(value.error?.syscall)) {
+    record.ioOperation = value.error.syscall;
+  }
   if (value.error instanceof ProcessDiagnosticError) {
     // The SAME canonical parser strips even a typed error's message before
     // copying its allowed native operation/phase/timeout/cause dimensions.

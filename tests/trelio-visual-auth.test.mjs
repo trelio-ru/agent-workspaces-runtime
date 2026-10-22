@@ -370,7 +370,13 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     await browser.close();
     activeDef = withTransition(origin); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
     await browser.call('navigate', { url: `${origin}/with-follow` });
-    assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
+    const followedAuthentication = await browser.call('authenticate');
+    // Keep the original success requirement. A closed native reason and exact
+    // effect counters locate a failed transition without printing credentials,
+    // URLs, browser state or private provider output into the hosted log.
+    assert.equal(followedAuthentication.state, 'saved_unverified', JSON.stringify({
+      reason: followedAuthentication.reason, passwordSubmits, methodFollows, codeSubmits,
+    }));
     assert.equal(passwordSubmits, 3); assert.equal(methodFollows, 1); assert.equal(codeSubmits, 3);
     await browser.close();
     for (const route of ['/follow-unsafe', '/follow-path', '/follow-popup', '/follow-download', '/follow-hidden', '/follow-ambiguous', '/follow-sensitive', '/follow-captcha']) {

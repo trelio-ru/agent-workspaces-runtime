@@ -303,6 +303,9 @@ publication tooling также остаются вне этого публичн
   claim/profile. Assertions never print the bearer-bearing owner descriptor.
   Synthetic startup failures retain only closed startup phases and common native
   process categories; messages/paths/owner data never enter fixture evidence.
+  Owner-publication failures also retain an allowlisted filesystem syscall;
+  authentication fixtures retain only closed reasons and synthetic effect counts.
+  Diagnostic evidence alone never fixes or permits replay of a failed action.
   Ubuntu namespace restriction решается exact AppArmor profile в CI, без
   --no-sandbox и глобального отключения ограничений; production не меняет OS policy.
   X11 child сохраняет DISPLAY и путь XAUTHORITY без выдачи auth cookie модели.
