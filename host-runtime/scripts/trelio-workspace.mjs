@@ -7981,6 +7981,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_VISUAL_SESSION_MODULE_URL: _staleVisualSessionModuleUrl,
     TRELIO_LOCAL_FORM_MODULE_URL: _staleLocalFormModuleUrl,
     TRELIO_LOCAL_FORM_NODE_EXECUTABLE: _staleLocalFormNode,
+    TRELIO_BROWSER_MAIL_MODULE_URL: _staleBrowserMailModule,
     ...cleanEnvironment
   } = sanitizeAgentSkillInheritedEnvironment(inheritedEnvironment);
   const connectionConfigJson = executionContext.companyConnection
@@ -8037,6 +8038,7 @@ export const buildAgentSkillRuntimeEnvironment = ({
         "TRELIO_ORIGIN",
         "TRELIO_LOCAL_FORM_MODULE_URL",
         "TRELIO_LOCAL_FORM_NODE_EXECUTABLE",
+        "TRELIO_BROWSER_MAIL_MODULE_URL",
       ].includes(key)
     );
     if (
@@ -8081,6 +8083,9 @@ export const buildAgentSkillRuntimeEnvironment = ({
       : {}),
     TRELIO_LOCAL_FORM_MODULE_URL: import.meta.url,
     TRELIO_LOCAL_FORM_NODE_EXECUTABLE: process.execPath,
+    // Public code location only. Private mail/browser admission is checked
+    // again by this host bridge against the current bound actor and attempt.
+    TRELIO_BROWSER_MAIL_MODULE_URL: new URL('./trelio-browser-mail-bridge.mjs', import.meta.url).href,
     // HTTP evidence is also available to native-supervised browser adapters
     // without a generic lifecycle descriptor. This grants no lease or policy;
     // inherited module URLs were stripped above and cannot select executable code.

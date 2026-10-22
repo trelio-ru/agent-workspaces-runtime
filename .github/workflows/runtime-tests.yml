@@ -84,6 +84,7 @@ jobs:
           node tests/trelio-visual-native-store.test.mjs
           node tests/trelio-visual-store.test.mjs
           node tests/trelio-visual-auth.test.mjs
+          node tests/trelio-browser-mail-auth.test.mjs
           node tests/trelio-local-form.test.mjs
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs
@@ -107,6 +108,7 @@ jobs:
               xvfb-run -a node "tests/trelio-visual-${file}.test.mjs"
             done
             xvfb-run -a node tests/trelio-visual-auth.test.mjs
+            node tests/trelio-browser-mail-auth.test.mjs
             xvfb-run -a node tests/trelio-local-form.test.mjs
             xvfb-run -a node tests/trelio-browser-text.test.mjs
             node tests/trelio-browser-tab-budget.test.mjs
@@ -223,6 +225,7 @@ jobs:
           node tests/trelio-browser-http.test.mjs
           node tests/trelio-visual-store.test.mjs
           node tests/trelio-visual-auth.test.mjs
+          node tests/trelio-browser-mail-auth.test.mjs
           node tests/trelio-local-form.test.mjs
           node tests/trelio-visual-transport.test.mjs
           node tests/trelio-visual-browser.test.mjs

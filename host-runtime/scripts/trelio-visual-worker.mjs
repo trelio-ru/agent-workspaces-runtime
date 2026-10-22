@@ -95,7 +95,11 @@ try {
     return engine.call(operation, args);
   }
   startupPhase = 'control_server';
-  server = createVisualControlServer({ token: owner.token, dispatch });
+  server = createVisualControlServer({ token: owner.token, dispatch,
+    mailDispatch: message => {
+      if (!engine) throw Error('authentication_mail_unavailable');
+      return engine.mailCall(message);
+    } });
   server.requestTimeout = 55_000; server.headersTimeout = 5000;
   startupPhase = 'control_listen';
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -111,7 +115,7 @@ try {
   // Keep the detached fixture's Chromium flags identical to production. Its
   // closed process/extension events do not require native log-file switches.
   startupPhase = 'browser';
-  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, authentication: owner.authentication || null, observationMode: owner.observationMode || 'image', attachmentDownloads: owner.attachmentDownloads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
+  engine = new ExtensionVisualBrowser({ dependencies, store, policy, origins: owner.origins, domains: owner.domains, authentication: owner.authentication || null, mailIdentity: owner.mailIdentity || null, observationMode: owner.observationMode || 'image', attachmentDownloads: owner.attachmentDownloads === true, lease: { deadlineAt: owner.deadlineAt }, testHeadless: owner.testHeadless === true, ...(fixtureOnly ? { testDiagnostics: fixtureDiagnostic, testNativeLogging: false } : {}) });
   current = await engine.call(owner.operation, owner.args);
 } catch (error) {
   fixtureDiagnostic({ stage: 'startup_failed', startupPhase, error, failureCode:error.diagnosticCode,

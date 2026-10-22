@@ -262,6 +262,15 @@ publication tooling также остаются вне этого публичн
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
   Missing API support is a runtime capability gap, not a ban on automatic login.
+  Signed setup guidance uses `trelio.protected-browser-auth-setup/v1` and the
+  common local-form renderer. Static paragraphs/approved-origin links never
+  change credential/fence fingerprints or trigger account-setting navigation.
+  Generic email OTP uses `trelio.protected-browser-mail-auth/v1`; provider
+  matchers/selectors stay outside host. Capture native UID baseline BEFORE any
+  mail-triggering input, serialize browser attempts per mail account, keep OTP
+  in private pipes, and grant exact Seen only after positive browser success.
+  Persist attempt/ACK fences in the SAME encrypted credential record; a lost
+  result permits observation/verify-only, never code/STORE replay.
   Signed authentication `follow` transitions use the additive
   `trelio.protected-browser-auth-transitions/v1` capability: exact same-origin
   anchor/path, no fields/values/popups/downloads or visible password/OTP.

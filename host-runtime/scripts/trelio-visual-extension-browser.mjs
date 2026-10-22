@@ -16,6 +16,8 @@ import { validVisualArguments, visualStatus, normalizeBrowserVisualResult, valid
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from './trelio-visual-browser.mjs';
 import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
+import { ProtectedBrowserMailAttempt } from './trelio-browser-mail-auth.mjs';
+import { acquireBrowserMailLock } from './trelio-browser-mail-lock.mjs';
 
 // A public manifest identity fixes the extension Origin across private
 // profiles. This is not a credential/signing secret; the independent random
@@ -102,18 +104,40 @@ export class ExtensionVisualBrowser {
   #replaceSessionCookies = false;
   #windowsClosed = false;
   #credentialSetup; #setupReason;
-  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, authentication = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
+  #authenticationTask; #mailAttempt;
+  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
     if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads });
+    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.testNativeLogging = Boolean(testDiagnostics) && testNativeLogging;
     this.sessionId = crypto.randomUUID();
     this.#deadline = setTimeout(() => { void this.close().catch(() => this.abort()); }, lease.deadlineAt - Date.now());
     this.#deadline.unref();
   }
-  #status(reason = 'none') { return visualStatus(this.#state, this.#terminal || this.#setupReason || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved }); }
+  #status(reason = 'none') {
+    if (this.#mailAttempt && !this.#terminal && !this.#closed) return validateVisualResult(this.#mailAttempt.publicStatus());
+    return visualStatus(this.#state, this.#terminal || this.#setupReason || reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
+  }
+  /** Called only by the separately authenticated host-private mail endpoint.
+   * It cannot start an attempt, select a mailbox or submit arbitrary inputs.
+   * The same actor/handle/fence is checked for every private transition.
+   */
+  async mailCall(message) {
+    if (!message || Object.keys(message).some(key => !['operation', 'handle', 'actor', 'payload'].includes(key))
+      || !this.#mailAttempt || this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('authentication_mail_unavailable');
+    const { operation, actor, handle, payload } = message;
+    let value;
+    if (operation === 'prepare' && payload === undefined) value = this.#mailAttempt.prepare(actor, handle);
+    else if (operation === 'begin') value = await this.#mailAttempt.begin(actor, handle, payload);
+    else if (operation === 'status' && payload === undefined) value = this.#mailAttempt.status(actor, handle);
+    else if (operation === 'deliver' && payload && Object.keys(payload).sort().join() === 'code,reference') value = await this.#mailAttempt.deliver(actor, handle, payload);
+    else if (operation === 'claim-ack') value = await this.#mailAttempt.claimAcknowledgement(actor, handle, payload);
+    else if (operation === 'record-ack' && payload && Object.keys(payload).sort().join() === 'seenVerified,writeAttempted') value = await this.#mailAttempt.recordAcknowledgement(actor, handle, payload);
+    else throw fault('authentication_mail_invalid');
+    return { ok: true, ...value };
+  }
   async #start(url, manual) {
     if (this.#child) return;
     this.#state = 'preparing'; this.#manual = manual; this.#extensionReady = false; this.#authHandshake = false; this.#authSnapshotReady = false; this.#windowsClosed = false;
@@ -333,6 +357,7 @@ export class ExtensionVisualBrowser {
     if (operation === 'status') return Promise.resolve(this.#status());
     const result = this.#tail.then(async () => {
       if (this.#closed || Date.now() >= this.lease.deadlineAt) return visualStatus('error', 'lease_expired');
+      if (this.#authenticationTask) return this.#status();
       if (this.#terminal) return this.#status();
       if (['credentials-setup', 'credentials-status', 'credentials-forget', 'authenticate'].includes(operation) && !this.authentication) return visualStatus('error', 'invalid_input');
       if (this.#credentialSetup) return this.#status();
@@ -355,6 +380,94 @@ export class ExtensionVisualBrowser {
       this.#setupReason = undefined;
       if (operation === 'credentials-status') return visualStatus(await hasVisualAuthenticationCredentials(this.store, this.authentication) ? 'saved_unverified' : 'not_configured');
       if (operation === 'credentials-forget') { await this.store.forgetCredentials(); return visualStatus('not_configured'); }
+      if (operation === 'authenticate-mail') {
+        if (!this.#child || !this.authentication || !this.mailIdentity
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(args.mailAccountId || '')
+          || !this.authentication.steps.some(step => step.fields?.emailOtp)) return visualStatus('error', 'invalid_input');
+        if (this.#manual) return this.#status('manual_control_active');
+        if (this.#mailAttempt) {
+          const previous = this.#mailAttempt.publicStatus();
+          if (!previous.authenticated || ['pending', 'unknown'].includes(previous.acknowledgement)) return this.#status();
+          // A terminal, unambiguous prior login is independent of the next
+          // one. Unknown ACKs keep their original journal/handle for read-back.
+          this.#mailAttempt = undefined;
+        }
+        const mailStep = this.authentication.steps.find(step => step.fields?.emailOtp);
+        const mailGuard = await acquireBrowserMailLock({ mailSkillId: mailStep.mail.skillId,
+          mailAccountId: args.mailAccountId, browserScope: this.mailIdentity.scope,
+          origin: this.mailIdentity.origin,
+          expiresAt: Math.min(Date.now() + 120000, this.lease.deadlineAt),
+          ...(this.policy.fixtureOnly ? { directory: this.store.directory } : {}) });
+        this.#state = 'preparing';
+        // Like protected setup, the original private attempt continues outside
+        // the public command queue. Status returns its value-free mail handle;
+        // ordinary browser input stays blocked while the signed mail worker
+        // supplies the code through the independent private pipe endpoint.
+        this.#authenticationTask = (async () => {
+          await this.#send('authentication-start');
+          const active = () => {
+            if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
+            mailGuard.assertActive();
+          };
+          let result;
+          try {
+            result = await authenticateVisualBrowser({ store: this.store, definition: this.authentication,
+              method: 'email', active, send: (op, input) => this.#send(op, input),
+              afterAuthentication: async authenticated => {
+                try {
+                  await this.#send('authentication-end', { success: authenticated });
+                  this.#manual = !authenticated;
+                  this.#state = authenticated ? 'saved_unverified' : 'manual_input_required';
+                  await this.#mailAttempt?.finish(authenticated);
+                } catch (error) {
+                  await this.#mailAttempt?.finish(false).catch(() => {});
+                  throw error;
+                }
+              },
+              prepareMail: async ({ credentials, requestedAt, expiresAt }) => {
+                if (this.#mailAttempt || credentials.attempt.mail) throw fault('authentication_mail_consumed');
+                credentials.attempt.mail = {};
+                const journal = credentials.attempt.mail, attemptId = credentials.attempt.id,
+                  fingerprint = credentials.fingerprint;
+                const persist = async () => {
+                  // ACK can happen after authenticate() erased its RAM copy.
+                  // Reopen the SAME encrypted record under the owned account,
+                  // preserve its secrets and require the original attempt CAS.
+                  const fresh = await this.store.readCredentials();
+                  try {
+                    if (!fresh || fresh.fingerprint !== fingerprint || fresh.attempt?.id !== attemptId) throw fault('authentication_mail_scope');
+                    fresh.attempt.mail = structuredClone(journal);
+                    await this.store.writeCredentials(fresh);
+                  } finally {
+                    if (fresh) { fresh.login = ''; fresh.password = ''; fresh.totp = ''; }
+                  }
+                };
+                this.#mailAttempt = new ProtectedBrowserMailAttempt({ scope: this.mailIdentity.scope,
+                  identity: this.mailIdentity, mailAccountId: args.mailAccountId, spec: mailStep.mail,
+                  // Authentication input owns the short mailbox lock, but
+                  // post-login ACK/read-back must survive its normal release.
+                  // The same browser owner and absolute lease still gate every
+                  // private request; the journal independently fences writes.
+                  journal, persist, active: () => {
+                    if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
+                  }, requestedAt,
+                  expiresAt: Math.min(expiresAt, this.lease.deadlineAt, mailGuard.expiresAt) });
+                await this.#mailAttempt.start();
+                return this.#mailAttempt.ready;
+              }, requestMailCode: () => this.#mailAttempt.code });
+          } catch { result = { state: 'manual_input_required', reason: 'authentication_unknown' }; }
+          this.#manual = result.state !== 'saved_unverified';
+          this.#state = result.state;
+        })().catch(async () => {
+          this.#manual = true; this.#state = 'manual_input_required'; this.#setupReason = 'authentication_unknown';
+          this.#mailAttempt?.cancel('authentication_mail_unknown');
+        }).finally(async () => {
+          try { await mailGuard.release(); }
+          catch { this.#terminal = 'storage_unavailable'; }
+          finally { this.#authenticationTask = undefined; }
+        });
+        return this.#status();
+      }
       if (operation === 'authenticate') {
         if (!this.#child) return visualStatus('error', 'session_closed');
         if (this.#manual) return this.#status('manual_control_active');
@@ -402,7 +515,7 @@ export class ExtensionVisualBrowser {
     });
     this.#tail = result.catch(() => {});
     return result.catch(error => {
-      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'storage_unavailable', 'authentication_setup_required'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
+      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'storage_unavailable', 'authentication_setup_required', 'authentication_mail_busy'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
       if (this.#state === 'preparing') { this.#state = 'error'; this.#terminal = reason; }
       return visualStatus('error', reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
     });
@@ -410,9 +523,11 @@ export class ExtensionVisualBrowser {
   async close() {
     if (this.#closed) return; this.#closed = true; clearTimeout(this.#deadline);
     this.#launchAbort.abort();
+    this.#mailAttempt?.cancel();
     this.testDiagnostics?.({ stage: 'close_queue' });
     await this.#tail;
     await this.#credentialSetup;
+    await this.#authenticationTask;
     // A window-close completion can have started outside the command queue.
     // Join it before cleanup so expiry/close cannot race a second save/remove.
     this.testDiagnostics?.({ stage: 'close_manual' });
@@ -435,6 +550,7 @@ export class ExtensionVisualBrowser {
   abort() {
     this.#closed = true; clearTimeout(this.#deadline); clearInterval(this.#heartbeat);
     this.#launchAbort.abort();
+    this.#mailAttempt?.cancel();
     const child = this.#child; if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     this.#socket?.terminate(); this.#wss?.close(); this.#server?.close(); this.#sessionCookies = []; this.store.close();
   }

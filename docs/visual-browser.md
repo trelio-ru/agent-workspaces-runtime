@@ -4,6 +4,13 @@ API v1 принадлежит generic host. Signed provider задаёт
 HTTPS origins/domains, начальный адрес и явный observationMode; binary, профиль, ключ и executable
 выбирает host. Source не означает stable release или завершённую native-проверку.
 
+Signed authentication recipe может добавить `setup: {paragraphs, links}` для
+защищённой формы через `trelio.protected-browser-auth-setup/v1`. До четырёх
+plain-text абзацев и четырёх ссылок `{label,url}` на уже разрешённые exact
+HTTPS origins, без credentials/query/hash. Их рендерит общий local-form API;
+переход по ссылке выполняет пользователь. Статическая подсказка не меняет
+fingerprint исполняемой recipe, credentials и pending fence.
+
 ## Что получает модель
 
 `trelio.visual-browser/v1` передаёт PNG отдельным MCP image block и закрытые
@@ -323,7 +330,7 @@ Native Chromium fixture проверяет полный password → choice → 
 а также foreign/path/popup/download/hidden/ambiguous/sensitive/CAPTCHA отказы.
 Provider-specific селекторы, решения и личные данные в host не добавляются.
 
-Новые public operations принимают только `{}`:
+Базовые public operations принимают только `{}`:
 
 - `credentials-setup` открывает существующий guarded loopback collector с
   логином, паролем и optional TOTP seed. `status`/`wait` наблюдают persisted
@@ -341,6 +348,45 @@ Provider-specific селекторы, решения и личные данны�
   контента: бизнес-readiness отдельно проверяет provider.
 - `credentials-forget` только по прямой просьбе удаляет credentials выбранного
   аккаунта, сохраняя browser session и OS key. `disconnect` удаляет обе записи.
+
+#### Защищённый email-код
+
+`BROWSER_MAIL_AUTH_API = trelio.protected-browser-mail-auth/v1` добавляет
+`authenticate-mail {mailAccountId}`: только UUID явно выбранного bound IMAP
+аккаунта. Recipe остаётся signed provider source. Шаг с `factor: 'email'`
+объявляет только `fields.emailOtp` и `mail: {skillId,sender,subjectIncludes,
+bodyIncludes,digits}`; 6/8 цифр и literal anchors, без model regex/selector.
+Шаги `factor: 'totp'` применяются только к TOTP; обычный `authenticate {}`
+не включает email автоматически. Одновременно допускается один email-шаг.
+
+Host сначала проверяет активную сессию. Для нового входа он создаёт private
+attempt и value-free `trelio.browser-mail-request/v1` handle. Первый input
+ещё не отправляется. Signed mail runtime того же company/member и exact
+mail account через private pipe получает matcher, делает readonly UID baseline
+и передаёт `begin`. Только persisted baseline разрешает пароль/выбор метода.
+Старый UID, включая код из той же секунды, не подходит. Уже открытый email
+challenge без такой предыстории остаётся ручным. Один host account lock
+не допускает двух одновременных browser-входов через тот же ящик; expiry
+не сбрасывает исходные credential fences.
+
+Для non-JS provider host выдаёт только code location
+`TRELIO_BROWSER_MAIL_MODULE_URL`; executable — прежний
+`TRELIO_LOCAL_FORM_NODE_EXECUTABLE`. Module запускается без CLI arguments,
+с `shell=false`, сообщения — captured private stdin/stdout до 16 KiB.
+Разрешены `prepare`, `begin`, `deliver`, `status`, `claim-ack`, `record-ack`.
+Это не MCP/обычный stdout и не разрешение запускать другой mail executor.
+Current signed skill/account admission остаётся обязательным. OTP никогда
+не записывается в файл/argv/env/log; matcher/receipt не выдаются модели.
+
+Mail provider читает только новые exact UID через PEEK, сверяет sender,
+native recipient, INTERNALDATE, UIDVALIDITY, MIME и единственный код.
+После private delivery host ещё раз проверяет исходный document/challenge,
+сохраняет fence до fill/submit и подтверждает положительный selector бизнеса.
+Только этот результат разрешает отдельный additive Seen для использованного
+UID с полным SHA-256 и FLAGS read-back. Его one-write fence сохраняется до
+STORE в том же encrypted attempt. Неизвестный исход даёт verify-only, не новый
+код, resend, submit или STORE. Ошибка пометки не отменяет состоявшийся вход.
+Общий механизм не содержит URL/селекторов/семантики конкретного сервиса.
 
 Credentials хранятся в `credentials.enc` с AES-256-GCM и отдельным purpose/AAD,
 вне профиля/Workspace/cache/package; OS-backed key и account scope общие с

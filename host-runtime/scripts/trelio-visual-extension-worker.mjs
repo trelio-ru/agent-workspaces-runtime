@@ -410,7 +410,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       }
       // Fixed top-frame messages, never arbitrary DOM/evaluate/CDP. Values
       // stay in this private channel; the public call API has no such aliases.
-      return chrome.tabs.sendMessage(tab.id, { kind: op, ...(['authentication-fill', 'authentication-follow'].includes(op) ? args : {}) }, { frameId: 0 });
+      return chrome.tabs.sendMessage(tab.id, { kind: op, ...(['authentication-fill', 'authentication-follow', 'authentication-probe'].includes(op) ? args : {}) }, { frameId: 0 });
     }
     if (op === 'manual') {
       manual = true; frame = undefined;

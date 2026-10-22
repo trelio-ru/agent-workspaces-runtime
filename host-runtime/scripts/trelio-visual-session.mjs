@@ -13,6 +13,8 @@ import { createVisualOriginPolicy } from './trelio-visual-browser.mjs';
 import { validVisualArguments, visualStatus, validateVisualResult } from './trelio-visual-result.mjs';
 import { readBrowserSessionBinding } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
+import { normalizeBrowserMailSpec, validateBrowserMailJournal } from './trelio-browser-mail-auth.mjs';
+export { BROWSER_MAIL_AUTH_API } from './trelio-browser-mail-auth.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -172,6 +174,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
     pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
     origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, authentication, authenticationFingerprint,
+    mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
     ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
   };
   await writePrivateJsonFile(file, owner);
@@ -198,12 +201,13 @@ export async function runVisualSession({ origins, domains = [], operation, args 
 }
 
 /** Authenticated loopback transport; web pages cannot call it or read tokens. */
-export function createVisualControlServer({ token, dispatch }) {
+export function createVisualControlServer({ token, dispatch, mailDispatch }) {
   const expectedAuthorization = Buffer.from(`Bearer ${token}`);
   return http.createServer(async (req, res) => {
     const deny = () => { res.writeHead(403, { 'content-length': '0' }); res.end(); };
     const authorization = Buffer.from(typeof req.headers.authorization === 'string' ? req.headers.authorization : '');
-    if (req.method !== 'POST' || req.url !== '/command' || req.headers.origin !== undefined
+    const privateMail = req.url === '/authentication-mail' && typeof mailDispatch === 'function';
+    if (req.method !== 'POST' || req.url !== '/command' && !privateMail || req.headers.origin !== undefined
       || req.headers['content-type'] !== 'application/json' || authorization.length !== expectedAuthorization.length
       || !crypto.timingSafeEqual(authorization, expectedAuthorization)
       || !/^127\.0\.0\.1:\d+$/u.test(req.headers.host || '')) return deny();
@@ -211,12 +215,20 @@ export function createVisualControlServer({ token, dispatch }) {
     try {
       for await (const bytes of req) { count += bytes.length; if (count > 32_768) throw new Error('invalid_input'); chunks.push(bytes); }
       const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (privateMail) {
+        // A separate private pipe endpoint; these matcher/receipt messages
+        // must never pass through ordinary visual result/MCP projection.
+        const result = await mailDispatch(value);
+        const body = JSON.stringify(result);
+        if (Buffer.byteLength(body) > 16384) throw Error('invalid_input');
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body); return;
+      }
       if (!value || Object.keys(value).sort().join() !== 'args,operation' || typeof value.operation !== 'string') throw new Error('invalid_input');
       const result = validateVisualResult(await dispatch(value.operation, value.args));
       const body = JSON.stringify(result);
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' }); res.end(body);
     } catch {
-      const body = JSON.stringify(visualStatus('error', 'operation_failed'));
+      const body = JSON.stringify(privateMail ? { ok: false, code: 'authentication_mail_unavailable' } : visualStatus('error', 'operation_failed'));
       res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }); res.end(body);
     }
   });
@@ -229,6 +241,7 @@ export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
 // credential fingerprint. A provider must check this export before declaring
 // value-free navigation between private credential forms.
 export const VISUAL_AUTHENTICATION_TRANSITIONS_API = 'trelio.protected-browser-auth-transitions/v1';
+export const VISUAL_AUTHENTICATION_SETUP_API = 'trelio.protected-browser-auth-setup/v1';
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const selector = value => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/u.test(value);
 const id = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,47}$/u.test(value);
@@ -242,7 +255,7 @@ const id = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,47}$/u.test(
 export function normalizeVisualAuthentication(value, policy) {
   if (value === undefined || value === null) return null;
   if (Buffer.byteLength(JSON.stringify(value)) > 16_384) fail('invalid_input');
-  if (!exact(value, ['steps', 'success']) || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 8 || !Array.isArray(value.success) || value.success.length < 1 || value.success.length > 8) fail('invalid_input');
+  if (!exact(value, ['steps', 'success', 'setup']) || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 8 || !Array.isArray(value.success) || value.success.length < 1 || value.success.length > 8) fail('invalid_input');
   const origin = raw => {
     if (typeof raw !== 'string' || !policy.origins?.includes(raw)) fail('navigation_blocked');
     const url = new URL(raw);
@@ -250,8 +263,10 @@ export function normalizeVisualAuthentication(value, policy) {
     return raw;
   };
   const steps = value.steps.map(step => {
+    if (step?.factor !== undefined && !['totp', 'email'].includes(step.factor)) fail('invalid_input');
+    const factor = step?.factor ? { factor: step.factor } : {};
     if (step?.action === 'follow') {
-      if (!exact(step, ['id', 'origin', 'challenge', 'action', 'target', 'path', 'manual'])
+      if (!exact(step, ['id', 'origin', 'challenge', 'action', 'target', 'path', 'manual', 'factor'])
         || !id(step.id) || !selector(step.challenge) || !selector(step.target)
         || typeof step.path !== 'string' || step.path.length > 1024
         || !step.path.startsWith('/') || step.path.startsWith('//') || /[\x00-\x20\x7f?#\\]/u.test(step.path)) fail('invalid_input');
@@ -261,33 +276,58 @@ export function normalizeVisualAuthentication(value, policy) {
       if (destination.origin !== boundOrigin || destination.pathname !== step.path) fail('invalid_input');
       const manual = step.manual ?? [];
       if (!Array.isArray(manual) || manual.length > 8 || !manual.every(selector)) fail('invalid_input');
-      return { id: step.id, origin: boundOrigin, challenge: step.challenge, action: 'follow', target: step.target, path: step.path, manual: manual.slice() };
+      return { id: step.id, origin: boundOrigin, challenge: step.challenge, action: 'follow', target: step.target, path: step.path, manual: manual.slice(), ...factor };
     }
-    if (!exact(step, ['id', 'origin', 'challenge', 'fields', 'submit', 'manual']) || !id(step.id) || !selector(step.challenge) || (step.submit !== null && !selector(step.submit)) || !exact(step.fields, ['login', 'password', 'totp']) || !Object.keys(step.fields).length) fail('invalid_input');
+    if (!exact(step, ['id', 'origin', 'challenge', 'fields', 'submit', 'manual', 'factor', 'mail']) || !id(step.id) || !selector(step.challenge) || (step.submit !== null && !selector(step.submit)) || !exact(step.fields, ['login', 'password', 'totp', 'emailOtp']) || !Object.keys(step.fields).length) fail('invalid_input');
     const fields = {};
-    for (const key of ['login', 'password', 'totp']) if (Object.hasOwn(step.fields, key)) {
+    for (const key of ['login', 'password', 'totp', 'emailOtp']) if (Object.hasOwn(step.fields, key)) {
       const list = Array.isArray(step.fields[key]) ? step.fields[key] : [step.fields[key]];
-      if (!list.length || list.length > (key === 'totp' ? 8 : 1) || !list.every(selector) || new Set(list).size !== list.length) fail('invalid_input');
+      if (!list.length || list.length > (['totp', 'emailOtp'].includes(key) ? 8 : 1) || !list.every(selector) || new Set(list).size !== list.length) fail('invalid_input');
       fields[key] = list.slice();
     }
     // A saved TOTP cannot satisfy an SMS/push challenge. Its recipe must name
     // an actual TOTP-specific rendered challenge, never just a generic OTP box.
     const manual = step.manual ?? [];
     if (!Array.isArray(manual) || manual.length > 8 || !manual.every(selector)) fail('invalid_input');
-    return { id: step.id, origin: origin(step.origin), challenge: step.challenge, fields, submit: step.submit, manual: manual.slice() };
+    if (fields.emailOtp ? step.factor !== 'email' || Object.keys(fields).length !== 1 || !step.mail : step.mail !== undefined) fail('invalid_input');
+    return { id: step.id, origin: origin(step.origin), challenge: step.challenge, fields, submit: step.submit, manual: manual.slice(), ...factor,
+      ...(fields.emailOtp ? { mail: normalizeBrowserMailSpec(step.mail) } : {}) };
   });
   // This private API is for a credential workflow, not an arbitrary signed
   // click runner. Transitions never create a credential-free execution mode.
   if (steps.every(step => step.action === 'follow')) fail('invalid_input');
+  if (steps.filter(step => step.fields?.emailOtp).length > 1) fail('invalid_input');
   if (new Set(steps.map(step => step.id)).size !== steps.length) fail('invalid_input');
   const success = value.success.map(item => {
     if (!exact(item, ['origin', 'selector']) || !selector(item.selector)) fail('invalid_input');
     return { origin: origin(item.origin), selector: item.selector };
   });
-  return { steps, success };
+  let setup;
+  if (value.setup !== undefined) {
+    // Presentation belongs to the signed provider, never model arguments or
+    // page prose. Only links to its already-approved exact HTTPS origins are
+    // allowed. Opening a link is a human action, not a host navigation step.
+    const text = item => typeof item === 'string' && item.trim().length > 0
+      && item.length <= 1000 && !/[\x00-\x1f\x7f]/u.test(item);
+    if (!exact(value.setup, ['paragraphs', 'links']) || !Array.isArray(value.setup.paragraphs)
+      || value.setup.paragraphs.length < 1 || value.setup.paragraphs.length > 4
+      || !value.setup.paragraphs.every(text) || !Array.isArray(value.setup.links)
+      || value.setup.links.length > 4) fail('invalid_input');
+    setup = { paragraphs: value.setup.paragraphs.slice(), links: value.setup.links.map(item => {
+      if (!exact(item, ['label', 'url']) || !text(item.label) || !text(item.url)) fail('invalid_input');
+      let url; try { url = new URL(item.url); } catch { fail('invalid_input'); }
+      origin(url.origin);
+      if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search) fail('invalid_input');
+      return { label: item.label, url: url.href };
+    }) };
+  }
+  return { steps, success, ...(setup ? { setup } : {}) };
 }
 
-export const visualAuthenticationFingerprint = definition => crypto.createHash('sha256').update(JSON.stringify(definition)).digest('hex');
+// Static setup copy cannot change credential destinations, invalidate a saved
+// login or clear an unknown-outcome fence. Legacy field/follow fingerprints
+// remain byte-identical; all executable recipe fields stay in this digest.
+export const visualAuthenticationFingerprint = ({ setup: _presentation, ...definition }) => crypto.createHash('sha256').update(JSON.stringify(definition)).digest('hex');
 
 function validateCredentials(value, definition) {
   if (!exact(value, ['schemaVersion', 'fingerprint', 'login', 'password', 'totp', 'attempt']) || value.schemaVersion !== 1 || value.fingerprint !== visualAuthenticationFingerprint(definition)) fail('authentication_setup_required');
@@ -300,7 +340,8 @@ function validateCredentials(value, definition) {
     catch { fail('authentication_setup_required'); }
     finally { parsed?.secret.fill(0); }
   }
-  if (value.attempt !== null && (!exact(value.attempt, ['id', 'state', 'steps']) || !/^[0-9a-f-]{36}$/u.test(value.attempt.id) || !['pending', 'complete'].includes(value.attempt.state) || !Array.isArray(value.attempt.steps) || value.attempt.steps.length > 8 || !value.attempt.steps.every(key => definition.steps.some(step => step.id === key)))) fail('authentication_setup_required');
+  if (value.attempt !== null && (!exact(value.attempt, ['id', 'state', 'steps', 'mail']) || !/^[0-9a-f-]{36}$/u.test(value.attempt.id) || !['pending', 'complete'].includes(value.attempt.state) || !Array.isArray(value.attempt.steps) || value.attempt.steps.length > 8 || !value.attempt.steps.every(key => definition.steps.some(step => step.id === key)))) fail('authentication_setup_required');
+  if (value.attempt && Object.hasOwn(value.attempt, 'mail')) validateBrowserMailJournal(value.attempt.mail);
   return value;
 }
 
@@ -326,6 +367,7 @@ export async function configureVisualAuthentication({ store, definition, signal,
       title: 'Данные входа',
       sections: [
         { paragraphs: ['Сохранение только на этом устройстве. Агент и Trelio не получат значения.', `Адреса входа: ${[...new Set(definition.steps.map(step => step.origin))].join(', ')}`] },
+        ...(definition.setup ? [definition.setup] : []),
         { ...(errorMessage ? { notice: { tone: 'error', text: 'Проверьте поля. Данные не сохранены; повторите ввод или отмените настройку.' } } : {}), fields: [
           ...(uses('login') ? [field('login', 'Логин')] : []),
           ...(uses('password') ? [field('password', 'Пароль')] : []),
@@ -355,34 +397,52 @@ export async function configureVisualAuthentication({ store, definition, signal,
  * or another CLI cannot replay it. A verified success may reconcile a pending
  * result without resubmitting. Human replacement explicitly clears the fence.
  */
-export async function authenticateVisualBrowser({ store, definition, send, active, wait = sleep, now = Date.now }) {
+export async function authenticateVisualBrowser({ store, definition, send, active, wait = sleep, now = Date.now, method = 'totp', prepareMail, requestMailCode, afterAuthentication }) {
+  if (!['totp', 'email'].includes(method) || method === 'email'
+    && (typeof requestMailCode !== 'function' || typeof prepareMail !== 'function'
+      || !definition.steps.some(step => step.fields?.emailOtp))
+    || afterAuthentication !== undefined && typeof afterAuthentication !== 'function') fail('invalid_input');
+  const methodArguments = method === 'email' ? { method } : {};
   const observe = async () => {
     active();
-    const value = await send('authentication-probe');
+    const value = await send('authentication-probe', method === 'email' ? methodArguments : undefined);
     if (!exact(value, ['state', 'stepId', 'documentId']) || !['success', 'challenge', 'unknown'].includes(value.state) || (value.state === 'challenge' && (!definition.steps.some(step => step.id === value.stepId) || typeof value.documentId !== 'string' || !/^[0-9a-f-]{36}$/u.test(value.documentId)))) fail('authentication_unknown');
     return value;
   };
-  let credentials;
+  let credentials, authenticated = false;
   try {
     const initial = await observe();
     if (initial.state === 'success') {
       // Reuse a proven active session without accessing the credential vault.
       // A previous pending fence is reconciled only if credentials are needed
       // again; it cannot authorize a replay merely from this success result.
+      authenticated = true;
       return { state: 'saved_unverified', reason: 'none' };
     }
     if (initial.state !== 'challenge') return { state: 'manual_input_required', reason: 'authentication_required' };
+    if (method === 'email' && definition.steps.find(step => step.id === initial.stepId)?.fields?.emailOtp)
+      return { state: 'manual_input_required', reason: 'authentication_required' };
     credentials = validateCredentials(await store.readCredentials(), definition);
     if (credentials.attempt?.state === 'pending') fail('authentication_unknown');
+    if (['pending', 'unknown'].includes(credentials.attempt?.mail?.acknowledgement)) fail('authentication_unknown');
     const attempt = { id: crypto.randomUUID(), state: 'pending', steps: [] };
     credentials.attempt = attempt;
     await store.writeCredentials(credentials);
-    const until = now() + 30_000;
+    const requestedAt = now(), until = requestedAt + (method === 'email' ? 120_000 : 30_000);
+    if (method === 'email') {
+      if (typeof prepareMail !== 'function') fail('invalid_input');
+      await prepareMail({ credentials, requestedAt, expiresAt: until });
+      // A human/site navigation during mailbox preparation revokes the old
+      // challenge rather than resuming a password on a different document.
+      active(); const fresh = await observe();
+      if (fresh.state !== 'challenge' || fresh.stepId !== initial.stepId || fresh.documentId !== initial.documentId) fail('authentication_unknown');
+    }
     let probe = initial;
     while (now() < until) {
       active();
       if (probe.state === 'success') {
         attempt.state = 'complete'; await store.writeCredentials(credentials);
+        authenticated = true;
         return { state: 'saved_unverified', reason: 'none' };
       }
       const step = definition.steps.find(item => item.id === probe.stepId);
@@ -392,7 +452,7 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
           // dispatch. A lost click response cannot replay this transition or
           // restart the earlier password step in another invocation.
           attempt.steps.push(step.id); await store.writeCredentials(credentials); active();
-          const value = await send('authentication-follow', { stepId: step.id, documentId: probe.documentId });
+          const value = await send('authentication-follow', { stepId: step.id, documentId: probe.documentId, ...methodArguments });
           if (!exact(value, ['state']) || value.state !== 'submitted') fail('authentication_unknown');
           await wait(200); active(); probe = await observe(); continue;
         }
@@ -407,6 +467,18 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
         }
         const values = {};
         for (const key of Object.keys(step.fields)) {
+          if (key === 'emailOtp') {
+            if (method !== 'email' || !requestMailCode) fail('authentication_required');
+            values.emailOtp = await requestMailCode({ step, documentId: probe.documentId, credentials,
+              requestedAt, expiresAt: until, persist: () => store.writeCredentials(credentials) });
+            // Mail arrival can outlive navigation. Re-probe the whole signed
+            // challenge and exact document before consuming the code locally.
+            active(); const fresh = await observe();
+            if (fresh.state !== 'challenge' || fresh.stepId !== step.id || fresh.documentId !== probe.documentId) {
+              values.emailOtp = ''; fail('authentication_unknown');
+            }
+            continue;
+          }
           if (!credentials[key]) return { state: 'manual_input_required', reason: 'authentication_required' };
           if (key === 'totp') {
             values.totp = deriveAgentSecretTotp(credentials.totp, now());
@@ -416,7 +488,7 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
         if (probe.state !== 'challenge' || probe.stepId !== step.id) continue;
         attempt.steps.push(step.id); await store.writeCredentials(credentials); active();
         let value;
-        try { value = await send('authentication-fill', { stepId: step.id, documentId: probe.documentId, values }); }
+        try { value = await send('authentication-fill', { stepId: step.id, documentId: probe.documentId, values, ...methodArguments }); }
         finally { for (const key of Object.keys(values)) values[key] = ''; }
         if (!exact(value, ['state']) || value.state !== 'submitted') fail('authentication_unknown');
       }
@@ -426,7 +498,11 @@ export async function authenticateVisualBrowser({ store, definition, send, activ
     }
     return { state: 'manual_input_required', reason: 'authentication_unknown' };
   } finally {
-    if (credentials) { credentials.login = ''; credentials.password = ''; credentials.totp = ''; }
+    // The mail broker persists its structural outcome through this SAME
+    // credentials object before we erase the in-memory secret strings. A late
+    // callback must not accidentally overwrite saved credentials with blanks.
+    try { if (afterAuthentication) await afterAuthentication(authenticated); }
+    finally { if (credentials) { credentials.login = ''; credentials.password = ''; credentials.totp = ''; } }
   }
 }
 
@@ -478,10 +554,11 @@ export function installVisualAuthentication(definition) {
     if (!form || fields.some(item => item.input.form !== form) || (submit && submit.form !== form) || new URL(submit?.formAction || form.action, location.href).origin !== step.origin || (submit?.formTarget || form.target || '_self') !== '_self' || (submit?.getAttribute('formmethod') || form.method).toLowerCase() !== 'post') return null;
     return { fields, submit };
   };
-  const probe = () => {
+  const probe = (method = 'totp') => {
     if (!definition) return { state: 'unknown' };
     if (!sensitive() && definition.success.some(item => location.origin === item.origin && unique(item.selector))) return { state: 'success' };
-    const matches = definition.steps.filter(step => challenge(step));
+    if (!['totp', 'email'].includes(method)) return { state: 'unknown' };
+    const matches = definition.steps.filter(step => (!step.factor || step.factor === method) && challenge(step));
     return matches.length === 1 ? { state: 'challenge', stepId: matches[0].id, documentId } : { state: 'unknown' };
   };
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -489,9 +566,9 @@ export function installVisualAuthentication(definition) {
     try {
       if (message?.kind === 'authentication-guard') { respond({ blocked: sensitive() || Boolean(definition?.steps.some(step => challenge(step))) }); return; }
       if (!definition) return;
-      if (message?.kind === 'authentication-probe') { respond(probe()); return; }
+      if (message?.kind === 'authentication-probe') { respond(probe(message.method)); return; }
       if (message?.kind === 'authentication-follow') {
-        const current = probe(), step = definition.steps.find(step => step.id === message.stepId);
+        const current = probe(message.method), step = definition.steps.find(step => step.id === message.stepId);
         if (!step || step.action !== 'follow' || current.state !== 'challenge'
           || current.stepId !== step.id || message.documentId !== documentId || spent.has(step.id)
           || Object.hasOwn(message, 'values')) throw Error();
@@ -504,9 +581,9 @@ export function installVisualAuthentication(definition) {
         controls.target.click(); respond({ state: 'submitted' }); return;
       }
       if (message?.kind !== 'authentication-fill') return;
-      const current = probe(), step = definition.steps.find(item => item.id === message.stepId);
+      const current = probe(message.method), step = definition.steps.find(item => item.id === message.stepId);
       if (!step || step.action === 'follow' || current.state !== 'challenge' || current.stepId !== step.id || message.documentId !== documentId || spent.has(step.id) || !message.values || Object.keys(message.values).sort().join() !== Object.keys(step.fields).sort().join()) throw Error();
-      for (const [key, value] of Object.entries(message.values)) if (typeof value !== 'string' || !value || value.length > 4096 || (key === 'totp' && !/^\d{6}(?:\d{2})?$/u.test(value))) throw Error();
+      for (const [key, value] of Object.entries(message.values)) if (typeof value !== 'string' || !value || value.length > 4096 || (['totp', 'emailOtp'].includes(key) && !/^\d{6}(?:\d{2})?$/u.test(value))) throw Error();
       const controls = challenge(step);
       if (!controls) throw Error();
       // Fence BEFORE setting the first character. Even an event handler that

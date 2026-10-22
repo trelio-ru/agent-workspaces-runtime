@@ -47,6 +47,22 @@ test('TOTP reuses the existing private generator and RFC vectors, not a seed del
   assert.equal(deriveAgentSecretTotp(`otpauth://totp/Fixture?secret=${seed}&digits=8`, 59000), '94287082');
 });
 
+test('signed setup guidance cannot broaden origins or change the credential/fence fingerprint', () => {
+  const origin = 'https://auth.example.test', base = definition(origin);
+  const setup = { paragraphs: ['Enable the authenticator in your profile.'],
+    links: [{ label: 'Profile', url: `${origin}/profile` }] };
+  const extended = normalizeVisualAuthentication({ ...base, setup }, { origins: [origin] });
+  assert.deepEqual(extended.setup, setup);
+  assert.equal(visualAuthenticationFingerprint(extended), visualAuthenticationFingerprint(base));
+  for (const patch of [{ url: 'https://foreign.example.test/profile' },
+    { url: `${origin}/profile?code=not-a-setup-link` }, { url: `${origin}/profile#private` },
+    { url: `https://login:password@auth.example.test/profile` }, { script: 'arbitrary()' }]) {
+    assert.throws(() => normalizeVisualAuthentication({ ...base,
+      setup: { ...setup, links: [{ ...setup.links[0], ...patch }] } }, { origins: [origin] }));
+  }
+  assert.throws(() => normalizeVisualAuthentication({ ...base, setup: { ...setup, fields: [] } }, { origins: [origin] }));
+});
+
 test('signed transitions are bounded exact-path anchors and preserve legacy recipe shapes', () => {
   const origin = 'https://auth.example.test', def = withTransition(origin), step = def.steps[1];
   assert.equal(VISUAL_AUTHENTICATION_TRANSITIONS_API, 'trelio.protected-browser-auth-transitions/v1');
@@ -160,11 +176,15 @@ test('credential management rejects value-bearing arguments before identity, sta
 
 test('one guarded local form saves the whole bundle, rejects injected fields, supports cancel and never returns values', async () => {
   const def = withTransition('https://auth.example.test'); let saved, calls = 0;
+  def.setup = { paragraphs: ['Enable the authenticator in your profile.'],
+    links: [{ label: 'Open account profile', url: 'https://auth.example.test/profile' }] };
   const store = { async prepare() {}, async writeCredentials(value) { saved = structuredClone(value); } };
   const openBrowserFn = async raw => {
     calls++; const url = new URL(raw), response = await fetch(url), html = await response.text();
     assert.equal(response.headers.get('cache-control'), 'no-store'); assert.match(response.headers.get('content-security-policy'), /frame-ancestors 'none'/);
     assert.match(html, /TOTP-секрет/); assert.doesNotMatch(html, new RegExp(seed));
+    assert.match(html, /Enable the authenticator in your profile/);
+    assert.match(html, /href="https:\/\/auth\.example\.test\/profile"/);
     const fields = { nonce: url.searchParams.get('nonce'), decision: 'save', login: 'SYNTHETIC_LOGIN', password: 'SYNTHETIC_PASSWORD', totp: seed };
     const post = body => fetch(`${url.origin}/credential`, { method: 'POST', headers: { origin: url.origin, 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(body) });
     assert.equal((await post({ ...fields, unexpected: 'not allowed' })).status, 400);
@@ -206,13 +226,23 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   // must fail normally rather than leave this test process alive indefinitely.
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-auth-native-')));
-  let passwordSubmits = 0, codeSubmits = 0, methodFollows = 0;
+  let passwordSubmits = 0, codeSubmits = 0, methodFollows = 0, mailSubmits = 0;
   const methodChoice = (href = '/totp-entry', extra = '') => `<!doctype html><section id="method-choice"><a id="choose-authenticator" href="${href}">Use authenticator</a>${extra}</section>`;
   const totpForm = '<!doctype html><form id="totp-form" method="post" action="/code"><input id="totp" name="totp" autocomplete="one-time-code"><button id="submit-totp">Sign in</button></form>';
   const server = http.createServer(async (req, res) => {
     const body = []; for await (const chunk of req) body.push(chunk);
     const form = new URLSearchParams(Buffer.concat(body).toString());
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    if (req.url === '/mail-start') { res.end('<!doctype html><form id="password-form" method="post" action="/mail-password"><input id="login" name="login"><input id="password" name="password" type="password"><button id="submit-password">Continue</button></form>'); return; }
+    if (req.url === '/mail-password' && req.method === 'POST') {
+      assert.equal(form.get('password'), 'SYNTHETIC_PASSWORD');
+      res.end('<!doctype html><section id="method-choice"><a id="choose-email" href="/mail-entry">Use email</a><a id="choose-authenticator" href="/totp-entry">Use authenticator</a></section>'); return;
+    }
+    if (req.url === '/mail-entry') { res.end('<!doctype html><form id="email-form" action="/mail-code" method="post"><input id="mail-code" name="code" autocomplete="one-time-code"><button id="submit-email">Continue</button></form>'); return; }
+    if (req.url === '/mail-code' && req.method === 'POST') {
+      mailSubmits++; assert.equal(form.get('code'), '123456');
+      res.end('<!doctype html><h1 id="mail-account">Synthetic email login complete</h1>'); return;
+    }
     if (req.url.startsWith('/password') && req.method === 'POST') {
       passwordSubmits++; assert.equal(form.get('login'), 'SYNTHETIC_LOGIN'); assert.equal(form.get('password'), 'SYNTHETIC_PASSWORD');
       if (req.url.includes('follow')) { res.end(methodChoice()); return; }
@@ -243,7 +273,10 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
-  const make = () => new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+  const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
+  const make = () => new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef,
+    mailIdentity: { origin: 'https://trelio.ru', companyId, memberId, scope: 'd'.repeat(64) },
+    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
   let browser = make();
   try {
     assert.equal((await browser.call('navigate', { url: origin })).reason, 'manual_control_active');
@@ -286,6 +319,46 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       assert.equal(passwordSubmits, 3); assert.equal(codeSubmits, 3, 'untrusted form/SMS never receives stored credentials or TOTP');
       await browser.close();
     }
+    const mail = recipe(origin);
+    mail.steps[1].factor = 'totp';
+    mail.steps.push({ id: 'choose-email', origin, challenge: '#method-choice', factor: 'email',
+      action: 'follow', target: '#choose-email', path: '/mail-entry' },
+    { id: 'email-code', origin, factor: 'email', challenge: '#email-form',
+      fields: { emailOtp: '#mail-code' }, submit: '#submit-email',
+      mail: { skillId: 'mail-fixture', sender: 'login@example.test', subjectIncludes: 'Sign in', bodyIncludes: 'Example account', digits: 6 } });
+    mail.success = [{ origin, selector: '#mail-account' }];
+    activeDef = normalizeVisualAuthentication(mail, { origins: [origin], fixtureOnly: true });
+    activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
+    await browser.call('navigate', { url: `${origin}/mail-start` });
+    await browser.call('authenticate-mail', { mailAccountId });
+    let status;
+    const until = Date.now() + 10000;
+    do { status = await browser.call('status'); if (status.kind === 'trelio.browser-mail-request/v1') break; await new Promise(resolve => setTimeout(resolve, 100)); } while (Date.now() < until);
+    assert.equal(status.kind, 'trelio.browser-mail-request/v1');
+    assert.doesNotMatch(JSON.stringify(status), /123456|SYNTHETIC|example\.test/);
+    assert.equal((await browser.call('screenshot')).kind, status.kind, 'pending auth never exposes the OTP form');
+    const actor = { origin: 'https://trelio.ru', companyId, memberId, accountId: mailAccountId, skillId: 'mail-fixture' };
+    await assert.rejects(browser.mailCall({ operation: 'prepare', handle: status.handle, actor: { ...actor, accountId: randomUUID() } }));
+    assert.equal((await browser.mailCall({ operation: 'prepare', handle: status.handle, actor })).sender, 'login@example.test');
+    const reference = { scope: 'a'.repeat(64), uidValidity: 10, uid: 21, revision: 'b'.repeat(64), originalSha256: 'c'.repeat(64) };
+    await browser.mailCall({ operation: 'begin', handle: status.handle, actor,
+      payload: { scope: reference.scope, uidValidity: reference.uidValidity, lastUid: reference.uid - 1 } });
+    const complete = await browser.mailCall({ operation: 'deliver', handle: status.handle, actor,
+      payload: { code: '123456', reference } });
+    assert.equal(complete.authenticated, true); assert.equal(mailSubmits, 1);
+    // ACK happens in a later mail process, after authentication has released
+    // its short mailbox lock. That normal cleanup must not revoke read-back
+    // or the one authorized flag write under the still-active browser lease.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal((await browser.mailCall({ operation: 'claim-ack', handle: status.handle, actor, payload: reference })).action, 'mark_seen_once');
+    assert.equal((await browser.mailCall({ operation: 'claim-ack', handle: status.handle, actor, payload: reference })).action, 'verify_only');
+    assert.equal((await browser.mailCall({ operation: 'record-ack', handle: status.handle, actor,
+      payload: { seenVerified: true, writeAttempted: true } })).acknowledgement, 'complete');
+    assert.equal(activeStore.saved.password, 'SYNTHETIC_PASSWORD', 'late mail ACK preserves the encrypted credential bundle');
+    assert.equal(activeStore.saved.attempt.mail.acknowledgement, 'complete');
+    await assert.rejects(browser.mailCall({ operation: 'deliver', handle: status.handle, actor,
+      payload: { code: '123456', reference } }));
+    assert.equal(mailSubmits, 1);
   } finally {
     await browser.close().catch(() => browser.abort()); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
