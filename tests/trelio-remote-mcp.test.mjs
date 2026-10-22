@@ -3081,6 +3081,57 @@ test("Codex diagnostics keep direct model tool exposure unverified despite ready
   assert.equal(payload.requiredActions.length, 0, "Expected direct routing does not authorize config or credential repair.");
 });
 
+test("Codex recovery stays non-executable when linked schedules and native client capabilities are unknown", async () => {
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    codexHookSettingsRead: async () => ({ status: "observed", effectiveState: "unknown" }),
+    publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }),
+    codexRoutingApply: async () => assert.fail("recovery inspection must not mutate client config"),
+  });
+  const payload = JSON.parse(result.content[0].text);
+  const recovery = payload.clientInspection.mcpRecovery;
+  assert.equal(payload.liveVerification.connectionRecovery.clientInspection, "clientInspection.mcpRecovery");
+  assert.equal(recovery.state, "client_preflight_required");
+  assert.equal(recovery.connectionRetried, false);
+  assert.equal(recovery.preferred.method, "config/mcpServer/reload");
+  assert.equal(recovery.preferred.availability, "not_checked");
+  assert.equal(recovery.preferred.owner, "existing_codex_app_server");
+  assert.equal(recovery.preferred.scope, "loaded_threads");
+  const fallback = recovery.sameThreadFallback;
+  assert.equal(fallback.automaticArchiveAllowed, false);
+  assert.equal(fallback.requiredTargetStatus, "idle");
+  assert.equal(fallback.requiredExecutor, "different_chat");
+  assert.equal(fallback.linkedSchedules, "unknown");
+  assert.equal(fallback.unknownSchedulesBlockArchive, true);
+  assert.deepEqual(fallback.clientTools, ["set_thread_archived", "navigate_to_codex_page"]);
+  assert.match(fallback.instructions, /возврат чата их не восстанавливает/u);
+  assert.match(fallback.instructions, /предупреждение об удалении блокирует/u);
+  assert.match(fallback.instructions, /без удаления\/пересоздания расписаний/u);
+  assert.match(fallback.instructions, /даже при ошибке проверки/u);
+  assert.match(recovery.verification.instructions, /ready не доказывает/u);
+  assert.ok(recovery.verification.checks.includes("safe_direct_read_in_target_thread"));
+  // A plan must not smuggle an archive mutation into the existing automatic
+  // repair channel. Native-client facts are still unknown, not negative.
+  assert.equal(payload.requiredActions.length, 0);
+  assert.doesNotMatch(JSON.stringify(recovery), /"(?:arguments|argumentsAfterConfirmation|targetThreadId|confirmed)":/u);
+});
+
+test("native Codex recovery inspection is absent from onboarding and other clients", async () => {
+  for (const [clientKind, intent] of [["codex", "onboarding"], ["claude-code", "diagnostics"], ["cursor", "diagnostics"], ["antigravity", "diagnostics"]]) {
+    const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", { clientKind, intent }, {
+      localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+      codexRoutingPlan: async () => ({ status: "ready" }),
+      codexHookSettingsRead: async () => ({ status: "observed", effectiveState: "unknown" }),
+    });
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.clientInspection.mcpRecovery, undefined, `${clientKind}/${intent}`);
+    assert.equal(payload.liveVerification.connectionRecovery?.clientInspection, undefined);
+  }
+});
+
 test("missing direct routing is diagnosed from the real config and offered as a separately confirmed repair", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "trelio-missing-direct-tools-"));
   const configPath = path.join(directory, "config.toml");

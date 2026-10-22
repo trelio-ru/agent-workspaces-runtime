@@ -43,7 +43,41 @@ const requireEnum = (value, allowed, fieldName) => {
   return normalized;
 };
 
-const buildClientInspection = (clientKind) => (
+/**
+ * These are native-client recovery instructions, never a runtime repair action.
+ * Archiving unloads an idle Codex thread, but the same operation can delete its
+ * associated automation. This stdio process sees neither the owner's complete
+ * scheduler inventory nor its current thread activity, so even a healthy doctor
+ * must not turn missing local files into permission to archive. In particular,
+ * no executable archive arguments are returned for a model to apply blindly.
+ */
+const buildCodexMcpRecoveryInspection = () => ({
+  state: "client_preflight_required",
+  connectionRetried: false,
+  preferred: {
+    method: "config/mcpServer/reload",
+    owner: "existing_codex_app_server",
+    scope: "loaded_threads",
+    availability: "not_checked",
+    instructions: "Только через доступный штатный API текущего owner. Новый codex app-server не обновляет подключение старого процесса; private IPC, правка приложения и повторный OAuth ради reload запрещены.",
+  },
+  sameThreadFallback: {
+    method: "archive_unarchive_open_same_thread",
+    automaticArchiveAllowed: false,
+    requiredTargetStatus: "idle",
+    requiredExecutor: "different_chat",
+    linkedSchedules: "unknown",
+    unknownSchedulesBlockArchive: true,
+    clientTools: ["set_thread_archived", "navigate_to_codex_page"],
+    instructions: "Это потенциально разрушительный fallback, не обычный reconnect. Архивирование может удалить связанные расписания; возврат чата их не восстанавливает. Не архивируй автоматически, из самого чата, при active/waiting работе либо неизвестном наличии расписаний. Отсутствие automation.toml не доказывает отсутствие расписания. Нужны проверка штатным клиентом и отдельное явное решение пользователя для точного простаивающего чата после раскрытия последствий. Любое связанное расписание или предупреждение об удалении блокирует путь: отменить, без удаления/пересоздания расписаний. Для разрешённого чата из другого чата: сохранить ID/название/project/cwd/закрепление и порядок; архивировать, сразу вернуть тот же ID даже при ошибке проверки, восстановить размещение, открыть. Не создавать копию и не посылать сообщения без отдельного разрешения.",
+  },
+  verification: {
+    checks: ["same_thread_and_placement_restored", "fresh_mcp_starting_then_ready", "safe_direct_read_in_target_thread"],
+    instructions: "Отдельно сообщи результат каждого шага. ready не доказывает выдачу инструментов модели: итоговый direct read выполняется в целевом чате с прежними ACL/proof/E2EE. Не объявляй всю проверку успешной по одному ready.",
+  },
+});
+
+const buildClientInspection = (clientKind, intent) => (
   clientKind === "codex"
     ? {
         // These are expected client capabilities, not observations made by
@@ -63,6 +97,7 @@ const buildClientInspection = (clientKind) => (
           checks: ["loaded_definition", "current_definition_trust_and_enabled", "effective_hooks_and_managed_only_policy", "pretooluse_started_and_completed"],
           instructions: "Сопоставь текущий чат и call_id с владеющим App Server, его версией, effective config и hook events. Версия CLI из PATH и новый дочерний codex.exe не доказывают версию/перезапуск owner. Имя dispatch из журнала не является tool_name hook; не выводи ошибку matcher из их различия. Если клиент не раскрывает эти сведения, сохрани unknown, без изменения trust/config/OAuth.",
         },
+        ...(intent === "diagnostics" ? { mcpRecovery: buildCodexMcpRecoveryInspection() } : {}),
         pluginInventory: {
           command: "codex plugin list --json",
           proves: ["installed_plugin_version", "plugin_enabled_state"],
@@ -379,7 +414,7 @@ export const buildTrelioInstallationDiagnostic = ({
             : {}),
         }
       : null,
-    clientInspection: buildClientInspection(clientKind),
+    clientInspection: buildClientInspection(clientKind, intent),
     requiredActions,
     warnings,
     ...(intent === "diagnostics" ? {
@@ -400,7 +435,10 @@ export const buildTrelioInstallationDiagnostic = ({
     } : {}),
     liveVerification: {
       ...(intent === "diagnostics" ? {
-        connectionRecovery: buildTrelioConnectionRecovery(publicService, requiredActions),
+        connectionRecovery: {
+          ...buildTrelioConnectionRecovery(publicService, requiredActions),
+          ...(clientKind === "codex" ? { clientInspection: "clientInspection.mcpRecovery" } : {}),
+        },
       } : {}),
       ...(clientKind === "codex" ? {
         toolExposure: {
