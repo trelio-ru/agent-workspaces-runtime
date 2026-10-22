@@ -162,6 +162,8 @@ publication tooling также остаются вне этого публичн
   exact PR-tested artifact; обычная учётная запись и ARM64 проверяются отдельно.
   Hook interoperability gate использует этот же native worker под исходным
   deadline; legacy PowerShell служит только внешней проверкой DPAPI bytes.
+  Его offline fixture имеет отдельный bounded startup budget и закрытые стадии;
+  этот бюджет не передаётся native hook, worker или production transport.
   Медленная readiness и общий deadline проверяются отдельными protocol fixtures.
 - ACL worker использует собственные pipes без shell/CLR и смены code page. Запрос ждёт readiness под исходным deadline;
   startup/dispatch различаются, readiness не является подтверждением ACL.

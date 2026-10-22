@@ -57,9 +57,9 @@ test('native package admission rejects changed source and binary bytes', async (
     await assert.rejects(validateWindowsPrivateWorker(root));
   } finally { await rm(root,{recursive:true,force:true}); }
 });
-const run = (program, args, input = '', env = process.env) => new Promise((resolve, reject) => {
+const run = (program, args, input = '', env = process.env, timeout = 15_000) => new Promise((resolve, reject) => {
   const child = spawn(program, args, {shell:false, windowsHide:true, env,
-    stdio:['pipe','pipe','pipe'], timeout:15_000});
+    stdio:['pipe','pipe','pipe'], timeout});
   let stdout = '', stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk; });
   child.stderr.on('data', chunk => { stderr += chunk; });
@@ -70,9 +70,23 @@ const run = (program, args, input = '', env = process.env) => new Promise((resol
 });
 const legacy = async (origin, mode, input) => {
   const invocation = buildWindowsBridgeDpapiInvocation(origin, mode);
-  const result = await run(invocation.executable, invocation.args, input+'\n',
-    {...process.env,...invocation.environment});
-  assert.equal(result.code,0,result.stderr);
+  // This is an OFFLINE compatibility oracle, outside the original 8-second
+  // native hook below. On hosted ARM the separate inbox PowerShell/CLR process
+  // was killed at exactly 15 seconds before this oracle completed; that is not
+  // native worker timing. Give only this oracle a bounded startup budget, keep
+  // its original script/DPAPI call and do not retry any invocation.
+  const args=[...invocation.args], script=Buffer.from(args.at(-1),'base64').toString('utf16le');
+  args[args.length-1]=Buffer.from('[Console]::Error.WriteLine("TRELIO_LEGACY_STAGE entered")\n'+script
+    .replace('Add-Type -AssemblyName System.Security', 'Add-Type -AssemblyName System.Security\n[Console]::Error.WriteLine("TRELIO_LEGACY_STAGE assembly")'), 'utf16le').toString('base64');
+  const started=Date.now();
+  const result = await run(invocation.executable, args, input+'\n',
+    {...process.env,...invocation.environment},45_000);
+  const phase=result.stderr.includes('TRELIO_LEGACY_STAGE assembly')?'assembly'
+    :result.stderr.includes('TRELIO_LEGACY_STAGE entered')?'entered':'startup';
+  // Never expose the oracle's stdout, input or arbitrary PowerShell error text.
+  console.error(JSON.stringify({fixtureStage:'legacy_dpapi',phase,elapsedMs:Date.now()-started,
+    code:result.code,signal:result.signal}));
+  assert.equal(result.code,0,`Legacy DPAPI oracle did not complete (${phase}).`);
   return result.stdout.trim();
 };
 
