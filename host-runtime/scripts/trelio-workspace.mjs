@@ -8761,7 +8761,19 @@ const skillCommand = async (
     });
     const response = await resolveAgentSkillRuntimeWithDeviceConsent({
       origin, token, companyId, projectId, skillId, releaseId,
-    });
+    }, assistant ? {
+      // An unattended task never opens the human bridge's loopback consent
+      // window or posts its device-consent endpoint. The managed owner action
+      // writes the SAME native grant; only a fresh resolve can observe it.
+      collectConsentFn: value => {
+        if(typeof profile.collectSkillRuntimeConsent!=="function")denyWorkspaceExecutionProfile();
+        return profile.collectSkillRuntimeConsent(value);
+      },
+      prepareEncryptedConsentFn: value => {
+        if(typeof profile.prepareSkillRuntimeConsent!=="function")denyWorkspaceExecutionProfile();
+        return profile.prepareSkillRuntimeConsent(value);
+      },
+    } : undefined);
     rawResolution = await response.json();
   }
   // Retain only the original wire representation, before any E2EE hydration.

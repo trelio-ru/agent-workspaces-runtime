@@ -744,6 +744,26 @@ native membership/project ACL, published-only authority and the assistant's own
 personal skill rules. Unsupported dedicated execution does not permit a human
 bridge, OAuth or provider fallback.
 
+### Managed company runtime consent
+
+A company-authored/unverified signed runtime in a stable plain company uses the
+SAME native consent, signed resolver/cache and process engine. A task never
+opens the ordinary human loopback consent window or posts a human bridge grant.
+The genuine managed profile returns `ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED`
+before package/cache/provider access. Native `get_agent_skill` supplies the exact
+structural owner-review fields, publication and instruction/package hashes.
+
+The owner explicitly approves the native `accept_skill_runtime` sealed action
+in Trelio. The task applies `skill_consent` with the original request UUID and
+question ID; this is a native-only metadata receipt, never a local command plan.
+The presend boundary rejects unknown root/parameters, device selectors and model
+fingerprints before HTTP. In encrypted mode only the managed private profile
+may add its own fingerprint. A fresh common resolve and pre-spawn admission,
+never the question or receipt alone, prove execution may continue. Lost effects
+are read back through the existing native operation receipt without a second
+consent. Generic account setup and encrypted private package inspection remain
+separate capabilities; missing support cannot select human UI/OAuth as fallback.
+
 ### Shared task-skill execution
 
 `get_agent_skill` may return the existing `skill_run` action through

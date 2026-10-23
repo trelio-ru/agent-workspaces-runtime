@@ -68,6 +68,7 @@ publication tooling также остаются вне этого публичн
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
 
+- Managed skill consent uses the SAME owner/native engine; no unattended human UI.
 - Модель ассистента: один owner choice/company, fresh execution state перед
   create/resume; native model/list и explicit flags, без fallback. Policy block
   пропускается без ack/roll-forward, не останавливает другие компании и не

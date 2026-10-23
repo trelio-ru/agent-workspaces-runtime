@@ -6,7 +6,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantNeutralPrivateMetadata } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, normalizeAssistantSkillConsentParameters, assistantNeutralPrivateMetadata } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -198,6 +198,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       preparePrivateSkillArguments:profile.preparePrivateSkillArguments,
       preparePrivateBrowserArguments:profile.preparePrivateBrowserArguments,
       preparePrivateCardArguments:profile.preparePrivateCardArguments,
+      prepareSkillConsentArguments:profile.prepareSkillConsentArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -318,7 +319,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task'}=
       // These are native metadata/preparation/creation receipts, not local command
       // plans. The next returned secret_browser_fill continuation executes in
       // the SAME isolated Workspace worker; no second browser executor exists.
-      if(['secret_list','secret_browser_prepare','secret_create'].includes(args?.operation))return result;
+      if(['secret_list','secret_browser_prepare','secret_create','skill_consent'].includes(args?.operation))return result;
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}
@@ -1154,6 +1155,17 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       ||p.offset!==undefined&&(!Number.isSafeInteger(p.offset)||p.offset<0)
       ||p.limit!==undefined&&(!Number.isSafeInteger(p.limit)||p.limit<1||p.limit>50))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
     return send(args);
+  }
+  if(name==='continue_assistant_workspace_action'&&args.operation==='skill_consent'){
+    privateEnvelope();
+    if(args.runIdentity!==undefined)throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    normalizeAssistantSkillConsentParameters(args.parameters);
+    return withProfile(async({readCompanyContentMode,prepareSkillConsentArguments})=>{
+      if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      const parameters=await readCompanyContentMode(signal)==='plain'?args.parameters
+        :await prepareSkillConsentArguments(args.parameters,signal);
+      signal?.throwIfAborted();return send({...args,parameters});
+    },{signal});
   }
   if(isAssistantStructuralResultRetraction(name,args)
     ||ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'

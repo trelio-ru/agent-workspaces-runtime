@@ -2547,3 +2547,19 @@ test('same selected skill hydrator opens only native Remote MCP config/title wit
   await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,recipientDeviceId:randomUUID()}}),{code:'ASSISTANT_SOURCE_BINDING_CHANGED'});
   await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,encryptedPayloads:[payload,{...payload,entityId:randomUUID()}]}}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
 });
+
+test('native skill consent is a closed structural receipt with owned encrypted identity before HTTP',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const parameters={skillId:'company-runtime',projectId:null,releaseId:randomUUID(),publicationId:randomUUID(),runtimeArtifactId:randomUUID(),
+    packageSha256:'a'.repeat(64),instructionsSha256:'b'.repeat(64),clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  const base={schemaVersion:1,operation:'skill_consent',parameters};let mode='plain',sent=0,prepared=0;
+  const invoke=args=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',args},async wire=>{sent++;return wire;},
+    {withProfile:action=>action({readCompanyContentMode:async()=>mode,prepareSkillConsentArguments:async value=>{prepared++;return {...value,encryptionFingerprint:'c'.repeat(43)};}})});
+  for(const changed of [{...base,extra:'CONSENT_PRIVATE_CANARY'},{...base,runIdentity:{runId:randomUUID(),workspaceId:randomUUID()}},
+    {...base,parameters:{...parameters,deviceId:randomUUID()}},{...base,parameters:{...parameters,extra:'CONSENT_PRIVATE_CANARY'}},
+    {...base,parameters:{...parameters,encryptionFingerprint:'d'.repeat(43)}}])await assert.rejects(invoke(changed));
+  assert.equal(sent,0);assert.equal(prepared,0);
+  assert.deepEqual(await invoke(base),base);assert.equal(sent,1);assert.equal(prepared,0);
+  mode='encrypted';const result=await invoke(base);assert.equal(result.parameters.encryptionFingerprint,'c'.repeat(43));
+  assert.equal(sent,2);assert.equal(prepared,1);assert.equal(JSON.stringify(result).includes('CONSENT_PRIVATE_CANARY'),false);
+});

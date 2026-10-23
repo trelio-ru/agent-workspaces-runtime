@@ -16,6 +16,22 @@ const fail = (code, status) => { throw new AssistantTransportError(code, status)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HEAD = /^[0-9a-f]{40,64}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
+/** Structural coordinates of an existing native consent, never the package,
+ * preview prose, a caller-selected device or a human bridge token. The native
+ * common builder independently selects every coordinate before its write. */
+export const normalizeAssistantSkillConsentParameters=value=>{
+  const keys=['skillId','projectId','releaseId','publicationId','runtimeArtifactId','packageSha256','instructionsSha256',
+    'clientRequestId','ownerDecisionId','expectedTaskUpdatedAt'];
+  if(!object(value)||Object.keys(value).sort().join(',')!==keys.sort().join(',')
+    ||typeof value.skillId!=='string'||!value.skillId.trim()||value.skillId.length>120||value.skillId!==value.skillId.trim()
+    ||value.projectId!==null&&!UUID.test(value.projectId??'')
+    ||['releaseId','publicationId','runtimeArtifactId','clientRequestId','ownerDecisionId'].some(key=>!UUID.test(value[key]??''))
+    ||['packageSha256','instructionsSha256'].some(key=>!SHA256.test(value[key]??''))
+    ||typeof value.expectedTaskUpdatedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value.expectedTaskUpdatedAt)
+    ||!Number.isFinite(Date.parse(value.expectedTaskUpdatedAt)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return structuredClone(value);
+};
+
 /** A closed structural exception, never a generic encrypted mutation bypass.
  * The live native schema/proof still owns the operation. This small presend
  * predicate merely proves there is no company prose to protect or leak: a
@@ -950,6 +966,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     async readCompanyContentMode(signal){
       return (await readAssistantCompanyContentMode({identity,host,client,signal})).encryptionState;
     },
+    async prepareSkillConsentArguments(parameters,signal){
+      const selected=normalizeAssistantSkillConsentParameters(parameters);
+      await assertLivePass(signal);
+      const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
+      if(stored?.assistantId!==identity.assistantId||stored.deviceId!==identity.deviceId||stored.companyId!==pass.companyId
+        ||!/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record?.fingerprint??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass(signal);
+      return {...selected,encryptionFingerprint:stored.record.fingerprint};
+    },
     async preparePrivateSkillArguments(parameters,signal){
       // No provider argv is sent to obtain a native refusal. Only an existing
       // signed command ID and public structural refs can reach encrypted MCP;
@@ -1099,6 +1124,20 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
         lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany&&!privateRun&&!attachmentSelection,lock});
       return managedEncryptionDevice;
+    },
+    async collectSkillRuntimeConsent({companyId}){
+      await assertLivePass();
+      if(companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      // The owner reviews the native exact publication in Trelio. Neither a
+      // model reply nor a local human-session UI may impersonate that decision.
+      fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
+    },
+    async prepareSkillRuntimeConsent({companyId}){
+      await assertLivePass();
+      if(companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      // Pending encrypted packages need the native selected manifest/preview
+      // adapter before they can become an owner question or executable cache.
+      fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
     },
     async hydrateSkillRuntimeResolution(raw,common,signal){
       return hydrateAssistantEncryptedSkill({raw,bundle:raw?.assistantEncryption,common,origin:identity.origin,token:handle,

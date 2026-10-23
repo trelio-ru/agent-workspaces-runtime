@@ -730,7 +730,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
       packageSha256:packageHash,packageSizeBytes:bytes.length,packageSignature:sign(null,bytes,privateKey).toString('base64'),
       signingKeyId:'task-test',signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1',manifest:{}}});
   const rules='# Synthetic task platform rules\n',rulesHash=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
-  let resolutions=0,downloads=0,denyNextLaunch=false;const nonces=new Set(),savedFetch=globalThis.fetch;
+  let resolutions=0,downloads=0,denyNextLaunch=false,consentPending=true;const nonces=new Set(),savedFetch=globalThis.fetch;
   globalThis.fetch=async(url,options)=>{
     assert.equal(url.origin,taskIdentity.origin);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
     const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));
@@ -740,6 +740,11 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
       status:options.headers.get('x-trelio-agent-rules-sha256')===rulesHash?'current':'update_required',revisionId,version:1,sha256:rulesHash,rulesMarkdown:rules}}));
     if(url.pathname==='/api/agent-skills/runtime/resolve'){
       resolutions++;
+      if(consentPending){
+        assert.equal(options.headers.get('x-trelio-agent-skill-device-consent'),'v1');
+        return new Response(JSON.stringify({code:'AGENT_SKILL_DEVICE_CONSENT_REQUIRED',message:'Synthetic native approval required',
+          challenge:{skill:{id:'task-runtime-fixture',releaseId:currentRelease}}}),{status:409});
+      }
       if(denyNextLaunch && resolutions%2===0)return new Response(JSON.stringify({code:'ASSISTANT_OWNER_PAUSED',message:'PRIVATE'}),{status:409});
       return new Response(JSON.stringify(dto()));
     }
@@ -749,6 +754,12 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     localAction:{schemaVersion:1,operation:'skill_run',parameters:{companyId:pass.companyId,skillId:'task-runtime-fixture',releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read','hello world']}}};
   const run=raw=>engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(raw,{withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost})}));
   try{
+    await assert.rejects(run(plan),error=>error.code==='ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED'||error.message.includes('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED'));
+    assert.equal(resolutions,1);assert.equal(downloads,0);assert.equal(observedStarts,0);
+    await assert.rejects(fs.readFile(calls),{code:'ENOENT'},'no provider/cache/package access while native consent is missing');
+    // The real native owner/action writer is tested in the backend fixture.
+    // This signed child boundary resumes only after another fresh resolution.
+    consentPending=false;resolutions=0;
     const first=await run(plan);assert.deepEqual(JSON.parse(first.stdout),{result:'Прочитано',args:['read','hello world']});
     assert.deepEqual(JSON.parse((await run(plan)).stdout),JSON.parse(first.stdout));
     assert.equal(downloads,1);assert.equal(resolutions,4,'cache hit still resolves before and immediately before provider launch');
