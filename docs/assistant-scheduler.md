@@ -567,8 +567,11 @@ all declared business capabilities. Pairing/contact, an executable, partial
 capabilities or a caller boolean cannot enable model work. This product gate
 is not proof of a trusted loaded hook or usable Windows desktop: the actual
 protected call still needs the normal observed pass proof and the Windows
-end-to-end gate remains mandatory. Until the complete backend is enabled, source
-polling may work while native business execution refuses readiness.
+end-to-end acceptance remains mandatory after the ordinary production release.
+The released backend advertises all six implemented capabilities with
+`stage:released`, `businessReady:true` and no missing capabilities. Its existing
+feature switch and live device verifier remain authoritative; no QA flag, local
+readiness override, owner allowlist or separate pilot rollout is required.
 
 `bridge assistant background` is an explicit host-only entry. Its stable
 supervisor invokes current signed workers through the existing loader, never
@@ -589,11 +592,16 @@ when the pass settles. Raw errors/content are not supervisor output.
 
 This entry is not installed by import or pairing. Explicit Windows registration
 is described below; actual next-run read-back, desktop availability and owner
-onboarding remain separate release gates. No existing pilot machine or user
-configuration is changed by these source changes. Automatic restart of Codex
+onboarding require independent live evidence after deployment. Pairing alone
+never installs or starts the service, and no user configuration changes on import. Automatic restart of Codex
 remains backlog-only.
 
-### Source-tree QA acceptance launcher
+### Optional source-tree QA launcher
+
+This is isolated development tooling, not a prerequisite for the normal
+production release or its Windows acceptance. The operational release uses the
+existing production origin, enrolled device and signed loader; do not disconnect
+the user's VPN or migrate that identity to QA.
 
 `scripts/assistant-qa-pilot.mjs` is a maintainer-only launcher outside the signed
 package. It supplies one immutable trusted JavaScript composition to the SAME
@@ -660,10 +668,11 @@ Constructor/closed-worker tests establish this composition boundary; the signed
 provider/HPKE fixtures exercise plain and encrypted profiles at a QA HTTPS origin.
 They do **not** establish real Windows, genuine external account login, actual
 notification/owner decision, provider ACK, recovery or next-run acceptance.
-Those live gates still require a prepared isolated QA backend, approved fresh
-signed artifacts, real owner enrollment/device and human-controlled Windows
-profile. Only their complete evidence can justify a separate production readiness
-release change; the QA native flag or launcher cannot open production readiness.
+When this optional launcher is used, its own live tests require an isolated QA
+backend, fresh signed artifacts and a genuine QA enrollment/device. Normal
+production acceptance instead runs after the ordinary release using the existing
+production device and published signed artifacts. Neither constructor tests nor
+the QA flag proves a successful Windows business pass or task outcome.
 
 ### Per-user Windows autostart
 
@@ -863,7 +872,8 @@ and must retain the artifact/hash. A cached package never preserves revoked
 task/device/policy authority. Only public, verified, non-revoked, plain and
 secret-free runtimes/configurations are currently admitted. Protected setup,
 owner account onboarding and unverified code remain independent
-readiness gates; this increment does not change `businessReady=false`.
+independent authority/acceptance gates; shared capability readiness cannot
+replace them.
 
 The same account catalogue uses an assistant/device namespace with native
 company bindings. Task calls do not migrate human legacy accounts, mutate
@@ -959,7 +969,8 @@ Transport/stdio tests verify live schema forwarding, argument snapshots, fixed
 audience, missing setup, post-pair catalog notification, unsupported tools,
 credential echo refusal, preserved pairing after failure, redacted errors and
 one deadline without a hidden retry. This does not install a daemon or prove a
-Windows business pass/outcome; `businessReady=false` remains until those stages.
+Windows business pass/outcome; the released native status is independent of
+those runtime receipts.
 
 ## Model-free maintenance
 
@@ -1057,8 +1068,9 @@ An older backend simply omits these names from its live catalogue.
 Each action still uses observed task-pass proof, native task permissions, snapshot
 CAS and a durable request UUID. The shared backend transaction commits effects
 and receipt together, then releases deferred messenger copies. A lost response
-is not retried by the facade, worker or transport. These actions do not enable
-businessReady until Workspace/outcome/service and Windows acceptance are wired.
+is not retried by the facade, worker or transport. Released readiness advertises
+the complete adapter but does not attest a successful Workspace/outcome/service
+flow or Windows acceptance.
 
 Company content is checked BEFORE the remote MCP `tools/call`, not only by a
 native encrypted-company refusal after HTTP has received it. The SAME managed
@@ -1476,8 +1488,8 @@ manifest plus positive native turn read-back processes selected original slots;
 omitted slots remain pending. Cycle continuation is projected separately into
 the existing scheduler and commits in that SAME inbox transaction. Task command
 policy still forbids provider ACK. Production original-fenced ACK/read-back,
-unknown conversation intake and real Windows E2E remain required before
-activation. These changes do not enable `businessReady` or prove Windows acceptance. See [schema v6](assistant-inbox.md#known-conversation-dispatch-schema-v6).
+unknown conversation intake and real Windows E2E retain their independent
+proof. Released capability admission is not a Windows acceptance result. See [schema v6](assistant-inbox.md#known-conversation-dispatch-schema-v6).
 
 ### Private Secret browser use
 
@@ -1583,7 +1595,8 @@ to another browser. A successful fill is not task completion or a persisted
 processing receipt. Input from a task or website never authorizes disclosure,
 new account creation or ownership classification. Existing-card generation/rotation, arbitrary CLI/reveal,
 arbitrary encrypted metadata creation, account registration and real Windows business E2E remain
-independent gates; this subset does not change businessReady=false.
+independent authority and acceptance gates; released readiness cannot authorize
+these actions or attest their business result.
 
 
 ### Native MAX selected-conversation source
@@ -1689,7 +1702,8 @@ SQLite route/read/selected-processing journal, then native ACK and uncertain
 verify-only read-back. Native backend tests independently enforce genuine
 observed task proof, exact encrypted personal-rule selection, accepted material
 and recipient/source/epoch/assignment denial. A fixture/native processing receipt
-is not a live Windows/provider business E2E and does not turn businessReady on.
+is not a live Windows/provider business E2E. Native released capability admission
+and post-release live acceptance remain distinct evidence.
 
 ### Managed encrypted task/intake content
 
