@@ -605,12 +605,12 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const common=await import('./trelio-workspace.mjs'),local=await import('./trelio-local-context.mjs'),
         crypto=await import('./trelio-company-encryption.mjs');
       const current=async()=>{await assertCurrent();await assertPass();};
-      let customField=null,commentFiles=null;
+      let customField=null,commentFiles=null,commentMentions=null,commentAttachmentLinks=[];
       const binding=async(phase,wire,action)=>{
         await current();
         return crypto.signCompanyEncryptionRecord(context.device.privateKeys.signingPrivateKey,
           {protocol:'assistant-managed-content/v1',phase,companyId:pass.companyId,target,nativeTool:name,
-            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{})});
+            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{})});
       };
       const hydrate=async bundle=>{
         await current();
@@ -629,7 +629,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const stage=async(protectedValue,{actionPreview=false,ownerActionContent}={})=>{
         const wire=Object.fromEntries(Object.entries(protectedValue.value).filter(([key])=>key!=='ownerDecisionId'));
         const action=actionPreview?{preview:true}:ownerActionContent?{content:ownerActionContent}:undefined;
-        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(actionPreview?{actionPreview:true}:{}),
+        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),...(actionPreview?{actionPreview:true}:{}),
           ...(ownerActionContent?{ownerActionContent}:{}),signature:await binding('preparation',wire,action)};
         const request=async(origin,selectedToken,pathname,options)=>{
           await current();
@@ -697,7 +697,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         }
         const normalized=local.normalizeLocalActionRichTextInputs(business);
         if(normalized.bodyText!==undefined||normalized.bodyMarkdown!==undefined)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
-        normalized.bodyJson=local.appendLocalTaskCommentAttachmentLinks(normalized.bodyJson??{type:'doc',content:[]},links);
+        commentAttachmentLinks=links;
         delete normalized.acceptedFiles;business={...normalized,encryptedFiles:descriptors};
       }
       if(name==='update_task_custom_field'){
@@ -724,6 +724,33 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         customField={id:definition.id,fieldType:definition.fieldType,updatedAt:definition.updatedAt};
         await current();
       }
+      if(['create_comment','update_comment'].includes(name)){
+        const selected={clientRequestId:business.clientRequestId,expectedTaskUpdatedAt:business.expectedTaskUpdatedAt,
+          ...(name==='update_comment'?{commentId:business.commentId}:{})};
+        const action={commentDefinition:true},preparation={nativeTool:name,arguments:selected,commentDefinition:true,
+          signature:await binding('preparation',selected,action)};
+        const response=await requestPayloads(context.requestOrigin,token,'/api/agent-workspaces/encryption/payloads',
+          {method:'POST',headers:{'content-type':'application/json'},signal,managedTarget:target,assertPass:current,
+            body:JSON.stringify({companySlug:company.companySlug,writerDeviceId:context.runtime.device.id,payloads:[],preparation})});
+        const bytes=await common.readBoundedResponseBuffer(response,512*1024,'Assistant comment audience');let definition;
+        try{definition=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+        catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}finally{bytes.fill(0);}
+        const members=definition?.commentDefinition?.members,groupIds=definition?.commentDefinition?.groupIds;
+        if(definition?.schemaVersion!==1||!Array.isArray(members)||members.length>5000
+          ||!Array.isArray(groupIds)||groupIds.length>5000||groupIds.some(id=>!UUID.test(id))||new Set(groupIds).size!==groupIds.length
+          ||members.some(member=>!object(member)||Object.keys(member).sort().join(',')!=='displayName,memberId,username'
+            ||!UUID.test(member.memberId)||typeof member.username!=='string'||member.username.length>128
+            ||typeof member.displayName!=='string'||member.displayName.length>1000)
+          ||new Set(members.map(member=>member.memberId)).size!==members.length
+          ||new Set(members.map(member=>member.username.toLowerCase())).size!==members.length)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        business=local.normalizeLocalActionRichTextInputs(business);
+        business.bodyJson=local.canonicalizeLocalProposalMentions(business.bodyJson,members);
+        commentMentions=local.collectLocalTaskCommentMentions(business.bodyJson,{members,groupIds});
+        await current();
+      }
+      // Keep the human publication order: canonicalize the actual message,
+      // then append file links. A filename containing @username is not a ping.
+      if(commentAttachmentLinks.length)business.bodyJson=local.appendLocalTaskCommentAttachmentLinks(business.bodyJson,commentAttachmentLinks);
       const readonly=['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
@@ -752,7 +779,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
           action={...ownerActionContent,snapshot:rawSnapshot};
         }else await stage(protectedValue);
       }
-      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),
+      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),
         ...(!readonly?{signature:await binding('publication',wire,action)}:{}),...(action?{action}:{})};
       await current();
       const authority=Object.fromEntries(Object.entries(args).filter(([key])=>['taskPass','intakePass','runtimeSessionProof'].includes(key)));

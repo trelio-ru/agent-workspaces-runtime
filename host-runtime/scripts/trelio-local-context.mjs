@@ -1772,7 +1772,7 @@ export const buildLocalMarkdownDocument = (value) => {
   return { type: "doc", content: content.length > 0 ? content : [{ type: "paragraph" }] };
 };
 
-const canonicalizeLocalProposalMentions = (value, mentionableMembers) => {
+export const canonicalizeLocalProposalMentions = (value, mentionableMembers) => {
   const memberByUsername = new Map((mentionableMembers ?? []).flatMap((member) => {
     const memberId = String(member?.memberId ?? "").trim();
     const username = String(member?.username ?? "").trim();
@@ -1818,6 +1818,27 @@ const canonicalizeLocalProposalMentions = (value, mentionableMembers) => {
   };
 
   return visit(value)[0];
+};
+
+/** Structural projection from the SAME canonical rich-text document. The
+ * native exact task catalogue defines all eligible IDs; group membership is
+ * expanded only by the existing native resolver, never copied into the host. */
+export const collectLocalTaskCommentMentions = (document, {members,groupIds}) => {
+  const eligibleMembers=new Set(members.map(member=>member.memberId)),eligibleGroups=new Set(groupIds),memberIds=new Set(),groups=new Set();
+  const visit=node=>{
+    if(Array.isArray(node)){for(const child of node)visit(child);return;}
+    if(!node||typeof node!=='object')return;
+    if(node.type==='mention'){
+      const id=node.attrs?.id,group=node.attrs?.entityType==='group';
+      if(typeof id!=='string'||!(group?eligibleGroups:eligibleMembers).has(id))
+        throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','Read the exact current task mention audience before publishing.');
+      (group?groups:memberIds).add(id);
+    }
+    if(Array.isArray(node.content))visit(node.content);
+  };
+  visit(document);
+  if(memberIds.size+groups.size>500)throw new TrelioLocalContextError('LOCAL_CONTEXT_INVALID_INPUT','Too many selected mention targets.');
+  return {memberIds:[...memberIds].sort(),groupIds:[...groups].sort()};
 };
 
 export const buildLocalProposalPublicationDocument = ({

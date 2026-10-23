@@ -1622,3 +1622,21 @@ a refusal; it does not switch company/account or retry an uncertain setup. Empty
 creation, saved configuration and window close still prove no provider login,
 owner sender identity, polling, body processing or ACK. A separate passive native
 verification remains required and cannot open a form or gain its longer budget.
+
+### Encrypted comment mentions
+
+Before sealing create_comment/update_comment body_json, the host reads only the
+current exact task audience through the existing managed preparation cell. It
+uses the SAME exported human rich-text canonicalizer, then selects only eligible
+member/group IDs from the resulting document. Group membership stays native;
+unknown nodes refuse before body staging. The complete encrypted body remains
+in the SAME payload codec and signed argument target.
+
+Hidden commentMentions is private host metadata signed with preparation/publication,
+not a model-selected recipient override. Native current task ACL and common
+comment/notification resolver repeat selection; SAME operation intent includes
+the structural set. Edits compare canonical previous mention rows, avoiding
+repeated notifications for retained mentions. Removal/re-addition behaves like
+ordinary comments. New hosts always send the set (including empty arrays); legacy
+missing metadata grants no selected-ID notification authority. No plaintext body,
+new company directory, group membership cache or notification executor is added.

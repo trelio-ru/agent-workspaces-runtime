@@ -91,6 +91,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
   const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
   const client={companies:async()=>available?[{companyId,companySlug:'encrypted',encryptionState:'encrypted'}]:[],
     readTaskPass:async()=>({state:'leased',passId:pass.passId,threadId:pass.threadId,leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
+  const mentionMemberId=randomUUID(),mentionGroupId=randomUUID();
   const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null,commentFileDefinition=null;
   const input={identity,host,client,
     store,companyId,companySlug:'encrypted',lockDirectory:root,lock:async(_file,action)=>action()};
@@ -121,7 +122,8 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         phase:'preparation',companyId,target,nativeTool:preparation.nativeTool,arguments:preparation.arguments,
         ...(preparation.customField?{customField:preparation.customField}:{}),
         ...(preparation.commentFiles?{commentFiles:preparation.commentFiles}:{}),
-        ...(preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
+        ...(preparation.commentMentions?{commentMentions:preparation.commentMentions}:{}),
+        ...(preparation.commentDefinition?{action:{commentDefinition:true}}:preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
       assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY/);
       if(preparation.commentFileDefinition){
         assert.equal(preparation.nativeTool,'create_comment');
@@ -130,6 +132,11 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         assert.equal(preparation.commentFileDefinition.runId,commentFileDefinition.runId);
         assert.equal(preparation.commentFileDefinition.ordinal,0);
         return json(commentFileDefinition);
+      }
+      if(preparation.commentDefinition){
+        assert.ok(['create_comment','update_comment'].includes(preparation.nativeTool));
+        assert.equal(body.payloads.length,0,'mention discovery never stages raw comment text');
+        return json({schemaVersion:1,commentDefinition:{members:[{memberId:mentionMemberId,displayName:'Exact task member',username:'fixture_owner'}],groupIds:[mentionGroupId]}});
       }
       if(preparation.customFieldDefinition){
         assert.equal(preparation.nativeTool,'update_task_custom_field');
@@ -199,9 +206,15 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     }
     assert.equal(preparations,readsBefore,'content-dependent choice refinements run before encryption/private I/O');
     const comment=await withAssistantManagedContentArguments({...input,name:'create_comment',args:{clientRequestId:randomUUID(),
-      expectedTaskUpdatedAt:new Date().toISOString(),bodyText:'RICH_BODY_CANARY'}},async wire=>{
+      expectedTaskUpdatedAt:new Date().toISOString(),bodyText:'RICH_BODY_CANARY @fixture_owner'}},async wire=>{
       assert.equal(Object.hasOwn(wire,'bodyText'),false,'normalization cannot leave plaintext source aliases in final wire');
-      assert.ok(wire.bodyJson.$trelioE2ee);return {content:[],structuredContent:{recorded:true}};
+      assert.ok(wire.bodyJson.$trelioE2ee);
+      assert.deepEqual(wire.encryptedContent.commentMentions,{memberIds:[mentionMemberId],groupIds:[]});
+      const {encryptedContent,...business}=wire;
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
+        companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'create_comment',arguments:business,
+        commentMentions:encryptedContent.commentMentions},encryptedContent.signature),true);
+      return {content:[],structuredContent:{recorded:true}};
     });
     assert.equal(comment.structuredContent.recorded,true);
     const richPayload=[...staged.values()].find(payload=>payload.entityId!==[...staged.keys()][0]);
@@ -235,7 +248,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         const {encryptedContent,...business}=wire;
         assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
           companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'create_comment',arguments:business,
-          commentFiles:encryptedContent.commentFiles},encryptedContent.signature),true);
+          commentFiles:encryptedContent.commentFiles,commentMentions:encryptedContent.commentMentions},encryptedContent.signature),true);
         const opened=await decryptCompanyPayload({encryptedPayload:staged.get(wire.bodyJson.$trelioE2ee.id),scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
         assert.equal(opened.values.body_json.content[0].content[0].text,'RICH_BODY_CANARY');
         const linked=opened.values.body_json.content.at(-1).content[0];
@@ -255,6 +268,25 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       await assert.rejects(withAssistantManagedContentArguments({...input,name:'create_comment',args:{...fileArgs,encryptedFiles:[]}},publish),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
       assert.equal(published,2);
     }finally{commentFileDefinition=null;await fs.rm(filesRoot,{recursive:true,force:true});}
+
+    assert.equal(richOpened.values.body_json.content[0].content.at(-1).type,'mention');
+    assert.equal(richOpened.values.body_json.content[0].content.at(-1).attrs.id,mentionMemberId,
+      'the SAME local canonicalizer stores the current native member ID inside encrypted rich text');
+    const noForeign=preparations;
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'update_comment',args:{clientRequestId:randomUUID(),
+      expectedTaskUpdatedAt:new Date().toISOString(),commentId:randomUUID(),bodyJson:{type:'doc',content:[{type:'mention',attrs:{id:randomUUID(),entityType:'member'}}]}}},
+      async()=>assert.fail('foreign mention cannot reach final native publication')));
+    assert.equal(preparations,noForeign,'foreign mention node fails before staging its body');
+    await withAssistantManagedContentArguments({...input,name:'update_comment',args:{clientRequestId:randomUUID(),
+      expectedTaskUpdatedAt:new Date().toISOString(),commentId:randomUUID(),bodyJson:{type:'doc',content:[{type:'paragraph',content:[
+        {type:'mention',attrs:{id:mentionGroupId,entityType:'group',label:'Group'}}]}]}}},async wire=>{
+      assert.deepEqual(wire.encryptedContent.commentMentions,{memberIds:[],groupIds:[mentionGroupId]},
+        'group metadata contains only its exact native ID, never copied member assignments');
+      const payload=staged.get(wire.bodyJson.$trelioE2ee.id),opened=await decryptCompanyPayload({encryptedPayload:payload,
+        scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+      assert.equal(opened.values.body_json.content[0].content[0].attrs.id,mentionGroupId);
+      return {content:[],structuredContent:{recorded:true}};
+    });
     const previewed=await withAssistantManagedContentArguments({...input,name:'get_assistant_owner_question',args:{questionId:randomUUID()}},async()=>({content:[],
       structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
         context:{questionText:`Complete document: ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_json')}`},encryptedPayloads:[richPayload]}}}));
