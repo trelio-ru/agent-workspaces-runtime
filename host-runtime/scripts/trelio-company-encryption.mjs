@@ -1250,6 +1250,7 @@ export const decryptFileFromCompanyContainerBytes = async ({
   scopePrivateJwk,
   expectedCiphertextSha256 = null,
   maximumPlaintextBytes = 16 * 1024 * 1024,
+  validateHeader = null,
 }) => {
   const source = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   let dataKeyBytes;
@@ -1306,6 +1307,7 @@ export const decryptFileFromCompanyContainerBytes = async ({
     }
 
     const aad = buildCompanyEncryptionAad(header.aad);
+    validateHeader?.(header);
     dataKeyBytes = await hpkeOpen({
       recipientPrivateKey: scopePrivateKey,
       recipientPrivateJwk: scopePrivateJwk,

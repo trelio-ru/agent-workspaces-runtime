@@ -906,7 +906,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,explicitRun,materialWorkspaceId,skillRead].filter(Boolean).length>1)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null,encryptedSkillCompany=null,skillFingerprint=null;
-  let lifecycle=null,lifecycleEncryption=null;
+  let lifecycle=null,lifecycleEncryption=null,attachmentSelection=null,attachmentEncryption=null;
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
     if(!same(current,expectedIdentity) || !same(validateAssistantActivePass(await host.readActivePass(),identity),pass)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -923,6 +923,21 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
     kind:'digital_assistant',
+    async prepareAttachmentRead(value){
+      if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId,skillRead].some(Boolean))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      const selected=await validateAssistantEncryptedAttachment(value,identity.origin);
+      if(selected.companyId!==pass.companyId||selected.taskId!==pass.taskId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(attachmentSelection&&JSON.stringify(attachmentSelection)!==JSON.stringify(selected))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      attachmentSelection=selected;await assertLivePass();
+      const common=await import('./trelio-workspace.mjs');
+      const opened=await common.ensureCompanyEncryptionContext({origin:identity.origin,requestOrigin:selected.requestOrigin,token:handle,
+        company:{id:pass.companyId,slug:selected.companySlug},collectEncryptionKey:async()=>fail('ASSISTANT_WORKSPACE_PROFILE_DENIED')});
+      if(!opened?.metadata?.enabled||opened.runtime.company.id!==pass.companyId||opened.runtime.viewer.userId!==identity.assistantId
+        ||opened.runtime.scope.id!==selected.aad.scopeId||opened.runtime.scope.epoch!==selected.aad.scopeEpoch)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(attachmentEncryption&&(opened.runtime.device.id!==attachmentEncryption.runtime.device.id
+        ||opened.runtime.envelope.id!==attachmentEncryption.runtime.envelope.id))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      await assertLivePass();attachmentEncryption=opened;return opened;
+    },
     encryptedTaskRead:encryptedRead,
     companyEncryptionUserId:identity.assistantId,
     async readCompanyContentMode(signal){
@@ -1075,7 +1090,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(requestOrigin!==identity.origin || companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
       managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
-        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany&&!privateRun,lock});
+        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany&&!privateRun&&!attachmentSelection,lock});
       return managedEncryptionDevice;
     },
     async hydrateSkillRuntimeResolution(raw,common,signal){
@@ -1211,18 +1226,18 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       // Validate destination/method before touching private state or observing
       // the live pass. No redirect, encoded separator or native secret/admin
       // path can turn this profile into a bearer-forwarding primitive.
-      if(![identity.origin,encryptedRead?.requestOrigin,inspection?.requestOrigin,lifecycle?.requestOrigin].includes(requestOrigin) || token!==handle || typeof pathname!=='string' || pathname.length>16_384
+      if(![identity.origin,encryptedRead?.requestOrigin,inspection?.requestOrigin,lifecycle?.requestOrigin,attachmentSelection?.requestOrigin].includes(requestOrigin) || token!==handle || typeof pathname!=='string' || pathname.length>16_384
         || typeof buildHeaders!=='function') fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       let url;try{url=new URL(pathname,requestOrigin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
       if(url.origin!==requestOrigin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();
       let rewritten,route,encryptionRuntime=false;
-      if((encryptedRead || privateSkill || inspection || lifecycle || encryptedSkillCompany) && method==='GET'
-        && (requestOrigin===identity.origin || inspection && requestOrigin===inspection.requestOrigin || lifecycle && requestOrigin===lifecycle.requestOrigin)
+      if((encryptedRead || privateSkill || inspection || lifecycle || encryptedSkillCompany || attachmentSelection) && method==='GET'
+        && (requestOrigin===identity.origin || inspection && requestOrigin===inspection.requestOrigin || lifecycle && requestOrigin===lifecycle.requestOrigin || attachmentSelection&&requestOrigin===attachmentSelection.requestOrigin)
         && url.pathname==='/api/agent-workspaces/encryption/runtime' && options.body===undefined){
         const keys=[...url.searchParams.keys()];
         if(new Set(keys).size!==keys.length || keys.some(key=>!['companySlug','fingerprint'].includes(key))
-          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection?.companySlug??lifecycle?.company.slug??encryptedSkillCompany?.slug)
+          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection?.companySlug??lifecycle?.company.slug??encryptedSkillCompany?.slug??attachmentSelection?.companySlug)
           || privateSkill && !lifecycle && url.searchParams.has('fingerprint')
           || url.searchParams.has('fingerprint') && url.searchParams.get('fingerprint')!==managedEncryptionDevice?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         // SAME native registry reader. A private authentication invocation may
@@ -1233,8 +1248,14 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // The SAME managed registry is a fixed canonical control-plane route.
         // Ciphertext Workspace snapshots/bundles remain on the server-selected
         // data origin; this initial mapping is never an error/fallback retry.
-        if(inspection || lifecycle)url=new URL(url.pathname+url.search,identity.origin);
+        if(inspection || lifecycle || attachmentSelection)url=new URL(url.pathname+url.search,identity.origin);
         route={proofTool:'assistant_workspace_data_plane_read'};encryptionRuntime=true;
+      }else if(attachmentSelection&&url.pathname===nativePrefix+`/scopes/task/${pass.taskId}/attachments/${attachmentSelection.attachmentId}`){
+        if(requestOrigin!==attachmentSelection.requestOrigin||method!=='GET'||options.body!==undefined||!attachmentEncryption
+          ||[...url.searchParams.keys()].join(',')!=='revision'||url.searchParams.get('revision')!==attachmentSelection.revision)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);route={proofTool:'assistant_workspace_data_plane_read'};
+      }else if(attachmentSelection){
+        fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       }else if(privateGeneration && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && (url.pathname==='/api/agent-secrets/generated-save-context'
           || url.pathname===`/api/agent-secrets/secrets/${privateGeneration.clientRequestId}/value-from-bridge`)){
@@ -1370,6 +1391,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
         headers.delete('x-trelio-assistant-secret-checkout');
         headers.delete(ASSISTANT_WORKSPACE_RECIPIENT_HEADER);
+        if(attachmentEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,attachmentEncryption.runtime.device.id);
         headers.delete('x-trelio-assistant-workspace-run');
         if(inspection && route.routePattern?.includes('/workspaces/'))
           headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,inspectionEncryption.runtime.device.id);
@@ -2172,6 +2194,27 @@ export const validateAssistantEncryptedInspection = async ({descriptor,identity,
   return Object.freeze(structuredClone(descriptor));
 };
 
+/** Native-selected ciphertext coordinates only. Filenames, MIME, plaintext
+ * hashes and full storage keys remain inside the authenticated container. The
+ * ordinary upload and accepted-Workspace reference have DIFFERENT AAD types;
+ * neither can be substituted for the other from a model-supplied attachment. */
+export const validateAssistantEncryptedAttachment = async (value,origin) => {
+  const keys='aad,attachmentId,companyId,companySlug,delivery,requestOrigin,revision,schemaVersion,sha256,sizeBytes,taskId';
+  const aad=value?.aad;
+  if(!object(value)||Object.keys(value).sort().join(',')!==keys||value.schemaVersion!==2||value.delivery!=='assistant-encrypted-local-file'
+    ||['companyId','taskId','attachmentId'].some(key=>!UUID.test(value[key]??''))||!/^[A-Za-z0-9_-]{1,128}$/u.test(value.companySlug??'')
+    ||!Number.isSafeInteger(value.sizeBytes)||value.sizeBytes<12||value.sizeBytes>25*1024*1024+108
+    ||!(/^[a-f0-9]{64}$/u).test(value.sha256??'')||!(/^[a-f0-9]{64}$/u).test(value.revision??'')
+    ||!object(aad)||Object.keys(aad).sort().join(',')!=='companyId,entityId,entityRevision,entityType,purpose,schemaVersion,scopeEpoch,scopeId,suite'
+    ||aad.suite!=='trelio-e2ee-v1'||aad.companyId!==value.companyId||!UUID.test(aad.scopeId??'')||!UUID.test(aad.entityId??'')
+    ||!Number.isSafeInteger(aad.scopeEpoch)||aad.scopeEpoch<1||aad.entityRevision!==1||aad.schemaVersion!==1||aad.purpose!=='file'
+    ||!['file.task_attachments','agent_workspace_browser_file'].includes(aad.entityType))fail('ASSISTANT_ATTACHMENT_DESCRIPTOR_INVALID');
+  const common=await import('./trelio-workspace.mjs');
+  try{if(common.resolveEncryptedDataPlaneOrigin(origin,value.requestOrigin)!==value.requestOrigin)throw new Error();}
+  catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+  return Object.freeze(structuredClone(value));
+};
+
 const encryptedWorkspaceArgumentBinding = value => {
   if(!object(value) || Object.keys(value).sort().join(',')!==
     'assistantUserId,companyId,deviceId,fencingToken,operation,passId,runId,taskId,workspaceId'
@@ -2338,10 +2381,42 @@ export const materializeAssistantEncryptedTask = async ({origin,descriptor,signa
  * Buffering is bounded by the existing local-file limit and never returned by
  * MCP; permissions, one-hour lease and cleanup remain in the shared primitive. */
 export const materializeAssistantAttachment = async ({ result, attachmentId, origin, signal,
-  common, attachments }) => {
+  common, attachments, prepareEncryptedRead }) => {
   common ??= await import('./trelio-workspace.mjs');
   attachments ??= await import('./trelio-local-attachments.mjs');
   const value=result?.structuredContent;
+  if(value?.schemaVersion===2){
+    const selected=await validateAssistantEncryptedAttachment(value,origin);
+    if(selected.attachmentId!==id(attachmentId)||typeof prepareEncryptedRead!=='function')fail('ASSISTANT_ATTACHMENT_DESCRIPTOR_INVALID');
+    let response,bytes;
+    try{
+      signal?.throwIfAborted();
+      if(common.currentWorkspaceExecutionProfile()?.kind!=='digital_assistant')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      const encryption=await prepareEncryptedRead(selected),token=await common.requireToken(origin);
+      const pathname=`/api/agent-workspaces/scopes/task/${selected.taskId}/attachments/${selected.attachmentId}?revision=${selected.revision}`;
+      response=await common.request(selected.requestOrigin,token,pathname,{signal,maximumErrorResponseBytes:16*1024});
+      if(response.status!==200||response.redirected===true||response.headers.has('content-range')
+        ||response.headers.get('content-length')!==String(selected.sizeBytes)||response.headers.get('x-trelio-attachment-sha256')!==selected.sha256
+        ||response.headers.get('x-trelio-attachment-revision')!==selected.revision
+        ||response.headers.get('content-type')?.split(';')[0].trim().toLowerCase()!=='application/octet-stream'
+        ||!['','identity'].includes(response.headers.get('content-encoding')??''))fail('ASSISTANT_ATTACHMENT_SOURCE_CHANGED');
+      bytes=await common.readBoundedResponseBuffer(response,25*1024*1024+108,'Encrypted attachment');
+      if(bytes.length!==selected.sizeBytes||createHash('sha256').update(bytes).digest('hex')!==selected.sha256)fail('ASSISTANT_ATTACHMENT_SOURCE_CHANGED');
+      const context=await import('./trelio-local-context.mjs');
+      // Reuse the SAME TRELIOE1 parser/HPKE codec and private-file publication.
+      // The exact full header AAD is checked BEFORE any decryption; the live
+      // pass/current recipient is read again after opening and before writing.
+      return await context.openLocalActionAttachmentResult({origin,token,companyEncryption:encryption,signal,
+        result:{structuredContent:{taskId:selected.taskId,attachmentId:selected.attachmentId,revision:selected.revision},content:[]},
+        readCiphertext:async()=>bytes,expectedCiphertextSha256:selected.sha256,
+        validateHeader:header=>{if(Object.keys(header.aad??{}).sort().join(',')!==Object.keys(selected.aad).sort().join(',')
+          ||Object.keys(selected.aad).some(key=>header.aad[key]!==selected.aad[key]))fail('ASSISTANT_ATTACHMENT_SOURCE_CHANGED');},
+        assertCurrent:()=>prepareEncryptedRead(selected),materialize:attachments.materializeLocalAttachment});
+    }catch(error){
+      if(error instanceof AssistantTransportError)throw error;
+      fail('ASSISTANT_ATTACHMENT_DOWNLOAD_UNAVAILABLE');
+    }finally{bytes?.fill(0);if(response?.body&&!response.body.locked)await response.body.cancel().catch(()=>undefined);}
+  }
   const fields=['schemaVersion','delivery','taskId','attachmentId','originalName','mimeType','sizeBytes','sha256','revision'];
   if(!object(value)||Object.keys(value).length!==fields.length||Object.keys(value).some(key=>!fields.includes(key))
     ||value.schemaVersion!==1||value.delivery!=='assistant-local-file'||!UUID.test(value.taskId??'')

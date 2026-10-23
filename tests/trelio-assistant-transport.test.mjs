@@ -1157,8 +1157,8 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile, assistantTas
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
-  const identity={schemaVersion:1,origin:encryptedTool||encryptedInspection||workspaceRun?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
+  const identity={schemaVersion:1,origin:encryptedTool||encryptedInspection||workspaceRun||encryptedAttachment?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
   const keys=generateKeyPairSync('ed25519'), store=memoryStore(), credential='tda_'+randomBytes(32).toString('base64url');
@@ -2115,6 +2115,75 @@ test('assistant original file uses fixed binary delivery, exact digest and nativ
     }
     assert.equal(publications,1);
   }finally{await fs.rm(root,{recursive:true,force:true});}
+});
+
+test('encrypted original attachment reuses genuine managed HPKE and SAME local-file delivery for both native AAD namespaces',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const attachments=await import('../host-runtime/scripts/trelio-local-attachments.mjs');
+  const {materializeAssistantAttachment}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=await workspaceProfileFixture({encryptedAttachment:true}),scopeId=randomUUID(),cryptoDeviceId=randomUUID();
+  // Enrollment is NOT performed by download: this memory store represents an
+  // already enrolled managed device, independently from its native recipient.
+  const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
+  const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+  const envelopeAad={suite:'trelio-e2ee-v1',companyId:f.pass.companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:cryptoDeviceId};
+  const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+    plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad:envelopeAad});
+  const envelope={id:randomUUID(),...envelopeAad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad:envelopeAad};
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-encrypted-original-')),source=path.join(root,'source.txt');
+  const secret=Buffer.from('PRIVATE_ORIGINAL_ATTACHMENT_CANARY');await fs.writeFile(source,secret,{mode:0o600});
+  const savedFetch=globalThis.fetch;let selected,body,mode='valid',downloads=0,writes=0;
+  const materializer={...attachments,materializeLocalAttachment:async input=>{writes++;return attachments.materializeLocalAttachment({...input,root:path.join(root,'downloads')});}};
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);assert.equal(options.headers.get('authorization'),`Bearer ${f.credential}`);
+    assert.equal(options.headers.get('cookie'),null);assert.equal(options.redirect,'error');
+    const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
+      assert.equal(url.origin,f.identity.origin);assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),null);
+      const found=url.searchParams.has('fingerprint');
+      return json({state:'encrypted',suite:'trelio-e2ee-v1',company:{id:f.pass.companyId,slug:'encrypted',name:'Synthetic'},viewer:{userId:f.identity.assistantId},
+        accessState:found?'ready':'device_required',device:found?{id:cryptoDeviceId,fingerprint:managed.fingerprint}:null,
+        scope:found?{id:scopeId,epoch:mode==='epoch'?2:1,publicEncryptionJwk:publicJwk}:null,envelope:found?envelope:null});
+    }
+    assert.equal(url.origin,'https://e2ee.trelio.ru');assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/scopes/task/${f.pass.taskId}/attachments/${selected.attachmentId}`);
+    assert.equal(url.searchParams.get('revision'),selected.revision);assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),cryptoDeviceId);
+    downloads++;if(mode==='late-close')f.close();
+    return new Response(body,{headers:{'content-length':String(body.length),'content-type':'application/octet-stream',
+      'x-trelio-attachment-sha256':selected.sha256,'x-trelio-attachment-revision':selected.revision}});
+  };
+  try{
+    for(const entityType of ['file.task_attachments','agent_workspace_browser_file']){
+      const attachmentId=randomUUID(),aad={suite:'trelio-e2ee-v1',companyId:f.pass.companyId,scopeId,scopeEpoch:1,entityType,entityId:randomUUID(),entityRevision:1,schemaVersion:1,purpose:'file'};
+      const target=path.join(root,`${attachmentId}.cipher`);
+      await encryptFileToCompanyContainer({sourcePath:source,destinationPath:target,scopePublicEncryptionJwk:publicJwk,aad,originalName:'../../PRIVATE_NAME_CANARY.txt',mimeType:'text/plain'});
+      body=await fs.readFile(target);selected={schemaVersion:2,delivery:'assistant-encrypted-local-file',companyId:f.pass.companyId,companySlug:'encrypted',
+        requestOrigin:'https://e2ee.trelio.ru',taskId:f.pass.taskId,attachmentId,sizeBytes:body.length,sha256:createHash('sha256').update(body).digest('hex'),revision:'a'.repeat(64),aad};
+      // A fresh download profile cannot silently switch its selected source.
+      const profile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,lockDirectory:root,lock:(_file,action)=>action()});
+      const run=changes=>withWorkspaceExecutionProfile(profile,()=>materializeAssistantAttachment({origin:f.identity.origin,attachmentId,
+        result:{structuredContent:{...selected,...changes},content:[{type:'text',text:'REMOTE_UNTRUSTED_CANARY'}]},common,attachments:materializer,
+        prepareEncryptedRead:value=>profile.prepareAttachmentRead(value)}));
+      assert.equal(body.includes(secret),false);assert.doesNotMatch(JSON.stringify(selected),/PRIVATE_NAME|PRIVATE_ORIGINAL/);
+      const result=await run(),output=result.structuredContent;
+      assert.equal(output.delivery,'local-file');assert.deepEqual(await fs.readFile(output.localFilePath),secret);
+      assert.equal(output.originalName,'../../PRIVATE_NAME_CANARY.txt');assert.equal(output.mimeType,'text/plain');
+      assert.doesNotMatch(JSON.stringify(result.content),/REMOTE_UNTRUSTED/);
+      for(const key of ['aad','requestOrigin','companySlug','dataBase64','downloadUrl'])assert.equal(Object.hasOwn(output,key),false);
+      const before=downloads,publications=writes;
+      await assert.rejects(run({aad:{...aad,entityId:randomUUID()}}));assert.equal(writes,publications);
+      for(const change of [{unreviewed:'PRIVATE'},{requestOrigin:'https://evil.test'},{aad:{...aad,unknown:'PRIVATE'}},{sizeBytes:26*1024*1024}])await assert.rejects(run(change));
+      assert.equal(downloads,before,'invalid descriptors do not perform binary I/O');
+      const unrelatedAad={...selected,aad:{...aad,entityId:randomUUID()}};
+      const other=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,lockDirectory:root,lock:(_file,action)=>action()});
+      await assert.rejects(withWorkspaceExecutionProfile(other,()=>materializeAssistantAttachment({origin:f.identity.origin,attachmentId,
+        result:{structuredContent:unrelatedAad,content:[]},common,attachments:materializer,prepareEncryptedRead:value=>other.prepareAttachmentRead(value)})),/SOURCE_CHANGED/);
+      assert.equal(writes,publications,'a valid digest and ready scope do not admit a different native-selected full header AAD');
+      const originalBody=body;body=Buffer.from(body);body[body.length-1]^=1;await assert.rejects(run(),/SOURCE_CHANGED/);body=originalBody;
+      assert.equal(writes,publications);mode='epoch';await assert.rejects(run());mode='valid';assert.equal(writes,publications);
+      if(entityType==='agent_workspace_browser_file'){mode='late-close';await assert.rejects(run());assert.equal(writes,publications);}
+    }
+  }finally{globalThis.fetch=savedFetch;await fs.rm(root,{recursive:true,force:true});}
 });
 
 test('MCP original download is hidden without a trusted materializer and returns only its local result',async()=>{

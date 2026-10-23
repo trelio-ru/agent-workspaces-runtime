@@ -3385,11 +3385,16 @@ export const openLocalActionAttachmentResult = async ({
   companyEncryption,
   signal,
   materialize = materializeLocalAttachment,
+  // Exact native-selected binary source/header only. This trusted callback
+  // never comes from tool arguments and introduces no URL/payload resolver.
+  readCiphertext = null, expectedCiphertextSha256 = null, validateHeader = null, assertCurrent = null,
 }) => {
   if (result?.isError || !result?.structuredContent) return result;
   const payload = result.structuredContent;
   let ciphertext;
-  if (payload.delivery === "inline-base64" && typeof payload.dataBase64 === "string") {
+  if (typeof readCiphertext === "function") {
+    ciphertext = await readCiphertext();
+  } else if (payload.delivery === "inline-base64" && typeof payload.dataBase64 === "string") {
     if (payload.dataBase64.length > 4 * Math.ceil(LOCAL_ACTION_MAX_RESPONSE_BYTES / 3)) {
       throw new TrelioLocalContextError("LOCAL_ACTION_DOWNLOAD_TOO_LARGE", "Encrypted attachment exceeds the local download limit.");
     }
@@ -3406,10 +3411,12 @@ export const openLocalActionAttachmentResult = async ({
       scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
       scopePrivateJwk: companyEncryption.scopePrivateEncryptionKey.privateJwk,
       maximumPlaintextBytes: LOCAL_ACTION_MAX_RESPONSE_BYTES,
+      expectedCiphertextSha256, validateHeader,
     });
     // This remains a local continuation of the same ACL-checked download.
     // Decrypted binary bytes must never expand either model-visible field.
     // A failed private write propagates without a base64/plaintext fallback.
+    await assertCurrent?.();
     const file = await materialize({ bytes: opened.bytes, originalName: opened.originalName, signal });
     return buildLocalAttachmentFileResult({ result, opened, file });
   } finally {

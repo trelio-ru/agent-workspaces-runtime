@@ -295,7 +295,8 @@ export const createProductionAssistantMcp = async () => {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
       }
       const {materializeAssistantAttachment}=await import('./trelio-assistant-transport.mjs');
-      return materializeAssistantAttachment({origin:identity.origin,result,attachmentId,signal});
+      return materializeAssistantAttachment({origin:identity.origin,result,attachmentId,signal,
+        prepareEncryptedRead:value=>current.prepareAttachmentRead(value)});
     },{signal}),
   });
 };

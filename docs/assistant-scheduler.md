@@ -1007,8 +1007,24 @@ exclusive file, one-hour lease and cleanup outside Git. MCP receives only its
 local-file metadata/path/expiry. Server TextContent/plans are never forwarded as a
 second copy. Cancellation/refusal closes the body and partial file publication is
 forbidden; there is no automatic replay or public/human fallback. Large native
-browser/Workspace downloads retain their independent limits. Encrypted assistant
-execution stays closed until its independent device data plane is implemented.
+browser/Workspace downloads retain their independent limits.
+
+Stable encrypted downloads use a closed ciphertext-only native v2 descriptor:
+company/task/attachment, selected production data origin, ciphertext size/hash,
+revision and the exact native header AAD. No plaintext filename/MIME/hash or
+general payload resolver crosses MCP. A download-only profile opens an ALREADY
+enrolled managed recipient through the SAME registry/envelope/HPKE engine; it
+cannot enroll, select another attachment, call arbitrary routes or use a human
+key. Binary GET is proof/recipient bound on the selected data plane. Native
+inventory plus the immutable selected range/header distinguish ordinary
+`file.task_attachments` and accepted `agent_workspace_browser_file` source IDs;
+comment metadata markers do not substitute for sourceFileId. The SAME common
+byte decryptor validates digest and full native-selected AAD before decryption,
+then repeats live pass/current recipient before the SAME private local-file
+publication. Ciphertext overhead has its own finite bound; plaintext stays
+24 MiB. Refusal, transition, scope/epoch change and uncertain response have no
+plaintext/public/human fallback or automatic replay. This is not live Windows
+or provider business E2E evidence.
 
 ## Shared Workspace HTTP profile
 
