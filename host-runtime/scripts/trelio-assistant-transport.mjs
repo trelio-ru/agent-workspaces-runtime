@@ -508,6 +508,17 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['ask_assistant_owner','request_as
   'get_assistant_owner_question','get_assistant_intake_context']);
 export const supportsAssistantManagedContent=(name,args)=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name)
   ||name==='continue_assistant_workspace_action'&&args?.operation==='skill_run';
+/** Closed local projection, not owner authority. Textual metadata is never
+ * declassified into the global personal pool by naming this mode. Native
+ * schemas/review still select fixed labels, one policy and the exact Run. */
+export const assistantNeutralPrivateMetadata=value=>{
+  if(!object(value)||value.metadataMode!=='neutral'||!['opaque','login','password'].includes(value.cardType)
+    ||Object.keys(value).some(key=>!['metadataMode','cardType','runId','generatedFields'].includes(key)))return false;
+  if(value.runId===undefined&&value.generatedFields===undefined)return true;
+  return UUID.test(value.runId??'')&&value.cardType==='password'&&Array.isArray(value.generatedFields)&&value.generatedFields.length===1
+    &&value.generatedFields.every(row=>object(row)&&Object.keys(row).sort().join(',')==='generator,key,length'
+      &&row.key==='password'&&row.generator==='password'&&Number.isSafeInteger(row.length)&&row.length>=16&&row.length<=128);
+};
 const managedBusinessArguments=raw=>Object.fromEntries(Object.entries(raw).filter(([key])=>
   !['taskPass','intakePass','runtimeSessionProof','encryptedContent'].includes(key)));
 const rejectBorrowedManagedMarkers=(value,depth=0)=>{
@@ -575,7 +586,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
 
   if(Object.hasOwn(business,'encryptedFiles')||Object.hasOwn(business,'acceptedFiles')&&name!=='create_comment'
     ||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
-    ||name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+    ||name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   if(business.acceptedFiles!==undefined&&(!Array.isArray(business.acceptedFiles)||business.acceptedFiles.length<1
     ||business.acceptedFiles.length>10||business.acceptedFiles.some(file=>!object(file)
       ||Object.keys(file).sort().join(',')!=='filePath,runId'||!UUID.test(file.runId)||typeof file.filePath!=='string'
@@ -771,7 +782,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const readonly=['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
-        if(name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+        if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,
           ...(customField?{customFieldTypeForId:id=>id===customField.id?customField.fieldType:null}:{})});
         // All new host metadata stays inside the ALREADY hidden envelope.
@@ -865,9 +876,10 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     || Object.values(secretBrowserFill).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateFill=secretBrowserFill===null?null:Object.freeze({...secretBrowserFill});
   if(secretGeneration!==null && (!object(secretGeneration)
-    || Object.keys(secretGeneration).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId,workspaceId'
+    || Object.keys(secretGeneration).filter(key=>key!=='neutralPlan').sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId,workspaceId'
     || ['clientRequestId','ownerDecisionId','runId','workspaceId'].some(key=>!uuid.test(secretGeneration[key]??''))
-    || typeof secretGeneration.expectedTaskUpdatedAt!=='string' || !Number.isFinite(Date.parse(secretGeneration.expectedTaskUpdatedAt))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    || typeof secretGeneration.expectedTaskUpdatedAt!=='string' || !Number.isFinite(Date.parse(secretGeneration.expectedTaskUpdatedAt))
+    ||secretGeneration.neutralPlan!==undefined&&!assistantNeutralPrivateMetadata({metadataMode:'neutral',runId:secretGeneration.runId,...secretGeneration.neutralPlan})))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateGeneration=secretGeneration===null?null:Object.freeze({...secretGeneration});
   if(secretSkill!==null && (!object(secretSkill)
     || Object.keys(secretSkill).sort().join(',')!=='companySlug,environmentVariable,fieldKey,grantId,runId,skill,workspaceId'
@@ -889,7 +901,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   if(workspaceRun!==null && (!object(workspaceRun) || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
     || Object.values(workspaceRun).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const explicitRun=workspaceRun===null?null:Object.freeze({...workspaceRun});
-  const privateRun=privateSkill??privateFill;
+  const privateRun=privateSkill??privateFill??privateGeneration;
   const ownRun=explicitRun??(privateRun?Object.freeze({runId:privateRun.runId,workspaceId:privateRun.workspaceId}):null);
   if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,explicitRun,materialWorkspaceId,skillRead].filter(Boolean).length>1)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -976,6 +988,25 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await current();
       return {parameters:{...selected.parameters,encryptedPlan:{schemaVersion:1,fingerprint:device.fingerprint,signature}},
         targetUrl:first,target:selected.parameters.steps?.[0]??selected.parameters};
+    },
+    async preparePrivateCardArguments(args,signal){
+      const p=args.parameters,current=()=>assertLivePass(signal);
+      if(!object(p)||typeof p.expectedTaskUpdatedAt!=='string'||!Number.isFinite(Date.parse(p.expectedTaskUpdatedAt))
+        ||['clientRequestId','ownerDecisionId'].some(key=>!uuid.test(p[key]??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      if(args.operation==='secret_create'){
+        if(Object.keys(p).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,metadata,ownerDecisionId'
+          ||!assistantNeutralPrivateMetadata(p.metadata)||p.metadata.runId!==undefined)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      }else if(args.operation==='secret_generate'){
+        if(Object.keys(p).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,neutralPlan,ownerDecisionId,runId'
+          ||!assistantNeutralPrivateMetadata({metadataMode:'neutral',runId:p.runId,...p.neutralPlan})
+          ||Object.keys(p.neutralPlan).sort().join(',')!=='cardType,generatedFields'
+          ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
+          ||args.runIdentity.runId!==p.runId||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      }else fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
+      await current();const device=await resolveAssistantCompanyEncryptionDevice({identity,companyId:pass.companyId,store,
+        lockDirectory,assertCurrent:current,allowCreate:false,lock});await current();
+      return {...structuredClone(p),encryptionFingerprint:device.fingerprint};
     },
     async prepareWorkspaceMaterial(){
       if(!materialWorkspaceId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -1204,19 +1235,21 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // data origin; this initial mapping is never an error/fallback retry.
         if(inspection || lifecycle)url=new URL(url.pathname+url.search,identity.origin);
         route={proofTool:'assistant_workspace_data_plane_read'};encryptionRuntime=true;
-      }else if(privateGeneration && requestOrigin===identity.origin
+      }else if(privateGeneration && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && (url.pathname==='/api/agent-secrets/generated-save-context'
           || url.pathname===`/api/agent-secrets/secrets/${privateGeneration.clientRequestId}/value-from-bridge`)){
         const expected={clientRequestId:privateGeneration.clientRequestId,ownerDecisionId:privateGeneration.ownerDecisionId,
-          expectedTaskUpdatedAt:privateGeneration.expectedTaskUpdatedAt,runId:privateGeneration.runId};
+          expectedTaskUpdatedAt:privateGeneration.expectedTaskUpdatedAt,runId:privateGeneration.runId,
+          ...(privateGeneration.neutralPlan?{neutralPlan:JSON.stringify(privateGeneration.neutralPlan)}:{})};
         if(method==='GET' && url.pathname==='/api/agent-secrets/generated-save-context' && options.body===undefined
-          && [...url.searchParams.keys()].length===4 && new Set(url.searchParams.keys()).size===4
+          && [...url.searchParams.keys()].length===Object.keys(expected).length && new Set(url.searchParams.keys()).size===Object.keys(expected).length
           && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value)){
           route={proofTool:'assistant_secret_generate_context'};
         }else if(method==='PUT' && !url.search && url.pathname.endsWith('/value-from-bridge')){
           let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
-          if(!object(input) || Object.keys(input).sort().join(',')!=='clientRequestId,expectedCurrentVersion,expectedTaskUpdatedAt,ownerDecisionId,requestFingerprint,runId,values'
-            || !Object.entries(expected).every(([key,value])=>input[key]===value) || input.expectedCurrentVersion!==0
+          if(!object(input) || Object.keys(input).filter(key=>key!=='neutralPlan').sort().join(',')!=='clientRequestId,expectedCurrentVersion,expectedTaskUpdatedAt,ownerDecisionId,requestFingerprint,runId,values'
+            || !Object.entries(expected).every(([key,value])=>(key==='neutralPlan'?JSON.stringify(input[key]):input[key])===value)
+            ||!privateGeneration.neutralPlan&&input.neutralPlan!==undefined || input.expectedCurrentVersion!==0
             || !/^[a-f0-9]{64}$/u.test(input.requestFingerprint??'') || !object(input.values)
             || Object.keys(input.values).length<1 || Object.keys(input.values).length>50
             || Object.entries(input.values).some(([key,value])=>!/^[a-z][a-z0-9_]{0,63}$/u.test(key)
@@ -1224,6 +1257,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           route={proofTool:'assistant_secret_generate_write'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
+        if(lifecycle)url=new URL(url.pathname+url.search,identity.origin);
       }else if(privateFill && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateFill.grantId}/`)){
         const base=`/api/agent-secrets/checkout-grants/${privateFill.grantId}`;
@@ -1345,7 +1379,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         }
         headers.delete('x-trelio-assistant-source-encryption-fingerprint');
         headers.delete('x-trelio-assistant-skill-guidance');
-        if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')||route.proofTool.startsWith('assistant_secret_browser_')){
+        if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')||route.proofTool.startsWith('assistant_secret_browser_')||route.proofTool.startsWith('assistant_secret_generate_')){
           const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
           if(stored?.assistantId===identity.assistantId&&stored.deviceId===identity.deviceId&&stored.companyId===pass.companyId
             &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){

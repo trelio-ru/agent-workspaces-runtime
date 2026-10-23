@@ -692,7 +692,9 @@ publication tooling также остаются вне этого публичн
   crosses MCP. Browser preparation uses SAME URL parser, origin/hash-only native
   grant and managed target signature; full path/query stays local. Native
   context/consume retain genuine ABI/recipient/pass/Run checks. Unknown root or
-  step fields fail before HTTP; private metadata creation remains closed.
+  step fields fail before HTTP. NEW encrypted private cards admit only native
+  neutral metadata and sealed owner policy; task prose stays company ciphertext,
+  values use SAME private writer/receipt. No company credential adoption/export.
   Sealed empty-card receipts
   remain metadata. Separately reviewed NEW password generation reuses the same
   HMAC/fingerprint/keyring writer, original pass/Run and protected device material;

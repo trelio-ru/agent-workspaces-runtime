@@ -6,7 +6,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantNeutralPrivateMetadata } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -196,6 +196,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       readCompanyContentMode:profile.readCompanyContentMode,
       preparePrivateSkillArguments:profile.preparePrivateSkillArguments,
       preparePrivateBrowserArguments:profile.preparePrivateBrowserArguments,
+      preparePrivateCardArguments:profile.preparePrivateCardArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -1006,12 +1007,14 @@ export const validateAssistantWorkspacePlan = async raw => {
     || action.parameters.skill?.companyId!==snapshot.scope.companyId
     || !new RegExp(UUID,'u').test(action.parameters.skill?.runtimeSessionId??'')))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(action.operation==='secret_generate'){
-    if(!action.parameters || Object.keys(action.parameters).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId'
+    if(!action.parameters || Object.keys(action.parameters).filter(key=>key!=='neutralPlan').sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId'
       || ['clientRequestId','ownerDecisionId','runId'].some(key=>!new RegExp(UUID,'u').test(action.parameters[key]??''))
       || !action.runIdentity || Object.keys(action.runIdentity).sort().join(',')!=='runId,workspaceId'
       || Object.values(action.runIdentity).some(value=>!new RegExp(UUID,'u').test(value??''))
       || action.parameters.runId!==action.runIdentity.runId || typeof action.parameters.expectedTaskUpdatedAt!=='string'
-      || !Number.isFinite(Date.parse(action.parameters.expectedTaskUpdatedAt)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+      || !Number.isFinite(Date.parse(action.parameters.expectedTaskUpdatedAt))
+      ||action.parameters.neutralPlan!==undefined&&(!assistantNeutralPrivateMetadata({metadataMode:'neutral',runId:action.parameters.runId,...action.parameters.neutralPlan})
+        ||Object.keys(action.parameters.neutralPlan).sort().join(',')!=='cardType,generatedFields'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
     return {...snapshot,runIdentity:action.runIdentity,invocation:null};
   }
   const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
@@ -1098,17 +1101,44 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
     const structural=Object.fromEntries(Object.entries(args).filter(([key])=>!['taskPass','runtimeSessionProof'].includes(key)));
     try{buildTrelioWorkspaceActionInvocation(structural);}catch{throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');}
   }
+  const privateEnvelope=()=>{
+    const object=value=>value&&typeof value==='object'&&!Array.isArray(value),uuid=value=>new RegExp(UUID,'u').test(value??'');
+    if(args.schemaVersion!==1||Object.keys(args).some(key=>!['schemaVersion','operation','parameters','runIdentity','taskPass','runtimeSessionProof'].includes(key)))
+      throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    // These are host transport coordinates, not arbitrary textual containers.
+    // Native proof verification is still the authority; this projection only
+    // prevents ignored prose from crossing HTTP before that verification.
+    if(args.taskPass!==undefined&&(!object(args.taskPass)||Object.keys(args.taskPass).sort().join(',')!=='companyId,passId,taskId'
+      ||Object.values(args.taskPass).some(value=>!uuid(value))))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    const p=args.runtimeSessionProof;
+    if(p!==undefined&&(!object(p)||Object.keys(p).sort().join(',')!=='issuedAt,nonce,runtimeSessionId,schemaVersion,signature'
+      ||p.schemaVersion!==1||!uuid(p.runtimeSessionId)||!uuid(p.nonce)||typeof p.issuedAt!=='string'||!Number.isFinite(Date.parse(p.issuedAt))
+      ||typeof p.signature!=='string'||!/^[A-Za-z0-9_-]{86}$/u.test(p.signature)))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+  };
+  if(name==='continue_assistant_workspace_action'&&args.operation==='secret_list'){
+    privateEnvelope();const p=args.parameters;
+    if(args.runIdentity!==undefined||!p||typeof p!=='object'||Array.isArray(p)||Object.keys(p).some(key=>!['offset','limit'].includes(key))
+      ||p.offset!==undefined&&(!Number.isSafeInteger(p.offset)||p.offset<0)
+      ||p.limit!==undefined&&(!Number.isSafeInteger(p.limit)||p.limit<1||p.limit>50))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    return send(args);
+  }
   if(isAssistantStructuralResultRetraction(name,args)
     ||ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'
     || name==='prepare_assistant_workspace_run'
     || name==='continue_assistant_workspace_action'
-      && ['inspect','open','status','heartbeat','secret_list','secret_generate'].includes(args.operation))return send(args);
-  return withProfile(async({readCompanyContentMode,preparePrivateSkillArguments,preparePrivateBrowserArguments})=>{
+      && ['inspect','open','status','heartbeat'].includes(args.operation))return send(args);
+  return withProfile(async({readCompanyContentMode,preparePrivateSkillArguments,preparePrivateBrowserArguments,preparePrivateCardArguments})=>{
     if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     if(await readCompanyContentMode(signal)!=='plain'){
-      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_browser_prepare','secret_browser_fill'].includes(args.operation)
+      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_browser_prepare','secret_browser_fill','secret_create','secret_generate'].includes(args.operation)
         && (args.schemaVersion!==1||Object.keys(args).some(key=>!['schemaVersion','operation','parameters','runIdentity','taskPass','runtimeSessionProof'].includes(key))
-          ||args.operation!=='secret_browser_fill'&&args.runIdentity!==undefined))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+          ||!['secret_browser_fill','secret_generate'].includes(args.operation)&&args.runIdentity!==undefined))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_browser_prepare','secret_browser_fill','secret_create','secret_generate'].includes(args.operation))privateEnvelope();
+      if(name==='continue_assistant_workspace_action'&&['secret_create','secret_generate'].includes(args.operation)){
+        if(typeof preparePrivateCardArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        const parameters=await preparePrivateCardArguments(args,signal);signal?.throwIfAborted();
+        return send({...args,parameters});
+      }
       if(name==='continue_assistant_workspace_action'&&['secret_browser_prepare','secret_browser_fill'].includes(args.operation)){
         if(typeof preparePrivateBrowserArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
         const local=await preparePrivateBrowserArguments(args,signal);
@@ -1329,7 +1359,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const inspecting=plan.localAction.operation==='inspect';
     const skill=plan.localAction.operation==='skill_run';
     const runLifecycle=['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation);
-    const encryption=runLifecycle||['secret_skill_run','secret_browser_fill'].includes(plan.localAction.operation)?await prepareWorkspaceRun():null;
+    const encryption=runLifecycle||['secret_skill_run','secret_browser_fill','secret_generate'].includes(plan.localAction.operation)?await prepareWorkspaceRun():null;
     if(plan.encryptedLifecycle && (!encryption || encryption.requestOrigin!==plan.encryptedLifecycle.requestOrigin
       || encryption.runtime.company.id!==plan.encryptedLifecycle.companyId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     if(!skill && !(inspecting && plan.encryptedInspection)){
@@ -1362,7 +1392,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     }
     if(plan.localAction.operation==='secret_generate'){
       const {handleAssistantGeneratedPrivateSecret}=await import('./trelio-secret-generate.mjs');
-      const result=await handleAssistantGeneratedPrivateSecret({origin:identity.origin,token,input:plan.localAction.parameters,
+      const result=await handleAssistantGeneratedPrivateSecret({origin:encryption?.requestOrigin??identity.origin,token,input:plan.localAction.parameters,
         scope:{assistantUserId:identity.assistantId,deviceId:identity.deviceId,companyId:active.companyId,taskId:active.taskId},
         withGenerationKey:withSecretGenerationKey});
       return {schemaVersion:1,operation:'secret_generate',stdout:JSON.stringify(result),stderr:''};

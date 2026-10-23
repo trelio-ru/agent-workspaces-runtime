@@ -153,8 +153,10 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         assert.ok(opened.values,'SAME payload crypto opens actual business content');
       }
       if(preparation.actionPreview)return json({schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,
-        scopeId,scopeEpoch:1,context:{snapshot:{control:{id:preparation.arguments.fields.controlId,note:preparation.arguments.reason}},
-          requiredActions:['change_other_control'],questionText:`Native preview: ${preparation.arguments.reason}`},encryptedPayloads:[...staged.values()]});
+        scopeId,scopeEpoch:1,context:{snapshot:preparation.arguments.operation==='create_private_secret'?{neutralPrivateMetadata:{name:'Personal secret'}}
+          :{control:{id:preparation.arguments.fields.controlId,note:preparation.arguments.reason}},
+          requiredActions:[preparation.arguments.operation==='create_private_secret'?'classify_secret':'change_other_control'],
+          questionText:`Native preview: ${preparation.arguments.reason}`},encryptedPayloads:[...staged.values()]});
       return json({stored:body.payloads.length});
     }
     assert.equal(url.pathname,'/api/digital-assistants/runtime/encryption/runtime');
@@ -313,6 +315,22 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       return {content:[],structuredContent:{questionId:randomUUID(),state:'pending'}};
     });
     assert.equal(planned.structuredContent.state,'pending');
+    const neutralFields={metadataMode:'neutral',cardType:'password',runId:randomUUID(),generatedFields:[{key:'password',generator:'password',length:32}]};
+    const neutralAction={operation:'create_private_secret',fields:neutralFields,reason:'NEUTRAL_PRIVATE_PURPOSE_CANARY',
+      clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+    const plannedPrivate=await withAssistantManagedContentArguments({...input,name:'request_assistant_action',args:neutralAction},async wire=>{
+      assert.deepEqual(wire.fields,neutralFields);assert.doesNotMatch(JSON.stringify(wire),/NEUTRAL_PRIVATE_PURPOSE_CANARY/);
+      const ref=wire.encryptedContent.action.intentJson.$trelioE2ee;
+      const opened=await decryptCompanyPayload({encryptedPayload:staged.get(ref.id),scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+      assert.equal(opened.values.intent_json.reason,neutralAction.reason);
+      assert.deepEqual(opened.values.intent_json.fields,neutralFields);return {content:[],structuredContent:{state:'pending'}};
+    });
+    assert.equal(plannedPrivate.structuredContent.state,'pending');
+    const stageCount=preparations;
+    for(const fields of [{...neutralFields,name:'TASK_NAME_CANARY'},{...neutralFields,generatedFields:[{key:'password',generator:'password',length:32,executable:'cmd'}]},
+      {...neutralFields,publicDescription:'TASK_DESCRIPTION_CANARY'}, {...neutralFields,cardType:'username'}])
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'request_assistant_action',args:{...neutralAction,fields}},()=>assert.fail('no native mutation')));
+    assert.equal(preparations,stageCount,'private text/unknown policy slots never reach preparation HTTP');
     const fieldId=randomUUID(),fieldUpdatedAt=new Date().toISOString(),optionId=randomUUID(),memberId=randomUUID();
     for(const [fieldType,value] of [['text','  FIELD_VALUE_CANARY\n  second line  '],['number',42],['checkbox',false],['date','2026-10-24'],
       ['select',[optionId]],['user',memberId],['group',[memberId]],['user_or_group',{entityType:'member',id:memberId}]]){
@@ -1157,7 +1175,7 @@ test('production content preflight refuses encrypted prose before the real MCP t
   const f=await workspaceProfileFixture();let mode='encrypted',inventoryReads=0,remoteCalls=0,loseResponse=false;
   const canary='SYNTHETIC_PRIVATE_COMPANY_CONTENT';
   f.client.companies=async()=>{inventoryReads++;return [{companyId:f.pass.companyId,encryptionState:mode}];};
-  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments,preparePrivateBrowserArguments:f.profile.preparePrivateBrowserArguments});
+  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments,preparePrivateBrowserArguments:f.profile.preparePrivateBrowserArguments,preparePrivateCardArguments:f.profile.preparePrivateCardArguments});
   const client=createAssistantMcpClient({...f.identity,store:f.store,
     withWorkspaceArguments:(input,send)=>withAssistantEncryptedWorkspaceArguments(input,send,{withProfile,
       withManagedContent:(input,send)=>withAssistantCompanyContentArguments(input,send,{withProfile})}),
@@ -1256,6 +1274,34 @@ test('encrypted private preparation sends only signed command coordinates with a
     await assert.rejects(invoke(changed),/ENCRYPTED_CONTENT_REQUIRED/);
   assert.equal(calls,1);assert.equal(wire.join('').includes(canary),false);
   f.close();await assert.rejects(invoke(parameters),/PASS_REVIEW_REQUIRED/);assert.equal(calls,1);
+});
+
+test('private neutral creation and pagination reject complete ignored text envelopes BEFORE HTTP',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const f=await workspaceProfileFixture();f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:'encrypted'}];
+  const managed=await resolveAssistantCompanyEncryptionDevice({identity:f.identity,companyId:f.pass.companyId,store:f.store,
+    lockDirectory:path.join(os.tmpdir(),'synthetic-private-neutral-key'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+  let calls=0;const canary='PRIVATE_NEUTRAL_IGNORED_CANARY',wire=[];
+  const invoke=args=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',args},async args=>{calls++;wire.push(JSON.stringify(args));return args;},
+    {withProfile:action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateCardArguments:f.profile.preparePrivateCardArguments})});
+  const base={clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  const create={schemaVersion:1,operation:'secret_create',parameters:{...base,metadata:{metadataMode:'neutral',cardType:'login'}}};
+  const runIdentity={workspaceId:randomUUID(),runId:randomUUID()},neutralPlan={cardType:'password',generatedFields:[{key:'password',generator:'password',length:32}]};
+  const generate={schemaVersion:1,operation:'secret_generate',runIdentity,parameters:{...base,runId:runIdentity.runId,neutralPlan}};
+  const list={schemaVersion:1,operation:'secret_list',parameters:{offset:0,limit:50}};
+  for(const args of [{...list,note:canary},{...list,parameters:{query:canary}}, {...list,parameters:{limit:canary}},
+    {...list,taskPass:{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId,note:canary}},
+    {...list,runtimeSessionProof:{signature:canary}}, {...create,reason:canary},
+    {...create,parameters:{...create.parameters,metadata:{...create.parameters.metadata,name:canary}}},
+    {...generate,parameters:{...generate.parameters,neutralPlan:{...neutralPlan,note:canary}}},
+    {...generate,runIdentity:{...runIdentity,note:canary}}, {...generate,parameters:{...generate.parameters,reason:canary}}])
+    await assert.rejects(invoke(args),/ENCRYPTED_CONTENT_REQUIRED/);
+  assert.equal(calls,0,'closed pagination/card/context DTO precedes every HTTP send');
+  assert.deepEqual(await invoke(list),list);
+  assert.equal((await invoke(create)).parameters.encryptionFingerprint,managed.fingerprint);
+  assert.equal((await invoke(generate)).parameters.encryptionFingerprint,managed.fingerprint);
+  assert.equal(calls,3);assert.doesNotMatch(wire.join(''),new RegExp(canary));
 });
 
 test('encrypted private browser signs normalized native targets and keeps full URL only in local fill plans',async()=>{

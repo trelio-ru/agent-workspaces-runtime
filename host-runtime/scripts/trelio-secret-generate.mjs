@@ -355,7 +355,8 @@ export const handleAssistantGeneratedPrivateSecret = async ({ origin, input, sco
     // adds a value/fingerprint to its response. Never echo a native object.
     return { created: true, secret: { id: result.secret.id, scopeType: "assistant", currentVersion: 1, hasValue: true } };
   };
-  const query = new URLSearchParams(input);
+  const query = new URLSearchParams(Object.fromEntries(Object.entries(input).map(([key,value])=>
+    [key,key==='neutralPlan'?JSON.stringify(value):value])));
   const context = await (await sendRequest(origin, token,
     "/api/agent-secrets/generated-save-context?" + query)).json();
   if (context?.completed === true) {

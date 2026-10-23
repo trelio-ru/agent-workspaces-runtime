@@ -887,7 +887,8 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
   const metadata={grantId,runId,secretId,secretVersion:1,storageMode:'trelio',deliveryMode:'env',executable:'trelio-workspace',fieldKeys:['value'],
     environmentVariable:binding.environmentVariable,expiresAt:new Date(Date.now()+300000).toISOString()};
   const rules='# Synthetic platform rules\n',sha256=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
-  let consumed=0,resolutions=0,lateRefusal=false,encrypted=encryptedCase,cryptoMode='valid',fetchFailure,browserMode=false,browserConsumed=0;const savedFetch=globalThis.fetch,nonces=new Set();
+  let consumed=0,resolutions=0,lateRefusal=false,encrypted=encryptedCase,cryptoMode='valid',fetchFailure,browserMode=false,browserConsumed=0;
+  let generation=null,generationWrites=0,generationCommitted=false,generationUncertain=false;const savedFetch=globalThis.fetch,nonces=new Set();
   const fixtureFetch=async(url,options)=>{
     assert.ok([taskIdentity.origin,'https://e2ee.trelio.ru'].includes(url.origin));assert.doesNotMatch(String(options.body??''),/PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
     const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
@@ -905,6 +906,22 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
         return new Response(JSON.stringify(value));}
       return new Response(JSON.stringify({suite:'trelio-e2ee-v1',state:encrypted?'encrypted':'plain',
         company:{id:pass.companyId,slug:'fixture'},viewer:{userId:taskIdentity.assistantId}}));}
+    if(generation&&url.pathname==='/api/agent-secrets/generated-save-context'){
+      assert.equal(url.origin,taskIdentity.origin);assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
+      assert.deepEqual(JSON.parse(url.searchParams.get('neutralPlan')),generation.neutralPlan);
+      if(generationCommitted)return Response.json({completed:true,receipt:generation.receipt});
+      return Response.json({schemaVersion:1,completed:false,secretId:generation.clientRequestId,runId,
+        assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId,
+        fields:[{key:'password',label:'Password',type:'password',required:true}],generatedFields:generation.neutralPlan.generatedFields});
+    }
+    if(generation&&url.pathname===`/api/agent-secrets/secrets/${generation.clientRequestId}/value-from-bridge`){
+      assert.equal(url.origin,taskIdentity.origin);assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
+      const body=JSON.parse(options.body);assert.deepEqual(body.neutralPlan,generation.neutralPlan);
+      assert.equal(Object.keys(body.values).join(','),'password');assert.equal(body.values.password.length,32);
+      assert.match(body.requestFingerprint,/^[0-9a-f]{64}$/u);generationWrites++;generationCommitted=true;
+      if(generationUncertain)throw new Error('Synthetic generation lost response');
+      return Response.json(generation.receipt);
+    }
     if(url.pathname===`/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context`){
       assert.equal(url.origin,taskIdentity.origin);if(encryptedCase)assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
       if(browserMode){assert.equal(url.searchParams.has('purpose'),false);return new Response(JSON.stringify({...metadata,
@@ -961,6 +978,25 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
         await assert.rejects(browser.prepareRequest({origin:encryption.requestOrigin,token,
           pathname:`/api/agent-workspaces/runs/${runId}/heartbeat`,options:{method:'POST',body:'{}'},buildHeaders:()=>new Headers()}),/ORIGIN_DENIED/);
       });
+      assert.equal(fetchFailure,undefined);
+      // Neutral NEW generation adds no metadata store or company marker to
+      // the personal pool. The SAME protected generator receives the original
+      // exact native policy and recovers its immutable receipt BEFORE key use.
+      generation={clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),runId,
+        neutralPlan:{cardType:'password',generatedFields:[{key:'password',generator:'password',length:32}]}};
+      generation.receipt={created:true,secret:{id:generation.clientRequestId,scopeType:'assistant',currentVersion:1,hasValue:true}};
+      const generationInput={...generation};delete generationInput.receipt;
+      const generator=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,
+        secretGeneration:{...generationInput,workspaceId},lockDirectory:path.join(directory,'private-generation-locks'),lock:(_file,action)=>action()});
+      const {handleAssistantGeneratedPrivateSecret}=await import('../host-runtime/scripts/trelio-secret-generate.mjs');let keyUses=0;
+      const generate=()=>engine.withWorkspaceExecutionProfile(generator,async()=>{
+        const encryption=await generator.prepareWorkspaceRun();
+        return handleAssistantGeneratedPrivateSecret({origin:encryption.requestOrigin,token:await engine.requireToken(taskIdentity.origin),input:generationInput,
+          scope:{assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId},
+          withGenerationKey:action=>{keyUses++;return generator.withSecretGenerationKey(action);}});
+      });
+      generationUncertain=true;await assert.rejects(generate());assert.equal(generationWrites,1);assert.equal(keyUses,1);
+      fetchFailure=undefined;assert.deepEqual(await generate(),generation.receipt);assert.equal(generationWrites,1);assert.equal(keyUses,1);
       assert.equal(fetchFailure,undefined);
     }
   }finally{globalThis.fetch=savedFetch;}

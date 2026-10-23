@@ -1410,7 +1410,7 @@ operations under the observed task pass:
   The native local plan executes directly and never round-trips its argv through
   another model MCP call. Private auth cannot inherit Workspace writes. Global
   personal values still use their SAME assistant AAD/keyring; encrypted metadata
-  creation and company Secret export/adoption remain closed. One field lives in RAM and the
+  task-derived creation and company Secret export/adoption remain closed. One field lives in RAM and the
   child-only environment, never shell/stdin/file/argv. Provider stdout/stderr
   are discarded entirely, not substring-redacted. Its structural
   `command_completed, verificationRequired:true` receipt requires an independent
@@ -1431,6 +1431,20 @@ operations under the observed task pass:
   returns its safe receipt BEFORE generation. Other fingerprints conflict;
   failed/uncertain write is never automatically retried. Receipt projection
   excludes values/fingerprints even if an upstream object adds unexpected keys.
+  In an encrypted task the NEW intent must use `metadataMode:neutral`, native
+  `cardType:password`, the original `runId` and one password policy. Empty neutral
+  cards may instead select opaque/login/password. Native fixes the personal
+  name/field labels/schema; arbitrary name, description, URL, task/company marker
+  or existing card cannot be exported into the global private realm. The SAME
+  managed owner preview/question/intent protects the complete task purpose and
+  displays personal server-keyring semantics before exact owner consent. The
+  host repeats only `neutralPlan:{cardType:password,generatedFields:[...]}` in
+  generation context/write; native revalidates it against that original sealed
+  digest and live recipient/pass/Run. Its JSON query is bounded and structural.
+  SAME HPKE own-Run reader, protected password/HMAC writer and lost-result receipt
+  remain authoritative; no separate policy store, vault, encryption realm or
+  human-key fallback is added. Whole private root/parameter/transport envelopes
+  and pagination reject ignored prose BEFORE HTTP.
 
 The internal HTTP profile admits only that original grant/Run's existing
 preflight, consume/outcome or sealed generation context/write paths. Native one-use proofs, current company
@@ -1452,7 +1466,7 @@ An uncertain consume/fill is not repeated or switched
 to another browser. A successful fill is not task completion or a persisted
 processing receipt. Input from a task or website never authorizes disclosure,
 new account creation or ownership classification. Existing-card generation/rotation, arbitrary CLI/reveal,
-encrypted metadata creation, account registration and real Windows business E2E remain
+arbitrary encrypted metadata creation, account registration and real Windows business E2E remain
 independent gates; this subset does not change businessReady=false.
 
 
@@ -1590,7 +1604,7 @@ created/waiting-owner terminal response may be read back without pretending its
 old lease is still executable. Local choice/Other and UTF-8 checks precede
 encryption; an owner answer still grants no sensitive action permission.
 
-Interactive source setup and private Secret intent metadata
+Arbitrary private Secret metadata
 retain separate encrypted guards. Unsupported arguments
 fail before remote tools/call. Ciphertext uses the native-selected approved data
 plane; a failure never falls back to canonical HTTP. Real HPKE/signed native and
