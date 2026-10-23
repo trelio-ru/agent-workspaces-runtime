@@ -919,12 +919,27 @@ test('production content preflight refuses encrypted prose before the real MCP t
       {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
   assert.equal(remoteCalls,0);assert.equal(wire.join('').includes(canary),false);
   assert.ok(inventoryReads>0);assert.equal(f.contacts(),2*inventoryReads,'fresh native pass checks bracket each inventory');
-  mode=null;await client.callTool('create_comment',args);assert.equal(remoteCalls,1,'legacy null mode is the native plain state');
+  for(const skillId of ['telegram-mtproto','email-imap-smtp','max-web']){
+    const provider=skillId==='email-imap-smtp'?'email':skillId==='max-web'?'max':'telegram';
+    const selectors=provider==='email'?['--uid','11','--uid-validity','17']
+      :['--chat',provider==='max'?'https://web.max.ru/-77':'-77','--message-id','11'];
+    const parameters={skillId,arguments:['read-reference',...selectors,'--expected-revision','b'.repeat(64),
+      '--expected-conversation-key',`${provider}-conversation/v1.${'a'.repeat(64)}`,'--local-account',randomUUID()]};
+    await client.callTool('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters});
+    const before=remoteCalls;
+    for(const argumentsList of [['send','--text',canary],parameters.arguments.slice(0,-2),
+      [...parameters.arguments,'--query',canary]])
+      await assert.rejects(client.callTool('continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',
+        parameters:{...parameters,arguments:argumentsList}}));
+    assert.equal(remoteCalls,before,'only exact structural references cross encrypted MCP, no implicit account or prose');
+  }
+  assert.equal(remoteCalls,3);assert.equal(wire.join('').includes(canary),false);
+  mode=null;await client.callTool('create_comment',args);assert.equal(remoteCalls,4,'legacy null mode is the native plain state');
   mode='plain';loseResponse=true;
   await assert.rejects(client.callTool('create_comment',args),{code:'ASSISTANT_MCP_UNAVAILABLE'});
-  assert.equal(remoteCalls,2,'a lost response does not replay the original mutation');
+  assert.equal(remoteCalls,5,'a lost response does not replay the original mutation');
   loseResponse=false;mode='encrypted';const before=inventoryReads;
-  await client.callTool('get_task',{});assert.equal(remoteCalls,3);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
+  await client.callTool('get_task',{});assert.equal(remoteCalls,6);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
 });
 
 test('content mode never falls back to plain on missing inventory, transition, stale pass or changed identity',async()=>{

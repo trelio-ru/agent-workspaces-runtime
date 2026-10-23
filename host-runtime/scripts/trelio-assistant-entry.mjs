@@ -6,7 +6,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -1090,7 +1090,15 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       && ['inspect','open','status','heartbeat','secret_list','secret_generate'].includes(args.operation))return send(args);
   return withProfile(async({readCompanyContentMode})=>{
     if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-    if(await readCompanyContentMode(signal)!=='plain')throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    if(await readCompanyContentMode(signal)!=='plain'){
+      // This narrow adapter carries only original native message selectors and
+      // account/HMAC refs. Reuse the SAME source observer parser, not a second
+      // provider grammar. Arbitrary search/send prose still needs a separate
+      // sealed argument adapter and must never be sent to obtain a refusal.
+      const read=name==='continue_assistant_workspace_action'&&args.operation==='skill_run'
+        ?parseAssistantSourceReadReference({skillId:args.parameters?.skillId,arguments:args.parameters?.arguments}):null;
+      if(!read?.accountId)throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    }
     signal?.throwIfAborted();
     // Exactly one exchange. No retry after refusal/transport failure and no
     // native human flag, temporary plain copy, key lookup or mode cache.
