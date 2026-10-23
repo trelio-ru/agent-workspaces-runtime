@@ -38,6 +38,14 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
     || new Set(deniedOptions).size !== deniedOptions.length
     || deniedOptions.some(option => typeof option !== 'string' || !/^--[a-z][a-z0-9-]{0,63}$/u.test(option))))
     fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID');
+  let setup;
+  try { setup = readSkillSetupDescriptor(parsedPackage); }
+  catch { fail('ASSISTANT_SKILL_COMMAND_POLICY_INVALID'); }
+  // A broad provider task prefix must not make its explicitly declared human
+  // login an ordinary unattended command. Its dedicated native owner/account
+  // grant and original human-input deadline remain an independent boundary.
+  if (setup?.humanInputCommands?.some(command => JSON.stringify(command.arguments) === JSON.stringify(runtimeArguments)))
+    fail('ASSISTANT_SKILL_COMMAND_DENIED');
   // Literal positional tokens only. No regex/glob, shell expansion, substring
   // matching, option skipping or parser abbreviation can broaden a prefix.
   // Provider arguments after it retain their existing strict native parser.
@@ -52,15 +60,23 @@ export const assertAssistantTaskSkillCommand = (parsedPackage, runtimeArguments)
     fail('ASSISTANT_SKILL_COMMAND_DENIED');
 };
 
-/** Read only the bytes whose package signature and per-file hashes were verified. */
-export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) => {
+/** Both setup purposes read the SAME complete signed descriptor. A human-input
+ * declaration contains no Secret binding/env or model slots and never weakens
+ * the legacy v1 or value-bearing v2 command grammar. */
+const readSkillSetupDescriptor = (parsedPackage) => {
   const file = parsedPackage.files.find((item) => item.path === SKILL_SECRET_SETUP_FILE);
   if (!file) return null;
-  if (file.bytes.length > 16 * 1024 || !parsedPackage.capabilities.includes("secret-checkout")) throw invalid();
+  if (!Buffer.isBuffer(file.bytes) || file.bytes.length > 16 * 1024) throw invalid();
   let descriptor;
   try { descriptor = JSON.parse(file.bytes.toString("utf8")); } catch { throw invalid(); }
-  if (!exactKeys(descriptor, ["schemaVersion", "commands"]) || ![1,2].includes(descriptor.schemaVersion)
-    || !Array.isArray(descriptor.commands) || !descriptor.commands.length || descriptor.commands.length > 8) throw invalid();
+  if (!exactKeys(descriptor, ["schemaVersion", "commands", ...(Object.hasOwn(descriptor ?? {}, "humanInputCommands") ? ["humanInputCommands"] : [])])
+    || ![1,2].includes(descriptor.schemaVersion) || !Array.isArray(descriptor.commands) || descriptor.commands.length > 8
+    || descriptor.schemaVersion === 1 && (descriptor.humanInputCommands !== undefined || !descriptor.commands.length)
+    || descriptor.humanInputCommands !== undefined && (!Array.isArray(descriptor.humanInputCommands)
+      || !descriptor.humanInputCommands.length || descriptor.humanInputCommands.length > 8)
+    || !descriptor.commands.length && !descriptor.humanInputCommands?.length
+    || descriptor.commands.length && !parsedPackage.capabilities.includes("secret-checkout")
+    || descriptor.humanInputCommands?.length && !parsedPackage.capabilities.includes("local-session")) throw invalid();
   const ids = new Set();
   const argumentSets = new Set();
   for (const command of descriptor.commands) {
@@ -78,8 +94,28 @@ export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) => 
     ids.add(command.id);
     argumentSets.add(JSON.stringify(command.arguments));
   }
-  return descriptor.commands.find((command) => JSON.stringify(command.arguments) === JSON.stringify(runtimeArguments)) ?? null;
+  for (const command of descriptor.humanInputCommands ?? []) {
+    if (!exactKeys(command, ["id", "purpose", "arguments", ...(Object.hasOwn(command ?? {}, "maximumDurationMs") ? ["maximumDurationMs"] : [])])
+      || command.purpose !== "authenticate_existing"
+      || typeof command.id !== "string" || !/^[a-z][a-z0-9-]{0,47}$/u.test(command.id)
+      || !Array.isArray(command.arguments) || !command.arguments.length || command.arguments.length > 8
+      || command.arguments.some(arg => typeof arg !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/u.test(arg))
+      || command.maximumDurationMs !== undefined && (!Number.isSafeInteger(command.maximumDurationMs)
+        || command.maximumDurationMs < 60_000 || command.maximumDurationMs > 600_000)
+      || ids.has(command.id) || argumentSets.has(JSON.stringify(command.arguments))) throw invalid();
+    ids.add(command.id); argumentSets.add(JSON.stringify(command.arguments));
+  }
+  return descriptor;
 };
+
+/** Read only bytes whose package signature and per-file hashes were verified. */
+export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) =>
+  readSkillSetupDescriptor(parsedPackage)?.commands.find(command => JSON.stringify(command.arguments) === JSON.stringify(runtimeArguments)) ?? null;
+
+/** A native-owned ID selects exact signed argv; no caller argv, Secret field,
+ * environment override or registration purpose is accepted by this reader. */
+export const readSkillHumanInputSetupCommand = (parsedPackage, commandId) =>
+  readSkillSetupDescriptor(parsedPackage)?.humanInputCommands?.find(command => command.id === commandId) ?? null;
 
 /**
  * A setup request cannot use an arbitrary secret id, executable, env name or

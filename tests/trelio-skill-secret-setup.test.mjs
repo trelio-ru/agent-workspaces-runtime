@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import {randomUUID} from "node:crypto";
-import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
 
 const command = { id: "configure", arguments: ["configure"], bindingKey: "service_token",
   fieldKey: "value", environmentVariable: "TRELIO_TEST_SETUP_TOKEN" };
@@ -100,6 +100,35 @@ test("private authentication reuses the real signed child engine and never retur
       await assert.rejects(runMaterializedAgentSkill({...input,privateSecretSetup:null,prepareSetupEnvironment:null}));
     });
   }finally{await fs.rm(directory,{recursive:true,force:true});}
+});
+
+test("human-input declaration is exact signed existing-account auth, never ordinary task or Secret authority", () => {
+  const human = { id: "login", purpose: "authenticate_existing", arguments: ["login", "--qr"], maximumDurationMs: 300_000 };
+  const descriptor = { schemaVersion: 2, commands: [], humanInputCommands: [human] };
+  const fixture = (value, capabilities = ["local-session"]) => ({ capabilities, files: [{
+    path: "trelio-secret-setup.json", bytes: Buffer.from(JSON.stringify(value)),
+  }] });
+  assert.deepEqual(readSkillHumanInputSetupCommand(fixture(descriptor), "login"), human);
+  assert.equal(readSkillHumanInputSetupCommand(fixture(descriptor), "missing"), null);
+  assert.equal(readSkillSecretSetupCommand(fixture(descriptor), human.arguments), null);
+  const taskPackage = fixture(descriptor);
+  taskPackage.files.push({ path: "trelio-assistant-execution.json", bytes: Buffer.from(JSON.stringify({
+    schemaVersion: 1, taskCommands: [["login"], ["read"]],
+  })) });
+  assert.throws(() => assertAssistantTaskSkillCommand(taskPackage, human.arguments), { code: "ASSISTANT_SKILL_COMMAND_DENIED" });
+  assert.doesNotThrow(() => assertAssistantTaskSkillCommand(taskPackage, ["read"]));
+  const secret = { ...command, purpose: "authenticate" };
+  assert.deepEqual(readSkillSecretSetupCommand(fixture({ ...descriptor, commands: [secret] }, ["local-session", "secret-checkout"]), secret.arguments), secret);
+  for (const invalid of [
+    fixture(descriptor, []), fixture({ ...descriptor, schemaVersion: 1 }), fixture({ ...descriptor, commands: [secret] }),
+    fixture({ schemaVersion: 2, commands: [] }), fixture({ ...descriptor, humanInputCommands: [] }),
+    fixture({ ...descriptor, humanInputCommands: [human, human] }),
+    fixture({ ...descriptor, commands: [secret], humanInputCommands: [{ ...human, id: secret.id }] }, ["local-session", "secret-checkout"]),
+    fixture({ ...descriptor, commands: [secret], humanInputCommands: [{ ...human, arguments: secret.arguments }] }, ["local-session", "secret-checkout"]),
+    ...[{ purpose: "create_account" }, { value: "MODEL_VALUE" }, { environmentVariable: "NODE_OPTIONS" },
+      { arguments: ["login", "*"] }, { maximumDurationMs: 59_999 }, { maximumDurationMs: 600_001 },
+      { maximumDurationMs: 60_000.5 }].map(change => fixture({ ...descriptor, humanInputCommands: [{ ...human, ...change }] })),
+  ]) assert.throws(() => readSkillHumanInputSetupCommand(invalid, "login"));
 });
 
 test("setup delivery rejects changed identity/config/env and never retries or leaks an error value", async () => {

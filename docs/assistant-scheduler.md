@@ -1724,6 +1724,21 @@ read-back; accepted history, files, goal and cycle remain intact. Successful
 ciphertext staging alone is never a cancellation receipt.
 
 
+### Signed human-input setup declaration
+
+The SAME signed `trelio-secret-setup.json` v2 optionally declares
+`humanInputCommands` with strict `{id, purpose:"authenticate_existing",
+arguments, maximumDurationMs?}`. These existing-account authentication commands
+contain no Secret/env/value/registration fields. They require `local-session`
+and host >=3.18.0; Secret commands still require `secret-checkout`. Empty
+`commands` is allowed only for a nonempty v2 human-input declaration. Both lists
+share unique IDs and exact argv; no wildcard, prefix or model slot is accepted.
+An optional integer duration is 60,000–600,000 ms and cannot extend the original
+native deadline. The reader selects signed argv by commandId only. An ordinary
+task prefix cannot execute any declared human-input argv. Native exact owner,
+account, device, artifact, human-input grant and the common process/catalogue
+remain separate requirements; parsing a declaration never authorizes a launch.
+
 ### Company Secret use
 
 Existing `secret_list` with `parameters.holder="company"` reads the SAME exact

@@ -510,6 +510,8 @@ publication tooling также остаются вне этого публичн
 - Assistant task skills use the SAME `skill_run`, signed loader/cache, account
   catalogue and process engine. Only native read admission/profile changes;
   no human cache/import/setup fallback. [Contract](docs/assistant-scheduler.md#shared-task-skill-execution).
+  Signed v2 humanInputCommands reuse the SAME setup parser; existing-account
+  auth requires independent owner/account admission and never ordinary task prefixes.
   Task commands additionally require provider-owned signed command prefixes;
   legacy/missing policy fails before account/bootstrap and again at execution.
   Policy v2 also rejects signed denied options (token/equals forms); no host
