@@ -533,6 +533,14 @@ Detached session/authentication fixtures сохраняют исходный ass
 закрывают свой HTTP listener и keyring handle. Если claim не снят, private
 профиль не удаляется. Закрытые fixture stages различают ожидание input/manual,
 остановку browser, snapshot и снятие claim, без bearer/PID/path/native output.
+Native authentication fixture отдельно закрывает только свой синтетический
+HTTP listener и активные sockets по AbortSignal, даже если browser queue или
+async finally ещё ждёт. При исходной ошибке owned browser отменяется без ожидания
+этой очереди; cleanup не заменяет первичный assertion. Unit проверяет active
+request, pre-aborted и pending-bind cleanup. Диагностика дополнительно сохраняет
+только фиксированные variant/action/state/reason. Это исправляет утечку fixture,
+а не доказывает устранение исходной native ошибки; 180 секунд и все assertions
+сохранены.
 Ранний startup отказ дополнительно сохраняет только закрытый этап control/listen/
 owner publish/dependency/browser и разрешённые common process category/operation/
 timeout/errno. Используется общий diagnostic parser; Error message/stack и owner

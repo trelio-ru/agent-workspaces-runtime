@@ -24,7 +24,10 @@ publication tooling также остаются вне этого публичн
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
   требует committed processing и отдельного native read proof.
-  Exact body reads reuse the SAME signed executor and private inbox. Only
+  Exact body reads reuse the SAME signed executor and private inbox.
+  Structural read-reference syntax shares one pure parser with pre-send privacy
+  admission; reuse the common account selector, never a second CLI grammar.
+  Syntax does not replace native pass/source/route checks or body evidence. Only
   explicitly selected original slots with independent read evidence and native
   material outcome become processed; a whole pass/read slot is insufficient.
   External ACK attempts are durably fenced before provider invocation; expiry,
@@ -305,6 +308,9 @@ publication tooling также остаются вне этого публичн
   Both detached session/authentication fixtures preserve the original assertion,
   always close their synthetic listener/keyring handle, and never erase an active
   claim/profile. Assertions never print the bearer-bearing owner descriptor.
+  The native authentication fixture also closes its own HTTP listener directly
+  on abort, independently of a blocked browser queue; closed variant/action/
+  state/reason diagnostics retain the original failure and unchanged deadlines.
   Synthetic startup failures retain only closed startup phases and common native
   process categories; messages/paths/owner data never enter fixture evidence.
   Owner-publication failures also retain an allowlisted filesystem syscall;

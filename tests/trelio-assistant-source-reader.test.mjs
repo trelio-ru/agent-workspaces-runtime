@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
+const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://trelio.ru',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -1401,4 +1401,35 @@ test('additional company binding reuses same catalogue, preserves sessions and r
  const before=await target.list();setupFixture={...setupFixture,id:randomUUID()};
  await assert.rejects(prepareAssistantSourceAccount({...input,sourceId:setupFixture.id}),/ACCOUNT_ID_CONFLICT/);
  assert.deepEqual(await target.list(),before,'another native intent cannot adopt a pre-existing binding');
+});
+
+
+test('the shared pure exact-read parser accepts only native structural selectors and the common account grammar',()=>{
+  const before=reads,accountId=randomUUID();
+  for(const skillId of ['telegram-mtproto','email-imap-smtp','max-web']){
+    const provider=skillId==='email-imap-smtp'?'email':skillId==='max-web'?'max':'telegram';
+    const key=`${provider}-conversation/v1.${'a'.repeat(64)}`,revision='b'.repeat(64);
+    const chat=provider==='max'?'https://web.max.ru/-77':'-77';
+    const args=provider==='email'?['read-reference','--uid','11','--uid-validity','17','--expected-revision',revision,'--expected-conversation-key',key]
+      :['read-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key];
+    const expected={provider,accountId:null,eventId:provider==='email'?'uid:17:11':'message:-77:11',eventRevision:revision,
+      conversationKey:key,...(provider==='email'?{}:{chat})};
+    assert.deepEqual(parseAssistantSourceReadReference({skillId,arguments:args}),expected);
+    assert.ok(Object.isFrozen(parseAssistantSourceReadReference({skillId,arguments:args})));
+    for(const raw of [['--local-account',accountId,...args],[...args,'--local-account',accountId]])
+      assert.deepEqual(parseAssistantSourceReadReference({skillId,arguments:raw}),{...expected,accountId});
+    const wrongKey=[...args];wrongKey[8]=`trelio-conversation/v1.${'a'.repeat(64)}`;
+    const prose=[...args];prose[2]='PRIVATE QUERY';
+    const wrongRevision=[...args];wrongRevision[6]='PRIVATE BODY';
+    const zero=[...args];zero[4]='0';
+    const duplicate=[...args];duplicate[3]=duplicate[1];
+    for(const invalid of [wrongKey,prose,wrongRevision,zero,duplicate,[...args,'--body','PRIVATE'],
+      [...args,'--local-account=PRIVATE'],[...args,'--local-account','PRIVATE'],
+      ['--local-account',accountId,...args,'--local-account',accountId]])
+      assert.throws(()=>parseAssistantSourceReadReference({skillId,arguments:invalid}),{code:'ASSISTANT_SOURCE_READ_REQUIRED'});
+  }
+  assert.equal(parseAssistantSourceReadReference({skillId:'other',arguments:['read-reference','PRIVATE']}),null);
+  assert.equal(parseAssistantSourceReadReference({skillId:'max-web',arguments:['history','PRIVATE']}),null,
+    'unreviewed commands are unavailable, never interpreted as safe queries');
+  assert.equal(reads,before,'pure parser performs no native/account/private storage I/O');
 });

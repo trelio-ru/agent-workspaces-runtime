@@ -1480,6 +1480,19 @@ private/unverified/secret-backed/Remote MCP/setup remain closed. The final resol
 rehydrates and compares current config/local identity before a single provider
 launch. Config/recipient/release/assignment changes do not cause a retry.
 
+The exported pure `parseAssistantSourceReadReference({skillId, arguments})`
+shares the exact SourceReadObserver grammar with encrypted pre-send privacy
+admission. It reuses `splitAccountArguments`, accepts only Telegram/email/MAX
+`read-reference` with the four exact structural flag/value pairs and optional
+one UUID local-account selector, and returns frozen provider/event/revision/
+conversation/account coordinates. Unsupported skill/command returns null;
+malformed recognized reads fail `ASSISTANT_SOURCE_READ_REQUIRED`. Numeric native
+IDs, provider-bound opaque conversation keys and revisions cannot carry query
+or message prose. It performs no I/O and grants no account/source/task authority:
+the observer still matches the original inbox ref and repeats every native
+scope/route/pass check. Other encrypted task argv require their own sealed
+content adapter; a signed command prefix alone is not plaintext permission.
+
 The SAME native Codex stdin validator accepts provider-bound Telegram/MAX
 chat-message and email UIDVALIDITY/UID references. Mixed prefixes, extra content
 or sender/owner claims fail before process launch; source refs never enter argv.

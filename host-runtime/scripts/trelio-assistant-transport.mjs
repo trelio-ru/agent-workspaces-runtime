@@ -7,6 +7,7 @@ import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistan
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
+import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -1105,6 +1106,41 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   });
 };
 
+/** Pure syntax boundary shared by pre-send privacy admission and the exact
+ * source reader. The account selector is parsed by the SAME catalogue grammar;
+ * this function performs no account/native/network I/O and grants no read or
+ * owner authority. The observer still matches the original frozen inbox ref
+ * and repeats current native source/task/route checks before provider work. */
+export const parseAssistantSourceReadReference = ({skillId,arguments:rawArguments}) => {
+  if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(skillId))return null;
+  if(!Array.isArray(rawArguments)||rawArguments.length>11||rawArguments.some(value=>typeof value!=='string'))
+    fail('ASSISTANT_SOURCE_READ_REQUIRED');
+  let selected;try{selected=splitAccountArguments(rawArguments);}catch{fail('ASSISTANT_SOURCE_READ_REQUIRED');}
+  const args=selected.providerArguments;
+  if(args[0]!=='read-reference')return null;
+  const email=skillId==='email-imap-smtp',max=skillId==='max-web',provider=email?'email':max?'max':'telegram';
+  if(args.length!==9)fail('ASSISTANT_SOURCE_READ_REQUIRED');
+  const fields=new Map(),allowed=email?['--uid','--uid-validity','--expected-revision','--expected-conversation-key']
+    :['--chat','--message-id','--expected-revision','--expected-conversation-key'];
+  for(let i=1;i<args.length;i+=2){
+    if(!allowed.includes(args[i])||fields.has(args[i]))fail('ASSISTANT_SOURCE_READ_REQUIRED');
+    fields.set(args[i],args[i+1]);
+  }
+  const positive=value=>typeof value==='string'&&/^[1-9]\d{0,18}$/u.test(value);
+  const chat=fields.get('--chat'),eventRevision=fields.get('--expected-revision'),conversationKey=fields.get('--expected-conversation-key');
+  // Positional shape alone is not a privacy boundary: an approved flag could
+  // otherwise carry arbitrary protected prose. Admit only the provider-bound
+  // opaque hashes and native numeric selectors already used by the inbox.
+  if(!/^[0-9a-f]{64}$/u.test(eventRevision??'')||!assistantConversationKeyMatches(provider,conversationKey)
+    ||(email?!positive(fields.get('--uid'))||!positive(fields.get('--uid-validity'))
+      :!positive(fields.get('--message-id'))||(max?!assistantMaxChatUrl(chat):typeof chat!=='string'||!/^-?[1-9]\d{0,18}$/u.test(chat))))
+    fail('ASSISTANT_SOURCE_READ_REQUIRED');
+  const eventId=email?`uid:${fields.get('--uid-validity')}:${fields.get('--uid')}`
+    :`message:${max?chat.slice('https://web.max.ru/'.length):chat}:${fields.get('--message-id')}`;
+  return Object.freeze({provider,accountId:selected.accountId===null?null:selected.accountId.toLowerCase(),eventId,eventRevision,
+    conversationKey,...(email?{}:{chat})});
+};
+
 /** A trusted observer of the SAME signed task executor, not a second provider.
  * Only an exact original queued read-reference can earn a private read slot.
  * Native source/route/pass reads happen before AND after provider I/O; the
@@ -1140,27 +1176,15 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
   return Object.freeze({
     async prepare({artifact,executionContext,runtimeArguments}){
       if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(artifact?.skillId)||runtimeArguments?.[0]!=='read-reference')return null;
-      const email=artifact.skillId==='email-imap-smtp',max=artifact.skillId==='max-web',provider=email?'email':max?'max':'telegram';
-      // This is an exact native protocol, not general option stripping. Extra,
-      // repeated or missing selectors cannot be interpreted as this body read.
-      if(runtimeArguments.length!==9)fail('ASSISTANT_SOURCE_READ_REQUIRED');
-      const fields=new Map();
-      for(let i=1;i<runtimeArguments.length;i+=2){
-        const name=runtimeArguments[i];
-        if(!(email?['--uid','--uid-validity','--expected-revision','--expected-conversation-key']
-          :['--chat','--message-id','--expected-revision','--expected-conversation-key']).includes(name)||fields.has(name))fail('ASSISTANT_SOURCE_READ_REQUIRED');
-        fields.set(name,runtimeArguments[i+1]);
-      }
-      const chat=fields.get('--chat');
-      if(max&&!assistantMaxChatUrl(chat))fail('ASSISTANT_SOURCE_READ_REQUIRED');
-      const eventId=email?`uid:${fields.get('--uid-validity')}:${fields.get('--uid')}`
-        :`message:${max?chat.slice('https://web.max.ru/'.length):chat}:${fields.get('--message-id')}`;
+      const parsed=parseAssistantSourceReadReference({skillId:artifact.skillId,arguments:runtimeArguments});
+      if(!parsed)fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      const {provider,eventId,eventRevision,conversationKey,chat}=parsed,max=provider==='max';
       const pass=await current();
       if(executionContext?.companyId!==pass.companyId||!UUID.test(executionContext.account?.id??''))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
       const refs=await withInbox(inbox=>inbox.externalDeliveryReferences(pass));
       const matched=refs.filter(row=>row.scope.provider===provider&&row.scope.accountId===executionContext.account.id
-        &&row.event_id===eventId&&row.event_revision===fields.get('--expected-revision')
-        &&row.conversation_key===fields.get('--expected-conversation-key'));
+        &&row.event_id===eventId&&row.event_revision===eventRevision
+        &&row.conversation_key===conversationKey);
       if(matched.length!==1)fail('ASSISTANT_SOURCE_READ_REQUIRED');
       const ref=matched[0],source=await authorize(pass,ref);
       if(source.projectId!==null&&executionContext.projectId!==source.projectId||max&&source.maxChatUrl!==chat)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');

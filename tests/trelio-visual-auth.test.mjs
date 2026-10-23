@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { normalizeVisualAuthentication, visualAuthenticationFingerprint, configureVisualAuthentication, authenticateVisualBrowser, hasVisualAuthenticationCredentials, VISUAL_AUTHENTICATION_TRANSITIONS_API, VISUAL_AUTHENTICATION_COMPATIBILITY_API } from '../host-runtime/scripts/trelio-visual-session.mjs';
@@ -13,6 +14,59 @@ import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-ex
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { runVisualSession } from '../host-runtime/scripts/trelio-visual-session.mjs';
+
+/** Own only this synthetic fixture's listener. Node test cancellation does
+ * not resume a blocked async finally; close the HTTP handle independently on
+ * abort so an already failed native assertion cannot pin the CI process. The
+ * original test/browser deadlines and assertions remain unchanged. */
+const ownFixtureHttpServer = (server, signal) => {
+  let stopping=null;
+  const stop=()=>{
+    signal.removeEventListener('abort',abort);
+    stopping??=new Promise((resolve,reject)=>server.close(error=>{
+      if(error&&error.code!=='ERR_SERVER_NOT_RUNNING')reject(error);else resolve();
+    }));
+    // Stop accepting first, then destroy only this fixture's sockets. Keeping
+    // these steps synchronous also leaves no gap for a new owned connection.
+    server.closeAllConnections();
+    return stopping;
+  };
+  const abort=()=>{void stop().catch(()=>{});};
+  signal.addEventListener('abort',abort,{once:true});
+  return {stop,async listen(){
+    signal.throwIfAborted();
+    const listening=once(server,'listening',{signal});
+    // The native signal also cancels a pending bind. The fixture callback
+    // above additionally destroys active HTTP sockets, not another server.
+    server.listen({port:0,host:'127.0.0.1',signal});await listening;
+  }};
+};
+
+test('synthetic auth listener closes active connections on abort even when browser cleanup is never reached', {timeout:3000}, async()=>{
+  const controller=new AbortController(),server=http.createServer(()=>{});
+  const owned=ownFixtureHttpServer(server,controller.signal);
+  let request;
+  try{
+    await owned.listen();const address=server.address(),incoming=once(server,'request');
+    request=http.get(`http://127.0.0.1:${address.port}`);request.on('error',()=>{});
+    // Destroying the server's active socket intentionally emits ECONNRESET on
+    // this disposable client. Wait for actual close rather than events.once(),
+    // whose error shortcut would reject before that cleanup proof arrives.
+    const disconnected=new Promise(resolve=>request.once('close',resolve));await incoming;
+    controller.abort(new Error('synthetic fixture timeout'));
+    await owned.stop();await disconnected;
+    assert.equal(server.listening,false,'a failed test has no live HTTP handle awaiting its blocked browser queue');
+    await owned.stop();
+  }finally{request?.destroy();await owned.stop();}
+  const early=new AbortController();early.abort(new Error('already aborted'));
+  const unopened=http.createServer(()=>{}),stopped=ownFixtureHttpServer(unopened,early.signal);
+  await assert.rejects(stopped.listen(),/already aborted/);await stopped.stop();assert.equal(unopened.listening,false);
+  const pending=new AbortController(),unbound=http.createServer(()=>{}),cancelled=ownFixtureHttpServer(unbound,pending.signal);
+  const binding=cancelled.listen();pending.abort();
+  await assert.rejects(binding,{name:'AbortError'});await cancelled.stop();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(unbound.listening,false,'an abort during bind cannot create a late listener after cleanup');
+});
 
 const seed = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ'; // RFC 6238 synthetic vector only.
 const recipe = origin => ({ steps: [
@@ -301,12 +355,18 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   let passwordSubmits = 0, codeSubmits = 0, methodFollows = 0, mailSubmits = 0;
   // Fixed synthetic phases/counters locate a hosted outer deadline without
   // printing forms, credentials, private browser output, URLs or native logs.
-  let phase='fixture_server',reported=false;const evidence=[];
+  let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;const evidence=[];
   const record=value=>{if(['auth','window_inventory','window','close_queue','close_manual','close_browser','close_snapshot',
     'browser_exit','browser_quit','browser_stop_timeout','extension_not_ready','extension_not_connected'].includes(value?.stage)){
     evidence.push(value.stage);if(evidence.length>8)evidence.shift();}};
   const diagnose=()=>{if(reported)return;reported=true;process.stderr.write(JSON.stringify({fixture:'synthetic_visual_auth',
-    phase,passwordSubmits,codeSubmits,methodFollows,mailSubmits,evidence})+'\n');};
+    phase,variant,action,lastState,lastReason,failure:primaryFailure?.code==='ERR_ASSERTION'?'assertion':t.signal.aborted?'timeout':'operation',
+    passwordSubmits,codeSubmits,methodFollows,mailSubmits,evidence})+'\n');};
+  const observe=value=>{
+    lastState=['ready','error','manual_input_required','saved_unverified'].includes(value?.state)?value.state:'other';
+    lastReason=['none','bootstrap_failed','manual_control_active','operation_failed','lease_expired','storage_unavailable'].includes(value?.reason)?value.reason:'other';
+    return value;
+  };
   t.signal.addEventListener('abort',diagnose,{once:true});
   const methodChoice = (href = '/totp-entry', extra = '') => `<!doctype html><section id="method-choice"><a id="choose-authenticator" href="${href}">Use authenticator</a>${extra}</section>`;
   const totpForm = '<!doctype html><form id="totp-form" method="post" action="/code"><input id="totp" name="totp" autocomplete="one-time-code"><button id="submit-totp">Sign in</button></form>';
@@ -351,7 +411,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     }
     res.end(req.headers.cookie?.includes('auth_fixture=') ? '<!doctype html><h1 id="account">Synthetic account</h1>' : `<!doctype html><form id="password-form" method="post" action="${req.url === '/unsafe' ? 'https://evil.example.test/' : '/password' + (req.url.includes('segmented') ? '?segmented' : req.url === '/with-follow' ? '?follow' : '')}"><input id="login" name="login"><input id="password" name="password" type="password">${req.url === '/ambiguous' ? '<input id="password" type="password">' : ''}<button id="submit-password">Continue</button></form>`);
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const ownedServer=ownFixtureHttpServer(server,t.signal);await ownedServer.listen();
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
   const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
@@ -392,15 +452,18 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     }));
     assert.equal(passwordSubmits, 3); assert.equal(methodFollows, 1); assert.equal(codeSubmits, 3);
     await browser.close();
-    phase='unsafe_transition_loop';for (const route of ['/follow-unsafe', '/follow-path', '/follow-popup', '/follow-download', '/follow-hidden', '/follow-ambiguous', '/follow-sensitive', '/follow-captcha']) {
-      activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
-      await browser.call('navigate', { url: origin + route });
-      assert.equal((await browser.call('authenticate')).state, 'manual_input_required', route);
-      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
-      assert.equal(methodFollows, 1, 'an unsafe/ambiguous transition never follows its link');
+    phase='unsafe_transition_loop';for (const [selectedVariant,route] of [['foreign_origin','/follow-unsafe'],['wrong_path','/follow-path'],
+      ['popup','/follow-popup'],['download','/follow-download'],['hidden','/follow-hidden'],['ambiguous','/follow-ambiguous'],
+      ['sensitive','/follow-sensitive'],['captcha','/follow-captcha']]) {
+      variant=selectedVariant;activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
+      action='navigate';observe(await browser.call('navigate', { url: origin + route }));
+      action='authenticate';assert.equal(observe(await browser.call('authenticate')).state, 'manual_input_required', route);
+      action='screenshot';assert.equal(observe(await browser.call('screenshot')).reason, 'manual_control_active');
+      action='counters';assert.equal(methodFollows, 1, 'an unsafe/ambiguous transition never follows its link');
       assert.equal(passwordSubmits, 3); assert.equal(codeSubmits, 3);
-      await browser.close();
+      action='close';await browser.close();
     }
+    variant='none';action='none';
     await browser.close(); activeDef = def;
     phase='manual_form_loop';for (const route of ['/unsafe', '/ambiguous', '/sms']) {
       activeStore = memoryStore(def); activeStore.directory = directory; browser = make();
@@ -454,11 +517,23 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     await assert.rejects(browser.mailCall({ operation: 'deliver', handle: status.handle, actor,
       payload: { code: '123456', reference } }));
     assert.equal(mailSubmits, 1);
-  } catch(error) {diagnose();throw error;} finally {
+  } catch(error) {primaryFailure=error;diagnose();throw error;} finally {
     phase='final_close';
-    await browser.close().catch(() => browser.abort()); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
-    t.signal.removeEventListener('abort',diagnose);t.signal.removeEventListener('abort',abortOwned);
+    // A failed body must preserve its original assertion, not wait behind the
+    // same browser queue which just failed. Abort only this owned test browser;
+    // the separate listener is closed FIRST and also has its own abort path.
+    let cleanupFailed=false;
+    try { await ownedServer.stop(); } catch { cleanupFailed=true; }
+    try {
+      if(primaryFailure||t.signal.aborted)browser.abort();
+      else await browser.close().catch(() => browser.abort());
+      await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    } catch { cleanupFailed=true; } finally {
+      t.signal.removeEventListener('abort',diagnose);t.signal.removeEventListener('abort',abortOwned);
+    }
+    // The primary native assertion is the useful failure. A cleanup problem
+    // may fail a successful body, but never replace that original evidence.
+    if(cleanupFailed&&!primaryFailure)throw new Error('synthetic_visual_auth_cleanup_failed');
   }
 });
 
