@@ -6613,6 +6613,12 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
   const input = rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)
     ? rawArguments
     : {};
+  if(nativeTool==='get_task_create_meta'){
+    const metadata=mirror.taskCreateMeta;
+    if(!metadata||metadata.companySlug!==mirror.company.slug||metadata.project?.slug!==input.projectSlug)
+      throw new TrelioLocalContextError('LOCAL_CONTEXT_RESULT_NOT_FOUND','Exact project creation metadata is unavailable.');
+    return {effectiveInstructions:buildLocalScopedEffectiveInstructions(mirror,metadata.project),...metadata};
+  }
   if (nativeTool === "search") {
     // Validate/normalize the existing query contract before matching guidance.
     // This also preserves the same material output for legacy query arguments.
@@ -8254,6 +8260,7 @@ export const usesFreshExactTaskRead = (nativeTool, input) => {
  * generation. Live task ACL and instruction revisions are checked on every
  * page; another task's comments cannot invalidate this task's authority. */
 export const readFreshExactTaskContext = async ({ origin, companySlug, nativeTool, input, provider, signal, unfiledQueue,
+  contextRead,
   requestJson = async (pathname, body) => readJson(await request(provider.requestOrigin, provider.token, pathname, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal,
   })),
@@ -8266,6 +8273,7 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
   }
   const raw = await requestJson(`/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/tasks/read`, {
     tasks: locators.map(locator => ({ projectSlug: locator.projectSlug, taskNumber: Number(locator.taskNumber) })),
+    ...(contextRead?{contextRead,...(nativeTool==='get_agent_procedure'?{procedureId:input.procedureId}:{})}:{}),
   });
   if (raw.company?.id !== provider.companyEncryption.runtime.company.id || raw.company?.slug !== companySlug) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact task context belongs to another company.");
@@ -8273,7 +8281,8 @@ export const readFreshExactTaskContext = async ({ origin, companySlug, nativeToo
   const mirror = await hydrate(raw);
   // Include live context before choosing inline/pages. Appending it after the
   // schema-v3 budget check could overflow a borderline instruction page.
-  return handleNativeLocalContextRead(unfiledQueue ? { ...mirror, unfiledQueue } : mirror, nativeTool, input);
+  const localInput=contextRead?.endsWith('_company')?{...input,projectSlug:undefined}:input;
+  return handleNativeLocalContextRead(unfiledQueue ? { ...mirror, unfiledQueue } : mirror, nativeTool, localInput);
 };
 
 export const handleTrelioLocalContextOperation = async (

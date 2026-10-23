@@ -1188,7 +1188,12 @@ const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=f
   const client={readTaskPass:async()=>{contacts++;return {...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};}};
   const locator={companySlug:'encrypted',projectSlug:`e-${randomUUID()}`,taskNumber:30};
   const descriptor=encryptedTool?{schemaVersion:1,nativeTool:encryptedTool,arguments:encryptedTool==='get_task_sections'
-    ? {...locator,sections:['comments']} : locator,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
+    ? {...locator,sections:['comments']} : {...locator,
+      ...(encryptedTool==='search_agent_guidance'?{query:'SYNTHETIC_TITLE'}:{}),
+      ...(encryptedTool==='get_agent_procedure'?{procedureId:randomUUID()}:{})},
+    ...({get_task_create_meta:'task_create_meta',search_agent_guidance:'guidance_company',get_agent_procedure:'procedure_company'}[encryptedTool]
+      ?{contextRead:{get_task_create_meta:'task_create_meta',search_agent_guidance:'guidance_company',get_agent_procedure:'procedure_company'}[encryptedTool]}:{}),
+    companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId,
     assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'}:null;
   const inspectionDescriptor=encryptedInspection?{schemaVersion:1,companyId:pass.companyId,companySlug:'encrypted',workspaceId:randomUUID(),requestOrigin:'https://e2ee.trelio.ru'}:null;
   const runIdentity=workspaceRun?{workspaceId:randomUUID(),runId:randomUUID()}:null;
@@ -1465,9 +1470,35 @@ test('managed encryption identity is scoped to the live pass and cannot select a
   await assert.rejects(select({origin:f.identity.origin,companyId:f.pass.companyId}),/PASS_REVIEW_REQUIRED/);
 });
 
+test('encrypted guidance keeps original query only in memory across the real MCP proxy and restores it for local ranking',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture({encryptedTool:'search_agent_guidance'});
+  const original={query:'GUIDANCE_QUERY_PRIVATE_CANARY',hints:['GUIDANCE_HINT_PRIVATE_CANARY']};
+  let materializations=0,calls=0;const wire=[];
+  const client=createAssistantMcpClient({...f.identity,store:f.store,
+    withWorkspaceArguments:(input,send)=>withAssistantCompanyContentArguments(input,send,{withProfile:action=>action({readCompanyContentMode:async()=>'encrypted'})}),
+    materializeEncryptedTask:async({descriptor})=>{
+      materializations++;assert.deepEqual({query:descriptor.arguments.query,hints:descriptor.arguments.hints},original);
+      assert.equal(descriptor.contextRead,'guidance_company');return {content:[],structuredContent:{guidance:[]}};
+    },httpRequest:async input=>{
+      wire.push(JSON.stringify(input.payload??{}));
+      const reply=result=>({sessionId:'local-guidance',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'search_agent_guidance',description:'Synthetic native catalogue',inputSchema:{type:'object'}}]});
+      calls++;assert.equal(input.payload.params.arguments.query,'[local guidance]');assert.equal(input.payload.params.arguments.hints,undefined);
+      const descriptor=structuredClone(f.descriptor);delete descriptor.arguments.query;
+      return reply({isError:true,content:[{type:'text',text:'ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED'}],structuredContent:{
+        code:'ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED',localRead:descriptor}});
+    }});
+  try{await client.callTool('search_agent_guidance',original);assert.equal(calls,1);assert.equal(materializations,1);
+    assert.doesNotMatch(wire.join(''),/GUIDANCE_QUERY_PRIVATE_CANARY|GUIDANCE_HINT_PRIVATE_CANARY/);
+  }finally{f.close();}
+});
+
 test('encrypted task reads compose the SAME managed keys, HPKE, native exact projection and selected ciphertext without a mirror',async()=>{
   const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
-  for(const nativeTool of ['get_task','get_task_sections']){
+  for(const nativeTool of ['get_task','get_task_sections','get_task_create_meta','search_agent_guidance','get_agent_procedure']){
     const f=await workspaceProfileFixture({encryptedTool:nativeTool});
     const descriptor=f.profile.encryptedTaskRead,scopeId=randomUUID(),cryptoDeviceId=randomUUID();
     const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
@@ -1486,11 +1517,18 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
     const marker=field=>buildCompanyEncryptedTextMarker(taskEntity,field);
     const company={id:f.pass.companyId,slug:'encrypted',name:'Synthetic'};
     const project={id:projectId,slug:descriptor.arguments.projectSlug,name:'Synthetic project'};
-    const raw=nativeTool==='get_task_sections'?{taskRevision:{id:f.pass.taskId,updatedAt:null},sections:{comments:{comments:[{bodyText:marker('comment')}]}}}
+    let raw=nativeTool==='get_task_sections'?{taskRevision:{id:f.pass.taskId,updatedAt:null},sections:{comments:{comments:[{bodyText:marker('comment')}]}}}
       : {schemaVersion:1,company,viewer:{memberId:randomUUID(),companyRole:'user'},viewerGroupIds:[],projects:[project],
         tasks:[{id:f.pass.taskId,projectId,projectSlug:project.slug,number:30,revisionToken:'synthetic:1',
           payload:{company,project,task:{id:f.pass.taskId,title:marker('title'),status:{code:'active',name:'Active'},participants:[],controls:[]}}}],
         instructions:{company:{compiledMarkdown:marker('rules')},projects:[],userProfile:null},workspaces:[],workspaceEntries:[],contextDocuments:[]};
+    if(nativeTool==='get_task_create_meta')raw={...raw,tasks:[],taskCreateMeta:{companySlug:company.slug,project:{...project,name:marker('title')},
+      viewer:raw.viewer,defaults:{statusCode:'active',urgency:0},statuses:[],availableMembers:[],availableMemberGroups:[]}};
+    if(['search_agent_guidance','get_agent_procedure'].includes(nativeTool))raw={...raw,tasks:[],
+      agentSkills:{company:[{id:'synthetic-skill',catalogSlug:'synthetic',title:marker('title'),description:'',enabled:true,searchTerms:[]}],projects:[]},
+      agentProcedures:nativeTool==='get_agent_procedure'?[{kind:'procedure',project:null,
+        procedure:{id:descriptor.arguments.procedureId,state:'published',publishedRevisionNumber:1},
+        revision:{title:marker('title'),description:'',instructionsMarkdown:marker('rules'),searchTerms:[]}}]:[]};
     const previous=globalThis.fetch;let mode='valid',contentReads=0;const paths=[];
     globalThis.fetch=async(url,options)=>{
       url=new URL(url);paths.push(url.pathname);
@@ -1509,6 +1547,11 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
       assert.equal(url.origin,'https://e2ee.trelio.ru');assert.equal(options.method,'POST');contentReads++;
       assert.equal(url.pathname,descriptor.paths[0].replace('/api/agent-workspaces','/api/digital-assistants/runtime/workspace'));
       assert.equal(JSON.parse(options.body).recipientDeviceId,cryptoDeviceId);
+      if(descriptor.contextRead){
+        const body=JSON.parse(options.body);assert.equal(body.contextRead,descriptor.contextRead);
+        assert.equal(body.query,undefined);assert.equal(body.hints,undefined);
+        if(nativeTool==='get_agent_procedure')assert.equal(body.procedureId,descriptor.arguments.procedureId);
+      }
       const selected=structuredClone(rows);
       if(mode==='aad')selected[0].aad.companyId=randomUUID();
       if(mode==='ciphertext')selected[0].ciphertext='AAAA';
@@ -1521,8 +1564,8 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
     try{
       const result=await run();assert.notEqual(result.isError,true);
       const rendered=JSON.stringify(result);
-      assert.match(rendered,nativeTool==='get_task'?/SYNTHETIC_TITLE/:/SYNTHETIC_COMMENT/);
-      if(nativeTool==='get_task')assert.match(rendered,/SYNTHETIC_RULE/);
+      assert.match(rendered,nativeTool==='get_task_sections'?/SYNTHETIC_COMMENT/:/SYNTHETIC_TITLE/);
+      if(['get_task','get_task_create_meta','get_agent_procedure'].includes(nativeTool))assert.match(rendered,/SYNTHETIC_RULE/);
       assert.doesNotMatch(rendered,/~e1:|wrappedPrivateBundle|scopePrivateEncryptionJwk|hpkeEnc|ciphertextSha256/);
       assert.equal(paths.some(path=>path.includes('manifest')||path.includes('payloads/resolve')),false);
       for(const failure of ['aad','ciphertext','missing','recipient']){

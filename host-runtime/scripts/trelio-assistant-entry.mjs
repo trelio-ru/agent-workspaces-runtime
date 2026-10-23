@@ -1210,6 +1210,18 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       signal?.throwIfAborted();return send({...args,parameters});
     },{signal});
   }
+  if(name==='search_agent_guidance')return withProfile(async({readCompanyContentMode})=>{
+    if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    if(await readCompanyContentMode(signal)==='plain')return send(args);
+    if(Object.keys(args).some(key=>!['companySlug','projectSlug','query','hints','limit','taskPass','runtimeSessionProof'].includes(key))
+      ||typeof args.query!=='string')throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    // Only this platform literal crosses encrypted MCP. Original query/hints
+    // stay in the current invocation and are restored AFTER the native scoped
+    // read descriptor is verified, before shared local matching. No payload,
+    // disk query cache, human mirror or plaintext HTTP fallback is created.
+    const {hints:_hints,...wire}=args;
+    signal?.throwIfAborted();return send({...wire,query:'[local guidance]'});
+  },{signal});
   if(isAssistantStructuralResultRetraction(name,args)
     ||ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'
     || name==='prepare_assistant_workspace_run'

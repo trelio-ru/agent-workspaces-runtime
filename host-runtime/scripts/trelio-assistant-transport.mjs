@@ -2597,7 +2597,18 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           if(typeof materializeEncryptedTask!=='function' || value.structuredContent.localRead?.nativeTool!==name)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           await validateAssistantEncryptedTaskRead({descriptor:value.structuredContent.localRead,
             identity:{origin,assistantId,deviceId}});
-          return materializeEncryptedTask({descriptor:structuredClone(value.structuredContent.localRead),name,signal});
+          const descriptor=structuredClone(value.structuredContent.localRead);
+          if(['search_agent_guidance','get_agent_procedure'].includes(name)
+            && (descriptor.contextRead?.endsWith('_project')!==Boolean(argumentsSnapshot.projectSlug)
+              ||name==='get_agent_procedure'&&descriptor.arguments.procedureId!==argumentsSnapshot.procedureId))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          if(name==='search_agent_guidance'){
+            // The native descriptor supplies scope, never the encrypted query.
+            // Native input-schema validation above already checked these
+            // original in-memory leaves; only the local matcher receives them.
+            descriptor.arguments.query=argumentsSnapshot.query;
+            if(argumentsSnapshot.hints!==undefined)descriptor.arguments.hints=argumentsSnapshot.hints;
+          }
+          return materializeEncryptedTask({descriptor,name,signal});
         }
         if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED'){
           if(name!=='get_agent_skill'||typeof materializeEncryptedSkill!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
@@ -2617,9 +2628,13 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
  * Native pass checks are repeated by the private profile and by every server
  * snapshot, so these coordinates confer no domain authority on their own. */
 export const validateAssistantEncryptedTaskRead = async ({descriptor,identity,pass}) => {
+  const contextRead={get_task_create_meta:['task_create_meta'],search_agent_guidance:['guidance_company','guidance_project'],
+    get_agent_procedure:['procedure_company','procedure_project']}[descriptor?.nativeTool];
   if(!object(descriptor) || Object.keys(descriptor).sort().join(',')!==
-    'arguments,assistantUserId,companyId,deviceId,nativeTool,passId,requestOrigin,schemaVersion,taskId'
-    || descriptor.schemaVersion!==1 || !['get_task','get_task_instruction_page','get_task_sections'].includes(descriptor.nativeTool)
+    `arguments,assistantUserId,companyId,${contextRead?'contextRead,':''}deviceId,nativeTool,passId,requestOrigin,schemaVersion,taskId`
+    || descriptor.schemaVersion!==1 || !['get_task','get_task_instruction_page','get_task_sections','get_task_create_meta','search_agent_guidance','get_agent_procedure'].includes(descriptor.nativeTool)
+    || contextRead&&!contextRead.includes(descriptor.contextRead)
+    || descriptor.nativeTool==='get_agent_procedure'&&!UUID.test(descriptor.arguments?.procedureId??'')
     || !object(descriptor.arguments) || ['taskPass','runtimeSessionProof','knownInstructionLayerKeys'].some(key=>Object.hasOwn(descriptor.arguments,key))
     || descriptor.assistantUserId!==identity.assistantId || descriptor.deviceId!==identity.deviceId
     || ['companyId','taskId','passId'].some(key=>!UUID.test(descriptor[key]??'') || pass && descriptor[key]!==pass[key]))fail('ASSISTANT_MCP_INVALID_RESPONSE');
@@ -2823,13 +2838,14 @@ export const materializeAssistantEncryptedTask = async ({origin,descriptor,signa
     ? await context.getTaskSectionsFromProvider({origin,token,companyEncryption,mirror:{company:{slug:descriptor.companySlug}},
       rawInput:args,signal,fresh:true,requestJson,hydrate})
     : await context.readFreshExactTaskContext({origin,companySlug:descriptor.companySlug,nativeTool:descriptor.nativeTool,
-      input:args,provider:{requestOrigin:descriptor.requestOrigin,token,companyEncryption},signal,requestJson,hydrate});
+      input:args,provider:{requestOrigin:descriptor.requestOrigin,token,companyEncryption},signal,requestJson,hydrate,
+      ...(descriptor.contextRead?{contextRead:descriptor.contextRead}:{})});
   signal?.throwIfAborted();
   await assertCurrent(signal);
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
   const {buildLocalTaskReadToolResult}=await import('./trelio-task-read-budget.mjs');
-  return compactLocalNativeMcpResult(descriptor.nativeTool,descriptor.nativeTool==='get_task_sections'
-    ? {structuredContent:result,content:[{type:'text',text:'Read the selected task sections from structuredContent.'}]}
+  return compactLocalNativeMcpResult(descriptor.nativeTool,!['get_task','get_task_instruction_page'].includes(descriptor.nativeTool)
+    ? {structuredContent:result,content:[{type:'text',text:'Read the selected native context from structuredContent.'}]}
     : buildLocalTaskReadToolResult(result),args);
 };
 

@@ -25,6 +25,7 @@ publication tooling также остаются вне этого публичн
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
   требует committed processing и отдельного native read proof.
   Exact body reads reuse the SAME signed executor and private inbox.
+  Encrypted metadata/guidance use the SAME scoped task reader; queries stay local.
   Structural read-reference syntax shares one pure parser with pre-send privacy
   admission; reuse the common account selector, never a second CLI grammar.
   Syntax does not replace native pass/source/route checks or body evidence. Only

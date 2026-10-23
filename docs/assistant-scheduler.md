@@ -2021,3 +2021,16 @@ Native bind/route guards are exercised by backend PostgreSQL tests; runtime
 fixtures separately exercise actual signed child/account/capture and the
 first-send → bind fixture → incoming reply → same-thread coordinator sequence.
 They do not assert a live provider exchange or Windows business acceptance.
+
+### Scoped encrypted creation metadata and published guidance
+
+The SAME exact task POST snapshot also selects one closed context read: project
+creation metadata, company/current-project guidance, or one published procedure.
+Native task/device/pass/proof, stable mode, current recipient and ordinary
+project CREATE/dependency ACL remain independent. It is not a company mirror or
+general payload resolver. Original queries/hints never cross MCP/HTTP: the host
+sends a fixed platform placeholder, keeps the original only in the invocation,
+verifies the native scope descriptor and restores the leaves for the SAME local
+ranking/hydration code. Native procedure IDs and scope cannot be substituted.
+Creation metadata reuses the native human projection and SAME scoped authority
+builder. No new journal, content field, cache, index, outbox or crypto engine.
