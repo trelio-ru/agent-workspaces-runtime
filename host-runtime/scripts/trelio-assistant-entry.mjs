@@ -6,7 +6,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -1086,7 +1086,8 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
 export const withAssistantCompanyContentArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace}={})=>{
   if(!ASSISTANT_MCP_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-  if(ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'
+  if(isAssistantStructuralResultRetraction(name,args)
+    ||ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'
     || name==='prepare_assistant_workspace_run'
     || name==='continue_assistant_workspace_action'
       && ['inspect','open','status','heartbeat','secret_list','secret_generate'].includes(args.operation))return send(args);

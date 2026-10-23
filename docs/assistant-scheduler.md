@@ -796,6 +796,14 @@ once. It neither copies native branch validators nor invents approval flags.
 current; subsequent changes require a normal `no_status_change` Run that reverses
 only the own erroneous delta and preserves later work. Conflicts remain blockers.
 
+In encrypted companies, only the closed structural retract branch crosses this
+native surface. Unknown fields, reasons and arbitrary operation names still fail
+before HTTP. No key or ciphertext is needed to retire evidence. Correct files
+through an ordinary encrypted no_status_change Run from the current head, using
+the accepted own base/delta and preserving later work/current control files. Read
+back accepted files before attaching correctionRunId; direct restore stays closed
+in this profile, without a human auth or server-Git fallback.
+
 The worker must inspect the resulting accepted files, then call `retract` with
 the verified `correctionRunId` and exact current head. Neither the source nor the
 correction is business completion. Continue the real human goal with a valid

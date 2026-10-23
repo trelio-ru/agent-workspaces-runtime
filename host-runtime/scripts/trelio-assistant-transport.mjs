@@ -16,6 +16,18 @@ const fail = (code, status) => { throw new AssistantTransportError(code, status)
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HEAD = /^[0-9a-f]{40,64}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
+/** A closed structural exception, never a generic encrypted mutation bypass.
+ * The live native schema/proof still owns the operation. This small presend
+ * predicate merely proves there is no company prose to protect or leak: a
+ * restore reason or an unknown root field cannot ride along with retraction. */
+export const isAssistantStructuralResultRetraction = (name,args) => name === 'repair_assistant_workspace_result'
+  &&object(args)&&args.operation==='retract'&&args.agentRecognizedOwnError===true
+  &&['workspaceId','runId'].every(key=>typeof args[key]==='string'&&UUID.test(args[key]))
+  &&typeof args.expectedHead==='string'&&HEAD.test(args.expectedHead)
+  &&['wrong_scope','unauthorized_write','incorrect_result'].includes(args.errorKind)
+  &&(args.correctionRunId===undefined||typeof args.correctionRunId==='string'&&UUID.test(args.correctionRunId))
+  &&Object.keys(args).every(key=>['operation','workspaceId','runId','expectedHead','errorKind','agentRecognizedOwnError',
+    'correctionRunId','taskPass','runtimeSessionProof'].includes(key));
 const id = value => { if (typeof value !== 'string' || !UUID.test(value)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); return value.toLowerCase(); };
 /** One catalogue for source polling and task execution on this managed device.
  * Company/member bindings remain inside the common catalogue. Neither profile

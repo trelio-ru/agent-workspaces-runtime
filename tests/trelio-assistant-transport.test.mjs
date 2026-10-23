@@ -1088,6 +1088,16 @@ test('production content preflight refuses encrypted prose before the real MCP t
     await assert.rejects(client.callTool('continue_assistant_workspace_action',{schemaVersion:1,operation,parameters:{value:canary}}),
       {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
   assert.equal(remoteCalls,0);assert.equal(wire.join('').includes(canary),false);
+  const retirement={operation:'retract',workspaceId:randomUUID(),runId:randomUUID(),expectedHead:'a'.repeat(40),
+    errorKind:'incorrect_result',agentRecognizedOwnError:true};
+  await client.callTool('repair_assistant_workspace_result',retirement);
+  assert.equal(remoteCalls,1,'structural retirement uses the same native tool once, without opening an encryption key');
+  for(const changed of [{...retirement,reason:canary},{...retirement,unknown:canary},
+    {...retirement,errorKind:canary},{...retirement,expectedHead:canary},
+    {...retirement,operation:'restore',reason:canary}]){
+    await assert.rejects(client.callTool('repair_assistant_workspace_result',changed),{code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+  }
+  assert.equal(remoteCalls,1,'no company prose can ride along with the structural exception');
   assert.ok(inventoryReads>0);assert.equal(f.contacts(),2*inventoryReads,'fresh native pass checks bracket each inventory');
   for(const skillId of ['telegram-mtproto','email-imap-smtp','max-web']){
     const provider=skillId==='email-imap-smtp'?'email':skillId==='max-web'?'max':'telegram';
@@ -1103,13 +1113,13 @@ test('production content preflight refuses encrypted prose before the real MCP t
         parameters:{...parameters,arguments:argumentsList}}));
     assert.equal(remoteCalls,before,'only exact structural references cross encrypted MCP, no implicit account or prose');
   }
-  assert.equal(remoteCalls,3);assert.equal(wire.join('').includes(canary),false);
-  mode=null;await client.callTool('create_comment',args);assert.equal(remoteCalls,4,'legacy null mode is the native plain state');
+  assert.equal(remoteCalls,4);assert.equal(wire.join('').includes(canary),false);
+  mode=null;await client.callTool('create_comment',args);assert.equal(remoteCalls,5,'legacy null mode is the native plain state');
   mode='plain';loseResponse=true;
   await assert.rejects(client.callTool('create_comment',args),{code:'ASSISTANT_MCP_UNAVAILABLE'});
-  assert.equal(remoteCalls,5,'a lost response does not replay the original mutation');
+  assert.equal(remoteCalls,6,'a lost response does not replay the original mutation');
   loseResponse=false;mode='encrypted';const before=inventoryReads;
-  await client.callTool('get_task',{});assert.equal(remoteCalls,6);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
+  await client.callTool('get_task',{});assert.equal(remoteCalls,7);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
 });
 
 test('encrypted private preparation sends only signed command coordinates with an owned fingerprint; arbitrary vectors never reach HTTP',async()=>{
