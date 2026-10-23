@@ -36,7 +36,7 @@ const hashSecretBrowserTargetUrl = (targetUrl) => (
   crypto.createHash("sha256").update(targetUrl, "utf8").digest("hex")
 );
 
-export const normalizeSecretBrowserTarget = (rawTargetUrl, expectedOrigin, expectedUrlSha256) => {
+export const normalizeSecretBrowserGrantTarget = (rawTargetUrl) => {
   let targetUrl;
   try {
     targetUrl = new URL(String(rawTargetUrl || ""));
@@ -48,7 +48,6 @@ export const normalizeSecretBrowserTarget = (rawTargetUrl, expectedOrigin, expec
     || targetUrl.username
     || targetUrl.password
     || targetUrl.toString().length > 2048
-    || targetUrl.origin !== expectedOrigin
   ) {
     throw new SecretBrowserFillError(
       "Browser fill target не совпадает с HTTPS origin одноразового grant.",
@@ -56,16 +55,23 @@ export const normalizeSecretBrowserTarget = (rawTargetUrl, expectedOrigin, expec
     );
   }
   const normalizedTargetUrl = targetUrl.toString();
+  return {targetUrl:normalizedTargetUrl,targetOrigin:targetUrl.origin,targetUrlSha256:hashSecretBrowserTargetUrl(normalizedTargetUrl)};
+};
+
+export const normalizeSecretBrowserTarget = (rawTargetUrl, expectedOrigin, expectedUrlSha256) => {
+  const target=normalizeSecretBrowserGrantTarget(rawTargetUrl);
+  if(target.targetOrigin!==expectedOrigin)throw new SecretBrowserFillError(
+    "Browser fill target не совпадает с HTTPS origin одноразового grant.","target_origin_changed");
   if (
     !/^[0-9a-f]{64}$/u.test(String(expectedUrlSha256 || ""))
-    || hashSecretBrowserTargetUrl(normalizedTargetUrl) !== expectedUrlSha256
+    || target.targetUrlSha256 !== expectedUrlSha256
   ) {
     throw new SecretBrowserFillError(
       "Browser fill target не совпадает с exact URL одноразового grant.",
       "target_url_changed",
     );
   }
-  return normalizedTargetUrl;
+  return target.targetUrl;
 };
 
 export const normalizeSecretBrowserFieldSelector = (rawSelector) => {

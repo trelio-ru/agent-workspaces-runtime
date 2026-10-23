@@ -887,7 +887,7 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
   const metadata={grantId,runId,secretId,secretVersion:1,storageMode:'trelio',deliveryMode:'env',executable:'trelio-workspace',fieldKeys:['value'],
     environmentVariable:binding.environmentVariable,expiresAt:new Date(Date.now()+300000).toISOString()};
   const rules='# Synthetic platform rules\n',sha256=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
-  let consumed=0,resolutions=0,lateRefusal=false,encrypted=encryptedCase,cryptoMode='valid',fetchFailure;const savedFetch=globalThis.fetch,nonces=new Set();
+  let consumed=0,resolutions=0,lateRefusal=false,encrypted=encryptedCase,cryptoMode='valid',fetchFailure,browserMode=false,browserConsumed=0;const savedFetch=globalThis.fetch,nonces=new Set();
   const fixtureFetch=async(url,options)=>{
     assert.ok([taskIdentity.origin,'https://e2ee.trelio.ru'].includes(url.origin));assert.doesNotMatch(String(options.body??''),/PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
     const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
@@ -907,6 +907,9 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
         company:{id:pass.companyId,slug:'fixture'},viewer:{userId:taskIdentity.assistantId}}));}
     if(url.pathname===`/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context`){
       assert.equal(url.origin,taskIdentity.origin);if(encryptedCase)assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
+      if(browserMode){assert.equal(url.searchParams.has('purpose'),false);return new Response(JSON.stringify({...metadata,
+        deliveryMode:'browser',targetOrigin:'https://service.invalid',targetUrlSha256:'b'.repeat(64),browserSteps:[{
+          targetOrigin:'https://service.invalid',targetUrlSha256:'b'.repeat(64),fields:[{fieldKey:'value',selector:'#password'}]}]}));}
       assert.equal(url.searchParams.get('purpose'),'signed_skill');return new Response(JSON.stringify(metadata));}
     if(url.pathname==='/api/agent-skills/runtime/resolve'){
       resolutions++;assert.deepEqual(JSON.parse(options.headers.get('x-trelio-assistant-secret-checkout')),{grantId,runId});
@@ -916,7 +919,8 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
     if(url.pathname==='/api/agent-skills/runtime/package')return new Response(bytes);
     assert.equal(url.pathname,`/api/agent-secrets/checkout-grants/${grantId}/consume`);
     assert.equal(url.origin,taskIdentity.origin);if(encryptedCase)assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
-    assert.deepEqual(JSON.parse(options.body),{runId,purpose:'signed_skill'});assert.equal(consumed,0,'the existing one-use native grant cannot replay');consumed++;
+    if(browserMode){assert.deepEqual(JSON.parse(options.body),{runId});assert.equal(browserConsumed,0);browserConsumed++;}
+    else{assert.deepEqual(JSON.parse(options.body),{runId,purpose:'signed_skill'});assert.equal(consumed,0,'the existing one-use native grant cannot replay');consumed++;}
     return new Response(JSON.stringify({...metadata,environmentVariables:null,values:{value}}));
   };
   globalThis.fetch=async(...args)=>{try{return await fixtureFetch(...args);}catch(error){fetchFailure=error;throw error;}};
@@ -938,7 +942,27 @@ for(const encryptedCase of [false,true])test(`private authentication composes re
     if(encryptedCase){const token=await profile.requireToken(taskIdentity.origin);
       await assert.rejects(profile.prepareRequest({origin:'https://e2ee.trelio.ru',token,
         pathname:`/api/agent-workspaces/runs/${runId}/heartbeat`,options:{method:'POST',body:'{}'},buildHeaders:()=>new Headers()}),/ORIGIN_DENIED/);
-      assert.equal(consumed,1,'private auth never inherits encrypted Workspace write authority');}
+      assert.equal(consumed,1,'private auth never inherits encrypted Workspace write authority');
+      // The browser adapter uses that SAME genuine encrypted Run/HPKE key and
+      // protected HTTP consumer, but its own exact profile never inherits the
+      // signed skill recipe or ordinary Workspace writes. The common browser
+      // controller's actual value/URL binding is covered by its process tests.
+      browserMode=true;
+      const browser=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,
+        secretBrowserFill:{grantId,runId,workspaceId},lockDirectory:path.join(directory,'private-browser-locks'),lock:(_file,action)=>action()});
+      await engine.withWorkspaceExecutionProfile(browser,async()=>{
+        cryptoMode='recipient';await assert.rejects(browser.prepareWorkspaceRun());assert.equal(browserConsumed,0);cryptoMode='valid';
+        const encryption=await browser.prepareWorkspaceRun();assert.equal(encryption.requestOrigin,'https://e2ee.trelio.ru');
+        const token=await engine.requireToken(taskIdentity.origin),prefix=`/api/agent-secrets/checkout-grants/${grantId}`;
+        const context=await (await engine.request(encryption.requestOrigin,token,`${prefix}/browser-fill-context?runId=${runId}`)).json();
+        assert.equal(context.deliveryMode,'browser');assert.equal(context.targetUrlSha256,'b'.repeat(64));
+        const delivered=await (await engine.request(encryption.requestOrigin,token,`${prefix}/consume`,{method:'POST',body:JSON.stringify({runId})})).json();
+        assert.equal(delivered.values.value,value);assert.equal(browserConsumed,1);
+        await assert.rejects(browser.prepareRequest({origin:encryption.requestOrigin,token,
+          pathname:`/api/agent-workspaces/runs/${runId}/heartbeat`,options:{method:'POST',body:'{}'},buildHeaders:()=>new Headers()}),/ORIGIN_DENIED/);
+      });
+      assert.equal(fetchFailure,undefined);
+    }
   }finally{globalThis.fetch=savedFetch;}
 });
 

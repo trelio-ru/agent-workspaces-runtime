@@ -872,7 +872,8 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   if(workspaceRun!==null && (!object(workspaceRun) || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
     || Object.values(workspaceRun).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const explicitRun=workspaceRun===null?null:Object.freeze({...workspaceRun});
-  const ownRun=explicitRun??(privateSkill?Object.freeze({runId:privateSkill.runId,workspaceId:privateSkill.workspaceId}):null);
+  const privateRun=privateSkill??privateFill;
+  const ownRun=explicitRun??(privateRun?Object.freeze({runId:privateRun.runId,workspaceId:privateRun.workspaceId}):null);
   if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,explicitRun,materialWorkspaceId,skillRead].filter(Boolean).length>1)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null,encryptedSkillCompany=null,skillFingerprint=null;
@@ -917,6 +918,47 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         ||!/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record?.fingerprint??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertLivePass(signal);
       return {...structuredClone(parameters),encryptionFingerprint:stored.record.fingerprint};
+    },
+    async preparePrivateBrowserArguments(args,signal){
+      const {normalizeSecretBrowserGrantTarget,normalizeSecretBrowserFieldSelector}=await import('./trelio-secret-browser.mjs');
+      const crypto=await import('./trelio-company-encryption.mjs');
+      const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
+      const current=()=>assertLivePass(signal),parameters=args.parameters;
+      if(!object(parameters)||Object.hasOwn(parameters,'encryptedPlan'))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      let selected,first;
+      if(args.operation==='secret_browser_prepare'){
+        if(Object.keys(parameters).sort().join(',')!=='runId,secretId,steps'||!uuid.test(parameters.runId??'')||!uuid.test(parameters.secretId??'')
+          ||!Array.isArray(parameters.steps)||parameters.steps.length<1||parameters.steps.length>10)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+        const seen=new Set();
+        const steps=parameters.steps.map((step,index)=>{
+          if(!object(step)||Object.keys(step).some(key=>!['targetUrl','fields','activationSelector','submitSelector'].includes(key))
+            ||!Array.isArray(step.fields)||!step.fields.length||step.fields.length>50
+            ||index<parameters.steps.length-1&&step.submitSelector===undefined)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+          const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(step.targetUrl);first??=targetUrl;
+          const fields=step.fields.map(field=>{
+            if(!object(field)||Object.keys(field).sort().join(',')!=='fieldKey,selector'
+              ||!/^[a-z][a-z0-9_]{0,63}$/u.test(field.fieldKey??'')||seen.has(field.fieldKey))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+            seen.add(field.fieldKey);return {fieldKey:field.fieldKey,selector:normalizeSecretBrowserFieldSelector(field.selector)};
+          });
+          return {...target,fields,...(step.activationSelector!==undefined?{activationSelector:normalizeSecretBrowserFieldSelector(step.activationSelector)}:{}),
+            ...(step.submitSelector!==undefined?{submitSelector:normalizeSecretBrowserFieldSelector(step.submitSelector)}:{})};
+        });
+        selected={schemaVersion:1,operation:args.operation,parameters:{secretId:parameters.secretId,runId:parameters.runId,steps}};
+      }else if(args.operation==='secret_browser_fill'){
+        if(Object.keys(parameters).sort().join(',')!=='grantId,targetUrl'||!uuid.test(parameters.grantId??'')
+          ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
+          ||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+        const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(parameters.targetUrl);first=targetUrl;
+        selected={schemaVersion:1,operation:args.operation,runIdentity:structuredClone(args.runIdentity),parameters:{grantId:parameters.grantId,...target}};
+      }else fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      await current();
+      const device=await resolveAssistantCompanyEncryptionDevice({identity,companyId:pass.companyId,store,lockDirectory,
+        assertCurrent:current,allowCreate:false,lock});
+      const signature=await crypto.signCompanyEncryptionRecord(device.privateKeys.signingPrivateKey,{protocol:'assistant-managed-content/v1',
+        phase:'publication',companyId:pass.companyId,target:{kind:'task',pass:locator},nativeTool:'continue_assistant_workspace_action',arguments:selected});
+      await current();
+      return {parameters:{...selected.parameters,encryptedPlan:{schemaVersion:1,fingerprint:device.fingerprint,signature}},
+        targetUrl:first,target:selected.parameters.steps?.[0]??selected.parameters};
     },
     async prepareWorkspaceMaterial(){
       if(!materialWorkspaceId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
@@ -985,7 +1027,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(requestOrigin!==identity.origin || companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
       managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
-        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany&&!privateSkill,lock});
+        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany&&!privateRun,lock});
       return managedEncryptionDevice;
     },
     async hydrateSkillRuntimeResolution(raw,common,signal){
@@ -1165,7 +1207,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           route={proofTool:'assistant_secret_generate_write'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
-      }else if(privateFill && requestOrigin===identity.origin
+      }else if(privateFill && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateFill.grantId}/`)){
         const base=`/api/agent-secrets/checkout-grants/${privateFill.grantId}`;
         if(method==='GET' && url.pathname===base+'/browser-fill-context' && options.body===undefined
@@ -1181,6 +1223,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           route={proofTool:outcome?'assistant_secret_browser_outcome':'assistant_secret_browser_consume'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
+        if(lifecycle)url=new URL(url.pathname+url.search,identity.origin);
       }else if(privateSkill && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateSkill.grantId}/`)){
         const base=`/api/agent-secrets/checkout-grants/${privateSkill.grantId}`;
@@ -1240,7 +1283,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
             || !url.pathname.startsWith(nativePrefix+`/workspaces/${inspection.workspaceId}/`)
             || !inspectionEncryption : requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         }else if(lifecycle){
-          if(privateSkill&&method!=='GET')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          if(privateRun&&method!=='GET')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           if(!assistantWorkspaceEncryptedLifecycleRoute(method,route.routePattern))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           const suffix=url.pathname.slice(nativePrefix.length);
           const runPath=suffix.startsWith(`/runs/${ownRun.runId}/`);
@@ -1285,7 +1328,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         }
         headers.delete('x-trelio-assistant-source-encryption-fingerprint');
         headers.delete('x-trelio-assistant-skill-guidance');
-        if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')){
+        if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')||route.proofTool.startsWith('assistant_secret_browser_')){
           const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
           if(stored?.assistantId===identity.assistantId&&stored.deviceId===identity.deviceId&&stored.companyId===pass.companyId
             &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){

@@ -1062,7 +1062,7 @@ test('production content preflight refuses encrypted prose before the real MCP t
   const f=await workspaceProfileFixture();let mode='encrypted',inventoryReads=0,remoteCalls=0,loseResponse=false;
   const canary='SYNTHETIC_PRIVATE_COMPANY_CONTENT';
   f.client.companies=async()=>{inventoryReads++;return [{companyId:f.pass.companyId,encryptionState:mode}];};
-  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments});
+  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments,preparePrivateBrowserArguments:f.profile.preparePrivateBrowserArguments});
   const client=createAssistantMcpClient({...f.identity,store:f.store,
     withWorkspaceArguments:(input,send)=>withAssistantEncryptedWorkspaceArguments(input,send,{withProfile,
       withManagedContent:(input,send)=>withAssistantCompanyContentArguments(input,send,{withProfile})}),
@@ -1130,6 +1130,47 @@ test('encrypted private preparation sends only signed command coordinates with a
     await assert.rejects(invoke(changed),/ENCRYPTED_CONTENT_REQUIRED/);
   assert.equal(calls,1);assert.equal(wire.join('').includes(canary),false);
   f.close();await assert.rejects(invoke(parameters),/PASS_REVIEW_REQUIRED/);assert.equal(calls,1);
+});
+
+test('encrypted private browser signs normalized native targets and keeps full URL only in local fill plans',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const crypto=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
+  const f=await workspaceProfileFixture();f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:'encrypted'}];
+  const managed=await resolveAssistantCompanyEncryptionDevice({identity:f.identity,companyId:f.pass.companyId,store:f.store,
+    lockDirectory:path.join(os.tmpdir(),'synthetic-browser-key'),assertCurrent:async()=>{},lock:(_f,fn)=>fn()});
+  const canary='PRIVATE_BROWSER_PATH_QUERY_CANARY',targetUrl=`https://example.invalid/account/${canary}?flow=${canary}`;
+  const target={targetOrigin:'https://example.invalid',targetUrlSha256:createHash('sha256').update(targetUrl).digest('hex')};
+  const runIdentity={workspaceId:randomUUID(),runId:randomUUID()},secretId=randomUUID(),grantId=randomUUID();let calls=0,tamper=false;
+  const args={schemaVersion:1,operation:'secret_browser_prepare',parameters:{secretId,runId:runIdentity.runId,
+    steps:[{targetUrl,fields:[{fieldKey:'password',selector:'#password'}],submitSelector:'#submit'}]}};
+  const withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,
+    preparePrivateBrowserArguments:f.profile.preparePrivateBrowserArguments,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments});
+  const invoke=input=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',args:input},async wire=>{
+    calls++;assert.doesNotMatch(JSON.stringify(wire),new RegExp(canary));
+    const {encryptedPlan,...parameters}=wire.parameters,record={schemaVersion:1,operation:wire.operation,
+      ...(wire.runIdentity?{runIdentity:wire.runIdentity}:{}),parameters};
+    assert.equal(encryptedPlan.fingerprint,managed.fingerprint);
+    assert.equal(await crypto.verifyCompanyEncryptionRecord(managed.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
+      companyId:f.pass.companyId,target:{kind:'task',pass:{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId}},
+      nativeTool:'continue_assistant_workspace_action',arguments:record},encryptedPlan.signature),true);
+    const action={schemaVersion:1,operation:'secret_browser_fill',runIdentity,parameters:{grantId,...target,...(tamper?{targetUrlSha256:'a'.repeat(64)}:{})}};
+    const value=wire.operation==='secret_browser_prepare'?{prepared:true,grant:{id:grantId,secretId,workspaceId:runIdentity.workspaceId},
+      bridge:{action:{arguments:action}}}:{prepared:true,localAction:action};
+    return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+  },{withProfile});
+  const prepared=await invoke(args);assert.deepEqual(prepared.structuredContent.bridge.action.arguments.parameters,{grantId,targetUrl});
+  const fill={schemaVersion:1,operation:'secret_browser_fill',runIdentity,parameters:{grantId,targetUrl}};
+  assert.deepEqual((await invoke(fill)).structuredContent.localAction.parameters,{grantId,targetUrl});assert.equal(calls,2);
+  for(const invalid of [{...args,reason:canary},{...args,parameters:{...args.parameters,extra:canary}},
+    {...args,parameters:{...args.parameters,steps:[{...args.parameters.steps[0],value:canary}]}},
+    {...fill,runIdentity:{...runIdentity,extra:canary}}])await assert.rejects(invoke(invalid));
+  assert.equal(calls,2,'unknown protected fields never reach native HTTP');
+  tamper=true;await assert.rejects(invoke(args),/PLAN_INVALID/);assert.equal(calls,3,'native target mismatch is not replayed');
+  const auth={schemaVersion:1,operation:'secret_skill_prepare',reason:canary,parameters:{secretId,runId:runIdentity.runId,
+    fieldKey:'password',environmentVariable:'TRELIO_AUTH',skill:{companyId:f.pass.companyId,skillId:'synthetic',releaseId:randomUUID(),
+      runtimeSessionId:f.runtime.state.runtimeSessionId,commandId:'authenticate'}}};
+  await assert.rejects(invoke(auth),/ENCRYPTED_CONTENT_REQUIRED/);assert.equal(calls,3);
 });
 
 test('content mode never falls back to plain on missing inventory, transition, stale pass or changed identity',async()=>{

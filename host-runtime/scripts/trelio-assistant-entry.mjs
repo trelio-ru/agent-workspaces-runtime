@@ -195,6 +195,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
       readCompanyContentMode:profile.readCompanyContentMode,
       preparePrivateSkillArguments:profile.preparePrivateSkillArguments,
+      preparePrivateBrowserArguments:profile.preparePrivateBrowserArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -1089,9 +1090,32 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
     || name==='prepare_assistant_workspace_run'
     || name==='continue_assistant_workspace_action'
       && ['inspect','open','status','heartbeat','secret_list','secret_generate'].includes(args.operation))return send(args);
-  return withProfile(async({readCompanyContentMode,preparePrivateSkillArguments})=>{
+  return withProfile(async({readCompanyContentMode,preparePrivateSkillArguments,preparePrivateBrowserArguments})=>{
     if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     if(await readCompanyContentMode(signal)!=='plain'){
+      if(name==='continue_assistant_workspace_action'&&['secret_skill_prepare','secret_browser_prepare','secret_browser_fill'].includes(args.operation)
+        && (args.schemaVersion!==1||Object.keys(args).some(key=>!['schemaVersion','operation','parameters','runIdentity','taskPass','runtimeSessionProof'].includes(key))
+          ||args.operation!=='secret_browser_fill'&&args.runIdentity!==undefined))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      if(name==='continue_assistant_workspace_action'&&['secret_browser_prepare','secret_browser_fill'].includes(args.operation)){
+        if(typeof preparePrivateBrowserArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        const local=await preparePrivateBrowserArguments(args,signal);
+        signal?.throwIfAborted();const result=await send({...args,parameters:local.parameters});
+        if(result?.isError)return result;
+        const value=structuredClone(result.structuredContent),action=args.operation==='secret_browser_prepare'
+          ?value?.bridge?.action?.arguments:value?.localAction;
+        const target=action?.parameters;
+        if(!action||action.schemaVersion!==1||action.operation!=='secret_browser_fill'||!target
+          ||Object.keys(target).sort().join(',')!=='grantId,targetOrigin,targetUrlSha256'
+          ||target.targetOrigin!==local.target.targetOrigin||target.targetUrlSha256!==local.target.targetUrlSha256
+          ||args.operation==='secret_browser_prepare'&&(target.grantId!==value.grant?.id||value.grant.secretId!==args.parameters.secretId
+            ||action.runIdentity?.runId!==args.parameters.runId||action.runIdentity?.workspaceId!==value.grant.workspaceId)
+          ||args.operation==='secret_browser_fill'&&(target.grantId!==args.parameters.grantId
+            ||JSON.stringify(action.runIdentity)!==JSON.stringify(args.runIdentity)))throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');
+        action.parameters={grantId:target.grantId,targetUrl:local.targetUrl};
+        // Original full URL is restored ONLY in the private local result. The
+        // native grant/browser will match its exact SHA again before filling.
+        return {...result,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+      }
       if(name==='continue_assistant_workspace_action'&&args.operation==='secret_skill_prepare'){
         if(typeof preparePrivateSkillArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
         const parameters=await preparePrivateSkillArguments(args.parameters,signal);
@@ -1292,7 +1316,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const inspecting=plan.localAction.operation==='inspect';
     const skill=plan.localAction.operation==='skill_run';
     const runLifecycle=['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation);
-    const encryption=runLifecycle||plan.localAction.operation==='secret_skill_run'?await prepareWorkspaceRun():null;
+    const encryption=runLifecycle||['secret_skill_run','secret_browser_fill'].includes(plan.localAction.operation)?await prepareWorkspaceRun():null;
     if(plan.encryptedLifecycle && (!encryption || encryption.requestOrigin!==plan.encryptedLifecycle.requestOrigin
       || encryption.runtime.company.id!==plan.encryptedLifecycle.companyId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     if(!skill && !(inspecting && plan.encryptedInspection)){

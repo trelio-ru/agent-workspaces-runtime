@@ -686,7 +686,10 @@ publication tooling также остаются вне этого публичн
   exact auth-only argv/env, late one-use consume, all provider output discarded.
   Encrypted existing-card use sends commandId only; native immutable public
   recipe/current managed recipient/pass/Run precede consume. No model argv/prose
-  crosses MCP; private metadata creation/browser fill remain separately closed.
+  crosses MCP. Browser preparation uses SAME URL parser, origin/hash-only native
+  grant and managed target signature; full path/query stays local. Native
+  context/consume retain genuine ABI/recipient/pass/Run checks. Unknown root or
+  step fields fail before HTTP; private metadata creation remains closed.
   Sealed empty-card receipts
   remain metadata. Separately reviewed NEW password generation reuses the same
   HMAC/fingerprint/keyring writer, original pass/Run and protected device material;

@@ -1385,7 +1385,7 @@ operations under the observed task pass:
   The native local plan executes directly and never round-trips its argv through
   another model MCP call. Private auth cannot inherit Workspace writes. Global
   personal values still use their SAME assistant AAD/keyring; encrypted metadata
-  creation, browser fill and company Secret export/adoption remain closed. One field lives in RAM and the
+  creation and company Secret export/adoption remain closed. One field lives in RAM and the
   child-only environment, never shell/stdin/file/argv. Provider stdout/stderr
   are discarded entirely, not substring-redacted. Its structural
   `command_completed, verificationRequired:true` receipt requires an independent
@@ -1415,11 +1415,19 @@ remain in the protected browser/provider process. Its owned fallback profile is 
 by assistant/device/task; it never opens the ordinary human fallback profile.
 
 Only value-free preflight and exact idempotent outcome reporting retain their
-existing bounded retries. An uncertain consume/fill is not repeated or switched
+existing bounded retries. In an encrypted task, preparation first normalizes
+the full URL locally through that SAME browser target parser. Only canonical
+origin/SHA-256 and operational selectors/field keys cross HTTP. The existing
+managed publication signature binds that plan and genuine task pass/Run; native
+checks current recipient and original grant target. A value-free native target
+reader cannot substitute an installed browser ABI or consume proof. Original
+path/query is restored only in the private local fill result and the common
+browser matches its exact hash again. Unknown root/step fields fail before HTTP.
+An uncertain consume/fill is not repeated or switched
 to another browser. A successful fill is not task completion or a persisted
 processing receipt. Input from a task or website never authorizes disclosure,
 new account creation or ownership classification. Existing-card generation/rotation, arbitrary CLI/reveal,
-encrypted use, account registration and real Windows business E2E remain
+encrypted metadata creation, account registration and real Windows business E2E remain
 independent gates; this subset does not change businessReady=false.
 
 
