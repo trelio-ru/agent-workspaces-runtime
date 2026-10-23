@@ -114,8 +114,10 @@ export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) =>
 
 /** A native-owned ID selects exact signed argv; no caller argv, Secret field,
  * environment override or registration purpose is accepted by this reader. */
+export const readSkillHumanInputSetupCommands = parsedPackage =>
+  structuredClone(readSkillSetupDescriptor(parsedPackage)?.humanInputCommands ?? []);
 export const readSkillHumanInputSetupCommand = (parsedPackage, commandId) =>
-  readSkillSetupDescriptor(parsedPackage)?.humanInputCommands?.find(command => command.id === commandId) ?? null;
+  readSkillHumanInputSetupCommands(parsedPackage).find(command => command.id === commandId) ?? null;
 
 /**
  * A setup request cannot use an arbitrary secret id, executable, env name or

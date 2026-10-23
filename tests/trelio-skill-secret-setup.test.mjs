@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import {randomUUID} from "node:crypto";
-import { readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "../host-runtime/scripts/trelio-skill-secret-setup.mjs";
 
 const command = { id: "configure", arguments: ["configure"], bindingKey: "service_token",
   fieldKey: "value", environmentVariable: "TRELIO_TEST_SETUP_TOKEN" };
@@ -109,6 +109,9 @@ test("human-input declaration is exact signed existing-account auth, never ordin
     path: "trelio-secret-setup.json", bytes: Buffer.from(JSON.stringify(value)),
   }] });
   assert.deepEqual(readSkillHumanInputSetupCommand(fixture(descriptor), "login"), human);
+  const all = readSkillHumanInputSetupCommands(fixture(descriptor));
+  assert.deepEqual(all,[human]);all[0].arguments[0]="changed";
+  assert.deepEqual(readSkillHumanInputSetupCommands(fixture(descriptor)),[human],"discovery cannot mutate the signed recipe");
   assert.equal(readSkillHumanInputSetupCommand(fixture(descriptor), "missing"), null);
   assert.equal(readSkillSecretSetupCommand(fixture(descriptor), human.arguments), null);
   const taskPackage = fixture(descriptor);
