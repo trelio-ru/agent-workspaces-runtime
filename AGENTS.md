@@ -498,6 +498,9 @@ publication tooling также остаются вне этого публичн
   This restriction never authorizes sending, source ACK or owner setup.
 
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).
+  Managed encrypted content reuses the SAME protector/payload collision/hydrator;
+  reject model markers before signing. Native exact target/proof/ACL/CAS and
+  persisted owner consent remain independent. No human bridge or content journal.
 - Source owner identity uses fresh native bindings, never usernames or a task grant: [contract](docs/assistant-scheduler.md#owner-identity-metadata-for-source-routing).
 - Model-free source reads reuse common signature/cache/account execution under a fresh fixed device HTTP profile; no human admission cache, task pass, ACK or cursor reset. [Contract](docs/assistant-scheduler.md#model-free-source-reader).
   Fixed device discovery returns scoped desired refs only, never login/readiness

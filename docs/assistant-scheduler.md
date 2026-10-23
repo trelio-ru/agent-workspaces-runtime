@@ -1477,3 +1477,38 @@ verify-only read-back. Native backend tests independently enforce genuine
 observed task proof, exact encrypted personal-rule selection, accepted material
 and recipient/source/epoch/assignment denial. A fixture/native processing receipt
 is not a live Windows/provider business E2E and does not turn businessReady on.
+
+### Managed encrypted task/intake content
+
+The current managed company OS identity and SAME P-256/HPKE, rich-text
+normalization, payload protector/collision comparison and exact native bundle
+hydrator implement owner dialogue, task text and taskless direct-command intake.
+There is no second executor/vault, human remembered key, OAuth or human MCP server.
+
+Before private signing the host rejects all incoming model markers and transport
+metadata. It stages only its freshly protected native field inventory against the
+exact genuine task/intake target using the existing payload routes. A current
+managed signature binds tool, target, fields and phase; preparation consumes no
+observed tool nonce and has no domain effect. Collisions use SAME selected native
+read-back plus local expected plaintext equality. Final tools/call is sent once,
+with independent native observed proof, ACL/CAS and owner policy.
+
+Canonical native owner previews are locally hydrated and protected as a complete
+question/opaque intent. Original native ciphertext markers stay in the final CAS
+snapshot. No plaintext digest/body or new journal is introduced. Current cipher
+revision/signature inventory belongs to the existing native version-2 intent
+seal; rewriting question/intent invalidates approval. Plain v1 is unchanged.
+
+Native-selected recipient bundles are process-only and never grant a general
+resolver. Taskless source context rebuilds full company/project/assistant-profile
+authority with the SAME local instruction projector after hydration. Its exact
+owner body proof and current linked native identity remain mandatory. A positive
+created/waiting-owner terminal response may be read back without pretending its
+old lease is still executable. Local choice/Other and UTF-8 checks precede
+encryption; an owner answer still grants no sensitive action permission.
+
+Interactive source setup, private Secret intent metadata, accepted-file publication
+and typed custom fields retain separate encrypted guards. Unsupported arguments
+fail before remote tools/call. Ciphertext uses the native-selected approved data
+plane; a failure never falls back to canonical HTTP. Real HPKE/signed native and
+SQLite fixtures are not a live Windows/provider business E2E or release claim.

@@ -6282,7 +6282,12 @@ export const hydrateAgentCompanyEncryptedJson = async ({
       for (const match of current.matchAll(EMBEDDED_ENCRYPTED_TEXT_MARKER_PATTERN)) {
         const marker = match[0];
         const resolved = resolveReference({ entityId: match[1], field: match[2] });
-        hydrated = hydrated.replaceAll(marker, String(resolved ?? ""));
+        // A JSON marker embedded in the native owner preview represents its
+        // complete structured value. Object coercion would silently turn a
+        // rich-text document into "[object Object]" before approval.
+        const display = resolved !== null && typeof resolved === "object"
+          ? JSON.stringify(resolved) : String(resolved ?? "");
+        hydrated = hydrated.replaceAll(marker, display);
       }
       return hydrated;
     }

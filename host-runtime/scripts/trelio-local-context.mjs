@@ -948,6 +948,9 @@ const LOCAL_ACTION_PROTECTED_FIELDS = new Map([
   ["instruction", "instruction"],
   ["message", "message"],
   ["perspective", "perspective"],
+  ["questionText", "question_text"],
+  ["intentJson", "intent_json"],
+  ["relationType", "relation_type"],
   ["rationale", "rationale"],
   ["label", "label"],
   ["options", "options"],
@@ -2354,7 +2357,9 @@ export const protectLocalActionArguments = async ({
         // They fail closed on the new field contract without sending plaintext.
         nativeTool === "delete_workspace" && field === "reason"
           ? "deletion_reason"
-          : LOCAL_ACTION_PROTECTED_FIELDS.get(field)]);
+          : field === "options" && ["ask_assistant_owner", "resolve_assistant_intake"].includes(nativeTool)
+            ? "answer_options_json"
+            : LOCAL_ACTION_PROTECTED_FIELDS.get(field)]);
       else result[field] = await visit(child, `${objectPath}.${field}`);
     }
     if (protectedEntries.length === 0) return result;
@@ -3085,13 +3090,14 @@ export const uploadLocalActionPayloads = async ({
   payloads,
   expectedPayloadValues = {},
   signal,
+  requestPayloads = request,
 }) => {
   for (let offset = 0; offset < payloads.length; offset += 100) {
     let pending = payloads.slice(offset, offset + 100);
 
     while (pending.length > 0) {
       try {
-        await request(
+        await requestPayloads(
           resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
           token,
           "/api/agent-workspaces/encryption/payloads",
@@ -3117,7 +3123,7 @@ export const uploadLocalActionPayloads = async ({
         // accept it only after plaintext equivalence, then retry just the missing
         // subset. Each loop removes at least one verified existing payload; a
         // 409 without such progress remains fail-closed instead of spinning.
-        const resolved = await readJson(await request(
+        const resolved = await readJson(await requestPayloads(
           resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
           token,
           "/api/agent-workspaces/encryption/payloads/resolve",
@@ -5152,7 +5158,7 @@ const buildLocalTaskInstructionSnapshot = (mirror, record) => {
   };
 };
 
-const buildLocalScopedEffectiveInstructions = (
+export const buildLocalScopedEffectiveInstructions = (
   mirror,
   project,
   knownInstructionLayerKeys = [],

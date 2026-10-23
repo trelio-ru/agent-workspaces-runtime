@@ -75,6 +75,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       delete supplied.intakePass;delete supplied.taskPass;delete supplied.runtimeSessionProof;
       delete supplied.sourceProcessingProof;
       delete supplied.encryptedMaterialWitness;
+      delete supplied.encryptedContent;
       const observation=await observe({hookInput:event});assertRuntimeHookBudget();
       if(observation?.schemaVersion!==1 || observation.clientFamily!=='codex' || observation.source!=='codex_hook'
         || observation.evidenceLevel!=='local_observed' || !observation.modelId) fail('ASSISTANT_HOOK_OBSERVATION_REQUIRED');

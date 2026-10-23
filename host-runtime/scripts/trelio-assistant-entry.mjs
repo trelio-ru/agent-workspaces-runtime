@@ -6,7 +6,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -195,6 +195,31 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
+  },signal);
+};
+
+/** Same private process/OS identity composition as the Workspace engine,
+ * without constructing a fake task profile for a taskless source intake. The
+ * fixed companies reader selects current mode; unsupported transitions never
+ * send original prose to a remote tools/call. */
+export const withProductionAssistantManagedContent=async({name,args,signal},send)=>{
+  const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
+    {withPrivateProcessSession}]=await Promise.all([
+    import('./trelio-workspace.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),
+    import('./trelio-assistant-transport.mjs'),import('./trelio-hook-private-session.mjs')]);
+  return withPrivateProcessSession(async()=>{
+    const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
+    const store=createAssistantPrivateStore({directory:path.join(directory,'credentials')}),host=createAssistantHostState({directory,store});
+    const identity=await host.readIdentity();
+    if(!identity||identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
+    const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+    const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+    const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
+    const company=(await client.companies(signal)).find(row=>row.companyId===pass.companyId);
+    if(!company||!['plain','encrypted',null].includes(company.encryptionState))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    if(company.encryptionState!=='encrypted')return send(args);
+    return transport.withAssistantManagedContentArguments({identity,host,client,store,lockDirectory:path.join(directory,'runtime-locks'),
+      name,args,signal},send);
   },signal);
 };
 
@@ -1012,7 +1037,9 @@ export const validateAssistantWorkspacePlan = async raw => {
  * survives its action. A native refusal/lost result is never replayed.
  */
 export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
-  {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs')}={})=>{
+  {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs'),
+    withManagedContent=withProductionAssistantManagedContent}={})=>{
+  if(supportsAssistantManagedContent(name))return withManagedContent({name,args,signal},send);
   if(name==='complete_assistant_pass')return withAssistantEncryptedMaterial({args,signal},send,{withProfile,loadCommon});
   if(name!=='continue_assistant_workspace_action' || !['checkpoint','finish','pause'].includes(args.operation))return send(args);
   if(!args.parameters || Object.hasOwn(args.parameters,'encryptedArguments'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');

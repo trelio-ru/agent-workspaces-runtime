@@ -279,7 +279,7 @@ const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, st
  * payload/Workspace/Secret route, owner OAuth, scope-key grant or decryption.
  * Native company membership/MCP/module/device fences remain server authority. */
 export const prepareAssistantCompanyEncryption = async ({identity,host,client,store,companyId,companySlug,signal,
-  lockDirectory,lock=withRuntimeStateLock}) => {
+  lockDirectory,lock=withRuntimeStateLock,managedContentOperation=null}) => {
   companyId=id(companyId);
   if(typeof companySlug!=='string'||!companySlug.length||companySlug.length>120||companySlug.trim()!==companySlug
     ||/[\x00-\x20\x7f]/u.test(companySlug)||!identity
@@ -300,20 +300,37 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
     return company;
   };
   await assertCurrent();
-  const handle=Object.freeze(Object.create(null));let owned=null;
+  const handle=Object.freeze(Object.create(null));let owned=null,activePreparation=null,contentOrigin=null;
+  if(managedContentOperation!==null && typeof managedContentOperation!=='function')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const profile=Object.freeze({kind:'digital_assistant_enrollment',companyEncryptionUserId:assistantId,
-    async requireToken(requestOrigin){if(requestOrigin!==origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');await assertCurrent();return handle;},
+    async requireToken(requestOrigin){if(requestOrigin!==origin && (!activePreparation || requestOrigin!==contentOrigin))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');await assertCurrent();return handle;},
     async resolveCompanyEncryptionDevice({origin:requestOrigin,companyId:requestedCompany}){
       if(requestOrigin!==origin||requestedCompany!==companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
-      owned=await resolveAssistantCompanyEncryptionDevice({identity:expected,companyId,store,lockDirectory,lock,assertCurrent});
+      owned=await resolveAssistantCompanyEncryptionDevice({identity:expected,companyId,store,lockDirectory,lock,assertCurrent,allowCreate:managedContentOperation===null});
       return owned;
     },
     async prepareRequest({origin:requestOrigin,token,pathname,options,buildHeaders}){
-      if(requestOrigin!==origin||token!==handle||typeof pathname!=='string'||typeof buildHeaders!=='function')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
-      let url;try{url=new URL(pathname,origin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
-      if(url.origin!==origin||url.hash||url.pathname!==pathname.split('?')[0])fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      if(token!==handle||typeof pathname!=='string'||typeof buildHeaders!=='function')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      let url;try{url=new URL(pathname,requestOrigin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+      if(url.origin!==requestOrigin||url.hash||url.pathname!==pathname.split('?')[0])fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();let suffix;
+      if(activePreparation && requestOrigin===contentOrigin && method==='POST' && !url.search
+        && ['/api/agent-workspaces/encryption/payloads','/api/agent-workspaces/encryption/payloads/resolve'].includes(url.pathname)){
+        let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+        if(JSON.stringify(input)!==activePreparation.body || url.pathname!==activePreparation.pathname)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        await assertCurrent();await activePreparation.assertCurrent();
+        const headers=buildHeaders(null,options.headers??{});
+        for(const key of ['cookie','cookie2','proxy-authorization','x-trelio-assistant-pass','x-trelio-assistant-proof'])headers.delete(key);
+        headers.set('authorization',`Bearer ${await loadAssistantDeviceCredential({...expected,store})}`);
+        headers.set('x-trelio-assistant-content-preparation','1');
+        headers.set('x-trelio-assistant-content-target',JSON.stringify(activePreparation.target));
+        headers.set('x-trelio-assistant-source-encryption-fingerprint',owned.fingerprint);
+        await assertCurrent();await activePreparation.assertCurrent();
+        url.pathname='/api/digital-assistants/runtime/workspace'+url.pathname.slice('/api/agent-workspaces'.length);
+        return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store',signal}};
+      }
+      if(requestOrigin!==origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       if(method==='GET'&&url.pathname==='/api/agent-workspaces/encryption/runtime'&&options.body===undefined){
         const keys=[...url.searchParams.keys()];
         if(new Set(keys).size!==keys.length||keys.some(key=>!['companySlug','fingerprint'].includes(key))
@@ -321,6 +338,7 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
           ||url.searchParams.has('fingerprint')&&url.searchParams.get('fingerprint')!==owned?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         suffix='/runtime';
       }else if(method==='POST'&&url.pathname==='/api/agent-workspaces/encryption/devices'&&!url.search){
+        if(managedContentOperation)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
         let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
         if(!owned||!object(input)||input.companySlug!==companySlug||input.fingerprint!==owned.fingerprint
           ||JSON.stringify(input.publicEncryptionJwk)!==JSON.stringify(owned.publicEncryptionJwk)
@@ -355,6 +373,26 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
   const runtime=context.runtime;
   if(runtime.company.id!==companyId||runtime.viewer?.userId!==assistantId||runtime.device?.fingerprint!==owned?.fingerprint
     ||!UUID.test(runtime.device?.id??'')||!['access_pending','ready'].includes(runtime.accessState))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  if(managedContentOperation){
+    if(runtime.accessState!=='ready'||!context.scopePrivateEncryptionKey)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    // Routing is current native metadata. Only the ordinary approved encrypted
+    // origin may receive ciphertext; never silently retry it on canonical HTTP.
+    if(typeof runtime.requestOrigin!=='string')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+    try{contentOrigin=common.resolveEncryptedDataPlaneOrigin(origin,runtime.requestOrigin);}
+    catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+    context.requestOrigin=contentOrigin;
+    return common.withWorkspaceExecutionProfile(profile,()=>managedContentOperation({context,token:handle,
+      assertCurrent,requestPayloads:async(requestOrigin,token,pathname,options)=>{
+        if(activePreparation||requestOrigin!==contentOrigin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        const {managedTarget:target,assertPass,...httpOptions}=options;
+        if(!object(target)||typeof assertPass!=='function')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        // These two trusted callback properties never enter Fetch/JSON. The
+        // strict native body carries only ciphertext and its signed inventory.
+        activePreparation={body:options.body,pathname,target,assertCurrent:assertPass};
+        try{return await common.request(requestOrigin,token,pathname,{...httpOptions,signal});}
+        finally{activePreparation=null;}
+      }}));
+  }
   // Only the completed common round-trip permits key_verified. This is local
   // key readiness, never business execution or a reusable content capability.
   // The envelope, opened key and private/JWK fields stay outside MCP/state.
@@ -412,6 +450,170 @@ const validateAssistantEncryptedSkillRead = (value,pass=null) => {
     ||value.arguments.knownInstructionKey!==undefined&&(typeof value.arguments.knownInstructionKey!=='string'||value.arguments.knownInstructionKey.length>300)
     ||pass&&value.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   return structuredClone(value);
+};
+
+/** Closed content surface implemented with the SAME local protector, payload
+ * collision comparison, managed OS identity and native data-plane routes. This
+ * list is a transport capability, never a replacement domain schema or ACL. */
+const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
+  'create_task','create_comment','update_comment','update_task_title','update_task_description','create_task_control',
+  'update_task_control','create_checklist','update_checklist','create_subtask','create_task_relation','update_task_status',
+  'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',
+  'delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
+  'get_assistant_owner_question','get_assistant_intake_context']);
+export const supportsAssistantManagedContent=name=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name);
+const managedBusinessArguments=raw=>Object.fromEntries(Object.entries(raw).filter(([key])=>
+  !['taskPass','intakePass','runtimeSessionProof','encryptedContent'].includes(key)));
+const rejectBorrowedManagedMarkers=(value,depth=0)=>{
+  if(depth>40)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+  // A model may know a marker from another task. Signing it would turn a
+  // narrow preparation into a payload oracle, so only freshly produced local
+  // markers may ever receive our private binding signature.
+  if(typeof value==='string'&&/~e1:[0-9a-f-]{36}:[a-z][a-z0-9_]{0,63}~/iu.test(value)
+    ||object(value)&&Object.hasOwn(value,'$trelioE2ee'))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+  if(value&&typeof value==='object')for(const child of Object.values(value))rejectBorrowedManagedMarkers(child,depth+1);
+};
+
+/** One bounded tools/call exchange. Staging has no domain effect and consumes
+ * no observed nonce. The ordinary send callback still executes exactly once
+ * with its independent live native pass/proof/CAS and sealed owner decision. */
+export const withAssistantManagedContentArguments=async({identity,host,client,store,lockDirectory,name,args,signal},send)=>{
+  if(!supportsAssistantManagedContent(name)||!object(args)||typeof send!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  // Ignore model-authored transport hints before signing; all private metadata
+  // comes from the genuine current OS/pass context below.
+  const business=managedBusinessArguments(args);rejectBorrowedManagedMarkers(business);
+  if(Object.hasOwn(business,'acceptedFiles')||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
+    ||name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  // Content-dependent refinements cannot be evaluated on opaque markers by
+  // the native Zod validator. Preserve its question/choice contract BEFORE
+  // sealing; these local guards grant no action or owner decision authority.
+  const question=name==='ask_assistant_owner'||name==='resolve_assistant_intake'&&business.decision==='ask_owner';
+  if(question){
+    if(typeof business.questionText!=='string'||!business.questionText.trim()
+      ||Buffer.byteLength(business.questionText.trim(),'utf8')>16384)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    business.questionText=business.questionText.trim();
+    if(business.options!==undefined){
+      if(!Array.isArray(business.options)||business.options.length<2||business.options.length>8
+        ||business.options.some(value=>typeof value!=='string'||!value.trim()||value.trim().length>300
+          ||Buffer.byteLength(value.trim(),'utf8')>600||['other','другое'].includes(value.trim().toLocaleLowerCase('ru-RU'))))
+        fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+      business.options=business.options.map(value=>value.trim());
+      if(new Set(business.options.map(value=>value.toLocaleLowerCase('ru-RU'))).size!==business.options.length)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    }
+  }
+  const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+  const target=pass.kind==='source_intake'
+    ?{kind:'source_intake',pass:{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}}
+    :{kind:'task',pass:{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId}};
+  if((target.kind==='source_intake')!==['get_assistant_intake_context','resolve_assistant_intake'].includes(name))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  if(name==='request_assistant_action'&&(typeof business.reason!=='string'||!business.reason.trim()
+    ||Buffer.byteLength(business.reason.trim(),'utf8')>2000))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+  let publicationTerminal=null;
+  const assertPass=async()=>{
+    signal?.throwIfAborted();
+    if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const current=target.kind==='task'?await client.readTaskPass(target.pass,signal):await client.readSourceIntake(target.pass,signal);
+    if((current.state!=='leased'&&current.state!==publicationTerminal)||current.threadId!==pass.threadId||Date.parse(current.leaseExpiresAt)<=Date.now()
+      ||target.kind==='source_intake'&&(current.eventId!==pass.eventId||current.sourceRevision!==pass.sourceRevision)
+      ||target.kind==='task'&&current.passId!==pass.passId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  };
+  await assertPass();
+  const company=(await client.companies(signal)).find(row=>row.companyId===pass.companyId);
+  if(company?.encryptionState!=='encrypted'||typeof company.companySlug!=='string')fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  return prepareAssistantCompanyEncryption({identity,host,client,store,companyId:pass.companyId,companySlug:company.companySlug,
+    signal,lockDirectory,managedContentOperation:async({context,token,requestPayloads,assertCurrent})=>{
+      const common=await import('./trelio-workspace.mjs'),local=await import('./trelio-local-context.mjs'),
+        crypto=await import('./trelio-company-encryption.mjs');
+      const current=async()=>{await assertCurrent();await assertPass();};
+      const binding=async(phase,wire,action)=>{
+        await current();
+        return crypto.signCompanyEncryptionRecord(context.device.privateKeys.signingPrivateKey,
+          {protocol:'assistant-managed-content/v1',phase,companyId:pass.companyId,target,nativeTool:name,
+            arguments:managedBusinessArguments(wire),...(action?{action}:{})});
+      };
+      const hydrate=async bundle=>{
+        await current();
+        if(!object(bundle)||bundle.companyId!==pass.companyId||bundle.recipientDeviceId!==context.runtime.device.id
+          ||bundle.envelopeId!==context.runtime.envelope.id||bundle.scopeId!==context.runtime.scope.id
+          ||bundle.scopeEpoch!==context.runtime.scope.epoch)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        const selected=readAssistantEncryptedSnapshotBundle({schemaVersion:1,...bundle},context,pass.companyId);
+        const value=await common.hydrateAgentCompanyEncryptedJson({value:selected.context,origin:identity.origin,token,
+          companyEncryption:context,signal,resolvePayloads:async ids=>{
+            await current();
+            if(ids.some(id=>!selected.payloads.has(id)))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+            return {payloads:ids.map(id=>selected.payloads.get(id))};
+          }});
+        await current();return value;
+      };
+      const stage=async(protectedValue,{actionPreview=false,ownerActionContent}={})=>{
+        const wire=Object.fromEntries(Object.entries(protectedValue.value).filter(([key])=>key!=='ownerDecisionId'));
+        const action=actionPreview?{preview:true}:ownerActionContent?{content:ownerActionContent}:undefined;
+        const preparation={nativeTool:name,arguments:wire,...(actionPreview?{actionPreview:true}:{}),
+          ...(ownerActionContent?{ownerActionContent}:{}),signature:await binding('preparation',wire,action)};
+        const request=async(origin,selectedToken,pathname,options)=>{
+          await current();
+          return requestPayloads(origin,selectedToken,pathname,{...options,managedTarget:target,assertPass:current,
+            body:JSON.stringify({...JSON.parse(options.body),preparation})});
+        };
+        // Reuse native collision -> exact selected ciphertext -> local expected
+        // plaintext equality. Never repeat the later business request here.
+        await local.uploadLocalActionPayloads({origin:identity.origin,token,companyEncryption:context,
+          payloads:protectedValue.payloads,expectedPayloadValues:protectedValue.expectedPayloadValues,signal,requestPayloads:request});
+        if(actionPreview){
+          const response=await request(context.requestOrigin,token,'/api/agent-workspaces/encryption/payloads',
+            {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({companySlug:company.companySlug,
+              writerDeviceId:context.runtime.device.id,payloads:[]}),signal});
+          const bytes=await common.readBoundedResponseBuffer(response,3*1024*1024,'Assistant managed content');
+          try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+          catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}finally{bytes.fill(0);}
+        }
+        return null;
+      };
+      const readonly=['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
+      let wire=business,action;
+      if(!readonly){
+        if(name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+        const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context});
+        wire=protectedValue.value;
+        if(name==='request_assistant_action'){
+          const preview=await stage(protectedValue,{actionPreview:true}),opened=await hydrate(preview);
+          if(typeof opened.questionText!=='string'||Buffer.byteLength(opened.questionText,'utf8')>16384||!object(opened.snapshot)||!Array.isArray(opened.requiredActions))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          // Keep original native markers for final CAS. Only the owner-visible
+          // preview and intent are hydrated and protected into this SAME store.
+          const rawSnapshot=structuredClone(preview.context.snapshot);
+          const content=await local.protectLocalActionArguments({nativeTool:name,companyEncryption:context,
+            arguments:{clientRequestId:business.clientRequestId,encryptedAction:{questionText:opened.questionText,
+              intentJson:{fields:business.fields,snapshot:opened.snapshot,reason:business.reason}}}});
+          const ownerActionContent=content.value.encryptedAction;
+          await stage({value:wire,payloads:content.payloads,expectedPayloadValues:content.expectedPayloadValues},{ownerActionContent});
+          action={...ownerActionContent,snapshot:rawSnapshot};
+        }else await stage(protectedValue);
+      }
+      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,
+        ...(!readonly?{signature:await binding('publication',wire,action)}:{}),...(action?{action}:{})};
+      await current();
+      const authority=Object.fromEntries(Object.entries(args).filter(([key])=>['taskPass','intakePass','runtimeSessionProof'].includes(key)));
+      const result=await send({...authority,...wire,encryptedContent}); // exactly ONE domain invocation
+      if(result?.isError===true)return result;
+      const terminal=result?.structuredContent?.managedEncryptedContent?.context?.state??result?.structuredContent?.state;
+      if(name==='resolve_assistant_intake'&&['ignored','created','waiting_owner','redirected'].includes(terminal))publicationTerminal=terminal;
+      const bundle=result?.structuredContent?.managedEncryptedContent;
+      if(!bundle){await current();return result;}
+      const value=await hydrate(bundle);
+      if(name==='get_assistant_intake_context'){
+        const authority=value.creationAuthority;
+        if(!object(authority)||authority.company?.id!==pass.companyId||!authority.instructions)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        value.effectiveInstructions=local.buildLocalScopedEffectiveInstructions(authority,null);
+        if(value.metadata){
+          const project=authority.projects.find(row=>row.id===value.projectId);
+          if(!project)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          value.metadata.structuredContent.effectiveInstructions=local.buildLocalScopedEffectiveInstructions(authority,project);
+          value.metadata.content=[{type:'text',text:JSON.stringify(value.metadata.structuredContent)}];
+        }
+        delete value.creationAuthority;
+      }
+      return {...result,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+    }});
 };
 
 /** Internal composition of native Workspace transport. Device credentials
@@ -1127,7 +1329,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value = await call('companies', undefined, signal);
       if (value.assistantUserId !== assistantId || value.bindingId !== deviceId || !Array.isArray(value.companies) || value.companies.length > 256) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return value.companies.map(company => ({ companyId: id(company.id), memberId: id(company.memberId),
-        encryptionState: company.encryptionState === null ? null : text(company.encryptionState, 64), execution:executionState(company.execution) }));
+        encryptionState: company.encryptionState === null ? null : text(company.encryptionState, 64),
+        ...(typeof company.slug==='string'?{companySlug:text(company.slug,120)}:{}), execution:executionState(company.execution) }));
     },
     async tasks(companyId, after = null, signal) {
       companyId = id(companyId); if (after !== null) after = id(after);
@@ -1351,7 +1554,7 @@ export const assistantModelInputSchema = source => {
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    for(const key of ['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness']){
+    for(const key of ['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent']){
       if(object(node.properties))delete node.properties[key];
       if(Array.isArray(node.required))node.required=node.required.filter(value=>value!==key);
     }

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto, createHash, createPublicKey } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask, withAssistantManagedContentArguments } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker, canonicalJson,
-  encryptFileToCompanyContainer } from '../host-runtime/scripts/trelio-company-encryption.mjs';
+  encryptFileToCompanyContainer, decryptCompanyPayload } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -85,7 +85,14 @@ test('managed key readiness opens a real recipient envelope and verifies the com
   await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},
     {assistantId:identity.assistantId,deviceId:identity.deviceId,credential:`tda_${'k'.repeat(43)}`,expiresAt:1});
   let registered=null,envelope=null,mode='valid',posts=0,available=true;
-  const input={identity,host:{readIdentity:async()=>identity},client:{companies:async()=>available?[{companyId,encryptionState:'encrypted'}]:[]},
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId,taskId:randomUUID(),
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+  // The exact native shape is also consumed by the production hook validator.
+  const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
+  const client={companies:async()=>available?[{companyId,companySlug:'encrypted',encryptionState:'encrypted'}]:[],
+    readTaskPass:async()=>({state:'leased',passId:pass.passId,threadId:pass.threadId,leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
+  const staged=new Map();let preparations=0,resolves=0,businessCalls=0;
+  const input={identity,host,client,
     store,companyId,companySlug:'encrypted',lockDirectory:root,lock:async(_file,action)=>action()};
   const previousFetch=globalThis.fetch;
   globalThis.fetch=async(url,options)=>{
@@ -97,10 +104,35 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       const plaintext=Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk}));
       try{
         const sealed=await hpkeSeal({recipientPublicEncryptionJwk:registered.publicEncryptionJwk,plaintext,aad});
-        envelope={recipientType:'agent_device',recipientId:cryptoDeviceId,scopeId,scopeEpoch:1,
+        envelope={id:randomUUID(),recipientType:'agent_device',recipientId:cryptoDeviceId,scopeId,scopeEpoch:1,
           hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
       }finally{plaintext.fill(0);}
       return json({device:{id:cryptoDeviceId,fingerprint:registered.fingerprint}});
+    }
+    if(url.pathname.startsWith('/api/digital-assistants/runtime/workspace/encryption/payloads')){
+      assert.equal(options.headers.get('x-trelio-assistant-content-preparation'),'1');
+      assert.equal(options.headers.get('x-trelio-assistant-proof'),null);
+      const body=JSON.parse(options.body),{signature,...preparation}=body.preparation;
+      const target=JSON.parse(options.headers.get('x-trelio-assistant-content-target'));
+      const active=await host.readActivePass();
+      assert.deepEqual(target,active.kind==='source_intake'?{kind:'source_intake',pass:{companyId,sourceId:active.sourceId,intakeId:active.passId}}
+        :{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}});
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',
+        phase:'preparation',companyId,target,nativeTool:preparation.nativeTool,arguments:preparation.arguments,
+        ...(preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
+      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY/);
+      if(url.pathname.endsWith('/resolve')){resolves++;return json({payloads:body.entityIds.map(id=>staged.get(id)).filter(Boolean)});}
+      preparations++;
+      if(body.payloads.some(payload=>staged.has(payload.entityId)))return new Response('{}',{status:409});
+      for(const payload of body.payloads){
+        assert.equal(payload.writerDeviceId,cryptoDeviceId);staged.set(payload.entityId,payload);
+        const opened=await decryptCompanyPayload({encryptedPayload:payload,scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+        assert.ok(opened.values,'SAME payload crypto opens actual business content');
+      }
+      if(preparation.actionPreview)return json({schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,
+        scopeId,scopeEpoch:1,context:{snapshot:{control:{id:preparation.arguments.fields.controlId,note:preparation.arguments.reason}},
+          requiredActions:['change_other_control'],questionText:`Native preview: ${preparation.arguments.reason}`},encryptedPayloads:[...staged.values()]});
+      return json({stored:body.payloads.length});
     }
     assert.equal(url.pathname,'/api/digital-assistants/runtime/encryption/runtime');
     const found=registered&&url.searchParams.get('fingerprint')===registered.fingerprint;
@@ -111,7 +143,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       const bytes=Buffer.from(selected.ciphertext,'base64url');bytes[0]^=1;selected.ciphertext=bytes.toString('base64url');
     }
     if(found&&mode==='revoke')available=false;
-    return json({state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'encrypted',name:'PUBLIC'},
+    return json({state:'encrypted',suite:'trelio-e2ee-v1',requestOrigin:identity.origin,company:{id:companyId,slug:'encrypted',name:'PUBLIC'},
       viewer:{userId:identity.assistantId},device:found?{id:cryptoDeviceId,fingerprint:registered.fingerprint}:null,
       scope:found?{id:scopeId,epoch:1,publicEncryptionJwk:mode==='public_key'?registered.publicEncryptionJwk:scopePublicEncryptionJwk}:null,
       envelope:selected,accessState:found?'ready':url.searchParams.has('fingerprint')?'registration_required':'device_required'});
@@ -124,6 +156,77 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     for(const value of [ready,persisted]){
       assert.equal(JSON.stringify(value).includes(scopePrivateEncryptionJwk.d),false,'scope private key never enters result or OS device slot');
     }
+    const question={clientRequestId:randomUUID(),questionText:'MANAGED_QUESTION_CANARY',options:['FIRST_OPTION_CANARY','Second']};
+    const send=async wire=>{
+      businessCalls++;
+      const {encryptedContent,...business}=wire;
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',
+        phase:'publication',companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},
+        nativeTool:'ask_assistant_owner',arguments:business},encryptedContent.signature),true);
+      assert.doesNotMatch(JSON.stringify(wire),/MANAGED_QUESTION_CANARY|FIRST_OPTION_CANARY/);
+      return {content:[],structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,
+        envelopeId:envelope.id,scopeId,scopeEpoch:1,context:{questionText:wire.questionText,options:wire.options},encryptedPayloads:[...staged.values()]}}};
+    };
+    const result=await withAssistantManagedContentArguments({...input,name:'ask_assistant_owner',args:question},send);
+    assert.equal(result.structuredContent.questionText,question.questionText);assert.deepEqual(result.structuredContent.options,question.options);
+    await withAssistantManagedContentArguments({...input,name:'ask_assistant_owner',args:question},send);
+    assert.equal(businessCalls,2,'one domain call per explicit invocation, never replayed by payload collision');
+    assert.equal(resolves,1);assert.equal(preparations,2,'existing cipher is compared locally before reuse');
+    const readsBefore=preparations;
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'ask_assistant_owner',args:{...question,
+      questionText:[...staged.values()][0].entityId?buildCompanyEncryptedTextMarker([...staged.keys()][0],'question_text'):''}},send),
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+    assert.equal(preparations,readsBefore,'borrowed marker never gets a private signature or payload resolve');
+    for(const options of [['Other','Second'],['Same','same'],['Only'],['x'.repeat(301),'Second']]){
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'ask_assistant_owner',args:{...question,options}},send),
+        {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+    }
+    assert.equal(preparations,readsBefore,'content-dependent choice refinements run before encryption/private I/O');
+    const comment=await withAssistantManagedContentArguments({...input,name:'create_comment',args:{clientRequestId:randomUUID(),
+      expectedTaskUpdatedAt:new Date().toISOString(),bodyText:'RICH_BODY_CANARY'}},async wire=>{
+      assert.equal(Object.hasOwn(wire,'bodyText'),false,'normalization cannot leave plaintext source aliases in final wire');
+      assert.ok(wire.bodyJson.$trelioE2ee);return {content:[],structuredContent:{recorded:true}};
+    });
+    assert.equal(comment.structuredContent.recorded,true);
+    const richPayload=[...staged.values()].find(payload=>payload.entityId!==[...staged.keys()][0]);
+    const richOpened=await decryptCompanyPayload({encryptedPayload:richPayload,scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+    assert.equal(richOpened.values.body_json.type,'doc');
+    const previewed=await withAssistantManagedContentArguments({...input,name:'get_assistant_owner_question',args:{questionId:randomUUID()}},async()=>({content:[],
+      structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
+        context:{questionText:`Complete document: ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_json')}`},encryptedPayloads:[richPayload]}}}));
+    assert.match(previewed.structuredContent.questionText,/RICH_BODY_CANARY/);assert.doesNotMatch(previewed.structuredContent.questionText,/\[object Object\]/);
+    const planned=await withAssistantManagedContentArguments({...input,name:'request_assistant_action',args:{operation:'clear_task_control',
+      fields:{controlId:randomUUID()},clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),reason:'ACTION_REASON_CANARY'}},async wire=>{
+      const {encryptedContent,...business}=wire;
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
+        companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'request_assistant_action',
+        arguments:business,action:encryptedContent.action},encryptedContent.signature),true);
+      assert.match(encryptedContent.action.snapshot.control.note,/^~e1:/u,'native CAS snapshot keeps its original ciphertext marker');
+      const intent=encryptedContent.action.intentJson.$trelioE2ee,opened=await decryptCompanyPayload({encryptedPayload:staged.get(intent.id),
+        scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+      assert.equal(opened.values.intent_json.reason,'ACTION_REASON_CANARY');
+      assert.equal(opened.values.question_text,'Native preview: ACTION_REASON_CANARY');
+      assert.doesNotMatch(JSON.stringify(wire),/ACTION_REASON_CANARY/,'entire final action and original reason are ciphertext before remote MCP');
+      return {content:[],structuredContent:{questionId:randomUUID(),state:'pending'}};
+    });
+    assert.equal(planned.structuredContent.state,'pending');
+    const intake={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId,
+      sourceId:randomUUID(),sourceRevision:3,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
+    let intakeState='leased',intakeReads=0;
+    host.readActivePass=async()=>intake;
+    client.readSourceIntake=async()=>{intakeReads++;return {state:intakeState,threadId:intake.threadId,eventId:intake.eventId,
+      sourceRevision:intake.sourceRevision,leaseExpiresAt:new Date(Date.now()+600000).toISOString()};};
+    try{
+      const result=await withAssistantManagedContentArguments({...input,name:'resolve_assistant_intake',args:{decision:'create_task',
+        intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId},clientRequestId:intake.passId,projectId:randomUUID(),
+        fields:{title:'New owner goal'}}},async wire=>{
+        assert.equal(Object.hasOwn(wire,'taskPass'),false,'taskless intake never constructs a fake task profile');
+        assert.deepEqual(wire.intakePass,{companyId,sourceId:intake.sourceId,intakeId:intake.passId});
+        assert.match(wire.fields.title,/^~e1:/u);intakeState='created';
+        return {content:[],structuredContent:{state:'created',receiptId:randomUUID(),taskId:randomUUID()}};
+      });
+      assert.equal(result.structuredContent.state,'created');assert.ok(intakeReads>=3,'terminal native read-back is not treated as an executable lease');
+    }finally{host.readActivePass=async()=>pass;}
     for(mode of ['recipient','epoch','ciphertext','public_key','revoke']){
       await assert.rejects(prepareAssistantCompanyEncryption(input));
       assert.equal(posts,1,'malformed keys or revoked authority never reset/re-register the persisted device');
@@ -192,7 +295,7 @@ test('device client loads only its exact private slot and projects server conten
     calls++; assert.equal(operation,'companies'); assert.match(credential,/^tda_/u);
     return {assistantUserId:assistantId,bindingId:deviceId,companies:[{id:companyId,memberId,encryptionState:null,secret:'PRIVATE',slug:'PRIVATE'}]};
   }});
-  assert.deepEqual(await client.companies(),[{companyId,memberId,encryptionState:null,execution:{state:'unconfigured',configuration:null,policyRevisionId:null}}]);
+  assert.deepEqual(await client.companies(),[{companyId,memberId,companySlug:'PRIVATE',encryptionState:null,execution:{state:'unconfigured',configuration:null,policyRevisionId:null}}]);
   const other=createAssistantDeviceClient({origin,assistantId,deviceId:randomUUID(),store,http:async()=>{calls++;},now:()=>100});
   await assert.rejects(other.companies(),/DEVICE_REQUIRED/); assert.equal(calls,1);
 });
