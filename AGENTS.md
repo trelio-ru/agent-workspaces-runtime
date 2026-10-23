@@ -531,6 +531,10 @@ publication tooling также остаются вне этого публичн
   injected exact ciphertext hydration, not human payload resolve or a second
   executor. See [contract](docs/assistant-scheduler.md#encrypted-source-and-exact-public-task-skill).
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
+  Content-bearing calls also require the SAME fresh managed company-mode
+  preflight before remote MCP; unsupported encrypted content refuses locally,
+  never after exposing prose to HTTP. Native ACL/CAS and sealed adapters remain
+  independent; failed/missing mode is not plain and no mode cache is authority.
   Independent task creation uses the SAME proxy/native creator with a sealed
   owner decision and project ACL; no inherited pass/chat/route or sender proof.
 

@@ -887,6 +887,65 @@ test('every supported source exact-body command requires the common native read 
   }finally{f.close();}
 });
 
+test('production content preflight refuses encrypted prose before the real MCP tools/call boundary',async()=>{
+  const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture();let mode='encrypted',inventoryReads=0,remoteCalls=0,loseResponse=false;
+  const canary='SYNTHETIC_PRIVATE_COMPANY_CONTENT';
+  f.client.companies=async()=>{inventoryReads++;return [{companyId:f.pass.companyId,encryptionState:mode}];};
+  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode});
+  const client=createAssistantMcpClient({...f.identity,store:f.store,
+    withWorkspaceArguments:(input,send)=>withAssistantEncryptedWorkspaceArguments(input,send,{withProfile}),
+    httpRequest:async input=>{
+      wire.push(JSON.stringify(input.payload??{}));
+      const reply=result=>({sessionId:'content-preflight',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      assert.equal(input.payload.method,'tools/call');remoteCalls++;
+      if(loseResponse)throw new Error('SYNTHETIC_LOST_MUTATION_RESULT');
+      return reply({content:[{type:'text',text:'native result'}]});
+    }});
+  const args={clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),bodyMarkdown:canary};
+  for(const name of ['create_comment','update_comment','ask_assistant_owner','request_assistant_action',
+    'create_task','update_task_title','update_task_description','update_task_custom_field',
+    'create_task_control','update_task_control','create_checklist','update_checklist','create_subtask',
+    'create_task_relation','cancel_agent_workspace_run','repair_assistant_workspace_result','search_agent_guidance']){
+    await assert.rejects(client.callTool(name,args),{code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+  }
+  // URLs, Secret metadata and provider argv can also contain protected company
+  // text. They must not reach native HTTP merely to receive its capability deny.
+  for(const operation of ['skill_run','secret_create','secret_browser_prepare','secret_browser_fill','secret_skill_prepare','secret_skill_run'])
+    await assert.rejects(client.callTool('continue_assistant_workspace_action',{schemaVersion:1,operation,parameters:{value:canary}}),
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+  assert.equal(remoteCalls,0);assert.equal(wire.join('').includes(canary),false);
+  assert.ok(inventoryReads>0);assert.equal(f.contacts(),2*inventoryReads,'fresh native pass checks bracket each inventory');
+  mode=null;await client.callTool('create_comment',args);assert.equal(remoteCalls,1,'legacy null mode is the native plain state');
+  mode='plain';loseResponse=true;
+  await assert.rejects(client.callTool('create_comment',args),{code:'ASSISTANT_MCP_UNAVAILABLE'});
+  assert.equal(remoteCalls,2,'a lost response does not replay the original mutation');
+  loseResponse=false;mode='encrypted';const before=inventoryReads;
+  await client.callTool('get_task',{});assert.equal(remoteCalls,3);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
+});
+
+test('content mode never falls back to plain on missing inventory, transition, stale pass or changed identity',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture();let rows=[],sent=0,afterInventory=()=>{};
+  f.client.companies=async()=>{afterInventory();return rows;};
+  const invoke=()=>withAssistantCompanyContentArguments({name:'create_comment',args:{bodyText:'SYNTHETIC_PRIVATE'}},
+    async()=>{sent++;},{withProfile:action=>action({readCompanyContentMode:f.profile.readCompanyContentMode})});
+  for(rows of [[],[{companyId:randomUUID(),encryptionState:'plain'}],
+    [{companyId:f.pass.companyId,encryptionState:'encrypting'}],[{companyId:f.pass.companyId}],
+    [{companyId:f.pass.companyId,encryptionState:'plain'},{companyId:f.pass.companyId,encryptionState:'plain'}]])
+    await assert.rejects(invoke(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  f.client.companies=async()=>{throw Object.assign(new Error('synthetic unavailable'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});};
+  await assert.rejects(invoke(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+  f.client.companies=async()=>{f.changeIdentity({...f.identity,deviceId:randomUUID()});return [{companyId:f.pass.companyId,encryptionState:'plain'}];};
+  await assert.rejects(invoke(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  f.changeIdentity(f.identity);f.client.companies=async()=>{f.close();return [{companyId:f.pass.companyId,encryptionState:'plain'}];};
+  await assert.rejects(invoke(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  assert.equal(sent,0,'no failed or late authority check exposes prose to send');
+
+});
+
 test('native encrypted refusal is consumed once by the trusted materializer under the original MCP deadline',async()=>{
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});let writes=0,hydrations=0,mode='valid';
   const descriptor=f.descriptor;

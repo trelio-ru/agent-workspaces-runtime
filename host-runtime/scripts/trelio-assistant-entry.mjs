@@ -5,7 +5,7 @@ import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-ho
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
@@ -193,6 +193,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
+      readCompanyContentMode:profile.readCompanyContentMode,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -1041,7 +1042,8 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     withManagedContent=withProductionAssistantManagedContent}={})=>{
   if(supportsAssistantManagedContent(name))return withManagedContent({name,args,signal},send);
   if(name==='complete_assistant_pass')return withAssistantEncryptedMaterial({args,signal},send,{withProfile,loadCommon});
-  if(name!=='continue_assistant_workspace_action' || !['checkpoint','finish','pause'].includes(args.operation))return send(args);
+  if(name!=='continue_assistant_workspace_action' || !['checkpoint','finish','pause'].includes(args.operation))
+    return withAssistantCompanyContentArguments({name,args,signal},send,{withProfile});
   if(!args.parameters || Object.hasOwn(args.parameters,'encryptedArguments'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   return withProfile(async({identity,host,prepareWorkspaceRun})=>{
     const common=await loadCommon();
@@ -1072,6 +1074,31 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     return {...result,structuredContent:{...result.structuredContent,localAction:{
       ...result.structuredContent.localAction,parameters:opened}}};
   },{signal,workspaceRun:args.runIdentity});
+};
+
+/** All task prose crosses ONE common pre-send boundary, including operations
+ * whose encrypted adapter is not available yet. A server-side refusal is too
+ * late: its HTTP request would already contain company text. Names below
+ * select structural reads/lifecycle only; native schemas, ACL, CAS and observed
+ * proofs remain authoritative and are neither copied nor synthesized here.
+ * New mutation names therefore fail closed without another hand-maintained
+ * list of content fields. Guidance queries are text even though they are reads.
+ */
+export const withAssistantCompanyContentArguments = async ({name,args,signal},send,
+  {withProfile=withProductionAssistantWorkspace}={})=>{
+  if(!ASSISTANT_MCP_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'
+    || name==='prepare_assistant_workspace_run'
+    || name==='continue_assistant_workspace_action'
+      && ['inspect','open','status','heartbeat','secret_list','secret_generate'].includes(args.operation))return send(args);
+  return withProfile(async({readCompanyContentMode})=>{
+    if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    if(await readCompanyContentMode(signal)!=='plain')throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+    signal?.throwIfAborted();
+    // Exactly one exchange. No retry after refusal/transport failure and no
+    // native human flag, temporary plain copy, key lookup or mode cache.
+    return send(args);
+  },{signal});
 };
 
 /** Completing an encrypted pass uses the SAME accepted inspector/Git and the

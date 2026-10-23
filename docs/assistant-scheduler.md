@@ -923,6 +923,21 @@ and receipt together, then releases deferred messenger copies. A lost response
 is not retried by the facade, worker or transport. These actions do not enable
 businessReady until Workspace/outcome/service and Windows acceptance are wired.
 
+Company content is checked BEFORE the remote MCP `tools/call`, not only by a
+native encrypted-company refusal after HTTP has received it. The SAME managed
+profile brackets a fresh native company-mode inventory with exact live pass
+checks. Missing/duplicate company, transition, failed inventory or changed pass
+never means plain; the mode is neither cached nor inferred from local key state.
+Legacy native `null` and explicit `plain` retain the ordinary native validators.
+Task mutations, owner requests, cancellation/repair reasons, guidance queries,
+Secret metadata/URLs and provider command arguments require this preflight.
+Unsupported encrypted content fails locally with
+`ASSISTANT_ENCRYPTED_CONTENT_REQUIRED`; it is never sent merely to obtain a
+server capability refusal. Already protected Run/material operations retain
+their SAME sealed adapters. Structural read/lifecycle calls keep their native
+route and independent output hydration. This guard supplies neither mutation
+authority nor a plaintext/key/human fallback, and never repeats a failed call.
+
 A successful model-free worker probe also returns a fingerprint of its bounded
 public tool catalogue. The long-lived stdio facade compares it with its last
 positive tools/list and emits MCP `notifications/tools/list_changed` only on a

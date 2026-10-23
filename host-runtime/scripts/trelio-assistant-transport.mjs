@@ -689,6 +689,19 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     kind:'digital_assistant',
     encryptedTaskRead:encryptedRead,
     companyEncryptionUserId:identity.assistantId,
+    async readCompanyContentMode(signal){
+      // This is a transport privacy preflight, not mutation authority. Obtain
+      // current mode from the SAME native device inventory and bracket it with
+      // the original exact pass checks. Never infer plain from missing company,
+      // a failed inventory, an old task mirror or absent local encryption keys.
+      await assertLivePass(signal);
+      const companies=await client.companies(signal);
+      const matches=companies.filter(company=>company.companyId===pass.companyId);
+      if(matches.length!==1 || ![null,'plain','encrypted'].includes(matches[0].encryptionState))
+        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      await assertLivePass(signal);
+      return matches[0].encryptionState??'plain';
+    },
     async prepareWorkspaceMaterial(){
       if(!materialWorkspaceId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertLivePass();
