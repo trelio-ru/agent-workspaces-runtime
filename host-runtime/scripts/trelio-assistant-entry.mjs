@@ -346,7 +346,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task'}=
       // These are native metadata/preparation/creation receipts, not local command
       // plans. The next returned secret_browser_fill continuation executes in
       // the SAME isolated Workspace worker; no second browser executor exists.
-      if(['secret_list','secret_browser_prepare','secret_create','skill_consent','skill_account_setup'].includes(args?.operation))return result;
+      if(['secret_list','secret_browser_prepare','secret_create','skill_consent','skill_account_setup','external_account_admit'].includes(args?.operation))return result;
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}

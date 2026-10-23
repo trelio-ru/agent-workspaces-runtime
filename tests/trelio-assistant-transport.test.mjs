@@ -2704,3 +2704,12 @@ test('private protected input binds exact native plan/card/pass and never export
     assert.equal(writes,2);
   }finally{globalThis.fetch=prior;}
 });
+
+test('external signup plan is a closed exact-origin projection and only its admission uses managed continuation',async()=>{
+  const {assistantExternalAccountPlan,supportsAssistantManagedContent}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const plan={siteOrigin:'https://signup.example.test',purpose:'Task account',intendedHolder:'company',signupPlan:'Create the free account and verify its home page'};
+  assert.equal(assistantExternalAccountPlan(plan),true);
+  for(const change of [{siteOrigin:'https://signup.example.test/'},{siteOrigin:'https://user:password@signup.example.test'},{purpose:' '},{signupPlan:' '},{intendedHolder:'owner'},{password:'SECRET_CANARY'},{approved:true}])assert.equal(assistantExternalAccountPlan({...plan,...change}),false);
+  assert.equal(supportsAssistantManagedContent('continue_assistant_workspace_action',{operation:'external_account_admit'}),true);
+  assert.equal(supportsAssistantManagedContent('continue_assistant_workspace_action',{operation:'signup_and_pay'}),false);
+});

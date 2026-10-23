@@ -575,8 +575,26 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['call_remote_agent_skill_tool','c
   'update_task_custom_field','delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
   'get_assistant_owner_question','get_assistant_intake_context']);
 export const supportsAssistantManagedContent=(name,args)=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name)
-  ||name==='continue_assistant_workspace_action'&&(args?.operation==='skill_run'
+  ||name==='continue_assistant_workspace_action'&&(args?.operation==='skill_run'||args?.operation==='external_account_admit'
     ||args?.operation==='secret_list'&&args.parameters?.holder==='company');
+/** Local privacy/shape boundary, never native owner authority. This mirrors
+ * only this closed value-free plan; the live native schema and decision still
+ * revalidate all fields and the exact task/device before admission. */
+export const assistantExternalAccountPlan=value=>{
+  if(!object(value)||Object.keys(value).sort().join(',')!=='intendedHolder,purpose,signupPlan,siteOrigin'
+    ||!['assistant','company'].includes(value.intendedHolder)
+    ||typeof value.purpose!=='string'||!value.purpose.trim()||value.purpose.length>2000
+    ||typeof value.signupPlan!=='string'||!value.signupPlan.trim()||value.signupPlan.length>8000
+    ||typeof value.siteOrigin!=='string'||value.siteOrigin.length>2048)return false;
+  try{const url=new URL(value.siteOrigin);return url.protocol==='https:'&&url.origin===value.siteOrigin&&!url.username&&!url.password;}
+  catch{return false;}
+};
+const assistantExternalAccountAdmission=value=>{
+  if(!object(value))return false;
+  const {clientRequestId,ownerDecisionId,expectedTaskUpdatedAt,...plan}=value;
+  return UUID.test(clientRequestId??'')&&UUID.test(ownerDecisionId??'')&&typeof expectedTaskUpdatedAt==='string'
+    &&Number.isFinite(Date.parse(expectedTaskUpdatedAt))&&assistantExternalAccountPlan(plan);
+};
 /** Closed local projection, not owner authority. Textual metadata is never
  * declassified into the global personal pool by naming this mode. Native
  * schemas/review still select fixed labels, one policy and the exact Run. */
@@ -650,6 +668,8 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   // Ignore model-authored transport hints before signing; all private metadata
   // comes from the genuine current OS/pass context below.
   let business=managedBusinessArguments(args);rejectBorrowedManagedMarkers(business);
+  if(name==='request_assistant_action'&&business.operation==='create_external_account'&&!assistantExternalAccountPlan(business.fields)
+    ||name==='continue_assistant_workspace_action'&&business.operation==='external_account_admit'&&!assistantExternalAccountAdmission(business.parameters))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   const secretMetadata=name==='continue_assistant_workspace_action'&&business.operation==='secret_list'&&business.parameters?.holder==='company';
   if(secretMetadata&&(business.schemaVersion!==1||business.runIdentity!==undefined||Object.keys(business).some(key=>!['schemaVersion','operation','parameters'].includes(key))
     ||Object.keys(business.parameters).some(key=>!['holder','offset','limit'].includes(key))
@@ -2441,7 +2461,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         const definitions=catalog.filter(tool=>tool?.name===name);
         if(definitions.length!==1)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         validateAssistantNativeInputShape(definitions[0].inputSchema,argumentsSnapshot);
-        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='setup_skill_account'){
+        if(name==='continue_assistant_workspace_action'&&argumentsSnapshot.operation==='external_account_admit'){
+          if(!assistantExternalAccountAdmission(argumentsSnapshot.parameters))fail('ASSISTANT_MCP_INPUT_INVALID');
+        }
+        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='create_external_account'){
+          if(!assistantExternalAccountPlan(argumentsSnapshot.fields))fail('ASSISTANT_MCP_INPUT_INVALID');
+        }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='setup_skill_account'){
           normalizeAssistantSkillAccountSetupFields(argumentsSnapshot.fields);
         }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='accept_skill_runtime'){
           // This native-only owner action has no ordinary human task mutation

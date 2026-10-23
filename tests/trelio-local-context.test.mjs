@@ -4805,3 +4805,20 @@ test('Remote MCP owner planning and final admission protect the same complete ar
   assert.ok(!JSON.stringify(final.value).includes('private.example'));
   assert.deepEqual(Object.values(final.expectedPayloadValues).map(value=>value.remote_arguments_json),[fields.arguments]);
 });
+
+test('external signup owner preview and native admission share exact protected origin, purpose and plan',async()=>{
+  const device=await createAgentEncryptionDevice();
+  const companyEncryption={runtime:{company:{id:'11111111-1111-4111-8111-111111111111',slug:'acme'},
+    scope:{id:'22222222-2222-4222-8222-222222222222',epoch:1,publicEncryptionJwk:device.publicEncryptionJwk},
+    device:{id:'33333333-3333-4333-8333-333333333333'}},device,
+    scopePrivateEncryptionKey:{privateKey:device.privateKeys.encryptionPrivateKey,privateJwk:device.privateBundle.encryptionPrivateJwk}};
+  const fields={siteOrigin:'https://private-signup.example.test',purpose:'PRIVATE_SIGNUP_PURPOSE',intendedHolder:'company',signupPlan:'PRIVATE_SIGNUP_PLAN'},clientRequestId='55555555-5555-4555-8555-555555555555';
+  const plan=await protectLocalActionArguments({nativeTool:'request_assistant_action',companyEncryption,
+    arguments:{operation:'create_external_account',fields,reason:'PRIVATE_SIGNUP_REASON',clientRequestId}});
+  const admitted=await protectLocalActionArguments({nativeTool:'continue_assistant_workspace_action',companyEncryption,
+    arguments:{schemaVersion:1,operation:'external_account_admit',parameters:{...fields,clientRequestId,ownerDecisionId:'66666666-6666-4666-8666-666666666666',expectedTaskUpdatedAt:'2026-10-23T00:00:00.000Z'}}});
+  for(const key of ['siteOrigin','purpose','signupPlan'])assert.deepEqual(plan.value.fields[key],admitted.value.parameters[key]);
+  assert.equal(admitted.value.parameters.intendedHolder,'company');
+  for(const value of [plan.value,admitted.value])assert.doesNotMatch(JSON.stringify(value),/private-signup|PRIVATE_SIGNUP/);
+  assert.deepEqual(Object.values(admitted.expectedPayloadValues).map(row=>Object.keys(row).sort()),[['external_origin','external_purpose','external_signup_plan']]);
+});

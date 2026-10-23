@@ -1901,3 +1901,11 @@ task purpose/question stay company-sealed and require the current recipient.
 Legacy empty/generation approvals never gain capture authority. Unknown/pending,
 cancel or form opening cannot mean saved or reopen input under that old intent.
 No model value, browser/file/session extraction, new vault or runtime module.
+
+### Owner-reviewed NEW external signup
+
+A signup is separate from existing-account human-input login and from Secret creation/use. Request `create_external_account` with exact HTTPS `siteOrigin`, `purpose`, `intendedHolder:assistant|company` and bounded full `signupPlan`. The SAME owner question/decision reviews the whole plan. After approval, native `external_account_admit` continuation consumes it once and commits a structural receipt BEFORE site effects; a lost/replayed response only returns `mayExecute:false` with the same receipt. It never starts a site or proves account success.
+
+Use only an existing permitted browser/provider route on the approved origin. Missing registration capability is a concrete blocker, not permission to extend an `authenticate_existing` recipe, bypass service terms/human login/public publication controls or spend money. Separate Secret ownership/create/use/capture authority supplies protected values without model exposure. Verify fresh site/provider state and save useful accepted task evidence before reporting success. Unknown outcomes stay unresolved; no automatic signup replay.
+
+In encrypted companies all origin/purpose/plan leaves use the SAME managed field protector, native preparation/current-recipient/signatures and process-only hydration. Planning and admission derive the SAME stable field coordinates from the original request UUID; no plaintext origin/plan/body or second vault/executor is introduced.
