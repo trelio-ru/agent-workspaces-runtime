@@ -644,3 +644,20 @@ proofs and does not invent owner evidence for historical rows. Tests use genuine
 SQLite transactions/restarts, signed native children and a separate native
 PostgreSQL/HTTP/MCP composition. They do not prove live Windows business E2E or
 an encrypted source content plane.
+
+### Encrypted source metadata and body processing
+
+Source UUID/revision and opaque known-route references remain structural in a
+stable encrypted company. The production coordinator passes the exact current
+source selection to the SAME signed monitor. Configuration ciphertext opens only
+inside the managed profile using native-selected payloads and current recipient.
+The SQLite schema and durable cursor/route/read/processing/uncertain-ACK engine
+remain unchanged. Provider body and decrypted config/rules never enter its rows.
+
+Task body read still uses a distinct genuine task pass/proof and shared signed
+executor/SourceReadObserver. Only successful complete native read plus current
+route can record a read slot. The independent native accepted encrypted material
+outcome must explicitly select the original slots before ACK. Restart preserves
+the same slots and one-use unknown-write fence; no blind ACK retry or fallback
+into human OAuth/session/key storage is introduced. Encrypted owner setup and
+unknown-conversation intake remain separate capabilities.

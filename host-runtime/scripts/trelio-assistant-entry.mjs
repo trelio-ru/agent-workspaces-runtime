@@ -173,7 +173,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -189,7 +189,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
@@ -258,6 +258,12 @@ export const createProductionAssistantMcp = async () => {
       return materializeAssistantEncryptedTask({origin:identity.origin,descriptor:current.encryptedTaskRead,signal,
         assertCurrent:current.assertEncryptedTaskReadCurrent});
     },{signal,encryptedTaskRead:descriptor}),
+    materializeEncryptedSkill: ({descriptor,signal}) => withProductionAssistantWorkspace(async current => {
+      if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key]))
+        throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+      const {materializeAssistantEncryptedSkill}=await import('./trelio-assistant-transport.mjs');
+      return materializeAssistantEncryptedSkill({origin:identity.origin,descriptor,signal});
+    },{signal,encryptedSkillRead:descriptor}),
     materializeAttachment: ({result,attachmentId,signal}) => withProductionAssistantWorkspace(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});

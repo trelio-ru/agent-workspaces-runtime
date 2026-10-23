@@ -244,7 +244,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // candidate. Only its structural binding UUID is persisted with refs.
       const ownerBefore=row.ownerTaskIntakeAllowed===true&&['telegram-mtproto','max-web'].includes(row.skillId)
         ?await client.ownerIdentities(signal):null;
-      const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
+      const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,sourceId:row.id,sourceRevision:row.revision,
         accountId:row.localAccountId,cursor:email&&streamId!==null?poll.cursor??poll.initialCursor:poll.cursor,
         ...(row.skillId==='max-web'?{chat:row.maxChatUrl,...(poll.cursor===null?{initialUnread:true}:{})}:email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
           ...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})})},signal);lease();

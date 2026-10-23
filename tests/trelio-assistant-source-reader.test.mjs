@@ -5,7 +5,7 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {randomUUID,generateKeyPairSync,sign,createHash} from 'node:crypto';
+import {randomUUID,generateKeyPairSync,sign,createHash,webcrypto} from 'node:crypto';
 
 const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-source-reader-'));
 for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCALAPPDATA','CODEX_HOME','TRELIO_CONFIG_HOME']){
@@ -16,12 +16,13 @@ const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
 const {createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
-const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
+const origin='https://trelio.ru',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
 const identity={schemaVersion:1,origin,assistantId,deviceId},scope={companyId,projectId:null,skillId:'telegram-mtproto'};
 const credential=`tda_${'k'.repeat(43)}`;
 let reads=0,liveIdentity=identity;
 const host={readIdentity:async()=>structuredClone(liveIdentity)};
 const store={get:async slot=>{
+  if(slot.kind==='company_encryption'){assert.deepEqual(slot,{origin,kind:'company_encryption',id:companyId,deviceId});return null;}
   reads++;assert.deepEqual(slot,{origin,kind:'device',id:assistantId});
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
@@ -668,8 +669,9 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     entrypointPath:'main.mjs',interpreter:'node',capabilities:['network']});
   const currentRelease=randomUUID(),currentArtifact=randomUUID(),packageHash=createHash('sha256').update(bytes).digest('hex');
   const packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({companyId:pass.companyId,skillId:'task-runtime-fixture',expectedReleaseId:currentRelease,artifactId:currentArtifact});
+  const taskMemberId=randomUUID();
   const dto=()=>({releaseId:currentRelease,company:{id:pass.companyId,slug:'fixture',name:'Fixture'},
-    localIdentity:{companyId:pass.companyId,projectId:null,skillId:'task-runtime-fixture',memberId:randomUUID(),connectionId:null},companyConnection:null,
+    localIdentity:{companyId:pass.companyId,projectId:null,skillId:'task-runtime-fixture',memberId:taskMemberId,connectionId:null},companyConnection:null,
     trust:{level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null},packageUrl,
     artifact:{id:currentArtifact,skillId:'task-runtime-fixture',runtimeVersion:'1.0.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
       packageSha256:packageHash,packageSizeBytes:bytes.length,packageSignature:sign(null,bytes,privateKey).toString('base64'),
@@ -1111,7 +1113,7 @@ test('derived ACK profile preserves short original grant budget and one-use spaw
 
 // A separate signed package uses exactly the production source profile and
 // common local catalogue. The fixture does not grant task or setup permission.
-test('MAX native source and committed ACK reuse one signed child/account engine with exact range and uncertain read-back',async t=>{
+for(const encrypted of [false,true])test(`MAX native source and committed ACK reuse one signed child/account engine with exact range and uncertain read-back (encrypted=${encrypted})`,async t=>{
   const saved={...scope},savedVersion=providerVersion;
   t.after(()=>{Object.assign(scope,saved);providerVersion=savedVersion;ackFixture=null;resolveOverride=null;});
   scope.skillId='max-web';providerVersion='2.11.0';
@@ -1125,40 +1127,177 @@ test('MAX native source and committed ACK reuse one signed child/account engine 
   const monitor={schemaVersion:1,baselineOnly:false,events:[event],nextCursor:cursor(),hasMore:false,
     coverage:{historicalBackfill:true,initialUnreadOnly:true,snapshotAtomic:false,ownerIdentityAvailable:true,
       nativeMessageVerified:true,earlierEditsIncluded:false,otherChatsIncluded:false},readState:{readReceiptsSent:false}};
-  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  let selectedStore=store,connectionId=null,encryptedWire=null,encryptionRuntime=null,cryptoMode='valid',bodyThread=null;
+  const savedFetch=globalThis.fetch;
+  if(encrypted){
+    // Real managed identity + HPKE company envelope + AEAD field payload, not
+    // a fake read slot or a pre-decrypted config passed into a provider.
+    const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+    const {hpkeSeal,encryptCompanyPayload,buildCompanyEncryptedTextMarker}=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
+    const slots=new Map();selectedStore={get:async slot=>slot.kind==='company_encryption'?slots.get(slot.id)??null:store.get(slot),
+      put:async(slot,value)=>{assert.equal(slot.kind,'company_encryption');slots.set(slot.id,value);}};
+    const managed=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store:selectedStore,
+      lockDirectory:path.join(directory,'source-crypto-locks'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+    const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+    const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+    const scopeId=randomUUID(),recipientDeviceId=randomUUID(),entityId=randomUUID();connectionId=randomUUID();
+    const aad={suite:'trelio-e2ee-v1',companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:recipientDeviceId};
+    const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+      plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+    const envelope={id:randomUUID(),...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+    const header={companyId,scopeId,scopeEpoch:1,entityType:'agent_skill_connection',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+    const payload={...header,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:header,
+      payload:{values:{config_json:{region:'ENCRYPTED_CONFIG_CANARY'},personal_rules:'CURRENT_ASSISTANT_RULE_CANARY'}}})};
+    encryptionRuntime={state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'synthetic',name:'Synthetic'},
+      viewer:{userId:assistantId},accessState:'ready',device:{id:recipientDeviceId,fingerprint:managed.fingerprint},
+      scope:{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk},envelope};
+    encryptedWire={schemaVersion:1,companyId,recipientDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,encryptedPayloads:[payload]};
+    globalThis.fetch=async(url,options)=>{
+      assert.equal(url.origin,origin);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
+      assert.equal(options.headers.get('cookie'),null);assert.equal(options.redirect,'error');
+      assert.doesNotMatch(String(options.body??''),/ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);
+      if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
+        const value=structuredClone(encryptionRuntime);if(cryptoMode==='recipient')value.envelope.recipientId=randomUUID();
+        return new Response(JSON.stringify(value));
+      }
+      if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-compatibility'){
+        const rules='# Encrypted source platform rules\n',sha256=createHash('sha256').update(rules).digest('hex');
+        return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{status:options.headers.get('x-trelio-agent-rules-sha256')===sha256?'current':'update_required',revisionId:scopeId,version:1,sha256,rulesMarkdown:rules}}));
+      }
+      if(url.pathname===prefix+'/resolve'||url.pathname==='/api/agent-skills/runtime/resolve'){
+        resolveCalls++;const body=JSON.parse(options.body);if(resolveOverride)return resolveOverride();
+        assert.equal(body.companyId,companyId);assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
+        const taskRead=url.pathname==='/api/agent-skills/runtime/resolve';
+        if(!taskRead&&!ackFixture)assert.deepEqual(body.sourceSelection,{sourceId,expectedRevision:0});
+        const raw=resolution();raw.companyConnection={id:connectionId,status:'configured',configured:true,
+          config:buildCompanyEncryptedTextMarker(entityId,'config_json'),secretBindings:[]};raw.localIdentity.connectionId=connectionId;
+        const query=new URL(raw.packageUrl,origin);query.searchParams.set('sourceId',sourceId);query.searchParams.set('sourceRevision','0');
+        raw.packageUrl=query.pathname+query.search;raw.sourceEncryption=structuredClone(encryptedWire);
+        if(taskRead){
+          const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));assert.equal(proof.schemaVersion,1);
+          delete raw.sourceAdmission;raw.assistantEncryption=raw.sourceEncryption;delete raw.sourceEncryption;
+          raw.packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({companyId,skillId:scope.skillId,expectedReleaseId:releaseId,artifactId});
+          if(options.headers.get('x-trelio-assistant-skill-guidance')==='1')raw.assistantGuidance={content:[],structuredContent:{
+            companySlug:'synthetic',projectSlug:null,skill:{id:scope.skillId,title:'MAX fixture',instructions:'Public fixture',
+              personalRules:{instructionsMarkdown:buildCompanyEncryptedTextMarker(entityId,'personal_rules')}},
+            runtimeExecution:{releaseId,localAction:{server:'trelio-local',tool:'continue_trelio_workspace_action',arguments:{
+              schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId:scope.skillId,releaseId}}}},remoteMcpExecution:null}};
+        }
+        const bundle=raw.sourceEncryption??raw.assistantEncryption;
+        if(cryptoMode==='aad')bundle.encryptedPayloads[0].aad.companyId=randomUUID();
+        if(cryptoMode==='missing')bundle.encryptedPayloads=[];
+        if(cryptoMode==='extra')bundle.encryptedPayloads.push({...payload,entityId:randomUUID()});
+        if(cryptoMode==='ciphertext')bundle.encryptedPayloads[0].ciphertext='AAAA';
+        assert.doesNotMatch(JSON.stringify(raw),/ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);
+        return new Response(JSON.stringify(raw));
+      }
+      assert.ok([prefix+'/package','/api/agent-skills/runtime/package'].includes(url.pathname));
+      if(url.pathname===prefix+'/package')assert.equal(url.searchParams.get('sourceId'),sourceId);
+      downloadCalls++;return new Response(packageBytes);
+    };
+    t.after(()=>{globalThis.fetch=savedFetch;});
+  }
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope});
   const root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
-  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId:null}),io:{
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId}),io:{
     ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
     checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
   await catalogue.change({operation:'create',id:accountId,name:'Synthetic native MAX',expectedRevision:(await catalogue.list()).revision});
-  const sourceDir=path.join(directory,'max-native-package'),marker=path.join(directory,'max-native-child'),fence=path.join(directory,'max-native-fence');
+  const sourceDir=path.join(directory,`max-native-package-${encrypted}`),marker=path.join(directory,`max-native-child-${encrypted}`),fence=path.join(directory,`max-native-fence-${encrypted}`);
   await fs.mkdir(sourceDir);
   const build=async({mode='monitor',verifyOnly=false,outcome='confirmed',failure=null}={})=>{
-    const args=mode==='monitor'?['monitor','--chat',chat,'--unread-backfill','--conversation-references','--limit','100']:
+    const args=mode==='read'?['read-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key]:mode==='monitor'?['monitor','--chat',chat,'--unread-backfill','--conversation-references','--limit','100']:
       ['ack-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key,
         '--covered-reference','11:'+revision,verifyOnly?'--verify-only':'--confirm'];
-    const output=mode==='monitor'?monitor:failure??{ok:true,schemaVersion:1,protocol:'max-message-ack/v1',
+    const output=mode==='read'?{schemaVersion:1,protocol:'max-message-read/v1',reference:{id:reference.id,revision,conversationKey:key},
+      message:{text:'EXACT_BODY_CANARY',textTruncated:false},coverage:{textComplete:true,attachmentsContentRead:false,otherMessagesIncluded:false,contextIncluded:false,nativeMessageVerified:true},
+      readState:{marksRead:false,readReceiptsSent:false,mode:'history-only',viewsRegistered:false}}:mode==='monitor'?monitor:failure??{ok:true,schemaVersion:1,protocol:'max-message-ack/v1',
       reference:{id:reference.id,revision,conversationKey:key,chatId:'77',messageId:'11'},readState:{acknowledged:outcome==='confirmed',
         coveredReferencesVerified:true,writeAttempted:!verifyOnly,writeOutcome:verifyOnly?'not_attempted':outcome,
         automaticRetryAllowed:false,viewsRegistered:false,verifyOnly,snapshotAtomic:false}};
     await fs.writeFile(path.join(sourceDir,'main.mjs'),`import fs from 'node:fs';import assert from 'node:assert/strict';
       assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});
-      assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+      assert.equal(process.env.CODEX_THREAD_ID,${JSON.stringify(mode==='read'?bodyThread:undefined)});assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
       assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+      ${encrypted?"assert.equal(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON).region,'ENCRYPTED_CONFIG_CANARY');":''}
       ${mode==='ack'?`assert.equal(fs.readFileSync(${JSON.stringify(fence)},'utf8'),'DURABLE');`:''}
       let input='';for await(const c of process.stdin)input+=c;assert.equal(input,'');
       fs.appendFileSync(${JSON.stringify(marker)},'1');${failure?'process.stderr':'process.stdout'}.write(${JSON.stringify(JSON.stringify(output))});
       process.exitCode=${failure?2:0};`);
+    await fs.writeFile(path.join(sourceDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:1,taskCommands:[['read-reference']]}));
     artifactId=randomUUID();releaseId=randomUUID();
     packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:providerVersion,sourceDirectory:sourceDir,
       entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
   };
   await build();
-  const page=await readAssistantSourceMonitor({identity,host,store,source:{...scope,accountId,chat,cursor:null,initialUnread:true}});
+  const page=await readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,initialUnread:true,...(encrypted?{sourceId,sourceRevision:0}:{})}});
   assert.equal(page.initialUnreadBackfill,true);assert.equal(page.events[0].senderNamespace,'max_user_id');
   assert.equal(page.events[0].conversationKey,key);assert.doesNotMatch(JSON.stringify(page),/PRIVATE/);
+  if(encrypted){
+    const before=await fs.readFile(marker,'utf8');
+    for(cryptoMode of ['aad','missing','extra','ciphertext','recipient']){
+      await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,
+        initialUnread:true,sourceId,sourceRevision:0}}));
+      assert.equal(await fs.readFile(marker,'utf8'),before,'bad ciphertext or recipient refuses before provider launch');
+    }
+    cryptoMode='valid';
+  }
+  if(encrypted){
+    const {DatabaseSync}=await import('node:sqlite');
+    const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+    const {createAssistantWorkspaceProfile,createAssistantSourceReadObserver,materializeAssistantEncryptedSkill}=
+      await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+    const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    const file=path.join(directory,'encrypted-max-inbox.sqlite');let database=new DatabaseSync(file);
+    let inbox=createAssistantInbox({database,now:()=>1_000_000});t.after(()=>database.close());
+    const canonical={origin,assistantId,companyId,provider:'trelio',accountId:memberId,bindingId:randomUUID()};
+    const external={origin,assistantId,companyId,provider:'max',accountId,bindingId:sourceId};
+    const bindingId=randomUUID(),route={id:routeId,sourceId,sourceRevision:0,conversationKey:key,bindingId,bindingRevision:1,taskId:reference.taskId};
+    inbox.register(canonical);inbox.register(external);inbox.observeExternalSourceRevision(external,0);
+    inbox.applyTaskState(canonical,{taskId:reference.taskId,state:'accepted',expectedRevision:0,authority:{bindingId,revision:1}});
+    inbox.commitPage(external,{...inbox.claimPoll(external),nextCursor:page.nextCursor,hasMore:false,
+      events:page.events.map(row=>({id:row.id,revision:row.revision,taskId:null,wake:false,providerWake:true,conversationKey:row.conversationKey}))});
+    inbox.routeExternalEvents(external,{canonicalSource:canonical,sourceRevision:0,eventKeys:inbox.pendingExternalRoutes(external).map(row=>row.event_key),routes:[route]});
+    const work=await inbox.claimDelivery({authorize:async()=>true});inbox.startDelivery(work.deliveryId);
+    const pass={schemaVersion:1,assistantId,deviceId,companyId,taskId:reference.taskId,passId:randomUUID(),deliveryId:work.deliveryId,
+      threadId:randomUUID(),bindingId,bindingRevision:1};bodyThread=pass.threadId;
+    const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
+      expiresAt:new Date(Date.now()+300000).toISOString(),privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
+      observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}}};
+    const taskStore={get:slot=>slot.kind==='runtime'?runtime:selectedStore.get(slot),put:selectedStore.put};
+    const taskHost={readIdentity:host.readIdentity,readActivePass:async()=>pass};
+    const taskClient={readTaskPass:async()=>({...pass,state:'leased',leaseExpiresAt:new Date(Date.now()+300000).toISOString()}),
+      sourceAccounts:async()=>[source],sourceRoutes:async()=>[route]};
+    const observer=createAssistantSourceReadObserver({identity,client:taskClient,host:taskHost,withInbox:async action=>action(inbox)});
+    await build({mode:'read'});
+    const profile=await createAssistantWorkspaceProfile({identity,client:taskClient,host:taskHost,store:taskStore,sourceReads:observer,
+      lockDirectory:path.join(directory,'encrypted-task-locks'),lock:(_file,action)=>action()});
+    const plan={prepared:true,scope:{assistantUserId:assistantId,deviceId,companyId,taskId:pass.taskId,passId:pass.passId},localAction:{
+      schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId:scope.skillId,releaseId,runtimeSessionId:runtime.state.runtimeSessionId,
+        arguments:['read-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key,'--local-account',accountId]}}};
+    const body=await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client:taskClient,host:taskHost,store:taskStore})}));
+    assert.equal(JSON.parse(body.stdout).message.text,'EXACT_BODY_CANARY');
+    const selected=[{sourceId,sourceRevision:0,routeId,eventOrdinal:0}];
+    assert.deepEqual(await observer.confirmProcessing(pass,selected),selected);
+    assert.equal(inbox.claimAcknowledgements(external),null,'actual signed body read is not material processing');
+    // The native accepted-material receipt is the independent backend contract;
+    // this queue composition accepts only its selected original delivery slots.
+    inbox.completeDelivery(work.deliveryId,`assistant:${receiptId}:codex:${pass.threadId}:${randomUUID()}`,{processedSourceReferences:selected});
+    database.close();database=new DatabaseSync(file);inbox=createAssistantInbox({database,now:()=>1_000_000});
+    const ack=inbox.claimAcknowledgements(external),refs=inbox.externalAcknowledgementReferences(external,{token:ack.token,sourceRevision:0});
+    assert.equal(refs.length,1);assert.equal(refs[0].id,reference.id);assert.equal(refs[0].receiptId,receiptId);
+    assert.doesNotMatch(JSON.stringify(database.prepare('SELECT * FROM assistant_inbox_events').all()),/EXACT_BODY_CANARY|ENCRYPTED_CONFIG_CANARY|CURRENT_ASSISTANT_RULE_CANARY/);
+    const descriptor={schemaVersion:1,nativeTool:'get_agent_skill',companyId,projectId:null,skillId:scope.skillId,releaseId,
+      arguments:{sections:['instructions','execution']}};
+    const readProfile=await createAssistantWorkspaceProfile({identity,client:taskClient,host:taskHost,store:taskStore,encryptedSkillRead:descriptor,
+      lockDirectory:path.join(directory,'encrypted-guidance-locks'),lock:(_file,action)=>action()});
+    const skill=await engine.withWorkspaceExecutionProfile(readProfile,()=>materializeAssistantEncryptedSkill({origin,descriptor}));
+    assert.match(JSON.stringify(skill),/CURRENT_ASSISTANT_RULE_CANARY/);
+    assert.doesNotMatch(JSON.stringify(skill),/~e1:|ciphertext|scopePrivateEncryptionJwk|trelio-local/);
+    await build();
+  }
   const before=await fs.readFile(marker,'utf8');providerVersion='2.10.2';await build();
-  await assert.rejects(readAssistantSourceMonitor({identity,host,store,source:{...scope,accountId,chat,cursor:null,initialUnread:true}}),/CAPABILITY_REQUIRED/);
+  await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,initialUnread:true,...(encrypted?{sourceId,sourceRevision:0}:{})}}),/CAPABILITY_REQUIRED/);
   assert.equal(await fs.readFile(marker,'utf8'),before,'old package cannot start a provider or claim a baseline');providerVersion='2.11.0';
   ackFixture={intent:{sourceId,sourceRevision:0,receipts:[{receiptId,eventOrdinals:[0]}]},admission:{schemaVersion:1,
     sourceId,sourceRevision:0,localAccountId:accountId,slots:[{receiptId,routeId,eventOrdinal:0}]}};
@@ -1166,7 +1305,7 @@ test('MAX native source and committed ACK reuse one signed child/account engine 
   const invoke=async(verifyOnly=false)=>{
     if(verifyOnly){ackFixture.intent.verifyOnly=true;ackFixture.admission.verifyOnly=true;}
     else{delete ackFixture.intent.verifyOnly;delete ackFixture.admission.verifyOnly;}
-    return acknowledgeAssistantSource({identity,host,store,client,source,references:[reference],verifyOnly,
+    return acknowledgeAssistantSource({identity,host,store:selectedStore,client,source,references:[reference],verifyOnly,
       assertReferences:()=>{},beforeInvoke:async()=>{starts++;await fs.writeFile(fence,'DURABLE');}});
   };
   await build({mode:'ack'});const resolves=resolveCalls;

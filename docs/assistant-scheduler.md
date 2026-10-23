@@ -1440,3 +1440,35 @@ The protected pass discriminator chooses it, never model arguments. Header alone
 supplies no native authority; strict original schema/proof/device/source checks
 remain in each handler. Both full raw catalogues retain the common 65,536-byte
 bound, with no schema copies, new endpoint or second executor.
+
+### Encrypted source and exact public task skill
+
+Stable encrypted source discovery/health/known-route/committed ACK uses the SAME
+native structural service and BOTH current memberships/project scopes. Monitor
+resolve/package carries only the exact source UUID/revision. Owner setup and
+taskless intake retain their separate content adapters; no inherited permission.
+
+The existing signed resolver/package returns a native-selected connection config
+ciphertext bundle for the assistant's active managed recipient/current epoch.
+Public platform_verified packages without Secret capabilities/bindings stay
+public/plain. Source and task profiles use ONE common field hydrator with injected
+exact payload resolution (max 8 payloads/256 KiB native bundle); neither can call
+the human general payload resolver. Keys stay in the SAME managed OS slot. A lost
+already-prepared slot is refused without creating a replacement identity.
+
+Encrypted get_agent_skill is a closed native descriptor, materialized through the
+SAME task pass/proof/runtime resolver/native detail builder and response projector.
+Only the current assistant's personal skill rule is selected. Its ciphertext and
+config are locally opened before projection. The usual skill_run continuation
+and SAME signed loader/process engine require independent native task authority;
+private/unverified/secret-backed/Remote MCP/setup remain closed. The final resolve
+rehydrates and compares current config/local identity before a single provider
+launch. Config/recipient/release/assignment changes do not cause a retry.
+
+The connected synthetic MAX test uses real managed identity/HPKE/AES fields,
+signed monitor and task read-reference subprocesses, SAME SourceReadObserver and
+SQLite route/read/selected-processing journal, then native ACK and uncertain
+verify-only read-back. Native backend tests independently enforce genuine
+observed task proof, exact encrypted personal-rule selection, accepted material
+and recipient/source/epoch/assignment denial. A fixture/native processing receipt
+is not a live Windows/provider business E2E and does not turn businessReady on.

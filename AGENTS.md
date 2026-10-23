@@ -524,6 +524,9 @@ publication tooling также остаются вне этого публичн
   complete unread time-range, one exact browser frame and verify-only unknown
   recovery, never names, a global receipt switch or numeric-ID range guesses.
   No local source/codec fixture proves a real MAX/Windows business E2E.
+  Encrypted public source/task skill uses SAME managed keys/native builders and
+  injected exact ciphertext hydration, not human payload resolve or a second
+  executor. See [contract](docs/assistant-scheduler.md#encrypted-source-and-exact-public-task-skill).
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
   Independent task creation uses the SAME proxy/native creator with a sealed
   owner decision and project ACL; no inherited pass/chat/route or sender proof.

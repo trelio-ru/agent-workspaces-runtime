@@ -106,10 +106,10 @@ export const createAssistantPrivateStore = ({ directory, platform = process.plat
  * registration/envelope/data-plane flow, which can still refuse independently.
  */
 export const resolveAssistantCompanyEncryptionDevice = async ({ identity, companyId, store,
-  lockDirectory, assertCurrent, lock = withRuntimeStateLock }) => {
+  lockDirectory, assertCurrent, allowCreate = true, lock = withRuntimeStateLock }) => {
   if (!identity || !UUID.test(identity.assistantId ?? '') || !UUID.test(identity.deviceId ?? '')
     || !path.isAbsolute(lockDirectory ?? '') || typeof assertCurrent !== 'function'
-    || typeof store?.get !== 'function' || typeof store?.put !== 'function') fail('ASSISTANT_PRIVATE_INVALID_INPUT');
+    || typeof allowCreate !== 'boolean' || typeof store?.get !== 'function' || typeof store?.put !== 'function') fail('ASSISTANT_PRIVATE_INVALID_INPUT');
   const input = { origin: identity.origin, kind: 'company_encryption', id: companyId, deviceId: identity.deviceId };
   const key = slot(input);
   const binding = { version: 1, origin: key.origin, assistantId: identity.assistantId.toLowerCase(),
@@ -132,6 +132,9 @@ export const resolveAssistantCompanyEncryptionDevice = async ({ identity, compan
       await assertLive();
       let entry = await store.get(input);
       if (entry === null) {
+        // Enrollment may create its initial identity. A passive reader that
+        // already sent an enrolled fingerprint must never replace a lost slot.
+        if(!allowCreate)fail('ASSISTANT_PRIVATE_CORRUPT');
         const generated = await createAgentEncryptionDevice();
         const entropy = randomBytes(48);let phrase,wrapped;
         try {

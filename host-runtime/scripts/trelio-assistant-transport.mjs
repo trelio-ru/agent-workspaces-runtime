@@ -363,11 +363,62 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
     settingsUrl:`${origin}/${encodeURIComponent(runtime.company.slug)}/settings/encryption/`});
 };
 
+/** SAME field crypto, narrowed to native-selected config/guidance payloads.
+ * Source and task profiles authenticate independently; neither obtains the
+ * ordinary arbitrary company payload resolver or a human encryption identity.
+ * The native bundle is bounded before opening and never kept in SQLite. */
+const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,token,companyId,assistantId,
+  fingerprint,openCompany,assertCurrent,signal}) => {
+  if(bundle===undefined){
+    if(common.collectAgentEncryptedReferences({config:raw?.companyConnection?.config,guidance:raw?.assistantGuidance}).size)
+      fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+    return {rawResolution:raw,companyEncryption:null};
+  }
+  await assertCurrent();
+  if(!object(bundle)||Object.keys(bundle).sort().join(',')!=='companyId,encryptedPayloads,envelopeId,recipientDeviceId,schemaVersion,scopeEpoch,scopeId'
+    ||bundle.schemaVersion!==1||bundle.companyId!==companyId||!UUID.test(bundle.recipientDeviceId??'')
+    ||!UUID.test(bundle.envelopeId??'')||!UUID.test(bundle.scopeId??'')||!Number.isSafeInteger(bundle.scopeEpoch)||bundle.scopeEpoch<1
+    ||!object(raw.company)||raw.company.id!==companyId||typeof raw.company.slug!=='string'||!fingerprint)
+    fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  const opened=await openCompany(raw.company);
+  if(!opened||opened.runtime.company.id!==companyId||opened.runtime.viewer?.userId!==assistantId
+    ||opened.runtime.device?.id!==bundle.recipientDeviceId||opened.runtime.envelope?.id!==bundle.envelopeId
+    ||opened.runtime.scope?.id!==bundle.scopeId||opened.runtime.scope?.epoch!==bundle.scopeEpoch
+    ||opened.runtime.device?.fingerprint!==fingerprint)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+  const selected=readAssistantEncryptedSnapshotBundle({schemaVersion:1,context:raw,encryptedPayloads:bundle.encryptedPayloads},opened,companyId);
+  const config=raw.companyConnection?.config??null,reference=config===null?null:common.parseAgentEncryptedContentReference(config);
+  const expected=common.collectAgentEncryptedReferences({config,...(raw.assistantGuidance?{guidance:raw.assistantGuidance}:{})});
+  if(config!==null&&reference?.field!=='config_json'||expected.size>8||selected.payloads.size!==expected.size
+    ||[...expected.keys()].some(entityId=>!selected.payloads.has(entityId)))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  const value={...raw};delete value.sourceEncryption;delete value.assistantEncryption;
+  // Always hydrate the exact native guidance too: a null connection does not
+  // imply the current member's personal skill rule is plaintext or empty.
+  const hydrated=await common.hydrateAgentCompanyEncryptedJson({value,origin,token,companyEncryption:opened,signal,
+    resolvePayloads:async ids=>{
+      if(ids.some(entityId=>!selected.payloads.has(entityId)))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      return {payloads:ids.map(entityId=>selected.payloads.get(entityId))};
+    }});
+  await assertCurrent();return {rawResolution:hydrated,companyEncryption:opened};
+};
+
+const validateAssistantEncryptedSkillRead = (value,pass=null) => {
+  if(!object(value)||Object.keys(value).sort().join(',')!=='arguments,companyId,nativeTool,projectId,releaseId,schemaVersion,skillId'
+    ||value.schemaVersion!==1||value.nativeTool!=='get_agent_skill'||!UUID.test(value.companyId??'')
+    ||value.projectId!==null&&!UUID.test(value.projectId??'')||!UUID.test(value.releaseId??'')
+    ||typeof value.skillId!=='string'||!value.skillId.length||value.skillId.length>120||!object(value.arguments)
+    ||Object.keys(value.arguments).some(key=>!['sections','knownInstructionKey'].includes(key))
+    ||value.arguments.sections!==undefined&&(!Array.isArray(value.arguments.sections)
+      ||value.arguments.sections.length>5||value.arguments.sections.some(item=>!['instructions','execution','connection','publication'].includes(item)))
+    ||value.arguments.knownInstructionKey!==undefined&&(typeof value.arguments.knownInstructionKey!=='string'||value.arguments.knownInstructionKey.length>300)
+    ||pass&&value.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  return structuredClone(value);
+};
+
 /** Internal composition of native Workspace transport. Device credentials
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -408,14 +459,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     if(privateSkill.skill.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     Object.freeze(privateSkill.skill.arguments);Object.freeze(privateSkill.skill);Object.freeze(privateSkill);
   }
+  const skillRead=encryptedSkillRead===null?null:validateAssistantEncryptedSkillRead(encryptedSkillRead,pass);
   let inspection=encryptedInspection===null?null:await validateAssistantEncryptedInspection({descriptor:encryptedInspection,identity,pass});
   if(materialWorkspaceId!==null && !uuid.test(materialWorkspaceId??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   if(workspaceRun!==null && (!object(workspaceRun) || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
     || Object.values(workspaceRun).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const ownRun=workspaceRun===null?null:Object.freeze({...workspaceRun});
-  if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId].filter(Boolean).length>1)
+  if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId,skillRead].filter(Boolean).length>1)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-  let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null;
+  let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null,encryptedSkillCompany=null,skillFingerprint=null;
   let lifecycle=null,lifecycleEncryption=null;
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
@@ -501,8 +553,17 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(requestOrigin!==identity.origin || companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
       managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
-        lockDirectory,assertCurrent:()=>assertLivePass(),lock});
+        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany,lock});
       return managedEncryptionDevice;
+    },
+    async hydrateSkillRuntimeResolution(raw,common,signal){
+      return hydrateAssistantEncryptedSkill({raw,bundle:raw?.assistantEncryption,common,origin:identity.origin,token:handle,
+        companyId:pass.companyId,assistantId:identity.assistantId,fingerprint:skillFingerprint,assertCurrent:()=>assertLivePass(signal),signal,
+        openCompany:async company=>{
+          encryptedSkillCompany={id:company.id,slug:company.slug};
+          return common.ensureCompanyEncryptionContext({origin:identity.origin,token:handle,company:encryptedSkillCompany,
+            collectEncryptionKey:async()=>fail('ASSISTANT_WORKSPACE_PROFILE_DENIED')});
+        }});
     },
     async prepareWorkspaceInspection({origin,workspaceId,requestOrigin}){
       if(!inspection)return null;
@@ -634,12 +695,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(url.origin!==requestOrigin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();
       let rewritten,route,encryptionRuntime=false;
-      if((encryptedRead || privateSkill || inspection || lifecycle) && method==='GET'
+      if((encryptedRead || privateSkill || inspection || lifecycle || encryptedSkillCompany) && method==='GET'
         && (requestOrigin===identity.origin || inspection && requestOrigin===inspection.requestOrigin || lifecycle && requestOrigin===lifecycle.requestOrigin)
         && url.pathname==='/api/agent-workspaces/encryption/runtime' && options.body===undefined){
         const keys=[...url.searchParams.keys()];
         if(new Set(keys).size!==keys.length || keys.some(key=>!['companySlug','fingerprint'].includes(key))
-          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection?.companySlug??lifecycle.company.slug)
+          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection?.companySlug??lifecycle?.company.slug??encryptedSkillCompany?.slug)
           || privateSkill && url.searchParams.has('fingerprint')
           || url.searchParams.has('fingerprint') && url.searchParams.get('fingerprint')!==managedEncryptionDevice?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         // SAME native registry reader. A private authentication invocation may
@@ -712,6 +773,8 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         try{input=method==='GET'?Object.fromEntries(url.searchParams):JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
         if(!object(input) || input.companyId!==pass.companyId
           || method==='GET' && new Set(url.searchParams.keys()).size!==[...url.searchParams.keys()].length)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        if(skillRead && (input.skillId!==skillRead.skillId||input.expectedReleaseId!==skillRead.releaseId
+          ||(input.projectId??null)!==skillRead.projectId))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         if(privateSkill && (input.skillId!==privateSkill.skill.skillId || input.expectedReleaseId!==privateSkill.skill.releaseId
           || (input.projectId??null)!==(privateSkill.skill.projectId??null)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
@@ -782,6 +845,16 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         if(lifecycleEncryption && route.routePattern && !encryptionRuntime){
           headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,lifecycleEncryption.runtime.device.id);
           headers.set('x-trelio-assistant-workspace-run',ownRun.runId);
+        }
+        headers.delete('x-trelio-assistant-source-encryption-fingerprint');
+        headers.delete('x-trelio-assistant-skill-guidance');
+        if(route.proofTool.startsWith('assistant-skill:')){
+          const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
+          if(stored?.assistantId===identity.assistantId&&stored.deviceId===identity.deviceId&&stored.companyId===pass.companyId
+            &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){
+            skillFingerprint=stored.record.fingerprint;headers.set('x-trelio-assistant-source-encryption-fingerprint',skillFingerprint);
+          }
+          if(skillRead && route.proofTool==='assistant-skill:resolve')headers.set('x-trelio-assistant-skill-guidance','1');
         }
         if(privateSkill && route.proofTool.startsWith('assistant-skill:'))headers.set('x-trelio-assistant-secret-checkout',
           JSON.stringify({grantId:privateSkill.grantId,runId:privateSkill.runId}));
@@ -896,6 +969,32 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
       return selected;
     },
   });
+};
+
+/** Native encrypted get_agent_skill uses the SAME signed runtime resolver and
+ * response projector. Only instructions/config ciphertext is opened locally;
+ * package execution still needs its separate task proof and signed loader. */
+export const materializeAssistantEncryptedSkill = async ({origin,descriptor,signal,common}) => {
+  common??=await import('./trelio-workspace.mjs');
+  const selected=validateAssistantEncryptedSkillRead(descriptor),profile=common.currentWorkspaceExecutionProfile();
+  if(profile?.kind!=='digital_assistant'||typeof profile.hydrateSkillRuntimeResolution!=='function')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const token=await common.requireToken(origin);
+  const response=await common.request(origin,token,'/api/agent-skills/runtime/resolve',{method:'POST',signal,
+    headers:{'content-type':'application/json'},body:JSON.stringify({companyId:selected.companyId,projectId:selected.projectId,
+      skillId:selected.skillId,expectedReleaseId:selected.releaseId})});
+  const raw=await readAssistantEncryptedSnapshotResponse(response,common);
+  if(raw.releaseId!==selected.releaseId||raw.company?.id!==selected.companyId||raw.artifact?.skillId!==selected.skillId
+    ||(raw.localIdentity?.projectId??null)!==selected.projectId||!raw.assistantGuidance)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  const {rawResolution}=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
+  const native=rawResolution.assistantGuidance,execution=native?.structuredContent?.runtimeExecution;
+  if(!execution||execution.releaseId!==selected.releaseId||native.structuredContent.skill?.id!==selected.skillId)
+    fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  native.content=[{type:'text',text:'Current skill instructions and assistant execution capability are in structuredContent.'}];
+  native.structuredContent={...native.structuredContent,runtimeExecution:{...execution,localAction:{...execution.localAction,
+    server:'trelio-assistant',tool:'continue_assistant_workspace_action'}},remoteMcpExecution:null,
+    assistantExecution:{state:'shared_runtime',automaticFallbackAllowed:false}};
+  const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
+  return compactLocalNativeMcpResult('get_agent_skill',native,selected.arguments);
 };
 
 /** Host-private client. Model tools receive only projections from these named
@@ -1265,7 +1364,7 @@ export const assistantModelInputSchema = source => {
   return schema;
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment,
-  materializeEncryptedTask, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, timeoutMs = 30_000 }) => {
+  materializeEncryptedTask, materializeEncryptedSkill, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, timeoutMs = 30_000 }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
   const selectedTools=async()=>{
@@ -1361,6 +1460,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           await validateAssistantEncryptedTaskRead({descriptor:value.structuredContent.localRead,
             identity:{origin,assistantId,deviceId}});
           return materializeEncryptedTask({descriptor:structuredClone(value.structuredContent.localRead),name,signal});
+        }
+        if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED'){
+          if(name!=='get_agent_skill'||typeof materializeEncryptedSkill!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          const descriptor=validateAssistantEncryptedSkillRead(value.structuredContent.localRead);
+          return materializeEncryptedSkill({descriptor,signal});
         }
         return { content: value.content.map(({ type, text }) => ({ type, text })),
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
@@ -1899,9 +2003,15 @@ const validateAssistantAcknowledgementArguments=(args,skillId)=>{
  * pass/model observation, human vault or renewal cache. The server rechecks the
  * live device, MCP grant, scope, assignment, current release and package on each
  * fixed endpoint. A local format header and a callback are not authorization. */
-export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,
+export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,sourceSelection=null,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,
   monotonic=()=>performance.now(),startedAt=monotonic()}) => {
   scope=sourceScope(scope);
+  if(sourceSelection!==null){
+    if(!object(sourceSelection)||Object.keys(sourceSelection).sort().join(',')!=='expectedRevision,sourceId'
+      ||!Number.isSafeInteger(sourceSelection.expectedRevision)||sourceSelection.expectedRevision<0
+      ||sourceSelection.expectedRevision>2_147_483_647)fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    sourceSelection=Object.freeze({sourceId:id(sourceSelection.sourceId),expectedRevision:sourceSelection.expectedRevision});
+  }
   if(accountSetup!==null){
     if(!object(accountSetup) || Object.keys(accountSetup).some(key=>!['sourceId','expectedRevision','operation'].includes(key))
       || accountSetup.operation!==undefined && !['configure','login','verify_login'].includes(accountSetup.operation)
@@ -1961,6 +2071,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   const expected={schemaVersion:1,origin,assistantId,deviceId};
   let active=true,resolveSent=false,packageSent=false,packagePath=null,budgetMs=maximumBudgetMs;
   let creation=null,creationUsed=false,intakeAdmission=null,intakeUsed=false,intakeStarted=false;
+  let encryptedCompany=null,managedEncryptionDevice=null,encryptionFingerprint=null;
   let interactiveSetup=null,interactiveUsed=false,acknowledgement=null,acknowledgementUsed=false,acknowledgementStarted=false;
   const handle=Object.freeze(Object.create(null));
   const assertCurrent=async()=>{
@@ -1977,6 +2088,25 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   await assertCurrent();
   return Object.freeze({
     kind:'digital_assistant_source',
+    companyEncryptionUserId:assistantId,
+    async resolveCompanyEncryptionDevice({origin:requestOrigin,companyId}){
+      if(!encryptedCompany||requestOrigin!==origin||companyId!==scope.companyId)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+      const common=await import('./trelio-workspace.mjs');
+      const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
+      managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity:expected,companyId,store,
+        lockDirectory:path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','encryption-locks'),assertCurrent,allowCreate:false});
+      if(managedEncryptionDevice.fingerprint!==encryptionFingerprint)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+      return managedEncryptionDevice;
+    },
+    async hydrateResolution(raw,common,signal){
+      return hydrateAssistantEncryptedSkill({raw,bundle:raw?.sourceEncryption,common,origin,token:handle,
+        companyId:scope.companyId,assistantId,fingerprint:encryptionFingerprint,assertCurrent,signal,
+        openCompany:async company=>{
+          encryptedCompany={id:company.id,slug:company.slug};
+          return common.ensureCompanyEncryptionContext({origin,token:handle,company:encryptedCompany,
+            collectEncryptionKey:async()=>fail('ASSISTANT_SOURCE_BINDING_CHANGED')});
+        }});
+    },
     async resolveSkillCatalogueDirectory(configDirectory){
       await assertCurrent();
       return assistantSkillCatalogueDirectory(configDirectory,expected);
@@ -2062,17 +2192,33 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       if(pathname===`${ASSISTANT_SOURCE_PREFIX}/resolve` && method==='POST' && !resolveSent){
         let body;try{body=JSON.parse(options.body);}catch{fail('ASSISTANT_SOURCE_ORIGIN_DENIED');}
         if(!object(body) || JSON.stringify(body)!==JSON.stringify({...scope,expectedReleaseId:null,
-          ...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+          ...(sourceSelection?{sourceSelection}:{}),...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
         // Fence dispatch even when a local read/network response fails. Another
         // poll needs a fresh profile, not an implicit retry under this lease.
         resolveSent=true;
       }else if(pathname===packagePath && method==='GET' && !packageSent && options.body===undefined){
         packageSent=true;
+      }else if(method==='GET'&&options.body===undefined&&encryptedCompany){
+        const url=new URL(pathname,origin),keys=[...url.searchParams.keys()];
+        if(url.origin!==origin||url.pathname!=='/api/agent-workspaces/encryption/runtime'||url.hash
+          ||new Set(keys).size!==keys.length||keys.some(key=>!['companySlug','fingerprint'].includes(key))
+          ||url.searchParams.get('companySlug')!==encryptedCompany.slug
+          ||url.searchParams.has('fingerprint')&&url.searchParams.get('fingerprint')!==encryptionFingerprint)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+        url.pathname='/api/digital-assistants/runtime/encryption/runtime';pathname=url.pathname+url.search;
       }else fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
       await assertCurrent();
       const headers=buildHeaders(null,options.headers??{});
       for(const key of ['cookie','cookie2','proxy-authorization','x-trelio-assistant-pass','x-trelio-assistant-proof'])headers.delete(key);
       headers.set('x-trelio-assistant-source-protocol','1');
+      headers.set('x-trelio-assistant-encryption-protocol','1');
+      // Only metadata from an already prepared managed identity is sent.
+      // Missing setup never creates keys or opens a human remembered identity.
+      const stored=await store.get({origin,kind:'company_encryption',id:scope.companyId,deviceId});
+      if(stored?.assistantId===assistantId&&stored.deviceId===deviceId&&stored.companyId===scope.companyId
+        &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){
+        encryptionFingerprint=stored.record.fingerprint;
+        headers.set('x-trelio-assistant-source-encryption-fingerprint',encryptionFingerprint);
+      }
       headers.set('authorization',`Bearer ${await loadAssistantDeviceCredential({origin,assistantId,deviceId,store})}`);
       await assertCurrent();
       return {url:new URL(pathname,origin),headers,options:{redirect:'error',credentials:'omit',cache:'no-store'}};
@@ -2097,8 +2243,10 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         || resolution.trust.requiresDeviceConsent || resolution.companyConnection?.secretBindings.length
         || resolution.companyConnection && !resolution.companyConnection.configured) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       const url=new URL(resolution.packageUrl,origin);
+      const packageSelection=sourceSelection??(encryptedCompany&&sourceAcknowledgement?{sourceId:sourceAcknowledgement.sourceId,expectedRevision:sourceAcknowledgement.sourceRevision}:null);
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
+        ...(packageSelection?{sourceId:packageSelection.sourceId,sourceRevision:String(packageSelection.expectedRevision)}:{}),
         ...(accountSetup?{accountSetupSourceId:accountSetup.sourceId,accountSetupRevision:String(accountSetup.expectedRevision),
           ...(setupCommand?{accountSetupOperation:accountSetup.operation}:{})}:{})};
       if(url.origin!==origin || url.pathname!==`${ASSISTANT_SOURCE_PREFIX}/package` || url.hash
@@ -2304,7 +2452,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
  * owner's empty-account setup. It is not an executor or an admission cache.
  * Setup refreshes native authority after materialization, charging both reads
  * to the ORIGINAL monotonic budget; no account/provider mutation is retried. */
-export const withAssistantSourcePackage = async ({identity,host,store,scope,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,signal},action) => {
+export const withAssistantSourcePackage = async ({identity,host,store,scope,sourceSelection=null,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,signal},action) => {
   scope=sourceScope(scope);
   if(sourceAcknowledgement!==null)sourceAcknowledgement=normalizeAssistantSourceAcknowledgement(sourceAcknowledgement);
   if(typeof action!=='function')fail('ASSISTANT_SOURCE_INVALID_INPUT');
@@ -2324,18 +2472,19 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
       if(combined.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
       const token=await profile.requireToken(identity.origin);
       const response=await engine.request(identity.origin,token,`${ASSISTANT_SOURCE_PREFIX}/resolve`,{
-        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})}),
+        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,...(sourceSelection?{sourceSelection}:{}),...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})}),
         headers:{'content-type':'application/json'},signal:combined,maximumErrorResponseBytes:16_384});
       const bytes=await engine.readBoundedResponseBuffer(response,512*1024,'Source resolution');
       let raw;try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}finally{bytes.fill(0);}
-      const resolution=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
+      const hydrated=await profile.hydrateResolution(raw,engine,combined);
+      const resolution=engine.normalizeResolvedSkillRuntimeArtifact(hydrated.rawResolution,{transportProfile:'assistant_source'});
       await profile.bindResolution(resolution,raw.sourceAdmission);raw=null;
-      return {resolution,token};
+      return {resolution,token,companyEncryption:hydrated.companyEncryption};
     };
-    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
     const initial=await engine.withWorkspaceExecutionProfile(profile,async()=>{
-      const {resolution,token}=await resolve();
-      const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,
+      const {resolution,token,companyEncryption}=await resolve();
+      const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,companyEncryption,
         requestOptions:{signal:combined,maximumErrorResponseBytes:16_384}});
       await profile.remainingMs();
       const capabilities=materialized.artifact.parsedPackage.capabilities;
@@ -2349,7 +2498,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
     // engine deliberately refuses nested profile replacement; retain that
     // device/human-isolation guard and its closed tombstone semantics.
     profile.close();
-    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
     return await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const fresh=await resolve();
       if(fresh.resolution.artifact.id!==initial.resolution.artifact.id
@@ -2524,7 +2673,7 @@ export const verifyAssistantEmailSource = async ({identity,host,store,client,com
 };
 
 export const readAssistantSourceMonitor = async ({identity,host,store,source,signal}) => {
-  if(!object(source) || Object.keys(source).some(key=>!['companyId','projectId','skillId','accountId','chat','folder','cursor','initialUnread','initialAccountCursor'].includes(key)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  if(!object(source) || Object.keys(source).some(key=>!['companyId','projectId','skillId','accountId','chat','folder','cursor','initialUnread','initialAccountCursor','sourceId','sourceRevision'].includes(key)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
   const accountId=id(source.accountId),cursor=source.cursor??null,chat=source.chat??null,folder=source.folder??null;
   const initialUnread=source.initialUnread??false;
@@ -2542,7 +2691,8 @@ export const readAssistantSourceMonitor = async ({identity,host,store,source,sig
     || scope.skillId==='max-web' && (folder!==null || !assistantMaxChatUrl(chat))
     || scope.skillId==='email-imap-smtp' && (chat!==null || folder!==null && (typeof folder!=='string' || !folder.length || folder.length>256 || /[\x00-\x1f\x7f]/u.test(folder))))fail('ASSISTANT_SOURCE_INVALID_INPUT');
   try{
-    return await withAssistantSourcePackage({identity,host,store,scope,signal},async({engine,profile,materialized,resolution,signal:combined})=>{
+    return await withAssistantSourcePackage({identity,host,store,scope,signal,
+      sourceSelection:source.sourceId===undefined?null:{sourceId:source.sourceId,expectedRevision:source.sourceRevision}},async({engine,profile,materialized,resolution,signal:combined})=>{
       // A fresh source cannot durably claim a baseline while silently losing
       // its historical unread seed. Existing forward positions are untouched.
       if(scope.skillId==='max-web'&&!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.11.0'))

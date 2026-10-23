@@ -6121,7 +6121,7 @@ const ENCRYPTED_TEXT_MARKER_PATTERN = /^~e1:([0-9a-f-]{36}):([a-z][a-z0-9_]{0,63
 const EMBEDDED_ENCRYPTED_TEXT_MARKER_PATTERN = /~e1:([0-9a-f-]{36}):([a-z][a-z0-9_]{0,63})~/gu;
 const ENCRYPTED_ROUTING_SLUG_PATTERN = /^e-([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/u;
 
-const parseAgentEncryptedContentReference = (value) => {
+export const parseAgentEncryptedContentReference = (value) => {
   if (typeof value === "string") {
     const match = ENCRYPTED_TEXT_MARKER_PATTERN.exec(value);
     return match ? { entityId: match[1], field: match[2] } : null;
@@ -6150,7 +6150,7 @@ const parseAgentEncryptedContentReference = (value) => {
   return { entityId: marker.id, field: marker.field };
 };
 
-const collectAgentEncryptedReferences = (value, result = new Map()) => {
+export const collectAgentEncryptedReferences = (value, result = new Map()) => {
   const direct = parseAgentEncryptedContentReference(value);
   if (direct) {
     result.set(direct.entityId, direct);
@@ -8761,12 +8761,14 @@ const skillCommand = async (
   }
   // Retain only the original wire representation, before any E2EE hydration.
   const admissionResolution = structuredClone(rawResolution);
-  const hydratedRuntime = await hydrateEncryptedAgentSkillRuntimeResolution({
+  const hydratedRuntime = await (assistant && typeof profile.hydrateSkillRuntimeResolution === "function"
+    ? profile.hydrateSkillRuntimeResolution(rawResolution, await import("./trelio-workspace.mjs"))
+    : hydrateEncryptedAgentSkillRuntimeResolution({
     rawResolution,
     origin,
     token,
     companyId,
-  });
+  }));
   rawResolution = hydratedRuntime.rawResolution;
   const companyEncryption = hydratedRuntime.companyEncryption;
   const resolution = normalizeResolvedSkillRuntimeArtifact(rawResolution);
@@ -8867,7 +8869,16 @@ const skillCommand = async (
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({companyId,projectId,skillId,expectedReleaseId:releaseId}),
     });
-    const live = normalizeResolvedSkillRuntimeArtifact(await current.json());
+    const liveRaw=await current.json();
+    const liveHydrated=typeof profile.hydrateSkillRuntimeResolution === "function"
+      ? await profile.hydrateSkillRuntimeResolution(liveRaw, await import("./trelio-workspace.mjs"))
+      : {rawResolution:liveRaw};
+    const live = normalizeResolvedSkillRuntimeArtifact(liveHydrated.rawResolution);
+    // A changed selected connection or local member scope cannot execute the
+    // old decrypted config after materialization. Refuse; never rerun provider.
+    if(JSON.stringify(live.companyConnection)!==JSON.stringify(resolution.companyConnection)
+      ||JSON.stringify(live.localIdentity)!==JSON.stringify(resolution.localIdentity))
+      throw Object.assign(new Error("ASSISTANT_SKILL_SCOPE_DENIED"),{code:"ASSISTANT_SKILL_SCOPE_DENIED"});
     if (live.artifact.id !== artifactForCache.id || live.artifact.packageSha256 !== artifactForCache.packageSha256)
       throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
   }
