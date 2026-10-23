@@ -1909,3 +1909,43 @@ A signup is separate from existing-account human-input login and from Secret cre
 Use only an existing permitted browser/provider route on the approved origin. Missing registration capability is a concrete blocker, not permission to extend an `authenticate_existing` recipe, bypass service terms/human login/public publication controls or spend money. Separate Secret ownership/create/use/capture authority supplies protected values without model exposure. Verify fresh site/provider state and save useful accepted task evidence before reporting success. Unknown outcomes stay unresolved; no automatic signup replay.
 
 In encrypted companies all origin/purpose/plan leaves use the SAME managed field protector, native preparation/current-recipient/signatures and process-only hydration. Planning and admission derive the SAME stable field coordinates from the original request UUID; no plaintext origin/plan/body or second vault/executor is introduced.
+
+
+### First outgoing reply routing
+
+Explicit provider `send --conversation-reference` retains the immutable argv and
+ordinary sending authority. New TG/email/MAX provider versions return an opaque
+`conversationReference` from the SAME native monitor account/thread scope. The
+common `skillCommand` captures exactly one signed process, then invokes the task
+profile's optional outgoing observer. No provider stdout/body/key is persisted
+by this observer, copied to a log or sent to generic metadata endpoints.
+
+The observer only returns `assistantSourceConversation` for a positive immediate
+send: `state=ready`, original provider `conversationKey`, native candidates
+`[{sourceId,sourceRevision}]`, `automaticRetryAllowed=false`. Native source reads
+are restricted to the current company/device and the account already selected
+by the common catalogue. Project source must match the resolver project; MAX
+also requires its exact registered canonical `--chat`. Source state/revision,
+account/project and original pass/thread/assignment are rechecked after capture.
+No key is computed by the model or host, and no whole source inventory is shown.
+
+The worker uses the existing `bind_assistant_source_conversation` with one exact
+native candidate, the provider key, fresh task snapshot and stable request UUID.
+Binding still needs its normal task/source/ACL/CAS/proof and rejects conflicts.
+Only the existing route/inbox/coordinator can wake a later incoming reply in the
+SAME permanent task chat; a hint is no route receipt, owner identity, new-task
+command, original-body read, processing proof or ACK authority.
+
+Optional hint, source outage/revocation, malformed key, missing selected source
+or changed pass produces only `state=unavailable`; an already positive send is
+preserved without any send replay, login or alternate transport. Preview,
+scheduled, partial or unknown sends do not claim ready routing. Existing output
+bounds remain unchanged; absence of a hint is unavailable. Email uses incoming
+INBOX UIDVALIDITY plus its generated Message-ID through the existing thread
+parser, never Sent UID/folder; SMTP-only cannot establish this incoming route.
+Missing reply thread headers or a changed namespace remain explicit limits.
+
+Native bind/route guards are exercised by backend PostgreSQL tests; runtime
+fixtures separately exercise actual signed child/account/capture and the
+first-send → bind fixture → incoming reply → same-thread coordinator sequence.
+They do not assert a live provider exchange or Windows business acceptance.

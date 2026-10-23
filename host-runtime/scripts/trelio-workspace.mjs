@@ -8934,6 +8934,8 @@ const skillCommand = async (
   // or promoted to processing merely because the command returned zero.
   const bodyRead = assistant && !privateSecretSetup && !humanInputSetup && typeof profile.prepareSkillBodyRead === 'function'
     ? await profile.prepareSkillBodyRead({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
+  const outgoing = assistant && !privateSecretSetup && typeof profile.prepareOutgoingConversation === 'function'
+    ? await profile.prepareOutgoingConversation({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
   const executed = await runMaterializedAgentSkill({
     artifact: artifactForCache,
     runtimeDirectory,
@@ -8952,7 +8954,13 @@ const skillCommand = async (
   // In-process assistant composition must not inherit the provider's OS fd1:
   // it would bypass the bridge's bounded result/visual projection. The SAME
   // native executor captures its pipes and hands bytes back to that projector.
-  if (assistant && !humanInputSetup) process.stdout.write(executed.stdout);
+  if (assistant && !humanInputSetup) {
+    // Routing observes only the one completed business send. Protected login
+    // output is discarded independently and never enters this projection.
+    const projected = outgoing !== null && typeof profile.projectOutgoingConversation === 'function'
+      ? await profile.projectOutgoingConversation(outgoing, executed) : executed;
+    process.stdout.write(projected.stdout);
+  }
   // Provider setup stdout may contain private profile paths or handoff URLs.
   // Exit zero/window close is not a login proof. Only this closed structural
   // completion crosses the MCP boundary; a fresh native provider probe is next.

@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { createAssistantInbox } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
+import { createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 
 const fixture = t => {
   const database=new DatabaseSync(':memory:');t.after(()=>database.close());
@@ -1150,4 +1151,46 @@ for(const recovery of ['source_paused','lease_expired','release_pending'])test(`
     assert.deepEqual({...f.database.prepare('SELECT processed,acked FROM assistant_inbox_events WHERE event_key=?').get(row.event_key)},
       {processed:0,acked:0});
   }finally{await coordinator.close();}
+});
+
+
+for(const provider of ['telegram','email','max'])test(`${provider} first outgoing source hint binds before a reply resumes the SAME permanent chat`,async t=>{
+  const f=await externalFixture(t),key=`${provider}-conversation/v1.${'f'.repeat(64)}`;
+  f.row.skillId={telegram:'telegram-mtproto',email:'email-imap-smtp',max:'max-web'}[provider];
+  if(provider==='max')f.row.maxChatUrl='https://web.max.ru/123';
+  let bound=null,sends=0,replies=0;
+  f.options.client.sourceRoutes=async input=>bound&&(input.routeIds?.includes(bound.id)||input.conversationKeys?.includes(key))?[bound]:[];
+  const observer=createAssistantOutgoingConversationObserver({identity:f.identity,client:f.options.client,
+    host:{readActivePass:async()=>f.activePass()},now:f.options.now});
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    const threadId=f.coordinator.status()[0].threadId;
+    f.options.native.run=async(input,options)=>{
+      assert.equal(input.threadId,threadId);options.startInvocation();
+      if(!bound){
+        const ticket=await observer.prepare({artifact:{skillId:f.row.skillId},executionContext:{companyId:f.companyId,projectId:null,account:{id:f.row.localAccountId}},
+          runtimeArguments:['send','--chat',provider==='max'?f.row.maxChatUrl:'123','--conversation-reference']});
+        sends++;
+        const response=await observer.project(ticket,{stdout:JSON.stringify({sent:true,conversationReference:{available:true,conversationKey:key}})});
+        const hint=JSON.parse(response.stdout).assistantSourceConversation;
+        assert.equal(hint.state,'ready');assert.deepEqual(hint.candidates,[{sourceId:f.row.id,sourceRevision:0}]);
+        // Runtime fixture stands in for the ALREADY separately PG-tested native
+        // bind: only its exact provider/native coordinates enter this route.
+        bound={id:randomUUID(),sourceId:hint.candidates[0].sourceId,sourceRevision:0,conversationKey:hint.conversationKey,
+          bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
+      }else{
+        replies++;assert.equal(input.taskContext.sourceReferences.length,1);
+        assert.equal(input.taskContext.sourceReferences[0].conversationKey,key);
+      }
+      const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
+    };
+    f.events.push({id:randomUUID(),revision:'first-outgoing',taskId:f.taskId,wake:true});f.advance(300000);
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();assert.equal(sends,1);assert.ok(bound);
+    f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'reply',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
+      events:[{id:provider==='email'?'uid:17:11':'message:123:5',revision:'a'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+    f.advance(300000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    assert.equal(replies,1);assert.equal(sends,1);assert.equal(f.counts().provisions,1);
+    assert.equal(f.coordinator.status()[0].threadId,threadId);
+    assert.equal(f.inbox.claimAcknowledgements(f.scope()),null,'route/hint is not read or processing proof');
+  }finally{await f.coordinator.close();}
 });

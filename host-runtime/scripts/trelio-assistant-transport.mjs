@@ -1045,6 +1045,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   await assertIdentity();
   // This opaque handle cannot reveal a credential through native metadata or
   // an accidental caller serialization. Only prepareRequest resolves auth.
+  const outgoingRoutes=createAssistantOutgoingConversationObserver({identity,client,host,now});
   const handle=Object.freeze(Object.create(null));
   return Object.freeze({
     kind:'digital_assistant',
@@ -1385,6 +1386,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         || current.runtime.scope?.epoch!==inspectionEncryption?.runtime.scope?.epoch)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       await assertLivePass();
     },
+    async prepareOutgoingConversation(input){
+      return outgoingRoutes.prepare(input);
+    },
+    async projectOutgoingConversation(ticket,result){
+      return outgoingRoutes.project(ticket,result);
+    },
     async prepareSkillBodyRead(input){
       await assertIdentity();
       if(sourceReads)return sourceReads.prepare(input);
@@ -1709,6 +1716,73 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         url.pathname=rewritten;
         return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store'}};
       });
+    },
+  });
+};
+
+/** Post-capture structural hint, never another provider executor or a body
+ * journal. Only an explicit send opt-in and the SAME selected account may find
+ * native owner-selected source coordinates in this company/device. Both reads
+ * retain current source/project/pass generations; no UUID/hash is invented.
+ * A source outage or metadata failure cannot erase an already positive send or
+ * become a reason to send again. The existing native bind remains independent. */
+export const createAssistantOutgoingConversationObserver=({identity,client,host,signal,now=Date.now})=>{
+  const tickets=new WeakSet();
+  const current=async expected=>{
+    signal?.throwIfAborted();
+    const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(expected&&JSON.stringify(pass)!==JSON.stringify(expected))throw new Error();
+    const live=await client.readTaskPass({companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},signal);
+    if(live.state!=='leased'||['passId','deliveryId','threadId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
+      ||!Number.isFinite(Date.parse(live.leaseExpiresAt))||Date.parse(live.leaseExpiresAt)<=now())throw new Error();
+    return pass;
+  };
+  const candidates=(rows,input,pass)=>rows.filter(row=>row.state==='active'&&row.companyId===pass.companyId
+    &&row.deviceId===identity.deviceId&&row.skillId===input.artifact.skillId&&row.localAccountId===input.executionContext.account.id
+    &&(row.projectId===null||row.projectId===input.executionContext.projectId)
+    &&(row.skillId!=='max-web'||row.maxChatUrl===input.chat));
+  return Object.freeze({
+    async prepare(input){
+      const provider={'telegram-mtproto':'telegram','email-imap-smtp':'email','max-web':'max'}[input.artifact?.skillId];
+      const args=input.runtimeArguments;
+      if(!provider||args?.[0]!=='send'||!args.includes('--conversation-reference'))return null;
+      const ticket={provider,ready:false};tickets.add(ticket);
+      try{
+        const pass=await current();
+        if(input.executionContext?.companyId!==pass.companyId||!UUID.test(input.executionContext.account?.id??''))return ticket;
+        const chatFlags=args.flatMap((arg,index)=>arg==='--chat'?[index]:[]);
+        const chat=chatFlags.length===1?args[chatFlags[0]+1]:null;
+        const selected={artifact:{skillId:input.artifact.skillId},chat,executionContext:{companyId:input.executionContext.companyId,
+          projectId:input.executionContext.projectId??null,account:{id:input.executionContext.account.id}}};
+        const rows=candidates(await client.sourceAccounts(pass.companyId,signal),selected,pass);
+        if(!rows.length)return ticket;
+        await current(pass);Object.assign(ticket,{ready:true,pass,input:selected,rows});
+      }catch{/* Closed optional metadata failure. Never raw provider/native text. */}
+      return ticket;
+    },
+    async project(ticket,result){
+      if(!tickets.has(ticket))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');tickets.delete(ticket);
+      let value;try{value=JSON.parse(result.stdout);}catch{return result;}
+      // Preview, scheduled and unknown/partial delivery never claim that a
+      // first outgoing message is ready to route. Preserve their exact result.
+      if(!object(value)||value.sent!==true||value.scheduled===true)return result;
+      let routing={state:'unavailable',code:'ASSISTANT_SOURCE_ROUTE_CONTEXT_UNAVAILABLE',automaticRetryAllowed:false};
+      try{
+        const ref=value.conversationReference;
+        if(!ticket.ready||!object(ref)||ref.available!==true||!assistantConversationKeyMatches(ticket.provider,ref.conversationKey))throw new Error();
+        await current(ticket.pass);
+        const live=candidates(await client.sourceAccounts(ticket.pass.companyId,signal),ticket.input,ticket.pass);
+        const rows=ticket.rows.filter(row=>live.some(next=>['id','revision','companyId','deviceId','localAccountId','projectId','skillId','state','maxChatUrl']
+          .every(key=>next[key]===row[key])));
+        if(!rows.length)throw new Error();
+        await current(ticket.pass);
+        routing={state:'ready',conversationKey:ref.conversationKey,
+          candidates:rows.map(row=>({sourceId:row.id,sourceRevision:row.revision})),automaticRetryAllowed:false};
+      }catch{/* Send remains positive. Only explicit native bind may establish routing. */}
+      const stdout=JSON.stringify({...value,assistantSourceConversation:routing})+'\n';
+      // Keep the existing task capture ceiling. A missing optional hint is
+      // unavailable; it never destroys an already positive provider result.
+      return Buffer.byteLength(stdout,'utf8')<=3*1024*1024?{...result,stdout}:result;
     },
   });
 };

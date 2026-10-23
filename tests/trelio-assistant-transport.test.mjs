@@ -2713,3 +2713,32 @@ test('external signup plan is a closed exact-origin projection and only its admi
   assert.equal(supportsAssistantManagedContent('continue_assistant_workspace_action',{operation:'external_account_admit'}),true);
   assert.equal(supportsAssistantManagedContent('continue_assistant_workspace_action',{operation:'signup_and_pay'}),false);
 });
+
+
+test('first outgoing hint drops stale or foreign source authority while retaining the one positive send',async()=>{
+  const {createAssistantOutgoingConversationObserver}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const identity={assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),taskId=randomUUID(),accountId=randomUUID(),projectId=randomUUID();
+  let pass={schemaVersion:1,...identity,companyId,taskId,passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  let row={id:randomUUID(),companyId,deviceId:identity.deviceId,localAccountId:accountId,projectId,skillId:'telegram-mtproto',state:'active',revision:0};
+  let rows=[row],outage=false,closed=false,reads=0;
+  const client={readTaskPass:async()=>({...pass,state:closed?'closed':'leased',leaseExpiresAt:new Date(Date.now()+60000).toISOString()}),
+    sourceAccounts:async()=>{reads++;if(outage)throw new Error('PRIVATE_NATIVE_HINT_ERROR');return structuredClone(rows);}};
+  const observer=createAssistantOutgoingConversationObserver({identity,client,host:{readActivePass:async()=>pass}});
+  const input={artifact:{skillId:'telegram-mtproto'},executionContext:{companyId,projectId,account:{id:accountId}},runtimeArguments:['send','--conversation-reference']};
+  const positive={stdout:JSON.stringify({sent:true,conversationReference:{available:true,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}})};
+  assert.equal(await observer.prepare({...input,runtimeArguments:['send']}),null);assert.equal(reads,0);
+  for(const changed of [{companyId:randomUUID()},{deviceId:randomUUID()},{localAccountId:randomUUID()},{projectId:randomUUID()},
+    {state:'paused'},{skillId:'email-imap-smtp'}]){
+    rows=[{...row,...changed}];const result=JSON.parse((await observer.project(await observer.prepare(input),positive)).stdout);
+    assert.equal(result.sent,true);assert.equal(result.assistantSourceConversation.state,'unavailable');
+    assert.equal(result.assistantSourceConversation.candidates,undefined);
+  }
+  rows=[row];const stale=await observer.prepare(input);row={...row,revision:1};rows=[row];
+  assert.equal(JSON.parse((await observer.project(stale,positive)).stdout).assistantSourceConversation.state,'unavailable');
+  const paused=await observer.prepare(input);closed=true;
+  assert.equal(JSON.parse((await observer.project(paused,positive)).stdout).assistantSourceConversation.state,'unavailable');closed=false;
+  outage=true;const lost=JSON.parse((await observer.project(await observer.prepare(input),positive)).stdout);
+  assert.equal(lost.sent,true);assert.doesNotMatch(JSON.stringify(lost),/PRIVATE_NATIVE_HINT_ERROR/);outage=false;
+  const preview={stdout:JSON.stringify({sent:false,prepared:true})};
+  assert.deepEqual(await observer.project(await observer.prepare(input),preview),preview);
+});

@@ -738,3 +738,7 @@ writer. `secret_company_create` binds holder, current task Run and original
 valueSource; protected input records one native begin before the SAME local
 form. Unknown begin/save permits exact receipt GET only, never automatic form
 or value retry. Private legacy holder/AAD and company ACL remain separate.
+
+- First outgoing reply routing is a post-capture structural projection on the
+  SAME signed provider/account/pass engine. No hint failure repeats send; native
+  bind stays independent. See [contract](docs/assistant-scheduler.md#first-outgoing-reply-routing).

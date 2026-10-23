@@ -695,6 +695,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
   let observedStarts=0,observedCompletions=0;
   const tickets=new WeakSet();
   const sourceReads={prepare:async input=>{
+    if(input.artifact.skillId==='telegram-mtproto')return null;
     observedStarts++;assert.equal(input.artifact.skillId,'task-runtime-fixture');
     assert.ok(input.artifact.parsedPackage.files.length);assert.equal(input.executionContext.codexThreadId,pass.threadId);
     const ticket={};tickets.add(ticket);return ticket;
@@ -729,6 +730,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     artifact:{id:currentArtifact,skillId:'task-runtime-fixture',runtimeVersion:'1.0.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
       packageSha256:packageHash,packageSizeBytes:bytes.length,packageSignature:sign(null,bytes,privateKey).toString('base64'),
       signingKeyId:'task-test',signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1',manifest:{}}});
+  let outgoingDto=null,outgoingBytes=null;
   const rules='# Synthetic task platform rules\n',rulesHash=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
   let resolutions=0,downloads=0,denyNextLaunch=false,consentPending=true;const nonces=new Set(),savedFetch=globalThis.fetch;
   globalThis.fetch=async(url,options)=>{
@@ -746,9 +748,9 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
           challenge:{skill:{id:'task-runtime-fixture',releaseId:currentRelease}}}),{status:409});
       }
       if(denyNextLaunch && resolutions%2===0)return new Response(JSON.stringify({code:'ASSISTANT_OWNER_PAUSED',message:'PRIVATE'}),{status:409});
-      return new Response(JSON.stringify(dto()));
+      return new Response(JSON.stringify(outgoingDto??dto()));
     }
-    assert.equal(url.pathname,'/api/agent-skills/runtime/package');downloads++;return new Response(bytes);
+    assert.equal(url.pathname,'/api/agent-skills/runtime/package');downloads++;return new Response(outgoingBytes??bytes);
   };
   const plan={prepared:true,scope:{assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
     localAction:{schemaVersion:1,operation:'skill_run',parameters:{companyId:pass.companyId,skillId:'task-runtime-fixture',releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read','hello world']}}};
@@ -821,6 +823,41 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
     const revision=(await own.list()).revision;
     await assert.rejects(prepare(['account','create','--name','Forbidden','--expected-revision',String(revision)]),/SETUP_REQUIRED/);
     assert.equal((await own.list()).revision,revision,'task cannot mutate owner account setup');
+    if(policyVersion===2){
+      // A real signed child passes through common skillCommand/account/capture
+      // and the task profile. The test never substitutes another executor.
+      const peerKey=`telegram-conversation/v1.${'f'.repeat(64)}`,sourceId=randomUUID(),accountId=randomUUID();
+      const selectedCatalogue=createAccountCatalogue({directory:catalogue,scope:accountScope({origin:taskIdentity.origin,
+        skillId:'telegram-mtproto',companyId:pass.companyId,memberId:taskMemberId,connectionId:null}),io});
+      await selectedCatalogue.change({operation:'create',id:accountId,name:'Selected fixture',expectedRevision:0});
+      client.sourceAccounts=async()=>[{id:sourceId,companyId:pass.companyId,deviceId:taskIdentity.deviceId,localAccountId:accountId,
+        projectId:null,skillId:'telegram-mtproto',state:'active',revision:7},
+        {id:randomUUID(),companyId:randomUUID(),deviceId:taskIdentity.deviceId,localAccountId:accountId,projectId:null,skillId:'telegram-mtproto',state:'active',revision:0}];
+      const outgoingDir=path.join(directory,'outgoing-signed-child');await fs.mkdir(outgoingDir);
+      await fs.writeFile(path.join(outgoingDir,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:1,taskCommands:[['send']]}));
+      await fs.writeFile(path.join(outgoingDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+        assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+        fs.appendFileSync(${JSON.stringify(calls)},'s');
+        process.stdout.write(JSON.stringify({sent:true,conversationReference:{available:true,conversationKey:${JSON.stringify(peerKey)}}}));`);
+      outgoingBytes=await engine.buildAgentSkillPackage({skillId:'telegram-mtproto',runtimeVersion:'1.0.0',sourceDirectory:outgoingDir,
+        entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+      const outgoingRelease=randomUUID();outgoingDto=dto();Object.assign(outgoingDto,{releaseId:outgoingRelease,
+        packageUrl:'/api/agent-skills/runtime/package?'+new URLSearchParams({companyId:pass.companyId,skillId:'telegram-mtproto',expectedReleaseId:outgoingRelease,artifactId:currentArtifact})});
+      outgoingDto.localIdentity.skillId='telegram-mtproto';Object.assign(outgoingDto.artifact,{skillId:'telegram-mtproto',
+        packageSha256:createHash('sha256').update(outgoingBytes).digest('hex'),packageSizeBytes:outgoingBytes.length,
+        packageSignature:sign(null,outgoingBytes,privateKey).toString('base64')});
+      const outgoingPlan=structuredClone(plan);Object.assign(outgoingPlan.localAction.parameters,{skillId:'telegram-mtproto',releaseId:outgoingRelease,
+        arguments:['send','--local-account',accountId,'--conversation-reference']});
+      const sent=JSON.parse((await run(outgoingPlan)).stdout);
+      assert.deepEqual(sent.assistantSourceConversation,{state:'ready',conversationKey:peerKey,
+        candidates:[{sourceId,sourceRevision:7}],automaticRetryAllowed:false});
+      assert.equal(await fs.readFile(calls,'utf8'),'111s');
+      client.sourceAccounts=async()=>{throw new Error('PRIVATE_SOURCE_OUTAGE');};
+      const unbound=JSON.parse((await run(outgoingPlan)).stdout);
+      assert.equal(unbound.sent,true);assert.equal(unbound.assistantSourceConversation.state,'unavailable');
+      assert.equal(await fs.readFile(calls,'utf8'),'111ss','one native invocation per explicitly submitted call; metadata never retries send');
+      assert.doesNotMatch(JSON.stringify(unbound),/PRIVATE_SOURCE_OUTAGE/);
+    }
     // The public executor's monitor boundary remains independent of task mode.
     await assert.rejects(engine.runMaterializedAgentSkill({captureOutput:true,captureMode:'assistant_task',runtimeArguments:['read']}),/MONITOR_INPUT_INVALID|private monitor/);
   }finally{globalThis.fetch=savedFetch;}
