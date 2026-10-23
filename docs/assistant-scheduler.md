@@ -1722,3 +1722,31 @@ Shared mutation authority repeats scope/model/target checks before native commit
 The common cancellation service owns fencing, status and exact same-marker
 read-back; accepted history, files, goal and cycle remain intact. Successful
 ciphertext staging alone is never a cancellation receipt.
+
+
+### Company Secret use
+
+Existing `secret_list` with `parameters.holder="company"` reads the SAME exact
+active task + parent scopes and native permissions. Plain metadata is unchanged;
+encrypted metadata is a native-selected managed snapshot, hydrated in process
+with the SAME recipient/field codec. The ordinary private list is unchanged.
+No values, general payload resolver, new cache or extra grant are exposed.
+
+Existing browser and signed v2 authenticate continuations can USE a company
+card without changing its holder. Native current assistant membership, Secret
+checkout ACL, current task Run, pass/device/model policy and one-use consumption
+all remain independent. Company audit retains its original company/member actor;
+private cards retain their original global assistant actor. Owner consent never
+widens company Secret rights. `use_granted_secret` keeps its current ordinary
+policy; create/reveal/export or unrelated sensitive work is not authorized.
+
+A company signed recipe additionally pins the current connection, binding key,
+original stored config/ciphertext-reference SHA and public artifact coordinates
+in the SAME immutable grant. The native signed declaration selects its Secret,
+field and child-only environment. Config redirects, rebinding, rotation, scope
+loss and revocation stop the old grant before consume; no automatic retry or
+new executor is added. The common Secret consumer selects keyring versus E2EE
+ciphertext; the SAME local decoder opens only granted fields and discards all
+provider output. The native encrypted secret-backed company connection setup
+still has its own closed owner/config capability; this use adapter alone does
+not enable or declassify that setup flow.

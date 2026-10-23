@@ -300,6 +300,22 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
         context:{questionText:`Complete document: ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_json')}`},encryptedPayloads:[richPayload]}}}));
     assert.match(previewed.structuredContent.questionText,/RICH_BODY_CANARY/);assert.doesNotMatch(previewed.structuredContent.questionText,/\[object Object\]/);
+    const metadataStages=preparations,secretId=randomUUID();
+    const listedSecrets=await withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',
+      args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',limit:20}}},async wire=>{
+        assert.deepEqual(wire.parameters,{holder:'company',limit:20});
+        assert.equal(wire.encryptedContent.fingerprint,registered.fingerprint);
+        assert.equal(wire.encryptedContent.signature,undefined,'metadata read is not staged or signed as a mutation');
+        return {content:[],structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,
+          envelopeId:envelope.id,scopeId,scopeEpoch:1,context:{secrets:[{id:secretId,
+            name:buildCompanyEncryptedTextMarker(richPayload.entityId,'body_plain_text'),fields:[]}]},encryptedPayloads:[richPayload]}}};
+      });
+    assert.match(listedSecrets.structuredContent.secrets[0].name,/RICH_BODY_CANARY/);
+    assert.equal(preparations,metadataStages,'the SAME selected-snapshot hydrator adds no payload write or general resolver');
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',
+      args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',query:'SECRET_METADATA_PROSE_CANARY'}}},()=>assert.fail('ignored metadata prose reached native HTTP')),
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+
     const planned=await withAssistantManagedContentArguments({...input,name:'request_assistant_action',args:{operation:'clear_task_control',
       fields:{controlId:randomUUID()},clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),reason:'ACTION_REASON_CANARY'}},async wire=>{
       const {encryptedContent,...business}=wire;
@@ -2333,6 +2349,18 @@ test('private browser profile admits only its original grant and Run, signs fres
   assert.equal(privateReads,before,'closed pass never reads the private device or signer');
 });
 
+
+test('company Secret metadata remains structural and rejects ignored holder prose before HTTP',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  let sends=0;
+  const send=async args=>{sends++;return args;},withProfile=()=>assert.fail('structural list never opens keys or a browser');
+  const input={name:'continue_assistant_workspace_action',args:{schemaVersion:1,operation:'secret_list',parameters:{holder:'company',offset:0,limit:20}}};
+  assert.deepEqual(await withAssistantCompanyContentArguments(input,send,{withProfile}),input.args);
+  for(const parameters of [{holder:'other'}, {holder:'company',scopeId:randomUUID()}, {holder:'company',name:'COMPANY_SECRET_CANARY'},
+    {holder:'company',limit:'20'}])await assert.rejects(withAssistantCompanyContentArguments({...input,args:{...input.args,parameters}},send,{withProfile}),
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+  assert.equal(sends,1);
+});
 
 test('private signed authentication binds one grant, exact skill vector and fresh device proofs without human fallback',async()=>{
   const {buildTrelioWorkspaceActionInvocation}=await import('../host-runtime/scripts/trelio-local-context.mjs');

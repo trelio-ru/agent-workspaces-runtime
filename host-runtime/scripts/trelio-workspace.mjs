@@ -16882,7 +16882,8 @@ const executeSecretCheckout = async (options, positional) => withRun(async ({
     const expectedKeys=['grantId','runId','secretId','secretVersion','storageMode','deliveryMode','executable','fieldKeys','environmentVariable','expiresAt'];
     if(!hasExactJsonKeys(before,expectedKeys) || before.grantId!==grantId || before.runId!==metadata.runId
       || !UUID_PATTERN.test(before.secretId??'') || !Number.isSafeInteger(before.secretVersion) || before.secretVersion<1
-      || before.storageMode!=='trelio' || before.deliveryMode!=='env' || before.executable!=='trelio-workspace'
+      || !['trelio','company_e2ee'].includes(before.storageMode)
+      || before.storageMode==='company_e2ee' && !companyEncryption || before.deliveryMode!=='env' || before.executable!=='trelio-workspace'
       || before.environmentVariable!==binding.environmentVariable || !Array.isArray(before.fieldKeys)
       || before.fieldKeys.length!==1 || before.fieldKeys[0]!==binding.fieldKey
       || !Number.isFinite(Date.parse(before.expiresAt)) || Date.parse(before.expiresAt)<=Date.now())
@@ -16905,7 +16906,7 @@ const executeSecretCheckout = async (options, positional) => withRun(async ({
         if(['grantId','runId','secretId','secretVersion','storageMode','deliveryMode','executable','environmentVariable']
           .some(key=>payload[key]!==before[key]) || JSON.stringify(payload.fieldKeys)!==JSON.stringify(before.fieldKeys)
           || payload.environmentVariables!==null)throw Object.assign(new Error('Private setup binding changed.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-        const values=await resolveCheckoutSecretValues(payload,null),value=values[binding.fieldKey];
+        const values=await resolveCheckoutSecretValues(payload,payload.storageMode==='company_e2ee'?companyEncryption:null),value=values[binding.fieldKey];
         if(typeof value!=='string' || !value.length || Buffer.byteLength(value)>65536 || value.includes('\0'))
           throw Object.assign(new Error('Private setup value is unavailable.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
         await profile.authorizePrivateSkillCheckout({grantId,runId:metadata.runId,commandArguments});

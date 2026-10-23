@@ -507,7 +507,8 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['cancel_agent_workspace_run','ask
   'update_task_custom_field','delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
   'get_assistant_owner_question','get_assistant_intake_context']);
 export const supportsAssistantManagedContent=(name,args)=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name)
-  ||name==='continue_assistant_workspace_action'&&args?.operation==='skill_run';
+  ||name==='continue_assistant_workspace_action'&&(args?.operation==='skill_run'
+    ||args?.operation==='secret_list'&&args.parameters?.holder==='company');
 /** Closed local projection, not owner authority. Textual metadata is never
  * declassified into the global personal pool by naming this mode. Native
  * schemas/review still select fixed labels, one policy and the exact Run. */
@@ -566,6 +567,11 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   // Ignore model-authored transport hints before signing; all private metadata
   // comes from the genuine current OS/pass context below.
   let business=managedBusinessArguments(args);rejectBorrowedManagedMarkers(business);
+  const secretMetadata=name==='continue_assistant_workspace_action'&&business.operation==='secret_list'&&business.parameters?.holder==='company';
+  if(secretMetadata&&(business.schemaVersion!==1||business.runIdentity!==undefined||Object.keys(business).some(key=>!['schemaVersion','operation','parameters'].includes(key))
+    ||Object.keys(business.parameters).some(key=>!['holder','offset','limit'].includes(key))
+    ||business.parameters.offset!==undefined&&(!Number.isSafeInteger(business.parameters.offset)||business.parameters.offset<0)
+    ||business.parameters.limit!==undefined&&(!Number.isSafeInteger(business.parameters.limit)||business.parameters.limit<1||business.parameters.limit>50)))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   const skillArguments=name==='continue_assistant_workspace_action'&&business.operation==='skill_run';
   let originalSkillArguments=null;
   if(skillArguments){
@@ -779,7 +785,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       // Keep the human publication order: canonicalize the actual message,
       // then append file links. A filename containing @username is not a ping.
       if(commentAttachmentLinks.length)business.bodyJson=local.appendLocalTaskCommentAttachmentLinks(business.bodyJson,commentAttachmentLinks);
-      const readonly=['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
+      const readonly=secretMetadata||['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
         if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
