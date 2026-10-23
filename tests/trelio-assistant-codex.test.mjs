@@ -196,7 +196,10 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   t.after(() => fs.rm(cwd,{ recursive:true,force:true }));
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const expectedCwd = await fs.realpath(cwd);
-  const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()]};
+  const sourceReferences=['telegram','email','max'].map((provider,eventOrdinal)=>({provider,eventOrdinal,
+    sourceId:randomUUID(),sourceRevision:3,routeId:randomUUID(),accountId:randomUUID(),eventRevision:'b'.repeat(64),
+    eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`}));
+  const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()],sourceReferences};
   let starts=0,reads=0,launches=0,confirmed=0,input='';
   const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,SHOULD_NOT_PASS:'private' },
     onAuthenticationConfirmed:async()=>{confirmed++;throw new Error('PRIVATE health report failed');},
@@ -208,6 +211,7 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
       assert.equal(spawnOptions.shell,false); assert.equal(spawnOptions.cwd,expectedCwd);
       assert.equal(spawnOptions.env.SHOULD_NOT_PASS,undefined);
       assert.ok(!args.some(arg => /bypass|ignore-rules|ignore-user-config|approval|sandbox/u.test(arg)));
+      assert.ok(!args.some(arg=>/message:|uid:|conversation\/v1/u.test(arg)),'source refs stay in stdin, never native argv');
       const child=fakeChild(); child.stdin.on('data',chunk=>{ input+=chunk.toString(); });
       child.stdin.on('end',()=>queueMicrotask(()=>{
         child.stdout.write(`${JSON.stringify({ type:'thread.started',thread_id:threadId })}\n${JSON.stringify({ type:'turn.completed' })}\n`);
@@ -255,6 +259,13 @@ test('external task context permits bounded structural refs only, without bodies
   const ref={sourceId:randomUUID(),sourceRevision:3,routeId:randomUUID(),eventOrdinal:2,provider:'telegram',accountId:randomUUID(),eventId:'message:123:4',
     eventRevision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
   assert.deepEqual(assistantWorkStateContext({...taskContext,sourceReferences:[ref]}).sourceReferences,[ref]);
+  for(const provider of ['email','max']){
+    const native={...ref,provider,eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`};
+    assert.deepEqual(assistantWorkStateContext({...taskContext,sourceReferences:[native]}).sourceReferences,[native]);
+    for(const changed of [{conversationKey:ref.conversationKey},{eventId:provider==='email'?'message:123:4':'uid:17:11'},
+      {eventId:provider==='email'?'uid:0:11':'message:-0:4'},{body:'PRIVATE'},{owner:true}])
+      assert.throws(()=>assistantWorkStateContext({...taskContext,sourceReferences:[{...native,...changed}]}),/INVALID_INPUT/);
+  }
   for(const changed of [{body:'PRIVATE'},{owner:true},{provider:'max'},{sourceId:'--config'},{accountId:'PRIVATE'},
     {sourceRevision:-1},{routeId:'PRIVATE'},{eventOrdinal:-1},{eventOrdinal:100},{eventId:'PRIVATE'},{eventRevision:'PRIVATE'},{conversationKey:'PRIVATE'}])
     assert.throws(()=>assistantWorkStateContext({...taskContext,sourceReferences:[{...ref,...changed}]}),/INVALID_INPUT/);

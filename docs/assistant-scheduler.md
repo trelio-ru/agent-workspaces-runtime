@@ -1465,6 +1465,11 @@ private/unverified/secret-backed/Remote MCP/setup remain closed. The final resol
 rehydrates and compares current config/local identity before a single provider
 launch. Config/recipient/release/assignment changes do not cause a retry.
 
+The SAME native Codex stdin validator accepts provider-bound Telegram/MAX
+chat-message and email UIDVALIDITY/UID references. Mixed prefixes, extra content
+or sender/owner claims fail before process launch; source refs never enter argv.
+An actual adapter test checks stdin delivery and positive native read-back.
+
 The connected synthetic MAX test uses real managed identity/HPKE/AES fields,
 signed monitor and task read-reference subprocesses, SAME SourceReadObserver and
 SQLite route/read/selected-processing journal, then native ACK and uncertain

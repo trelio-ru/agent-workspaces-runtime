@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
+import { assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -44,14 +45,19 @@ export const assistantWorkStateContext = value => {
   let sourceReferences;
   if(value.sourceReferences!==undefined){
     if(!Array.isArray(value.sourceReferences)||!value.sourceReferences.length||value.sourceReferences.length>100)fail('ASSISTANT_CODEX_INVALID_INPUT');
+    // SAME source journal owns provider-bound conversation keys. These are
+    // exact structural stdin selectors only: email uses UIDVALIDITY/UID, MAX
+    // and Telegram native chat/message IDs. No body or sender/owner assertion
+    // enters argv; the signed reader independently verifies the original ref.
     sourceReferences=value.sourceReferences.map(row=>{
       if(!row||Object.getPrototypeOf(row)!==Object.prototype||Object.keys(row).sort().join(',')!==
         'accountId,conversationKey,eventId,eventOrdinal,eventRevision,provider,routeId,sourceId,sourceRevision'
         ||!Number.isSafeInteger(row.eventOrdinal)||row.eventOrdinal<0||row.eventOrdinal>99
-        ||row.provider!=='telegram'||!Number.isSafeInteger(row.sourceRevision)||row.sourceRevision<0||row.sourceRevision>2_147_483_647
-        ||typeof row.eventId!=='string'||!/^message:-?[1-9]\d{0,18}:[1-9]\d{0,18}$/u.test(row.eventId)
+        ||!['telegram','email','max'].includes(row.provider)||!Number.isSafeInteger(row.sourceRevision)||row.sourceRevision<0||row.sourceRevision>2_147_483_647
+        ||typeof row.eventId!=='string'||!(row.provider==='email'?/^uid:[1-9]\d{0,18}:[1-9]\d{0,18}$/u
+          :/^message:-?[1-9]\d{0,18}:[1-9]\d{0,18}$/u).test(row.eventId)
         ||typeof row.eventRevision!=='string'||!/^[0-9a-f]{64}$/u.test(row.eventRevision)
-        ||typeof row.conversationKey!=='string'||!/^telegram-conversation\/v1\.[0-9a-f]{64}$/u.test(row.conversationKey))fail('ASSISTANT_CODEX_INVALID_INPUT');
+        ||!assistantConversationKeyMatches(row.provider,row.conversationKey))fail('ASSISTANT_CODEX_INVALID_INPUT');
       return Object.freeze({sourceId:id(row.sourceId),sourceRevision:row.sourceRevision,routeId:id(row.routeId),eventOrdinal:row.eventOrdinal,provider:row.provider,accountId:id(row.accountId),
         eventId:row.eventId,eventRevision:row.eventRevision,conversationKey:row.conversationKey});
     });
