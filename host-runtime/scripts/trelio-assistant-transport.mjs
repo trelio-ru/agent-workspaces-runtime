@@ -991,7 +991,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     },
     async preparePrivateCardArguments(args,signal){
       const p=args.parameters,current=()=>assertLivePass(signal);
-      if(!object(p)||typeof p.expectedTaskUpdatedAt!=='string'||!Number.isFinite(Date.parse(p.expectedTaskUpdatedAt))
+      if(!object(p)||typeof p.expectedTaskUpdatedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(p.expectedTaskUpdatedAt)||!Number.isFinite(Date.parse(p.expectedTaskUpdatedAt))
         ||['clientRequestId','ownerDecisionId'].some(key=>!uuid.test(p[key]??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
       if(args.operation==='secret_create'){
         if(Object.keys(p).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,metadata,ownerDecisionId'

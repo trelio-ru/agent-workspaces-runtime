@@ -1112,7 +1112,7 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       ||Object.values(args.taskPass).some(value=>!uuid(value))))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
     const p=args.runtimeSessionProof;
     if(p!==undefined&&(!object(p)||Object.keys(p).sort().join(',')!=='issuedAt,nonce,runtimeSessionId,schemaVersion,signature'
-      ||p.schemaVersion!==1||!uuid(p.runtimeSessionId)||!uuid(p.nonce)||typeof p.issuedAt!=='string'||!Number.isFinite(Date.parse(p.issuedAt))
+      ||p.schemaVersion!==1||!uuid(p.runtimeSessionId)||!uuid(p.nonce)||typeof p.issuedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(p.issuedAt)||!Number.isFinite(Date.parse(p.issuedAt))
       ||typeof p.signature!=='string'||!/^[A-Za-z0-9_-]{86}$/u.test(p.signature)))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
   };
   if(name==='continue_assistant_workspace_action'&&args.operation==='secret_list'){

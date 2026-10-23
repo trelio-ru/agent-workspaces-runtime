@@ -1292,7 +1292,9 @@ test('private neutral creation and pagination reject complete ignored text envel
   const list={schemaVersion:1,operation:'secret_list',parameters:{offset:0,limit:50}};
   for(const args of [{...list,note:canary},{...list,parameters:{query:canary}}, {...list,parameters:{limit:canary}},
     {...list,taskPass:{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId,note:canary}},
-    {...list,runtimeSessionProof:{signature:canary}}, {...create,reason:canary},
+    {...list,runtimeSessionProof:{signature:canary}},
+    {...list,runtimeSessionProof:{schemaVersion:1,runtimeSessionId:randomUUID(),nonce:randomUUID(),issuedAt:`January 1 2026 (${canary})`,signature:'a'.repeat(86)}},
+    {...create,parameters:{...create.parameters,expectedTaskUpdatedAt:`January 1 2026 (${canary})`}}, {...create,reason:canary},
     {...create,parameters:{...create.parameters,metadata:{...create.parameters.metadata,name:canary}}},
     {...generate,parameters:{...generate.parameters,neutralPlan:{...neutralPlan,note:canary}}},
     {...generate,runIdentity:{...runIdentity,note:canary}}, {...generate,parameters:{...generate.parameters,reason:canary}}])
