@@ -8,6 +8,7 @@ import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
+import { canonicalJson } from './trelio-company-encryption.mjs';
 
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
@@ -35,6 +36,46 @@ export const normalizeAssistantSkillConsentParameters=value=>{
   if(!UUID.test(clientRequestId??'')||!UUID.test(ownerDecisionId??'')
     ||typeof expectedTaskUpdatedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(expectedTaskUpdatedAt)
     ||!Number.isFinite(Date.parse(expectedTaskUpdatedAt)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return structuredClone(value);
+};
+/** Native-only setup admission, never model argv or catalogue metadata.
+ * Encrypted private declarations remain opaque markers in the native receipt;
+ * the host reselects their commandId from that exact signed package locally. */
+const assistantSkillSetupMarker=value=>object(value)&&Object.keys(value).join(',')==='$trelioE2ee'
+  &&object(value.$trelioE2ee)&&Object.keys(value.$trelioE2ee).sort().join(',')==='field,id,v'
+  &&value.$trelioE2ee.v===1&&UUID.test(value.$trelioE2ee.id??'')&&value.$trelioE2ee.field==='skill_setup_command_json';
+export const normalizeAssistantSkillAccountSetupPlan=value=>{
+  const keys=['schemaVersion','requestId','accountId','companyId','projectId','memberId','connectionId','connectionConfigSha256','skillId','releaseId','artifactId','packageSha256','commandId','purpose','maximumDurationMs'];
+  if(!object(value)||Object.keys(value).sort().join(',')!==[...keys,...(Object.hasOwn(value,'arguments')?['arguments']:['inspectedCommand'])].sort().join(',')
+    ||value.schemaVersion!==1||value.purpose!=='authenticate_existing'
+    ||['requestId','accountId','companyId','memberId','releaseId','artifactId'].some(key=>!UUID.test(value[key]??''))
+    ||value.projectId!==null&&!UUID.test(value.projectId??'')||value.connectionId!==null&&!UUID.test(value.connectionId??'')
+    ||value.connectionConfigSha256!==null&&!SHA256.test(value.connectionConfigSha256??'')
+    ||(value.connectionId===null)!==(value.connectionConfigSha256===null)
+    ||typeof value.skillId!=='string'||!value.skillId.trim()||value.skillId!==value.skillId.trim()||value.skillId.length>120
+    ||!SHA256.test(value.packageSha256??'')||!/^[a-z][a-z0-9-]{0,47}$/u.test(value.commandId??'')
+    ||!Number.isSafeInteger(value.maximumDurationMs)||value.maximumDurationMs<60000||value.maximumDurationMs>600000
+    ||Object.hasOwn(value,'arguments')&&(!Array.isArray(value.arguments)||!value.arguments.length||value.arguments.length>8
+      ||value.arguments.some(argument=>typeof argument!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/u.test(argument)))
+    ||!Object.hasOwn(value,'arguments')&&!assistantSkillSetupMarker(value.inspectedCommand))
+    fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+  return structuredClone(value);
+};
+export const normalizeAssistantSkillAccountSetupFields=value=>{
+  if(!object(value)||Object.keys(value).sort().join(',')!=='accountId,commandId,projectId,releaseId,skillId'
+    ||typeof value.skillId!=='string'||!value.skillId.trim()||value.skillId!==value.skillId.trim()||value.skillId.length>120
+    ||!UUID.test(value.accountId??'')||!UUID.test(value.releaseId??'')||value.projectId!==null&&!UUID.test(value.projectId??'')
+    ||!/^[a-z][a-z0-9-]{0,47}$/u.test(value.commandId??''))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+  return structuredClone(value);
+};
+export const normalizeAssistantSkillAccountSetupParameters=value=>{
+  if(!object(value))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+  const {clientRequestId,ownerDecisionId,expectedTaskUpdatedAt,inspectedCommand,...fields}=value;
+  normalizeAssistantSkillAccountSetupFields(fields);
+  if(inspectedCommand!==undefined&&!assistantSkillSetupMarker(inspectedCommand))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+  if(!UUID.test(clientRequestId??'')||!UUID.test(ownerDecisionId??'')||typeof expectedTaskUpdatedAt!=='string'
+    ||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(expectedTaskUpdatedAt)
+    ||!Number.isFinite(Date.parse(expectedTaskUpdatedAt)))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
   return structuredClone(value);
 };
 /** A closed structural exception, never a generic encrypted mutation bypass.
@@ -897,7 +938,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -943,7 +984,14 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     if(privateSkill.skill.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     Object.freeze(privateSkill.skill.arguments);Object.freeze(privateSkill.skill);Object.freeze(privateSkill);
   }
-  const skillRead=encryptedSkillRead===null?null:validateAssistantEncryptedSkillRead(encryptedSkillRead,pass);
+  const accountSetup=skillAccountSetup===null?null:Object.freeze(normalizeAssistantSkillAccountSetupPlan(skillAccountSetup));
+  if(accountSetup&&accountSetup.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const setupStarted=performance.now();let setupBudget=accountSetup?.maximumDurationMs??0;
+  let setupCommand=null,setupCreationUsed=false,setupProcessUsed=false,setupLeaseExpiresAt=0;
+  const setupRemaining=()=>Math.floor(Math.min(setupBudget-(performance.now()-setupStarted),setupLeaseExpiresAt-now()));
+  const skillRead=encryptedSkillRead===null?(accountSetup?validateAssistantEncryptedSkillRead({schemaVersion:1,nativeTool:'get_agent_skill',
+    companyId:accountSetup.companyId,projectId:accountSetup.projectId,skillId:accountSetup.skillId,releaseId:accountSetup.releaseId,
+    arguments:{sections:['instructions','execution']}},pass):null):validateAssistantEncryptedSkillRead(encryptedSkillRead,pass);
   let inspection=encryptedInspection===null?null:await validateAssistantEncryptedInspection({descriptor:encryptedInspection,identity,pass});
   if(materialWorkspaceId!==null && !uuid.test(materialWorkspaceId??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   if(workspaceRun!==null && (!object(workspaceRun) || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
@@ -964,6 +1012,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     const live=await client.readTaskPass(locator,signal);
     if(live.state!=='leased' || ['passId','threadId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
       || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    if(accountSetup)setupLeaseExpiresAt=setupLeaseExpiresAt?Math.min(setupLeaseExpiresAt,Date.parse(live.leaseExpiresAt)):Date.parse(live.leaseExpiresAt);
   };
   await assertIdentity();
   // This opaque handle cannot reveal a credential through native metadata or
@@ -990,6 +1039,79 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     companyEncryptionUserId:identity.assistantId,
     async readCompanyContentMode(signal){
       return (await readAssistantCompanyContentMode({identity,host,client,signal})).encryptionState;
+    },
+    async prepareSkillAccountSetupArguments(parameters,signal){
+      const selected=normalizeAssistantSkillAccountSetupParameters(parameters);
+      await assertLivePass(signal);
+      if((await readAssistantCompanyContentMode({identity,host,client,signal})).encryptionState==='plain')return selected;
+      const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
+      if(stored?.assistantId!==identity.assistantId||stored.deviceId!==identity.deviceId||stored.companyId!==pass.companyId
+        ||!/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record?.fingerprint??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass(signal);return {...selected,encryptionFingerprint:stored.record.fingerprint};
+    },
+    async readHumanInputSkillSetupCommand(common){
+      await assertLivePass();
+      if(!accountSetup||setupCommand||setupRemaining()<1000)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      const inspected=await inspectAssistantSkillAccountSetupForOwner({origin:identity.origin,companyId:pass.companyId,
+        fields:{skillId:accountSetup.skillId,projectId:accountSetup.projectId,releaseId:accountSetup.releaseId,
+          accountId:accountSetup.accountId,commandId:accountSetup.commandId},common});
+      if(inspected.artifactId!==accountSetup.artifactId||inspected.packageSha256!==accountSetup.packageSha256
+        ||accountSetup.arguments&&accountSetup.maximumDurationMs>(inspected.command.maximumDurationMs??600000)
+        ||accountSetup.arguments&&JSON.stringify(accountSetup.arguments)!==JSON.stringify(inspected.command.arguments))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      if(accountSetup.inspectedCommand&&common.parseAgentEncryptedContentReference(accountSetup.inspectedCommand)?.field!=='skill_setup_command_json')
+        fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      setupBudget=Math.min(setupBudget,inspected.command.maximumDurationMs??600000);
+      setupCommand=Object.freeze({...inspected.command,arguments:Object.freeze([...inspected.command.arguments])});
+      const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+      if(record?.ended||!UUID.test(record?.state?.runtimeSessionId??''))fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
+      await assertLivePass();
+      return {...accountSetup,arguments:[...setupCommand.arguments],runtimeSessionId:record.state.runtimeSessionId};
+    },
+    async prepareHumanInputSkillSetupAccount({artifact,runtimeDirectory,executionContext,humanInputCommand}){
+      if(!accountSetup||!setupCommand||!same(setupCommand,humanInputCommand)||setupCreationUsed
+        ||artifact.id!==accountSetup.artifactId||executionContext.companyId!==accountSetup.companyId
+        ||executionContext.localIdentity?.memberId!==accountSetup.memberId
+        ||(executionContext.localIdentity?.connectionId??null)!==accountSetup.connectionId)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      await assertLivePass();
+      const common=await import('./trelio-workspace.mjs');
+      const prepare=async runtimeArguments=>{
+        let output;const result=await common.prepareSkillAccount({origin:identity.origin,artifact,runtimeDirectory,executionContext,
+          runtimeArguments,output:value=>{if(output)fail('ASSISTANT_SKILL_SETUP_REQUIRED');output=value;}});
+        if(!result.handled||!output?.ok||!Number.isSafeInteger(output.revision)||!Array.isArray(output.accounts))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+        await assertLivePass();return output;
+      };
+      const listed=await prepare(['account','list']);
+      if(listed.accounts.some(row=>row.id===accountSetup.accountId&&row.bound===true)){
+        // A new exact owner approval may reopen this device/company's already
+        // bound managed account. Hidden/unbound and human entries never appear
+        // here; no rebind, import, metadata rewrite or duplicate is attempted.
+        setupCreationUsed=true;return;
+      }
+      // Creation remains the SAME atomic catalogue intent. A pre-existing
+      // human/unbound entry or different native request is never adopted.
+      const created=await prepare(['account','create','--id',accountSetup.accountId,'--name',accountSetup.skillId,
+        '--expected-revision',String(listed.revision)]);
+      if(created.id!==accountSetup.accountId||!created.accounts.some(row=>row.id===accountSetup.accountId&&row.bound))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+    },
+    async authorizeAccountCreation(command,context){
+      await assertLivePass();
+      if(!accountSetup||!setupCommand||setupCreationUsed||setupProcessUsed||setupRemaining()<1000
+        ||command.operation!=='create'||command.id!==accountSetup.accountId||command.name!==accountSetup.skillId||(command.comment??'')!==''
+        ||context.companyId!==accountSetup.companyId||(context.projectId??null)!==accountSetup.projectId||context.skillId!==accountSetup.skillId
+        ||context.memberId!==accountSetup.memberId||(context.connectionId??null)!==accountSetup.connectionId)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      setupCreationUsed=true;return Object.freeze({creationRequestId:accountSetup.requestId});
+    },
+    async authorizeHumanInputSkillSetup({artifact,executionContext,runtimeArguments}){
+      await assertLivePass();
+      if(!accountSetup||!setupCommand||!setupCreationUsed||setupProcessUsed||setupRemaining()<1000
+        ||artifact.id!==accountSetup.artifactId||executionContext.releaseId!==accountSetup.releaseId
+        ||executionContext.account?.id!==accountSetup.accountId||executionContext.localIdentity?.memberId!==accountSetup.memberId
+        ||JSON.stringify(runtimeArguments)!==JSON.stringify(setupCommand.arguments))fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+      setupProcessUsed=true;return setupRemaining();
+    },
+    async assertHumanInputSkillSetupCurrent(){
+      await assertLivePass();
+      if(!accountSetup||!setupProcessUsed||setupRemaining()<1000)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
     },
     async prepareSkillConsentArguments(parameters,signal){
       const selected=normalizeAssistantSkillConsentParameters(parameters);
@@ -1170,6 +1292,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
     },
     async hydrateSkillRuntimeResolution(raw,common,signal){
+      if(accountSetup&&(raw?.artifact?.id!==accountSetup.artifactId||raw.artifact.packageSha256!==accountSetup.packageSha256
+        ||raw.releaseId!==accountSetup.releaseId||raw.artifact.skillId!==accountSetup.skillId
+        ||raw.localIdentity?.memberId!==accountSetup.memberId||(raw.localIdentity?.connectionId??null)!==accountSetup.connectionId
+        ||(raw.companyConnection?createHash('sha256').update(canonicalJson(raw.companyConnection.config)).digest('hex'):null)!==accountSetup.connectionConfigSha256))
+        fail('ASSISTANT_SKILL_SETUP_REQUIRED');
       return hydrateAssistantEncryptedSkill({raw,bundle:raw?.assistantEncryption,common,origin:identity.origin,token:handle,
         companyId:pass.companyId,assistantId:identity.assistantId,fingerprint:skillFingerprint,assertCurrent:()=>assertLivePass(signal),signal,taskRuntimeMetadata:true,
         openCompany:async company=>{
@@ -1715,14 +1842,15 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
   if(!(companyRuntime||resolved.artifact.contentProtection==='plain'&&resolved.trust.level==='platform_verified'
     &&resolved.trust.artifactLevel==='platform_verified'&&!resolved.trust.requiresDeviceConsent)
     ||resolved.companyConnection?.secretBindings.length)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  const setupRequested=selected.arguments.sections?.includes('connection')===true;
   let inspected=null;
-  if(pending){
+  if(pending||setupRequested&&resolved.artifact.contentProtection==='company_e2ee_v1'){
     if(resolved.artifact.contentProtection!=='company_e2ee_v1'||!companyEncryption)fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
     // SAME verifier, bounded encrypted download, TRELIOE1/AAD decrypt, complete
     // manifest equality and ephemeral cleanup. This is inspection, never an
     // executable cache or a provider launch, before exact owner approval.
     inspected=await common.inspectEncryptedAgentSkillRuntimeForConsent({origin,token,packageUrl:resolved.packageUrl,
-      artifact:resolved.artifact,companyEncryption});
+      artifact:resolved.artifact,companyEncryption,inspectHumanInputCommands:setupRequested});
   }
   const native=rawResolution.assistantGuidance,execution=native?.structuredContent?.runtimeExecution;
   if(!execution||execution.releaseId!==selected.releaseId||native.structuredContent.skill?.id!==selected.skillId)
@@ -1730,16 +1858,43 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
   native.content=[{type:'text',text:'Current skill instructions and assistant execution capability are in structuredContent.'}];
   const privateAuthentication=native.structuredContent.assistantExecution?.privateAuthentication;
   const runtimeConsent=native.structuredContent.assistantExecution?.runtimeConsent;
+  const accountSetup=setupRequested&&inspected?.humanInputCommands?.length
+    ?{state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup',
+      commands:inspected.humanInputCommands.map(({id,purpose,maximumDurationMs})=>({id,purpose,...(maximumDurationMs===undefined?{}:{maximumDurationMs})}))}
+    :native.structuredContent.assistantExecution?.accountSetup;
   if(pending&&(!runtimeConsent||runtimeConsent.state!=='owner_review_required'
     ||runtimeConsent.fields?.runtimeArtifactId!==resolved.artifact.id||runtimeConsent.fields.releaseId!==resolved.releaseId
     ||runtimeConsent.fields.packageSha256!==resolved.artifact.packageSha256))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   native.structuredContent={...native.structuredContent,runtimeExecution:{...execution,localAction:{...execution.localAction,
     server:'trelio-assistant',tool:'continue_assistant_workspace_action'}},remoteMcpExecution:null,
-    assistantExecution:{state:pending?'shared_runtime_setup':'shared_runtime',automaticFallbackAllowed:false,
+    assistantExecution:{state:pending||setupRequested&&accountSetup?'shared_runtime_setup':'shared_runtime',automaticFallbackAllowed:false,
       ...(runtimeConsent?{runtimeConsent:{...runtimeConsent,...(inspected?{localInspection:{capabilities:inspected.capabilities,
-        packageSizeBytes:inspected.packageSizeBytes}}:{})}}:{}),...(privateAuthentication?{privateAuthentication}:{})}};
+        packageSizeBytes:inspected.packageSizeBytes}}:{})}}:{}),...(accountSetup?{accountSetup}:{}),...(privateAuthentication?{privateAuthentication}:{})}};
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
   return compactLocalNativeMcpResult('get_agent_skill',native,selected.arguments);
+};
+
+/** Exact signed human-input recipe selected locally, never model argv.
+ * This uses the SAME metadata hydrator and signature/TRELIOE1 inspector for
+ * public or private artifacts. Current device consent is required first. */
+export const inspectAssistantSkillAccountSetupForOwner=async({origin,companyId,fields,signal,common})=>{
+  const selected=normalizeAssistantSkillAccountSetupFields(fields);common??=await import('./trelio-workspace.mjs');
+  const profile=common.currentWorkspaceExecutionProfile();
+  if(profile?.kind!=='digital_assistant'||typeof profile.hydrateSkillRuntimeResolution!=='function')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const token=await common.requireToken(origin);
+  const response=await common.request(origin,token,'/api/agent-skills/runtime/resolve',{method:'POST',signal,
+    headers:{'content-type':'application/json'},body:JSON.stringify({companyId,projectId:selected.projectId,skillId:selected.skillId,expectedReleaseId:selected.releaseId})});
+  const raw=await readAssistantEncryptedSnapshotResponse(response,common);
+  const hydrated=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
+  const resolved=common.normalizeResolvedSkillRuntimeArtifact(hydrated.rawResolution);
+  if(resolved.company.id!==companyId||resolved.releaseId!==selected.releaseId||resolved.artifact.skillId!==selected.skillId
+    ||(resolved.localIdentity?.projectId??null)!==selected.projectId)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+  const inspected=await common.inspectEncryptedAgentSkillRuntimeForConsent({origin,token,packageUrl:resolved.packageUrl,
+    artifact:resolved.artifact,companyEncryption:hydrated.companyEncryption,humanInputCommandId:selected.commandId});
+  if(!inspected.capabilities.includes('local-session')||!inspected.capabilities.includes('local-accounts-v1')||!inspected.humanInputCommand)
+    fail('ASSISTANT_SKILL_SETUP_REQUIRED');
+  return {command:inspected.humanInputCommand,artifactId:resolved.artifact.id,packageSha256:resolved.artifact.packageSha256,
+    privateRuntime:resolved.artifact.contentProtection==='company_e2ee_v1'};
 };
 
 /** Fresh encrypted private-package inspection for the owner question. The
@@ -2277,7 +2432,9 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         const definitions=catalog.filter(tool=>tool?.name===name);
         if(definitions.length!==1)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         validateAssistantNativeInputShape(definitions[0].inputSchema,argumentsSnapshot);
-        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='accept_skill_runtime'){
+        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='setup_skill_account'){
+          normalizeAssistantSkillAccountSetupFields(argumentsSnapshot.fields);
+        }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='accept_skill_runtime'){
           // This native-only owner action has no ordinary human task mutation
           // alias. Its SAME pure structural parser closes generic fields before
           // any plain send or encrypted preparation HTTP.

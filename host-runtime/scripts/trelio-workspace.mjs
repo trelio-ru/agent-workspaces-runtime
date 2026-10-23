@@ -24,7 +24,7 @@ const reportFinishProgress = (stage, counts = {}) => {
   writeFinishProgress({ stage, ...counts });
 };
 
-import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -7146,6 +7146,8 @@ export const inspectEncryptedAgentSkillRuntimeForConsent = async ({
   packageUrl,
   artifact,
   companyEncryption,
+  humanInputCommandId = null,
+  inspectHumanInputCommands = false,
 }) => {
   const response = await request(origin, token, packageUrl);
   const encryptedPackageBytes = await readBoundedResponseBuffer(
@@ -7165,11 +7167,14 @@ export const inspectEncryptedAgentSkillRuntimeForConsent = async ({
       throw new Error("Загруженный runtime package не совпадает с consent metadata.");
     }
     verifyAgentSkillPackageSignature(encryptedPackageBytes, artifact);
-    plaintextPackageBytes = await decryptEncryptedAgentSkillRuntimePackage({
-      packageBytes: encryptedPackageBytes,
-      artifact,
-      companyEncryption,
+    // The SAME signature/manifest inspector also selects a public signed
+    // human-input declaration. Private bytes still require the exact existing
+    // TRELIOE1 recipient; this branch never guesses or falls back from E2EE.
+    if (artifact.contentProtection === "plain") plaintextPackageBytes = Buffer.from(encryptedPackageBytes);
+    else if (artifact.contentProtection === "company_e2ee_v1") plaintextPackageBytes = await decryptEncryptedAgentSkillRuntimePackage({
+      packageBytes: encryptedPackageBytes, artifact, companyEncryption,
     });
+    else throw new Error("Unknown skill content protection.");
     parsedPackage = parseAndValidateAgentSkillPackage(
       plaintextPackageBytes,
       artifact.skillId,
@@ -7205,6 +7210,8 @@ export const inspectEncryptedAgentSkillRuntimeForConsent = async ({
     return {
       capabilities: [...parsedPackage.capabilities].sort(),
       packageSizeBytes: parsedPackage.packageSizeBytes,
+      ...(humanInputCommandId === null ? {} : { humanInputCommand: readSkillHumanInputSetupCommand(parsedPackage, humanInputCommandId) }),
+      ...(inspectHumanInputCommands ? { humanInputCommands: readSkillHumanInputSetupCommands(parsedPackage) } : {}),
     };
   } finally {
     encryptedPackageBytes.fill(0);
@@ -8161,6 +8168,7 @@ export const runMaterializedAgentSkill = async ({
   // belong to its reviewed signed implementation, not this string check.
   const taskCapture = captureMode === 'assistant_task';
   const sourceSetupCapture = captureMode === 'assistant_source_setup';
+  const taskSetupCapture = captureMode === 'assistant_skill_setup';
   const sourceAckCapture = captureMode === 'assistant_source_ack';
   const sourceIntakeCapture = captureMode === 'assistant_source_intake';
   const profile = currentWorkspaceExecutionProfile();
@@ -8169,9 +8177,12 @@ export const runMaterializedAgentSkill = async ({
     || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
     || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
     throw Object.assign(new Error('Private setup requires its exact task profile.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-  if (!['monitor','assistant_task','assistant_source_setup','assistant_source_ack','assistant_source_intake'].includes(captureMode)
+  if (!['monitor','assistant_task','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
+    || taskSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
+      || typeof profile.authorizeHumanInputSkillSetup !== 'function'
+      || typeof profile.assertHumanInputSkillSetupCurrent !== 'function')
     || sourceSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
       || typeof profile.authorizeInteractiveSourceSetup !== 'function'
       || typeof profile.assertInteractiveSourceSetupCurrent !== 'function')
@@ -8182,10 +8193,10 @@ export const runMaterializedAgentSkill = async ({
       || typeof profile.authorizeSourceIntake !== 'function' || typeof profile.startSourceIntake !== 'function')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && runtimeArguments[0] !== 'monitor'
+    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup
-    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture ? 10 * 60_000 : 180_000)
+    || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture || taskSetupCapture ? 10 * 60_000 : 180_000)
     || signal !== null && !(signal instanceof AbortSignal))) {
     throw Object.assign(new Error('Invalid private monitor invocation.'), { code: 'TRELIO_SKILL_MONITOR_INPUT_INVALID' });
   }
@@ -8199,6 +8210,12 @@ export const runMaterializedAgentSkill = async ({
   // before interpreter/bootstrap I/O. Neither a capture-mode string nor an
   // arbitrary provider command grants setup. Later, immediately before spawn,
   // we repeat the non-consuming identity/deadline check below.
+  if (taskSetupCapture) {
+    const remaining = await profile.authorizeHumanInputSkillSetup({artifact, executionContext, runtimeArguments});
+    if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 600000)
+      throw Object.assign(new Error('Invalid protected setup budget.'), {code:'ASSISTANT_SKILL_SETUP_REQUIRED'});
+    timeoutMs = Math.min(timeoutMs, remaining);
+  }
   if (sourceSetupCapture) {
     const remaining = await profile.authorizeInteractiveSourceSetup({artifact, executionContext, runtimeArguments});
     if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 10 * 60_000)
@@ -8273,6 +8290,7 @@ export const runMaterializedAgentSkill = async ({
     now: runtimeStartedAt,
   });
   if (sourceSetupCapture) await profile.assertInteractiveSourceSetupCurrent();
+  if (taskSetupCapture) await profile.assertHumanInputSkillSetupCurrent();
   const browserSessionDeadlineAt = Number(
     runtimeEnvironment.TRELIO_BROWSER_SESSION_DEADLINE_AT || 0,
   );
@@ -8691,7 +8709,7 @@ const skillCommand = async (
   origin,
   options,
   positional,
-  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null } = {},
+  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null, humanInputSetup = null } = {},
 ) => {
   const skillSubcommand = positional[0];
 
@@ -8834,10 +8852,16 @@ const skillCommand = async (
   }
 
   const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
+  const humanInputCommand = humanInputSetup === null ? null : readSkillHumanInputSetupCommand(artifactForCache.parsedPackage, humanInputSetup.commandId);
+  if(humanInputSetup !== null && (!assistant || privateSecretSetup || !humanInputCommand
+    || !artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
+    || JSON.stringify(splitAccountArguments(positional.slice(1)).providerArguments)!==JSON.stringify(humanInputCommand.arguments)
+    || typeof profile.prepareHumanInputSkillSetupAccount!=='function'))
+    throw Object.assign(new Error('Use exact signed human-input setup.'),{code:'ASSISTANT_SKILL_SETUP_REQUIRED'});
   if(privateSecretSetup && (!assistant || setupCommand?.purpose!=='authenticate'
     || setupCommand.fieldKey!==privateSecretSetup.fieldKey || setupCommand.environmentVariable!==privateSecretSetup.environmentVariable))
     throw Object.assign(new Error('Use exact signed authentication setup.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-  if (assistant && !privateSecretSetup && !parseAccountCommand(positional.slice(1))) {
+  if (assistant && !privateSecretSetup && !humanInputSetup && !parseAccountCommand(positional.slice(1))) {
     // Check before prepareSkillAccount: catalogue import/selection is I/O too.
     // Only the existing host selector is removed, by its strict shared parser.
     const providerArguments = artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
@@ -8871,6 +8895,7 @@ const skillCommand = async (
     companyConnection: resolution.companyConnection,
   };
   let runtimeArguments = positional.slice(1);
+  if (humanInputSetup) await profile.prepareHumanInputSkillSetupAccount({artifact:artifactForCache,runtimeDirectory,executionContext,humanInputCommand});
   if (artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)) {
     const accountResult = await prepareSkillAccount({ origin, artifact: artifactForCache,
       runtimeDirectory, executionContext, runtimeArguments });
@@ -8907,7 +8932,7 @@ const skillCommand = async (
   // engine. The private profile validates native source/task routing before
   // launch and after complete successful pipes; no provider output is saved
   // or promoted to processing merely because the command returned zero.
-  const bodyRead = assistant && !privateSecretSetup && typeof profile.prepareSkillBodyRead === 'function'
+  const bodyRead = assistant && !privateSecretSetup && !humanInputSetup && typeof profile.prepareSkillBodyRead === 'function'
     ? await profile.prepareSkillBodyRead({artifact:artifactForCache,executionContext,runtimeArguments}) : null;
   const executed = await runMaterializedAgentSkill({
     artifact: artifactForCache,
@@ -8916,7 +8941,7 @@ const skillCommand = async (
     executionContext,
     grantedEnvironment,
     grantedStdin,
-    ...(assistant ? {captureOutput:true,captureMode:'assistant_task',timeoutMs:180_000} : {}),
+    ...(assistant ? {captureOutput:true,captureMode:humanInputSetup?'assistant_skill_setup':'assistant_task',timeoutMs:humanInputSetup?600000:180_000} : {}),
     privateSecretSetup: privateSecretSetup ? {fieldKey:privateSecretSetup.fieldKey,environmentVariable:privateSecretSetup.environmentVariable} : null,
     prepareSetupEnvironment: privateSecretSetup ? privateSecretSetup.prepareEnvironment : setupCommand ? () => deliverSkillSetupEnvironment({
       request, origin, token, command: setupCommand, resolution, companyId,
@@ -8927,7 +8952,24 @@ const skillCommand = async (
   // In-process assistant composition must not inherit the provider's OS fd1:
   // it would bypass the bridge's bounded result/visual projection. The SAME
   // native executor captures its pipes and hands bytes back to that projector.
-  if (assistant) process.stdout.write(executed.stdout);
+  if (assistant && !humanInputSetup) process.stdout.write(executed.stdout);
+  // Provider setup stdout may contain private profile paths or handoff URLs.
+  // Exit zero/window close is not a login proof. Only this closed structural
+  // completion crosses the MCP boundary; a fresh native provider probe is next.
+  if (humanInputSetup) return {state:'handoff_finished',loginVerified:false,replayAllowed:false};
+};
+
+/** Host-only continuation of one native owner-approved account setup. The
+ * current profile supplies its immutable native plan, then the SAME package,
+ * catalogue and process engine reselect the signed command before any child.
+ * This is not a CLI/MCP argv or a second executor. */
+export const runAssistantSkillAccountSetup = async ({origin}) => {
+  const profile=currentWorkspaceExecutionProfile();
+  if(profile?.kind!=='digital_assistant'||typeof profile.readHumanInputSkillSetupCommand!=='function')denyWorkspaceExecutionProfile();
+  const selected=await profile.readHumanInputSkillSetupCommand(await import('./trelio-workspace.mjs'));
+  return skillCommand(origin,{company:selected.companyId,...(selected.projectId?{project:selected.projectId}:{}),
+    skill:selected.skillId,release:selected.releaseId,...(selected.runtimeSessionId?{'runtime-session':selected.runtimeSessionId}:{})},
+    ['run','--local-account',selected.accountId,...selected.arguments],{humanInputSetup:{commandId:selected.commandId}});
 };
 
 /** Run only the signed provider's fixed read-only migration entry. Its bounded
@@ -8986,7 +9028,7 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     // A task/read profile cannot authorize setup. The native source-owner
     // profile may admit one exact new EMPTY entry or owner-reviewed extra-company
     // bind; it repeats identity/deadline/scope and never admits legacy import.
-    if (profile.kind !== "digital_assistant_source" || typeof profile.authorizeAccountCreation !== "function")
+    if (!["digital_assistant_source","digital_assistant"].includes(profile.kind) || typeof profile.authorizeAccountCreation !== "function")
       throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
     accountCreation = await profile.authorizeAccountCreation(command,{companyId:executionContext.companyId,projectId:executionContext.projectId??null,
       skillId:artifact.skillId,memberId:executionContext.localIdentity?.memberId,connectionId:executionContext.localIdentity?.connectionId??null});

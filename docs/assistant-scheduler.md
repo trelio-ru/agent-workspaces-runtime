@@ -1861,3 +1861,31 @@ form or collects replacement bytes. A committed receipt returns before key/input
 pending is an explicit unresolved attempt, not readiness or success. Only native
 card/version/ACL/audit/decision/receipt atomic commit confirms storage. No extra
 runtime module, vault, executor, clipboard/file import or source body journal.
+
+### Owner-reviewed managed local-account authentication
+
+`setup_skill_account` is the SAME sealed owner action for an existing-account
+login/configuration, not website signup. The owner selects exact native
+skill/release/device/account and signed `authenticate_existing` command ID.
+The native admission receipt names the current artifact, original stored config
+hash, member/company binding and a bounded human-input budget. It consumes
+permission once; a lost result is reconcile-only and never reopens a form.
+
+The host obtains the recipe through the SAME signature/manifest inspector.
+Encrypted private recipe JSON stays inside the existing managed payload and
+owner seal; the final host reselects it by the exact package hash and command ID.
+No model argv, Secret/env overrides, provider profile paths or legacy imports
+are accepted. Native/model discovery exposes command IDs only. Request
+`get_agent_skill` sections `instructions`, `execution`, `connection` to enter the
+existing setup presentation; an ordinary skill read keeps the task view.
+
+The SAME managed catalogue either atomically creates the neutral empty account
+for that intent or selects an already-bound account of this assistant/device
+and company/member. It never adopts a human/unbound other-company entry,
+rewrites labels, binds implicitly or creates a duplicate during relogin.
+The SAME signed process then opens the protected existing-account handoff;
+its original monotonic budget is capped by the first observed native lease,
+including inspection/account/bootstrap time. No terminal stdin/value delivery
+or unattended login is introduced. Complete provider stdout/stderr remains
+private. Handoff exit/window close returns only `loginVerified:false`; a
+separate fresh native provider probe is required before claiming a usable login.

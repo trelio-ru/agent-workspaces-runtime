@@ -6,7 +6,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, normalizeAssistantSkillConsentParameters, assistantNeutralPrivateMetadata, assistantNeutralCompanySecret } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralCompanySecret } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -174,7 +174,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -190,7 +190,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
@@ -199,6 +199,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       preparePrivateBrowserArguments:profile.preparePrivateBrowserArguments,
       preparePrivateCardArguments:profile.preparePrivateCardArguments,
       prepareSkillConsentArguments:profile.prepareSkillConsentArguments,
+      prepareSkillAccountSetupArguments:profile.prepareSkillAccountSetupArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -222,6 +223,15 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
     const company=await transport.readAssistantCompanyContentMode({identity,host,client,signal});
     if(company.encryptionState==='plain')return send(args);
     let selectedArguments=args;
+    if(name==='request_assistant_action'&&args.operation==='setup_skill_account'){
+      const fields=transport.normalizeAssistantSkillAccountSetupFields(args.fields);
+      const inspected=await withProductionAssistantWorkspace(async current=>{
+        if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        return transport.inspectAssistantSkillAccountSetupForOwner({origin:identity.origin,companyId:company.companyId,fields,signal,common});
+      },{signal,encryptedSkillRead:{schemaVersion:1,nativeTool:'get_agent_skill',companyId:company.companyId,
+        projectId:fields.projectId,skillId:fields.skillId,releaseId:fields.releaseId,arguments:{sections:['instructions','execution']}}});
+      if(inspected.privateRuntime)selectedArguments={...args,fields:{...fields,inspectedCommand:inspected.command}};
+    }
     if(name==='request_assistant_action'&&args.operation==='accept_skill_runtime'){
       if(typeof args.reason!=='string'||Buffer.byteLength(args.reason.trim(),'utf8')>1400)fail('ASSISTANT_SKILL_CONSENT_REASON_TOO_LONG');
       const inspected=await withProductionAssistantWorkspace(async current=>{
@@ -336,7 +346,7 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task'}=
       // These are native metadata/preparation/creation receipts, not local command
       // plans. The next returned secret_browser_fill continuation executes in
       // the SAME isolated Workspace worker; no second browser executor exists.
-      if(['secret_list','secret_browser_prepare','secret_create','skill_consent'].includes(args?.operation))return result;
+      if(['secret_list','secret_browser_prepare','secret_create','skill_consent','skill_account_setup'].includes(args?.operation))return result;
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
       catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}
@@ -1182,6 +1192,27 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       ||p.offset!==undefined&&(!Number.isSafeInteger(p.offset)||p.offset<0)
       ||p.limit!==undefined&&(!Number.isSafeInteger(p.limit)||p.limit<1||p.limit>50))throw new AssistantTransportError('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
     return send(args);
+  }
+  if(name==='continue_assistant_workspace_action'&&args.operation==='skill_account_setup'){
+    privateEnvelope();if(args.runIdentity!==undefined)throw new AssistantTransportError('ASSISTANT_SKILL_SETUP_REQUIRED');
+    normalizeAssistantSkillAccountSetupParameters(args.parameters);
+    return withProfile(async({readCompanyContentMode,prepareSkillAccountSetupArguments})=>{
+      if(typeof readCompanyContentMode!=='function'||typeof prepareSkillAccountSetupArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      const parameters=await prepareSkillAccountSetupArguments(args.parameters,signal);
+      signal?.throwIfAborted();const result=await send({...args,parameters});
+      if(result?.isError)return result;
+      const admitted=result?.structuredContent;
+      if(!admitted||admitted.state!=='admitted'||admitted.replayAllowed!==false||typeof admitted.reconcileOnly!=='boolean')throw new AssistantTransportError('ASSISTANT_MCP_INVALID_RESPONSE');
+      if(admitted.reconcileOnly)return result;
+      const plan=normalizeAssistantSkillAccountSetupPlan(admitted.accountSetup);
+      if(plan.requestId!==args.parameters.clientRequestId||['skillId','projectId','releaseId','accountId','commandId'].some(key=>plan[key]!==args.parameters[key]))
+        throw new AssistantTransportError('ASSISTANT_SKILL_SETUP_REQUIRED');
+      const finished=await withProfile(async({identity})=>{
+        const common=await import('./trelio-workspace.mjs');return common.runAssistantSkillAccountSetup({origin:identity.origin});
+      },{signal,skillAccountSetup:plan});
+      return {content:[{type:'text',text:'Protected existing-account handoff finished; a separate fresh provider probe is required.'}],
+        structuredContent:{...admitted,accountSetup:undefined,...finished}};
+    },{signal});
   }
   if(name==='continue_assistant_workspace_action'&&args.operation==='skill_consent'){
     privateEnvelope();

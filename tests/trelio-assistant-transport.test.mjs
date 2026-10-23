@@ -2620,3 +2620,48 @@ test('company NEW Secret profile binds native derived card ID, exact original pl
     await assert.rejects(f.profile.selectCompanySecretContext({...prepared,companyId:randomUUID()}));
   }finally{globalThis.fetch=prior;}
 });
+
+// Generic fields are intentionally a native record. Close this host-created
+// operation before preparation HTTP, without inventing an ordinary task alias.
+test('human-input setup request rejects model recipes before real MCP and reconciles a lost admission without process work',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {normalizeAssistantSkillAccountSetupPlan,normalizeAssistantSkillAccountSetupParameters}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=await workspaceProfileFixture();let calls=0;
+  const fields={skillId:'public-login',projectId:null,releaseId:randomUUID(),accountId:randomUUID(),commandId:'login'};
+  const client=createAssistantMcpClient({...f.identity,store:f.store,httpRequest:async input=>{
+    const reply=result=>({sessionId:'setup-preflight',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+    if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='tools/list')return reply({tools:[{name:'request_assistant_action',description:'Native setup',inputSchema:{type:'object'}}]});
+    calls++;assert.deepEqual(input.payload.params.arguments.fields,fields);return reply({structuredContent:{questionId:randomUUID()},content:[]});
+  }});
+  const request={operation:'setup_skill_account',fields,reason:'Open protected account login',clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  try{
+    for(const extra of [{arguments:['login','PRIVATE_CANARY']},{deviceId:randomUUID()},{inspectedCommand:{purpose:'authenticate_existing'}},{extra:'PRIVATE_CANARY'}])
+      await assert.rejects(client.callTool('request_assistant_action',{...request,fields:{...fields,...extra}}));
+    assert.equal(calls,0);await client.callTool('request_assistant_action',request);assert.equal(calls,1);
+    const parameters={...fields,clientRequestId:request.clientRequestId,ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:request.expectedTaskUpdatedAt};
+    assert.deepEqual(normalizeAssistantSkillAccountSetupParameters(parameters),parameters);
+    const marker={$trelioE2ee:{v:1,id:randomUUID(),field:'skill_setup_command_json'}};
+    assert.deepEqual(normalizeAssistantSkillAccountSetupParameters({...parameters,inspectedCommand:marker}).inspectedCommand,marker);
+    for(const extra of [{arguments:['login']},{encryptionFingerprint:'c'.repeat(43)},{inspectedCommand:{...marker.$trelioE2ee}},{extra:'PRIVATE_CANARY'}])
+      assert.throws(()=>normalizeAssistantSkillAccountSetupParameters({...parameters,...extra}));
+    let prepared=0,sent=0,profiles=0;
+    const base={schemaVersion:1,operation:'skill_account_setup',parameters};
+    const invoke=args=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',args},async wire=>{
+      sent++;assert.equal(wire.parameters.encryptionFingerprint,'c'.repeat(43));
+      return {content:[],structuredContent:{state:'admitted',reconcileOnly:true,replayAllowed:false,receiptId:randomUUID()}};
+    },{withProfile:action=>{profiles++;return action({readCompanyContentMode:async()=>'encrypted',prepareSkillAccountSetupArguments:async value=>{
+      prepared++;return {...value,encryptionFingerprint:'c'.repeat(43)};}});}});
+    for(const bad of [{...base,extra:'PRIVATE_CANARY'},{...base,runIdentity:{runId:randomUUID(),workspaceId:randomUUID()}},
+      {...base,parameters:{...parameters,argv:['PRIVATE_CANARY']}}])await assert.rejects(invoke(bad));
+    assert.equal(prepared,0);assert.equal(sent,0);
+    const reconciled=await invoke(base);assert.equal(reconciled.structuredContent.reconcileOnly,true);
+    assert.equal(sent,1);assert.equal(profiles,1,'a read-back receipt never constructs an execution profile');
+    const plan={schemaVersion:1,requestId:parameters.clientRequestId,accountId:fields.accountId,companyId:randomUUID(),projectId:null,memberId:randomUUID(),connectionId:null,connectionConfigSha256:null,
+      skillId:fields.skillId,releaseId:fields.releaseId,artifactId:randomUUID(),packageSha256:'a'.repeat(64),commandId:'login',purpose:'authenticate_existing',maximumDurationMs:60000,arguments:['login','--headed']};
+    assert.deepEqual(normalizeAssistantSkillAccountSetupPlan(plan),plan);
+    for(const changed of [{...plan,argv:['PRIVATE_CANARY']},{...plan,maximumDurationMs:600001},{...plan,purpose:'register_new'},
+      {...plan,arguments:['login','https://private.test/secret']}])assert.throws(()=>normalizeAssistantSkillAccountSetupPlan(changed));
+  }finally{f.close();}
+});

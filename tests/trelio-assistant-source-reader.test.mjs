@@ -1632,14 +1632,21 @@ test('encrypted company runtime is inspected through its exact managed bundle be
   const managed=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store:nativeStore,lockDirectory:path.join(directory,'private-consent-keys'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
   const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
   const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
-  const scopeId=randomUUID(),recipientId=randomUUID(),entityId=randomUUID(),currentRelease=randomUUID(),currentArtifact=randomUUID(),publicationId=randomUUID();
+  const scopeId=randomUUID(),recipientId=randomUUID(),entityId=randomUUID(),currentRelease=randomUUID(),currentArtifact=randomUUID(),publicationId=randomUUID(),publicArtifact=randomUUID();
   const aad={suite:'trelio-e2ee-v1',companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId};
   const wrapped=await crypto.hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
   const envelope={id:randomUUID(),...aad,hpkeEnc:wrapped.enc,ciphertext:wrapped.ciphertext,aad};
   const skillId='encrypted-company-task-fixture',root=path.join(directory,'private-consent-package'),childMarker=path.join(directory,'private-consent-child');await fs.mkdir(root);
-  const source=`import fs from 'node:fs';fs.appendFileSync(${JSON.stringify(childMarker)},'1');console.log('PRIVATE_COMPANY_CHILD_OK');`;
+  const setupAccountId=randomUUID();
+  const source=`import fs from 'node:fs';import assert from 'node:assert/strict';
+    const args=process.argv.slice(2);if(args[0]==='login'){
+      assert.deepEqual(args,['login','--headed']);assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(setupAccountId)});
+      let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
+      fs.appendFileSync(${JSON.stringify(childMarker)},'s');console.log('PRIVATE_SETUP_PROFILE_PATH_DO_NOT_RETURN');
+    }else{fs.appendFileSync(${JSON.stringify(childMarker)},'1');console.log('PRIVATE_COMPANY_CHILD_OK');}`;
   await fs.writeFile(path.join(root,'main.mjs'),source);await fs.writeFile(path.join(root,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:1,taskCommands:[['read']]}));
-  const plaintext=await engine.buildAgentSkillPackage({skillId,runtimeVersion:'1.0.0',sourceDirectory:root,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network']});
+  await fs.writeFile(path.join(root,'trelio-secret-setup.json'),JSON.stringify({schemaVersion:2,commands:[],humanInputCommands:[{id:'login',purpose:'authenticate_existing',arguments:['login','--headed'],maximumDurationMs:60000}]}));
+  const plaintext=await engine.buildAgentSkillPackage({skillId,runtimeVersion:'1.0.0',sourceDirectory:root,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
   const parsed=engine.parseAndValidateAgentSkillPackage(plaintext,skillId),manifest={format:'trelio-agent-skill-package/v1',skill:{id:skillId,runtimeVersion:'1.0.0'},entrypoint:parsed.entrypoint,
     capabilities:[...parsed.capabilities].sort(),files:parsed.files.map(file=>({path:file.path,mode:file.mode,sha256:file.sha256,sizeBytes:file.bytes.length}))};
   const original=path.join(directory,'private-consent-plaintext.skillpkg'),encrypted=path.join(directory,'private-consent-cipher.skillpkg');await fs.writeFile(original,plaintext,{mode:0o600});
@@ -1672,31 +1679,87 @@ test('encrypted company runtime is inspected through its exact managed bundle be
       return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{status:options.headers.get('x-trelio-agent-rules-sha256')===sha256?'current':'update_required',revisionId:scopeId,version:1,sha256,rulesMarkdown:rules}}));
     }
     if(url.pathname==='/api/agent-skills/runtime/resolve'){
-      resolveCount++;const value=raw();if(variant==='latehash'&&resolveCount%2===0)value.artifact.packageSha256='c'.repeat(64);if(variant==='recipient')value.assistantEncryption.recipientDeviceId=randomUUID();
+      resolveCount++;const value=raw();if(variant==='public'){
+        value.trust={level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null};
+        value.artifact={...value.artifact,id:publicArtifact,contentProtection:'plain',packageFormat:'trelio-agent-skill-package/v1',manifest,packageSha256:createHash('sha256').update(plaintext).digest('hex'),
+          packageSizeBytes:plaintext.length,packageSignature:sign(null,plaintext,privateKey).toString('base64')};
+        value.packageUrl='/api/agent-skills/runtime/package?'+new URLSearchParams({companyId,skillId,expectedReleaseId:currentRelease,artifactId:publicArtifact});
+      }if(variant==='latehash'&&resolveCount%2===0)value.artifact.packageSha256='c'.repeat(64);if(variant==='recipient')value.assistantEncryption.recipientDeviceId=randomUUID();
       if(variant==='scope')value.assistantEncryption.scopeEpoch=2;
       if(variant==='extra')value.assistantEncryption.encryptedPayloads.push({...payload,entityId:randomUUID()});
       return new Response(JSON.stringify(value));
     }
-    assert.equal(url.pathname,'/api/agent-skills/runtime/package');downloads++;const bytes=Buffer.from(cipher);if(variant==='cipher')bytes[bytes.length-1]^=1;return new Response(bytes);
+    assert.equal(url.pathname,'/api/agent-skills/runtime/package');downloads++;const bytes=Buffer.from(variant==='public'?plaintext:cipher);if(variant==='cipher')bytes[bytes.length-1]^=1;return new Response(bytes);
   };
   const make=read=>createAssistantWorkspaceProfile({identity,client,host:taskHost,store:nativeStore,...(read?{encryptedSkillRead:descriptor}:{}),lockDirectory:path.join(directory,'private-consent-locks'),lock:(_file,action)=>action()});
   try{
     const profile=await make(true),run=action=>engine.withWorkspaceExecutionProfile(profile,action);
     const view=await run(()=>materializeAssistantEncryptedSkill({origin,descriptor}));
-    assert.deepEqual(view.structuredContent.assistantExecution.runtimeConsent.localInspection.capabilities,['network']);assert.equal(downloads,1);
+    assert.deepEqual(view.structuredContent.assistantExecution.runtimeConsent.localInspection.capabilities,['local-accounts-v1','local-session','network']);assert.equal(downloads,1);
     assert.match(JSON.stringify(view),/PRIVATE_COMPANY_SKILL_TITLE/);assert.doesNotMatch(JSON.stringify(view),/~e1:|scopePrivateEncryptionJwk|ciphertext|trelio-local/);
     await assert.rejects(fs.readFile(childMarker),{code:'ENOENT'});
-    const review=await run(()=>inspectAssistantSkillConsentForOwner({origin,companyId,fields}));assert.deepEqual(review.capabilities,['network']);
+    const review=await run(()=>inspectAssistantSkillConsentForOwner({origin,companyId,fields}));assert.deepEqual(review.capabilities,['local-accounts-v1','local-session','network']);
     await assert.rejects(run(()=>inspectAssistantSkillConsentForOwner({origin,companyId,fields:{...fields,packageSha256:'b'.repeat(64)}})),/CONSENT_CHANGED/);
     for(const changed of ['recipient','scope','extra','cipher']){variant=changed;await assert.rejects(run(()=>materializeAssistantEncryptedSkill({origin,descriptor})));}
     variant='valid';granted=true;
+    const setupDescriptor={...descriptor,arguments:{sections:['instructions','execution','connection']}};
+    const setupView=await engine.withWorkspaceExecutionProfile(await make(true),()=>materializeAssistantEncryptedSkill({origin,descriptor:setupDescriptor}));
+    assert.deepEqual(setupView.structuredContent.assistantExecution.accountSetup,{state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup',
+      commands:[{id:'login',purpose:'authenticate_existing',maximumDurationMs:60000}]});
+    assert.equal(setupView.structuredContent.assistantExecution.state,'shared_runtime_setup');
+    assert.equal(JSON.stringify(setupView.structuredContent.assistantExecution.accountSetup).includes('--headed'),false,'discovery exposes IDs only, never private argv');
+    const accountSetup={schemaVersion:1,requestId:randomUUID(),accountId:setupAccountId,companyId,projectId:null,memberId,connectionId:null,connectionConfigSha256:null,
+      skillId,releaseId:currentRelease,artifactId:currentArtifact,packageSha256,commandId:'login',purpose:'authenticate_existing',maximumDurationMs:600000,
+      inspectedCommand:jsonMarker('skill_setup_command_json')};
+    const createSetup=plan=>createAssistantWorkspaceProfile({identity,client,host:taskHost,store:nativeStore,skillAccountSetup:plan,
+      lockDirectory:path.join(directory,'private-consent-locks'),lock:(_file,action)=>action()});
+    const setupProfile=await createSetup(accountSetup);
+    for(const changed of [{...accountSetup,packageSha256:'b'.repeat(64)},{...Object.fromEntries(Object.entries(accountSetup).filter(([key])=>key!=='inspectedCommand')),arguments:['login','--unsafe']},
+      {...accountSetup,connectionConfigSha256:'d'.repeat(64)},
+      {...accountSetup,inspectedCommand:jsonMarker('other_payload_json')}])
+      await assert.rejects(createSetup(changed).then(profile=>engine.withWorkspaceExecutionProfile(profile,()=>engine.runAssistantSkillAccountSetup({origin}))));
+    await assert.rejects(fs.readFile(childMarker),{code:'ENOENT'});
+    const managedDirectory=await setupProfile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());
+    const catalogueFor=(directory,selectedCompany)=>createAccountCatalogue({directory,
+      scope:accountScope({origin,skillId,companyId:selectedCompany,memberId,connectionId:null}),io:{ensureDirectory:engine.ensurePrivateDirectory,
+        read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+    const human=catalogueFor(engine.resolveWorkspaceBridgeConfigDirectory(),companyId);
+    await human.change({operation:'create',id:setupAccountId,name:'PRIVATE_HUMAN_LOGIN_ACCOUNT',expectedRevision:(await human.list()).revision});
+    const beforeHuman=await human.list();
+    const stdout=process.stdout.write,hostOutput=[];let setup;
+    process.stdout.write=function(chunk,...args){hostOutput.push(String(chunk));const callback=args.find(value=>typeof value==='function');callback?.();return true;};
+    const setupCaptureProfile=Object.freeze({...setupProfile,authorizeHumanInputSkillSetup:async input=>{
+      const remaining=await setupProfile.authorizeHumanInputSkillSetup(input);assert.ok(remaining>1000&&remaining<=60000,'signed private maximum narrows opaque native 600000 ceiling');return remaining;}});
+    try{setup=await engine.withWorkspaceExecutionProfile(setupCaptureProfile,()=>engine.runAssistantSkillAccountSetup({origin}));}
+    finally{process.stdout.write=stdout;}
+    assert.equal(hostOutput.join(''),'','raw provider handoff/profile output never reaches native worker stdout');
+    assert.deepEqual(setup,{state:'handoff_finished',loginVerified:false,replayAllowed:false});
+    assert.doesNotMatch(JSON.stringify(setup),/PRIVATE|profile|path|sessionVerified/);
+    assert.equal(await fs.readFile(childMarker,'utf8'),'s');
+    assert.deepEqual(await human.list(),beforeHuman,'no human session/catalogue is imported, rebound or rewritten');
+    await assert.rejects(engine.withWorkspaceExecutionProfile(setupProfile,()=>engine.runAssistantSkillAccountSetup({origin})),/SETUP_REQUIRED/);
+    assert.equal(await fs.readFile(childMarker,'utf8'),'s','the same admitted profile cannot launch human input twice');
+    const relogin=await createSetup({...accountSetup,requestId:randomUUID()});
+    await engine.withWorkspaceExecutionProfile(relogin,()=>engine.runAssistantSkillAccountSetup({origin}));
+    assert.equal(await fs.readFile(childMarker,'utf8'),'ss','new exact approval may reopen this already-bound managed account without duplication');
+    const own=catalogueFor(managedDirectory,companyId);assert.equal((await own.list()).accounts.filter(row=>row.bound).length,1);
+    const other=catalogueFor(managedDirectory,randomUUID()),unboundId=randomUUID();
+    await other.change({operation:'create',id:unboundId,name:'PRIVATE_OTHER_COMPANY_ACCOUNT',expectedRevision:(await other.list()).revision});
+    const unbound=await createSetup({...accountSetup,requestId:randomUUID(),accountId:unboundId});
+    await assert.rejects(engine.withWorkspaceExecutionProfile(unbound,()=>engine.runAssistantSkillAccountSetup({origin})),/ACCOUNT_ID_CONFLICT|ACCOUNT_NOT_BOUND/);
+    assert.equal(await fs.readFile(childMarker,'utf8'),'ss','an owner setup UUID never adopts an unbound other-company account');
     const live=await make(false),plan={prepared:true,scope:{assistantUserId:assistantId,deviceId,companyId,taskId:pass.taskId,passId:pass.passId},localAction:{schemaVersion:1,operation:'skill_run',
       parameters:{companyId,skillId,releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read']}}};
     const executed=await engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})}));
-    assert.equal(executed.stdout.trim(),'PRIVATE_COMPANY_CHILD_OK');assert.equal(await fs.readFile(childMarker,'utf8'),'1');
+    assert.equal(executed.stdout.trim(),'PRIVATE_COMPANY_CHILD_OK');assert.equal(await fs.readFile(childMarker,'utf8'),'ss1');
     variant='latehash';resolveCount=0;
     await assert.rejects(engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})})),/AGENT_SKILL_RELEASE_CHANGED/);
-    assert.equal(await fs.readFile(childMarker,'utf8'),'1','changed live ciphertext cannot execute the already verified plaintext cache');
-    variant='valid';active=false;await assert.rejects(run(()=>materializeAssistantEncryptedSkill({origin,descriptor})));assert.equal(await fs.readFile(childMarker,'utf8'),'1');
+    assert.equal(await fs.readFile(childMarker,'utf8'),'ss1','changed live ciphertext cannot execute the already verified plaintext cache');
+    variant='public';
+    const publicSetup=await createSetup({...Object.fromEntries(Object.entries(accountSetup).filter(([key])=>key!=='inspectedCommand')),
+      requestId:randomUUID(),artifactId:publicArtifact,packageSha256:createHash('sha256').update(plaintext).digest('hex'),maximumDurationMs:60000,arguments:['login','--headed']});
+    assert.deepEqual(await engine.withWorkspaceExecutionProfile(publicSetup,()=>engine.runAssistantSkillAccountSetup({origin})),{state:'handoff_finished',loginVerified:false,replayAllowed:false});
+    assert.equal(await fs.readFile(childMarker,'utf8'),'ss1s','public plain bytes use the SAME signed recipe/process under the encrypted task recipient');
+    variant='valid';active=false;await assert.rejects(run(()=>materializeAssistantEncryptedSkill({origin,descriptor})));assert.equal(await fs.readFile(childMarker,'utf8'),'ss1s');
   }finally{globalThis.fetch=previous;await fs.rm(root,{recursive:true,force:true});await fs.rm(original,{force:true});await fs.rm(encrypted,{force:true});}
 });
