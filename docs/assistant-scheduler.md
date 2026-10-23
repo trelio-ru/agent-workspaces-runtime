@@ -869,11 +869,11 @@ The common engine verifies/materializes the signed artifact, selects the
 account and starts the normal Node/Python provider. Human admission caching is
 disabled for this profile; live resolve runs again immediately before launch
 and must retain the artifact/hash. A cached package never preserves revoked
-task/device/policy authority. Only public, verified, non-revoked, plain and
-secret-free runtimes/configurations are currently admitted. Protected setup,
-owner account onboarding and unverified code remain independent
-independent authority/acceptance gates; shared capability readiness cannot
-replace them.
+task/device/policy authority. Public verified execution, reviewable company
+code, encrypted configuration and Secret-backed authentication retain their
+separate native admissions described below. Protected account setup and
+unverified code require their independent current owner decisions; shared
+capability readiness cannot replace them.
 
 The same account catalogue uses an assistant/device namespace with native
 company bindings. Task calls do not migrate human legacy accounts, mutate
@@ -2019,7 +2019,8 @@ send: `state=ready`, original provider `conversationKey`, native candidates
 `[{sourceId,sourceRevision}]`, `automaticRetryAllowed=false`. Native source reads
 are restricted to the current company/device and the account already selected
 by the common catalogue. Project source must match the resolver project; MAX
-also requires its exact registered canonical `--chat`. Source state/revision,
+requires the registered canonical `--chat` for an exact-chat source, or native
+account-root discovery admission for an account-wide source. Source state/revision,
 account/project and original pass/thread/assignment are rechecked after capture.
 No key is computed by the model or host, and no whole source inventory is shown.
 
