@@ -490,7 +490,7 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['ask_assistant_owner','request_as
   'create_task','create_comment','update_comment','update_task_title','update_task_description','create_task_control',
   'update_task_control','create_checklist','update_checklist','create_subtask','create_task_relation','update_task_status',
   'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',
-  'delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
+  'update_task_custom_field','delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
   'get_assistant_owner_question','get_assistant_intake_context']);
 export const supportsAssistantManagedContent=name=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name);
 const managedBusinessArguments=raw=>Object.fromEntries(Object.entries(raw).filter(([key])=>
@@ -503,6 +503,33 @@ const rejectBorrowedManagedMarkers=(value,depth=0)=>{
   if(typeof value==='string'&&/~e1:[0-9a-f-]{36}:[a-z][a-z0-9_]{0,63}~/iu.test(value)
     ||object(value)&&Object.hasOwn(value,'$trelioE2ee'))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   if(value&&typeof value==='object')for(const child of Object.values(value))rejectBorrowedManagedMarkers(child,depth+1);
+};
+
+/** Only canonical structural value shapes may cross encrypted transport.
+ * This is not a second domain normalizer: number precision, current select
+ * membership, eligible people and definition CAS remain native checks. It
+ * prevents malformed prose in an alleged number/date/ID from leaking FIRST.
+ */
+const managedCustomFieldValue=(definition,value)=>{
+  if(value===null||value===undefined||value==='')return null;
+  const id=value=>typeof value==='string'&&UUID.test(value);
+  const ids=value=>id(value)||Array.isArray(value)&&value.length<=200&&value.every(id);
+  const selection=value=>typeof value==='string'&&definition.optionIds.includes(value);
+  const entity=value=>object(value)&&Object.keys(value).sort().join(',')==='entityType,id'
+    &&['member','group'].includes(value.entityType)&&id(value.id);
+  let valid=false;
+  switch(definition.fieldType){
+    case 'text':valid=typeof value==='string'&&value.length<=255;break;
+    case 'number':valid=typeof value==='number'&&Number.isFinite(value);break;
+    case 'checkbox':valid=typeof value==='boolean';break;
+    case 'date':valid=typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/u.test(value)
+      &&Number.isFinite(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;break;
+    case 'select':valid=selection(value)||Array.isArray(value)&&value.length<=200&&value.every(selection);break;
+    case 'user':case 'group':valid=ids(value);break;
+    case 'user_or_group':valid=entity(value)||Array.isArray(value)&&value.length<=200&&value.every(entity);break;
+  }
+  if(!valid)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+  return value; // The SAME protector preserves text; this guard never normalizes domain values.
 };
 
 /** One bounded tools/call exchange. Staging has no domain effect and consumes
@@ -556,11 +583,12 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const common=await import('./trelio-workspace.mjs'),local=await import('./trelio-local-context.mjs'),
         crypto=await import('./trelio-company-encryption.mjs');
       const current=async()=>{await assertCurrent();await assertPass();};
+      let customField=null;
       const binding=async(phase,wire,action)=>{
         await current();
         return crypto.signCompanyEncryptionRecord(context.device.privateKeys.signingPrivateKey,
           {protocol:'assistant-managed-content/v1',phase,companyId:pass.companyId,target,nativeTool:name,
-            arguments:managedBusinessArguments(wire),...(action?{action}:{})});
+            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{})});
       };
       const hydrate=async bundle=>{
         await current();
@@ -579,7 +607,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const stage=async(protectedValue,{actionPreview=false,ownerActionContent}={})=>{
         const wire=Object.fromEntries(Object.entries(protectedValue.value).filter(([key])=>key!=='ownerDecisionId'));
         const action=actionPreview?{preview:true}:ownerActionContent?{content:ownerActionContent}:undefined;
-        const preparation={nativeTool:name,arguments:wire,...(actionPreview?{actionPreview:true}:{}),
+        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(actionPreview?{actionPreview:true}:{}),
           ...(ownerActionContent?{ownerActionContent}:{}),signature:await binding('preparation',wire,action)};
         const request=async(origin,selectedToken,pathname,options)=>{
           await current();
@@ -600,11 +628,36 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         }
         return null;
       };
+      if(name==='update_task_custom_field'){
+        // Ask the SAME native preparation cell for one active field's OPEN
+        // type/settings. Never send `value` (even malformed input) in this read.
+        const selected={fieldId:business.fieldId,clientRequestId:business.clientRequestId,expectedTaskUpdatedAt:business.expectedTaskUpdatedAt};
+        const preparation={nativeTool:name,arguments:selected,customFieldDefinition:true,
+          signature:await binding('preparation',selected,{customFieldDefinition:true})};
+        const response=await requestPayloads(context.requestOrigin,token,'/api/agent-workspaces/encryption/payloads',
+          {method:'POST',headers:{'content-type':'application/json'},signal,managedTarget:target,assertPass:current,
+            body:JSON.stringify({companySlug:company.companySlug,writerDeviceId:context.runtime.device.id,payloads:[],preparation})});
+        const bytes=await common.readBoundedResponseBuffer(response,32768,'Assistant field definition');let result;
+        try{result=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+        catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}finally{bytes.fill(0);}
+        const definition=result?.customField;
+        if(result?.schemaVersion!==1||!object(definition)||definition.id!==business.fieldId||!UUID.test(definition.id)
+          ||!['text','number','checkbox','date','select','user','group','user_or_group'].includes(definition.fieldType)
+          ||typeof definition.updatedAt!=='string'||!Number.isFinite(Date.parse(definition.updatedAt))
+          ||Object.keys(definition).some(key=>!['id','fieldType','updatedAt','optionIds'].includes(key))
+          ||definition.fieldType==='select'&&(!Array.isArray(definition.optionIds)||definition.optionIds.length>200
+            ||definition.optionIds.some(id=>typeof id!=='string'||!id||id.length>255))
+          ||definition.fieldType!=='select'&&definition.optionIds!==undefined)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        business.value=managedCustomFieldValue(definition,business.value);
+        customField={id:definition.id,fieldType:definition.fieldType,updatedAt:definition.updatedAt};
+        await current();
+      }
       const readonly=['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
         if(name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-        const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context});
+        const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,
+          ...(customField?{customFieldTypeForId:id=>id===customField.id?customField.fieldType:null}:{})});
         wire=protectedValue.value;
         if(name==='request_assistant_action'){
           const preview=await stage(protectedValue,{actionPreview:true}),opened=await hydrate(preview);
@@ -620,7 +673,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
           action={...ownerActionContent,snapshot:rawSnapshot};
         }else await stage(protectedValue);
       }
-      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,
+      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),
         ...(!readonly?{signature:await binding('publication',wire,action)}:{}),...(action?{action}:{})};
       await current();
       const authority=Object.fromEntries(Object.entries(args).filter(([key])=>['taskPass','intakePass','runtimeSessionProof'].includes(key)));

@@ -1536,7 +1536,23 @@ old lease is still executable. Local choice/Other and UTF-8 checks precede
 encryption; an owner answer still grants no sensitive action permission.
 
 Interactive source setup, private Secret intent metadata, accepted-file publication
-and typed custom fields retain separate encrypted guards. Unsupported arguments
+retain separate encrypted guards. Unsupported arguments
 fail before remote tools/call. Ciphertext uses the native-selected approved data
 plane; a failure never falls back to canonical HTTP. Real HPKE/signed native and
 SQLite fixtures are not a live Windows/provider business E2E or release claim.
+
+
+### Encrypted typed custom-field values
+
+`update_task_custom_field` reuses the SAME managed device/profile/protector and
+native custom-field writer. Before encrypting a value, the existing signed
+preparation cell reads only the exact active field's type, revision and structural
+option IDs; raw values/names/labels never enter this discovery. The common protector
+receives this trusted native type through an internal callback, never a model
+hint. Text is protected; canonical date/number/boolean and exact option/member/group
+references stay open. Invalid prose in structural slots is refused before HTTP.
+The publication binding carries the field revision, and the native handler rechecks
+current definition/module/project/task ACL and task CAS under row locks. There is
+no second normalizer/executor/config resolver/vault or business retry. Plain
+custom-field behavior and the common protector's existing mirror path remain
+unchanged; native precision, eligibility and idempotency remain independent.

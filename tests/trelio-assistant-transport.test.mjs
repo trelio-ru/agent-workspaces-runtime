@@ -91,7 +91,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
   const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
   const client={companies:async()=>available?[{companyId,companySlug:'encrypted',encryptionState:'encrypted'}]:[],
     readTaskPass:async()=>({state:'leased',passId:pass.passId,threadId:pass.threadId,leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
-  const staged=new Map();let preparations=0,resolves=0,businessCalls=0;
+  const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null;
   const input={identity,host,client,
     store,companyId,companySlug:'encrypted',lockDirectory:root,lock:async(_file,action)=>action()};
   const previousFetch=globalThis.fetch;
@@ -119,8 +119,15 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         :{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}});
       assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',
         phase:'preparation',companyId,target,nativeTool:preparation.nativeTool,arguments:preparation.arguments,
-        ...(preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
-      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY/);
+        ...(preparation.customField?{customField:preparation.customField}:{}),
+        ...(preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
+      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY/);
+      if(preparation.customFieldDefinition){
+        assert.equal(preparation.nativeTool,'update_task_custom_field');
+        assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt','fieldId']);
+        assert.equal(body.payloads.length,0,'type discovery never stages or accepts a raw value');
+        return json({schemaVersion:1,customField:customFieldDefinition});
+      }
       if(url.pathname.endsWith('/resolve')){resolves++;return json({payloads:body.entityIds.map(id=>staged.get(id)).filter(Boolean)});}
       preparations++;
       if(body.payloads.some(payload=>staged.has(payload.entityId)))return new Response('{}',{status:409});
@@ -210,6 +217,42 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       return {content:[],structuredContent:{questionId:randomUUID(),state:'pending'}};
     });
     assert.equal(planned.structuredContent.state,'pending');
+    const fieldId=randomUUID(),fieldUpdatedAt=new Date().toISOString(),optionId=randomUUID(),memberId=randomUUID();
+    for(const [fieldType,value] of [['text','  FIELD_VALUE_CANARY\n  second line  '],['number',42],['checkbox',false],['date','2026-10-24'],
+      ['select',[optionId]],['user',memberId],['group',[memberId]],['user_or_group',{entityType:'member',id:memberId}]]){
+      customFieldDefinition={id:fieldId,fieldType,updatedAt:fieldUpdatedAt,...(fieldType==='select'?{optionIds:[optionId]}:{})};
+      const expectedField={id:fieldId,fieldType,updatedAt:fieldUpdatedAt};
+      const result=await withAssistantManagedContentArguments({...input,name:'update_task_custom_field',args:{
+        fieldId,value,clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()}},async wire=>{
+        const {encryptedContent,...business}=wire;
+        assert.deepEqual(encryptedContent.customField,expectedField);
+        assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
+          companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'update_task_custom_field',
+          arguments:business,customField:expectedField},encryptedContent.signature),true);
+        if(fieldType==='text'){
+          assert.match(wire.value,/^~e1:/u);assert.doesNotMatch(JSON.stringify(wire),/FIELD_VALUE_CANARY/);
+          const entityId=wire.value.split(':')[1];
+          const opened=await decryptCompanyPayload({encryptedPayload:staged.get(entityId),scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+          assert.equal(opened.values.value,value,'SAME field protector and payload codec preserve the original text');
+        }else assert.deepEqual(wire.value,value,'structural values stay native, never encrypted prose');
+        return {content:[],structuredContent:{recorded:true}};
+      });
+      assert.equal(result.structuredContent.recorded,true);
+    }
+    for(const [fieldType,value] of [['number','SECRET_NUMBER_CANARY'],['checkbox','SECRET_CHECKBOX_CANARY'],['date','2026-02-30'],
+      ['select','UNKNOWN_OPTION_CANARY'],['user','UNKNOWN_USER_CANARY'],['group',['UNKNOWN_GROUP_CANARY']],
+      ['user_or_group',{entityType:'member',id:memberId,note:'SECRET_NESTED_CANARY'}],['text','x'.repeat(256)]]){
+      customFieldDefinition={id:fieldId,fieldType,updatedAt:fieldUpdatedAt,...(fieldType==='select'?{optionIds:[optionId]}:{})};
+      const before=preparations;
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'update_task_custom_field',args:{fieldId,value,
+        clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()}},async()=>assert.fail('malformed value reached business MCP')),
+        {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+      assert.equal(preparations,before,'invalid prose never reaches a payload store or domain call');
+    }
+    customFieldDefinition={id:randomUUID(),fieldType:'text',updatedAt:fieldUpdatedAt};
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'update_task_custom_field',args:{fieldId,value:'PRIVATE_UNKNOWN_FIELD',
+      clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()}},async()=>assert.fail('foreign field reached MCP')),
+      {code:'ASSISTANT_MCP_INVALID_RESPONSE'});
     const intake={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId,
       sourceId:randomUUID(),sourceRevision:3,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
     let intakeState='leased',intakeReads=0;

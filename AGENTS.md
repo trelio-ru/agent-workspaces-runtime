@@ -503,6 +503,7 @@ publication tooling также остаются вне этого публичн
   provider map or model-selected executable/window/time override is introduced.
   This restriction never authorizes sending, source ACK or owner setup.
 
+- Typed custom fields use native type/revision discovery and the SAME value protector; no model type hint or structural prose over HTTP.
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).
   Managed encrypted content reuses the SAME protector/payload collision/hydrator;
   reject model markers before signing. Native exact target/proof/ACL/CAS and

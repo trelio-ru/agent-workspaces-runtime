@@ -2087,6 +2087,8 @@ export const protectLocalActionArguments = async ({
   arguments: rawArguments,
   companyEncryption,
   mirror = null,
+  // Trusted native-selected metadata injection, never a model transport hint.
+  customFieldTypeForId = null,
 }) => {
   const payloads = [];
   const expectedPayloadValues = {};
@@ -2192,6 +2194,7 @@ export const protectLocalActionArguments = async ({
    * value must never reach the server in plaintext.
    */
   const resolveCustomFieldType = ({ fieldId, objectPath }) => {
+    if (typeof customFieldTypeForId === "function") return customFieldTypeForId(String(fieldId || ""));
     if (!mirror) return null;
     const operationMatch = /^\$\.operations\[(\d+)\]/u.exec(objectPath);
     const locator = operationMatch
