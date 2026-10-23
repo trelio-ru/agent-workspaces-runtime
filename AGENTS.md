@@ -71,7 +71,8 @@ publication tooling также остаются вне этого публичн
 
 - Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login.
   Public signed human-input setup also selects the bounded setup view without
-  pending device consent. Test task discovery → existing list change → exact
+  pending device consent, including encrypted task instructions/execution reads.
+  Test task discovery → existing list change → exact
   owner decision → advertised setup → task view; never add a hidden-call alias.
 - Модель ассистента: один owner choice/company, fresh execution state перед
   create/resume; native model/list и explicit flags, без fallback. Policy block

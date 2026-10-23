@@ -1776,6 +1776,8 @@ test('encrypted company runtime is inspected through its exact managed bundle be
     }
     if(url.pathname==='/api/agent-skills/runtime/resolve'){
       resolveCount++;const value=raw();if(variant==='public'){
+        value.assistantGuidance.structuredContent.assistantExecution.accountSetup={state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup',
+          commands:[{id:'login',purpose:'authenticate_existing',maximumDurationMs:60000}]};
         value.trust={level:'platform_verified',artifactLevel:'platform_verified',requiresDeviceConsent:false,consentId:null};
         value.artifact={...value.artifact,id:publicArtifact,contentProtection:'plain',packageFormat:'trelio-agent-skill-package/v1',manifest,packageSha256:createHash('sha256').update(plaintext).digest('hex'),
           packageSizeBytes:plaintext.length,packageSignature:sign(null,plaintext,privateKey).toString('base64')};
@@ -1852,6 +1854,16 @@ test('encrypted company runtime is inspected through its exact managed bundle be
     await assert.rejects(engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{expectedOrigin:identity.origin,withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})})),/AGENT_SKILL_RELEASE_CHANGED/);
     assert.equal(await fs.readFile(childMarker,'utf8'),'ss1','changed live ciphertext cannot execute the already verified plaintext cache');
     variant='public';
+    // A public signed recipe is visible in native guidance without requesting
+    // connection secrets or doing a private-package inspection. The managed
+    // encrypted task projection must preserve that advertised setup catalogue.
+    const beforePublicDiscovery={downloads,child:await fs.readFile(childMarker,'utf8')};
+    const publicView=await engine.withWorkspaceExecutionProfile(await make(true),()=>materializeAssistantEncryptedSkill({origin,descriptor}));
+    assert.equal(publicView.structuredContent.assistantExecution.state,'shared_runtime_setup');
+    assert.deepEqual(publicView.structuredContent.assistantExecution.accountSetup,{state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup',
+      commands:[{id:'login',purpose:'authenticate_existing',maximumDurationMs:60000}]});
+    assert.equal(downloads,beforePublicDiscovery.downloads,'public discovery does not inspect or download a private recipe');
+    assert.equal(await fs.readFile(childMarker,'utf8'),beforePublicDiscovery.child,'discovery never starts provider input');
     const publicSetup=await createSetup({...Object.fromEntries(Object.entries(accountSetup).filter(([key])=>key!=='inspectedCommand')),
       requestId:randomUUID(),artifactId:publicArtifact,packageSha256:createHash('sha256').update(plaintext).digest('hex'),maximumDurationMs:60000,arguments:['login','--headed']});
     assert.deepEqual(await engine.withWorkspaceExecutionProfile(publicSetup,()=>engine.runAssistantSkillAccountSetup({origin})),{state:'handoff_finished',loginVerified:false,replayAllowed:false});

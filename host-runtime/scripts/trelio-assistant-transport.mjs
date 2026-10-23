@@ -2033,7 +2033,11 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
     ||runtimeConsent.fields.packageSha256!==resolved.artifact.packageSha256))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   native.structuredContent={...native.structuredContent,runtimeExecution:{...execution,localAction:{...execution.localAction,
     server:'trelio-assistant',tool:'continue_assistant_workspace_action'}},remoteMcpExecution:null,
-    assistantExecution:{state:pending||setupRequested&&accountSetup?'shared_runtime_setup':'shared_runtime',automaticFallbackAllowed:false,
+    // Native public setup discovery is already signed/current-scope guidance.
+    // Keep its setup view for ordinary instructions/execution reads as well;
+    // the connection section only controls local inspection of opaque recipes.
+    // Advertising that view never consumes owner approval or launches input.
+    assistantExecution:{state:pending||Boolean(accountSetup)?'shared_runtime_setup':'shared_runtime',automaticFallbackAllowed:false,
       ...(runtimeConsent?{runtimeConsent:{...runtimeConsent,...(inspected?{localInspection:{capabilities:inspected.capabilities,
         packageSizeBytes:inspected.packageSizeBytes}}:{})}}:{}),...(accountSetup?{accountSetup}:{}),...(privateAuthentication?{privateAuthentication}:{})}};
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
