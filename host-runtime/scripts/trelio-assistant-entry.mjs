@@ -1086,6 +1086,18 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
 export const withAssistantCompanyContentArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace}={})=>{
   if(!ASSISTANT_MCP_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(name==='continue_assistant_workspace_action'&&['inspect','open','status','heartbeat'].includes(args.operation)){
+    // The native catalogue keeps generic parameters for returned plans. Reuse
+    // its SAME local pure parser before structural forwarding, not only after
+    // the server reply. Human-only open paths/session overrides are not part
+    // of the dedicated native ABI and could otherwise carry arbitrary prose.
+    if(Object.keys(args).some(key=>!['schemaVersion','operation','parameters','runIdentity','taskPass','runtimeSessionProof'].includes(key))
+      ||args.operation==='open'&&args.parameters&&['directory','runtimeSessionId'].some(key=>Object.hasOwn(args.parameters,key)))
+      throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
+    const structural=Object.fromEntries(Object.entries(args).filter(([key])=>!['taskPass','runtimeSessionProof'].includes(key)));
+    try{buildTrelioWorkspaceActionInvocation(structural);}catch{throw new AssistantTransportError('ASSISTANT_WORKSPACE_PLAN_INVALID');}
+  }
   if(isAssistantStructuralResultRetraction(name,args)
     ||ASSISTANT_MCP_READ_TOOLS.includes(name) && name!=='search_agent_guidance'
     || name==='prepare_assistant_workspace_run'

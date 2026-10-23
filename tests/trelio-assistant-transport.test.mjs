@@ -1218,6 +1218,26 @@ test('production content preflight refuses encrypted prose before the real MCP t
   await client.callTool('get_task',{});assert.equal(remoteCalls,7);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
 });
 
+test('structural Workspace parameters use the common parser before any send or key opening',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const runIdentity={workspaceId:randomUUID(),runId:randomUUID()},canary='STRUCTURAL_PARAMETERS_PROSE_CANARY';
+  let sent=0;
+  const invoke=args=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',args},async wire=>{
+    assert.equal(JSON.stringify(wire).includes(canary),false);sent++;return {structuredContent:{}};
+  },{withProfile:async()=>assert.fail('a structural call must not acquire an encryption key')});
+  for(const operation of ['inspect','open','status','heartbeat']){
+    const args={schemaVersion:1,operation,parameters:operation==='inspect'?{workspaceId:runIdentity.workspaceId}
+      :operation==='open'?runIdentity:{},...(['status','heartbeat'].includes(operation)?{runIdentity}:{})};
+    await assert.rejects(invoke({...args,parameters:{...args.parameters,extra:canary}}),{code:'ASSISTANT_WORKSPACE_PLAN_INVALID'});
+    await assert.rejects(invoke({...args,extra:canary}),{code:'ASSISTANT_WORKSPACE_PLAN_INVALID'});
+    if(operation==='open')await assert.rejects(invoke({...args,parameters:{...args.parameters,directory:`/${canary}`}}),
+      {code:'ASSISTANT_WORKSPACE_PLAN_INVALID'});
+    assert.equal(sent,['inspect','open','status','heartbeat'].indexOf(operation));
+    await invoke(args);
+  }
+  assert.equal(sent,4);
+});
+
 test('encrypted private preparation sends only signed command coordinates with an owned fingerprint; arbitrary vectors never reach HTTP',async()=>{
   const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture();f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:'encrypted'}];
