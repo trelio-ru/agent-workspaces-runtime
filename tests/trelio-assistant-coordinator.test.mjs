@@ -562,17 +562,17 @@ test('invalid stream hints, unknown deletions and oversized cursor refuse advanc
   }
 });
 
-test('MAX source does not guess a conversation and one busy source cannot consume the whole coordinator tick',async t=>{
+test('MAX account discovery uses native hints and one busy source cannot consume the whole coordinator tick',async t=>{
   const f=await externalFixture(t);
   try{
-    f.row.skillId='max-web';await f.coordinator.pollOnce();assert.equal(f.reads(),0);
-    assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED'));
+    f.row.skillId='max-web';f.read(async source=>{assert.equal(source.chat,undefined);assert.equal(source.initialUnread,undefined);return {baselineOnly:true,events:[],nextCursor:'max-complete',initialAccountCursor:'max-complete',conversationsToSync:[],hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.reads(),1);assert.equal(f.position(),'max-complete');
     f.row.skillId='telegram-mtproto';const rows=Array.from({length:6},()=>({...f.row,id:randomUUID(),localAccountId:randomUUID()}));
     f.rows(rows);f.advance(300000);f.read(async()=>({events:[],nextCursor:'more',hasMore:true,channelsToSync:[],unresolvedDeletionIds:[]}));
-    await f.coordinator.pollOnce();assert.equal(f.reads(),4,'one page from at most four oldest due registrations');
+    await f.coordinator.pollOnce();assert.equal(f.reads(),5,'one page from at most four oldest due registrations');
     // No time advance: the two never-polled rows retain due=0 and must win.
     f.read(async()=>({events:[],nextCursor:'end',hasMore:false}));
-    await f.coordinator.pollOnce();assert.equal(f.reads(),8);
+    await f.coordinator.pollOnce();assert.equal(f.reads(),9);
     assert.equal(rows.filter(row=>f.inbox.status({...f.scope(),accountId:row.localAccountId,bindingId:row.id}).cursorRevision>0).length,6);
   }finally{await f.coordinator.close();}
 });
@@ -1280,4 +1280,73 @@ test('complete native inventory chooses one local triage queue per physical acco
     assert.equal(inbox.ownerIntake(row.id).eventIds.length,1,'frozen batch remains immutable');
   }finally{await coordinator.close();database.close();}
  }
+});
+
+
+test('MAX complete account sync persists original child seed, seen-elsewhere events and restart dedup in SAME SQLite streams',async t=>{
+  const f=await externalFixture(t),chat='77',url='https://web.max.ru/77';f.row.skillId='max-web';
+  const position=time=>Buffer.from(JSON.stringify({v:3,scope:'f'.repeat(64),startedAt:time})).toString('base64url');
+  try{
+    f.read(async source=>{assert.equal(source.chat,undefined);assert.equal(source.cursor,null);return {baselineOnly:true,events:[],
+      nextCursor:position(100),initialAccountCursor:position(100),conversationsToSync:[chat],hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.position(),position(100));assert.equal(f.inbox.hasPendingStreams(f.scope()),true);
+    await f.restart();f.advance(1);
+    f.read(async source=>{assert.equal(source.chat,url);assert.equal(source.initialAccountCursor,position(100));assert.equal(source.initialUnread,undefined);
+      assert.equal(source.cursor,null);return {baselineOnly:false,initialAccountBackfill:true,events:[{id:'message:77:11',revision:'a'.repeat(64)}],nextCursor:'native-history-1',hasMore:true};});
+    await f.coordinator.pollOnce();await f.restart();f.advance(1);
+    f.read(async source=>{assert.equal(source.chat,url);assert.equal(source.cursor,'native-history-1');assert.equal(source.initialAccountCursor,undefined);
+      return {baselineOnly:false,events:[{id:'message:77:12',revision:'b'.repeat(64)}],nextCursor:'native-history-2',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.inbox.hasPendingStreams(f.scope()),false);
+    // Native account changes, rather than an unread counter, reactivate the
+    // exact same stream after a message was read on another device.
+    f.advance(300000);f.read(async source=>{assert.equal(source.chat,undefined);assert.equal(source.cursor,position(100));
+      return {baselineOnly:true,events:[],nextCursor:position(200),initialAccountCursor:position(100),conversationsToSync:[chat],hasMore:false};});
+    await f.coordinator.pollOnce();await f.restart();f.advance(1);
+    f.read(async source=>{assert.equal(source.cursor,'native-history-2');assert.equal(source.initialAccountCursor,undefined);
+      return {baselineOnly:false,events:[{id:'message:77:12',revision:'b'.repeat(64)},{id:'message:77:13',revision:'c'.repeat(64)}],nextCursor:'native-history-3',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_events').get().n,3);
+    assert.equal(f.database.prepare('SELECT initial_cursor FROM assistant_inbox_streams').get().initial_cursor,position(100));
+    assert.ok(f.database.prepare('SELECT task_id,wake,processed,acked FROM assistant_inbox_events').all().every(r=>r.task_id===null&&!r.wake&&!r.processed&&!r.acked));
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+  }finally{await f.coordinator.close();}
+});
+
+test('MAX partial inventory, wrong child seed or paused registration cannot advance account or child cursor',async t=>{
+  const f=await externalFixture(t);f.row.skillId='max-web';
+  try{
+    for(const result of [{baselineOnly:false,events:[],nextCursor:'bad',hasMore:false},
+      {baselineOnly:true,events:[],nextCursor:'bad',initialAccountCursor:'seed',conversationsToSync:['77','77'],hasMore:false},
+      {baselineOnly:true,events:[],nextCursor:'bad',initialAccountCursor:'seed',conversationsToSync:['not-a-native-id'],hasMore:false}]){
+      f.read(async()=>result);await f.coordinator.pollOnce();assert.equal(f.position(),null);f.advance(300000);
+    }
+    f.read(async()=>({baselineOnly:true,events:[],nextCursor:'account',initialAccountCursor:'original',conversationsToSync:['77'],hasMore:false}));
+    await f.coordinator.pollOnce();f.advance(1);
+    f.read(async()=>({baselineOnly:true,events:[],nextCursor:'silent-child',hasMore:false}));await f.coordinator.pollOnce();
+    assert.equal(f.database.prepare('SELECT cursor FROM assistant_inbox_streams').get().cursor,null);
+    f.advance(300000);f.read(async()=>{f.row.revision++;f.row.state='paused';return {baselineOnly:true,initialAccountBackfill:true,events:[],nextCursor:'changed',hasMore:false};});
+    await f.coordinator.pollOnce();assert.equal(f.position(),'account');assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_events').get().n,0);
+    assert.equal(f.counts().acks,0);
+  }finally{await f.coordinator.close();}
+});
+
+
+test('coexisting MAX account root and exact-chat sources select one triage queue from actual native chat coverage',async()=>{
+  const database=new DatabaseSync(':memory:');let clock=Date.now(),sequence=1;
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),accountId=randomUUID();
+  const rows=[null,'https://web.max.ru/123'].map((maxChatUrl,index)=>({id:`00000000-0000-4000-8000-00000000000${index+1}`,
+    companyId,deviceId:identity.deviceId,localAccountId:accountId,projectId:null,skillId:'max-web',state:'active',revision:0,maxChatUrl}));
+  const key='max-conversation/v1.'+'f'.repeat(64);
+  const client={identity,heartbeat:async()=>{},companies:async()=>[{companyId,memberId:randomUUID()}],tasks:async()=>({bindings:[],nextCursor:null}),
+    poll:async()=>({events:[],nextCursor:'0',hasMore:false}),acknowledge:async()=>({acknowledged:0}),sourceAccounts:async()=>rows,
+    sourceRoutes:async()=>[],beginSourceIntake:async()=>assert.fail('polling cannot start native intake')};
+  const coordinator=createAssistantCoordinator({database,client,native:{ready:async()=>assert.fail('polling cannot start Codex')},workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,
+    readSourceMonitor:async input=>input.chat===undefined?{baselineOnly:true,events:[],nextCursor:'account-'+sequence,initialAccountCursor:'seed',conversationsToSync:['123'],hasMore:false}:
+      {baselineOnly:false,initialAccountBackfill:true,nextCursor:'child-'+sequence,hasMore:false,events:[{id:`message:123:${sequence}`,revision:String(sequence).repeat(64),kind:'new',outgoing:false,conversationKey:key}]}});
+  try{
+    await coordinator.pollOnce();clock++;await coordinator.pollOnce();const inbox=createAssistantInbox({database,now:()=>clock});
+    assert.equal(inbox.ownerIntakes().length,1);const row=inbox.ownerIntakes()[0];assert.equal(row.scope.bindingId,rows[0].id);
+    inbox.freezeExistingTaskIntake(row.id);sequence=2;clock+=300001;await coordinator.pollOnce();clock++;await coordinator.pollOnce();
+    assert.equal(inbox.ownerIntakes().length,1,'exact-chat copy cannot create a competing frozen follow-up');
+    assert.equal(inbox.ownerIntake(row.id).eventIds.length,1);
+  }finally{await coordinator.close();database.close();}
 });

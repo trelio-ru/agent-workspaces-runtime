@@ -537,11 +537,33 @@ still do not enter SQLite, and history capture alone never marks mail read.
 
 The native registration optionally selects one canonical numeric `maxChatUrl`
 (`https://web.max.ru/<signed-64-bit-chat-id>`), including its generation/CAS.
-A missing selector preserves the old refusal before provider launch. No title,
-handle, default conversation, human catalogue or legacy-session import is used.
-Each selected conversation is an ordinary source; no new queue/schema is needed.
+A null selector is the native owner-selected account root and requires signed
+provider >=2.12.0 plus native `maxAccountDiscovery:true`. Explicit old URL rows
+retain their exact selector and >=2.11.0 contract. No title, handle, default
+conversation, human catalogue or legacy-session import is used.
 
-Reviewed signed MAX provider >=2.11.0 runs through the SAME account catalogue,
+The account root observes the browser's own fresh full sync (`chatsSync:0`) and
+correlated native dialog pages until `marker:0`. An unread DOM folder or partial
+list cannot advance its v3 account cursor. At most 1,000 genuine signed-64-bit
+dialog IDs are admitted; incomplete/oversized/stale chains preserve the original
+position. The browser emits every request; the runtime never sends protocol
+packets or reads its auth storage. `lastEventTime` changes signal histories even
+when a different device already marked the message read. Initial unread or
+unknown-counter rows also signal history. Native server scan time scopes the
+opaque original seed; no dialog titles, message bodies or auth packets persist.
+
+Account cursor and conversation hints commit atomically in the SAME existing
+SQLite stream table before any child read. New children preserve their ORIGINAL
+account seed through later scans and restart; the first signed history must cover
+that interval and complete unread range, including already-read newer messages.
+Missing rendered/native coverage refuses advancement. Later child reads use the
+existing exact v2 message cursor, independent of unread flags. Shared stream
+fairness and one-page worker bounds stay in force. No new queue/schema is needed.
+Coexisting account-root/exact-chat registrations use the complete native account
+inventory and actual event chat coverage to select one local triage queue; this
+never selects a company, owner identity or task on its own.
+
+Both MAX modes run through the SAME account catalogue,
 package verifier/cache and subprocess engine. It observes only the same
 browser's native history and correlates genuine sender/message IDs with the
 selected DOM history. Initial polling requires a complete native unread interval;

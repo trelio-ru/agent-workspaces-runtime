@@ -228,9 +228,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         observation=snapshot;
       }catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
       lease(); // Diagnostic failure cannot hide expiry of the original poll lease.
-      // MAX requires its owner-configured exact native numeric chat URL.
-      // Missing/changed selectors never open a guessed/default conversation.
-      if(row.skillId==='max-web'&&(!assistantMaxChatUrl(row.maxChatUrl)||streamId!==null))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      // A native owner-selected MAX account is its root stream. Numeric child
+      // IDs come only from complete signed native inventory, never a title,
+      // username or model target. Existing exact-chat registrations stay exact.
+      const max=row.skillId==='max-web',maxAccount=max&&row.maxChatUrl==null;
+      if(max&&(maxAccount?streamId!==null&&!assistantMaxChatUrl(`https://web.max.ru/${streamId}`):!assistantMaxChatUrl(row.maxChatUrl)||streamId!==null))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(streamId!==null && poll.cursor===null && typeof poll.initialCursor!=='string')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const email=row.skillId==='email-imap-smtp';
       const initialEmail=email&&streamId===null&&poll.cursor===null;
@@ -246,7 +248,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         ?await client.ownerIdentities(signal):null;
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,sourceId:row.id,sourceRevision:row.revision,
         accountId:row.localAccountId,cursor:email&&streamId!==null?poll.cursor??poll.initialCursor:poll.cursor,
-        ...(row.skillId==='max-web'?{chat:row.maxChatUrl,...(poll.cursor===null?{initialUnread:true}:{})}:email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
+        ...(max?{...(maxAccount?streamId===null?{}:{chat:`https://web.max.ru/${streamId}`,...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})}:{chat:row.maxChatUrl,...(poll.cursor===null?{initialUnread:true}:{})})}:email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
           ...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})})},signal);lease();
       // A native Channel constructor supplies a positive channel ID, not an
       // untyped chat number. Apply Telethon's documented marked representation
@@ -261,6 +263,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         return {id:String(marked),revision:createHash('sha256').update(JSON.stringify(['telegram-channel-signal/v1',source,
           channelId,result.nextCursor])).digest('hex'),initialCursor:poll.cursor};
       });
+      const maxHints=result.conversationsToSync??[];
+      if(!Array.isArray(maxHints)||maxHints.length>1000||new Set(maxHints).size!==maxHints.length
+        ||maxHints.length&&(!maxAccount||streamId!==null)||maxHints.some(chatId=>!assistantMaxChatUrl(`https://web.max.ru/${chatId}`)))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      if(maxAccount&&streamId===null){
+        if(result.baselineOnly!==true||result.events?.length||typeof result.initialAccountCursor!=='string'
+          ||result.initialAccountCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+        for(const chatId of maxHints)streams.push({id:chatId,revision:createHash('sha256').update(JSON.stringify([
+          'max-conversation-signal/v1',source,chatId,result.nextCursor])).digest('hex'),initialCursor:result.initialAccountCursor});
+      }else if(result.initialAccountCursor!==undefined)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(initialEmail){
         if(result.baselineOnly!==true||!Array.isArray(result.events)||result.events.length
           ||typeof result.initialUnreadCursor!=='string'||!result.initialUnreadCursor.length
@@ -269,8 +280,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           .update(JSON.stringify([EMAIL_INITIAL_UNREAD_STREAM,source,result.initialUnreadCursor])).digest('hex'),
           initialCursor:result.initialUnreadCursor});
       }else if(result.initialUnreadCursor!==undefined)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
-      if(streamId!==null && (result.baselineOnly!==false || (result.unresolvedDeletionIds??[]).length
-        || (email?result.initialUnreadBackfill!==true:row.skillId!=='telegram-mtproto'
+      if(streamId!==null && ((maxAccount?result.baselineOnly!==(poll.cursor===null&&result.events?.length===0):result.baselineOnly!==false) || (result.unresolvedDeletionIds??[]).length
+        || (email?result.initialUnreadBackfill!==true:maxAccount?poll.cursor===null&&result.initialAccountBackfill!==true:row.skillId!=='telegram-mtproto'
           || poll.cursor===null && result.initialAccountBackfill!==true)))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const deletions=resolveCloudDeletions(source,result);
       if(!Array.isArray(result.events)||result.events.length+deletions.length>100)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
@@ -336,15 +347,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       eventKeys:pending.map(event=>event.event_key),routes});
     // Absence is known only after this successful fresh native route lookup.
     // Read-only errors never enqueue a competing classification/model turn.
-    const preferred=externalInventoryComplete?[...externalRegistrations.values()].filter(candidate=>candidate.state==='active'
-      &&candidate.skillId===row.skillId&&candidate.localAccountId===row.localAccountId
-      &&(row.skillId!=='max-web'||candidate.maxChatUrl===row.maxChatUrl)).sort((a,b)=>a.id.localeCompare(b.id))[0]:null;
+    const preferredFor=event=>{
+      const maxChat=row.skillId==='max-web'?/^message:(-?[1-9]\d{0,18}):/u.exec(event.event_id)?.[1]:null;
+      return externalInventoryComplete?[...externalRegistrations.values()].filter(candidate=>candidate.state==='active'
+        &&candidate.skillId===row.skillId&&candidate.localAccountId===row.localAccountId
+        &&(row.skillId!=='max-web'||maxChat&&(candidate.maxChatUrl==null||candidate.maxChatUrl===`https://web.max.ru/${maxChat}`)))
+        .sort((a,b)=>a.id.localeCompare(b.id))[0]:null;
+    };
     // Company-scoped keys cannot dedup follow-ups across company registrations.
     // Choose ONE source for local intake cost only, from a complete successful
     // inventory. Native company selection still asks the owner and alone grants
     // the selected scope; this preference grants no body/task/source authority.
-    if(typeof client.beginSourceIntake==='function'&&preferred?.id===row.id)inbox.queueExistingTaskIntakes(source,{sourceRevision:row.revision,
-      eventKeys:pending.filter(event=>!routes.some(route=>route.conversationKey===event.conversation_key)).map(event=>event.event_key)});
+    if(typeof client.beginSourceIntake==='function')inbox.queueExistingTaskIntakes(source,{sourceRevision:row.revision,
+      eventKeys:pending.filter(event=>preferredFor(event)?.id===row.id&&!routes.some(route=>route.conversationKey===event.conversation_key)).map(event=>event.event_key)});
   };
   const verifyExternalDelivery=async(job,binding,signal)=>{
     const external=job.events.filter(event=>JSON.parse(event.event_scope_json).provider!=='trelio');

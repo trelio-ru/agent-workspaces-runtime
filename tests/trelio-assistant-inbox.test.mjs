@@ -1054,3 +1054,23 @@ test('ordinary task hint uses only the exact settled routed receipt; read/ACK se
  assert.equal(inbox.sourceIntakeKind(selector),null,'a later target must not inherit another receipt hint');
  assert.equal(database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
 });
+
+
+test('MAX full native dialog hints use SAME atomic stream journal up to 1000, while failed inserts keep every original position',t=>{
+  const {inbox,database}=memory(t),source=scope({provider:'max'});inbox.register(source);
+  const hints=Array.from({length:1000},(_,n)=>({id:String(n+1),revision:'native-dialogs-1',initialCursor:'original-account-seed'}));
+  const poll=inbox.claimPoll(source);
+  database.exec("CREATE TRIGGER fail_max_dialog BEFORE INSERT ON assistant_inbox_streams WHEN NEW.stream_id='1000' BEGIN SELECT RAISE(ABORT,'fixture'); END");
+  assert.throws(()=>inbox.commitPage(source,{...poll,nextCursor:'never-durable',hasMore:false,events:[],streams:hints}));
+  assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_streams').get().n,0);assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,null);
+  database.exec('DROP TRIGGER fail_max_dialog');
+  inbox.commitPage(source,{...poll,nextCursor:'account-complete',hasMore:false,events:[],streams:hints});
+  assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_streams').get().n,1000);
+  assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_events').get().n,0);assert.equal(inbox.claimAcknowledgements(source),null);
+  const child=inbox.claimStreamPoll(source,'77');assert.equal(child.initialCursor,'original-account-seed');
+  inbox.commitStreamPage(source,{...child,streamId:'77',nextCursor:'history-final',hasMore:false,events:[event(null,false,'message:77:11')]});
+  assert.equal(database.prepare("SELECT cursor FROM assistant_inbox_streams WHERE stream_id='77'").get().cursor,'history-final');
+  const ordinary=scope({provider:'telegram'});inbox.register(ordinary);
+  assert.throws(()=>inbox.commitPage(ordinary,{...inbox.claimPoll(ordinary),nextCursor:'bad',hasMore:false,events:[],streams:hints}),/INVALID_INPUT/);
+  assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources WHERE scope_json LIKE ?').get('%'+ordinary.bindingId+'%').cursor,null,'MAX inventory bound never raises event or other-provider page bounds');
+});

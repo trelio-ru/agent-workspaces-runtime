@@ -28,8 +28,8 @@ const store={get:async slot=>{
   reads++;assert.deepEqual(slot,{origin,kind:'device',id:assistantId});
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
-let setupFixture=null,ackFixture=null,intakeFixture=null;
-const admission=()=>{
+let setupFixture=null,ackFixture=null,intakeFixture=null,maxAccountFixture=false,sourceSelectionFixture=null;
+const baseAdmission=()=>{
   if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
@@ -47,6 +47,7 @@ const admission=()=>{
     ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
       localAccountId:setupFixture.localAccountId,operation:operation??(setupFixture.bindFromSourceId?'bind':'create'),...(setupFixture.bindingOrigin?{bindingOrigin:setupFixture.bindingOrigin}:{})}}:{})};
 };
+const admission=()=>({...baseAdmission(),...(maxAccountFixture?{maxAccountDiscovery:true}:{})});
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
 const event={id:'message:123:5',revision:'a'.repeat(64),kind:'new',chatId:'123',messageId:'5',topicId:null,
   senderUserId:'123',senderNamespace:'telegram_user_id',outgoing:false,forwarded:false,viaBot:false};
@@ -71,6 +72,7 @@ const resolution=()=>{
   const raw=payload();const query=new URLSearchParams({companyId,skillId:scope.skillId,expectedReleaseId:releaseId,artifactId});
   if(setupFixture){query.set('accountSetupSourceId',setupFixture.id);query.set('accountSetupRevision',String(setupFixture.revision));}
   if(setupFixture?.operation)query.set('accountSetupOperation',setupFixture.operation);
+  if(sourceSelectionFixture){query.set('sourceId',sourceSelectionFixture.sourceId);query.set('sourceRevision',String(sourceSelectionFixture.expectedRevision));}
   raw.packageUrl=`${prefix}/package?${query}`;return raw;
 };
 const originalFetch=globalThis.fetch;
@@ -83,7 +85,7 @@ globalThis.fetch=async(url,options)=>{
   assert.ok(options.headers.get('x-trelio-host-runtime-version'));
   if(url.pathname===`${prefix}/resolve`){
     resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null,
-      ...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
+      ...(sourceSelectionFixture?{sourceSelection:sourceSelectionFixture}:{}),...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
         ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{}),...(intakeFixture?{sourceIntake:intakeFixture.intent}:{})});
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
@@ -1336,20 +1338,23 @@ test('derived ACK profile preserves short original grant budget and one-use spaw
 
 // A separate signed package uses exactly the production source profile and
 // common local catalogue. The fixture does not grant task or setup permission.
-for(const encrypted of [false,true])test(`MAX native source and committed ACK reuse one signed child/account engine with exact range and uncertain read-back (encrypted=${encrypted})`,async t=>{
+for(const encrypted of [false,true])for(const accountWide of [false,true])test(`MAX native source and committed ACK reuse one signed child/account engine with exact range and uncertain read-back (encrypted=${encrypted}, accountWide=${accountWide})`,async t=>{
   const saved={...scope},savedVersion=providerVersion;
-  t.after(()=>{Object.assign(scope,saved);providerVersion=savedVersion;ackFixture=null;resolveOverride=null;});
-  scope.skillId='max-web';providerVersion='2.11.0';
+  t.after(()=>{Object.assign(scope,saved);providerVersion=savedVersion;ackFixture=null;resolveOverride=null;maxAccountFixture=false;sourceSelectionFixture=null;});
+  scope.skillId='max-web';providerVersion=accountWide?'2.12.0':'2.11.0';maxAccountFixture=accountWide;
   const chat='https://web.max.ru/77',accountId=randomUUID(),sourceId=randomUUID(),routeId=randomUUID(),receiptId=randomUUID();
-  const source={...scope,id:sourceId,deviceId,localAccountId:accountId,maxChatUrl:chat,state:'active',revision:0};
+  const source={...scope,id:sourceId,deviceId,localAccountId:accountId,maxChatUrl:accountWide?null:chat,state:'active',revision:0};
   const key='max-conversation/v1.'+'f'.repeat(64),revision='a'.repeat(64),maxScope='b'.repeat(64);
   const cursor=(anchorId='11',anchorRevision=revision)=>Buffer.from(JSON.stringify({v:2,scope:maxScope,anchorId,anchorRevision})).toString('base64url');
   const reference={eventKey:'e'.repeat(64),id:'message:77:11',revision,conversationKey:key,routeId,eventOrdinal:0,receiptId,taskId:randomUUID()};
   const event={id:reference.id,revision,kind:'new',chatId:'77',messageId:'11',conversationKey:key,
     senderUserId:'123',senderNamespace:'max_user_id',outgoing:false,forwarded:false,text:'PRIVATE_BODY'};
+  const accountCursor=(startedAt=100)=>Buffer.from(JSON.stringify({v:3,scope:maxScope,startedAt})).toString('base64url');
+  const accountMonitor={schemaVersion:1,baselineOnly:true,events:[],nextCursor:accountCursor(200),initialAccountCursor:accountCursor(),conversationsToSync:['77'],hasMore:false,coverage:{accountDiscovery:true,nativeDialogIds:true,complete:true,snapshotAtomic:false,unreadOnly:false},readState:{readReceiptsSent:false}};
   const monitor={schemaVersion:1,baselineOnly:false,events:[event],nextCursor:cursor(),hasMore:false,
     coverage:{historicalBackfill:true,initialUnreadOnly:true,snapshotAtomic:false,ownerIdentityAvailable:true,
-      nativeMessageVerified:true,earlierEditsIncluded:false,otherChatsIncluded:false},readState:{readReceiptsSent:false}};
+      nativeMessageVerified:true,earlierEditsIncluded:false,otherChatsIncluded:false,...(accountWide?{initialAccountInterval:true,initialUnreadOnly:undefined}:{})},readState:{readReceiptsSent:false}};
+  if(accountWide)sourceSelectionFixture={sourceId,expectedRevision:0};
   let selectedStore=store,connectionId=null,encryptedWire=null,encryptionRuntime=null,cryptoMode='valid',bodyThread=null;
   const savedFetch=globalThis.fetch;
   if(encrypted){
@@ -1426,15 +1431,15 @@ for(const encrypted of [false,true])test(`MAX native source and committed ACK re
     ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
     checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
   await catalogue.change({operation:'create',id:accountId,name:'Synthetic native MAX',expectedRevision:(await catalogue.list()).revision});
-  const sourceDir=path.join(directory,`max-native-package-${encrypted}`),marker=path.join(directory,`max-native-child-${encrypted}`),fence=path.join(directory,`max-native-fence-${encrypted}`);
+  const sourceDir=path.join(directory,`max-native-package-${encrypted}-${accountWide}`),marker=path.join(directory,`max-native-child-${encrypted}-${accountWide}`),fence=path.join(directory,`max-native-fence-${encrypted}-${accountWide}`);
   await fs.mkdir(sourceDir);
   const build=async({mode='monitor',verifyOnly=false,outcome='confirmed',failure=null}={})=>{
-    const args=mode==='read'?['read-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key]:mode==='monitor'?['monitor','--chat',chat,'--unread-backfill','--conversation-references','--limit','100']:
+    const args=mode==='read'?['read-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key]:mode==='root'?['monitor','--account-discovery','--cursor',accountCursor(),'--conversation-references','--limit','100']:mode==='monitor'?['monitor','--chat',chat,...(accountWide?['--initial-account-cursor',accountCursor()]:['--unread-backfill']),'--conversation-references','--limit','100']:
       ['ack-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key,
         '--covered-reference','11:'+revision,verifyOnly?'--verify-only':'--confirm'];
     const output=mode==='read'?{schemaVersion:1,protocol:'max-message-read/v1',reference:{id:reference.id,revision,conversationKey:key},
       message:{text:'EXACT_BODY_CANARY',textTruncated:false},coverage:{textComplete:true,attachmentsContentRead:false,otherMessagesIncluded:false,contextIncluded:false,nativeMessageVerified:true},
-      readState:{marksRead:false,readReceiptsSent:false,mode:'history-only',viewsRegistered:false}}:mode==='monitor'?monitor:failure??{ok:true,schemaVersion:1,protocol:'max-message-ack/v1',
+      readState:{marksRead:false,readReceiptsSent:false,mode:'history-only',viewsRegistered:false}}:mode==='root'?accountMonitor:mode==='monitor'?monitor:failure??{ok:true,schemaVersion:1,protocol:'max-message-ack/v1',
       reference:{id:reference.id,revision,conversationKey:key,chatId:'77',messageId:'11'},readState:{acknowledged:outcome==='confirmed',
         coveredReferencesVerified:true,writeAttempted:!verifyOnly,writeOutcome:verifyOnly?'not_attempted':outcome,
         automaticRetryAllowed:false,viewsRegistered:false,verifyOnly,snapshotAtomic:false}};
@@ -1452,15 +1457,23 @@ for(const encrypted of [false,true])test(`MAX native source and committed ACK re
     packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:providerVersion,sourceDirectory:sourceDir,
       entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
   };
+  if(accountWide){
+    await build({mode:'root'});const discovered=await readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,cursor:accountCursor(),sourceId,sourceRevision:0}});
+    assert.deepEqual(discovered.conversationsToSync,['77']);assert.equal(discovered.initialAccountCursor,accountCursor());
+    assert.equal(discovered.events.length,0);assert.doesNotMatch(JSON.stringify(discovered),/PRIVATE|CANARY/);
+    const before=await fs.readFile(marker,'utf8');maxAccountFixture=false;
+    await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,cursor:accountCursor(),sourceId,sourceRevision:0}}),/SCOPE_CHANGED/);
+    assert.equal(await fs.readFile(marker,'utf8'),before,'a locally chosen null chat cannot create native root authority');maxAccountFixture=true;
+  }
   await build();
-  const page=await readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,initialUnread:true,...(encrypted?{sourceId,sourceRevision:0}:{})}});
-  assert.equal(page.initialUnreadBackfill,true);assert.equal(page.events[0].senderNamespace,'max_user_id');
+  const page=await readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,...(accountWide?{initialAccountCursor:accountCursor()}:{initialUnread:true}),...(encrypted||accountWide?{sourceId,sourceRevision:0}:{})}});
+  assert.equal(page[accountWide?'initialAccountBackfill':'initialUnreadBackfill'],true);assert.equal(page.events[0].senderNamespace,'max_user_id');
   assert.equal(page.events[0].conversationKey,key);assert.doesNotMatch(JSON.stringify(page),/PRIVATE/);
   if(encrypted){
     const before=await fs.readFile(marker,'utf8');
     for(cryptoMode of ['aad','missing','extra','ciphertext','recipient']){
       await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,
-        initialUnread:true,sourceId,sourceRevision:0}}));
+        ...(accountWide?{initialAccountCursor:accountCursor()}:{initialUnread:true}),sourceId,sourceRevision:0}}));
       assert.equal(await fs.readFile(marker,'utf8'),before,'bad ciphertext or recipient refuses before provider launch');
     }
     cryptoMode='valid';
@@ -1471,14 +1484,19 @@ for(const encrypted of [false,true])test(`MAX native source and committed ACK re
     const {createAssistantWorkspaceProfile,createAssistantSourceReadObserver,materializeAssistantEncryptedSkill}=
       await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
     const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
-    const file=path.join(directory,'encrypted-max-inbox.sqlite');let database=new DatabaseSync(file);
+    const file=path.join(directory,`encrypted-max-inbox-${accountWide}.sqlite`);let database=new DatabaseSync(file);
     let inbox=createAssistantInbox({database,now:()=>1_000_000});t.after(()=>database.close());
     const canonical={origin,assistantId,companyId,provider:'trelio',accountId:memberId,bindingId:randomUUID()};
     const external={origin,assistantId,companyId,provider:'max',accountId,bindingId:sourceId};
     const bindingId=randomUUID(),route={id:routeId,sourceId,sourceRevision:0,conversationKey:key,bindingId,bindingRevision:1,taskId:reference.taskId};
     inbox.register(canonical);inbox.register(external);inbox.observeExternalSourceRevision(external,0);
     inbox.applyTaskState(canonical,{taskId:reference.taskId,state:'accepted',expectedRevision:0,authority:{bindingId,revision:1}});
-    inbox.commitPage(external,{...inbox.claimPoll(external),nextCursor:page.nextCursor,hasMore:false,
+    if(accountWide){
+      inbox.commitPage(external,{...inbox.claimPoll(external),nextCursor:accountMonitor.nextCursor,hasMore:false,events:[],streams:[{id:'77',revision:'native-full-sync',initialCursor:accountCursor()}]});
+      database.close();database=new DatabaseSync(file);inbox=createAssistantInbox({database,now:()=>1_000_000});
+      const child=inbox.claimStreamPoll(external,'77');assert.equal(child.initialCursor,accountCursor());
+      inbox.commitStreamPage(external,{...child,streamId:'77',nextCursor:page.nextCursor,hasMore:false,events:page.events.map(row=>({id:row.id,revision:row.revision,taskId:null,wake:false,providerWake:true,conversationKey:row.conversationKey}))});
+    }else inbox.commitPage(external,{...inbox.claimPoll(external),nextCursor:page.nextCursor,hasMore:false,
       events:page.events.map(row=>({id:row.id,revision:row.revision,taskId:null,wake:false,providerWake:true,conversationKey:row.conversationKey}))});
     inbox.routeExternalEvents(external,{canonicalSource:canonical,sourceRevision:0,eventKeys:inbox.pendingExternalRoutes(external).map(row=>row.event_key),routes:[route]});
     const work=await inbox.claimDelivery({authorize:async()=>true});inbox.startDelivery(work.deliveryId);
@@ -1520,8 +1538,8 @@ for(const encrypted of [false,true])test(`MAX native source and committed ACK re
     await build();
   }
   const before=await fs.readFile(marker,'utf8');providerVersion='2.10.2';await build();
-  await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,initialUnread:true,...(encrypted?{sourceId,sourceRevision:0}:{})}}),/CAPABILITY_REQUIRED/);
-  assert.equal(await fs.readFile(marker,'utf8'),before,'old package cannot start a provider or claim a baseline');providerVersion='2.11.0';
+  await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,...(accountWide?{initialAccountCursor:accountCursor()}:{initialUnread:true}),...(encrypted||accountWide?{sourceId,sourceRevision:0}:{})}}),/CAPABILITY_REQUIRED/);
+  assert.equal(await fs.readFile(marker,'utf8'),before,'old package cannot start a provider or claim a baseline');providerVersion=accountWide?'2.12.0':'2.11.0';sourceSelectionFixture=null;
   ackFixture={intent:{sourceId,sourceRevision:0,receipts:[{receiptId,eventOrdinals:[0]}]},admission:{schemaVersion:1,
     sourceId,sourceRevision:0,localAccountId:accountId,slots:[{receiptId,routeId,eventOrdinal:0}]}};
   const client={identity,sourceAccounts:async()=>[source]};let starts=0;
@@ -1543,6 +1561,11 @@ for(const encrypted of [false,true])test(`MAX native source and committed ACK re
   const calls=await fs.readFile(marker,'utf8'),fences=starts;
   resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),protocol:'telegram-message-ack/v1'}}));
   await assert.rejects(invoke(),/INVALID_RESPONSE/);assert.equal(starts,fences);assert.equal(await fs.readFile(marker,'utf8'),calls);resolveOverride=null;
+  if(accountWide)for(const chatId of ['0','-0','9223372036854775808']){
+    const beforeResolve=resolveCalls;await assert.rejects(acknowledgeAssistantSource({identity,host,store:selectedStore,client,source,
+      references:[{...reference,id:`message:${chatId}:11`}],assertReferences:()=>{},beforeInvoke:()=>assert.fail('invalid root chat cannot launch ACK')}),/INVALID_INPUT/);
+    assert.equal(resolveCalls,beforeResolve,'invalid account-root native IDs refuse before remote admission');
+  }
   client.sourceAccounts=async()=>[{...source,maxChatUrl:'https://web.max.ru/78'}];
   await assert.rejects(invoke(),/BINDING_CHANGED/);assert.equal(starts,fences);assert.equal(await fs.readFile(marker,'utf8'),calls);
 });
@@ -1569,17 +1592,17 @@ test('MAX native projection binds exact numeric chat, native identity and unchan
 });
 
 test('owner intake rereads one exact signed original, rechecks native owner and never acknowledges or imports',async t=>{
- const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
- for(const provider of ['telegram-mtproto','max-web']){
-  scope.skillId=provider;const max=provider==='max-web',sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),ownerIdentityId=randomUUID();
-  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,ownerTaskIntakeAllowed:true,...(max?{maxChatUrl:'https://web.max.ru/77'}:{})};
+ const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;maxAccountFixture=false;});
+ for(const [provider,accountWide] of [['telegram-mtproto',false],['max-web',false],['max-web',true]]){
+  scope.skillId=provider;maxAccountFixture=accountWide;const max=provider==='max-web',sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),ownerIdentityId=randomUUID();
+  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,ownerTaskIntakeAllowed:true,...(max?{maxChatUrl:accountWide?null:'https://web.max.ru/77'}:{})};
   const pass={schemaVersion:1,kind:'source_intake',assistantId,deviceId,companyId,sourceId,sourceRevision:0,passId:intakeId,deliveryId:randomUUID(),eventId,threadId};
   const ref={eventId,id:'message:77:8',revision:'b'.repeat(64),conversationKey:`${max?'max':'telegram'}-conversation/v1.${'a'.repeat(64)}`};
   intakeFixture={intent:{intakeId,sourceId,expectedRevision:0},admission:{schemaVersion:1,intakeId,sourceId,sourceRevision:0,localAccountId:accountId,
-    eventId,threadId,ownerIdentityId,ownerExternalUserId:'123456',...(max?{maxChatUrl:source.maxChatUrl}:{})}};
-  const dir=path.join(directory,`intake-${provider}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
+    eventId,threadId,ownerIdentityId,ownerExternalUserId:'123456',...(max?{maxChatUrl:source.maxChatUrl,...(accountWide?{maxAccountDiscovery:true}:{})}:{})}};
+  const dir=path.join(directory,`intake-${provider}-${accountWide}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
   await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
-    assert.deepEqual(process.argv.slice(2),${JSON.stringify(['read-reference','--chat',max?source.maxChatUrl:'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey])});
+    assert.deepEqual(process.argv.slice(2),${JSON.stringify(['read-reference','--chat',max?'https://web.max.ru/77':'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey])});
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);fs.appendFileSync(${JSON.stringify(marker)},'read;');process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
   artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:provider,runtimeVersion:'2.99.42',sourceDirectory:dir,
@@ -1851,4 +1874,18 @@ test('existing-task triage reads exact signed Telegram/email/MAX bodies without 
   live.eventIds=[randomUUID()];await assert.rejects(readAssistantOwnerIntakeMessage(input),/INTAKE_CHANGED/);
   assert.equal(await fs.readFile(marker,'utf8'),'r','changed native frozen batch refuses before provider launch');
  }
+});
+
+
+test('MAX account projector requires complete native scope/chain and never treats unread DOM fragments as a cursor',()=>{
+  const position=(time,scope='a'.repeat(64))=>Buffer.from(JSON.stringify({v:3,scope,startedAt:time})).toString('base64url');
+  const raw={schemaVersion:1,baselineOnly:true,events:[],nextCursor:position(200),initialAccountCursor:position(100),
+    conversationsToSync:['77','-88'],hasMore:false,coverage:{accountDiscovery:true,nativeDialogIds:true,complete:true,snapshotAtomic:false,unreadOnly:false},readState:{readReceiptsSent:false}};
+  const options={skillId:'max-web',cursor:position(100),chat:null,nativeMax:true};
+  const project=value=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify(value)},options);
+  assert.deepEqual(project(raw).conversationsToSync,['77','-88']);
+  for(const value of [{...raw,events:[{id:'unread-only'}]},{...raw,hasMore:true},{...raw,conversationsToSync:['77','77']},
+    {...raw,conversationsToSync:['0']},{...raw,initialAccountCursor:position(200)},{...raw,nextCursor:position(99)},
+    {...raw,nextCursor:position(200,'b'.repeat(64))},{...raw,coverage:{...raw.coverage,complete:false}},
+    {...raw,coverage:{...raw.coverage,unreadOnly:true}},{...raw,readState:{readReceiptsSent:true}}])assert.throws(()=>project(value),/INVALID_RESPONSE/);
 });

@@ -456,7 +456,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if (nextCursor !== null) opaque(nextCursor, 2048);
       if (typeof hasMore !== 'boolean' || (hasMore && nextCursor === null) || !Array.isArray(events) || events.length > MAX_PAGE) inputError();
       const page = events.map(eventOf);
-      if(!Array.isArray(streams) || streams.length>MAX_PAGE || streams.length && scope.provider==='trelio')inputError();
+      if(!Array.isArray(streams) || streams.length>(scope.provider==='max'?1000:MAX_PAGE) || streams.length && scope.provider==='trelio')inputError();
       const hints=streams.map(value=>{
         object(value,['id','revision','initialCursor']);return {id:opaque(value.id,64),revision:opaque(value.revision,128),
           initialCursor:value.initialCursor==null?null:opaque(value.initialCursor,2048)};

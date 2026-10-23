@@ -754,3 +754,13 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   presentation-only `intakeKind:'route_existing'` never grants read/ACK/binding.
   Permanent task binding and material processing remain independent. See the
   schema v10 section in `docs/assistant-inbox.md`; no per-message chats or new executor.
+
+- MAX account roots require native selected `maxChatUrl:null`, fresh
+  `maxAccountDiscovery:true` admission and signed provider >=2.12.0. Observe only
+  the browser-emitted full sync/list chain through marker zero; no partial unread
+  folder becomes an account cursor. Persist native dialog hints and original
+  account-time seed atomically in SAME streams, then exact native history covers
+  that seed plus unread range. Read-elsewhere flags never filter new references.
+  Exact-chat rows retain >=2.11.0 semantics; body/material/ACK/owner proof remain
+  independent, and root/exact duplicates choose only one local triage queue.
+  [Contract](docs/assistant-inbox.md#native-max-through-the-same-source-journal).
