@@ -1194,3 +1194,90 @@ for(const provider of ['telegram','email','max'])test(`${provider} first outgoin
     assert.equal(f.inbox.claimAcknowledgements(f.scope()),null,'route/hint is not read or processing proof');
   }finally{await f.coordinator.close();}
 });
+
+for(const provider of ['telegram','email','max'])test(`${provider} existing-task triage freezes a batch, selects company before chat and routes without ACK`,async t=>{
+  const database=new DatabaseSync(':memory:');let clock=Date.now(),active=null,provisions=0,triageTurns=0,wait=true;
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
+  const sourceId=randomUUID(),accountId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID(),key=`${provider}-conversation/v1.${'8'.repeat(64)}`;
+  const skillId={telegram:'telegram-mtproto',email:'email-imap-smtp',max:'max-web'}[provider];
+  const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+  const source={id:sourceId,companyId,deviceId:identity.deviceId,localAccountId:accountId,projectId:null,skillId,state:'active',revision:0,
+    ...(provider==='max'?{maxChatUrl:'https://web.max.ru/123'}:{})};
+  const intake=new Map(),markers=new Map(),begins=[];
+  const client={identity,heartbeat:async()=>{},companies:async()=>[{companyId,memberId,execution:{state:'ready',configuration:execution}}],
+    tasks:async()=>({bindings:[{id:bindingId,taskId,state:'accepted',revision:0}],nextCursor:null}),
+    task:async()=>({id:bindingId,taskId,state:'accepted',revision:0,execution:{state:'ready',configuration:execution}}),
+    poll:async()=>({events:[],nextCursor:'0',hasMore:false}),acknowledge:async()=>({acknowledged:0}),sourceAccounts:async()=>[{...source}],
+    sourceRoutes:async input=>input.conversationKeys?[]:[...intake.values()].filter(value=>value.route&&input.routeIds.includes(value.route.id))
+      .map(value=>({...value.route,taskId})),
+    beginSourceIntake:async input=>{
+      begins.push(structuredClone(input));assert.equal(input.kind,'route_existing');assert.equal(input.ownerIdentityId,undefined);
+      if(!intake.has(input.intakeId)){
+        assert.equal(input.threadId,null);assert.equal(provisions,0,'native company selection precedes tool-free chat');
+        intake.set(input.intakeId,{schemaVersion:1,kind:'route_existing',id:input.intakeId,companyId,sourceId,sourceRevision:0,
+          eventId:input.eventId,eventIds:input.eventIds,threadId:null,state:'waiting_owner',companySelectionRequired:true,
+          leaseExpiresAt:new Date(clock+1800000).toISOString(),taskId:null,receiptId:randomUUID(),readConfirmed:false,execution:null});
+      }
+      const result=intake.get(input.intakeId);if(input.threadId!==null){assert.equal(wait,false);result.threadId=input.threadId;}
+      return structuredClone(result);
+    },readSourceIntake:async input=>structuredClone(intake.get(input.intakeId)),
+    claimTaskHost:async input=>({bindingId:input.bindingId,provisionId:input.provisionId,threadId:null}),reportSchedule:async input=>({sequence:input.sequence})};
+  const native={ready:async()=>true,readDelivery:async(_thread,id)=>markers.get(id)??{state:'uncertain'},
+    provision:async(input,options)=>{provisions++;options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
+      const result={state:'completed',threadId,receipt:'fixture-provision'};markers.set(input.deliveryId,result);return result;},
+    run:async(input,options)=>{
+      if(!input.intakeContext)throw Object.assign(new Error(),{code:'ASSISTANT_FIXTURE_TASK_BOUNDARY'});
+      options.startInvocation();triageTurns++;assert.equal(input.intakeContext.intakeKind,'route_existing');
+      assert.equal(input.intakeContext.eventIds.length,2);assert.deepEqual(active.eventIds,input.intakeContext.eventIds);
+      const current=intake.get(input.intakeContext.intakeId);Object.assign(current,{state:'routed',taskId,receiptId:randomUUID(),readConfirmed:true,
+        route:{id:randomUUID(),sourceId,sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key}});
+      const result={state:'completed',receipt:'fixture-triage'};markers.set(input.deliveryId,result);return result;
+    }};
+  const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
+    releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
+    timeZone:'Europe/Moscow',now:()=>clock};
+  let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();database.close();});
+  await coordinator.pollOnce();
+  const inbox=createAssistantInbox({database,now:()=>clock}),scope={origin:identity.origin,assistantId:identity.assistantId,companyId,provider,accountId,bindingId:sourceId};
+  inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+  const poll=inbox.claimPoll(scope),events=[1,2].map(i=>({id:provider==='email'?`uid:12:${i}`:`message:123:${i}`,revision:String(i).repeat(64),
+    taskId:null,wake:false,providerWake:true,conversationKey:key}));
+  inbox.commitPage(scope,{...poll,nextCursor:'2',hasMore:false,events});
+  inbox.queueExistingTaskIntakes(scope,{sourceRevision:0,eventKeys:inbox.pendingExternalRoutes(scope).map(row=>row.event_key)});
+  await coordinator.workOnce();assert.equal(provisions,1,'ordinary accepted task may provision while the source waits');assert.equal(triageTurns,0);assert.equal(active,null);
+  const original=inbox.ownerIntakes()[0];assert.equal(original.frozen,1);assert.equal(original.state,'waiting_owner');
+  const selected=intake.get(original.id);wait=false;Object.assign(selected,{state:'leased',execution,receiptId:null});delete selected.companySelectionRequired;
+  clock+=300001;assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(triageTurns,1);assert.equal(provisions,2,'one permanent task chat and one selected-company triage chat');
+  assert.equal(begins[0].threadId,null);assert.ok(begins.at(-1).threadId);assert.equal(active,null);
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/BOUNDARY|SETUP_REQUIRED|UNAVAILABLE/u));
+  const routed=database.prepare('SELECT * FROM assistant_inbox_events WHERE source_key=?').all(original.source_key);
+  assert.equal(routed.length,2);assert.ok(routed.every(row=>row.task_id===taskId&&row.route_id&&row.processed===0&&row.acked===0));
+  await coordinator.close();coordinator=createAssistantCoordinator(options);
+  await coordinator.workOnce().catch(()=>{});assert.equal(triageTurns,1,'restart never reclassifies a frozen original batch');
+});
+
+test('complete native inventory chooses one local triage queue per physical account; frozen follow-ups cannot create cross-company questions',async t=>{
+ for(const incomplete of [false,true]){
+  const database=new DatabaseSync(':memory:');let clock=Date.now(),sequence=1;
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companies=[randomUUID(),randomUUID()],accountId=randomUUID();
+  const rows=companies.map((companyId,index)=>({id:`00000000-0000-4000-8000-00000000000${index+1}`,companyId,deviceId:identity.deviceId,localAccountId:accountId,
+    projectId:null,skillId:'telegram-mtproto',state:'active',revision:0}));
+  const client={identity,heartbeat:async()=>{},companies:async()=>companies.map(companyId=>({companyId,memberId:randomUUID()})),
+    tasks:async()=>({bindings:[],nextCursor:null}),poll:async()=>({events:[],nextCursor:'0',hasMore:false}),acknowledge:async()=>({acknowledged:0}),
+    sourceAccounts:async companyId=>{if(incomplete&&companyId===companies[1])throw Object.assign(new Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});return rows.filter(row=>row.companyId===companyId);},
+    sourceRoutes:async()=>[],beginSourceIntake:async()=>assert.fail('polling must not invoke a model/native intake')};
+  const options={database,client,native:{ready:async()=>assert.fail('polling cannot start Codex')},workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,
+    readSourceMonitor:async input=>({schemaVersion:1,baselineOnly:false,nextCursor:String(sequence),hasMore:false,
+      events:[{id:`message:123:${sequence}`,revision:String(sequence).repeat(64),kind:'new',outgoing:false,
+        conversationKey:`telegram-conversation/v1.${(input.sourceId===rows[0].id?'a':'b').repeat(64)}`}]})};
+  const coordinator=createAssistantCoordinator(options);
+  try{
+    await coordinator.pollOnce();const inbox=createAssistantInbox({database,now:()=>clock});
+    if(incomplete){assert.equal(inbox.ownerIntakes().length,0,'partial inventory never becomes a singleton company choice');continue;}
+    assert.equal(inbox.ownerIntakes().length,1);const row=inbox.ownerIntakes()[0];assert.equal(row.scope.bindingId,rows[0].id);
+    inbox.freezeExistingTaskIntake(row.id);sequence=2;clock+=300001;await coordinator.pollOnce();
+    assert.equal(inbox.ownerIntakes().length,1,'second-company scoped key cannot create another follow-up classification');
+    assert.equal(inbox.ownerIntake(row.id).eventIds.length,1,'frozen batch remains immutable');
+  }finally{await coordinator.close();database.close();}
+ }
+});

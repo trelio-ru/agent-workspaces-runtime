@@ -182,3 +182,21 @@ test('taskless intake hook has genuine observed one-use proof and cannot borrow 
  for(const denied of ['get_assistant_task','create_task','apply_assistant_task_action','confirm_assistant_intake_read'])await assert.rejects(f.hook(event,denied),/CAPABILITY_UNAVAILABLE/);
  await assert.rejects(f.hook({...event,session_id:crypto.randomUUID()},tool),/TASK_MISMATCH/);
 });
+
+test('source triage hook seals the exact frozen role/batch with ordinary observed proof, never owner/task authority',async()=>{
+ const f=fixture(),{companyId,passId,deliveryId,threadId}=f.pass,eventIds=[crypto.randomUUID(),crypto.randomUUID()];
+ const pass={schemaVersion:1,kind:'source_intake',intakeKind:'route_existing',eventIds,assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
+   companyId,passId,deliveryId,threadId,sourceId:crypto.randomUUID(),sourceRevision:2,eventId:eventIds[0]};
+ f.setActive(pass);let live={...pass,kind:'route_existing',id:passId,state:'leased',leaseExpiresAt:new Date(Date.now()+600000).toISOString()};
+ f.client.readSourceIntake=async()=>({...live});f.client.registerIntakeRuntime=async input=>{
+   const result={runtimeSessionId:crypto.randomUUID(),passId,observation:input.observation,expiresAt:new Date(Date.now()+300000).toISOString(),runtimeRefreshSupported:true};
+   f.records.set(input.publicKeySpki,result);return result;};
+ const event={hook_event_name:'PreToolUse',session_id:threadId,tool_input:{decision:'route_existing',taskId:crypto.randomUUID(),clientRequestId:passId}};
+ const first=await f.hook(event,'resolve_assistant_intake'),proof=first.hookSpecificOutput.updatedInput.runtimeSessionProof;
+ const [key]=[...f.records.keys()];assert.equal(crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,'resolve_assistant_intake',proof.issuedAt,proof.nonce].join('\n')),
+   crypto.createPublicKey({key:Buffer.from(key,'base64url'),format:'der',type:'spki'}),Buffer.from(proof.signature,'base64url')),true);
+ assert.deepEqual(first.hookSpecificOutput.updatedInput.intakePass,{companyId,sourceId:pass.sourceId,intakeId:passId});
+ for(const name of ['create_task','request_assistant_action','get_task','confirm_assistant_intake_read'])await assert.rejects(f.hook(event,name),/CAPABILITY_UNAVAILABLE/);
+ live={...live,eventIds:[crypto.randomUUID()]};await assert.rejects(f.hook(event,'resolve_assistant_intake'),/PASS_REVIEW_REQUIRED/);
+ live={...live,eventIds,kind:'owner_command'};await assert.rejects(f.hook(event,'get_assistant_intake_context'),/PASS_REVIEW_REQUIRED/);
+});

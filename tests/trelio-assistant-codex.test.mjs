@@ -259,6 +259,8 @@ test('external task context permits bounded structural refs only, without bodies
   const ref={sourceId:randomUUID(),sourceRevision:3,routeId:randomUUID(),eventOrdinal:2,provider:'telegram',accountId:randomUUID(),eventId:'message:123:4',
     eventRevision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
   assert.deepEqual(assistantWorkStateContext({...taskContext,sourceReferences:[ref]}).sourceReferences,[ref]);
+  assert.deepEqual(assistantWorkStateContext({...taskContext,sourceReferences:[{...ref,intakeKind:'route_existing'}]}).sourceReferences,[{...ref,intakeKind:'route_existing'}]);
+  for(const intakeKind of ['owner_command','create_task','PRIVATE',null])assert.throws(()=>assistantWorkStateContext({...taskContext,sourceReferences:[{...ref,intakeKind}]}),/INVALID_INPUT/);
   for(const provider of ['email','max']){
     const native={...ref,provider,eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`};
     assert.deepEqual(assistantWorkStateContext({...taskContext,sourceReferences:[native]}).sourceReferences,[native]);

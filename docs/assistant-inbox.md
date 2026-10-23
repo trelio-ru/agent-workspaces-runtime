@@ -661,3 +661,77 @@ outcome must explicitly select the original slots before ACK. Restart preserves
 the same slots and one-use unknown-write fence; no blind ACK retry or fallback
 into human OAuth/session/key storage is introduced. Encrypted owner setup and
 unknown-conversation intake remain separate capabilities.
+
+## Schema v10: existing-task triage before body access
+
+The SAME private inbox supports two closed intake kinds. `owner_command` keeps
+its proven native owner identity and original single-event creation workflow.
+`route_existing` has no owner identity, contains 1–100 immutable original UUIDs,
+and can select only an existing accessible accepted task. Bodies, senders,
+candidate titles, rules and answers never enter SQLite. The additional bounded
+batch-reference table contains only exact original/event/account IDs and ordering;
+the parent retains closed kind/freeze/redirect and native receipt/route/task IDs.
+The forward v9 migration preserves every cursor, original UUID, native invocation
+fence, delivery and outcome. Unknown schema is not reset.
+
+A successful native known-route lookup precedes new triage. A failed or partial
+source inventory is never a singleton choice. A complete successful inventory
+selects one local queue source per physical account/provider (and configured MAX
+chat); this is a cost/dedup preference, never company authority. Same-account
+originals deduplicate across company source rows before body access. A direct
+owner-command claim takes precedence. A positive current native known route may
+remove only a still-local, unfrozen pending triage claim. Already classified or
+ignored originals are not reconsidered; ignored is not processed or ACKed.
+
+Unfrozen originals coalesce by conversation/source generation. The first native
+begin freezes the exact ordered batch. Later messages wait for a separate batch;
+settled batches reuse the restricted chat of that same conversation/generation.
+No per-message native chat is provisioned. A frozen/native-started attempt cannot
+be promoted, rewritten, or released by a later mapping, owner proof or timeout.
+Unknown native invocations retain the common global fence and exact marker
+read-back, independently of source pause/revocation and domain cancellation.
+
+The native `route_existing` begin first receives `threadId:null`. It selects the
+company/source before any tool-free chat, body read, model turn or content
+hydration. Ambiguity uses the existing neutral native owner question; waiting has
+no executable model configuration. After a positive selection the SAME begin
+attaches the actual provisioned thread UUID under CAS. No fabricated UUID or new
+endpoint is involved. An original redirect/cancellation may retain a null thread
+and null execution as a structural terminal receipt; neither admits a model.
+
+Company/source redirects never copy an old provider key or revision into the
+new scope. The host must first find exact same-account native originals in the
+selected source's actual signed monitor journal. Email takes the selected
+UIDVALIDITY/UID revision as well. The original UUID batch and native redirect
+receipt remain provenance, while body reads use only selected-scope refs. Missing
+historical target metadata yields bounded backoff and the specific
+`ASSISTANT_INTAKE_SELECTED_REFERENCE_REQUIRED` incident; no guessed key, reset,
+body read, model turn, cross-company route exception or ACK fills that gap.
+
+The existing observed hook/proof and session-fixed `source_intake` MCP view serve
+`source_triage/v1` through the SAME two tools. The local pass adds only closed
+`intakeKind:'route_existing'` and frozen `eventIds`; role/batch swaps fail before
+execution. Native context supplies accessible task candidates with bounded
+cursor pagination. The SAME signed account/process/read-result guard supplies
+complete exact original text and confirms the whole frozen batch without owner
+proof, neighboring history, attachment reads or read-state mutation. Partial,
+changed or oversized reads remain unresolved. Candidate/rules hydration uses
+only the native-selected encrypted bundle and current managed recipient; fixed
+project sources load that project's exact effective rules through the SAME
+instruction builder. No plaintext server fallback or generic payload resolver
+is added.
+
+A native `routed` result still applies only to this original batch. It is settled
+into the ordinary existing permanent task chat after fresh task/source/route
+checks. The dispatcher may add presentation-only `intakeKind:'route_existing'`
+to an exact task source reference only from its settled native receipt with the
+same original, route, task and source generation. This is not a read selector,
+processing proof or binding permission. After actual read, the task worker uses
+the ordinary native conversation binder under its genuine current task pass and
+permanent chat before material completion. Only a confirmed whole-conversation
+binding makes later replies a known-route wake. Owner-command/new-task intake
+references have no such hint and must not bind the shared owner conversation.
+Processing and provider ACK remain separate ordinary task outcomes.
+
+Synthetic SQLite, hook, signed-child and coordinator tests cover this composition;
+they do not establish a live Windows/business messenger acceptance.

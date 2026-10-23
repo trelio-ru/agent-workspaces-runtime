@@ -30,8 +30,8 @@ const store={get:async slot=>{
 }};
 let setupFixture=null,ackFixture=null,intakeFixture=null;
 const admission=()=>{
-  if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='max-web'?'max':'telegram',
-    protocol:scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+  if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
+    protocol:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
@@ -1807,4 +1807,48 @@ test('encrypted company runtime is inspected through its exact managed bundle be
     assert.equal(await fs.readFile(childMarker,'utf8'),'ss1s','public plain bytes use the SAME signed recipe/process under the encrypted task recipient');
     variant='valid';active=false;await assert.rejects(run(()=>materializeAssistantEncryptedSkill({origin,descriptor})));assert.equal(await fs.readFile(childMarker,'utf8'),'ss1s');
   }finally{globalThis.fetch=previous;await fs.rm(root,{recursive:true,force:true});await fs.rm(original,{force:true});await fs.rm(encrypted,{force:true});}
+});
+
+
+test('existing-task triage reads exact signed Telegram/email/MAX bodies without owner proof or ACK',async t=>{
+ const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
+ for(const skillId of ['telegram-mtproto','email-imap-smtp','max-web']){
+  scope.skillId=skillId;const email=skillId==='email-imap-smtp',max=skillId==='max-web',provider=email?'email':max?'max':'telegram';
+  const sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventIds=[randomUUID(),randomUUID()],eventId=eventIds[0],threadId=randomUUID();
+  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,...(max?{maxChatUrl:'https://web.max.ru/77'}:{})};
+  const pass={schemaVersion:1,kind:'source_intake',intakeKind:'route_existing',eventIds,assistantId,deviceId,companyId,sourceId,sourceRevision:0,
+    passId:intakeId,deliveryId:randomUUID(),eventId,threadId};
+  const ref={eventId:eventIds[1],id:email?'uid:77:8':'message:77:8',revision:'b'.repeat(64),conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`};
+  intakeFixture={intent:{intakeId,sourceId,expectedRevision:0},admission:{schemaVersion:1,kind:'route_existing',intakeId,sourceId,sourceRevision:0,
+    localAccountId:accountId,eventId,eventIds,threadId,...(max?{maxChatUrl:source.maxChatUrl}:{})}};
+  const dir=path.join(directory,`triage-${provider}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
+  const args=email?['read-reference','--uid','8','--uid-validity','77','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey]
+    :['read-reference','--chat',max?source.maxChatUrl:'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey];
+  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);fs.appendFileSync(${JSON.stringify(marker)},'r');process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
+  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId,runtimeVersion:'2.99.42',sourceDirectory:dir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId,companyId,memberId}),io:{ensureDirectory:engine.ensurePrivateDirectory,
+    read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  await catalogue.change({operation:'create',id:accountId,name:'Synthetic routing account',expectedRevision:(await catalogue.list()).revision});
+  const text='A reply about the existing project',message={schemaVersion:1,protocol:`${provider}-message-read/v1`,
+    reference:{...ref,...(email?{uid:'8',uidValidity:'77'}:{senderUserId:'654321',forwarded:true,outgoing:false})},
+    message:email?{body:text}:{text,textTruncated:false},...(email?{originalSha256:'c'.repeat(64)}:{}),
+    coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false,nativeMessageVerified:true,otherMessagesIncluded:false},
+    readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}};
+  const live={kind:'route_existing',eventIds,state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
+  const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({...live})};
+  const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
+  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text});
+  assert.equal(await fs.readFile(marker,'utf8'),'r','SAME selected-account signed child, one exact read');
+  intakeFixture.admission={...intakeFixture.admission,ownerIdentityId:randomUUID(),ownerExternalUserId:'654321'};
+  await assert.rejects(readAssistantOwnerIntakeMessage(input),/INVALID_RESPONSE/);
+  assert.equal(await fs.readFile(marker,'utf8'),'r','routing admission never accepts an owner-proof shape');
+  delete intakeFixture.admission.ownerIdentityId;delete intakeFixture.admission.ownerExternalUserId;
+  live.eventIds=[randomUUID()];await assert.rejects(readAssistantOwnerIntakeMessage(input),/INTAKE_CHANGED/);
+  assert.equal(await fs.readFile(marker,'utf8'),'r','changed native frozen batch refuses before provider launch');
+ }
 });

@@ -53,7 +53,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       database.exec('COMMIT');
     } catch(error) { database.exec('ROLLBACK'); throw error; }
   };
-  let active = null, polling = false, nextDiscoveryAt = 0;
+  let active = null, polling = false, nextDiscoveryAt = 0, externalInventoryComplete=false;
   // This map contains only the current invocation's native structural refs.
   // Persistent positions/events use the SAME inbox as Trelio. A failed source
   // inventory never becomes authoritative absence or permits stale polling.
@@ -334,6 +334,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
     inbox.routeExternalEvents(source,{canonicalSource,sourceRevision:row.revision,
       eventKeys:pending.map(event=>event.event_key),routes});
+    // Absence is known only after this successful fresh native route lookup.
+    // Read-only errors never enqueue a competing classification/model turn.
+    const preferred=externalInventoryComplete?[...externalRegistrations.values()].filter(candidate=>candidate.state==='active'
+      &&candidate.skillId===row.skillId&&candidate.localAccountId===row.localAccountId
+      &&(row.skillId!=='max-web'||candidate.maxChatUrl===row.maxChatUrl)).sort((a,b)=>a.id.localeCompare(b.id))[0]:null;
+    // Company-scoped keys cannot dedup follow-ups across company registrations.
+    // Choose ONE source for local intake cost only, from a complete successful
+    // inventory. Native company selection still asks the owner and alone grants
+    // the selected scope; this preference grants no body/task/source authority.
+    if(typeof client.beginSourceIntake==='function'&&preferred?.id===row.id)inbox.queueExistingTaskIntakes(source,{sourceRevision:row.revision,
+      eventKeys:pending.filter(event=>!routes.some(route=>route.conversationKey===event.conversation_key)).map(event=>event.event_key)});
   };
   const verifyExternalDelivery=async(job,binding,signal)=>{
     const external=job.events.filter(event=>JSON.parse(event.event_scope_json).provider!=='trelio');
@@ -443,11 +454,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           await syncTasks(source,signal);
         }
         if(readSourceMonitor){
-          externalRegistrations.clear();
+          externalRegistrations.clear();externalInventoryComplete=false;let complete=true;
           for(const company of companies){
             try{await syncExternalSources(company.companyId,signal);}
-            catch(error){emit(errorCode(error));}
+            catch(error){complete=false;emit(errorCode(error));}
           }
+          externalInventoryComplete=complete;
         }
         nextDiscoveryAt=now()+300_000;
       }
@@ -546,15 +558,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const intakeSource=async(row,signal)=>{
     const selected=(await client.sourceAccounts(row.scope.companyId,signal)).find(source=>source.id===row.scope.bindingId);lease();
-    if(!selected||selected.state!=='active'||selected.ownerTaskIntakeAllowed!==true||selected.revision!==row.source_revision
+    if(!selected||selected.state!=='active'||row.kind!=='route_existing'&&selected.ownerTaskIntakeAllowed!==true||selected.revision!==row.source_revision
       ||!sameSource(externalSourceFor(identity,selected),row.scope))fail('ASSISTANT_INTAKE_CHANGED');
     return selected;
   };
   const intakeLocator=row=>({companyId:row.scope.companyId,sourceId:row.scope.bindingId,intakeId:row.id});
   const settleIntake=async(row,outcome,signal)=>{
-    if(outcome.id!==row.id||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||!uuid.test(outcome.receiptId??''))
+    if(outcome.id!==row.id||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||!uuid.test(outcome.receiptId??'')
+      ||row.kind==='route_existing'&&(outcome.kind!=='route_existing'||JSON.stringify(outcome.eventIds)!==JSON.stringify(row.eventIds)))
       fail('ASSISTANT_INTAKE_CHANGED');
-    if(['ready','started','uncertain','waiting_owner'].includes(row.state))inbox.finishOwnerIntake(row.id,outcome);
+    if(['pending','ready','started','uncertain','waiting_owner'].includes(row.state))inbox.finishOwnerIntake(row.id,outcome);
     row=inbox.ownerIntake(row.id);
     const activePass=await passHost.readActivePass();
     if(activePass){
@@ -566,13 +579,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const target=outcome.redirect;
       if(!target||target.sourceId===row.scope.bindingId)fail('ASSISTANT_INTAKE_CHANGED');
       const current=(await client.sourceAccounts(target.companyId,signal)).find(source=>source.id===target.sourceId);lease();
-      if(!current||current.state!=='active'||current.revision!==target.sourceRevision||current.ownerTaskIntakeAllowed!==true
+      if(!current||current.state!=='active'||current.revision!==target.sourceRevision||row.kind!=='route_existing'&&current.ownerTaskIntakeAllowed!==true
         ||current.localAccountId!==row.scope.accountId||externalProviders[current.skillId]!==row.scope.provider)fail('ASSISTANT_INTAKE_CHANGED');
       const scope=externalSourceFor(identity,current);inbox.register(scope);inbox.observeExternalSourceRevision(scope,current.revision);
       inbox.redirectOwnerIntake(row.id,{scope,sourceRevision:current.revision,receiptId:outcome.receiptId});
       inbox.settleOwnerIntake(row.id);return;
     }
-    if(outcome.state!=='created'||!outcome.route||!uuid.test(outcome.taskId??''))fail('ASSISTANT_INTAKE_CHANGED');
+    if(!['created','routed'].includes(outcome.state)||!outcome.route||!uuid.test(outcome.taskId??''))fail('ASSISTANT_INTAKE_CHANGED');
     const companies=await client.companies(signal),company=companies.find(value=>value.companyId===row.scope.companyId);lease();
     if(!company)fail('ASSISTANT_INTAKE_CHANGED');
     const canonical=sourceFor(identity,company);inbox.register(canonical);
@@ -586,7 +599,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const routes=await client.sourceRoutes({companyId:row.scope.companyId,sourceId:row.scope.bindingId,
       sourceRevision:row.source_revision,routeIds:[outcome.route.id]},signal);lease();
     if(routes.length!==1||routes[0].taskId!==outcome.taskId)fail('ASSISTANT_INTAKE_CHANGED');
-    inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,eventKeys:[row.event_key],routes,intakeId:row.id});
+    inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,eventKeys:row.kind==='route_existing'?row.originals.map(event=>event.event_key):[row.event_key],routes,intakeId:row.id});
     inbox.settleOwnerIntake(row.id);
   };
   const deferredIntake=row=>Object.freeze({state:'deferred',kind:'source_intake',intakeId:row.id});
@@ -633,7 +646,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // exact native lease; only its positive cancelled receipt may seed a
         // later owner-resumed generation. Unknown never becomes a new attempt.
         try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
-          if(!['created','ignored','redirected','cancelled'].includes(closed.state))throw error;
+          if(!['created','routed','ignored','redirected','cancelled'].includes(closed.state))throw error;
           await settleIntake(row,closed,signal);
         }catch(closing){if(saved)throw closing;inbox.deferOwnerIntake(row.id);}
         return deferredIntake(row);
@@ -662,18 +675,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     catch(error){
       if(saved?.passId===row.id||['started','uncertain'].includes(row.state)){
         const outcome=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
-        if(!['created','ignored','redirected','cancelled'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
+        if(!['created','routed','ignored','redirected','cancelled'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
         if(row.native_started===1&&!await nativeIntakeStopped(row,signal))return blockedIntake();
         inbox.finishOwnerIntake(row.id,outcome);if(saved)await passHost.releasePass(outcome);
         // Source revocation does not prove an old native process stopped.
         // A started invocation needs exact terminal read-back; a never-started
         // preparation does not invent a marker. Continue without further task
         // ACL/route reads. Original refs stay unprocessed/unacked.
-        if(outcome.state==='created'||outcome.state==='redirected')inbox.settleOwnerIntake(row.id);
-      }else if(row.state==='ready'){
+        if(['created','routed','redirected'].includes(outcome.state))inbox.settleOwnerIntake(row.id);
+      }else if(row.state==='ready'||row.kind==='route_existing'&&row.state==='pending'&&row.frozen){
         try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
-          if(!['created','ignored','redirected','cancelled'].includes(closed.state))throw error;
-          inbox.finishOwnerIntake(row.id,closed);if(['created','redirected'].includes(closed.state))inbox.settleOwnerIntake(row.id);
+          if(!['created','routed','ignored','redirected','cancelled'].includes(closed.state))throw error;
+          inbox.finishOwnerIntake(row.id,closed);if(['created','routed','redirected'].includes(closed.state))inbox.settleOwnerIntake(row.id);
         }catch{inbox.deferOwnerIntake(row.id);}
       }else inbox.deferOwnerIntake(row.id);
       return deferredIntake(row);
@@ -692,6 +705,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       }
       return blockedIntake();
     }
+    let selection=null;
+    if(row.kind==='route_existing'&&row.state==='pending'){
+      // Select the company under the native account/owner engine BEFORE even a
+      // tool-free Codex chat exists. Unknown begin is safe only as exact native
+      // receipt read-back/idempotent admission, never a model or provider retry.
+      row=inbox.freezeExistingTaskIntake(row.id);
+      selection=await client.beginSourceIntake({...intakeLocator(row),kind:'route_existing',sourceRevision:row.source_revision,
+        eventId:row.original_event_id,eventIds:row.eventIds,threadId:null,conversationKey:row.conversation_key,
+        ...(row.redirect_from_intake_id?{redirectFromIntakeId:row.redirect_from_intake_id}:{})},signal);lease();
+      if(selection.state!=='leased'){await settleIntake(row,selection,signal);return deferredIntake(row);}
+      if(Date.parse(selection.leaseExpiresAt)<=now()){
+        const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+        await settleIntake(row,closed,signal);return deferredIntake(row);
+      }
+    }
     const company=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
     if(company?.execution?.state!=='ready'){
       // No native turn/pass has started. Preserve this original event and
@@ -699,7 +727,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       blockedCompanies.add(row.scope.companyId);inbox.deferOwnerIntake(row.id);
       emit('ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED');return deferredIntake(row);
     }
-    let execution=assistantExecutionConfiguration(company.execution.configuration);
+    let execution=assistantExecutionConfiguration(selection?.execution??company.execution.configuration);
     const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
     if(row.state==='pending'){inbox.prepareOwnerIntake(row.id);row=inbox.ownerIntake(row.id);}
     if(row.state==='provisioning'){
@@ -710,15 +738,20 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
     }
     if(row.state!=='ready')fail('ASSISTANT_INTAKE_CHANGED');
-    const owner=(await client.ownerIdentities(signal)).identities.find(value=>value.provider===row.scope.provider);lease();
-    if(!owner||owner.bindingId!==row.owner_identity_id)fail('ASSISTANT_INTAKE_OWNER_UNVERIFIED');
+    let owner;
+    if(row.kind!=='route_existing'){
+      owner=(await client.ownerIdentities(signal)).identities.find(value=>value.provider===row.scope.provider);lease();
+      if(!owner||owner.bindingId!==row.owner_identity_id)fail('ASSISTANT_INTAKE_OWNER_UNVERIFIED');
+    }
     const admitted=await client.beginSourceIntake({...intakeLocator(row),sourceRevision:row.source_revision,eventId:row.original_event_id,
-      threadId:row.thread_id,ownerIdentityId:owner.bindingId,senderExternalUserId:owner.externalUserId,conversationKey:row.conversation_key},signal);lease();
-    if(admitted.state!=='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+      threadId:row.thread_id,conversationKey:row.conversation_key,...(row.kind==='route_existing'
+        ?{kind:'route_existing',eventIds:row.eventIds,...(row.redirect_from_intake_id?{redirectFromIntakeId:row.redirect_from_intake_id}:{})}
+        :{ownerIdentityId:owner.bindingId,senderExternalUserId:owner.externalUserId})},signal);lease();
+    if(admitted.state!=='leased'||admitted.threadId!==row.thread_id||Date.parse(admitted.leaseExpiresAt)<=now())fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
     execution=assistantExecutionConfiguration(admitted.execution);
     const pass=validateAssistantActivePass({schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,
       companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,passId:row.id,deliveryId:row.delivery_id,
-      eventId:row.original_event_id,threadId:row.thread_id},identity);
+      eventId:row.original_event_id,threadId:row.thread_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})},identity);
     await passHost.activatePass(pass);
     let started=false,watching=false,cancelledOutcome=null;
     const settleOwnedCancellation=async()=>{
@@ -749,7 +782,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     try{
       const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
-          intakeId:row.id,eventId:row.original_event_id}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
+          intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
       if(cancelledOutcome)return settleOwnedCancellation();
       const outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
       if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
@@ -862,7 +895,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
               const source=JSON.parse(event.event_scope_json);
               return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,routeId:event.route_id,eventOrdinal:event.event_ordinal,provider:source.provider,
-                accountId:source.accountId,eventId:event.event_id,eventRevision:event.event_revision,conversationKey:event.conversation_key};
+                accountId:source.accountId,eventId:event.event_id,eventRevision:event.event_revision,conversationKey:event.conversation_key,
+                ...(inbox.sourceIntakeKind({eventKey:event.event_key,routeId:event.route_id,sourceRevision:event.route_source_revision})==='route_existing'?{intakeKind:'route_existing'}:{})};
             })}:{}),
             // Only current delivery refs enter stdin. Full answers are read
             // by the task worker under fresh backend pass/owner/assignment ACL.

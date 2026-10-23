@@ -106,7 +106,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -208,16 +208,41 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN read_original_sha256 TEXT CHECK(read_original_sha256 IS NULL OR (length(read_original_sha256)=64 AND read_original_sha256 NOT GLOB \'*[^0-9a-f]*\'))');
       run('UPDATE assistant_inbox_meta SET version=8');
     }
-    db.exec(`CREATE TABLE IF NOT EXISTS assistant_owner_intakes(
+    const createIntakes=()=>db.exec(`CREATE TABLE IF NOT EXISTS assistant_owner_intakes(
       id TEXT PRIMARY KEY, original_event_id TEXT NOT NULL, event_key TEXT NOT NULL REFERENCES assistant_inbox_events(event_key),
       account_key TEXT NOT NULL, native_event_id TEXT NOT NULL, native_revision TEXT NOT NULL,
-      owner_identity_id TEXT NOT NULL, source_key TEXT NOT NULL REFERENCES assistant_inbox_sources(source_key), source_revision INTEGER NOT NULL,
+      owner_identity_id TEXT, source_key TEXT NOT NULL REFERENCES assistant_inbox_sources(source_key), source_revision INTEGER NOT NULL,
       state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','provisioning','ready','started','uncertain','waiting_owner','complete')),
       provision_id TEXT NOT NULL, delivery_id TEXT NOT NULL, thread_id TEXT, native_started INTEGER NOT NULL DEFAULT 0 CHECK(native_started IN(0,1)),
       outcome_receipt TEXT, outcome_state TEXT, settled INTEGER NOT NULL DEFAULT 0 CHECK(settled IN(0,1)), next_check_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'owner_command' CHECK(kind IN('owner_command','route_existing')),
+      frozen INTEGER NOT NULL DEFAULT 0 CHECK(frozen IN(0,1)), redirect_from_intake_id TEXT, conversation_key TEXT,
+      outcome_route_id TEXT, outcome_task_id TEXT,
       UNIQUE(account_key,native_event_id,native_revision,source_key,source_revision));`);
-    if(versions.length && versions[0].version<9)run('UPDATE assistant_inbox_meta SET version=9');
-    if (!versions.length) run('INSERT INTO assistant_inbox_meta(version) VALUES (9)');
+
+    createIntakes();
+    if(versions.length&&versions[0].version<10&&!all('PRAGMA table_info(assistant_owner_intakes)').some(column=>column.name==='kind')){
+      // Forward migration preserves every original UUID, native-start fence,
+      // lease, source generation and receipt. Only route_existing has no owner
+      // identity. Empty/legacy rows never acquire that new role by inference.
+      db.exec('ALTER TABLE assistant_owner_intakes RENAME TO assistant_owner_intakes_v9');
+      createIntakes();
+      const oldColumns='id,original_event_id,event_key,account_key,native_event_id,native_revision,owner_identity_id,source_key,source_revision,state,provision_id,delivery_id,thread_id,native_started,outcome_receipt,outcome_state,settled,next_check_at,created_at';
+      db.exec(`INSERT INTO assistant_owner_intakes(${oldColumns}) SELECT ${oldColumns} FROM assistant_owner_intakes_v9; DROP TABLE assistant_owner_intakes_v9;`);
+    }
+    db.exec(`UPDATE assistant_owner_intakes SET conversation_key=(SELECT e.conversation_key FROM assistant_inbox_events e WHERE e.event_key=assistant_owner_intakes.event_key) WHERE conversation_key IS NULL;
+      CREATE TABLE IF NOT EXISTS assistant_source_intake_events(
+      intake_id TEXT NOT NULL REFERENCES assistant_owner_intakes(id), original_event_id TEXT NOT NULL,
+      event_key TEXT NOT NULL REFERENCES assistant_inbox_events(event_key), account_key TEXT NOT NULL,
+      native_event_id TEXT NOT NULL,native_revision TEXT NOT NULL,ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND ordinal<100),
+      PRIMARY KEY(intake_id,event_key),UNIQUE(intake_id,original_event_id),UNIQUE(intake_id,ordinal));
+      CREATE INDEX IF NOT EXISTS assistant_source_intake_original ON assistant_source_intake_events(account_key,native_event_id,native_revision);
+      CREATE UNIQUE INDEX IF NOT EXISTS assistant_route_intake_active ON assistant_owner_intakes(source_key,source_revision,conversation_key)
+        WHERE kind='route_existing' AND state!='complete';
+      INSERT OR IGNORE INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal)
+        SELECT id,original_event_id,event_key,account_key,native_event_id,native_revision,0 FROM assistant_owner_intakes;`);
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=10');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (10)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -243,6 +268,33 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   };
   // Both account and child-stream pages enter the exact same event journal.
   // Keep dedup/snapshot/bounds in one implementation under the caller's tx.
+  const releasePendingTriageOriginal=(scope,event)=>{
+    const accountKey=digest([scope.origin,scope.assistantId,scope.provider,scope.accountId]);
+    const claims=all(`SELECT i.* FROM assistant_owner_intakes i JOIN assistant_source_intake_events b ON b.intake_id=i.id
+      WHERE b.account_key=? AND b.native_event_id=? AND (b.native_revision=? OR ?='email') AND i.kind='route_existing'`,accountKey,event.id,event.revision,scope.provider);
+    for(const claim of claims){
+      if(claim.frozen||claim.state!=='pending')continue;
+      run("DELETE FROM assistant_source_intake_events WHERE intake_id=? AND native_event_id=? AND (native_revision=? OR ?='email')",claim.id,event.id,event.revision,scope.provider);
+      const remaining=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',claim.id);
+      if(!remaining.length)run('DELETE FROM assistant_owner_intakes WHERE id=?',claim.id);
+      else{
+        // Stable original UUIDs survive; only the still-local ordering is
+        // compacted before the first native request freezes the batch.
+        run('DELETE FROM assistant_source_intake_events WHERE intake_id=?',claim.id);
+        remaining.forEach((entry,index)=>run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,?)',
+          entry.intake_id,entry.original_event_id,entry.event_key,entry.account_key,entry.native_event_id,entry.native_revision,index));
+        const first=remaining[0];run('UPDATE assistant_owner_intakes SET original_event_id=?,event_key=?,native_event_id=?,native_revision=? WHERE id=?',
+          first.original_event_id,first.event_key,first.native_event_id,first.native_revision,claim.id);
+      }
+    }
+  };
+  // Keep parent attempts and their extra structural batch refs under the
+  // SAME durable inbox bound, including explicit generation/redirect recovery.
+  // Overflow never evicts originals, advances a cursor or releases a fence.
+  const assertIntakeRoom=(count,newIntake=true)=>{
+    if(get('SELECT count(*) AS n FROM assistant_source_intake_events').n+count>MAX_EVENTS
+      ||newIntake&&get('SELECT count(*) AS n FROM assistant_owner_intakes').n>=MAX_EVENTS)fail('ASSISTANT_INBOX_FULL');
+  };
   const commitEvents = (scope,page) => {
     let added=0;
     for(const event of page){
@@ -271,7 +323,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const accountKey=digest([scope.origin,scope.assistantId,scope.provider,scope.accountId]);
         const revision=source(scope).configuration_revision;
         if(!Number.isSafeInteger(revision)||revision<0)fail('ASSISTANT_INBOX_CONFLICT');
-        if(get('SELECT 1 FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND native_revision=?',accountKey,event.id,event.revision)){added++;continue;}
+        // A later source-company poll can prove this SAME original was an
+        // owner command. Only an unfrozen routing batch may yield it; already
+        // admitted/native-started work retains its exact role and global fence.
+        releasePendingTriageOriginal(scope,event);
+        if(get('SELECT 1 FROM assistant_source_intake_events WHERE account_key=? AND native_event_id=? AND native_revision=?',accountKey,event.id,event.revision)){added++;continue;}
+        assertIntakeRoom(1);
         run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
           owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(account_key,native_event_id,native_revision,source_key,source_revision) DO NOTHING`,randomUUID(),randomUUID(),key,accountKey,event.id,event.revision,
@@ -279,6 +336,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       }
       added++;
     }
+    run(`INSERT OR IGNORE INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal)
+      SELECT id,original_event_id,event_key,account_key,native_event_id,native_revision,0 FROM assistant_owner_intakes WHERE kind='owner_command'`);
     return added;
   };
   const delivery = id => {
@@ -364,13 +423,21 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           AND i.outcome_state='cancelled' AND i.outcome_receipt IS NOT NULL AND i.source_revision<?
           AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.account_key=i.account_key
             AND n.native_event_id=i.native_event_id AND n.native_revision=i.native_revision
-            AND (n.outcome_state='created' OR n.source_key=i.source_key AND n.source_revision>i.source_revision))`,scope.key,nativeRevision);
-        for(const old of cancelled)run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
-          owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,randomUUID(),old.original_event_id,
-          old.event_key,old.account_key,old.native_event_id,old.native_revision,old.owner_identity_id,scope.key,nativeRevision,randomUUID(),randomUUID(),time());
+            AND (n.outcome_state IN('created','routed') OR n.source_key=i.source_key AND n.source_revision>i.source_revision))`,scope.key,nativeRevision);
+        for(const old of cancelled){
+          const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
+          assertIntakeRoom(originals.length);
+          const next=randomUUID();
+          run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
+            owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at,kind,conversation_key)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,next,old.original_event_id,old.event_key,old.account_key,old.native_event_id,old.native_revision,
+            old.owner_identity_id,scope.key,nativeRevision,randomUUID(),randomUUID(),time(),old.kind,old.conversation_key);
+          for(const original of originals)run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,?)',
+            next,original.original_event_id,original.event_key,original.account_key,original.native_event_id,original.native_revision,original.ordinal);
+        }
         // Pending has never provisioned or admitted a native intake; changing
         // its still-unstarted generation cannot duplicate an unknown create.
-        run("UPDATE assistant_owner_intakes SET source_revision=?,next_check_at=0 WHERE source_key=? AND state='pending' AND native_started=0",nativeRevision,scope.key);
+        run("UPDATE assistant_owner_intakes SET source_revision=?,next_check_at=0 WHERE source_key=? AND state='pending' AND native_started=0 AND frozen=0",nativeRevision,scope.key);
       });
     },
     /** One bounded poll per exact source binding; the host performs provider I/O. */
@@ -557,6 +624,53 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         }
       });
     },
+    /** Queue unknown INCOMING refs for routing to an existing task only.
+     * Cross-company duplicates use the physical account/native identity before
+     * any body/model work. The first original UUID survives batching/restarts;
+     * owner_command records always take precedence, and ignored originals stay
+     * classified without earning processing/ACK. No content enters SQLite. */
+    queueExistingTaskIntakes(scopeInput,{sourceRevision,eventKeys}){return transaction(()=>{
+      const scope=scopeOf(scopeInput);integer(sourceRevision,0,2_147_483_647);
+      if(!['telegram','email','max'].includes(scope.provider)||!Array.isArray(eventKeys)||eventKeys.length>100
+        ||new Set(eventKeys).size!==eventKeys.length)inputError();
+      if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
+      const accountKey=digest([scope.origin,scope.assistantId,scope.provider,scope.accountId]);
+      const selected=eventKeys.map(key=>get('SELECT * FROM assistant_inbox_events WHERE source_key=? AND event_key=?',scope.key,key));
+      if(selected.some(event=>!event))fail('ASSISTANT_INBOX_CONFLICT');
+      for(const event of selected){
+        if(!event.conversation_key||!event.provider_wake||event.task_id!==null||event.processed||event.acked)continue;
+        if(event.dispatched||get(`SELECT 1 FROM assistant_inbox_events e JOIN assistant_inbox_sources s ON s.source_key=e.source_key
+          WHERE e.event_id=? AND (e.event_revision=? OR ?='email') AND e.task_id IS NOT NULL AND e.route_id IS NOT NULL
+          AND s.state='active' AND s.configuration_revision=e.route_source_revision
+          AND json_extract(s.scope_json,'$.origin')=? AND json_extract(s.scope_json,'$.assistantId')=?
+          AND json_extract(s.scope_json,'$.provider')=? AND json_extract(s.scope_json,'$.accountId')=?`,
+          event.event_id,event.event_revision,scope.provider,scope.origin,scope.assistantId,scope.provider,scope.accountId))continue;
+        if(get(`SELECT 1 FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND (native_revision=? OR ?='email')`,accountKey,event.event_id,event.event_revision,scope.provider)
+          ||get("SELECT 1 FROM assistant_source_intake_events WHERE account_key=? AND native_event_id=? AND (native_revision=? OR ?='email')",accountKey,event.event_id,event.event_revision,scope.provider))continue;
+        // A frozen batch cannot absorb a follow-up after its native request.
+        // The next batch reuses this conversation's restricted chat only once
+        // the previous original outcome/native invocation is fully settled.
+        const active=get(`SELECT i.* FROM assistant_owner_intakes i LEFT JOIN assistant_owner_intakes parent ON parent.id=i.redirect_from_intake_id
+          WHERE i.account_key=? AND i.kind='route_existing' AND i.state!='complete'
+          AND (i.conversation_key=? OR parent.source_key=? AND parent.conversation_key=?) ORDER BY i.created_at LIMIT 1`,
+          accountKey,event.conversation_key,scope.key,event.conversation_key);
+        if(active&&(active.frozen||active.source_key!==scope.key||active.source_revision!==sourceRevision))continue;
+        const count=active?get('SELECT count(*) AS n FROM assistant_source_intake_events WHERE intake_id=?',active.id).n:0;
+        if(count>=100)continue;
+        assertIntakeRoom(1,!active);
+        const original=randomUUID(),intake=active?.id??randomUUID();
+        if(!active)run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
+          owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at,kind,conversation_key) VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,'route_existing',?)`,
+          intake,original,event.event_key,accountKey,event.event_id,event.event_revision,scope.key,sourceRevision,randomUUID(),randomUUID(),time(),event.conversation_key);
+        run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,?)',
+          intake,original,event.event_key,accountKey,event.event_id,event.event_revision,count);
+      }
+    });},
+    freezeExistingTaskIntake(id){return transaction(()=>{
+      const row=this.ownerIntake(id);if(row.kind!=='route_existing'||row.source_state!=='active'||row.source_revision!==row.configuration_revision
+        ||!['pending','ready','waiting_owner'].includes(row.state))fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET frozen=1 WHERE id=?',row.id);return this.ownerIntake(row.id);
+    });},
     /** Private structural original-event journal. Neither a sender username nor
      * a model-authored "owner" bit can call native task creation. The production
      * host still rereads the exact signed body and linked native owner ID. */
@@ -568,16 +682,19 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         WHEN i.next_check_at<=? THEN 1 ELSE 2 END,i.created_at,i.id LIMIT 100`,time())
       .map(row=>({...row,scope:scopeInputWithoutKey(JSON.parse(row.scope_json))}));},
     ownerIntake(id){
-      const row=get(`SELECT i.*,e.event_id,e.event_revision,e.conversation_key,s.scope_json,s.state AS source_state,
+      const row=get(`SELECT i.*,e.event_id,e.event_revision,CASE WHEN i.kind='owner_command' THEN e.conversation_key ELSE i.conversation_key END AS conversation_key,s.scope_json,s.state AS source_state,
         s.configuration_revision FROM assistant_owner_intakes i JOIN assistant_inbox_events e ON e.event_key=i.event_key
         JOIN assistant_inbox_sources s ON s.source_key=i.source_key WHERE i.id=?`,uuid(id));
       if(!row)fail('ASSISTANT_INBOX_INTAKE_REQUIRED');
-      return {...row,scope:scopeInputWithoutKey(JSON.parse(row.scope_json))};
+      const originals=all('SELECT original_event_id,event_key,native_event_id,native_revision,ordinal FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',row.id);
+      return {...row,eventIds:originals.map(event=>event.original_event_id),originals,scope:scopeInputWithoutKey(JSON.parse(row.scope_json))};
     },
     prepareOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='pending'||row.source_state!=='active'||row.source_revision!==row.configuration_revision)
         fail('ASSISTANT_INBOX_CONFLICT');
-      const previous=get("SELECT thread_id FROM assistant_owner_intakes WHERE source_key=? AND owner_identity_id=? AND state='complete' AND thread_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",row.source_key,row.owner_identity_id);
+      const previous=row.kind==='route_existing'
+        ?get("SELECT thread_id FROM assistant_owner_intakes WHERE source_key=? AND source_revision=? AND conversation_key=? AND kind='route_existing' AND state='complete' AND settled=1 AND thread_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",row.source_key,row.source_revision,row.conversation_key)
+        :get("SELECT thread_id FROM assistant_owner_intakes WHERE source_key=? AND owner_identity_id=? AND kind='owner_command' AND state='complete' AND thread_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",row.source_key,row.owner_identity_id);
       run('UPDATE assistant_owner_intakes SET state=?,thread_id=? WHERE id=?',previous?'ready':'provisioning',previous?.thread_id??null,row.id);
       return this.ownerIntake(id);
     });},
@@ -603,9 +720,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id);if(!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_CONFLICT');
       run("UPDATE assistant_owner_intakes SET state='uncertain' WHERE id=?",row.id);
     });},
-    finishOwnerIntake(id,{receiptId,state}){return transaction(()=>{
+    finishOwnerIntake(id,{receiptId,state,route=null,taskId=null}){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
-      if(!['ready','started','uncertain','waiting_owner'].includes(row.state)||!['created','ignored','waiting_owner','redirected','cancelled'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
+      if(!(row.kind==='route_existing'?['pending','ready','started','uncertain','waiting_owner']:['ready','started','uncertain','waiting_owner']).includes(row.state)||!['created','routed','ignored','waiting_owner','redirected','cancelled'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
+      if(state==='routed'){
+        if(row.kind!=='route_existing'||!route||route.sourceId!==row.scope.bindingId||route.sourceRevision!==row.source_revision)fail('ASSISTANT_INBOX_CONFLICT');
+        run('UPDATE assistant_owner_intakes SET outcome_route_id=?,outcome_task_id=? WHERE id=?',uuid(route.id),uuid(taskId),row.id);
+      }
       run('UPDATE assistant_owner_intakes SET state=?,outcome_receipt=?,outcome_state=?,settled=?,next_check_at=? WHERE id=?',
         state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled'].includes(state)),state==='waiting_owner'?time()+300000:0,row.id);
     });},
@@ -615,6 +736,27 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ||target.accountId!==row.scope.accountId||target.provider!==row.scope.provider||target.assistantId!==row.scope.assistantId
         ||target.origin!==row.scope.origin||target.bindingId===row.scope.bindingId||activeSource(target).configuration_revision!==sourceRevision)
         fail('ASSISTANT_INBOX_CONFLICT');
+      if(row.kind==='route_existing'){
+        const previous=get('SELECT id FROM assistant_owner_intakes WHERE redirect_from_intake_id=?',row.id);
+        if(previous)return {id:previous.id};
+        // Scoped keys/revisions come ONLY from the selected source's actual
+        // signed monitor journal. Never clone or hash the origin's key into a
+        // different company; no provider body/chat runs while metadata is absent.
+        const refs=row.originals.map(original=>{
+          const matches=all('SELECT * FROM assistant_inbox_events WHERE source_key=? AND event_id=?',target.key,original.native_event_id)
+            .filter(event=>target.provider==='email'||event.event_revision===original.native_revision);
+          if(matches.length!==1||!matches[0].conversation_key||matches[0].task_id!==null||matches[0].processed||matches[0].acked)fail('ASSISTANT_INTAKE_SELECTED_REFERENCE_REQUIRED');
+          return {...original,target:matches[0]};
+        });
+        if(new Set(refs.map(ref=>ref.target.conversation_key)).size!==1)fail('ASSISTANT_INTAKE_SELECTED_REFERENCE_REQUIRED');
+        assertIntakeRoom(refs.length);
+        const first=refs[0],next=randomUUID();
+        run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at,kind,frozen,redirect_from_intake_id,conversation_key) VALUES(?,?,?,?,?,?,NULL,?,?,?,?,?,'route_existing',1,?,?)`,
+          next,first.original_event_id,first.target.event_key,row.account_key,first.target.event_id,first.target.event_revision,target.key,sourceRevision,randomUUID(),randomUUID(),time(),row.id,first.target.conversation_key);
+        refs.forEach((ref,index)=>run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,?)',
+          next,ref.original_event_id,ref.target.event_key,row.account_key,ref.target.event_id,ref.target.event_revision,index));
+        return {id:next};
+      }
       const previous=get('SELECT id FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND native_revision=? AND source_key=?',
         row.account_key,row.native_event_id,row.native_revision,target.key);
       if(previous)return {id:previous.id};
@@ -622,10 +764,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         row.account_key,row.native_event_id,row.native_revision))fail('ASSISTANT_INBOX_CONFLICT');
       const event={id:row.native_event_id,revision:row.native_revision,taskId:null,wake:false,conversationKey:row.conversation_key,
         providerWake:true,ownerQuestionId:null,ownerIdentityId:null};
+      assertIntakeRoom(1);
       commitEvents(target,[event]);const eventKey=digest([target.key,event.id,event.revision]),next=randomUUID();
       run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,owner_identity_id,
         source_key,source_revision,provision_id,delivery_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,next,row.original_event_id,eventKey,
         row.account_key,row.native_event_id,row.native_revision,row.owner_identity_id,target.key,sourceRevision,randomUUID(),randomUUID(),time());
+      run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,0)',next,row.original_event_id,eventKey,row.account_key,row.native_event_id,row.native_revision);
       return {id:next};
     });},
     settleOwnerIntake(id){return transaction(()=>{
@@ -635,7 +779,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     deferOwnerIntake(id){run('UPDATE assistant_owner_intakes SET next_check_at=? WHERE id=?',time()+300000,uuid(id));},
     resumeOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='waiting_owner')fail('ASSISTANT_INBOX_CONFLICT');
-      run("UPDATE assistant_owner_intakes SET state='ready',delivery_id=?,native_started=0,outcome_receipt=NULL,next_check_at=0 WHERE id=?",randomUUID(),row.id);
+      run("UPDATE assistant_owner_intakes SET state=?,delivery_id=?,native_started=0,outcome_receipt=NULL,next_check_at=0 WHERE id=?",row.thread_id?'ready':'pending',randomUUID(),row.id);
     });},
     unrouted(scopeInput) {
       const scope = scopeOf(scopeInput); activeSource(scope);
@@ -645,8 +789,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope=scopeOf(scopeInput);if(!['telegram','email','max'].includes(scope.provider))inputError();activeSource(scope);
       return all(`SELECT event_key,event_id,event_revision,conversation_key,task_id,route_id,route_source_revision,route_checked_at
         FROM assistant_inbox_events WHERE source_key=? AND processed=0 AND conversation_key IS NOT NULL
-        AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes i WHERE i.event_key=assistant_inbox_events.event_key AND (i.state!='complete' OR i.outcome_state IN('created','redirected')))
-        AND (route_checked_at=0 OR route_checked_at<=?) ORDER BY route_checked_at,rowid LIMIT 100`,scope.key,Math.max(0,time()-300_000));
+        AND NOT EXISTS(SELECT 1 FROM assistant_source_intake_events b JOIN assistant_owner_intakes i ON i.id=b.intake_id WHERE b.event_key=assistant_inbox_events.event_key AND (i.state!='complete' OR i.outcome_state IN('created','routed','redirected','ignored')))
+        AND NOT EXISTS(SELECT 1 FROM assistant_source_intake_events b JOIN assistant_owner_intakes i ON i.id=b.intake_id
+          WHERE b.account_key=? AND b.native_event_id=assistant_inbox_events.event_id
+          AND (b.native_revision=assistant_inbox_events.event_revision OR ?='email') AND i.kind='owner_command'
+          AND (i.state!='complete' OR i.outcome_state!='cancelled'))
+        AND (route_checked_at=0 OR route_checked_at<=?) ORDER BY route_checked_at,rowid LIMIT 100`,scope.key,
+        digest([scope.origin,scope.assistantId,scope.provider,scope.accountId]),scope.provider,Math.max(0,time()-300_000));
     },
     deferExternalRouting(scopeInput,{sourceRevision,eventKeys}){
       const scope=scopeOf(scopeInput);if(!['telegram','email','max'].includes(scope.provider))inputError();integer(sourceRevision,0,2_147_483_647);
@@ -684,7 +833,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(intakeId!==null){
           const intake=get('SELECT * FROM assistant_owner_intakes WHERE id=?',uuid(intakeId));
           if(!intake||intake.source_key!==scope.key||!['started','uncertain','complete'].includes(intake.state)
-            ||selected.length!==1||selected[0].event_key!==intake.event_key||projected.length!==1)fail('ASSISTANT_INBOX_CONFLICT');
+            ||projected.length!==1)fail('ASSISTANT_INBOX_CONFLICT');
+          const originalKeys=all('SELECT event_key FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',intake.id).map(event=>event.event_key);
+          if(selected.length!==originalKeys.length||selected.some(event=>!originalKeys.includes(event.event_key)))fail('ASSISTANT_INBOX_CONFLICT');
         }
         for(const row of projected){
           const task=get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',canonical.key,row.taskId);
@@ -709,6 +860,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // a failed network lookup never reaches this transaction or becomes [].
         for(const event of selected){
           const route=projected.find(row=>row.conversationKey===event.conversation_key);
+          if(route&&intakeId===null)releasePendingTriageOriginal(scope,{id:event.event_id,revision:event.event_revision});
           run(`UPDATE assistant_inbox_events SET task_id=?,dispatch_source_key=?,route_id=?,route_source_revision=?,route_checked_at=?
             WHERE event_key=?`,route?.taskId??null,route?canonical.key:null,route?.id??null,route?sourceRevision:null,time(),event.event_key);
         }
@@ -739,6 +891,19 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           fail('ASSISTANT_INBOX_EVENT_CHANGED');
         run('UPDATE assistant_inbox_events SET read_delivery_id=?,read_original_sha256=? WHERE event_key=?',deliveryId,originalSha256,eventKey);
       });
+    },
+    /** Presentation hint from an already committed exact native intake receipt.
+     * It is never a read selector, processing proof or permission to bind. The
+     * ordinary task pass/current source/permanent-chat checks remain native. */
+    sourceIntakeKind({eventKey,routeId,sourceRevision}){
+      if(typeof eventKey!=='string'||!/^[0-9a-f]{64}$/u.test(eventKey))inputError();
+      routeId=uuid(routeId);integer(sourceRevision,0,2_147_483_647);
+      const row=get(`SELECT 1 FROM assistant_inbox_events e JOIN assistant_source_intake_events b ON b.event_key=e.event_key
+        JOIN assistant_owner_intakes i ON i.id=b.intake_id WHERE e.event_key=? AND e.route_id=? AND e.route_source_revision=?
+        AND i.source_key=e.source_key AND i.source_revision=e.route_source_revision AND i.kind='route_existing'
+        AND i.state='complete' AND i.outcome_state='routed' AND i.settled=1 AND i.outcome_receipt IS NOT NULL
+        AND i.outcome_route_id=e.route_id AND i.outcome_task_id=e.task_id`,eventKey,routeId,sourceRevision);
+      return row?'route_existing':null;
     },
     /** Protected task/observer lookup, not a model tool. Original slots are
      * rechecked synchronously against current source/route/task generation.

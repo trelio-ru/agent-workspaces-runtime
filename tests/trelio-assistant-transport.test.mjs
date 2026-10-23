@@ -462,6 +462,25 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         return {content:[],structuredContent:{state:'created',receiptId:randomUUID(),taskId:randomUUID()}};
       });
       assert.equal(result.structuredContent.state,'created');assert.ok(intakeReads>=3,'terminal native read-back is not treated as an executable lease');
+      intake.intakeKind='route_existing';intake.eventIds=[intake.eventId,randomUUID()];intakeState='leased';
+      const projectId=randomUUID(),taskId=randomUUID();
+      client.readSourceIntake=async()=>({state:intakeState,kind:'route_existing',eventIds:intake.eventIds,threadId:intake.threadId,eventId:intake.eventId,
+        sourceRevision:intake.sourceRevision,leaseExpiresAt:new Date(Date.now()+600000).toISOString()});
+      const context=await withAssistantManagedContentArguments({...input,name:'get_assistant_intake_context',
+        args:{intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId}}},async()=>({content:[],structuredContent:{managedEncryptedContent:{
+          schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
+          context:{kind:'route_existing',projectId,candidates:[{taskId,title:buildCompanyEncryptedTextMarker(richPayload.entityId,'body_plain_text')}],
+            creationAuthority:{company:{id:companyId,slug:'encrypted'},viewer:{memberId:randomUUID()},projects:[{id:projectId,slug:'selected-project'}],
+              instructions:{company:{compiledMarkdown:'COMPANY_RULES'},projects:[{projectId,snapshot:{compiledMarkdown:`SELECTED_PROJECT ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_plain_text')}`}}],userProfile:null}}},
+          encryptedPayloads:[richPayload]}}}));
+      assert.match(context.structuredContent.candidates[0].title,/RICH_BODY_CANARY/);
+      assert.equal(context.structuredContent.effectiveInstructions.scope.project.id,projectId);
+      assert.match(context.structuredContent.effectiveInstructions.layers[0].markdown,/SELECTED_PROJECT.*RICH_BODY_CANARY/);
+      assert.equal(context.structuredContent.creationAuthority,undefined,'SAME selected bundle hydrator exposes authority once, without general payload resolve');
+      const beforeTriage=preparations;
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'resolve_assistant_intake',args:{decision:'create_task',clientRequestId:intake.passId,fields:{title:'UNAUTHORIZED_TRIAGE_TITLE'}}},()=>assert.fail('triage cannot stage a new task')),/CAPABILITY_UNAVAILABLE/);
+      assert.equal(preparations,beforeTriage,'owner creation fields cannot reach staging under a triage role');
+
     }finally{host.readActivePass=async()=>pass;}
     for(mode of ['recipient','epoch','ciphertext','public_key','revoke']){
       await assert.rejects(prepareAssistantCompanyEncryption(input));
@@ -2784,4 +2803,25 @@ test('first outgoing hint drops stale or foreign source authority while retainin
   assert.equal(lost.sent,true);assert.doesNotMatch(JSON.stringify(lost),/PRIVATE_NATIVE_HINT_ERROR/);outage=false;
   const preview={stdout:JSON.stringify({sent:false,prepared:true})};
   assert.deepEqual(await observer.project(await observer.prepare(input),preview),preview);
+});
+
+test('triage device transport preserves null-thread company decisions and refuses role/batch swaps before body',async()=>{
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+ const eventIds=[randomUUID(),randomUUID()],input={companyId,sourceId,intakeId,sourceRevision:2,kind:'route_existing',eventId:eventIds[0],eventIds,
+   threadId:null,conversationKey:`email-conversation/v1.${'a'.repeat(64)}`};
+ const credential=`tda_${'q'.repeat(43)}`;let reads=0,calls=0,changed=null,projection={schemaVersion:1,kind:'route_existing',id:intakeId,companyId,sourceId,sourceRevision:2,
+   eventId:eventIds[0],eventIds,threadId:null,state:'waiting_owner',companySelectionRequired:true,taskId:null,receiptId:randomUUID(),readConfirmed:false,
+   execution:null,leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
+ const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>{reads++;return {assistantId,deviceId,credential,expiresAt:1};}},
+   http:async(operation,body,token)=>{calls++;assert.equal(operation,'intakeBegin');assert.deepEqual(body,input);assert.equal(token,credential);return {...projection,...changed};}});
+ assert.equal((await client.beginSourceIntake(input)).execution,null);assert.equal(calls,1);
+ projection={...projection,state:'redirected',redirect:{sourceId:randomUUID(),companyId:randomUUID(),sourceRevision:4},companySelectionRequired:false};
+ assert.equal((await client.beginSourceIntake(input)).state,'redirected','structural redirect with no chat/model remains recoverable');
+ for(const invalid of [{...input,body:'PRIVATE'},{...input,ownerIdentityId:randomUUID()},{...input,eventIds:[eventIds[1],eventIds[0]]},
+   {...input,eventIds:[eventIds[0],eventIds[0]]},{...input,conversationKey:'PRIVATE'}]){
+   const before=reads;await assert.rejects(client.beginSourceIntake(invalid),/INVALID_INPUT/);assert.equal(reads,before);
+ }
+ for(const patch of [{kind:'owner_command'},{eventIds:[randomUUID()]},{state:'leased',execution:null}]){
+   changed=patch;await assert.rejects(client.beginSourceIntake(input),/INVALID_RESPONSE/);
+ }
 });

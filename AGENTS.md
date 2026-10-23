@@ -745,3 +745,12 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
 - First outgoing reply routing is a post-capture structural projection on the
   SAME signed provider/account/pass engine. No hint failure repeats send; native
   bind stays independent. See [contract](docs/assistant-scheduler.md#first-outgoing-reply-routing).
+
+- Existing-task source triage reuses SAME v10 inbox, nullable-thread native company
+  selection, observed proof and two-tool `source_intake` view. Freeze original UUID
+  batches before native begin; selected-scope refs must come from the actual signed
+  journal before body access. Complete-inventory local queue preference grants no
+  company authority. Native `routed` receipts install only original batch routes;
+  presentation-only `intakeKind:'route_existing'` never grants read/ACK/binding.
+  Permanent task binding and material processing remain independent. See the
+  schema v10 section in `docs/assistant-inbox.md`; no per-message chats or new executor.

@@ -263,28 +263,43 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',c
         ||descriptor.sourceId!==pass.sourceId||descriptor.sourceRevision!==pass.sourceRevision||descriptor.threadId!==pass.threadId
         ||descriptor.companyId!==pass.companyId||args.intakePass?.intakeId!==pass.passId)
         throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+      const routing=pass.intakeKind==='route_existing';
+      if(routing&&(descriptor.kind!=='route_existing'||JSON.stringify(descriptor.eventIds)!==JSON.stringify(pass.eventIds)))
+        throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
       const opened=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
-      let reference;
+      let references;
       try{
         const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
         const row=createAssistantInbox({database:opened.database}).ownerIntake(pass.passId);
         if(row.original_event_id!==pass.eventId||row.scope.bindingId!==pass.sourceId||row.scope.accountId!==descriptor.localAccountId
           ||row.source_revision!==pass.sourceRevision||row.thread_id!==pass.threadId||!['started','uncertain'].includes(row.state))
           throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
-        reference={eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key};
+        if(routing&&(row.kind!=='route_existing'||!row.frozen||JSON.stringify(row.eventIds)!==JSON.stringify(pass.eventIds)))
+          throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+        references=routing?row.originals.map(original=>({eventId:original.original_event_id,id:original.native_event_id,revision:original.native_revision,conversationKey:row.conversation_key}))
+          :[{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key}];
       }finally{await opened.close();}
       const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(row=>row.id===pass.sourceId);
-      const message=await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal});
+      const messages=[];let bytes=0;
+      // Complete the frozen exact batch through the SAME signed read engine.
+      // Partial reads never earn confirmation, owner proof, processing or ACK.
+      for(const reference of references){
+        const message=await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal});
+        bytes+=Buffer.byteLength(message.text);if(bytes>262144)throw Object.assign(new Error(),{code:'ASSISTANT_SOURCE_READ_INVALID'});
+        messages.push({...message,eventId:reference.eventId});
+      }
+      const message=messages[0];
       await withRuntimeStateLock(path.join(directory,'runtime-locks',`${pass.passId}.json`),async()=>{
         const latest=validateAssistantActivePass(await host.readActivePass(),identity);
         const saved=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
         if(JSON.stringify(latest)!==JSON.stringify(pass)||saved?.ended||!saved?.state||saved.threadId!==pass.threadId)
           throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
-        await sourceClient.confirmIntakeRead({intakePass:args.intakePass,ownerIdentityId:message.ownerIdentityId,
-          senderExternalUserId:message.ownerExternalUserId,runtimeSessionProof:buildRuntimeSessionProof({state:saved.state,
+        await sourceClient.confirmIntakeRead({intakePass:args.intakePass,...(routing?{kind:'route_existing',eventIds:pass.eventIds}
+          :{ownerIdentityId:message.ownerIdentityId,senderExternalUserId:message.ownerExternalUserId}),runtimeSessionProof:buildRuntimeSessionProof({state:saved.state,
             toolName:'confirm_assistant_intake_read',now:new Date()})},signal);
       });
-      const value={...result.structuredContent,ownerMessage:{text:message.text,verifiedNativeOwner:true}};
+      const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text})=>({eventId,text}))}
+        :{ownerMessage:{text:message.text,verifiedNativeOwner:true}})};
       delete value.sourceRead;
       return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
     },

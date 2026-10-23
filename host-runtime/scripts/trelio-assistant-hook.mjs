@@ -17,12 +17,14 @@ const sameObservation=(left,right)=>left && right && ['schemaVersion','clientFam
 const passKeys=['schemaVersion','assistantId','deviceId','companyId','taskId','passId','deliveryId','threadId','bindingId','bindingRevision'];
 const intakeKeys=['schemaVersion','kind','assistantId','deviceId','companyId','sourceId','sourceRevision','passId','deliveryId','eventId','threadId'];
 export const validateAssistantActivePass=(value,identity)=>{
-  const intake=value?.kind==='source_intake',keys=intake?intakeKeys:passKeys;
+  const intake=value?.kind==='source_intake',routing=intake&&value.intakeKind==='route_existing',keys=intake?[...intakeKeys,...(routing?['intakeKind','eventIds']:[])]:passKeys;
   if(!exactObject(value,keys) || value.schemaVersion!==1 || value.assistantId!==identity.assistantId || value.deviceId!==identity.deviceId
     || keys.filter(key=>key.endsWith('Id')).some(key=>!uuid.test(value[key]??''))
-    || !Number.isSafeInteger(intake?value.sourceRevision:value.bindingRevision) || (intake?value.sourceRevision:value.bindingRevision)<0)
+    || !Number.isSafeInteger(intake?value.sourceRevision:value.bindingRevision) || (intake?value.sourceRevision:value.bindingRevision)<0
+    ||routing&&(!Array.isArray(value.eventIds)||!value.eventIds.length||value.eventIds.length>100||value.eventIds[0]!==value.eventId
+      ||new Set(value.eventIds).size!==value.eventIds.length||value.eventIds.some(id=>!uuid.test(id??''))))
     fail('ASSISTANT_ACTIVE_PASS_REQUIRED');
-  return Object.freeze(Object.fromEntries(keys.map(key=>[key,value[key]])));
+  return Object.freeze(Object.fromEntries(keys.map(key=>[key,key==='eventIds'?Object.freeze([...value[key]]):value[key]])));
 };
 
 export const createAssistantTaskHook=({identity,client,store,readActivePass,lockDirectory,
@@ -46,8 +48,9 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       if(JSON.stringify(active)!==JSON.stringify(pass)) fail('ASSISTANT_HOOK_TASK_MISMATCH');
       const live=await client[intake?'readSourceIntake':'readTaskPass'](locator,runtimeHookSignal());
       const ending=event.hook_event_name==='SessionEnd';
-      if((live.state!=='leased' && !(ending && (intake?['ignored','created','waiting_owner','redirected','cancelled'].includes(live.state):live.state==='closed')))
+      if((live.state!=='leased' && !(ending && (intake?['ignored','created','routed','waiting_owner','redirected','cancelled'].includes(live.state):live.state==='closed')))
         || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
+          ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
           :live.deliveryId!==pass.deliveryId || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision)
         || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || live.state==='leased' && Date.parse(live.leaseExpiresAt)<=now())
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
@@ -186,8 +189,9 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const old=await store.get(slot);if(!old)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       const pass=validateAssistantActivePass(old,identity);
       const intake=pass.kind==='source_intake';
-      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','waiting_owner','redirected','cancelled'].includes(outcome.state):outcome.state!=='confirmed')
-        || !uuid.test(outcome.receiptId??'') || (intake?outcome.id!==pass.passId || outcome.sourceId!==pass.sourceId || outcome.eventId!==pass.eventId
+      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','routed','waiting_owner','redirected','cancelled'].includes(outcome.state):outcome.state!=='confirmed')
+        || !uuid.test(outcome.receiptId??'') || (intake?outcome.id!==pass.passId || outcome.sourceId!==pass.sourceId || outcome.eventId!==pass.eventId||outcome.threadId!==pass.threadId||outcome.sourceRevision!==pass.sourceRevision
+          ||pass.intakeKind==='route_existing'&&(outcome.kind!=='route_existing'||JSON.stringify(outcome.eventIds)!==JSON.stringify(pass.eventIds))
           :['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>outcome[key]!==pass[key])))
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       // The backend already ended these signing sessions. Remove their local
