@@ -7140,7 +7140,7 @@ const decryptEncryptedAgentSkillRuntimePackage = async ({
   }
 };
 
-const inspectEncryptedAgentSkillRuntimeForConsent = async ({
+export const inspectEncryptedAgentSkillRuntimeForConsent = async ({
   origin,
   token,
   packageUrl,
@@ -8896,7 +8896,11 @@ const skillCommand = async (
     if(JSON.stringify(live.companyConnection)!==JSON.stringify(resolution.companyConnection)
       ||JSON.stringify(live.localIdentity)!==JSON.stringify(resolution.localIdentity))
       throw Object.assign(new Error("ASSISTANT_SKILL_SCOPE_DENIED"),{code:"ASSISTANT_SKILL_SCOPE_DENIED"});
-    if (live.artifact.id !== artifactForCache.id || live.artifact.packageSha256 !== artifactForCache.packageSha256)
+    // Encrypted materialization changes only artifactForCache to its verified
+    // plaintext content address. Native admission still names the signed
+    // ciphertext. Compare two immutable wire identities, never ciphertext
+    // against the local cache digest (which would reject every private run).
+    if (live.artifact.id !== resolution.artifact.id || live.artifact.packageSha256 !== resolution.artifact.packageSha256)
       throw Object.assign(new Error("AGENT_SKILL_RELEASE_CHANGED"), {code:"AGENT_SKILL_RELEASE_CHANGED"});
   }
   // Observe an exact queued body through the SAME signed process/account

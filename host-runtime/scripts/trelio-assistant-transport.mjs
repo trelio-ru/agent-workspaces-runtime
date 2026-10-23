@@ -472,9 +472,14 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
  * ordinary arbitrary company payload resolver or a human encryption identity.
  * The native bundle is bounded before opening and never kept in SQLite. */
 export const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,token,companyId,assistantId,
-  fingerprint,openCompany,assertCurrent,signal}) => {
+  fingerprint,openCompany,assertCurrent,signal,taskRuntimeMetadata=false}) => {
+  const privateRuntime=raw?.artifact?.contentProtection==='company_e2ee_v1';
+  if(privateRuntime&&!taskRuntimeMetadata)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  const runtimeMetadata=privateRuntime?{manifest:raw.artifact.manifest,consentChallenge:raw.consentChallenge}:null;
+  const manifestReference=privateRuntime?common.parseAgentEncryptedContentReference(raw.artifact.manifest):null;
+  if(privateRuntime&&manifestReference?.field!=='manifest_json')fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   if(bundle===undefined){
-    if(common.collectAgentEncryptedReferences({config:raw?.remoteMcp?.config??raw?.companyConnection?.config,guidance:raw?.assistantGuidance,...(raw?.remoteMcp?{skillTitle:raw?.skill?.title}:{})}).size)
+    if(common.collectAgentEncryptedReferences({config:raw?.remoteMcp?.config??raw?.companyConnection?.config,guidance:raw?.assistantGuidance,runtimeMetadata,...(raw?.remoteMcp?{skillTitle:raw?.skill?.title}:{})}).size)
       fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
     return {rawResolution:raw,companyEncryption:null};
   }
@@ -491,7 +496,7 @@ export const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,t
     ||opened.runtime.device?.fingerprint!==fingerprint)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
   const selected=readAssistantEncryptedSnapshotBundle({schemaVersion:1,context:raw,encryptedPayloads:bundle.encryptedPayloads},opened,companyId);
   const config=raw.remoteMcp?(raw.remoteMcp.contentProtection==='company_e2ee_v1'?raw.remoteMcp.config:null):raw.companyConnection?.config??null,reference=config===null?null:common.parseAgentEncryptedContentReference(config);
-  const expected=common.collectAgentEncryptedReferences({config,...(raw.assistantGuidance?{guidance:raw.assistantGuidance}:{}),...(raw.remoteMcp?{skillTitle:raw.skill?.title}:{})});
+  const expected=common.collectAgentEncryptedReferences({config,...(raw.assistantGuidance?{guidance:raw.assistantGuidance}:{}),...(raw.remoteMcp?{skillTitle:raw.skill?.title}:{}),...(runtimeMetadata?{runtimeMetadata}:{})});
   if(config!==null&&reference?.field!==(raw.remoteMcp?'remote_mcp_config_json':'config_json')||expected.size>8||selected.payloads.size!==expected.size
     ||[...expected.keys()].some(entityId=>!selected.payloads.has(entityId)))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   const value={...raw};delete value.sourceEncryption;delete value.assistantEncryption;
@@ -502,7 +507,7 @@ export const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,t
       if(ids.some(entityId=>!selected.payloads.has(entityId)))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       return {payloads:ids.map(entityId=>selected.payloads.get(entityId))};
     }});
-  await assertCurrent();return {rawResolution:hydrated,companyEncryption:opened};
+  await assertCurrent();return {rawResolution:{...hydrated,...(privateRuntime?{encryptedManifestEntityId:manifestReference.entityId}:{})},companyEncryption:opened};
 };
 
 const validateAssistantEncryptedSkillRead = (value,pass=null) => {
@@ -1146,7 +1151,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     },
     async hydrateSkillRuntimeResolution(raw,common,signal){
       return hydrateAssistantEncryptedSkill({raw,bundle:raw?.assistantEncryption,common,origin:identity.origin,token:handle,
-        companyId:pass.companyId,assistantId:identity.assistantId,fingerprint:skillFingerprint,assertCurrent:()=>assertLivePass(signal),signal,
+        companyId:pass.companyId,assistantId:identity.assistantId,fingerprint:skillFingerprint,assertCurrent:()=>assertLivePass(signal),signal,taskRuntimeMetadata:true,
         openCompany:async company=>{
           encryptedSkillCompany={id:company.id,slug:company.slug};
           return common.ensureCompanyEncryptionContext({origin:identity.origin,token:handle,company:encryptedSkillCompany,
@@ -1643,7 +1648,7 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
   const raw=await readAssistantEncryptedSnapshotResponse(response,common);
   if(raw.releaseId!==selected.releaseId||raw.company?.id!==selected.companyId||(selected.executionKind==='remote_mcp'?raw.localIdentity?.skillId:raw.artifact?.skillId)!==selected.skillId
     ||(raw.localIdentity?.projectId??null)!==selected.projectId||!raw.assistantGuidance)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-  const {rawResolution}=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
+  const {rawResolution,companyEncryption}=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
   if (selected.executionKind === 'remote_mcp') {
     const native = rawResolution.assistantGuidance, remote = native?.structuredContent?.remoteMcpExecution;
     if (!remote || remote.releaseId !== selected.releaseId || native.structuredContent.skill?.id !== selected.skillId)
@@ -1656,20 +1661,52 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
     const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
     return compactLocalNativeMcpResult('get_agent_skill',native,selected.arguments);
   }
-  const resolved=common.normalizeResolvedSkillRuntimeArtifact(rawResolution);
-  if(resolved.artifact.contentProtection!=='plain'||resolved.trust.level!=='platform_verified'
-    ||resolved.trust.artifactLevel!=='platform_verified'||resolved.trust.requiresDeviceConsent
+  const pending=rawResolution?.trust?.requiresDeviceConsent===true&&rawResolution.trust.consentId===null;
+  const resolved=common.normalizeResolvedSkillRuntimeArtifact(rawResolution,{allowPendingEncryptedConsent:pending});
+  const companyRuntime=resolved.trust.level==='company_unverified'&&resolved.trust.requiresDeviceConsent
+    &&['company_unverified','platform_verified'].includes(resolved.trust.artifactLevel);
+  if(!(companyRuntime||resolved.artifact.contentProtection==='plain'&&resolved.trust.level==='platform_verified'
+    &&resolved.trust.artifactLevel==='platform_verified'&&!resolved.trust.requiresDeviceConsent)
     ||resolved.companyConnection?.secretBindings.length)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  let inspected=null;
+  if(pending){
+    if(resolved.artifact.contentProtection!=='company_e2ee_v1'||!companyEncryption)fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
+    // SAME verifier, bounded encrypted download, TRELIOE1/AAD decrypt, complete
+    // manifest equality and ephemeral cleanup. This is inspection, never an
+    // executable cache or a provider launch, before exact owner approval.
+    inspected=await common.inspectEncryptedAgentSkillRuntimeForConsent({origin,token,packageUrl:resolved.packageUrl,
+      artifact:resolved.artifact,companyEncryption});
+  }
   const native=rawResolution.assistantGuidance,execution=native?.structuredContent?.runtimeExecution;
   if(!execution||execution.releaseId!==selected.releaseId||native.structuredContent.skill?.id!==selected.skillId)
     fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   native.content=[{type:'text',text:'Current skill instructions and assistant execution capability are in structuredContent.'}];
   const privateAuthentication=native.structuredContent.assistantExecution?.privateAuthentication;
+  const runtimeConsent=native.structuredContent.assistantExecution?.runtimeConsent;
+  if(pending&&(!runtimeConsent||runtimeConsent.state!=='owner_review_required'
+    ||runtimeConsent.fields?.runtimeArtifactId!==resolved.artifact.id||runtimeConsent.fields.releaseId!==resolved.releaseId
+    ||runtimeConsent.fields.packageSha256!==resolved.artifact.packageSha256))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   native.structuredContent={...native.structuredContent,runtimeExecution:{...execution,localAction:{...execution.localAction,
     server:'trelio-assistant',tool:'continue_assistant_workspace_action'}},remoteMcpExecution:null,
-    assistantExecution:{state:'shared_runtime',automaticFallbackAllowed:false,...(privateAuthentication?{privateAuthentication}:{})}};
+    assistantExecution:{state:pending?'shared_runtime_setup':'shared_runtime',automaticFallbackAllowed:false,
+      ...(runtimeConsent?{runtimeConsent:{...runtimeConsent,...(inspected?{localInspection:{capabilities:inspected.capabilities,
+        packageSizeBytes:inspected.packageSizeBytes}}:{})}}:{}),...(privateAuthentication?{privateAuthentication}:{})}};
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
   return compactLocalNativeMcpResult('get_agent_skill',native,selected.arguments);
+};
+
+/** Fresh encrypted private-package inspection for the owner question. The
+ * exact native fields are compared again; model-supplied capability claims,
+ * package paths and device/recipient selectors never enter the review. */
+export const inspectAssistantSkillConsentForOwner=async({origin,companyId,fields,signal,common})=>{
+  const selected=normalizeAssistantSkillConsentFields(fields);
+  const result=await materializeAssistantEncryptedSkill({origin,descriptor:{schemaVersion:1,nativeTool:'get_agent_skill',companyId,
+    projectId:selected.projectId,skillId:selected.skillId,releaseId:selected.releaseId,arguments:{sections:['instructions','execution']}},signal,common});
+  const consent=result.structuredContent?.assistantExecution?.runtimeConsent;
+  if(consent?.state!=='owner_review_required'||Object.keys(selected).some(key=>JSON.stringify(selected[key])!==JSON.stringify(consent.fields?.[key]))
+    ||!object(consent.localInspection)||!Array.isArray(consent.localInspection.capabilities)
+    ||consent.localInspection.capabilities.some(value=>typeof value!=='string'||!/^[a-z][a-z0-9-]{0,63}$/u.test(value)))fail('ASSISTANT_SKILL_CONSENT_CHANGED');
+  return {capabilities:[...consent.localInspection.capabilities],packageSizeBytes:consent.localInspection.packageSizeBytes};
 };
 
 /** Host-private client. Model tools receive only projections from these named

@@ -1611,3 +1611,92 @@ test('the shared pure exact-read parser accepts only native structural selectors
     'unreviewed commands are unavailable, never interpreted as safe queries');
   assert.equal(reads,before,'pure parser performs no native/account/private storage I/O');
 });
+
+// Exact native owner/grant effects are exercised in PostgreSQL; this fixture
+// composes the genuine managed profile with actual HPKE, signed ciphertext,
+// complete temporary inspection and then the SAME signed child after consent.
+test('encrypted company runtime is inspected through its exact managed bundle before owner review and executes only after fresh consent',async()=>{
+  const {createAssistantWorkspaceProfile,materializeAssistantEncryptedSkill,inspectAssistantSkillConsentForOwner}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const crypto=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
+  const values=new Map(),nativeStore={get:async slot=>values.get(JSON.stringify(slot))??null,
+    put:async(slot,value)=>values.set(JSON.stringify(slot),structuredClone(value))};
+  await nativeStore.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  const pass={schemaVersion:1,assistantId,deviceId,companyId,taskId:randomUUID(),passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
+  const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),expiresAt:new Date(Date.now()+300000).toISOString(),
+    privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}}};
+  await nativeStore.put({origin,kind:'runtime',id:pass.passId},runtime);
+  let active=true,granted=false,variant='valid',downloads=0,resolveCount=0;const client={readTaskPass:async()=>({...pass,state:active?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300000).toISOString()})};
+  const taskHost={readIdentity:async()=>identity,readActivePass:async()=>pass};
+  const managed=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store:nativeStore,lockDirectory:path.join(directory,'private-consent-keys'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+  const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+  const scopeId=randomUUID(),recipientId=randomUUID(),entityId=randomUUID(),currentRelease=randomUUID(),currentArtifact=randomUUID(),publicationId=randomUUID();
+  const aad={suite:'trelio-e2ee-v1',companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId};
+  const wrapped=await crypto.hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+  const envelope={id:randomUUID(),...aad,hpkeEnc:wrapped.enc,ciphertext:wrapped.ciphertext,aad};
+  const skillId='encrypted-company-task-fixture',root=path.join(directory,'private-consent-package'),childMarker=path.join(directory,'private-consent-child');await fs.mkdir(root);
+  const source=`import fs from 'node:fs';fs.appendFileSync(${JSON.stringify(childMarker)},'1');console.log('PRIVATE_COMPANY_CHILD_OK');`;
+  await fs.writeFile(path.join(root,'main.mjs'),source);await fs.writeFile(path.join(root,'trelio-assistant-execution.json'),JSON.stringify({schemaVersion:1,taskCommands:[['read']]}));
+  const plaintext=await engine.buildAgentSkillPackage({skillId,runtimeVersion:'1.0.0',sourceDirectory:root,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network']});
+  const parsed=engine.parseAndValidateAgentSkillPackage(plaintext,skillId),manifest={format:'trelio-agent-skill-package/v1',skill:{id:skillId,runtimeVersion:'1.0.0'},entrypoint:parsed.entrypoint,
+    capabilities:[...parsed.capabilities].sort(),files:parsed.files.map(file=>({path:file.path,mode:file.mode,sha256:file.sha256,sizeBytes:file.bytes.length}))};
+  const original=path.join(directory,'private-consent-plaintext.skillpkg'),encrypted=path.join(directory,'private-consent-cipher.skillpkg');await fs.writeFile(original,plaintext,{mode:0o600});
+  await crypto.encryptFileToCompanyContainer({sourcePath:original,destinationPath:encrypted,scopePublicEncryptionJwk:publicJwk,
+    aad:{companyId,scopeId,scopeEpoch:1,entityType:'file.agent_skill_runtime_artifacts',entityId,entityRevision:1,schemaVersion:1},
+    originalName:'private.skillpkg',mimeType:'application/vnd.trelio.agent-skill-package+json',writerDeviceId:recipientId,signingPrivateKey:managed.privateKeys.signingPrivateKey});
+  const cipher=await fs.readFile(encrypted),packageSha256=createHash('sha256').update(cipher).digest('hex');
+  const textMarker=field=>crypto.buildCompanyEncryptedTextMarker(entityId,field),jsonMarker=field=>crypto.buildCompanyEncryptedJsonMarker(entityId,field);
+  const fieldAad={companyId,scopeId,scopeEpoch:1,entityType:'agent_skill.publication',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+  const payload={...fieldAad,...await crypto.encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:fieldAad,payload:{values:{manifest_json:manifest,title:'PRIVATE_COMPANY_SKILL_TITLE',instructions_markdown:'# Private company instructions',summary:'Private release',change_reason:'Private purpose'}}})};
+  const fields={skillId,projectId:null,releaseId:currentRelease,publicationId,runtimeArtifactId:currentArtifact,packageSha256,instructionsSha256:'a'.repeat(64)};
+  const descriptor={schemaVersion:1,nativeTool:'get_agent_skill',companyId,projectId:null,skillId,releaseId:currentRelease,arguments:{sections:['instructions','execution']}};
+  const raw=()=>({releaseId:currentRelease,company:{id:companyId,slug:'fixture',name:'Fixture'},localIdentity:{companyId,projectId:null,skillId,memberId,connectionId:null},companyConnection:null,
+    trust:{level:'company_unverified',artifactLevel:'company_unverified',requiresDeviceConsent:true,consentId:granted?publicationId:null},
+    artifact:{id:currentArtifact,skillId,runtimeVersion:'1.0.0',packageFormat:'trelio-company-encrypted-skill-package/v1',contentProtection:'company_e2ee_v1',manifest:jsonMarker('manifest_json'),packageSha256,
+      packageSizeBytes:cipher.length,packageSignature:sign(null,cipher,privateKey).toString('base64'),signingKeyId:'fixture',signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1'},
+    packageUrl:'/api/agent-skills/runtime/package?'+new URLSearchParams({companyId,skillId,expectedReleaseId:currentRelease,artifactId:currentArtifact}),
+    consentChallenge:granted?null:{skill:{title:textMarker('title')},publication:{summary:textMarker('summary'),changeReason:textMarker('change_reason')},artifact:{previousManifest:null}},
+    assistantEncryption:{schemaVersion:1,companyId,recipientDeviceId:recipientId,envelopeId:envelope.id,scopeId,scopeEpoch:1,encryptedPayloads:[payload]},
+    assistantGuidance:{content:[],structuredContent:{skill:{id:skillId,title:textMarker('title'),instructionsMarkdown:textMarker('instructions_markdown')},runtimeExecution:{releaseId:currentRelease,
+      localAction:{server:'trelio-local',tool:'continue_trelio_workspace_action',arguments:{schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId,releaseId:currentRelease}}}},
+      assistantExecution:{runtimeConsent:granted?{state:'accepted',consentId:publicationId}:{state:'owner_review_required',fields,challenge:{},operation:'accept_skill_runtime',continuation:'skill_consent'}}}}});
+  const previous=globalThis.fetch;globalThis.fetch=async(url,options)=>{
+    assert.equal(url.origin,origin);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);assert.equal(options.headers.get('cookie'),null);
+    assert.doesNotMatch(String(options.body??''),/PRIVATE_COMPANY_SKILL_TITLE|Private company instructions|scopePrivateEncryptionJwk/);
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime')return new Response(JSON.stringify({state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'fixture',name:'Fixture'},
+      viewer:{userId:assistantId},accessState:'ready',device:{id:recipientId,fingerprint:managed.fingerprint},scope:{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk},envelope}));
+    if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-compatibility'){
+      const rules='# Private consent fixture',sha256=createHash('sha256').update(rules).digest('hex');
+      return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{status:options.headers.get('x-trelio-agent-rules-sha256')===sha256?'current':'update_required',revisionId:scopeId,version:1,sha256,rulesMarkdown:rules}}));
+    }
+    if(url.pathname==='/api/agent-skills/runtime/resolve'){
+      resolveCount++;const value=raw();if(variant==='latehash'&&resolveCount%2===0)value.artifact.packageSha256='c'.repeat(64);if(variant==='recipient')value.assistantEncryption.recipientDeviceId=randomUUID();
+      if(variant==='scope')value.assistantEncryption.scopeEpoch=2;
+      if(variant==='extra')value.assistantEncryption.encryptedPayloads.push({...payload,entityId:randomUUID()});
+      return new Response(JSON.stringify(value));
+    }
+    assert.equal(url.pathname,'/api/agent-skills/runtime/package');downloads++;const bytes=Buffer.from(cipher);if(variant==='cipher')bytes[bytes.length-1]^=1;return new Response(bytes);
+  };
+  const make=read=>createAssistantWorkspaceProfile({identity,client,host:taskHost,store:nativeStore,...(read?{encryptedSkillRead:descriptor}:{}),lockDirectory:path.join(directory,'private-consent-locks'),lock:(_file,action)=>action()});
+  try{
+    const profile=await make(true),run=action=>engine.withWorkspaceExecutionProfile(profile,action);
+    const view=await run(()=>materializeAssistantEncryptedSkill({origin,descriptor}));
+    assert.deepEqual(view.structuredContent.assistantExecution.runtimeConsent.localInspection.capabilities,['network']);assert.equal(downloads,1);
+    assert.match(JSON.stringify(view),/PRIVATE_COMPANY_SKILL_TITLE/);assert.doesNotMatch(JSON.stringify(view),/~e1:|scopePrivateEncryptionJwk|ciphertext|trelio-local/);
+    await assert.rejects(fs.readFile(childMarker),{code:'ENOENT'});
+    const review=await run(()=>inspectAssistantSkillConsentForOwner({origin,companyId,fields}));assert.deepEqual(review.capabilities,['network']);
+    await assert.rejects(run(()=>inspectAssistantSkillConsentForOwner({origin,companyId,fields:{...fields,packageSha256:'b'.repeat(64)}})),/CONSENT_CHANGED/);
+    for(const changed of ['recipient','scope','extra','cipher']){variant=changed;await assert.rejects(run(()=>materializeAssistantEncryptedSkill({origin,descriptor})));}
+    variant='valid';granted=true;
+    const live=await make(false),plan={prepared:true,scope:{assistantUserId:assistantId,deviceId,companyId,taskId:pass.taskId,passId:pass.passId},localAction:{schemaVersion:1,operation:'skill_run',
+      parameters:{companyId,skillId,releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read']}}};
+    const executed=await engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})}));
+    assert.equal(executed.stdout.trim(),'PRIVATE_COMPANY_CHILD_OK');assert.equal(await fs.readFile(childMarker,'utf8'),'1');
+    variant='latehash';resolveCount=0;
+    await assert.rejects(engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})})),/AGENT_SKILL_RELEASE_CHANGED/);
+    assert.equal(await fs.readFile(childMarker,'utf8'),'1','changed live ciphertext cannot execute the already verified plaintext cache');
+    variant='valid';active=false;await assert.rejects(run(()=>materializeAssistantEncryptedSkill({origin,descriptor})));assert.equal(await fs.readFile(childMarker,'utf8'),'1');
+  }finally{globalThis.fetch=previous;await fs.rm(root,{recursive:true,force:true});await fs.rm(original,{force:true});await fs.rm(encrypted,{force:true});}
+});

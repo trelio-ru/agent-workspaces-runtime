@@ -746,7 +746,7 @@ bridge, OAuth or provider fallback.
 
 ### Managed company runtime consent
 
-A company-authored/unverified signed runtime in a stable plain company uses the
+A company-authored/unverified signed runtime in a stable plain or encrypted company uses the
 SAME native consent, signed resolver/cache and process engine. A task never
 opens the ordinary human loopback consent window or posts a human bridge grant.
 The genuine managed profile returns `ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED`
@@ -761,8 +761,16 @@ fingerprints before HTTP. In encrypted mode only the managed private profile
 may add its own fingerprint. A fresh common resolve and pre-spawn admission,
 never the question or receipt alone, prove execution may continue. Lost effects
 are read back through the existing native operation receipt without a second
-consent. Generic account setup and encrypted private package inspection remain
-separate capabilities; missing support cannot select human UI/OAuth as fallback.
+consent. Encrypted private preview uses only native-selected manifest/publication
+markers in the same bounded managed bundle, own recipient/current epoch and
+injected exact resolver. Before staging an owner question the host uses the SAME
+Ed25519/TRELIOE1 inspector; it seals the actual capabilities/size in the reason
+without executing or caching the pending package. After approval, a fresh native
+resolve plus final spawn recheck bind the immutable ciphertext artifact, not its
+separate verified plaintext cache digest. A real signed-child fixture covers
+inspection/no process, approval/execution and late ciphertext change refusal.
+Generic account setup remains independent; missing support never selects human
+UI/OAuth as fallback.
 
 ### Shared task-skill execution
 

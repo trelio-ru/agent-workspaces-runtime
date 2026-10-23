@@ -221,8 +221,25 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const company=await transport.readAssistantCompanyContentMode({identity,host,client,signal});
     if(company.encryptionState==='plain')return send(args);
+    let selectedArguments=args;
+    if(name==='request_assistant_action'&&args.operation==='accept_skill_runtime'){
+      if(typeof args.reason!=='string'||Buffer.byteLength(args.reason.trim(),'utf8')>1400)fail('ASSISTANT_SKILL_CONSENT_REASON_TOO_LONG');
+      const inspected=await withProductionAssistantWorkspace(async current=>{
+        if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+        const pass=validateAssistantActivePass(await current.host.readActivePass(),identity);
+        return transport.inspectAssistantSkillConsentForOwner({origin:identity.origin,companyId:pass.companyId,
+          fields:args.fields,signal,common});
+      },{signal,encryptedSkillRead:{schemaVersion:1,nativeTool:'get_agent_skill',companyId:company.companyId,
+        projectId:args.fields?.projectId,skillId:args.fields?.skillId,releaseId:args.fields?.releaseId,
+        arguments:{sections:['instructions','execution']}}});
+      // Host-authored observation is protected in the SAME owner reason/intent.
+      // It cannot be supplied by a model boolean or reused for another package;
+      // the native sealed snapshot still pins its original exact byte hashes.
+      selectedArguments={...args,reason:`${args.reason.trim()}\n\nЛокальная проверка подписанного зашифрованного пакета: ${inspected.capabilities.join(', ')||'нет заявленных возможностей'}; ${inspected.packageSizeBytes} байт. Пакет не запускался.`};
+    }
     return transport.withAssistantManagedContentArguments({identity,host,client,store,lockDirectory:path.join(directory,'runtime-locks'),
-      name,args,signal},send);
+      name,args:selectedArguments,signal},send);
   },signal);
 };
 
