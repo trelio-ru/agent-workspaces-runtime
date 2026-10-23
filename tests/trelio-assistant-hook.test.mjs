@@ -142,10 +142,12 @@ test('completion signs only an independently confirmed original selection with t
     if(!allowed)throw Object.assign(new Error(),{code:'ASSISTANT_INBOX_SOURCE_READ_REQUIRED'});
   }});
   const fields={clientRequestId:crypto.randomUUID(),workspaceId:crypto.randomUUID(),workspaceHead:'a'.repeat(40),
-    acceptedRunId:crypto.randomUUID(),noChange:false,processedSourceReferences:selected,sourceProcessingProof:{signature:'FORGED'}};
+    acceptedRunId:crypto.randomUUID(),noChange:false,processedSourceReferences:selected,sourceProcessingProof:{signature:'FORGED'},
+    encryptedMaterialWitness:{signature:'FORGED_MATERIAL'}};
   const event={...f.event(),tool_input:fields};
   const output=await hook(event,'complete_assistant_pass'),normal=verifyProof(f,output,'complete_assistant_pass');
   const input=output.hookSpecificOutput.updatedInput,proof=input.sourceProcessingProof;
+  assert.equal(input.encryptedMaterialWitness,undefined,'only the protected accepted-material host, never model input, builds a witness');
   assert.equal(proof.runtimeSessionId,normal.runtimeSessionId);assert.notEqual(proof.nonce,normal.nonce);
   const [spki]=[...f.records.entries()].find(([,row])=>row.runtimeSessionId===normal.runtimeSessionId);
   const key=crypto.createPublicKey({key:Buffer.from(spki,'base64url'),format:'der',type:'spki'});

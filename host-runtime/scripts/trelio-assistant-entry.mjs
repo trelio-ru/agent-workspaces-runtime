@@ -173,7 +173,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -189,8 +189,10 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,secretBrowserFill,secretGeneration,secretSkill,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
+      prepareWorkspaceRun:profile.prepareWorkspaceRun,
+      prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -212,6 +214,7 @@ export const createProductionAssistantMcp = async () => {
   const identity = await host.readIdentity();
   if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
   return createAssistantMcpClient({ ...identity, store,
+    withWorkspaceArguments:withAssistantEncryptedWorkspaceArguments,
     materializeEncryptedTask: ({descriptor,signal}) => withProductionAssistantWorkspace(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
@@ -896,11 +899,18 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
  * model. Parse it before private I/O; the child repeats live pass/Run admission
  * before accessing local files, including the nominally local status action. */
 export const validateAssistantWorkspacePlan = async raw => {
-  if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection'].includes(key))
+  if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection','encryptedLifecycle'].includes(key))
     || raw.prepared!==true || !raw.scope || Object.keys(raw.scope).sort().join(',')!=='assistantUserId,companyId,deviceId,passId,taskId'
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   const snapshot=JSON.parse(JSON.stringify(raw));
   const action=snapshot.localAction;
+  if(Object.hasOwn(snapshot,'encryptedLifecycle')){
+    if(!['open','status','heartbeat','checkpoint','finish','pause'].includes(action?.operation)
+      || snapshot.encryptedLifecycle?.workspaceId!==(action.operation==='open'?action.parameters?.workspaceId:action.runIdentity?.workspaceId))
+      fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    await validateAssistantEncryptedInspection({descriptor:snapshot.encryptedLifecycle,
+      identity:{origin:'https://trelio.ru'},pass:snapshot.scope});
+  }
   if(Object.hasOwn(snapshot,'encryptedInspection')){
     if(action?.operation!=='inspect' || snapshot.encryptedInspection?.workspaceId!==action.parameters?.workspaceId)
       fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
@@ -946,6 +956,95 @@ export const validateAssistantWorkspacePlan = async raw => {
     || action.operation==='open' && !new RegExp(UUID,'u').test(action.parameters.runtimeSessionId??''))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   if(Buffer.byteLength(JSON.stringify(snapshot))>131072)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   return {...snapshot,runIdentity,invocation};
+};
+
+/** Protect the SAME typed continuation BEFORE a remote MCP call can receive
+ * summary, evidence, paths or questions. Keep the managed key/profile alive
+ * only for this one bounded exchange; no plaintext or key-bearing closure
+ * survives its action. A native refusal/lost result is never replayed.
+ */
+export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
+  {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs')}={})=>{
+  if(name==='complete_assistant_pass')return withAssistantEncryptedMaterial({args,signal},send,{withProfile,loadCommon});
+  if(name!=='continue_assistant_workspace_action' || !['checkpoint','finish','pause'].includes(args.operation))return send(args);
+  if(!args.parameters || Object.hasOwn(args.parameters,'encryptedArguments'))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return withProfile(async({identity,host,prepareWorkspaceRun})=>{
+    const common=await loadCommon();
+    const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+    const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+    const scope={assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+      companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+    const plan=await validateAssistantWorkspacePlan({prepared:true,scope,localAction:{
+      schemaVersion:args.schemaVersion,operation:args.operation,parameters:args.parameters,runIdentity:args.runIdentity}});
+    const encryption=await prepareWorkspaceRun();
+    if(!encryption)return send(args);
+    const response=await common.request(encryption.requestOrigin??identity.origin,
+      await common.requireToken(identity.origin),
+      `/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/runs/${plan.runIdentity.runId}`,{signal});
+    const current=await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response);
+    if(current.run?.id!==plan.runIdentity.runId || !Number.isSafeInteger(current.run.fencingToken)
+      || !['running','waiting_for_human'].includes(current.run.status))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const transport=await import('./trelio-assistant-transport.mjs');
+    const binding={...scope,...plan.runIdentity,fencingToken:current.run.fencingToken,operation:args.operation};
+    const sealed=await transport.sealAssistantWorkspaceArguments({binding,parameters:args.parameters,companyEncryption:encryption});
+    const result=await send({...args,parameters:{encryptedArguments:sealed}});
+    if(result?.isError)return result;
+    if(!result?.structuredContent?.encryptedLifecycle
+      || JSON.stringify(result.structuredContent.localAction?.parameters)!==JSON.stringify({encryptedArguments:sealed})
+      || Object.keys(result.structuredContent.scope??{}).sort().join(',')!==Object.keys(scope).sort().join(',')
+      || Object.entries(scope).some(([key,value])=>result.structuredContent.scope[key]!==value))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    const opened=await transport.openAssistantWorkspaceArguments({binding,sealed,companyEncryption:encryption});
+    return {...result,structuredContent:{...result.structuredContent,localAction:{
+      ...result.structuredContent.localAction,parameters:opened}}};
+  },{signal,workspaceRun:args.runIdentity});
+};
+
+/** Completing an encrypted pass uses the SAME accepted inspector/Git and the
+ * existing observed runtime signer. No cleartext/digest is sent to native MCP
+ * or kept in another journal. The native server still owns accepted material,
+ * noChange/retraction and final grant/head/envelope/CAS validation. */
+export const withAssistantEncryptedMaterial = async ({args,signal},send,
+  {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs')}={})=>{
+  if(Object.hasOwn(args,'encryptedMaterialWitness') || !new RegExp(UUID,'u').test(args.workspaceId??'')
+    || !/^[0-9a-f]{40,64}$/u.test(args.workspaceHead??'') || typeof args.noChange!=='boolean')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return withProfile(async({identity,host,client,store,prepareWorkspaceMaterial})=>{
+    const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
+    const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(!await prepareWorkspaceMaterial())return send(args);
+    const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+    const basis=args.noChange?await client.readTaskMaterialBasis(locator,signal):null;
+    if(args.noChange && (!basis || basis.workspaceId!==args.workspaceId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const common=await loadCommon();
+    const inspection=await common.inspectAcceptedWorkspace(identity.origin,{workspace:args.workspaceId});
+    await common.validateAcceptedAssistantWorkState({inspection,assistantId:identity.assistantId,workspaceHead:args.workspaceHead,
+      previousHead:basis?.workspaceHead??null});
+    const runtime=inspection.companyEncryption?.runtime;
+    if(runtime?.state!=='encrypted' || runtime.accessState!=='ready' || runtime.company.id!==pass.companyId
+      || runtime.viewer?.userId!==identity.assistantId || runtime.envelope?.recipientId!==runtime.device?.id)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const witness={schemaVersion:1,cryptoDeviceId:runtime.device.id,envelopeId:runtime.envelope.id,
+      scopeId:runtime.scope.id,scopeEpoch:runtime.scope.epoch,
+      previousOutcomeId:basis?.receiptId??null,previousHead:basis?.workspaceHead??null};
+    const transport=await import('./trelio-assistant-transport.mjs');
+    const {assistantSourceProcessingReferences}=await import('./trelio-assistant-inbox.mjs');
+    const manifest=transport.assistantEncryptedMaterialProofPayload({...pass,...args,...witness,
+      references:assistantSourceProcessingReferences(args.processedSourceReferences??[])});
+    const {buildRuntimeSessionProof,withRuntimeStateLock}=await import('./trelio-runtime-session.mjs');
+    const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime-locks');
+    // Native reads acquire the ordinary state lock themselves. Complete their
+    // fresh envelope check before taking that lock for this one local signature.
+    await common.currentWorkspaceExecutionProfile().assertWorkspaceInspectionCurrent();
+    return withRuntimeStateLock(path.join(directory,`${pass.passId}.json`),async()=>{
+      signal?.throwIfAborted();
+      if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+      if(record?.schemaVersion!==1 || record.passId!==pass.passId || record.threadId!==pass.threadId || record.ended
+        || !record.state || record.state.runtimeSessionId!==args.runtimeSessionProof?.runtimeSessionId
+        || !Number.isFinite(Date.parse(record.state.expiresAt)) || Date.parse(record.state.expiresAt)<=Date.now())fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      const proof=buildRuntimeSessionProof({state:record.state,toolName:transport.assistantEncryptedMaterialProofTool(
+        createHash('sha256').update(manifest).digest('hex'))});
+      return send({...args,encryptedMaterialWitness:{...witness,runtimeSessionProof:proof}});
+    });
+  },{signal,materialWorkspaceId:args.workspaceId});
 };
 const assistantPlanTaskScope=plan=>({origin:'https://trelio.ru',assistantId:plan.scope.assistantUserId,deviceId:plan.scope.deviceId,
   companyId:plan.scope.companyId,taskId:plan.scope.taskId});
@@ -1068,7 +1167,7 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
 export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProductionAssistantWorkspace,
   loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs')}={}) => {
   const plan=await validateAssistantWorkspacePlan(raw);
-  return withProfile(async({identity,client,store,host,withSecretGenerationKey})=>{
+  return withProfile(async({identity,client,store,host,withSecretGenerationKey,prepareWorkspaceRun})=>{
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
     const active=validateAssistantActivePass(await host.readActivePass(),identity);
@@ -1079,9 +1178,14 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const token=await common.requireToken(identity.origin);
     const inspecting=plan.localAction.operation==='inspect';
     const skill=plan.localAction.operation==='skill_run';
+    const runLifecycle=['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation);
+    const encryption=runLifecycle?await prepareWorkspaceRun():null;
+    if(plan.encryptedLifecycle && (!encryption || encryption.requestOrigin!==plan.encryptedLifecycle.requestOrigin
+      || encryption.runtime.company.id!==plan.encryptedLifecycle.companyId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     if(!skill && !(inspecting && plan.encryptedInspection)){
-      const response=await common.request(identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
-      const snapshot=JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,inspecting?'Assistant accepted Workspace':'Assistant Run')).toString('utf8'));
+      const response=await common.request(encryption?.requestOrigin??identity.origin,token,`/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}/${inspecting?'read-snapshot':`runs/${plan.runIdentity.runId}`}`);
+      const snapshot=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
+        :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,inspecting?'Assistant accepted Workspace':'Assistant Run')).toString('utf8'));
       if(inspecting ? snapshot.workspace?.id!==plan.runIdentity.workspaceId || snapshot.workspace.scopeType!=='task'
         || snapshot.workspace.scopeKey!==`task:${plan.scope.taskId}`
         : snapshot.run?.id!==plan.runIdentity.runId || snapshot.run.workspaceId!==plan.runIdentity.workspaceId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -1096,7 +1200,12 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     // Signed skill commands use the same task-local cwd, but need no invented
     // Workspace/Run. Their native resolver repeats task admission before launch.
     const root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan)):assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
-    if(!inspecting)await common.ensurePrivateDirectory(root);
+    // The common opener claims a new root itself. Precreating that final
+    // --dir makes it look like an unrelated existing directory and correctly
+    // trips its ownership guard. Prepare ONLY its private parent for open;
+    // never weaken that guard or adopt an unrecognized existing folder.
+    const opening=plan.localAction.operation==='open';
+    if(!inspecting)await common.ensurePrivateDirectory(opening?path.dirname(root):root);
     if(!inspecting && !skill && plan.localAction.operation!=='open') {
       const local=await context.readOpenedWorkspaceRunIdentity(directory,identity.origin);
       if(local.workspaceId!==plan.runIdentity.workspaceId || local.runId!==plan.runIdentity.runId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -1125,7 +1234,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           const done=typeof encoding==='function'?encoding:callback;done?.();return true;
         };
         try {
-          process.chdir(options.cwd??(inspecting?previousDirectory:root));
+          process.chdir(options.cwd??(inspecting?previousDirectory:opening?path.dirname(root):root));
           // The common CLI's `--` starts provider arguments. Keep host origin
           // before that boundary; appending it would mutate the provider's
           // command instead of selecting the authenticated native endpoint.
@@ -1156,6 +1265,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       throw error;
     }
   },{encryptedInspection:plan.encryptedInspection??null,
+    workspaceRun:['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation)?plan.runIdentity:null,
     secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
     ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity}:null,
     secretSkill:plan.localAction.operation==='secret_skill_run'

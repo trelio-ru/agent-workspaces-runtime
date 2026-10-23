@@ -6204,6 +6204,17 @@ export const hydrateAgentCompanyEncryptedJson = async ({
   const references = collectAgentEncryptedReferences(value);
   const routingAliasEntityIds = collectAgentRoutingAliasEntityIds(value);
   if (references.size === 0 && routingAliasEntityIds.size === 0) return value;
+  // Shared Run readers hydrate at several stages (overview, exact pinned Run,
+  // claim result). A managed profile must select only native-bundled refs at
+  // ALL of them, without a copied hydrator or a general human resolver fallback.
+  // The explicit per-call callback still wins for existing exact-task readers.
+  // This hook supplies no authority itself: the profile owns the closed map and
+  // repeats its current native binding for every requested batch.
+  const profile=currentWorkspaceExecutionProfile();
+  const selectedResolver=resolvePayloads ?? (profile?.resolveCompanyEncryptedPayloads
+    ? ids=>profile.resolveCompanyEncryptedPayloads({entityIds:ids,
+      companyId:companyEncryption.runtime.company.id,scopeId:companyEncryption.runtime.scope.id,
+      scopeEpoch:companyEncryption.runtime.scope.epoch}) : null);
   const decryptedByEntity = new Map();
   const entityIds = [...new Set([...references.keys(), ...routingAliasEntityIds])];
 
@@ -6211,7 +6222,7 @@ export const hydrateAgentCompanyEncryptedJson = async ({
   // Company mirrors can contain thousands of protected leaves, so the bridge
   // batches exact ids without ever sending plaintext values or search terms.
   for (let offset = 0; offset < entityIds.length; offset += 250) {
-    const response = resolvePayloads ? await resolvePayloads(entityIds.slice(offset, offset + 250)) : await readJsonResponse(await request(
+    const response = selectedResolver ? await selectedResolver(entityIds.slice(offset, offset + 250)) : await readJsonResponse(await request(
       resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
       token,
       "/api/agent-workspaces/encryption/payloads/resolve",
@@ -9698,6 +9709,10 @@ const stageEncryptedDerivedArtifactInventory = async ({
   companyEncryption,
   inventory,
 }) => {
+  // Staging carries protected markers/ciphertext as well as native Run refs.
+  // Keep it on the SAME server-selected encrypted data plane as the payload
+  // batch and candidate; a canonical-origin fallback is not a retry route.
+  const requestOrigin = resolveCompanyEncryptionRequestOrigin(origin, companyEncryption);
   const record = buildEncryptedAgentWorkspaceDerivedArtifactsRecord({
     companyId: companyEncryption.runtime.company.id,
     workspaceId: requireUuid(metadata.workspaceId, "workspace"),
@@ -9715,7 +9730,7 @@ const stageEncryptedDerivedArtifactInventory = async ({
     record,
   );
   const submitStage = async () => readJsonResponse(await request(
-      origin,
+      requestOrigin,
       token,
       `/api/agent-workspaces/runs/${metadata.runId}/encrypted-derived-artifacts`,
       {
@@ -9749,7 +9764,7 @@ const stageEncryptedDerivedArtifactInventory = async ({
     // a lost response; no plaintext manifest is written to local metadata.
     for (let offset = 0; offset < inventory.payloads.length; offset += 100) {
       await readJsonResponse(await request(
-        origin,
+        requestOrigin,
         token,
         "/api/agent-workspaces/encryption/payloads",
         {
@@ -11109,7 +11124,13 @@ const writeContextIndex = async (
   }
 };
 
-const readJsonResponse = async (response) => response.json();
+const readJsonResponse = async (response) => {
+  const profile = currentWorkspaceExecutionProfile();
+  // The same Run engine parses all JSON. A dedicated encrypted profile may
+  // unwrap ONLY its server-selected bounded ciphertext snapshot in process;
+  // human/plain parsing and all downstream hydration algorithms stay shared.
+  return profile?.readWorkspaceJsonResponse ? profile.readWorkspaceJsonResponse(response) : response.json();
+};
 
 export class BridgePluginUpgradeRequiredError extends Error {
   constructor(compatibility) {
@@ -13123,7 +13144,7 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   return documents;
 };
 
-const inspectWorkspace = async (origin, options) => {
+export const inspectAcceptedWorkspace = async (origin, options) => {
   const workspaceId = requireUuid(options.workspace, "workspace");
   const token = await requireToken(origin);
   await ensureBridgeCompatibility(origin, token);
@@ -13147,7 +13168,7 @@ const inspectWorkspace = async (origin, options) => {
         ? await inspectionProfile.readWorkspaceInspectionResponse(snapshotHttpResponse) : await readJsonResponse(snapshotHttpResponse);
       const rawSnapshot=inspectionProfile?.unwrapWorkspaceInspectionSnapshot
         ? await inspectionProfile.unwrapWorkspaceInspectionSnapshot(snapshotResponse) : snapshotResponse;
-      const { company } = validateWorkspaceReadSnapshot(rawSnapshot, workspaceId);
+      const { company, acceptedHead } = validateWorkspaceReadSnapshot(rawSnapshot, workspaceId);
       if(preparedEncryption && (preparedEncryption.runtime.company.id!==company.id
         || preparedEncryption.runtime.company.slug!==company.slug))denyWorkspaceExecutionProfile();
       const companyEncryption = preparedEncryption ?? await ensureCompanyEncryptionContext({
@@ -13162,13 +13183,12 @@ const inspectWorkspace = async (origin, options) => {
         workspaceId,
         rawSnapshot,
         companyEncryption,
-        ...(inspectionProfile?.resolveWorkspaceInspectionPayloads ? {
-          resolvePayloads:ids=>inspectionProfile.resolveWorkspaceInspectionPayloads(ids),
-        } : {}),
       }));
       await inspectionProfile?.assertWorkspaceInspectionCurrent?.();
-      process.stdout.write(`${inspection.workspaceDirectory}\n`);
-      return;
+      // Internal callers may validate immutable accepted material in the SAME
+      // cache. Keys/context stay process-only; the public CLI below still
+      // returns only its ordinary read-only directory.
+      return { ...inspection, acceptedHead, companyEncryption };
     } catch (error) {
       // The accepted head may legitimately advance between the read-snapshot
       // response and the pinned bundle download. Both operations are read-only,
@@ -13182,6 +13202,47 @@ const inspectWorkspace = async (origin, options) => {
       }
     }
   }
+};
+
+const inspectWorkspace = async (origin, options) => {
+  const inspection = await inspectAcceptedWorkspace(origin, options);
+  process.stdout.write(`${inspection.workspaceDirectory}\n`);
+};
+
+/** A business witness must read the immutable Git blob of the freshly
+ * authenticated accepted snapshot, never editable files or a timestamp. The
+ * computed own path is not caller input. Any previous revision is required to
+ * be an ancestor in THAT verified bundle; no historical HTTP or human fallback.
+ * Bodies/hashes remain in RAM and are erased before returning structural facts.
+ */
+export const validateAcceptedAssistantWorkState = async ({ inspection, assistantId, workspaceHead, previousHead = null }) => {
+  if (!UUID_PATTERN.test(String(assistantId)) || !GIT_OBJECT_PATTERN.test(String(workspaceHead))
+    || inspection?.acceptedHead !== workspaceHead
+    || previousHead !== null && !GIT_OBJECT_PATTERN.test(String(previousHead))) denyWorkspaceExecutionProfile();
+  const filePath = `assistants/${assistantId}/WORK.md`, directory = inspection.workspaceDirectory;
+  const read = async head => {
+    const tree = await runGit(["ls-tree", head, "--", filePath], { cwd: directory });
+    if (!/^(?:100644|100755) blob [0-9a-f]{40,64}\t/u.test(tree.stdout)
+      || tree.stdout.trimEnd().split("\t")[1] !== filePath) denyWorkspaceExecutionProfile();
+    const size = await runGit(["cat-file", "-s", `${head}:${filePath}`], { cwd: directory });
+    if (!/^[0-9]+\s*$/u.test(size.stdout) || Number(size.stdout) < 1 || Number(size.stdout) > 65_536) denyWorkspaceExecutionProfile();
+    const bytes = await readGitRevisionFileBytes({ workspaceDirectory: directory, workspaceHead: head, filePath });
+    try {
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (bytes.length > 65_536 || !text.trim() || text.includes("\0")) denyWorkspaceExecutionProfile();
+      return crypto.createHash("sha256").update(bytes).digest();
+    } finally { bytes.fill(0); }
+  };
+  let current, previous;
+  try {
+    current = await read(workspaceHead);
+    if (previousHead && previousHead !== workspaceHead) {
+      await runGit(["merge-base", "--is-ancestor", previousHead, workspaceHead], { cwd: directory });
+      previous = await read(previousHead);
+      if (!crypto.timingSafeEqual(current, previous)) denyWorkspaceExecutionProfile();
+    }
+  } catch { denyWorkspaceExecutionProfile(); }
+  finally { current?.fill(0); previous?.fill(0); }
 };
 
 const migrateEncryptedWorkspaceBrowserFiles = async (origin, options) => {

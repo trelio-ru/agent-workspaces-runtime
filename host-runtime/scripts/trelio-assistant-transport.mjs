@@ -362,7 +362,7 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -403,10 +403,15 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     if(privateSkill.skill.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     Object.freeze(privateSkill.skill.arguments);Object.freeze(privateSkill.skill);Object.freeze(privateSkill);
   }
-  const inspection=encryptedInspection===null?null:await validateAssistantEncryptedInspection({descriptor:encryptedInspection,identity,pass});
-  if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection].filter(Boolean).length>1)
+  let inspection=encryptedInspection===null?null:await validateAssistantEncryptedInspection({descriptor:encryptedInspection,identity,pass});
+  if(materialWorkspaceId!==null && !uuid.test(materialWorkspaceId??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  if(workspaceRun!==null && (!object(workspaceRun) || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
+    || Object.values(workspaceRun).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const ownRun=workspaceRun===null?null:Object.freeze({...workspaceRun});
+  if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId].filter(Boolean).length>1)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null;
+  let lifecycle=null,lifecycleEncryption=null;
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
     if(!same(current,expectedIdentity) || !same(validateAssistantActivePass(await host.readActivePass(),identity),pass)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -425,6 +430,60 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     kind:'digital_assistant',
     encryptedTaskRead:encryptedRead,
     companyEncryptionUserId:identity.assistantId,
+    async prepareWorkspaceMaterial(){
+      if(!materialWorkspaceId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass();
+      const common=await import('./trelio-workspace.mjs');
+      const routing=await common.resolveBridgeDataPlaneRouting({origin:identity.origin,token:handle,workspaceId:materialWorkspaceId});
+      if(routing.company.id!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(routing.encryptionState==='plain')return null;
+      if(routing.encryptionState!=='encrypted')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      // Only the authenticated native routing response selects this accepted
+      // read cell. A model's Workspace UUID never chooses another company,
+      // recipient, history route or data-plane origin.
+      inspection=await validateAssistantEncryptedInspection({descriptor:{schemaVersion:1,companyId:pass.companyId,
+        companySlug:routing.company.slug,workspaceId:materialWorkspaceId,requestOrigin:routing.requestOrigin},identity,pass});
+      await assertLivePass();
+      return inspection;
+    },
+    async prepareWorkspaceRun(){
+      if(!ownRun)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass();
+      const common=await import('./trelio-workspace.mjs');
+      const routing=await common.resolveBridgeDataPlaneRouting({origin:identity.origin,token:handle,workspaceId:ownRun.workspaceId});
+      if(routing.company.id!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(routing.encryptionState==='plain')return null;
+      if(routing.encryptionState!=='encrypted')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      lifecycle=Object.freeze({...routing,workspaceId:ownRun.workspaceId});
+      const opened=await common.ensureCompanyEncryptionContext({origin:identity.origin,requestOrigin:routing.requestOrigin,token:handle,
+        company:routing.company,collectEncryptionKey:async()=>fail('ASSISTANT_WORKSPACE_PROFILE_DENIED')});
+      if(!opened || opened.runtime.company.id!==pass.companyId || opened.runtime.viewer?.userId!==identity.assistantId
+        || opened.runtime.device?.fingerprint!==managedEncryptionDevice?.fingerprint || opened.runtime.accessState!=='ready')
+        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      lifecycleEncryption=opened;inspectionPayloads=new Map();
+      await assertLivePass();
+      return {...opened,requestOrigin:routing.requestOrigin};
+    },
+    async readWorkspaceJsonResponse(response){
+      if(!lifecycleEncryption)return response.json();
+      const bundle=await readAssistantEncryptedSnapshotResponse(response,await import('./trelio-workspace.mjs'));
+      if(!object(bundle) || !Object.hasOwn(bundle,'encryptedPayloads'))return bundle;
+      await assertLivePass();
+      const opened=readAssistantEncryptedSnapshotBundle(bundle,lifecycleEncryption,pass.companyId);
+      const snapshot=opened.context;
+      const run=snapshot.run??(snapshot.id===ownRun.runId?snapshot:null);
+      if((run ? run.id!==ownRun.runId || run.workspaceId!==ownRun.workspaceId
+        : snapshot.workspace?.id!==ownRun.workspaceId || snapshot.workspace?.scopeType!=='task'
+          || snapshot.workspace?.scopeKey!==`task:${pass.taskId}`)
+        || snapshot.company && snapshot.company.id!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      for(const [id,payload] of opened.payloads){
+        const previous=inspectionPayloads.get(id);
+        if(previous && JSON.stringify(previous)!==JSON.stringify(payload))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        inspectionPayloads.set(id,payload);
+      }
+      if(inspectionPayloads.size>4096)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      return opened.context;
+    },
     async assertEncryptedTaskReadCurrent(signal){
       if(!encryptedRead)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertLivePass(signal);
@@ -471,9 +530,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(!inspection)return response.json();
       return readAssistantEncryptedSnapshotResponse(response,await import('./trelio-workspace.mjs'));
     },
-    async resolveWorkspaceInspectionPayloads(ids){
+    async resolveCompanyEncryptedPayloads({entityIds:ids,companyId,scopeId,scopeEpoch}){
       await assertLivePass();
-      if(!inspection || !inspectionPayloads || !Array.isArray(ids) || ids.length>250
+      const opened=inspectionEncryption??lifecycleEncryption;
+      if(!opened || !inspectionPayloads || !Array.isArray(ids) || ids.length>250
+        || companyId!==pass.companyId || scopeId!==opened.runtime.scope.id
+        || scopeEpoch!==opened.runtime.scope.epoch
         || ids.some(id=>!inspectionPayloads.has(id)))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       return {payloads:ids.map(id=>inspectionPayloads.get(id))};
     },
@@ -561,18 +623,18 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       // Validate destination/method before touching private state or observing
       // the live pass. No redirect, encoded separator or native secret/admin
       // path can turn this profile into a bearer-forwarding primitive.
-      if(![identity.origin,encryptedRead?.requestOrigin,inspection?.requestOrigin].includes(requestOrigin) || token!==handle || typeof pathname!=='string' || pathname.length>16_384
+      if(![identity.origin,encryptedRead?.requestOrigin,inspection?.requestOrigin,lifecycle?.requestOrigin].includes(requestOrigin) || token!==handle || typeof pathname!=='string' || pathname.length>16_384
         || typeof buildHeaders!=='function') fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       let url;try{url=new URL(pathname,requestOrigin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
       if(url.origin!==requestOrigin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();
       let rewritten,route,encryptionRuntime=false;
-      if((encryptedRead || privateSkill || inspection) && method==='GET'
-        && (requestOrigin===identity.origin || inspection && requestOrigin===inspection.requestOrigin)
+      if((encryptedRead || privateSkill || inspection || lifecycle) && method==='GET'
+        && (requestOrigin===identity.origin || inspection && requestOrigin===inspection.requestOrigin || lifecycle && requestOrigin===lifecycle.requestOrigin)
         && url.pathname==='/api/agent-workspaces/encryption/runtime' && options.body===undefined){
         const keys=[...url.searchParams.keys()];
         if(new Set(keys).size!==keys.length || keys.some(key=>!['companySlug','fingerprint'].includes(key))
-          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection.companySlug)
+          || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection?.companySlug??lifecycle.company.slug)
           || privateSkill && url.searchParams.has('fingerprint')
           || url.searchParams.has('fingerprint') && url.searchParams.get('fingerprint')!==managedEncryptionDevice?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         // SAME native registry reader. A private authentication invocation may
@@ -583,7 +645,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // The SAME managed registry is a fixed canonical control-plane route.
         // Ciphertext Workspace snapshots/bundles remain on the server-selected
         // data origin; this initial mapping is never an error/fallback retry.
-        if(inspection)url=new URL(url.pathname+url.search,identity.origin);
+        if(inspection || lifecycle)url=new URL(url.pathname+url.search,identity.origin);
         route={proofTool:'assistant_workspace_data_plane_read'};encryptionRuntime=true;
       }else if(privateGeneration && requestOrigin===identity.origin
         && (url.pathname==='/api/agent-secrets/generated-save-context'
@@ -673,6 +735,24 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           if(workspaceRoute ? requestOrigin!==inspection.requestOrigin
             || !url.pathname.startsWith(nativePrefix+`/workspaces/${inspection.workspaceId}/`)
             || !inspectionEncryption : requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        }else if(lifecycle){
+          if(!assistantWorkspaceEncryptedLifecycleRoute(method,route.routePattern))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          const suffix=url.pathname.slice(nativePrefix.length);
+          const runPath=suffix.startsWith(`/runs/${ownRun.runId}/`);
+          const workspacePath=[`/workspaces/${ownRun.workspaceId}`,
+            `/workspaces/${ownRun.workspaceId}/runs/${ownRun.runId}`,
+            `/workspaces/${ownRun.workspaceId}/read-snapshot`,`/workspaces/${ownRun.workspaceId}/encrypted-bundle`].includes(suffix);
+          const control=['/bridge-routing','/bridge-compatibility'].includes(suffix);
+          if(!runPath && !workspacePath && !control && suffix!=='/encryption/payloads'
+            || requestOrigin!==(control?identity.origin:lifecycle.requestOrigin)
+            || !control && !lifecycleEncryption)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          if(suffix==='/encryption/payloads'){
+            let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+            if(input.companySlug!==lifecycle.company.slug || input.writerDeviceId!==lifecycleEncryption.runtime.device.id
+              || !Array.isArray(input.payloads) || input.payloads.length<1 || input.payloads.length>100
+              || input.payloads.some(payload=>!['agent_workspace.checkpoint','agent_workspace.derived_artifact'].includes(payload?.entityType))
+              || input.payloads.some(payload=>payload.entityType==='agent_workspace.checkpoint') && input.payloads.length!==1)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          }
         }else if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       }
       return lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
@@ -691,8 +771,13 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
         headers.delete('x-trelio-assistant-secret-checkout');
         headers.delete(ASSISTANT_WORKSPACE_RECIPIENT_HEADER);
+        headers.delete('x-trelio-assistant-workspace-run');
         if(inspection && route.routePattern?.includes('/workspaces/'))
           headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,inspectionEncryption.runtime.device.id);
+        if(lifecycleEncryption && route.routePattern && !encryptionRuntime){
+          headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,lifecycleEncryption.runtime.device.id);
+          headers.set('x-trelio-assistant-workspace-run',ownRun.runId);
+        }
         if(privateSkill && route.proofTool.startsWith('assistant-skill:'))headers.set('x-trelio-assistant-secret-checkout',
           JSON.stringify({grantId:privateSkill.grantId,runId:privateSkill.runId}));
         headers.set('x-trelio-assistant-pass',JSON.stringify(locator));
@@ -958,6 +1043,15 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
         leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
     },
+    async readTaskMaterialBasis(input,signal){
+      const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),includeMaterialBasis:true},signal);
+      if(value.passId!==input.passId || value.state!=='leased' || !Object.hasOwn(value,'materialBasis'))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      if(value.materialBasis===null)return null;
+      const basis=value.materialBasis;
+      if(!object(basis)||Object.keys(basis).sort().join(',')!=='receiptId,workspaceHead,workspaceId'
+        || !/^[0-9a-f]{40,64}$/u.test(basis.workspaceHead??''))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return Object.freeze({receiptId:id(basis.receiptId),workspaceId:id(basis.workspaceId),workspaceHead:basis.workspaceHead});
+    },
     async renewTaskPass(input,signal) {
       const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
         expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId)},signal);
@@ -1115,7 +1209,7 @@ export const assistantModelInputSchema = source => {
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    for(const key of ['taskPass','runtimeSessionProof','sourceProcessingProof']){
+    for(const key of ['taskPass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness']){
       if(object(node.properties))delete node.properties[key];
       if(Array.isArray(node.required))node.required=node.required.filter(value=>value!==key);
     }
@@ -1132,7 +1226,7 @@ export const assistantModelInputSchema = source => {
   return schema;
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment,
-  materializeEncryptedTask, timeoutMs = 30_000 }) => {
+  materializeEncryptedTask, withWorkspaceArguments, timeoutMs = 30_000 }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
   const perform = async (action, signal) => {
@@ -1182,10 +1276,18 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
-        const response = await request({ config, credential, sessionId: session.sessionId, payload: {
-          jsonrpc: "2.0", id: session.nextRequestId(), method: "tools/call", params: { name, arguments: argumentsSnapshot },
-        } }, { signal });
-        const value = protocol.assertJsonRpcResult(response, "tools/call");
+        const send=async wireArguments=>{
+          // The public input bound was checked before protection. Ciphertext
+          // adds only the standard bounded envelope/base64 overhead; this is
+          // not a larger model input or a caller-controlled wire override.
+          if(Buffer.byteLength(JSON.stringify(wireArguments))>96*1024)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          const response=await request({config,credential,sessionId:session.sessionId,payload:{
+            jsonrpc:"2.0",id:session.nextRequestId(),method:"tools/call",params:{name,arguments:wireArguments},
+          }},{signal});
+          return protocol.assertJsonRpcResult(response,"tools/call");
+        };
+        const value=typeof withWorkspaceArguments==='function'
+          ? await withWorkspaceArguments({name,args:argumentsSnapshot,signal},send) : await send(argumentsSnapshot);
         if (!object(value) || !Array.isArray(value.content) || value.content.length > 20
           || value.content.some(item => !object(item) || item.type !== "text" || typeof item.text !== "string")
           || (value.structuredContent !== undefined && !object(value.structuredContent))
@@ -1252,6 +1354,95 @@ export const validateAssistantEncryptedInspection = async ({descriptor,identity,
   let selected;try{selected=common.resolveEncryptedDataPlaneOrigin(identity.origin,descriptor.requestOrigin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
   if(selected!==descriptor.requestOrigin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
   return Object.freeze(structuredClone(descriptor));
+};
+
+const encryptedWorkspaceArgumentBinding = value => {
+  if(!object(value) || Object.keys(value).sort().join(',')!==
+    'assistantUserId,companyId,deviceId,fencingToken,operation,passId,runId,taskId,workspaceId'
+    || !['checkpoint','finish','pause'].includes(value.operation)
+    || !Number.isSafeInteger(value.fencingToken) || value.fencingToken<1
+    || ['assistantUserId','companyId','deviceId','passId','runId','taskId','workspaceId'].some(key=>!UUID.test(value[key]??'')))
+    fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return Object.fromEntries(Object.keys(value).sort().map(key=>[key,value[key]]));
+};
+const assertWorkspaceArgumentContext = (binding,context) => {
+  if(context?.runtime?.company?.id!==binding.companyId || context.runtime.viewer?.userId!==binding.assistantUserId
+    || context.runtime.state!=='encrypted' || context.runtime.accessState!=='ready'
+    || !UUID.test(context.runtime.device?.id??'') || !UUID.test(context.runtime.scope?.id??'')
+    || !Number.isSafeInteger(context.runtime.scope.epoch) || context.runtime.scope.epoch<1
+    || context.runtime.device.fingerprint!==context.device?.fingerprint
+    || context.runtime.envelope?.recipientType!=='agent_device' || context.runtime.envelope.recipientId!==context.runtime.device.id
+    || context.runtime.envelope.scopeId!==context.runtime.scope.id || context.runtime.envelope.scopeEpoch!==context.runtime.scope.epoch)
+    fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+};
+
+/** Process-only protection for the ordinary typed continuation parameters.
+ * The caller must first validate its original local plan and genuine native
+ * pass/own Run. This codec neither admits a tool nor enables an HTTP route.
+ * Reuse the SAME field payload/signature codec; never send summary/evidence to
+ * remote MCP while waiting for an encrypted-capability refusal. No temporary
+ * field, second vault, human key or new cryptographic wire format is created.
+ */
+export const sealAssistantWorkspaceArguments = async ({binding:rawBinding,parameters,companyEncryption}) => {
+  const binding=encryptedWorkspaceArgumentBinding(rawBinding);
+  assertWorkspaceArgumentContext(binding,companyEncryption);
+  if(!object(parameters))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  let serialized;
+  try{serialized=JSON.stringify(parameters);}catch{fail('ASSISTANT_WORKSPACE_PLAN_INVALID');}
+  // Keep the existing one-MiB ordinary local action process boundary. The
+  // independently bounded remote request still counts encoded ciphertext.
+  if(Buffer.byteLength(serialized)>1024*1024)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  const crypto=await import('./trelio-company-encryption.mjs'),common=await import('./trelio-workspace.mjs');
+  // Keep the existing AAD codec unchanged: pass UUID fits the native 64-byte
+  // entityType bound, Run UUID is entityId and the current fence is revision.
+  // The complete device/task/Workspace tuple is additionally checked inside
+  // the encrypted body. No custom AAD extension or crypto suite is introduced.
+  const aad={companyId:binding.companyId,scopeId:companyEncryption.runtime.scope.id,
+    scopeEpoch:companyEncryption.runtime.scope.epoch,entityType:`assistant.local_${binding.operation}.${binding.passId}`,
+    entityId:binding.runId,entityRevision:binding.fencingToken,schemaVersion:1,purpose:'content'};
+  const payload={...await crypto.encryptCompanyPayload({payload:{schemaVersion:1,binding,parameters:JSON.parse(serialized)},
+    scopePublicEncryptionJwk:companyEncryption.runtime.scope.publicEncryptionJwk,aad}),
+    scopeId:aad.scopeId,scopeEpoch:aad.scopeEpoch,entityType:aad.entityType,entityId:aad.entityId,
+    entityRevision:aad.entityRevision,writerDeviceId:companyEncryption.runtime.device.id};
+  payload.signature=await crypto.signCompanyEncryptionRecord(companyEncryption.device.privateKeys.signingPrivateKey,
+    common.buildAgentEncryptedPayloadSignatureRecord(payload));
+  return {schemaVersion:1,payload};
+};
+
+export const openAssistantWorkspaceArguments = async ({binding:rawBinding,sealed,companyEncryption}) => {
+  const binding=encryptedWorkspaceArgumentBinding(rawBinding);
+  assertWorkspaceArgumentContext(binding,companyEncryption);
+  if(!object(sealed) || Object.keys(sealed).sort().join(',')!=='payload,schemaVersion' || sealed.schemaVersion!==1)
+    fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  try{if(Buffer.byteLength(JSON.stringify(sealed))>2*1024*1024)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');}
+  catch{fail('ASSISTANT_WORKSPACE_PLAN_INVALID');}
+  const payload=sealed.payload,scope=companyEncryption.runtime.scope;
+  const fields='aad,ciphertext,ciphertextSha256,entityId,entityRevision,entityType,nonce,schemaVersion,scopeEpoch,scopeId,signature,suite,wrappedDataKey,writerDeviceId';
+  if(!object(payload) || Object.keys(payload).filter(key=>key!=='writerIdentityId').sort().join(',')!==fields
+    || Object.hasOwn(payload,'writerIdentityId') && payload.writerIdentityId!==null
+    || payload.writerDeviceId!==companyEncryption.runtime.device.id
+    || payload.scopeId!==scope.id || payload.scopeEpoch!==scope.epoch
+    || payload.entityType!==`assistant.local_${binding.operation}.${binding.passId}` || payload.entityId!==binding.runId
+    || payload.entityRevision!==binding.fencingToken || payload.aad?.companyId!==binding.companyId
+    || payload.aad?.scopeId!==scope.id || payload.aad?.scopeEpoch!==scope.epoch
+    || payload.aad?.entityType!==payload.entityType || payload.aad?.entityId!==binding.runId
+    || payload.aad?.entityRevision!==binding.fencingToken || payload.aad?.schemaVersion!==1 || payload.aad?.purpose!=='content'
+    || Object.keys(payload.aad).sort().join(',')!=='companyId,entityId,entityRevision,entityType,purpose,schemaVersion,scopeEpoch,scopeId,suite')
+    fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  const crypto=await import('./trelio-company-encryption.mjs'),common=await import('./trelio-workspace.mjs');
+  let opened;
+  try{
+    if(!await crypto.verifyCompanyEncryptionRecord(companyEncryption.device.publicSigningJwk,
+      common.buildAgentEncryptedPayloadSignatureRecord(payload),payload.signature))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    opened=await crypto.decryptCompanyPayload({encryptedPayload:payload,
+      scopePrivateKey:companyEncryption.scopePrivateEncryptionKey.privateKey,
+      scopePrivateJwk:companyEncryption.scopePrivateEncryptionKey.privateJwk});
+  }catch{fail('ASSISTANT_WORKSPACE_PLAN_INVALID');}
+  if(!object(opened) || Object.keys(opened).sort().join(',')!=='binding,parameters,schemaVersion'
+    || opened.schemaVersion!==1 || JSON.stringify(opened.binding)!==JSON.stringify(binding)
+    || !object(opened.parameters) || Buffer.byteLength(JSON.stringify(opened.parameters))>1024*1024)
+    fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  return opened.parameters;
 };
 
 // Field authority is the SAME bounded native envelope for exact task and
@@ -1397,6 +1588,10 @@ const assistantWorkspaceReadPaths = new Set([
     "/scopes/:scopeType/:scopeId", "/workspaces/:workspaceId", "/workspaces/:workspaceId/runs/:runId",
     "/workspaces/:workspaceId/read-snapshot", "/workspaces/:workspaceId/bundle", "/workspaces/:workspaceId/file",
     "/workspaces/:workspaceId/encrypted-bundle",
+    "/runs/:runId/encrypted-bundle", "/runs/:runId/context/:dependencyKind/encrypted-bundle",
+    "/runs/:runId/context/related/:relatedWorkspaceId/encrypted-bundle",
+    "/runs/:runId/encrypted-storage", "/runs/:runId/encrypted-storage/uploads/:uploadId",
+    "/runs/:runId/encrypted-storage/publication",
     "/runs/:runId/bundle", "/runs/:runId/file", "/runs/:runId/objects/:sha256", "/runs/:runId/codex-conversation",
     "/runs/:runId/context/:dependencyKind/bundle", "/runs/:runId/context-objects/:dependencyWorkspaceId",
     "/runs/:runId/context/related/:relatedWorkspaceId/bundle",
@@ -1407,6 +1602,15 @@ const assistantWorkspaceWritePaths = new Map([
     ["POST /runs/:runId/checkpoints", "checkpoint"], ["POST /runs/:runId/draft", "draft"],
     ["POST /runs/:runId/candidate", "candidate"], ["POST /runs/:runId/objects/register", "register_object"],
     ["PUT /runs/:runId/objects/:sha256/content", "upload_object"], ["PUT /runs/:runId/codex-conversation", "sync_title"],
+    ["POST /encryption/payloads", "encrypted_payload"],
+    ["POST /runs/:runId/encrypted-storage/uploads", "encrypted_upload"],
+    ["PUT /runs/:runId/encrypted-storage/uploads/:uploadId/parts/:partIndex", "encrypted_part"],
+    ["POST /runs/:runId/encrypted-storage/uploads/:uploadId/complete", "encrypted_complete"],
+    ["POST /runs/:runId/encrypted-storage/projection", "encrypted_projection"],
+    ["POST /runs/:runId/encrypted-storage/draft", "encrypted_draft"],
+    ["POST /runs/:runId/encrypted-storage/candidate", "encrypted_candidate"],
+    ["POST /runs/:runId/encrypted-derived-artifacts", "encrypted_derived"],
+    ["POST /runs/:runId/encrypted-candidate-from-draft", "encrypted_candidate"],
 ]);
 // POST-shaped reads keep the native exact-task parsers/MVCC snapshot. They
 // expose no mirror, generic payload resolver, key grant or write route. Only
@@ -1428,6 +1632,23 @@ export const assistantWorkspaceEncryptedInspectionReadRoute = (method, route) =>
     "/bridge-compatibility", "/bridge-routing", "/workspaces/:workspaceId/read-snapshot",
     "/workspaces/:workspaceId/encrypted-bundle",
 ].some(path => route === ASSISTANT_WORKSPACE_PREFIX + path);
+/** Reviewed Run lifecycle of the SAME engine. This classification does not
+ * grant a key, allow server Git/plaintext, admit general fields/proposals or
+ * replace current own-Run/recipient/lease/CAS/native writer authorization. */
+export const assistantWorkspaceEncryptedLifecycleRoute = (method, route) => {
+    if (assistantWorkspaceEncryptedInspectionReadRoute(method, route))
+        return true;
+    const suffix = route.startsWith(ASSISTANT_WORKSPACE_PREFIX + "/")
+        ? route.slice(ASSISTANT_WORKSPACE_PREFIX.length) : "";
+    return (method === "GET" || method === "HEAD") && (suffix === "/workspaces/:workspaceId"
+        || suffix === "/workspaces/:workspaceId/runs/:runId" || suffix === "/runs/:runId/codex-conversation"
+        || suffix === "/runs/:runId/encrypted-bundle" || suffix === "/runs/:runId/context/:dependencyKind/encrypted-bundle"
+        || suffix === "/runs/:runId/context/related/:relatedWorkspaceId/encrypted-bundle"
+        || suffix.startsWith("/runs/:runId/encrypted-storage"))
+        || assistantWorkspaceWritePaths.has(`${method} ${suffix}`) && (suffix === "/encryption/payloads"
+            || ["/runs/:runId/claim", "/runs/:runId/heartbeat", "/runs/:runId/checkpoints", "/runs/:runId/codex-conversation"].includes(suffix)
+            || suffix.startsWith("/runs/:runId/encrypted-"));
+};
 export const assistantWorkspaceOperation = (method, route) => {
     if (!route.startsWith(ASSISTANT_WORKSPACE_PREFIX + "/"))
         throw assistantWorkspacePolicyDenied();
@@ -1480,6 +1701,21 @@ export const assistantSourceProcessingProofTool = (structuralManifestSha256) => 
     if (!/^[0-9a-f]{64}$/u.test(structuralManifestSha256))
         throw assistantWorkspacePolicyDenied();
     return `assistant_source_processing_${structuralManifestSha256}`;
+};
+/** Structural evidence for the SAME observed runtime signer. The protected
+ * host verifies the computed own accepted WORK.md locally; neither its bytes,
+ * name nor plaintext hash crosses the encrypted data boundary. Native receipt,
+ * current envelope and material/retraction/CAS checks remain server authority. */
+export const assistantEncryptedMaterialProofPayload = (input) => JSON.stringify(["assistant-encrypted-material/v1", input.assistantId, input.deviceId,
+    input.companyId, input.taskId, input.passId, input.deliveryId, input.bindingId,
+    input.bindingRevision, input.threadId, input.clientRequestId, input.workspaceId,
+    input.workspaceHead, input.acceptedRunId ?? null, input.noChange, input.goalState,
+    input.cadence, input.timeZone, input.cryptoDeviceId, input.envelopeId, input.scopeId,
+    input.scopeEpoch, input.previousOutcomeId, input.previousHead, input.references.map(ref => [ref.sourceId, ref.sourceRevision, ref.routeId, ref.eventOrdinal])]);
+export const assistantEncryptedMaterialProofTool = (structuralManifestSha256) => {
+    if (!/^[0-9a-f]{64}$/u.test(structuralManifestSha256))
+        throw assistantWorkspacePolicyDenied();
+    return `assistant_encrypted_material_${structuralManifestSha256}`;
 };
 // END GENERATED ASSISTANT WORKSPACE POLICY
 
@@ -1545,7 +1781,7 @@ const maxMonitorPosition=value=>{
 export const assistantMaxChatUrl=value=>{
   if(typeof value!=='string'||!/^https:\/\/web\.max\.ru\/-?(?:0|[1-9]\d{0,18})$/u.test(value))return false;
   const id=BigInt(value.slice('https://web.max.ru/'.length));
-  return id>=-9223372036854775808n&&id<=9223372036854775807n;
+  return id!==0n&&id>=-9223372036854775808n&&id<=9223372036854775807n;
 };
 const sourceScope = input => {
   if(!object(input) || Object.keys(input).some(key=>!['companyId','projectId','skillId'].includes(key))

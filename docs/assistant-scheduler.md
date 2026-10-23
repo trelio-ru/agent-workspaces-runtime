@@ -983,8 +983,8 @@ resolver callback over that exact bundle: company/scope/epoch/entity AAD must
 match and missing/tampered bytes refuse. Core/page projection uses the SAME
 schema-v3 reader/result budget; sections use the SAME deferred-section builder.
 The live pass is checked again after local hydration. No content is saved in
-SQLite, a company mirror or a second cache/vault. Other encrypted Workspace
-writes/files/source/Secret/outcome adapters remain independently gated; this
+SQLite, a company mirror or a second cache/vault. Encrypted Run/material outcomes
+use the separate profile below; file/source/Secret adapters remain independently gated; this
 read subset does not establish `businessReady` or Windows business E2E.
 
 ### Encrypted accepted Workspace inspection
@@ -1006,13 +1006,47 @@ materials inside the existing assistant/device/task namespace. Every reuse
 still reads fresh native authority and verifies exact head/files. The final
 live pass and managed recipient-envelope identity are checked again after
 local work, before publishing the directory. No general payload resolver,
-second cache/vault or encrypted write/source/Secret/outcome permission follows.
+second cache/vault or encrypted write/source/Secret/outcome permission follows from inspection alone.
 Unsupported old workers refuse rather than report loaded authority; neither
 key setup nor this read establishes `businessReady` or Windows business E2E.
 
 The composition fixture runs real Git/container/HPKE/cache inside an isolated
 child HOME and requires an explicit end-of-flow sentinel. It removes inherited
 `NODE_TEST_CONTEXT`; a nested runner exit 0 alone cannot prove execution.
+
+### Encrypted Run and accepted material completion
+
+The SAME native lifecycle, shared Git and v2 encrypted upload/chain engines run
+under one exact `workspaceRun` profile. Only prepare/open/status/heartbeat,
+checkpoint/finish/pause and their reviewed native storage paths are admitted.
+Native JSON supplies referenced ciphertext only; current managed recipient and
+live pass are checked again before streams and after local work. No human keys,
+arbitrary payload resolver/history/Secret route or second executor is added.
+
+The signed worker seals ordinary checkpoint/finish/pause arguments BEFORE the
+single remote MCP call. It reuses common HPKE/AAD/P-256 codecs without publishing
+a temporary field. Standard AAD binds `assistant.local_<operation>.<passUUID>`,
+Run UUID and fencing token; full device/task/Workspace identity is inside the
+ciphertext. Native validation uses the SAME writer/envelope/signature boundary.
+Only an exact opaque echo in the original scope is opened, process-only, before
+the SAME local command. Refusals/lost responses are not replayed.
+
+Encrypted `complete_assistant_pass` reads a fresh authenticated accepted snapshot
+through the SAME inspector/cache and full/delta chain validator. Its own computed
+WORK.md must be a regular nonempty UTF-8/no-NUL blob at that exact head, <=64 KiB.
+For noChange, the existing optional pass/read material basis selects a structural
+previous receipt/head; comparison happens in RAM within the verified ancestry.
+An editable local folder, copied file, cached head or model assertion cannot
+substitute. No body/path/plaintext digest is sent or persisted.
+
+The host-only material witness binds exact pass, accepted result, continuation,
+prior receipt and current recipient/scope/envelope with the SAME observed runtime
+key/nonce engine. Its field is removed from model input by the hook and hidden
+from discovery. The original runtime session/expiry is preserved. Native final
+transaction rechecks envelope, head/accepted material/initiator, retraction and
+correction exclusions, latest valid noChange basis and live grant/lease/native
+ACL. Plain completion retains its existing accepted-file check. Neither this
+composition nor key readiness establishes full encrypted/Windows business E2E.
 
 ### Managed encryption identity ownership
 

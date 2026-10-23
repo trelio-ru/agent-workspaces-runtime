@@ -64,6 +64,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       if(!event.tool_input || Object.getPrototypeOf(event.tool_input)!==Object.prototype) fail('ASSISTANT_HOOK_INVALID_INPUT');
       const supplied=structuredClone(event.tool_input);
       delete supplied.sourceProcessingProof;
+      delete supplied.encryptedMaterialWitness;
       const observation=await observe({hookInput:event});assertRuntimeHookBudget();
       if(observation?.schemaVersion!==1 || observation.clientFamily!=='codex' || observation.source!=='codex_hook'
         || observation.evidenceLevel!=='local_observed' || !observation.modelId) fail('ASSISTANT_HOOK_OBSERVATION_REQUIRED');

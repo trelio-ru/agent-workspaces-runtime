@@ -568,7 +568,7 @@ test('assistant Workspace preflight binds own protected pass and server Run befo
   },readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async directory=>{files++;await fs.mkdir(directory,{recursive:true});},
     runWorkspaceCommand:async args=>{calls.push(args);process.stdout.write('native CLI output\n');}};
   const withProfile=async action=>action({identity:{origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId},
-    client:{},host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
+    prepareWorkspaceRun:async()=>null,client:{},host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
   const result=await executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common});
   assert.equal(result.stdout,'native CLI output\n');assert.equal(files,1);
   const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
@@ -634,7 +634,7 @@ test('prototype writable task roots stop new materialization without moving or h
   const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),request:async()=>({run:{id:p.runId,workspaceId:p.workspaceId}}),
     readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async()=>{writes++;},runWorkspaceCommand:async()=>{writes++;}};
   const withProfile=async action=>action({identity:{origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId},
-    host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
+    prepareWorkspaceRun:async()=>null,host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
   await assert.rejects(executeAssistantWorkspacePlan(plan,{withProfile,loadCommon:async()=>common}),error=>error.code==='ASSISTANT_TASK_STORAGE_REVIEW_REQUIRED');
   assert.equal(writes,0);assert.equal(await fs.readFile(path.join(legacy,'pending.txt'),'utf8'),'synthetic pending work');
 });

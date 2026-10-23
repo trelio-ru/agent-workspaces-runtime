@@ -477,6 +477,11 @@ publication tooling также остаются вне этого публичн
   native snapshot and final managed pass/envelope read-back; only exact pinned
   snapshot/bundle reads open. Child fixtures require an executed-flow sentinel,
   never inherited NODE_TEST_CONTEXT plus exit 0 as proof.
+  Encrypted Run arguments are sealed before remote MCP with the SAME payload
+  codecs and native writer validation; accepted material completion uses that
+  SAME readonly inspector and observed signer. Never send/persist own WORK.md
+  body/path/plaintext hash or treat a model witness as authority. Native
+  acceptance/retraction/noChange/head/recipient guards remain independent.
   Managed setup uses that SAME registration/read-back, OS store and local scope
   opening/TRELIOE1 self-test; key_verified grants no content execution. See
   [identity ownership](docs/assistant-scheduler.md#managed-encryption-identity-ownership).
