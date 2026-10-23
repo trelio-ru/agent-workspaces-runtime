@@ -464,6 +464,9 @@ publication tooling также остаются вне этого публичн
 - Test subprocess fixtures изолируют HOME/USERPROFILE, config roots и origin:
   CODEX_HOME не отделяет hook journal. Проверяй настоящий writer в fixture-очереди
   с cleanup; stdio collector не должен читать рабочий журнал/credential.
+  Native locked-Keychain fixtures prepare the real helper in their isolated HOME
+  before the unchanged no-UI lookup deadline; cold compilation remains covered
+  by the separate migration/rebuild fixture, never a relaxed runtime deadline.
 - `search` возвращает компактный `guidance` перед материалами; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.

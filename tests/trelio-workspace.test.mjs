@@ -8392,6 +8392,27 @@ test("macOS bridge preserves plaintext without opening UI when Keychain is locke
     );
     await execFileAsync(
       "/usr/bin/security",
+      ["unlock-keychain", "-p", keychainPassword, keychainFile],
+      { encoding: "utf8" },
+    );
+    // Each isolated HOME has a cold source-reviewed Swift helper. Prepare it
+    // through the real empty Keychain reader before timing the locked lookup:
+    // compilation is setup, not evidence that SecurityAgent blocked the read.
+    // Keep the existing five-second locked-read assertion unchanged; the
+    // adjacent migration/rebuild fixture independently covers cold compilation.
+    const prepared = await execFileAsync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { getMacosBridgeSessionToken } from ${JSON.stringify(pathToFileURL(bridgePath).href)}; process.stdout.write(String(await getMacosBridgeSessionToken(process.argv[1]) === null));`,
+        origin,
+      ],
+      { encoding: "utf8", env: childEnvironment, timeout: 30_000 },
+    );
+    assert.equal(prepared.stdout, "true");
+    await execFileAsync(
+      "/usr/bin/security",
       ["lock-keychain", keychainFile],
       { encoding: "utf8" },
     );
