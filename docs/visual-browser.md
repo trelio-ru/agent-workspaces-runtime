@@ -19,6 +19,8 @@ metadata: frame/session IDs, размеры, scroll flags, фазу и безо�
 bodies, clipboard, selectors или произвольный результат протокола браузера. Отдельный signed opt-in для
 входящих файлов возвращает только локальный receipt, описанный ниже.
 У API нет команд evaluate, произвольного CDP, raw HTTP или чтения профиля.
+Отдельный signed opt-in исходящих файлов выбирает host-frozen originals через
+native file chooser; он возвращает обычное наблюдение интерфейса, без bytes/paths.
 PNG проверяется до обычного stdout limit: размер, chunks/CRC и отсутствие
 текстовых/вложенных данных. Невалидный marker не возвращается как обычный stdout.
 
@@ -255,6 +257,52 @@ Workspace. Разрешённое сохранение в Workspace выполн
 публиковать его, переходить по его инструкциям или расширять аудиторию.
 Unsupported/link-required/size/limit – отдельные закрытые причины; generic
 HTTP/другой browser transport не является fallback.
+
+## Исходящие файлы
+
+`VISUAL_FILE_UPLOAD_API === 'trelio.visual-file-upload/v1'` в host module
+подтверждает additive API. Signed provider включает `fileUploads: true` в
+`runVisualSession`; default false сохраняет прежний контракт других навыков.
+Opt-in закреплён в live owner. Изменение требует обычного close с сохранением
+авторизации, а не переиспользования worker со старой policy.
+
+`upload-files {frameId,x,y,files:[absolutePath,...]}` выбирает один или несколько
+originals через отрисованную кнопку вложения. Типы/расширения не фильтруются
+host-ом: фотографии, видео, документы, архивы и другие bytes остаются данными,
+не исполняются и не распаковываются. Допустимость формата определяет сайт.
+Пользователь должен разрешить выбранные файлы, destination и действие; скачивание
+входящего файла или вход в аккаунт не дают основания на upload.
+
+До website input host проверяет regular files, отсутствие symlink ancestors,
+hardlinks/devices/directories и изменения source во время чтения. Он не меняет
+originals или их ACL. Сохраняются имя и байты, duplicate basenames из разных
+каталогов не конфликтуют. Выделенные private copies вне auth profile передаются
+через тот же закрытый host/extension transport; source/staging paths, hashes,
+binary/base64, input identity и browser protocol не выходят через MCP.
+Windows UNC/device paths и alternate data streams не открываются.
+
+Копирование потоковое, до 1 GiB на файл, 32 originals за вызов, 2 GiB/256 файлов
+на browser lifetime и 25 секунд на staging в пределах исходной lease. Это
+ресурсные границы локальной копии, не квоты/разрешённые форматы VK. Полный private
+command сохраняет прежний deadline. Ошибка до dispatch удаляет только собственную
+неполную копию; источник и прежние uploads сохраняются.
+
+После fresh frame review один trusted coordinate click открывает перехваченный
+`Page.fileChooserOpened`. Только его top-frame backend node, прежние loader/
+navigation generation, origin, manual gate и lease разрешают один
+`DOM.setFileInputFiles` с frozen paths. Ни selector, ни произвольный DOM/CDP
+не принимаются. Single-file chooser не сокращает multi-file selection молча.
+Late/unrequested chooser не получает files и не открывает OS dialog. Manual
+handoff штатно отсоединяет debugger, возвращая обычный chooser человеку.
+
+После выбора возвращается fresh text/PNG. Change handler сайта может начать
+upload сразу; выбор не доказывает завершение upload, отправку сообщения или
+публикацию. Проверь состояние вложений и отдельный результат порученного действия.
+Неизвестный результат, detach и timeout не разрешают повтор input; сначала
+fresh read-back. Copies после dispatch удерживаются до normal browser cleanup:
+renderer может читать File асинхронно даже после потерянного ответа. Они не
+попадают в auth archive. Crash сохраняет private остаток по прежнему recovery
+контракту, не доказывает upload/save и не разрешает replay.
 
 ## Локальное хранение и ручной вход
 

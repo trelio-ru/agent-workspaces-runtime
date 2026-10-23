@@ -8,6 +8,8 @@ import { crc32 } from 'node:zlib';
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 import { saveVisualAttachment } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { validVisualArguments } from '../host-runtime/scripts/trelio-visual-result.mjs';
+import { freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-uploads.mjs';
 
 // A tiny stored ZIP builder keeps the fixture public, deterministic and free
 // of Office tooling, downloaded documents and corporate source/code samples.
@@ -77,4 +79,80 @@ test('maximum-size original uses canonical decoding and a full cache never evict
     await assert.rejects(saveVisualAttachment(directory,{mimeType:'text/plain',dataBase64:Buffer.from('extra').toString('base64')},sessionId),{code:'attachment_limit_reached'});
     assert.equal((await fs.readdir(path.join(directory,'attachments'))).length,32); assert.equal((await fs.stat(receipt.filePath)).size,MAX_ATTACHMENT_BYTES);
   } finally { await fs.rm(directory,{recursive:true,force:true}); }
+});
+
+test('outgoing staging preserves arbitrary formats, original names, empty files and bytes above the incoming limit', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const owned = path.join(directory, 'owned'); await fs.mkdir(owned, { mode: 0o700 });
+  const entries = [
+    ['документ.docx', Buffer.from('synthetic document bytes')],
+    ['archive.zip', Buffer.from('opaque original archive, never extracted')],
+    ['script.js', Buffer.from('untrusted file bytes, never executed')],
+    ['unknown.data', Buffer.alloc(21 * 1024 * 1024, 0x78)],
+    ['empty.txt', Buffer.alloc(0)],
+  ];
+  const files = [];
+  for (const [name, bytes] of entries) { const file = path.join(directory, name); await fs.writeFile(file, bytes); files.push(file); }
+  const modes = await Promise.all(files.map(async file => (await fs.stat(file)).mode));
+  const frozen = await freezeVisualUploads({ directory: owned, files, deadlineAt: Date.now() + 30_000 });
+  assert.equal(frozen.files.length, entries.length);
+  for (const [index, result] of frozen.files.entries()) {
+    assert.equal(path.basename(result.filePath), entries[index][0]);
+    assert.notEqual(result.filePath, files[index]);
+    assert.deepEqual(await fs.readFile(result.filePath), entries[index][1]);
+    assert.equal(result.sha256, createHash('sha256').update(entries[index][1]).digest('hex'));
+    assert.equal((await fs.stat(files[index])).mode, modes[index], 'never harden or rewrite a selected source');
+  }
+  await fs.writeFile(files[0], 'changed after selection');
+  assert.deepEqual(await fs.readFile(frozen.files[0].filePath), entries[0][1], 'browser receives frozen bytes');
+  assert.equal(validVisualArguments('upload-files', { frameId: randomUUID(), x: 1, y: 2, files }), true);
+  for (const input of [[], ['relative'], [files[0], files[0]], null]) {
+    assert.equal(validVisualArguments('upload-files', { frameId: randomUUID(), x: 1, y: 2, files: input }), false);
+  }
+});
+
+test('outgoing staging refuses directories, hardlinks, linked ancestors, resource overflow and expired work before browser input', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-guards-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const owned = path.join(directory, 'owned'); await fs.mkdir(owned, { mode: 0o700 });
+  const file = path.join(directory, 'source.bin'); await fs.writeFile(file, 'synthetic bytes');
+  const stage = (files, extra = {}) => freezeVisualUploads({ directory: owned, files, deadlineAt: Date.now() + 30_000, ...extra });
+  await assert.rejects(stage([directory]), { code: 'upload_file_invalid' });
+  await assert.rejects(stage([file], { remainingBytes: 1 }), { code: 'upload_limit_reached' });
+  await assert.rejects(stage([file], { deadlineAt: 0 }), { code: 'lease_expired' });
+  const alias = path.join(directory, 'linked');
+  await fs.symlink(owned, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const linkedSource = path.join(owned, 'linked-source.bin'); await fs.writeFile(linkedSource, 'keep');
+  await assert.rejects(stage([path.join(alias, 'linked-source.bin')]), { code: 'upload_file_invalid' });
+  const hardlink = path.join(directory, 'hardlink.bin'); await fs.link(file, hardlink);
+  await assert.rejects(stage([hardlink]), { code: 'upload_file_invalid' });
+  assert.deepEqual((await fs.readdir(owned)).sort(), ['linked-source.bin']);
+  assert.equal(await fs.readFile(file, 'utf8'), 'synthetic bytes');
+});
+
+test('a source changed during streaming is never handed to the browser and its partial copy is removed', async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-race-')));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const owned = path.join(directory, 'owned'); await fs.mkdir(owned, { mode: 0o700 });
+  const file = path.join(directory, 'source.bin'); await fs.writeFile(file, Buffer.alloc(128 * 1024, 1));
+  const open = fs.open;
+  let changed = false;
+  fs.open = async function(target, ...args) {
+    const handle = await open.call(this, target, ...args);
+    if (target === file) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        const result = await read(...readArgs);
+        if (!changed) { changed = true; await fs.appendFile(file, 'replacement bytes'); }
+        return result;
+      };
+    }
+    return handle;
+  };
+  try {
+    await assert.rejects(freezeVisualUploads({ directory: owned, files: [file], deadlineAt: Date.now() + 30_000 }), { code: 'upload_file_changed' });
+    assert.equal(changed, true);
+    assert.deepEqual(await fs.readdir(owned), []);
+  } finally { fs.open = open; }
 });

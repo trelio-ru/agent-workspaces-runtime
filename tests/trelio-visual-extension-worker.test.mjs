@@ -5,7 +5,60 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { visualExtensionWorker, visualDocumentResponsePolicy } from '../host-runtime/scripts/trelio-visual-extension-worker.mjs';
 import { visualCookieState } from '../host-runtime/scripts/trelio-visual-cookie-state.mjs';
+import { randomUUID } from 'node:crypto';
 const startWorker = (config, context) => vm.runInNewContext(`(${visualExtensionWorker.toString()})(${JSON.stringify(config)}, (${visualCookieState.toString()})(${JSON.stringify(config)}), ${createBrowserRequestPacing.toString()}, ${createBrowserTabBudget.toString()}, ${visualDocumentResponsePolicy.toString()});`, context);
+
+test('lost file-selection acknowledgement consumes the original frame and never replays native input', async () => {
+  const events = { addListener() {} }, sent = [];
+  let socket, nativeEvent, selections = 0, chooserFrame = 'main', currentUrl = 'about:blank';
+  const context = { URL, Date, TextEncoder, performance, setTimeout, clearTimeout, crypto: { randomUUID }, chrome: {
+    runtime: { id: 'fixture', onMessage: events },
+    debugger: { onDetach: events, onEvent: { addListener(fn) { nativeEvent = fn; } }, async attach() {},
+      async sendCommand(_source, method, args) {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main', loaderId: 'original', mimeType: 'text/html', url: currentUrl } } };
+        if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 }, cssContentSize: { x: 0, y: 0, width: 800, height: 600 } };
+        if (method === 'Input.dispatchMouseEvent' && args.type === 'mouseReleased') {
+          queueMicrotask(() => nativeEvent({ tabId: 1 }, 'Page.fileChooserOpened', { frameId: chooserFrame, backendNodeId: 7, mode: 'selectMultiple' }));
+        }
+        if (method === 'DOM.setFileInputFiles') { selections++; throw Error('PRIVATE_NATIVE_LOST_REPLY'); }
+        return {};
+      } },
+    webRequest: { onBeforeRequest: events, onHeadersReceived: events },
+    cookies: { onChanged: events, async getAll() { return []; } },
+    declarativeNetRequest: { async getSessionRules() { return []; }, async updateSessionRules() {} },
+    windows: { onCreated: events, onRemoved: events, async getAll() { return [{ id: 1 }]; } },
+    tabs: { onCreated: events, onRemoved: events,
+      async query() { return [{ id: 1, url: currentUrl, status: 'complete' }]; },
+      async get() { return { id: 1, url: currentUrl, status: 'complete' }; },
+      async update(_id, input) { currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
+      async sendMessage(_id, message) { return message.kind === 'authentication-guard' ? { blocked: false } : { text: 'synthetic', controls: [], nextOffset: null, scanLimited: false }; } },
+  }, WebSocket: class { static OPEN = 1; constructor() { socket = this; this.readyState = 1; } send(value) { sent.push(JSON.parse(value)); } } };
+  const config = { origins: ['https://example.test'], domains: [], matches: ['https://example.test/*'],
+    initialUrl: 'https://example.test/', endpoint: 'ws://127.0.0.1/', token: 'synthetic', observationMode: 'text', fileUploads: true, deadlineAt: Date.now() + 10_000 };
+  startWorker(config, context);
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await tick(); socket.onopen();
+  let sequence = 0;
+  const dispatch = async (operation, args = {}) => {
+    const id = String(++sequence); socket.onmessage({ data: JSON.stringify({ id, operation, args }) });
+    for (let i = 0; i < 30; i++) { await tick(); const item = sent.find(value => value.id === id); if (item) return item.result; }
+    throw Error('synthetic_command_timeout');
+  };
+  await dispatch('restore-session-auth', { cookies: [], replace: false });
+  const frame = await dispatch('read-text');
+  assert.equal(frame.state, 'ready');
+  const args = { frameId: frame.frameId, x: 10, y: 20, files: ['/synthetic/private/frozen.bin'] };
+  assert.equal((await dispatch('upload-files', args)).reason, 'operation_failed');
+  assert.equal(selections, 1);
+  assert.equal((await dispatch('upload-files', args)).reason, 'stale_frame');
+  nativeEvent({ tabId: 1 }, 'Page.fileChooserOpened', { frameId: 'main', backendNodeId: 7, mode: 'selectMultiple' });
+  await tick(); assert.equal(selections, 1, 'unsolicited/late chooser cannot select files');
+  chooserFrame = 'foreign-frame';
+  const fresh = await dispatch('read-text');
+  assert.equal((await dispatch('upload-files', { ...args, frameId: fresh.frameId })).reason, 'upload_control_required');
+  assert.equal(selections, 1, 'foreign frame never receives a selection');
+  assert.equal(JSON.stringify(sent).includes('PRIVATE_NATIVE_LOST_REPLY'), false);
+});
 
 test('document response guard distinguishes redirects from final resources without revealing headers', () => {
   const header = (name, value) => ({ name, value });

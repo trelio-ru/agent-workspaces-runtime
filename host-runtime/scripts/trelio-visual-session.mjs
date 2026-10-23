@@ -101,8 +101,8 @@ async function request(owner, operation, args) {
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, authentication = null, env = process.env, fixture }) {
-  if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads)) return visualStatus('error', 'invalid_input');
+export async function runVisualSession({ origins, domains = [], operation, args = {}, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, env = process.env, fixture }) {
+  if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof fileUploads !== 'boolean' || (operation === 'download-attachment' && !attachmentDownloads) || (operation === 'upload-files' && !fileUploads)) return visualStatus('error', 'invalid_input');
   if (['wait', 'close', 'disconnect'].includes(operation) ? !args || Object.keys(args).length : !validVisualArguments(operation, args)) return visualStatus('error', 'invalid_input');
   const binding = visualSessionBinding(env);
   const policy = createVisualOriginPolicy({ origins, domains, allowLoopback: Boolean(fixture) });
@@ -161,7 +161,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
     // Upgrading a provider may reuse its saved auth but must not silently
     // reuse an older live worker with a different content-disclosure mode.
     // Cleanup/status remain available so the exact owner can finish it safely.
-    if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
+    if (((owner.observationMode || 'image') !== observationMode || (owner.attachmentDownloads === true) !== attachmentDownloads || (owner.fileUploads === true) !== fileUploads) && !['status', 'wait', 'close', 'ready', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
     if ((owner.authenticationFingerprint || null) !== authenticationFingerprint && !['status', 'wait', 'close', 'disconnect'].includes(operation)) return visualStatus('error', 'observation_mode_mismatch');
     // Do not slide the original deadline when another CLI invocation arrives.
     if (owner.deadlineAt <= Date.now()) return visualStatus('error', 'lease_expired');
@@ -216,7 +216,7 @@ export async function runVisualSession({ origins, domains = [], operation, args 
   owner = {
     schemaVersion: 1, scope: binding.scope, bindingHash: binding.bindingHash, deadlineAt: binding.deadlineAt,
     pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
-    origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, authentication, authenticationFingerprint,
+    origins, domains, directory: configDirectory, operation, args, observationMode, attachmentDownloads, fileUploads, authentication, authenticationFingerprint,
     mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
     ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
   };
@@ -282,6 +282,9 @@ export function createVisualControlServer({ token, dispatch, mailDispatch }) {
 
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 export const VISUAL_AUTHENTICATION_API = 'trelio.protected-browser-auth/v1';
+// Additive signed opt-in. A provider checks this marker before relying on file
+// chooser delivery; source availability never claims that an old host has it.
+export const VISUAL_FILE_UPLOAD_API = 'trelio.visual-file-upload/v1';
 // Additive capability: legacy v1 recipes keep their exact normalization and
 // credential fingerprint. A provider must check this export before declaring
 // value-free navigation between private credential forms.

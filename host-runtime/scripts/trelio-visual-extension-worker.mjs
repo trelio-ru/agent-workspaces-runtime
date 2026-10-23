@@ -38,7 +38,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   const attached = new Set();
   const guardedTabs = new Set(), documentFailures = new Set();
   let guardUpdate = Promise.resolve(), guardFailed = false;
-  let pendingAttachment, pendingFileLink;
+  let pendingAttachment, pendingFileLink, pendingUpload;
   let tabCleanup = Promise.resolve(), tabCleanupFailed = false;
   const admitTab = tab => {
     if (tabBudget.admit(tab.id)) return;
@@ -145,11 +145,41 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     attached.delete(source.tabId); guardedTabs.delete(source.tabId);
     if (frame?.tabId === source.tabId) frame = undefined;
     if (pendingAttachment?.tabId === source.tabId) pendingAttachment.reject(Error('operation_failed'));
+    if (pendingUpload?.tabId === source.tabId) pendingUpload.reject(Error('operation_failed'));
     // Revoke the response-rule exception after unexpected native detach. No
     // further observation/input runs while that policy write is unresolved.
     guardUpdate = guardUpdate.then(() => installRules()).catch(() => { guardFailed = true; });
   });
   chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (method === 'Page.fileChooserOpened') {
+      const upload = pendingUpload;
+      // Interception alone never selects a file. Only the chooser opened by
+      // the one reviewed coordinate click may receive host-frozen paths.
+      // Ignore unrelated/late choosers rather than opening an OS dialog or
+      // replaying input. No DOM tree, selector or backend node reaches MCP.
+      if (!upload || upload.claimed || source.tabId !== upload.tabId) return;
+      upload.claimed = true;
+      void (async () => {
+        if (params.frameId !== upload.mainFrameId || !Number.isInteger(params.backendNodeId)
+          || params.backendNodeId <= 0 || !['selectSingle', 'selectMultiple'].includes(params.mode)
+          || params.mode === 'selectSingle' && upload.files.length !== 1) throw Error('upload_control_required');
+        const tab = await chrome.tabs.get(upload.tabId); allowedNavigation(tab.url);
+        await credentialGuard(upload.tabId);
+        const tree = await command(upload.tabId, 'Page.getFrameTree');
+        if (pendingUpload !== upload || manual || authenticating || Date.now() >= upload.until
+          || Date.now() >= config.deadlineAt || upload.generation !== navigationGeneration
+          || tree.frameTree.frame.id !== upload.mainFrameId
+          || tree.frameTree.frame.loaderId !== upload.loaderId) throw Error('stale_frame');
+        // Consume before dispatch: a lost native response never grants a
+        // second selection/change event or a fresh browser upload attempt.
+        upload.dispatched = true;
+        await command(upload.tabId, 'DOM.setFileInputFiles', {
+          backendNodeId: params.backendNodeId, files: upload.files,
+        });
+        upload.resolve();
+      })().catch(error => upload.reject(error));
+      return;
+    }
     if (method === 'Fetch.requestPaused') {
       // Fixed response-stage Document interception only; never request a body,
       // evaluate site code or return headers/URLs through the pixels/text API.
@@ -181,7 +211,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     // An allowed navigation still replaces the pictured document. Retire its
     // token without reading/forwarding event URLs, frame trees or page data.
-    if ((method === 'Page.frameNavigated' && !params.frame?.parentId) || method === 'Page.navigatedWithinDocument') navigationGeneration++;
+    if ((method === 'Page.frameNavigated' && !params.frame?.parentId) || method === 'Page.navigatedWithinDocument') {
+      navigationGeneration++;
+      if (pendingUpload?.tabId === source.tabId && !pendingUpload.dispatched) pendingUpload.reject(Error('stale_frame'));
+    }
     if (source.tabId === frame?.tabId && ((method === 'Page.frameNavigated' && !params.frame?.parentId)
       || (method === 'Page.navigatedWithinDocument' && params.frameId === frame.mainFrameId))) frame = undefined;
   });
@@ -250,6 +283,10 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     // Do not enable Runtime/Debugger/Network or inspect a page's source. The
     // only page reads are layout metrics, MIME type and raster screenshot.
     await command(tabId, 'Page.enable');
+    // Retain interception for the work phase so a delayed/unsolicited chooser
+    // cannot activate a native file dialog after a timed-out call. Manual
+    // handoff detaches the debugger, restoring the human browser's own chooser.
+    if (config.fileUploads === true && !manual) await command(tabId, 'Page.setInterceptFileChooserDialog', { enabled: true });
     // Enable the final-document guard BEFORE exempting this exact owned tab
     // from DNR's MIME-only rule. Unattached popups keep the strict default;
     // their mere creation never opens an unguarded download/navigation gap.
@@ -309,7 +346,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (width <= 1920 && height <= 1440) {
         await credentialGuard(tab.id);
         const frameId = crypto.randomUUID();
-        frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
+        frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: viewport.clientWidth, cssHeight: viewport.clientHeight };
         return { state: 'ready', frameId, width, height, scroll: { up: viewport.pageY > 1, down: viewport.pageY + viewport.clientHeight < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + viewport.clientWidth < content.x + content.width - 1 }, image: { mimeType: 'image/png', data: result.data } };
       }
       scale *= Math.min(1440 / width, 1000 / height);
@@ -350,7 +387,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     const after = await command(tab.id, 'Page.getFrameTree');
     if (generation !== navigationGeneration || after.frameTree.frame.loaderId !== tree.frameTree.frame.loaderId) throw Error('stale_frame');
     const frameId = crypto.randomUUID(), width = viewport.clientWidth, height = viewport.clientHeight;
-    frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
+    frame = { frameId, tabId: tab.id, mainFrameId: tree.frameTree.frame.id, loaderId: tree.frameTree.frame.loaderId, at: Date.now(), width, height, cssWidth: width, cssHeight: height };
     return { kind: 'trelio.browser-text/v1', state: 'ready', frameId, width, height,
       scroll: { up: viewport.pageY > 1, down: viewport.pageY + height < content.y + content.height - 1, left: viewport.pageX > 1, right: viewport.pageX + width < content.x + content.width - 1 }, ...observation };
   }
@@ -479,8 +516,32 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     await credentialGuard(tab.id);
     frame = undefined; // consume before any input, including an unknown outcome
     const integer = (v, low, high) => Number.isInteger(v) && v >= low && v <= high;
-    if (['click', 'scroll', 'download-attachment'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
+    if (['click', 'scroll', 'download-attachment', 'upload-files'].includes(op) && (!integer(args.x, 0, f.width - 1) || !integer(args.y, 0, f.height - 1))) throw Error('invalid_input');
     const x = args.x * f.cssWidth / f.width, y = args.y * f.cssHeight / f.height;
+    if (op === 'upload-files') {
+      if (config.fileUploads !== true || pendingUpload || !Array.isArray(args.files)
+        || args.files.length < 1 || args.files.length > 32
+        || args.files.some(file => typeof file !== 'string' || !file || file.length > 4096 || /[\u0000-\u001f]/u.test(file))) throw Error('invalid_input');
+      const until = Math.min(Date.now() + 10_000, config.deadlineAt);
+      let timer;
+      const selectedFiles = new Promise((resolve, reject) => {
+        pendingUpload = { tabId: f.tabId, mainFrameId: f.mainFrameId, loaderId: f.loaderId,
+          generation: navigationGeneration, files: args.files, until, resolve, reject, claimed: false, dispatched: false };
+        timer = setTimeout(() => reject(Error('upload_control_required')), Math.max(1, until - Date.now()));
+      });
+      selectedFiles.catch(() => {});
+      try {
+        await command(f.tabId, 'Page.setInterceptFileChooserDialog', { enabled: true });
+        // This is one normal trusted click, not selector lookup or a synthetic
+        // change event. The native chooser supplies the exact input identity.
+        await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+        await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+        await command(f.tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+        await selectedFiles;
+        await pause(500);
+        return captureDefault();
+      } finally { clearTimeout(timer); pendingUpload = undefined; }
+    }
     if (op === 'download-attachment') {
       if (config.attachmentDownloads !== true || pendingAttachment) throw Error('invalid_input');
       const link = await chrome.tabs.sendMessage(f.tabId, { kind: 'resolve_attachment_link', x, y }, { frameId: 0 });
@@ -576,7 +637,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         try { send({ kind: 'result', id: message.id, result: await execute(message.operation, message.args || {}) }); }
         catch (error) {
           const pacingReason = { BROWSER_REQUEST_PREVIOUS_RESULT_NOT_REVIEWED: 'request_not_reviewed', BROWSER_REQUEST_NO_RESULT_TO_REVIEW: 'request_not_ready' }[error.message];
-          const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required'].includes(error.message) ? error.message : 'operation_failed');
+          const reason = pacingReason || (['invalid_input', 'stale_frame', 'navigation_blocked', 'document_blocked', 'manual_control_active', 'session_closed', 'lease_expired', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required', 'upload_control_required'].includes(error.message) ? error.message : 'operation_failed');
           send({ kind: 'result', id: message.id, result: { state: 'error', reason } });
         }
       };

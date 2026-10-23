@@ -12,6 +12,85 @@ import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-ex
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
 
+test('outgoing chooser uploads original image, document, archive and arbitrary files without a native dialog or replay', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-browser-')));
+  const originals = path.join(directory, 'originals'); await fs.mkdir(originals, { mode: 0o700 });
+  const received = [], clicks = [];
+  let snapshot;
+  const server = http.createServer(async (request, response) => {
+    if (request.url === '/selected') {
+      const chunks = []; for await (const chunk of request) chunks.push(chunk);
+      received.push(JSON.parse(Buffer.concat(chunks).toString()));
+      response.end('ok'); return;
+    }
+    if (request.url === '/clicked') { clicks.push(true); response.end(); return; }
+    response.setHeader('Content-Type', 'text/html; charset=utf-8');
+    response.end(`<!doctype html><body style="margin:0;font:24px sans-serif">
+      <button style="position:absolute;left:30px;top:40px;width:220px;height:60px" onclick="fetch('/clicked');document.getElementById('files').click()">Attach files</button>
+      <button style="position:absolute;left:300px;top:40px;width:220px;height:60px" onclick="document.getElementById('single').click()">Single file</button>
+      <input id="files" type="file" multiple hidden><input id="single" type="file" hidden>
+      <p id="result" style="position:absolute;top:150px">No files selected</p>
+      <script>
+      for(const input of document.querySelectorAll('input')) input.onchange=async()=>{
+        const selected=[];
+        for(const file of input.files){
+          const bytes=new Uint8Array(await file.arrayBuffer());
+          selected.push({name:file.name,bytes:Array.from(bytes)});
+        }
+        await fetch('/selected',{method:'POST',body:JSON.stringify(selected)});
+        document.getElementById('result').textContent=selected.map(file=>file.name).join(', ');
+      };
+      </script>`);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
+  const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); }, close() {} };
+  const diagnostics = [];
+  const browser = new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }),
+    origins: [origin], fileUploads: true, observationMode: 'text', lease: { deadlineAt: Date.now() + 150_000 },
+    testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testDiagnostics: value => diagnostics.push(value) });
+  const selected = [
+    ['photo.png', Buffer.from('synthetic image bytes')],
+    ['договор.docx', Buffer.from('synthetic document bytes')],
+    ['archive.zip', Buffer.from('synthetic archive bytes')],
+    ['unknown.bin', Buffer.from([0, 1, 2, 255])],
+  ], files = [];
+  for (const [name, bytes] of selected) { const file = path.join(originals, name); await fs.writeFile(file, bytes); files.push(file); }
+  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
+  const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1'
+    ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
+  try {
+    let frame = ready(await browser.call('navigate', { url: origin }));
+    if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
+    const before = focus(), token = frame.frameId;
+    frame = ready(await browser.call('upload-files', { frameId: token, x: 100, y: 70, files }));
+    if (before) assert.equal(focus(), before, 'native file selection never activates a dialog or another app');
+    assert.equal(received.length, 1);
+    assert.deepEqual(received[0], selected.map(([name, bytes]) => ({ name, bytes: [...bytes] })));
+    assert.equal(clicks.length, 1);
+    assert.ok(frame.text.includes('договор.docx'));
+    assert.equal((await browser.call('upload-files', { frameId: token, x: 100, y: 70, files })).reason, 'stale_frame');
+    assert.equal(received.length, 1, 'consumed input cannot repeat an upload');
+    frame = ready(await browser.call('read-text'));
+    assert.equal((await browser.call('upload-files', { frameId: frame.frameId, x: 100, y: 70, files: [originals] })).reason, 'upload_file_invalid');
+    assert.equal(clicks.length, 1, 'invalid sources fail before the website is clicked');
+    frame = ready(await browser.call('read-text'));
+    assert.equal((await browser.call('upload-files', { frameId: frame.frameId, x: 400, y: 70, files })).reason, 'upload_control_required');
+    assert.equal(received.length, 1, 'multi-file selection never silently narrows to the first file');
+    frame = ready(await browser.call('read-text'));
+    ready(await browser.call('upload-files', { frameId: frame.frameId, x: 400, y: 70, files: [files[1]] }));
+    assert.deepEqual(received[1], [{ name: selected[1][0], bytes: [...selected[1][1]] }]);
+    await browser.close();
+    assert.deepEqual((await fs.readdir(directory)).sort(), ['originals'], 'owned staged copies disappear on normal close');
+    for (const [index, [, bytes]] of selected.entries()) assert.deepEqual(await fs.readFile(files[index]), bytes);
+  } finally {
+    await browser.close().catch(() => browser.abort());
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
 // Inspect only this file's synthetic fixture snapshot, never a real account.
 // Closed counts distinguish persistence from browser startup loss; cookie
 // values, ciphertext, paths and profile contents never enter the log.

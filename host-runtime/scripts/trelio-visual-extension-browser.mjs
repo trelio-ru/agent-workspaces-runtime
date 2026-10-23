@@ -18,6 +18,7 @@ import { assertPrivatePathKind } from './trelio-workspace.mjs';
 import { snapshotVisualProfile, restoreVisualProfile, prepareVisualProfileStartup } from './trelio-visual-profile.mjs';
 import { ProtectedBrowserMailAttempt } from './trelio-browser-session.mjs';
 import { acquireBrowserMailLock } from './trelio-browser-session.mjs';
+import { freezeVisualUploads, MAX_VISUAL_UPLOAD_SESSION_BYTES } from './trelio-visual-uploads.mjs';
 
 // A public manifest identity fixes the extension Origin across private
 // profiles. This is not a credential/signing secret; the independent random
@@ -105,11 +106,12 @@ export class ExtensionVisualBrowser {
   #windowsClosed = false;
   #credentialSetup; #setupReason;
   #authenticationTask; #mailAttempt;
-  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
-    if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean') throw fault('invalid_input');
+  #uploadBytes = 0; #uploadFiles = 0;
+  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
+    if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
-    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, mailIdentity });
+    Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
     this.testNativeLogging = Boolean(testDiagnostics) && testNativeLogging;
     this.sessionId = crypto.randomUUID();
@@ -198,7 +200,7 @@ export class ExtensionVisualBrowser {
     });
     await new Promise(resolve => this.#server.listen(0, '127.0.0.1', resolve));
     const matches = [...this.origins.map(origin => `${origin}/*`), ...this.domains.map(domain => `https://*.${domain}/*`)];
-    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
+    const config = { endpoint: `ws://127.0.0.1:${this.#server.address().port}/extension`, token, origins: this.origins, domains: this.domains, matches, initialUrl: url, manual, deadlineAt: this.lease.deadlineAt, observationMode: this.observationMode, attachmentDownloads: this.attachmentDownloads, fileUploads: this.fileUploads, authentication: Boolean(this.authentication), fixtureOnly: this.policy.fixtureOnly };
     const manifest = visualExtensionManifest(matches, this.#server.address().port, this.observationMode, this.attachmentDownloads);
     await fs.writeFile(path.join(extension, 'manifest.json'), JSON.stringify(manifest), { mode: 0o600 });
     // Only the ephemeral transport token is materialized here. Cookie values
@@ -349,6 +351,7 @@ export class ExtensionVisualBrowser {
     // public aliases for model-selected debugger methods.
     if (this.observationMode !== 'text' && ['read-text', 'submit', 'request-ready'].includes(operation)) return Promise.resolve(visualStatus('error', 'invalid_input'));
     if (operation === 'download-attachment' && !this.attachmentDownloads) return Promise.resolve(visualStatus('error', 'invalid_input'));
+    if (operation === 'upload-files' && !this.fileUploads) return Promise.resolve(visualStatus('error', 'invalid_input'));
     if (operation === 'submit') {
       const { action, ...input } = args || {};
       if (!['navigate', 'click', 'key'].includes(action) || (action === 'key' && input.key !== 'Enter') || !validVisualArguments(action, input)) return Promise.resolve(visualStatus('error', 'invalid_input'));
@@ -500,6 +503,18 @@ export class ExtensionVisualBrowser {
         fresh = true;
       }
       if (this.#manual) return this.#status(operation === 'setup' ? 'none' : 'manual_control_active');
+      if (operation === 'upload-files') {
+        if (this.#uploadFiles + args.files.length > 256) throw fault('upload_limit_reached');
+        // Freeze complete regular files before clicking a website. Only these
+        // owned immutable paths reach the private extension. Keep copies until
+        // normal browser cleanup even on an unknown input outcome: File reads
+        // can happen asynchronously after the chooser response.
+        const frozen = await freezeVisualUploads({ directory: this.#directory, files: args.files,
+          deadlineAt: this.lease.deadlineAt, signal: this.#launchAbort.signal,
+          remainingBytes: MAX_VISUAL_UPLOAD_SESSION_BYTES - this.#uploadBytes });
+        this.#uploadBytes += frozen.sizeBytes; this.#uploadFiles += frozen.files.length;
+        args = { ...args, files: frozen.files.map(file => file.filePath) };
+      }
       if (fresh) await sleep(500);
       const value = await this.#send(fresh && operation === 'navigate' ? (this.observationMode === 'text' ? 'read-text' : 'screenshot') : operation, args);
       if (value.state === 'error') return visualStatus('error', value.reason, { sessionId: this.sessionId, ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
@@ -515,7 +530,7 @@ export class ExtensionVisualBrowser {
     });
     this.#tail = result.catch(() => {});
     return result.catch(error => {
-      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'storage_unavailable', 'authentication_setup_required', 'authentication_mail_busy'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
+      const reason = ['invalid_input', 'navigation_blocked', 'bootstrap_failed', 'lease_expired', 'attachment_unsupported', 'attachment_too_large', 'attachment_limit_reached', 'upload_file_invalid', 'upload_file_changed', 'upload_too_large', 'upload_limit_reached', 'upload_timed_out', 'storage_unavailable', 'authentication_setup_required', 'authentication_mail_busy'].includes(error.code) ? error.code : String(error.code || '').startsWith('VISUAL_STORAGE') ? 'storage_unavailable' : 'operation_failed';
       if (this.#state === 'preparing') { this.#state = 'error'; this.#terminal = reason; }
       return visualStatus('error', reason, { sessionId: this.sessionId, hasStoredSession: this.#saved });
     });

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import path from 'node:path';
 import { BROWSER_MAIL_REQUEST_KIND, parseBrowserMailHandle } from './trelio-browser-session.mjs';
+import { validVisualUploadFiles } from './trelio-visual-uploads.mjs';
 
 // A browser picture is a binary MCP block, never a base64 string in an ordinary
 // text result. This boundary is provider-neutral and accepts no page prose,
@@ -13,6 +14,7 @@ export const MAX_VISUAL_PNG_BYTES = 2 * 1024 * 1024;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const states = new Set(['not_configured', 'preparing', 'manual_input_required', 'saved_unverified', 'ready', 'closed', 'error']);
 const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'navigation_blocked', 'document_blocked', 'lease_expired', 'operation_failed', 'bootstrap_failed', 'storage_unavailable', 'storage_corrupt', 'session_busy', 'session_closed', 'browser_process_lost', 'invalid_input', 'http_document_failure', 'request_not_reviewed', 'request_not_ready', 'observation_mode_mismatch', 'tab_limit_reached', 'attachment_unsupported', 'attachment_too_large', 'attachment_link_required', 'attachment_limit_reached']);
+for (const reason of ['upload_file_invalid', 'upload_file_changed', 'upload_too_large', 'upload_limit_reached', 'upload_control_required', 'upload_timed_out']) reasons.add(reason);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 for (const reason of ['authentication_required', 'authentication_setup_required', 'authentication_unknown', 'authentication_cancelled', 'authentication_timeout', 'authentication_setup_failed', 'authentication_mail_busy']) reasons.add(reason);
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
@@ -144,7 +146,9 @@ export function parseVisualSkillOutput(stdout) {
 // Value-free command schemas shared by the public controller and browser.
 // Reject unknown fields BEFORE private owner state or worker creation.
 const fields = { status: [], ready: [], 'show-login': [], screenshot: [], 'read-text': ['query', 'offset', 'includeControls'], submit: ['action', 'frameId', 'x', 'y', 'key', 'url'], 'request-ready': ['frameId'], setup: ['url'], navigate: ['url'], click: ['frameId', 'x', 'y'], 'download-attachment': ['frameId', 'x', 'y'], scroll: ['frameId', 'x', 'y', 'deltaY', 'deltaX'], 'type-text': ['frameId', 'text'], key: ['frameId', 'key'] };
+fields['upload-files'] = ['frameId', 'x', 'y', 'files'];
 export const validVisualArguments = (operation, args) => Object.hasOwn(fields, operation) && args && typeof args === 'object' && !Array.isArray(args) && Object.keys(args).every(key => fields[operation].includes(key)) && Buffer.byteLength(JSON.stringify(args)) <= 32_768
-  && (operation !== 'authenticate-mail' || Object.keys(args).length === 1 && typeof args.mailAccountId === 'string' && uuid.test(args.mailAccountId));
+  && (operation !== 'authenticate-mail' || Object.keys(args).length === 1 && typeof args.mailAccountId === 'string' && uuid.test(args.mailAccountId))
+  && (operation !== 'upload-files' || validVisualUploadFiles(args.files) && typeof args.frameId === 'string' && Number.isInteger(args.x) && Number.isInteger(args.y));
 for (const operation of ['credentials-setup', 'credentials-status', 'credentials-forget', 'authenticate']) fields[operation] = [];
 fields['authenticate-mail'] = ['mailAccountId'];

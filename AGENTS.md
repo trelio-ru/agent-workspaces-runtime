@@ -369,6 +369,12 @@ publication tooling также остаются вне этого публичн
   с quota/unsafe-path guards, без исполнения, извлечения архива или auth reset.
   Обычные non-HTML navigate остаются запрещены; native fixtures проверяют
   anchor/button, bytes, сохранение чата и отсутствие focus на всех OS.
+- Исходящие файлы – signed `fileUploads` opt-in и additive API marker по
+  [visual contract](docs/visual-browser.md#исходящие-файлы). Один coordinate
+  click/native chooser получает только frozen regular files, без фильтра
+  расширений, DOM/source/bytes в MCP и OS dialog. Source не меняется;
+  copies вне auth profile живут до cleanup. Loader/frame/manual/lease и
+  no-replay сохраняются; native fixtures проверяют разные типы и multi-file.
 - Signed provider может явно выбрать bounded text observation по
   [контракту](docs/visual-browser.md#текстовый-режим). Default image-only не
   расширяется автоматически. Fixed isolated reader не выдаёт HTML/JS, input
