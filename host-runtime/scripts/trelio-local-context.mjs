@@ -2360,7 +2360,9 @@ export const protectLocalActionArguments = async ({
         && (Object.hasOwn(current, "color") || Object.hasOwn(current, "isFinal"));
       const acceptedCommentPath = nativeTool === "create_comment" && field === "filePath"
         && /^\$\.encryptedFiles\[\d+\]$/u.test(objectPath);
-      const protectedField = (LOCAL_ACTION_PROTECTED_FIELDS.has(field) || acceptedCommentPath)
+      const skillArguments = nativeTool === "continue_assistant_workspace_action" && normalizedArguments.operation === "skill_run"
+        && objectPath === "$.parameters" && field === "encryptedArguments";
+      const protectedField = (skillArguments || acceptedCommentPath || LOCAL_ACTION_PROTECTED_FIELDS.has(field))
         && !statusDictionaryLabel
         && !isEmptyLocalActionValue(child)
         && !isEncryptedLocalActionMarker(child)
@@ -2372,6 +2374,7 @@ export const protectLocalActionArguments = async ({
           || nativeTool === "upsert_registry_rows"
         );
       if (protectedField) protectedEntries.push([field, child,
+        skillArguments ? "skill_arguments_json" :
         // The existing `reason` input is already encrypted by older hosts.
         // They fail closed on the new field contract without sending plaintext.
         acceptedCommentPath ? "file_path" : nativeTool === "delete_workspace" && field === "reason"

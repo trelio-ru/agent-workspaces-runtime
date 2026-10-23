@@ -1037,7 +1037,7 @@ export const validateAssistantWorkspacePlan = async raw => {
 export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs'),
     withManagedContent=withProductionAssistantManagedContent}={})=>{
-  if(supportsAssistantManagedContent(name))return withManagedContent({name,args,signal},send);
+  if(supportsAssistantManagedContent(name,args))return withManagedContent({name,args,signal},send);
   if(name==='complete_assistant_pass')return withAssistantEncryptedMaterial({args,signal},send,{withProfile,loadCommon});
   if(name!=='continue_assistant_workspace_action' || !['checkpoint','finish','pause'].includes(args.operation))
     return withAssistantCompanyContentArguments({name,args,signal},send,{withProfile});

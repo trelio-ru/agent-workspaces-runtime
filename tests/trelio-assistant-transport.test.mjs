@@ -122,7 +122,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         ...(preparation.customField?{customField:preparation.customField}:{}),
         ...(preparation.commentFiles?{commentFiles:preparation.commentFiles}:{}),
         ...(preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
-      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY/);
+      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY/);
       if(preparation.commentFileDefinition){
         assert.equal(preparation.nativeTool,'create_comment');
         assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt']);
@@ -310,6 +310,44 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     await assert.rejects(withAssistantManagedContentArguments({...input,name:'update_task_custom_field',args:{fieldId,value:'PRIVATE_UNKNOWN_FIELD',
       clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()}},async()=>assert.fail('foreign field reached MCP')),
       {code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+    const vector=['send','--account',randomUUID(),'--chat','123','--text','ARGV_TEXT_CANARY \n exact spacing'];
+    const vectorArgs={schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId:'signed-fixture',releaseId:randomUUID(),
+      runtimeSessionId:randomUUID(),arguments:vector}};
+    const protectedVector=await withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',args:vectorArgs},async wire=>{
+      const {encryptedContent,...business}=wire;
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
+        companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'continue_assistant_workspace_action',arguments:business},
+        encryptedContent.signature),true);
+      assert.deepEqual(wire.parameters.arguments,[]);assert.doesNotMatch(JSON.stringify(wire),/ARGV_TEXT_CANARY/);
+      const marker=wire.parameters.encryptedArguments.$trelioE2ee??wire.parameters.encryptedArguments[0].$trelioE2ee;
+      assert.equal(marker.field,'skill_arguments_json');
+      const payload=staged.get(marker.id),opened=await decryptCompanyPayload({encryptedPayload:payload,
+        scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+      assert.deepEqual(opened.values.skill_arguments_json,vector,'the exact whole vector uses the SAME payload codec');
+      return {content:[],structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,
+        envelopeId:envelope.id,scopeId,scopeEpoch:1,context:{prepared:true,localAction:{schemaVersion:1,operation:'skill_run',parameters:wire.parameters},
+          scope:{companyId,taskId:pass.taskId,passId:pass.passId,assistantUserId:identity.assistantId,deviceId:identity.deviceId}},encryptedPayloads:[payload]}}};
+    });
+    assert.deepEqual(protectedVector.structuredContent.localAction.parameters,vectorArgs.parameters,
+      'ordinary continuation receives the original vector before the SAME signed policy/account/process execution');
+    assert.equal(Object.hasOwn(protectedVector.structuredContent.localAction.parameters,'encryptedArguments'),false);
+    const {createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    let executions=0;
+    const executor=await createAssistantWorkspaceExecutor({configDirectory:root,runPlan:async plan=>{
+      executions++;assert.equal(plan.localAction.operation,'skill_run');
+      assert.deepEqual(plan.localAction.parameters.arguments,vector,'SAME continuation validator/executor sees the opened original vector');
+      assert.equal(Object.hasOwn(plan.localAction.parameters,'encryptedArguments'),false);
+      return {operation:'skill_run',exitCode:0};
+    }});
+    await executor.execute(protectedVector.structuredContent);assert.equal(executions,1);
+
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',args:vectorArgs},async()=>({
+      content:[],structuredContent:{prepared:true,localAction:{operation:'skill_run',parameters:{arguments:vector}}}})),{code:'ASSISTANT_MCP_INVALID_RESPONSE'},
+      'a plaintext plan or missing native-selected bundle cannot execute');
+    for(const args of [{...vectorArgs,operation:'secret_skill_run'},
+      {...vectorArgs,parameters:{...vectorArgs.parameters,encryptedArguments:vector}},
+      {...vectorArgs,parameters:{...vectorArgs.parameters,arguments:[]}}])
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',args},async()=>assert.fail('invalid vector reached native MCP')));
     const intake={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId,
       sourceId:randomUUID(),sourceRevision:3,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
     let intakeState='leased',intakeReads=0;

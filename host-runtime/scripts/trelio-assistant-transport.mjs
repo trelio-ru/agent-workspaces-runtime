@@ -494,7 +494,8 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['ask_assistant_owner','request_as
   'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',
   'update_task_custom_field','delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
   'get_assistant_owner_question','get_assistant_intake_context']);
-export const supportsAssistantManagedContent=name=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name);
+export const supportsAssistantManagedContent=(name,args)=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name)
+  ||name==='continue_assistant_workspace_action'&&args?.operation==='skill_run';
 const managedBusinessArguments=raw=>Object.fromEntries(Object.entries(raw).filter(([key])=>
   !['taskPass','intakePass','runtimeSessionProof','encryptedContent'].includes(key)));
 const rejectBorrowedManagedMarkers=(value,depth=0)=>{
@@ -538,10 +539,23 @@ const managedCustomFieldValue=(definition,value)=>{
  * no observed nonce. The ordinary send callback still executes exactly once
  * with its independent live native pass/proof/CAS and sealed owner decision. */
 export const withAssistantManagedContentArguments=async({identity,host,client,store,lockDirectory,name,args,signal},send)=>{
-  if(!supportsAssistantManagedContent(name)||!object(args)||typeof send!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(!supportsAssistantManagedContent(name,args)||!object(args)||typeof send!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   // Ignore model-authored transport hints before signing; all private metadata
   // comes from the genuine current OS/pass context below.
   let business=managedBusinessArguments(args);rejectBorrowedManagedMarkers(business);
+  const skillArguments=name==='continue_assistant_workspace_action'&&business.operation==='skill_run';
+  let originalSkillArguments=null;
+  if(skillArguments){
+    // Preserve the SAME CLI vector exactly, including account/option order.
+    // Only this fixed operation may replace it with a native-owned JSON marker;
+    // model-supplied transport fields or arbitrary continuation operations fail.
+    if(!object(business.parameters)||Object.hasOwn(business.parameters,'encryptedArguments')
+      ||!Array.isArray(business.parameters.arguments)||!business.parameters.arguments.length||business.parameters.arguments.length>100
+      ||business.parameters.arguments.some(value=>typeof value!=='string'||value.length>4096))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    originalSkillArguments=structuredClone(business.parameters.arguments);
+    business.parameters={...business.parameters,encryptedArguments:business.parameters.arguments,arguments:[]};
+  }
+
   if(Object.hasOwn(business,'encryptedFiles')||Object.hasOwn(business,'acceptedFiles')&&name!=='create_comment'
     ||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
     ||name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
@@ -747,8 +761,23 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const terminal=result?.structuredContent?.managedEncryptedContent?.context?.state??result?.structuredContent?.state;
       if(name==='resolve_assistant_intake'&&['ignored','created','waiting_owner','redirected'].includes(terminal))publicationTerminal=terminal;
       const bundle=result?.structuredContent?.managedEncryptedContent;
+      if(skillArguments&&!bundle)fail('ASSISTANT_MCP_INVALID_RESPONSE');
       if(!bundle){await current();return result;}
       const value=await hydrate(bundle);
+      if(skillArguments){
+        // Hydration precedes the ordinary continuation validator and signed
+        // skill policy/account/process engine. The encrypted adapter grants no
+        // command permission, provider input or replay exception by itself.
+        const action=value.localAction,parameters=action?.parameters;
+        if(value.prepared!==true||action?.operation!=='skill_run'||!object(parameters)
+          ||!Array.isArray(parameters.arguments)||parameters.arguments.length!==0
+          ||!Array.isArray(parameters.encryptedArguments)||parameters.encryptedArguments.length>100
+          ||parameters.encryptedArguments.some(value=>typeof value!=='string'||value.length>4096)
+          ||JSON.stringify(parameters.encryptedArguments)!==JSON.stringify(originalSkillArguments))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        action.parameters={...parameters,arguments:parameters.encryptedArguments};
+        delete action.parameters.encryptedArguments;
+      }
+
       if(name==='get_assistant_intake_context'){
         const authority=value.creationAuthority;
         if(!object(authority)||authority.company?.id!==pass.companyId||!authority.instructions)fail('ASSISTANT_MCP_INVALID_RESPONSE');

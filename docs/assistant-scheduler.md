@@ -1568,3 +1568,29 @@ current definition/module/project/task ACL and task CAS under row locks. There i
 no second normalizer/executor/config resolver/vault or business retry. Plain
 custom-field behavior and the common protector's existing mirror path remain
 unchanged; native precision, eligibility and idempotency remain independent.
+
+
+### Encrypted ordinary skill argument vectors
+
+The public `continue_assistant_workspace_action` predicate selects only
+`operation=skill_run`; Workspace lifecycle and private Secret operations retain
+their independent adapters. Before remote MCP, the SAME managed protector encrypts
+the complete original `parameters.arguments` vector as `skill_arguments_json`.
+Native transport receives an empty structural vector plus its canonical opaque
+`encryptedArguments` reference and the SAME private preparation/publication binding.
+The existing preparation cell repeats genuine task/device/pass/current recipient
+and strict native operation validation; it creates no command execution or owner
+consent. The ordinary continuation repeats those checks, current public verified
+secret-free release/project/runtimeSession admission and returns only the exact
+native-selected ciphertext bundle. Old raw encrypted calls get the explicit
+`ASSISTANT_ENCRYPTED_SKILL_ARGUMENTS_REQUIRED` refusal, never a fallback.
+
+The SAME local hydrator opens the whole vector and compares it with the original
+immutable input before removing its transport marker. Only then does the ordinary
+continuation validator/executor run its unchanged signed command policy, account
+namespace, source observer and bounded native process. A missing bundle, changed
+vector, model marker/transport hint, mixed plaintext vector, revoked recipient or
+changed admission fails closed without a child invocation or domain retry. No
+second executor/provider grammar/key/vault/endpoint, plaintext digest, SQLite body
+or human auth alias is introduced. The original input bounds and provider sending
+approval rules remain independent; this content adapter grants no message authority.
