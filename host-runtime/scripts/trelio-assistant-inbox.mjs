@@ -560,8 +560,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     /** Private structural original-event journal. Neither a sender username nor
      * a model-authored "owner" bit can call native task creation. The production
      * host still rereads the exact signed body and linked native owner ID. */
+    // Preserve unknown native fences ahead of due rows, but keep future owner
+    // questions from occupying the entire bounded page after every restart.
     ownerIntakes(){return all(`SELECT i.*,s.scope_json FROM assistant_owner_intakes i
-      JOIN assistant_inbox_sources s ON s.source_key=i.source_key WHERE (i.state!='complete' OR i.settled=0) ORDER BY i.created_at,i.id LIMIT 100`)
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key WHERE (i.state!='complete' OR i.settled=0)
+      ORDER BY CASE WHEN i.state IN('started','uncertain') OR (i.state='provisioning' AND i.native_started=1) THEN 0
+        WHEN i.next_check_at<=? THEN 1 ELSE 2 END,i.created_at,i.id LIMIT 100`,time())
       .map(row=>({...row,scope:scopeInputWithoutKey(JSON.parse(row.scope_json))}));},
     ownerIntake(id){
       const row=get(`SELECT i.*,e.event_id,e.event_revision,e.conversation_key,s.scope_json,s.state AS source_state,

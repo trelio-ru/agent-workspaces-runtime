@@ -38,6 +38,11 @@ function fixtureDiagnostic(value) {
   // Reuse the common closed subprocess categories. Never persist an Error,
   // message, stack, filesystem path, descriptor or arbitrary cause string.
   if (['owner_read','policy','control_server','control_listen','owner_publish','dependencies','browser'].includes(value.startupPhase)) record.startupPhase = value.startupPhase;
+  // Both are host-owned constant refusals, never arbitrary exception prose.
+  // Distinguish a busy descriptor mutex from an expired/changed original claim
+  // when a synthetic detached worker fails before browser startup.
+  if(value.startupPhase==='owner_publish' && ['VISUAL_OWNER_BUSY','VISUAL_IDENTITY_INVALID'].includes(value.error?.message))
+    record.ownerFailure=value.error.message;
   if (PROCESS_DIAGNOSTIC_CODES.includes(value.failureCode)) record.failureCode = value.failureCode;
   if (value.causeCode === 'UNKNOWN' || processDiagnosticCauseCode({code:value.causeCode}) === value.causeCode) record.causeCode = value.causeCode;
   // Node's filesystem error includes private paths/message as well as a fixed

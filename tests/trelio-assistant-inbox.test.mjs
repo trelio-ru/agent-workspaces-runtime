@@ -952,3 +952,20 @@ test('intake cancellation resumes only after positive native closure and explici
  inbox.observeExternalSourceRevision(source,2);assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,2);
  assert.equal(database.prepare('SELECT sum(processed) AS p,sum(acked) AS a FROM assistant_inbox_events').get().p,0);
 });
+
+
+test('a bounded intake page keeps future rows behind due work and unknown native fences first',t=>{
+ const {inbox,database,advance}=memory(t),first=scope({provider:'telegram'}),second={...first,companyId:randomUUID(),bindingId:randomUUID()};
+ const ownerIdentityId=randomUUID(),key=`telegram-conversation/v1.${'a'.repeat(64)}`;
+ inbox.register(first);inbox.observeExternalSourceRevision(first,0);
+ page(inbox,first,Array.from({length:100},(_,index)=>({id:`message:123:${index+1}`,revision:'a'.repeat(64),
+  conversationKey:key,taskId:null,wake:false,providerWake:true,ownerIdentityId})));
+ const old=inbox.ownerIntakes()[0];for(const row of inbox.ownerIntakes())inbox.deferOwnerIntake(row.id);
+ advance(1);inbox.register(second);inbox.observeExternalSourceRevision(second,0);
+ page(inbox,second,[{id:'message:123:101',revision:'a'.repeat(64),conversationKey:key,taskId:null,wake:false,providerWake:true,ownerIdentityId}]);
+ assert.equal(inbox.ownerIntakes().length,100);assert.equal(inbox.ownerIntakes()[0].scope.companyId,second.companyId);
+ assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,101);
+ inbox.prepareOwnerIntake(old.id);inbox.startOwnerIntakeProvision(old.id);
+ assert.equal(inbox.ownerIntakes()[0].id,old.id,'an unknown native invocation retains priority even over a due row');
+ assert.equal(database.prepare('SELECT sum(processed) AS p,sum(acked) AS a FROM assistant_inbox_events').get().p,0);
+});

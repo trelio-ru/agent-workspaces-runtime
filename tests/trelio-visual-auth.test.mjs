@@ -293,12 +293,21 @@ test('credential ciphertext survives restart, is separate from sessions and cann
   } finally { first.close(); await fs.rm(directory, { recursive: true, force: true }); }
 });
 
-test('native browser performs login and TOTP privately, gates images and reuses saved authenticated state', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180000 }, async () => {
+test('native browser performs login and TOTP privately, gates images and reuses saved authenticated state', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180000 }, async t => {
   // Preflight before allocating a listener: an absent exact native dependency
   // must fail normally rather than leave this test process alive indefinitely.
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-auth-native-')));
   let passwordSubmits = 0, codeSubmits = 0, methodFollows = 0, mailSubmits = 0;
+  // Fixed synthetic phases/counters locate a hosted outer deadline without
+  // printing forms, credentials, private browser output, URLs or native logs.
+  let phase='fixture_server',reported=false;const evidence=[];
+  const record=value=>{if(['auth','window_inventory','window','close_queue','close_manual','close_browser','close_snapshot',
+    'browser_exit','browser_quit','browser_stop_timeout','extension_not_ready','extension_not_connected'].includes(value?.stage)){
+    evidence.push(value.stage);if(evidence.length>8)evidence.shift();}};
+  const diagnose=()=>{if(reported)return;reported=true;process.stderr.write(JSON.stringify({fixture:'synthetic_visual_auth',
+    phase,passwordSubmits,codeSubmits,methodFollows,mailSubmits,evidence})+'\n');};
+  t.signal.addEventListener('abort',diagnose,{once:true});
   const methodChoice = (href = '/totp-entry', extra = '') => `<!doctype html><section id="method-choice"><a id="choose-authenticator" href="${href}">Use authenticator</a>${extra}</section>`;
   const totpForm = '<!doctype html><form id="totp-form" method="post" action="/code"><input id="totp" name="totp" autocomplete="one-time-code"><button id="submit-totp">Sign in</button></form>';
   const server = http.createServer(async (req, res) => {
@@ -346,29 +355,33 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
   const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
-  const make = () => new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef,
+  const make = () => new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
     mailIdentity: { origin: 'https://trelio.ru', companyId, memberId, scope: 'd'.repeat(64) },
     policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
   let browser = make();
+  // A timed-out fixture must stop only its own live browser handle, rather
+  // than leave it running into the next native test. The original timeout
+  // remains a failure; this neither repeats an action nor hides its evidence.
+  const abortOwned=()=>browser.abort();t.signal.addEventListener('abort',abortOwned,{once:true});
   try {
     assert.equal((await browser.call('navigate', { url: origin })).reason, 'manual_control_active');
     assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
     assert.equal((await browser.call('authenticate', { password: 'forbidden' })).reason, 'invalid_input');
-    const result = await browser.call('authenticate'); assert.equal(result.state, 'saved_unverified', result.reason);
+    phase='first_auth';const result = await browser.call('authenticate'); assert.equal(result.state, 'saved_unverified', result.reason);
     assert.doesNotMatch(JSON.stringify(result), /SYNTHETIC|GEZDGNBV/);
     assert.equal((await browser.call('screenshot')).state, 'ready');
-    await browser.close(); browser = make();
+    phase='session_reuse';await browser.close(); browser = make();
     assert.equal((await browser.call('navigate', { url: origin })).state, 'ready');
     assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
     assert.equal(passwordSubmits, 1); assert.equal(codeSubmits, 1);
     await browser.close();
-    const segmented = recipe(origin); segmented.steps[1].fields.totp = Array.from({ length: 6 }, (_, i) => `#d${i}`); segmented.steps[1].submit = null;
+    phase='segmented_totp';const segmented = recipe(origin); segmented.steps[1].fields.totp = Array.from({ length: 6 }, (_, i) => `#d${i}`); segmented.steps[1].submit = null;
     activeDef = normalizeVisualAuthentication(segmented, { origins: [origin], fixtureOnly: true }); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
     await browser.call('navigate', { url: `${origin}/segmented` });
     assert.equal((await browser.call('authenticate')).state, 'saved_unverified');
     assert.equal(passwordSubmits, 2); assert.equal(codeSubmits, 2, 'auto-submit OTP has no additional click/submission');
     await browser.close();
-    activeDef = withTransition(origin); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
+    phase='follow_transition';activeDef = withTransition(origin); activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
     await browser.call('navigate', { url: `${origin}/with-follow` });
     const followedAuthentication = await browser.call('authenticate');
     // Keep the original success requirement. A closed native reason and exact
@@ -379,7 +392,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     }));
     assert.equal(passwordSubmits, 3); assert.equal(methodFollows, 1); assert.equal(codeSubmits, 3);
     await browser.close();
-    for (const route of ['/follow-unsafe', '/follow-path', '/follow-popup', '/follow-download', '/follow-hidden', '/follow-ambiguous', '/follow-sensitive', '/follow-captcha']) {
+    phase='unsafe_transition_loop';for (const route of ['/follow-unsafe', '/follow-path', '/follow-popup', '/follow-download', '/follow-hidden', '/follow-ambiguous', '/follow-sensitive', '/follow-captcha']) {
       activeStore = memoryStore(activeDef); activeStore.directory = directory; browser = make();
       await browser.call('navigate', { url: origin + route });
       assert.equal((await browser.call('authenticate')).state, 'manual_input_required', route);
@@ -389,7 +402,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       await browser.close();
     }
     await browser.close(); activeDef = def;
-    for (const route of ['/unsafe', '/ambiguous', '/sms']) {
+    phase='manual_form_loop';for (const route of ['/unsafe', '/ambiguous', '/sms']) {
       activeStore = memoryStore(def); activeStore.directory = directory; browser = make();
       await browser.call('navigate', { url: origin + route });
       assert.equal((await browser.call('authenticate')).state, 'manual_input_required');
@@ -397,7 +410,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       assert.equal(passwordSubmits, 3); assert.equal(codeSubmits, 3, 'untrusted form/SMS never receives stored credentials or TOTP');
       await browser.close();
     }
-    const mail = recipe(origin);
+    phase='mail_factor';const mail = recipe(origin);
     mail.steps[1].factor = 'totp';
     mail.steps.push({ id: 'choose-email', origin, challenge: '#method-choice', factor: 'email',
       action: 'follow', target: '#choose-email', path: '/mail-entry' },
@@ -430,7 +443,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     // ACK happens in a later mail process, after authentication has released
     // its short mailbox lock. That normal cleanup must not revoke read-back
     // or the one authorized flag write under the still-active browser lease.
-    await new Promise(resolve => setTimeout(resolve, 200));
+    phase='mail_ack';await new Promise(resolve => setTimeout(resolve, 200));
     assert.equal((await browser.mailCall({ operation: 'claim-ack', handle: status.handle, actor, payload: reference })).action, 'mark_seen_once');
     assert.equal((await browser.mailCall({ operation: 'claim-ack', handle: status.handle, actor, payload: reference })).action, 'verify_only');
     assert.equal((await browser.mailCall({ operation: 'record-ack', handle: status.handle, actor,
@@ -441,9 +454,11 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     await assert.rejects(browser.mailCall({ operation: 'deliver', handle: status.handle, actor,
       payload: { code: '123456', reference } }));
     assert.equal(mailSubmits, 1);
-  } finally {
+  } catch(error) {diagnose();throw error;} finally {
+    phase='final_close';
     await browser.close().catch(() => browser.abort()); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    t.signal.removeEventListener('abort',diagnose);t.signal.removeEventListener('abort',abortOwned);
   }
 });
 

@@ -589,6 +589,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,eventKeys:[row.event_key],routes,intakeId:row.id});
     inbox.settleOwnerIntake(row.id);
   };
+  const deferredIntake=Object.freeze({state:'deferred',kind:'source_intake'});
   const workIntake=async signal=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
@@ -607,16 +608,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           if(!['created','ignored','redirected','cancelled'].includes(closed.state))throw error;
           await settleIntake(row,closed,signal);
         }catch(closing){if(saved)throw closing;inbox.deferOwnerIntake(row.id);}
-        return null;
+        return deferredIntake;
       }
     }
     if(row.state==='complete'||row.state==='waiting_owner'){
       let outcome;try{outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();}
-      catch(error){if(saved)throw error;inbox.deferOwnerIntake(row.id);return null;}
+      catch(error){if(saved)throw error;inbox.deferOwnerIntake(row.id);return deferredIntake;}
       if(outcome.state==='leased'&&row.state==='waiting_owner'){
         inbox.resumeOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
       }else{
-        await settleIntake(row,outcome,signal);if(outcome.state==='waiting_owner')inbox.deferOwnerIntake(row.id);return null;
+        await settleIntake(row,outcome,signal);if(outcome.state==='waiting_owner')inbox.deferOwnerIntake(row.id);return deferredIntake;
       }
     }
     let source;
@@ -636,23 +637,28 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           inbox.finishOwnerIntake(row.id,closed);if(['created','redirected'].includes(closed.state))inbox.settleOwnerIntake(row.id);
         }catch{inbox.deferOwnerIntake(row.id);}
       }else inbox.deferOwnerIntake(row.id);
-      return null;
+      return deferredIntake;
     }
     if(['started','uncertain'].includes(row.state)){
       const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
       const nativeResult=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
       if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
-        await settleIntake(row,outcome,signal);return null;
+        await settleIntake(row,outcome,signal);return deferredIntake;
       }
       if(Date.parse(outcome.leaseExpiresAt)<=now()){
         const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(closed.state!=='cancelled')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
-        await settleIntake(row,closed,signal);emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return null;
+        await settleIntake(row,closed,signal);emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return deferredIntake;
       }
       emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};
     }
     const company=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
-    if(company?.execution?.state!=='ready')fail('ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED');
+    if(company?.execution?.state!=='ready'){
+      // No native turn/pass has started. Preserve this original event and
+      // back off only its row; another company's due intake/task may proceed.
+      blockedCompanies.add(row.scope.companyId);inbox.deferOwnerIntake(row.id);
+      emit('ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED');return deferredIntake;
+    }
     let execution=assistantExecutionConfiguration(company.execution.configuration);
     const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
     if(row.state==='pending'){inbox.prepareOwnerIntake(row.id);row=inbox.ownerIntake(row.id);}
@@ -826,7 +832,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       lease();
       const saved=passHost?await passHost.readActivePass():null;
       if(saved?.kind!=='source_intake'&&await reconcile(signal))return {state:'blocked'};
-      const intake=await workIntake(signal);if(intake)return intake;
+      // Read-only waiting/policy/source recovery owns no native invocation.
+      // Walk the bounded existing page so its oldest row cannot starve every
+      // later company on each five-minute worker. Unknown/started work still
+      // returns blocked and preserves the protected active-pass fence.
+      for(let attempt=0;attempt<100;attempt++){
+        const intake=await workIntake(signal);
+        if(intake?.state==='deferred')continue;
+        if(intake)return intake;
+        break;
+      }
       if(await reconcile(signal)) return {state:'blocked'};
       // Readiness includes the dedicated assistant MCP/plugin admission. A
       // working executable or human OAuth alone cannot enable business work.

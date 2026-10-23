@@ -961,3 +961,63 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
   assert.equal(new Set([...intakes.values()].map(value=>value.threadId)).size,1);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'created\'').get().n,2);
 });
+
+
+for(const firstState of ['policy_blocked','waiting_owner'])test(`${firstState} owner intake retains its event while another company intake and ordinary task proceed`,async t=>{
+  const f=fixture(t);await f.coordinator.close();
+  const companyB=randomUUID(),memberB=randomUUID(),taskB=randomUUID(),bindingB=randomUUID(),ownerId=randomUUID();
+  const second={id:bindingB,taskId:taskB,state:'accepted',revision:0},account=randomUUID(),receipts=new Map();
+  f.execution.state='policy_blocked';
+  const execution={...f.execution.configuration};
+  f.options.client.companies=async()=>[{companyId:f.companyId,memberId:f.memberId,execution:f.execution},
+    {companyId:companyB,memberId:memberB,execution:{state:'ready',configuration:execution}}];
+  f.options.client.tasks=async id=>({bindings:[id===companyB?second:f.authority],nextCursor:null});
+  f.options.client.task=async id=>({... (id===companyB?second:f.authority),execution:id===companyB?{state:'ready',configuration:execution}:f.execution});
+  const sources=[f.companyId,companyB].map(companyId=>({id:randomUUID(),companyId,deviceId:f.identity.deviceId,
+    localAccountId:account,projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true}));
+  f.options.client.sourceAccounts=async companyId=>sources.filter(row=>row.companyId===companyId);
+  f.options.client.ownerIdentities=async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]});
+  f.options.client.beginSourceIntake=async input=>{assert.equal(input.companyId,companyB);
+    const value={schemaVersion:1,id:input.intakeId,companyId:companyB,sourceId:input.sourceId,sourceRevision:0,
+      eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:'2099-01-01T00:00:00.000Z',
+      taskId:null,receiptId:null,execution,readConfirmed:false};receipts.set(input.intakeId,value);return value;};
+  f.options.client.readSourceIntake=async input=>receipts.get(input.intakeId);
+  let active=null,intakeRuns=0;
+  f.options.passHost={readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
+    releasePass:async receipt=>{assert.equal(receipt.id,active.passId);active=null;}};
+  f.options.workspaceForIntake=async()=>process.cwd();
+  f.options.native.run=async(input,options)=>{assert.equal(input.intakeContext.companyId,companyB);options.startInvocation();intakeRuns++;
+    const value=receipts.get(input.intakeContext.intakeId);Object.assign(value,{state:'ignored',receiptId:randomUUID(),readConfirmed:true});
+    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;};
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  for(const [index,row]of sources.entries()){
+    const source={...f.identity,companyId:row.companyId,provider:'telegram',accountId:account,bindingId:row.id};delete source.deviceId;
+    inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+    const poll=inbox.claimPoll(source);
+    inbox.commitPage(source,{...poll,nextCursor:'1',hasMore:false,events:[{id:`message:123:${index+1}`,revision:'a'.repeat(64),
+      taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'b'.repeat(64)}`}]});
+    f.advance(1);
+  }
+  if(firstState==='waiting_owner'){
+    const pending=inbox.ownerIntakes().find(row=>row.scope.companyId===f.companyId);
+    inbox.prepareOwnerIntake(pending.id);inbox.startOwnerIntakeProvision(pending.id);
+    inbox.bindOwnerIntakeThread(pending.id,randomUUID());inbox.readyOwnerIntake(pending.id);inbox.startOwnerIntake(pending.id);
+    const row=inbox.ownerIntake(pending.id),receiptId=randomUUID();
+    inbox.finishOwnerIntake(row.id,{state:'waiting_owner',receiptId});
+    receipts.set(row.id,{schemaVersion:1,id:row.id,companyId:f.companyId,sourceId:row.scope.bindingId,sourceRevision:0,
+      eventId:row.original_event_id,threadId:row.thread_id,state:'waiting_owner',leaseExpiresAt:'2099-01-01T00:00:00.000Z',
+      taskId:null,receiptId,execution,readConfirmed:true});
+    f.advance(300000); // The oldest unanswered question is due on this worker.
+  }
+  const coordinator=createAssistantCoordinator(f.options);try{await coordinator.pollOnce();
+  assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(intakeRuns,1);assert.equal(active,null);
+  const retained=inbox.ownerIntakes().find(row=>row.scope.companyId===f.companyId);
+  assert.equal(retained.state,firstState==='waiting_owner'?'waiting_owner':'pending');
+  assert.equal(retained.native_started,firstState==='waiting_owner'?1:0);
+  assert.equal(typeof retained.thread_id,firstState==='waiting_owner'?'string':'object');
+  assert.ok(retained.next_check_at>0);
+  assert.equal((await coordinator.workOnce()).kind,'provision');
+  assert.equal(coordinator.status().length,1);assert.equal(coordinator.status()[0].companyId,companyB);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE source_key=?').get(retained.source_key).processed,0);
+  }finally{await coordinator.close();}
+});

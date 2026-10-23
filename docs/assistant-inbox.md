@@ -621,7 +621,10 @@ generation can clone an unfinished original candidate; old receipt remains
 immutable, original-event UUID is retained and native global created-event
 uniqueness prevents duplicate tasks. A paused waiting question is cancelled by
 that same native path. Inaccessible rows without a running pass defer without
-blocking unrelated companies; an unknown active pass keeps its global fence.
+blocking unrelated companies. The bounded existing page skips a policy-blocked
+or unanswered row after recording its next check, so every five-minute worker
+can reach later companies; no event is processed/ACKed or cycle moved for that
+row. An unknown active pass keeps its global fence.
 
 Schema upgrade is additive, preserves all original cursors/deliveries/read/ACK
 proofs and does not invent owner evidence for historical rows. Tests use genuine
