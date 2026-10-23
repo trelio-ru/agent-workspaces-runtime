@@ -405,3 +405,33 @@ test("company protected input never reopens on pending or retries an unknown sav
     }});
   assert.equal(result.secret.id,secretId);assert.equal(writes,2);assert.equal(forms,1);assert.equal(reads,3);
 });
+
+test('private input shares company capture execution while task encryption never changes its global keyring holder',async()=>{
+  const {handleAssistantNewSecretCreation}=await import('../host-runtime/scripts/trelio-secret-generate.mjs');
+  const encryption=await encryptionFixture();
+  const scope={assistantUserId:randomUUID(),deviceId:randomUUID(),companyId,taskId:randomUUID()};
+  const input={holder:'assistant',clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),ownerDecisionId:randomUUID(),runId,
+    plan:{metadataMode:'neutral',cardType:'login',runId,valueSource:'protected_input'}};
+  const context={schemaVersion:1,completed:false,...scope,secretId:input.clientRequestId,runId,storageMode:'trelio',currentVersion:0,
+    valueSource:'protected_input',protectedInputStorageSupported:true,metadata:{name:'Personal secret',templateType:'login'},fields:capturedFields};
+  const receipt={created:true,secret:{id:input.clientRequestId,holder:'assistant',scopeType:'assistant',storageMode:'trelio',currentVersion:1,hasValue:true}};
+  let pending=false,saved=false,forms=0,reads=0;const writes=[];
+  const options={origin:'https://trelio.ru',input,scope,token:{opaque:true},companyEncryption:encryption,
+    withGenerationKey:action=>action(Buffer.from('synthetic-native-device-key')),
+    collectValues:async({holder,persistValues})=>{assert.equal(holder,'assistant');forms++;await persistValues({username:'synthetic-user',password:'PRIVATE_CAPTURE_RUNTIME_CANARY'});},
+    sendRequest:async(_origin,_token,_path,options={})=>{
+      if(!options.method){reads++;return {json:async()=>saved?{completed:true,receipt}:pending?{pending:true,secretId:input.clientRequestId}:context};}
+      const body=JSON.parse(options.body);writes.push(body);
+      if(body.stage==='begin'){pending=true;return {json:async()=>({started:true,secretId:input.clientRequestId})};}
+      assert.deepEqual(Object.keys(body).sort(),['clientRequestId','expectedCurrentVersion','expectedTaskUpdatedAt','holder','ownerDecisionId','plan','requestFingerprint','runId','secretId','stage','values']);
+      assert.equal(body.values.password,'PRIVATE_CAPTURE_RUNTIME_CANARY');
+      saved=true;throw new Error('synthetic private save reply lost');
+    }};
+  const result=await handleAssistantNewSecretCreation(options);
+  assert.deepEqual(result,receipt);assert.equal(forms,1);assert.equal(writes.length,2);assert.equal(reads,3);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_CAPTURE_RUNTIME_CANARY'),false);
+  assert.deepEqual(await handleAssistantNewSecretCreation({...options,withGenerationKey:()=>assert.fail('committed receipt precedes key/input')}),receipt);
+  assert.equal(forms,1);assert.equal(writes.length,2);
+  await assert.rejects(handleAssistantNewSecretCreation({...options,sendRequest:async()=>({json:async()=>({pending:true,secretId:input.clientRequestId})}),
+    withGenerationKey:()=>assert.fail('pending capture cannot open another form')}),e=>e.code==='ASSISTANT_SECRET_INPUT_ATTEMPT_UNCERTAIN');
+});

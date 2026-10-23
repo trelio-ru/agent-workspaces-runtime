@@ -391,14 +391,23 @@ export const handleAssistantGeneratedPrivateSecret = async ({ origin, input, sco
   });
 };
 
-/** NEW company card through the SAME generator, metadata/value codec and
- * genuine Secret HTTP profile. Only neutral metadata enters this local path.
+/** NEW company/private cards through the SAME protected producer and genuine
+ * Secret HTTP profile. Only native-neutral metadata enters this local path.
+ * Company metadata/value and global private keyring AAD stay independent.
  * Preflight proves current ACL/Run and reads a committed receipt before key or
  * human input. No response failure retries begin/save or reopens a form. */
-export const handleAssistantCompanySecretCreation = async ({origin,input,scope,token,withGenerationKey,
+export const handleAssistantNewSecretCreation = async ({origin,input,scope,token,withGenerationKey,
   companyEncryption=null,onContext=()=>undefined,sendRequest=request,collectValues}) => {
+  const personal=input.holder==='assistant';
+  if(personal&&input.plan?.valueSource!=='protected_input')invalid();
   const receipt=result=>{
     const secret=result?.receipt?.secret;
+    if(personal){
+      if(result?.completed!==true||result.receipt?.created!==true||secret?.id!==input.clientRequestId
+        ||secret.holder!=='assistant'||secret.scopeType!=='assistant'||secret.storageMode!=='trelio'
+        ||secret.currentVersion!==1||secret.hasValue!==true)invalid();
+      return {created:true,secret:{id:secret.id,holder:'assistant',scopeType:'assistant',storageMode:'trelio',currentVersion:1,hasValue:true}};
+    }
     if(result?.completed!==true||result.receipt?.created!==true||!UUID.test(secret?.id??'')||secret.holder!=='company'
       ||secret.companyId!==scope.companyId||secret.scopeType!=='task'||secret.scopeId!==scope.taskId
       ||secret.currentVersion!==(input.plan.valueSource==='empty'?0:1)||secret.hasValue!==(input.plan.valueSource!=='empty')
@@ -418,14 +427,22 @@ export const handleAssistantCompanySecretCreation = async ({origin,input,scope,t
     'Предыдущий ввод или сохранение не подтверждены. Проверьте исходный запрос; форма повторно не открывается.');
   if(!isRecord(context)||context.schemaVersion!==1||context.completed!==false||!UUID.test(context.secretId??'')
     ||context.runId!==input.runId||['assistantUserId','deviceId','companyId','taskId'].some(key=>context[key]!==scope[key])
-    ||context.valueSource!==input.plan.valueSource||context.scopeType!=='task'||context.scopeId!==scope.taskId
-    ||context.storageMode!==(companyEncryption?'company_e2ee':'trelio')||!isRecord(context.metadata)
-    ||context.metadata.name!=='Company secret'||typeof withGenerationKey!=='function')invalid();
+    ||context.valueSource!==input.plan.valueSource||!personal&&(context.scopeType!=='task'||context.scopeId!==scope.taskId)
+    ||context.storageMode!==(!personal&&companyEncryption?'company_e2ee':'trelio')||!isRecord(context.metadata)
+    ||context.metadata.name!==(personal?'Personal secret':'Company secret')||personal&&context.secretId!==input.clientRequestId||typeof withGenerationKey!=='function')invalid();
   await onContext(context);
   const endpoint=`/api/agent-secrets/secrets/${context.secretId}/value-from-bridge`;
   const post=async body=>(await sendRequest(origin,token,endpoint,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
   const newSecret={...context.metadata,scopeType:'task',scopeId:scope.taskId};
   const save=async(values,key)=>{
+    if(personal){
+      // Global private values use the SAME native private keyring/AAD. Only
+      // the surrounding task question uses company E2EE; never wrap these
+      // bytes with company metadata/value markers or send a holder override.
+      const requestFingerprint=buildLocalSecretRequestFingerprint({key,source:'protected_input',
+        binding:{...scope,...input,secretId:context.secretId,fields:context.fields,values}});
+      return receipt(await post({...input,secretId:context.secretId,stage:'save',expectedCurrentVersion:0,requestFingerprint,values}));
+    }
     let localWrite;
     if(input.plan.valueSource==='empty'){
       const protectedMetadata=companyEncryption?await protectNewSecretMetadata(newSecret,context,companyEncryption):null;
@@ -452,7 +469,7 @@ export const handleAssistantCompanySecretCreation = async ({origin,input,scope,t
         'Ввод не допущен либо уже был начат. Форма повторно не открывается.');
       const collect=collectValues??collectAgentSecretThroughProtectedForm;
       let result;
-      await collect({origin,fields:context.fields,holder:'company',persistValues:async values=>{
+      await collect({origin,fields:context.fields,holder:personal?'assistant':'company',persistValues:async values=>{
         // Reread original pending attempt after human delay. Neither a stale
         // form nor logout/Run expiry can skip the native final ACL/owner CAS.
         const current=await read();
@@ -474,6 +491,10 @@ export const handleAssistantCompanySecretCreation = async ({origin,input,scope,t
     throw error;
   }
 };
+
+// Preserve the existing company adapter import; both holders execute the one
+// implementation above, not another form/HTTP/credential engine.
+export const handleAssistantCompanySecretCreation=handleAssistantNewSecretCreation;
 
 /** Human-entered values use the SAME protected loopback and renderer as PAT
  * setup. This is an internal host callback, never an MCP value/file producer.

@@ -588,6 +588,12 @@ export const assistantNeutralPrivateMetadata=value=>{
     &&value.generatedFields.every(row=>object(row)&&Object.keys(row).sort().join(',')==='generator,key,length'
       &&row.key==='password'&&row.generator==='password'&&Number.isSafeInteger(row.length)&&row.length>=16&&row.length<=128);
 };
+/** Explicit NEW human input; this cannot upgrade a legacy empty/generation
+ * approval. Native intent/holder/Run/attempt remain the authority. */
+export const assistantNeutralPrivateInput=value=>object(value)
+  &&Object.keys(value).sort().join(',')==='cardType,metadataMode,runId,valueSource'
+  &&value.metadataMode==='neutral'&&['opaque','login','password'].includes(value.cardType)
+  &&UUID.test(value.runId??'')&&value.valueSource==='protected_input';
 /** Value-free NEW company intent. This is a syntax/privacy check only;
  * native scope/create ACL, original owner decision and Run remain authority. */
 export const assistantNeutralCompanySecret=value=>{
@@ -669,7 +675,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
 
   if(Object.hasOwn(business,'encryptedFiles')||Object.hasOwn(business,'acceptedFiles')&&name!=='create_comment'
     ||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
-    ||name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)
+    ||name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)&&!assistantNeutralPrivateInput(business.fields)
     ||name==='request_assistant_action'&&business.operation==='create_company_secret'&&!assistantNeutralCompanySecret(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   if(business.acceptedFiles!==undefined&&(!Array.isArray(business.acceptedFiles)||business.acceptedFiles.length<1
     ||business.acceptedFiles.length>10||business.acceptedFiles.some(file=>!object(file)
@@ -866,7 +872,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const readonly=secretMetadata||['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
-        if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)
+        if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)&&!assistantNeutralPrivateInput(business.fields)
           ||name==='request_assistant_action'&&business.operation==='create_company_secret'&&!assistantNeutralCompanySecret(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,
           ...(customField?{customFieldTypeForId:id=>id===customField.id?customField.fieldType:null}:{})});
@@ -961,9 +967,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     || Object.values(secretBrowserFill).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateFill=secretBrowserFill===null?null:Object.freeze({...secretBrowserFill});
   const companyGeneration=secretGeneration?.holder==='company';
+  const privateInput=secretGeneration?.holder==='assistant';
+  const newCreation=companyGeneration||privateInput;
   if(secretGeneration!==null && (!object(secretGeneration)
-    || (companyGeneration?Object.keys(secretGeneration).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,holder,ownerDecisionId,plan,runId,workspaceId'
-      ||!assistantNeutralCompanySecret(secretGeneration.plan)||secretGeneration.plan.runId!==secretGeneration.runId
+    || (newCreation?Object.keys(secretGeneration).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,holder,ownerDecisionId,plan,runId,workspaceId'
+      ||!(companyGeneration?assistantNeutralCompanySecret:assistantNeutralPrivateInput)(secretGeneration.plan)||secretGeneration.plan.runId!==secretGeneration.runId
       :Object.keys(secretGeneration).filter(key=>key!=='neutralPlan').sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId,workspaceId')
     || ['clientRequestId','ownerDecisionId','runId','workspaceId'].some(key=>!uuid.test(secretGeneration[key]??''))
     || typeof secretGeneration.expectedTaskUpdatedAt!=='string' || !Number.isFinite(Date.parse(secretGeneration.expectedTaskUpdatedAt))
@@ -1196,9 +1204,9 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           ||Object.keys(p.neutralPlan).sort().join(',')!=='cardType,generatedFields'
           ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
           ||args.runIdentity.runId!==p.runId||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-      }else if(args.operation==='secret_company_create'){
+      }else if(args.operation==='secret_company_create'||args.operation==='secret_input'){
         if(Object.keys(p).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,holder,ownerDecisionId,plan,runId'
-          ||p.holder!=='company'||!assistantNeutralCompanySecret(p.plan)||p.plan.runId!==p.runId
+          ||!(args.operation==='secret_input'?p.holder==='assistant'&&assistantNeutralPrivateInput(p.plan):p.holder==='company'&&assistantNeutralCompanySecret(p.plan))||p.plan.runId!==p.runId
           ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
           ||args.runIdentity.runId!==p.runId||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
       }else fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
@@ -1410,7 +1418,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return assistantSkillCatalogueDirectory(configDirectory,identity);
     },
     async selectCompanySecretContext(context){
-      if(!companyGeneration||!privateGeneration||!object(context)||context.completed!==false
+      if(!newCreation||!privateGeneration||!object(context)||context.completed!==false
         ||!uuid.test(context.secretId??'')||context.runId!==privateGeneration.runId
         ||['companyId','taskId'].some(key=>context[key]!==pass[key])
         ||context.assistantUserId!==identity.assistantId||context.deviceId!==identity.deviceId
@@ -1494,7 +1502,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);route={proofTool:'assistant_workspace_data_plane_read'};
       }else if(attachmentSelection){
         fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
-      }else if(companyGeneration&&privateGeneration&&requestOrigin===(lifecycle?.requestOrigin??identity.origin)
+      }else if(newCreation&&privateGeneration&&requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         &&(url.pathname==='/api/agent-secrets/generated-save-context'||selectedCompanySecretId&&url.pathname===`/api/agent-secrets/secrets/${selectedCompanySecretId}/value-from-bridge`)){
         const {workspaceId:_workspace,...expected}=privateGeneration;
         if(method==='GET'&&url.pathname==='/api/agent-secrets/generated-save-context'&&options.body===undefined
@@ -1504,12 +1512,13 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         }else if(method==='PUT'&&!url.search&&selectedCompanySecretId){
           let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
           const begin=input?.stage==='begin';
-          const allowed=Object.keys(expected).concat(['secretId','stage'],begin?[]:['expectedCurrentVersion','requestFingerprint','companySlug','contentProtection','values','fieldKeys','name','publicDescription','templateType','fields','encryptedPayloads']);
+          const allowed=Object.keys(expected).concat(['secretId','stage'],begin?[]:privateInput?['expectedCurrentVersion','requestFingerprint','values']:['expectedCurrentVersion','requestFingerprint','companySlug','contentProtection','values','fieldKeys','name','publicDescription','templateType','fields','encryptedPayloads']);
           if(!object(input)||Object.keys(input).some(key=>!allowed.includes(key))||input.secretId!==selectedCompanySecretId
             ||!Object.entries(expected).every(([key,value])=>(key==='plan'?JSON.stringify(input[key]):input[key])===(key==='plan'?JSON.stringify(value):value))
             ||begin&&privateGeneration.plan.valueSource!=='protected_input'
             ||!begin&&(input.stage!=='save'||input.expectedCurrentVersion!==0||!/^[a-f0-9]{64}$/u.test(input.requestFingerprint??'')
-              ||!object(input.values)||!Array.isArray(input.fields)||!Array.isArray(input.fieldKeys)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+              ||!object(input.values)||(!privateInput&&(!Array.isArray(input.fields)||!Array.isArray(input.fieldKeys)))
+              ||privateInput&&(Buffer.byteLength(JSON.stringify(input.values),'utf8')>8192||Object.values(input.values).some(value=>value!==null&&typeof value!=='string'))))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           route={proofTool:'assistant_secret_generate_write'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;if(lifecycle)url=new URL(url.pathname+url.search,identity.origin);

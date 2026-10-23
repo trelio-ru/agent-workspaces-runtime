@@ -1889,3 +1889,15 @@ including inspection/account/bootstrap time. No terminal stdin/value delivery
 or unattended login is introduced. Complete provider stdout/stderr remains
 private. Handoff exit/window close returns only `loginVerified:false`; a
 separate fresh native provider probe is required before claiming a usable login.
+
+### NEW private protected input
+
+An explicit neutral `create_private_secret` source `protected_input` binds its
+card enum and original own Run to the SAME persisted native owner action.
+`secret_input` uses the existing company/private NEW producer implementation,
+shared protected form/loopback and structural begin/save/GET receipt protocol.
+The native private writer retains assistant AAD/keyring and NULL company columns;
+task purpose/question stay company-sealed and require the current recipient.
+Legacy empty/generation approvals never gain capture authority. Unknown/pending,
+cancel or form opening cannot mean saved or reopen input under that old intent.
+No model value, browser/file/session extraction, new vault or runtime module.

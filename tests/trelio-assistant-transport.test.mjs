@@ -2665,3 +2665,42 @@ test('human-input setup request rejects model recipes before real MCP and reconc
       {...plan,arguments:['login','https://private.test/secret']}])assert.throws(()=>normalizeAssistantSkillAccountSetupPlan(changed));
   }finally{f.close();}
 });
+
+test('private protected input binds exact native plan/card/pass and never exports a value through its task profile',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {handleAssistantNewSecretCreation}=await import('../host-runtime/scripts/trelio-secret-generate.mjs');
+  const runId=randomUUID(),input={holder:'assistant',runId,clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),
+    plan:{metadataMode:'neutral',cardType:'password',runId,valueSource:'protected_input'}};
+  const f=await workspaceProfileFixture({secretGeneration:{...input,workspaceId:randomUUID()}});
+  const scope={assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.pass.companyId,taskId:f.pass.taskId};
+  const fields=[{key:'password',label:'Password',type:'password',required:true}];
+  const context={schemaVersion:1,completed:false,...scope,secretId:input.clientRequestId,runId,storageMode:'trelio',currentVersion:0,
+    protectedInputStorageSupported:true,valueSource:'protected_input',metadata:{name:'Personal secret',templateType:'custom'},fields};
+  const receipt={created:true,secret:{id:input.clientRequestId,holder:'assistant',scopeType:'assistant',storageMode:'trelio',currentVersion:1,hasValue:true}};
+  let pending=false,saved=false,writes=0;const nonces=new Set(),prior=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));
+    const method=options.method??'GET',tool=method==='GET'?'assistant_secret_generate_context':'assistant_secret_generate_write';
+    assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);
+    assert.equal(nonces.has(proof.nonce),false);nonces.add(proof.nonce);
+    if(method==='GET')return new Response(JSON.stringify(saved?{completed:true,receipt}:pending?{pending:true,secretId:input.clientRequestId}:context));
+    writes++;const body=JSON.parse(options.body);assert.equal(url.pathname,`/api/agent-secrets/secrets/${input.clientRequestId}/value-from-bridge`);
+    assert.equal(body.holder,'assistant');
+    if(body.stage==='begin'){pending=true;return new Response(JSON.stringify({started:true,secretId:input.clientRequestId}));}
+    assert.equal(body.values.password,'PRIVATE_PROFILE_CAPTURE_CANARY');saved=true;
+    return new Response(JSON.stringify({completed:true,receipt}));
+  };
+  try{
+    const result=await withWorkspaceExecutionProfile(f.profile,async()=>handleAssistantNewSecretCreation({origin:f.identity.origin,input,scope,
+      token:await common.requireToken(f.identity.origin),withGenerationKey:f.profile.withSecretGenerationKey,onContext:f.profile.selectCompanySecretContext,
+      collectValues:async({persistValues})=>persistValues({password:'PRIVATE_PROFILE_CAPTURE_CANARY'})}));
+    assert.deepEqual(result,receipt);assert.equal(writes,2);assert.equal(JSON.stringify(result).includes('PRIVATE_PROFILE_CAPTURE_CANARY'),false);
+    const token=await f.profile.requireToken(f.identity.origin);
+    for(const changed of [{holder:'company'},{plan:{...input.plan,valueSource:'generated'}},{name:'arbitrary-company-metadata'}]){
+      await assert.rejects(f.profile.prepareRequest({origin:f.identity.origin,token,pathname:`/api/agent-secrets/secrets/${input.clientRequestId}/value-from-bridge`,
+        options:{method:'PUT',body:JSON.stringify({...input,secretId:input.clientRequestId,stage:'save',expectedCurrentVersion:0,requestFingerprint:'a'.repeat(64),values:{password:'synthetic'},...changed})},
+        buildHeaders:(_token,input)=>new Headers(input)}));
+    }
+    assert.equal(writes,2);
+  }finally{globalThis.fetch=prior;}
+});

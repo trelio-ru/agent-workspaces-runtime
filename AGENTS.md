@@ -270,7 +270,7 @@ publication tooling также остаются вне этого публичн
   навыков не объединяются.
 - Локальные формы и private skills используют общий [renderer](docs/local-forms.md):
   декларативные поля/QR/status, без собственной HTML/CSS-копии и secret prefill.
-  Protected input новых Secret использует тот же loopback и Secret writer;
+  Protected input новых company/private Secret использует тот же loopback и writer;
   после persist failure форма терминальна, exact native receipt читается без
   повторной записи. Открытие формы не является сохранением или входом.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
