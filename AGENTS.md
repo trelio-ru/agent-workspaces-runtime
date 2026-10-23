@@ -70,6 +70,9 @@ publication tooling также остаются вне этого публичн
   startInvocation обязательны, queue/exit code не являются завершением.
 
 - Managed skill consent/setup reuse SAME owner engine, signed inspector, account catalogue and bounded protected-input process; no model argv/import/unattended login.
+  Public signed human-input setup also selects the bounded setup view without
+  pending device consent. Test task discovery → existing list change → exact
+  owner decision → advertised setup → task view; never add a hidden-call alias.
 - Модель ассистента: один owner choice/company, fresh execution state перед
   create/resume; native model/list и explicit flags, без fallback. Policy block
   пропускается без ack/roll-forward, не останавливает другие компании и не

@@ -745,6 +745,73 @@ test('same task chat can wait for an exact remote owner decision, call once, and
   assert.equal(messages.filter(message=>message.id).length,9);
 });
 
+test('public signed account setup follows task skill discovery through owner approval and its advertised setup continuation',async()=>{
+  const questionId=randomUUID(),clientRequestId=randomUUID(),accountId=randomUUID(),calls=[],views=[];
+  const fields={skillId:'synthetic-public-login',projectId:null,releaseId:randomUUID(),accountId,commandId:'login'};
+  const parameters={...fields,clientRequestId,ownerDecisionId:questionId,expectedTaskUpdatedAt:new Date().toISOString()};
+  const continuation={schemaVersion:1,operation:'skill_account_setup',parameters};
+  let questionReads=0,attempts=0,raw='';
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+    {jsonrpc:'2.0',id:2,method:'tools/list'},
+    {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'get_agent_skill',arguments:{skillId:fields.skillId,sections:['instructions','execution','connection']}}},
+    {jsonrpc:'2.0',id:4,method:'tools/list'},
+    {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'request_assistant_action',arguments:{operation:'setup_skill_account',fields,clientRequestId}}},
+    {jsonrpc:'2.0',id:6,method:'tools/call',params:{name:'get_assistant_owner_question',arguments:{questionId}}},
+    {jsonrpc:'2.0',id:7,method:'tools/call',params:{name:'get_assistant_owner_question',arguments:{questionId}}},
+    {jsonrpc:'2.0',id:8,method:'tools/call',params:{name:'continue_assistant_workspace_action',arguments:continuation}},
+    {jsonrpc:'2.0',id:9,method:'tools/call',params:{name:'get_assistant_status',arguments:{}}},
+    {jsonrpc:'2.0',id:10,method:'tools/list'}];
+  const output=new PassThrough();output.on('data',chunk=>{raw+=chunk;});
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createMcp:async({presentationProfile})=>{
+      views.push(presentationProfile);
+      const operations=presentationProfile==='skill_setup'?['skill_consent','skill_account_setup']:['skill_run'];
+      return {listTools:async()=>[{name:'continue_assistant_workspace_action',inputSchema:{type:'object',properties:{operation:{enum:operations}}}}],
+        callTool:async(name,args)=>{
+          calls.push(name);
+          if(name==='get_agent_skill'){
+            assert.equal(presentationProfile,'task');
+            // Native public guidance returns no pending unverified-runtime
+            // consent. Its signed account setup alone selects the existing
+            // small view; the backend PG regression verifies this real state.
+            return {content:[],structuredContent:{assistantExecution:{state:'shared_runtime_setup',accountSetup:{
+              state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup',
+              commands:[{id:'login',purpose:'authenticate_existing'}]}}}};
+          }
+          if(name==='request_assistant_action'){
+            assert.equal(presentationProfile,'skill_setup');assert.deepEqual(args.fields,fields);
+            return {content:[],structuredContent:{questionId,continuation:{arguments:continuation}}};
+          }
+          if(name==='get_assistant_owner_question'){
+            assert.equal(presentationProfile,'skill_setup');assert.equal(args.questionId,questionId);
+            return {content:[],structuredContent:{id:questionId,action:{state:++questionReads===1?'pending':'approved'}}};
+          }
+          if(name==='continue_assistant_workspace_action'){
+            assert.equal(questionReads,2,'pending owner input alone never admits setup');
+            assert.deepEqual(args,continuation,'facade must forward the exact returned native intent');
+            assert.equal(operations.includes(args.operation),true,'never call an operation hidden in this live view');
+            attempts++;
+            return {content:[],structuredContent:{state:'admitted',replayAllowed:false,reconcileOnly:false}};
+          }
+          assert.equal(name,'get_assistant_status');
+          return {content:[],structuredContent:{schemaVersion:1}};
+        }};
+    }});
+  const messages=raw.trim().split('\n').map(line=>JSON.parse(line)),reply=id=>messages.find(message=>message.id===id);
+  assert.deepEqual(reply(2).result.tools.at(-1).inputSchema.properties.operation.enum,['skill_run']);
+  assert.deepEqual(reply(4).result.tools.at(-1).inputSchema.properties.operation.enum,['skill_consent','skill_account_setup']);
+  assert.deepEqual(reply(10).result.tools.at(-1).inputSchema.properties.operation.enum,['skill_run']);
+  assert.deepEqual(reply(5).result.structuredContent.continuation.arguments,continuation);
+  assert.equal(reply(6).result.structuredContent.action.state,'pending');
+  assert.equal(reply(7).result.structuredContent.action.state,'approved');
+  assert.equal(reply(8).result.structuredContent.state,'admitted');assert.equal(attempts,1);
+  assert.deepEqual(calls,['get_agent_skill','request_assistant_action','get_assistant_owner_question','get_assistant_owner_question',
+    'continue_assistant_workspace_action','get_assistant_status']);
+  assert.deepEqual(views,['task','task','skill_setup','skill_setup','skill_setup','skill_setup','skill_setup','skill_setup','task']);
+  assert.equal(messages.filter(message=>message.method==='notifications/tools/list_changed').length,2,
+    'the SAME notification selects/restores presentation without a session, pass or authority replacement');
+});
+
 test('maintainer QA configuration is exact, hash-pinned and never a production origin or credential container',async t=>{
   const fs=await import('node:fs/promises'),os=await import('node:os'),path=await import('node:path');
   const {createHash}=await import('node:crypto');
