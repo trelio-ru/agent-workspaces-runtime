@@ -620,7 +620,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     async prepareSkillBodyRead(input){
       await assertIdentity();
       if(sourceReads)return sourceReads.prepare(input);
-      if(['telegram-mtproto','email-imap-smtp'].includes(input.artifact?.skillId)&&input.runtimeArguments?.[0]==='read-reference')fail('ASSISTANT_SOURCE_READ_REQUIRED');
+      if(['telegram-mtproto','email-imap-smtp','max-web'].includes(input.artifact?.skillId)&&input.runtimeArguments?.[0]==='read-reference')fail('ASSISTANT_SOURCE_READ_REQUIRED');
       return null;
     },
     async commitSkillBodyRead(ticket,result){
@@ -986,6 +986,10 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
   if(raw.releaseId!==selected.releaseId||raw.company?.id!==selected.companyId||raw.artifact?.skillId!==selected.skillId
     ||(raw.localIdentity?.projectId??null)!==selected.projectId||!raw.assistantGuidance)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   const {rawResolution}=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
+  const resolved=common.normalizeResolvedSkillRuntimeArtifact(rawResolution);
+  if(resolved.artifact.contentProtection!=='plain'||resolved.trust.level!=='platform_verified'
+    ||resolved.trust.artifactLevel!=='platform_verified'||resolved.trust.requiresDeviceConsent
+    ||resolved.companyConnection?.secretBindings.length)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   const native=rawResolution.assistantGuidance,execution=native?.structuredContent?.runtimeExecution;
   if(!execution||execution.releaseId!==selected.releaseId||native.structuredContent.skill?.id!==selected.skillId)
     fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
@@ -2208,7 +2212,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       }else fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
       await assertCurrent();
       const headers=buildHeaders(null,options.headers??{});
-      for(const key of ['cookie','cookie2','proxy-authorization','x-trelio-assistant-pass','x-trelio-assistant-proof'])headers.delete(key);
+      for(const key of ['cookie','cookie2','proxy-authorization','x-trelio-assistant-pass','x-trelio-assistant-proof','x-trelio-assistant-source-encryption-fingerprint'])headers.delete(key);
       headers.set('x-trelio-assistant-source-protocol','1');
       headers.set('x-trelio-assistant-encryption-protocol','1');
       // Only metadata from an already prepared managed identity is sent.
@@ -2490,10 +2494,11 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
       const capabilities=materialized.artifact.parsedPackage.capabilities;
       if(!['network','local-session','local-accounts-v1'].every(value=>capabilities.includes(value))
         || capabilities.includes('secret-checkout'))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
-      if(!accountSetup&&!sourceAcknowledgement&&!sourceIntake)return {result:await action({engine,profile,materialized,resolution,signal:combined})};
-      return {materialized,resolution};
+      const refresh=Boolean(accountSetup||sourceAcknowledgement||sourceIntake||companyEncryption);
+      if(!refresh)return {result:await action({engine,profile,materialized,resolution,signal:combined})};
+      return {materialized,resolution,refresh};
     });
-    if(!accountSetup&&!sourceAcknowledgement&&!sourceIntake)return initial.result;
+    if(!initial.refresh)return initial.result;
     // Exit the first async profile before entering the fresh one. The common
     // engine deliberately refuses nested profile replacement; retain that
     // device/human-isolation guard and its closed tombstone semantics.
@@ -2501,6 +2506,8 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
     profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,sourceSelection,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
     return await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const fresh=await resolve();
+      if(JSON.stringify(fresh.resolution.companyConnection)!==JSON.stringify(initial.resolution.companyConnection)
+        ||JSON.stringify(fresh.resolution.localIdentity)!==JSON.stringify(initial.resolution.localIdentity))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
       if(fresh.resolution.artifact.id!==initial.resolution.artifact.id
         || fresh.resolution.artifact.packageSha256!==initial.resolution.artifact.packageSha256
         || fresh.resolution.releaseId!==initial.resolution.releaseId)fail('AGENT_SKILL_RELEASE_CHANGED');

@@ -772,6 +772,18 @@ const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=f
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
 };
 
+test('every supported source exact-body command requires the common native read observer',async()=>{
+  const f=await workspaceProfileFixture();
+  try{
+    for(const skillId of ['telegram-mtproto','email-imap-smtp','max-web']){
+      await assert.rejects(f.profile.prepareSkillBodyRead({artifact:{skillId},runtimeArguments:['read-reference','synthetic']}),
+        {code:'ASSISTANT_SOURCE_READ_REQUIRED'});
+    }
+    assert.equal(await f.profile.prepareSkillBodyRead({artifact:{skillId:'max-web'},runtimeArguments:['probe']}),null,
+      'ordinary separately admitted reads are not guessed exact message proofs');
+  }finally{f.close();}
+});
+
 test('native encrypted refusal is consumed once by the trusted materializer under the original MCP deadline',async()=>{
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});let writes=0,hydrations=0,mode='valid';
   const descriptor=f.descriptor;

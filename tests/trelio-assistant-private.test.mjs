@@ -99,8 +99,14 @@ test('foreign, corrupt or unavailable encryption state never regenerates or fall
   const store={get:async()=>structuredClone(saved),put:async(_key,value)=>{saved=structuredClone(value);writes++;}};
   const options={identity,companyId,store,lockDirectory:path.resolve(os.tmpdir(),'assistant-crypto-fixture'),
     lock:(_name,action)=>action(),assertCurrent:async()=>{if(!live)throw new Error('PRIVATE revoked device');}};
+  await assert.rejects(resolveAssistantCompanyEncryptionDevice({...options,allowCreate:false}),/PRIVATE_CORRUPT/);
+  assert.equal(writes,0,'passive reader cannot create its first or replacement key');
   await resolveAssistantCompanyEncryptionDevice(options);assert.equal(writes,1);
   const original=structuredClone(saved);
+  saved=null;
+  await assert.rejects(resolveAssistantCompanyEncryptionDevice({...options,allowCreate:false}),/PRIVATE_CORRUPT/);
+  assert.equal(writes,1,'lost reader state preserves the old enrollment instead of a new key');
+  saved=structuredClone(original);
   for(const mutate of [entry=>{entry.deviceId=randomUUID();},entry=>{entry.assistantId=randomUUID();},
     entry=>{entry.companyId=randomUUID();},entry=>{entry.record.companyId=randomUUID();},
     entry=>{entry.record.wrappedPrivateBundle.ciphertext='invalid';}]){

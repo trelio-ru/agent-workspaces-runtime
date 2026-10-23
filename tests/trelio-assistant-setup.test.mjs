@@ -312,7 +312,7 @@ test('production host composes real SQLite, fresh private calls and the native a
     contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null});
   },dependencies:{directory:taskConfig,
     readSourceMonitor:async(source,signal)=>{sourcePolls++;assert.ok(signal);assert.deepEqual(source,{companyId,projectId:null,
-      skillId:'email-imap-smtp',accountId:sourceAccountId,cursor:sourcePolls===1?null:'email-history',initialUnread:true});
+      skillId:'email-imap-smtp',sourceId,sourceRevision:0,accountId:sourceAccountId,cursor:sourcePolls===1?null:'email-history',initialUnread:true});
       return {baselineOnly:sourcePolls===1,events:[],nextCursor:sourcePolls===1?'email-baseline':'email-end',hasMore:false,
         ...(sourcePolls===1?{initialUnreadCursor:'email-history'}:{initialUnreadBackfill:true})};},
     ensureDirectory:async()=>{},openDatabase:async directory=>{
