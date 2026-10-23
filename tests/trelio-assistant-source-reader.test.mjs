@@ -264,7 +264,53 @@ test('native owner setup uses the same signed loader/catalogue, has atomic creat
   assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls);
 });
 
-test('protected email setup consumes separate native permission and the same signed account/process engine',async t=>{
+/** Real managed envelope/config around the SAME native setup fixtures. No
+ * provider form is automated here: the signed disposable child proves only
+ * that protected capture admission receives opened config locally. */
+const encryptedSetupFixture=async(t,encrypted)=>{
+  if(!encrypted)return {selectedStore:store};
+  const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const {hpkeSeal,encryptCompanyPayload,buildCompanyEncryptedTextMarker}=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
+  const slots=new Map(),selectedStore={get:slot=>slot.kind==='company_encryption'?Promise.resolve(slots.get(slot.id)??null):store.get(slot),
+    put:async(slot,value)=>{assert.equal(slot.kind,'company_encryption');slots.set(slot.id,value);}};
+  const managed=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store:selectedStore,
+    lockDirectory:path.join(directory,'setup-crypto-locks'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+  const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+  const scopeId=randomUUID(),recipientDeviceId=randomUUID(),entityId=randomUUID(),connectionId=randomUUID();
+  const aad={suite:'trelio-e2ee-v1',companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:recipientDeviceId};
+  const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+    plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+  const envelope={id:randomUUID(),...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+  const header={companyId,scopeId,scopeEpoch:1,entityType:'agent_skill_connection',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+  const payload={...header,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:header,
+    payload:{values:{config_json:{setup:'ENCRYPTED_SETUP_CONFIG_CANARY'}}}})};
+  const runtime={state:'encrypted',suite:'trelio-e2ee-v1',company:{id:companyId,slug:'synthetic',name:'Synthetic'},viewer:{userId:assistantId},
+    accessState:'ready',device:{id:recipientDeviceId,fingerprint:managed.fingerprint},scope:{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk},envelope};
+  const savedFetch=globalThis.fetch;let mode='valid';
+  globalThis.fetch=async(url,options)=>{
+    assert.doesNotMatch(String(options.body??''),/ENCRYPTED_SETUP_CONFIG_CANARY|scopePrivateEncryptionJwk/);
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime')return new Response(JSON.stringify(runtime));
+    const response=await savedFetch(url,options);
+    if(url.pathname!==prefix+'/resolve'||!response.ok)return response;
+    assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
+    const raw=await response.json(),query=new URL(raw.packageUrl,origin);
+    query.searchParams.set('sourceId',setupFixture.id);query.searchParams.set('sourceRevision',String(setupFixture.revision));
+    raw.packageUrl=query.pathname+query.search;raw.localIdentity.connectionId=connectionId;
+    raw.companyConnection={id:connectionId,status:'configured',configured:true,
+      config:buildCompanyEncryptedTextMarker(entityId,'config_json'),secretBindings:[]};
+    raw.sourceEncryption={schemaVersion:1,companyId,recipientDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,encryptedPayloads:[payload]};
+    if(mode==='recipient')raw.sourceEncryption.recipientDeviceId=randomUUID();
+    if(mode==='missing')raw.sourceEncryption.encryptedPayloads=[];
+    if(mode==='selection'){query.searchParams.set('sourceId',randomUUID());raw.packageUrl=query.pathname+query.search;}
+    assert.doesNotMatch(JSON.stringify(raw),/ENCRYPTED_SETUP_CONFIG_CANARY|scopePrivateEncryptionJwk/);
+    return new Response(JSON.stringify(raw));
+  };
+  t.after(()=>{globalThis.fetch=savedFetch;});
+  return {selectedStore,setMode:value=>{mode=value;}};
+};
+
+for(const encrypted of [false,true])test(`protected email setup consumes separate native permission and the same signed account/process engine (encrypted=${encrypted})`,async t=>{
   const selected={...scope};
   t.after(()=>{Object.assign(scope,selected);setupFixture=null;resolveOverride=null;});
   scope.skillId='email-imap-smtp';
@@ -272,18 +318,20 @@ test('protected email setup consumes separate native permission and the same sig
     provisionLocalAccount:true,interactiveSetupAllowed:true,executionVerified:false};
   const sourceId=setupFixture.id,accountId=setupFixture.localAccountId;
   const client={identity,sourceAccounts:async()=>[setupFixture]};
-  const configure=()=>configureAssistantEmailSource({identity,host,store,client,companyId,sourceId});
+  const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
+  const configure=()=>configureAssistantEmailSource({identity,host,store:selectedStore,client,companyId,sourceId});
   if(!['darwin','win32'].includes(process.platform)){
     const before=resolveCalls;
     await assert.rejects(configure(),/SETUP_UNAVAILABLE/);
     assert.equal(resolveCalls,before,'unsupported storage cannot open a form or borrow a human account');return;
   }
-  const sourceDir=path.join(directory,'email-setup-package');await fs.mkdir(sourceDir);
-  const marker=path.join(directory,'email-setup-native-calls');
+  const sourceDir=path.join(directory,`email-setup-package-${encrypted}`);await fs.mkdir(sourceDir);
+  const marker=path.join(directory,`email-setup-native-calls-${encrypted}`);
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
     assert.deepEqual(process.argv.slice(2),['configure','--account',${JSON.stringify(accountId)},'--password-input','browser']);
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    if(${encrypted})assert.deepEqual(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON),{setup:'ENCRYPTED_SETUP_CONFIG_CANARY'});
     let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
     fs.appendFileSync(${JSON.stringify(marker)},'1');
     process.stdout.write(JSON.stringify({configured:${JSON.stringify(accountId)},passwordInput:'browser',connectionMode:'imap_smtp',
@@ -292,13 +340,16 @@ test('protected email setup consumes separate native permission and the same sig
   artifactId=randomUUID();releaseId=randomUUID();
   packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
     entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
-  await prepareAssistantSourceAccount({identity,host,store,client,companyId,sourceId});
+  await prepareAssistantSourceAccount({identity,host,store:selectedStore,client,companyId,sourceId});
   setupFixture.operation='configure';
   const readMarker=()=>fs.readFile(marker,'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
   const before=resolveCalls;
   setupFixture.interactiveSetupAllowed=false;
   await assert.rejects(configure(),/SETUP_REQUIRED/);assert.equal(resolveCalls,before);assert.equal(await readMarker(),'');
   setupFixture.interactiveSetupAllowed=true;
+  if(encrypted){for(const mode of ['recipient','missing','selection']){
+    setMode(mode);await assert.rejects(configure());assert.equal(await readMarker(),'','bad cipher/recipient/source never opens a provider form');
+  }setMode('valid');}
   resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),
     accountSetup:{...admission().accountSetup,operation:'create'}}}));
   await assert.rejects(configure(),/INVALID_RESPONSE/);assert.equal(await readMarker(),'','empty-create is not login permission');
@@ -315,7 +366,7 @@ test('protected email setup consumes separate native permission and the same sig
 
   // An independently constructed private profile must still refuse terminal,
   // secret, account and argument overrides before interpreter/provider I/O.
-  const p=await createAssistantSourceRuntimeProfile({identity,host,store,scope,
+  const p=await createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope,
     accountSetup:{sourceId,expectedRevision:0,operation:'configure'}});
   const token=await p.requireToken(origin);
   await p.prepareRequest({origin,token,pathname:`${prefix}/resolve`,options:{method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,
@@ -337,31 +388,33 @@ test('protected email setup consumes separate native permission and the same sig
   p.close();assert.equal(await readMarker(),'1');
 });
 
-test('Telegram QR setup uses the same signed native child and never leaks factors or proves owner identity',async t=>{
+for(const encrypted of [false,true])test(`Telegram QR setup uses the same signed native child and never leaks factors or proves owner identity (encrypted=${encrypted})`,async t=>{
   const savedScope={...scope};t.after(()=>{Object.assign(scope,savedScope);setupFixture=null;resolveOverride=null;});
   scope.skillId='telegram-mtproto';
   setupFixture={...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
     provisionLocalAccount:true,interactiveSetupAllowed:true,executionVerified:false};
   const sourceId=setupFixture.id,accountId=setupFixture.localAccountId;
+  const {selectedStore}=await encryptedSetupFixture(t,encrypted);
   let inventoryCalls=0;
   const client={identity,sourceAccounts:async()=>{inventoryCalls++;return [{...setupFixture}];}};
-  const configure=()=>configureAssistantTelegramSource({identity,host,store,client,companyId,sourceId});
+  const configure=()=>configureAssistantTelegramSource({identity,host,store:selectedStore,client,companyId,sourceId});
   if(!['darwin','win32'].includes(process.platform)){
     const before=resolveCalls;await assert.rejects(configure(),/SETUP_UNAVAILABLE/);assert.equal(resolveCalls,before);return;
   }
-  const sourceDir=path.join(directory,'telegram-login-package');await fs.mkdir(sourceDir);
-  const marker=path.join(directory,'telegram-login-native-calls');
+  const sourceDir=path.join(directory,`telegram-login-package-${encrypted}`);await fs.mkdir(sourceDir);
+  const marker=path.join(directory,`telegram-login-native-calls-${encrypted}`);
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
     assert.deepEqual(process.argv.slice(2),['login','--account',${JSON.stringify(accountId)},'--qr']);
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    if(${encrypted})assert.deepEqual(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON),{setup:'ENCRYPTED_SETUP_CONFIG_CANARY'});
     let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
     fs.appendFileSync(${JSON.stringify(marker)},'1');
     process.stdout.write(JSON.stringify({authorized:true,userId:12345,username:'PRIVATE_USERNAME',qr:'PRIVATE_QR',password:'PRIVATE_FACTOR'}));`);
   artifactId=randomUUID();releaseId=randomUUID();
   packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
     entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
-  await prepareAssistantSourceAccount({identity,host,store,client,companyId,sourceId});
+  await prepareAssistantSourceAccount({identity,host,store:selectedStore,client,companyId,sourceId});
   setupFixture.operation='login';
   const markerValue=()=>fs.readFile(marker,'utf8').catch(error=>{if(error.code==='ENOENT')return '';throw error;});
   setupFixture.interactiveSetupAllowed=false;const before=resolveCalls;
@@ -383,7 +436,7 @@ test('Telegram QR setup uses the same signed native child and never leaks factor
   client.sourceAccounts=async()=>{const rows=await read();if(++late===2)rows[0].revision++;return rows;};
   await assert.rejects(configure(),/BINDING_CHANGED/);assert.equal(await markerValue(),'11');
   assert.ok(inventoryCalls>=5);
-  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope,
     accountSetup:{sourceId,expectedRevision:0,operation:'login'}});
   const token=await profile.requireToken(origin);
   await profile.prepareRequest({origin,token,pathname:`${prefix}/resolve`,options:{method:'POST',body:JSON.stringify({...scope,
@@ -397,7 +450,7 @@ test('Telegram QR setup uses the same signed native child and never leaks factor
   const exact={artifact:normalized.artifact,executionContext:context,runtimeArguments:['login','--account',accountId,'--qr']};
   await profile.authorizeInteractiveSourceSetup(exact);
   await assert.rejects(profile.authorizeInteractiveSourceSetup(exact),/SETUP_REQUIRED/);profile.close();
-  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope:{...scope,skillId:'email-imap-smtp'},
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope:{...scope,skillId:'email-imap-smtp'},
     accountSetup:{sourceId,expectedRevision:0,operation:'login'}}),/INVALID_INPUT/);
 });
 
@@ -848,24 +901,26 @@ test('private authentication composes the real Run CLI, signed package and one-u
 
 // Exercises the production signed loader/catalogue and native child, not an
 // injected success function. All paths/accounts/provider output are synthetic.
-test('MAX handoff is never login proof; independent short probe rechecks native registration and drops private diagnostics',async t=>{
+for(const encrypted of [false,true])test(`MAX handoff is never login proof; independent short probe rechecks native registration and drops private diagnostics (encrypted=${encrypted})`,async t=>{
   const saved={...scope};t.after(()=>{Object.assign(scope,saved);setupFixture=null;resolveOverride=null;});
   scope.skillId='max-web';
   setupFixture={...scope,id:randomUUID(),deviceId,localAccountId:randomUUID(),revision:0,state:'active',
     provisionLocalAccount:true,interactiveSetupAllowed:true,executionVerified:false};
   const sourceId=setupFixture.id,accountId=setupFixture.localAccountId;
   const client={identity,sourceAccounts:async()=>[{...setupFixture}]};
-  const input={identity,host,store,client,companyId,sourceId};
+  const {selectedStore}=await encryptedSetupFixture(t,encrypted);
+  const input={identity,host,store:selectedStore,client,companyId,sourceId};
   if(!['darwin','win32'].includes(process.platform)){
     const before=resolveCalls;await assert.rejects(configureAssistantMaxSource(input),/SETUP_UNAVAILABLE/);
     await assert.rejects(verifyAssistantMaxSource(input),/SETUP_UNAVAILABLE/);assert.equal(resolveCalls,before);return;
   }
-  const sourceDir=path.join(directory,'max-login-package');await fs.mkdir(sourceDir);
-  const marker=path.join(directory,'max-login-calls'),output=path.join(directory,'max-login-output');
+  const sourceDir=path.join(directory,`max-login-package-${encrypted}`);await fs.mkdir(sourceDir);
+  const marker=path.join(directory,`max-login-calls-${encrypted}`),output=path.join(directory,`max-login-output-${encrypted}`);
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
     const args=process.argv.slice(2);assert.deepEqual(args,args[0]==='probe'?['probe']:['login','--headed','--hold-ms','540000']);
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
+    if(${encrypted})assert.deepEqual(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON),{setup:'ENCRYPTED_SETUP_CONFIG_CANARY'});
     let stdin='';for await(const c of process.stdin)stdin+=c;assert.equal(stdin,'');
     fs.appendFileSync(${JSON.stringify(marker)},args[0]+';');
     process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
@@ -898,7 +953,7 @@ test('MAX handoff is never login proof; independent short probe rechecks native 
   client.sourceAccounts=async()=>{const rows=await read();if(++n===2)rows[0].state='paused';return rows;};
   await assert.rejects(verifyAssistantMaxSource(input),/BINDING_CHANGED/);
   assert.equal(await fs.readFile(marker,'utf8'),calls+'probe;','late pause never replays provider work');client.sourceAccounts=read;
-  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope,
     accountSetup:{sourceId,expectedRevision:0,operation:'verify_login'}});
   const token=await profile.requireToken(origin);
   await profile.prepareRequest({origin,token,pathname:`${prefix}/resolve`,options:{method:'POST',body:JSON.stringify({...scope,
@@ -911,7 +966,7 @@ test('MAX handoff is never login proof; independent short probe rechecks native 
   const exact={artifact:normalized.artifact,executionContext:context,runtimeArguments:['probe']};
   assert.ok(await profile.authorizeInteractiveSourceSetup(exact)<=60000,'probe cannot borrow the human-input budget');
   await assert.rejects(profile.authorizeInteractiveSourceSetup(exact),/SETUP_REQUIRED/);profile.close();
-  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store,scope:{...scope,skillId:'telegram-mtproto'},
+  await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope:{...scope,skillId:'telegram-mtproto'},
     accountSetup:{sourceId,expectedRevision:0,operation:'verify_login'}}),/INVALID_INPUT/);
 });
 

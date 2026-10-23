@@ -2654,7 +2654,11 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         || resolution.trust.requiresDeviceConsent || resolution.companyConnection?.secretBindings.length
         || resolution.companyConnection && !resolution.companyConnection.configured) fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       const url=new URL(resolution.packageUrl,origin);
-      const packageSelection=sourceSelection??(encryptedCompany&&sourceAcknowledgement?{sourceId:sourceAcknowledgement.sourceId,expectedRevision:sourceAcknowledgement.sourceRevision}:null);
+      // The native encrypted setup adapter binds its exact registration as
+      // well as the immutable owner account intent. Reuse the same selected
+      // package path; no setup flag can borrow an unrelated source scope.
+      const packageSelection=sourceSelection??(encryptedCompany&&sourceAcknowledgement?{sourceId:sourceAcknowledgement.sourceId,expectedRevision:sourceAcknowledgement.sourceRevision}
+        :encryptedCompany&&accountSetup?{sourceId:accountSetup.sourceId,expectedRevision:accountSetup.expectedRevision}:null);
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
         ...(packageSelection?{sourceId:packageSelection.sourceId,sourceRevision:String(packageSelection.expectedRevision)}:{}),

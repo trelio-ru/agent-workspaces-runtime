@@ -1594,3 +1594,21 @@ changed admission fails closed without a child invocation or domain retry. No
 second executor/provider grammar/key/vault/endpoint, plaintext digest, SQLite body
 or human auth alias is introduced. The original input bounds and provider sending
 approval rules remain independent; this content adapter grants no message authority.
+
+### Encrypted interactive source setup
+
+Explicit owner registration/create/bind/configure/login/verify_login is structural
+metadata in stable encrypted mode; it grants none of the provider's human input.
+The SAME source resolve/package profile binds the exact setup source/revision and
+opens only native-selected config ciphertext with the existing managed recipient
+and local hydrator. Account creation/bind uses the same immutable catalogue
+receipt/CAS and existing sessions. Fixed provider forms/QR/2FA and separate
+passive verification keep their original command, OS protection and deadlines;
+no human session import, credential copy, unattended login or new executor exists.
+
+Before final native delivery the origin of an additional-company binding is read
+again independently of its target. Pause/revoke/membership or envelope loss stays
+a refusal; it does not switch company/account or retry an uncertain setup. Empty
+creation, saved configuration and window close still prove no provider login,
+owner sender identity, polling, body processing or ACK. A separate passive native
+verification remains required and cannot open a form or gain its longer budget.
