@@ -564,6 +564,11 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
     if(!object(business.parameters)||Object.hasOwn(business.parameters,'encryptedArguments')
       ||!Array.isArray(business.parameters.arguments)||!business.parameters.arguments.length||business.parameters.arguments.length>100
       ||business.parameters.arguments.some(value=>typeof value!=='string'||value.length>4096))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    // The wire catalogue intentionally exposes generic parameters; reuse the
+    // SAME pure continuation parser BEFORE the first preparation HTTP rather
+    // than duplicating its closed skill parameter schema in a protector.
+    const {buildTrelioWorkspaceActionInvocation}=await import('./trelio-local-context.mjs');
+    try{buildTrelioWorkspaceActionInvocation(business);}catch{fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');}
     originalSkillArguments=structuredClone(business.parameters.arguments);
     business.parameters={...business.parameters,encryptedArguments:business.parameters.arguments,arguments:[]};
   }
@@ -1857,7 +1862,8 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
  * into the raw call before the backend's mandatory validation/admission.
  * No domain schema, scope or permission is inferred/copied by this projection.
  */
-export const assistantModelInputSchema = source => {
+const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent']);
+export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS}={}) => {
   const schema=structuredClone(source);
   let visited=0;
   const projectRoot=(node,depth=0)=>{
@@ -1868,7 +1874,7 @@ export const assistantModelInputSchema = source => {
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    for(const key of ['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent']){
+    for(const key of omittedRootFields){
       if(object(node.properties))delete node.properties[key];
       if(Array.isArray(node.required))node.required=node.required.filter(value=>value!==key);
     }
@@ -1883,6 +1889,84 @@ export const assistantModelInputSchema = source => {
   if(!object(schema))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   projectRoot(schema);
   return schema;
+};
+/** Privacy preflight over the CURRENT native input inventory, not a copied
+ * domain schema or a JSON-Schema authorization engine. Unknown closed-object
+ * fields and incompatible scalar/container shapes must fail locally BEFORE
+ * any managed preparation can transmit unprotected metadata. Native domain
+ * refinements, format constraints, pass/proof/ACL/CAS remain independent.
+ * Local refs/compositions follow the same native document; no remote resolver,
+ * schema cache, input coercion, default injection or error-value echo exists. */
+export const validateAssistantNativeInputShape=(nativeSchema,raw,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,
+  ignoredRootFields=ASSISTANT_MCP_ADMISSION_FIELDS}={})=>{
+  if(!object(nativeSchema)||nativeSchema.type!=='object'||!object(raw))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+  const root=assistantModelInputSchema(nativeSchema,{omittedRootFields});
+  const input=Object.fromEntries(Object.entries(raw).filter(([key])=>!ignoredRootFields.includes(key)));
+  let visits=0;
+  const walk=(schema,value,depth=0)=>{
+    if(++visits>16384||depth>64)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    if(typeof schema==='boolean')return schema;
+    if(!object(schema))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    if(Object.hasOwn(schema,'$ref')){
+      // Only a bounded JSON pointer into this exact fresh native document.
+      // A cycle consumes the same traversal budget and fails closed.
+      if(typeof schema.$ref!=='string'||!schema.$ref.startsWith('#/'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      let target=root;
+      for(const token of schema.$ref.slice(2).split('/')){
+        const key=token.replace(/~1/gu,'/').replace(/~0/gu,'~');
+        if(!object(target)||!Object.hasOwn(target,key))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        target=target[key];
+      }
+      if(!walk(target,value,depth+1))return false;
+    }
+    for(const key of ['allOf','anyOf','oneOf'])if(Object.hasOwn(schema,key)){
+      if(!Array.isArray(schema[key])||schema[key].length===0||schema[key].length>128)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      const matches=schema[key].map(branch=>walk(branch,value,depth+1));
+      if(key==='allOf'?!matches.every(Boolean):!matches.some(Boolean))return false;
+      // oneOf is intentionally a structural union here: overlapping native
+      // format/refinement branches remain the server validator's authority.
+    }
+    const types=schema.type===undefined?[]:Array.isArray(schema.type)?schema.type:[schema.type];
+    const matchesType=type=>type==='null'?value===null:type==='object'?object(value):type==='array'?Array.isArray(value)
+      :type==='integer'?Number.isSafeInteger(value):type==='number'?typeof value==='number'&&Number.isFinite(value)
+      :type==='string'||type==='boolean'?typeof value===type:false;
+    if(types.length&&!types.some(matchesType))return false;
+    if(typeof value==='string'&&schema.pattern!==undefined){
+      // Reuse the native published syntax (UUID/date/ID patterns), never a
+      // second per-field regex map. No caller/provider can select this schema.
+      if(typeof schema.pattern!=='string'||schema.pattern.length>4096)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      let pattern;try{pattern=new RegExp(schema.pattern,'u');}catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}
+      if(!pattern.test(value))return false;
+    }
+
+    if(Object.hasOwn(schema,'const')&&JSON.stringify(schema.const)!==JSON.stringify(value))return false;
+    if(Object.hasOwn(schema,'enum')){
+      if(!Array.isArray(schema.enum))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      if(!schema.enum.some(item=>JSON.stringify(item)===JSON.stringify(value)))return false;
+    }
+    if(object(value)){
+      if(schema.properties!==undefined&&!object(schema.properties))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      if(schema.required!==undefined&&(!Array.isArray(schema.required)||schema.required.some(key=>typeof key!=='string')))
+        fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      if(schema.required?.some(key=>!Object.hasOwn(value,key)))return false;
+      for(const [key,child]of Object.entries(value)){
+        if(Object.hasOwn(schema.properties??{},key)){
+          if(!walk(schema.properties[key],child,depth+1))return false;
+        }else if(schema.additionalProperties===false)return false;
+        else if(object(schema.additionalProperties)&&!walk(schema.additionalProperties,child,depth+1))return false;
+      }
+    }else if(Array.isArray(value)){
+      const prefix=schema.prefixItems??(Array.isArray(schema.items)?schema.items:null);
+      if(prefix!==null&&!Array.isArray(prefix))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      for(let index=0;index<value.length;index++){
+        const child=prefix&&index<prefix.length?prefix[index]
+          :prefix&&Array.isArray(schema.items)?schema.additionalItems:schema.items;
+        if(child!==undefined&&!walk(child,value[index],depth+1))return false;
+      }
+    }
+    return true;
+  };
+  if(!walk(root,input))fail('ASSISTANT_MCP_INPUT_INVALID');
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment,
   materializeEncryptedTask, materializeEncryptedSkill, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, timeoutMs = 30_000 }) => {
@@ -1945,6 +2029,25 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
         const allowed=await selectedTools();
         if(!allowed.includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+        // Fetch the exact native schema in this SAME session/deadline. A prior
+        // model catalogue or mutable caller never becomes staging authority.
+        // The request contains no caller arguments and no business mutation.
+        const catalog=await protocol.listRemoteTools(config,credential,session,request,{signal});
+        if(Buffer.byteLength(JSON.stringify(catalog))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        const definitions=catalog.filter(tool=>tool?.name===name);
+        if(definitions.length!==1)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+        validateAssistantNativeInputShape(definitions[0].inputSchema,argumentsSnapshot);
+        if(name==='request_assistant_action'&&argumentsSnapshot.operation!=='create_private_secret'){
+          // Native action planning reuses the ordinary operation's schema for
+          // its generic fields record. Apply that SAME live inventory here;
+          // wrapper metadata is omitted, never supplied/faked by the model.
+          const operation=catalog.filter(tool=>tool?.name===argumentsSnapshot.operation);
+          if(operation.length!==1||!ASSISTANT_MCP_TOOLS.includes(argumentsSnapshot.operation))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          if(!object(argumentsSnapshot.fields))fail('ASSISTANT_MCP_INPUT_INVALID');
+          validateAssistantNativeInputShape(operation[0].inputSchema,argumentsSnapshot.fields,{
+            omittedRootFields:[...ASSISTANT_MCP_ADMISSION_FIELDS,'clientRequestId','expectedTaskUpdatedAt','ownerDecisionId'],ignoredRootFields:[]});
+        }
+
         const send=async wireArguments=>{
           // The public input bound was checked before protection. Ciphertext
           // adds only the standard bounded envelope/base64 overhead; this is

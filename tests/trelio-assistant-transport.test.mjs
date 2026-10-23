@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto, createHash, createPublicKey } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask, withAssistantManagedContentArguments } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask, withAssistantManagedContentArguments, validateAssistantNativeInputShape } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker, canonicalJson,
   encryptFileToCompanyContainer, decryptCompanyPayload, unlockRememberedAgentEncryptionDevice } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
@@ -179,6 +179,13 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     for(const value of [ready,persisted]){
       assert.equal(JSON.stringify(value).includes(scopePrivateEncryptionJwk.d),false,'scope private key never enters result or OS device slot');
     }
+    const validSkill={schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId:'email-imap-smtp',releaseId:randomUUID(),
+      runtimeSessionId:randomUUID(),arguments:['send','--text','PRIVATE_ORIGINAL_CLI_CANARY','--local-account',randomUUID()]}};
+    const beforeInvalidSkill=preparations;
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',
+      args:{...validSkill,parameters:{...validSkill.parameters,unpublishedParameter:'PRIVATE_EXTRA_CLI_CANARY'}}},async()=>assert.fail('invalid native shape was dispatched')),
+      {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
+    assert.equal(preparations,beforeInvalidSkill,'SAME pure continuation parser refuses extra generic parameters before any staging HTTP');
     const question={clientRequestId:randomUUID(),questionText:'MANAGED_QUESTION_CANARY',options:['FIRST_OPTION_CANARY','Second']};
     const send=async wire=>{
       businessCalls++;
@@ -742,6 +749,93 @@ test('business outcome read is fixed, exact and strict; pending never implies fa
 });
 
 
+test('native input inventory rejects closed shape mismatches without copying domain schemas',()=>{
+  const ref={type:'object',properties:{label:{type:'string'},targets:{type:'array',items:{$ref:'#/$defs/target'}}},
+    required:['label','targets'],additionalProperties:false,
+    $defs:{target:{oneOf:[{type:'object',properties:{kind:{const:'member'},id:{type:'string'}},required:['kind','id'],additionalProperties:false},
+      {type:'object',properties:{kind:{const:'none'},value:{type:'null'}},required:['kind','value'],additionalProperties:false}]}}};
+  const good={label:'exact',targets:[{kind:'member',id:'native-id'},{kind:'none',value:null}]};
+  validateAssistantNativeInputShape(ref,good);
+  const before=structuredClone(ref);
+  for(const bad of [{...good,unknown:'PRIVATE_UNKNOWN_ROOT'},{...good,targets:[{...good.targets[0],extra:'PRIVATE_NESTED'}]},
+    {...good,targets:[{kind:'member',id:{text:'PRIVATE_ID_OBJECT'}}]}, {...good,targets:{}}, {...good,label:[]},
+    {...good,targets:[{kind:'other',id:'native-id'}]}, {label:'missing required targets'}])
+    assert.throws(()=>validateAssistantNativeInputShape(ref,bad),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+  assert.deepEqual(ref,before,'live native schema is never rewritten or cached as an authorization profile');
+  validateAssistantNativeInputShape({type:'object',properties:{parameters:{type:'object',additionalProperties:{type:'string'}}}},
+    {parameters:{nativeOpenKey:'valid'}});
+  assert.throws(()=>validateAssistantNativeInputShape({type:'object',properties:{parameters:{type:'object',additionalProperties:{type:'string'}}}},
+    {parameters:{nativeOpenKey:{text:'not the advertised open value type'}}}),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+  for(const schema of [{type:'object',properties:{x:{$ref:'https://foreign.test/schema'}}},
+    {type:'object',properties:{x:{$ref:'#/$defs/missing'}}},{type:'object',properties:{x:{type:'string',pattern:'['}}}])
+    assert.throws(()=>validateAssistantNativeInputShape(schema,{x:'native'}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+  const cycle={type:'object',properties:{x:{$ref:'#/$defs/cycle'}},$defs:{cycle:{$ref:'#/$defs/cycle'}}};
+  assert.throws(()=>validateAssistantNativeInputShape(cycle,{x:1}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+});
+
+test('fresh native input shape is checked before managed preparation and never retries a mutation',async()=>{
+  const origin='https://input-shape.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});
+  let nativeSchema={type:'object',properties:{bodyMarkdown:{type:'string'},selection:{type:'object',properties:{id:{type:'string',pattern:'^native-[0-9]+$'}},additionalProperties:false}},additionalProperties:false};
+  let preparations=0,business=0,catalogs=0,lose=false;const wire=[];
+  const proxy=createAssistantMcpClient({origin,assistantId,deviceId,store,
+    withWorkspaceArguments:async({args},send)=>{preparations++;return send({...args,bodyMarkdown:'PROTECTED_MARKER'});},
+    httpRequest:async(input,{signal})=>{
+      assert.ok(signal);wire.push(JSON.stringify(input.payload??{}));
+      const reply=result=>({sessionId:'fresh-shape',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list'){catalogs++;return reply({tools:[{name:'create_comment',description:'Exact current native shape',inputSchema:nativeSchema}]});}
+      assert.equal(input.payload.method,'tools/call');business++;if(lose)throw new Error('synthetic unknown mutation outcome');
+      return reply({content:[]});
+    }});
+  const canary='PRIVATE_INVALID_SHAPE_CANARY';
+  for(const args of [{bodyMarkdown:'ok',unknown:canary},{bodyMarkdown:{unprotected:canary}},
+    {bodyMarkdown:'ok',selection:{id:'native-1',unknown:canary}},{bodyMarkdown:'ok',selection:{id:canary}}])
+    await assert.rejects(proxy.callTool('create_comment',args),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+  assert.equal(preparations,0,'no invalid root/nested shape reaches payload staging');assert.equal(business,0);
+  assert.equal(wire.join('').includes(canary),false,'catalogue/initialize contain no caller data');
+  await proxy.callTool('create_comment',{bodyMarkdown:'valid private content',selection:{id:'native-1'}});
+  assert.equal(preparations,1);assert.equal(business,1);
+  nativeSchema={...nativeSchema,properties:{...nativeSchema.properties,newNativeField:{type:'boolean'}}};
+  await proxy.callTool('create_comment',{bodyMarkdown:'valid',newNativeField:true});
+  assert.equal(business,2,'new native fields need no copied host schema or restart');
+  nativeSchema={...nativeSchema,properties:{newNativeField:{type:'boolean'}}};
+  await assert.rejects(proxy.callTool('create_comment',{bodyMarkdown:'now removed'}),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+  assert.equal(business,2,'a previously advertised field is not cached staging authority');
+  lose=true;await assert.rejects(proxy.callTool('create_comment',{newNativeField:true}),{code:'ASSISTANT_MCP_UNAVAILABLE'});
+  assert.equal(business,3,'lost mutation result is never replayed');assert.equal(catalogs,8);
+});
+
+test('generic owner action fields reuse their current native operation inventory before staging',async()=>{
+  const origin='https://action-shape.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'q'.repeat(43)}`,expiresAt:1});
+  let prepares=0,calls=0;const wire=[];
+  const proxy=createAssistantMcpClient({origin,assistantId,deviceId,store,
+    withWorkspaceArguments:async({args},send)=>{prepares++;return send(args);},httpRequest:async input=>{
+      wire.push(JSON.stringify(input.payload??{}));
+      const reply=result=>({sessionId:'action-shape',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[
+        {name:'request_assistant_action',description:'Native generic request',inputSchema:{type:'object',properties:{
+          operation:{enum:['update_task_control']},fields:{type:'object',additionalProperties:{}},reason:{type:'string'},
+          clientRequestId:{type:'string'},expectedTaskUpdatedAt:{type:'string'}},additionalProperties:false}},
+        {name:'update_task_control',description:'SAME ordinary native operation',inputSchema:{type:'object',properties:{
+          controlId:{type:'string'},note:{type:'string'},clientRequestId:{type:'string'},expectedTaskUpdatedAt:{type:'string'},
+          ownerDecisionId:{type:'string'},taskPass:{},runtimeSessionProof:{}},required:['controlId','clientRequestId','expectedTaskUpdatedAt'],additionalProperties:false}}]});
+      assert.equal(input.payload.method,'tools/call');calls++;return reply({content:[]});
+    }});
+  const action={operation:'update_task_control',reason:'Native request',clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  const canary='PRIVATE_UNKNOWN_ACTION_FIELD_CANARY';
+  for(const fields of [{controlId:'id',unknown:canary},{controlId:'id',note:{plaintext:canary}},
+    {controlId:'id',ownerDecisionId:canary},{controlId:'id',taskPass:{secret:canary}},{controlId:'id',clientRequestId:canary}])
+    await assert.rejects(proxy.callTool('request_assistant_action',{...action,fields}),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+  assert.equal(prepares,0);assert.equal(calls,0);assert.equal(wire.join('').includes(canary),false);
+  await proxy.callTool('request_assistant_action',{...action,fields:{controlId:'id',note:'native field'}});
+  assert.equal(prepares,1);assert.equal(calls,1,'same native business fields need no host-specific action schema');
+});
+
 test('assistant MCP reuses the bounded protocol with its real device profile and no schema copies or hidden retry', async () => {
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   const credential=`tda_${'z'.repeat(43)}`;
@@ -762,17 +856,18 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
       {name:'get_assistant_status',description:'Live status',inputSchema:shape,_meta:{private:'DO_NOT_PROXY_METADATA'}},
       {name:'get_task',description:'Live backend schema',inputSchema:shape},
       {name:'human_login',description:'Never delegate this',inputSchema:shape},
-      {name:'create_comment',description:'Current assistant backend write',inputSchema:shape,annotations:{idempotentHint:true}},
+      {name:'create_comment',description:'Current assistant backend write',inputSchema:{type:'object'},annotations:{idempotentHint:true}},
       {name:'continue_assistant_workspace_action',description:'Current local action',inputSchema:shape,annotations:{idempotentHint:false}},
-      {name:'request_assistant_action',description:'Live sealed owner action',inputSchema:{...shape,properties:{...shape.properties,operation:{type:'string'},fields:{type:'object'}}}},
-      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment'].map(name=>({name,description:'Live native task operation',inputSchema:shape,annotations:{destructiveHint:name==='delete_checklist'||name==='delete_task_relation'||name==='delete_attachment'}})),
-      ...['search_agent_guidance','get_agent_skill','get_agent_procedure'].map(name=>({name,description:'Live native guidance read',inputSchema:shape})),
+      {name:'request_assistant_action',description:'Live sealed owner action',inputSchema:{...shape,properties:{...shape.properties,operation:{type:'string'},fields:{type:'object'},reason:{type:'string'},clientRequestId:{type:'string'},expectedTaskUpdatedAt:{type:'string'}}}},
+      ...['update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment'].map(name=>({name,description:'Live native task operation',inputSchema:{type:'object'},annotations:{destructiveHint:name==='delete_checklist'||name==='delete_task_relation'||name==='delete_attachment'}})),
+      ...['search_agent_guidance','get_agent_skill','get_agent_procedure'].map(name=>({name,description:'Live native guidance read',inputSchema:{type:'object'}})),
+      {name:'clear_task_control',description:'Current native control write',inputSchema:{type:'object'}},
       {name:'delete_workspace',description:'Unsupported; must remain closed',inputSchema:shape},
     ]});
     assert.equal(input.payload.method,'tools/call');receivedArgs=input.payload.params.arguments;
     return response({content:[{type:'text',text:echoed?credential:'native content'}],structuredContent:{schemaVersion:3},_meta:{discard:true}});
   }});
-  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment','search_agent_guidance','get_agent_skill','get_agent_procedure']);
+  const tools=await client.listTools();assert.deepEqual(tools.map(tool=>tool.name),['get_assistant_status','get_task','create_comment','continue_assistant_workspace_action','request_assistant_action','update_task_due_date','update_task_assignee','set_task_participants','update_task_custom_field','create_task_relation','delete_task_relation','delete_checklist','delete_attachment','search_agent_guidance','get_agent_skill','get_agent_procedure','clear_task_control']);
   assert.deepEqual(tools[1].inputSchema,{type:'object',properties:{},additionalProperties:false});
   assert.deepEqual(Object.keys(shape.properties),['taskPass','runtimeSessionProof']);
   assert.equal(tools[2].annotations.idempotentHint,true);assert.equal(tools[3].annotations.idempotentHint,false);assert.ok(!JSON.stringify(tools).includes('DO_NOT_PROXY_METADATA'));
@@ -780,7 +875,7 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   const resultPromise=client.callTool('get_task',args);args.runtimeSessionProof.signature='changed';
   const result=await resultPromise;assert.equal(receivedArgs.runtimeSessionProof.signature,'original');
   assert.equal(result.content[0].text,'native content');assert.ok(!('_meta' in result));
-  assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/call','DELETE']);
+  assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/list','tools/call','DELETE']);
   const count=calls.length;await assert.rejects(client.callTool('delete_workspace',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
   assert.equal(tools[2].annotations.readOnlyHint,false);
   assert.equal(tools.find(tool=>tool.name==='delete_checklist').annotations.destructiveHint,true);
@@ -793,7 +888,7 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   assert.deepEqual(receivedArgs,body,'the current backend owns validation; the host adds no human approval flags');
   assert.equal(calls.slice(beforeWrite).filter(name=>name==='tools/call').length,1,'one write is never replayed');
   assert.equal(tools[4].annotations.readOnlyHint,false);
-  assert.deepEqual(Object.keys(tools[4].inputSchema.properties).sort(),['fields','operation']);
+  assert.deepEqual(Object.keys(tools[4].inputSchema.properties).sort(),['clientRequestId','expectedTaskUpdatedAt','fields','operation','reason']);
   const intent={operation:'clear_task_control',fields:{controlId:randomUUID()},reason:'Confirmed outcome',
     clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
   await client.callTool('request_assistant_action',intent);assert.deepEqual(receivedArgs,intent);
@@ -827,10 +922,10 @@ test('assistant MCP preserves live accepted-file and question-choice schemas and
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1});
   const fields={
-    create_comment:{acceptedFiles:{type:'array',items:{type:'object',properties:{runId:{type:'string'},filePath:{type:'string'}},additionalProperties:false},minItems:1,maxItems:10}},
-    ask_assistant_owner:{options:{type:'array',items:{type:'string'},minItems:2,maxItems:8}},
-    create_task_relation:{targetTaskId:{type:'string'},relationType:{type:'string'}},
-    delete_task_relation:{relationId:{type:'string'}},
+    create_comment:{clientRequestId:{type:'string'},bodyMarkdown:{type:'string'},acceptedFiles:{type:'array',items:{type:'object',properties:{runId:{type:'string'},filePath:{type:'string'}},additionalProperties:false},minItems:1,maxItems:10}},
+    ask_assistant_owner:{clientRequestId:{type:'string'},questionText:{type:'string'},options:{type:'array',items:{type:'string'},minItems:2,maxItems:8}},
+    create_task_relation:{clientRequestId:{type:'string'},targetTaskId:{type:'string'},relationType:{type:'string'}},
+    delete_task_relation:{clientRequestId:{type:'string'},relationId:{type:'string'}},
     cancel_agent_workspace_run:{runId:{type:'string',format:'uuid'},reason:{type:'string',minLength:1,maxLength:2000}},
   };
   const calls=[];let failed=false;
@@ -931,7 +1026,7 @@ test('self-repair proxies the dedicated live schema and exact immutable intent w
   // projection without the generic host maintaining its own recovery schema.
   const properties={operation:{enum:['retract','restore']},workspaceId:{type:'string',format:'uuid'},
     runId:{type:'string',format:'uuid'},expectedHead:{type:'string'},targetHead:{type:'string'},
-    correctionRunId:{type:'string',format:'uuid'},futureNativeField:{type:'boolean'}};
+    correctionRunId:{type:'string',format:'uuid'},errorKind:{type:'string'},agentRecognizedOwnError:{type:'boolean'},reason:{type:'string'},futureNativeField:{type:'boolean'}};
   const required=['operation','workspaceId','runId','expectedHead'];
   const calls=[];let failed=false;
   const client=createAssistantMcpClient({origin,assistantId,deviceId,store,httpRequest:async input=>{
@@ -1071,6 +1166,7 @@ test('production content preflight refuses encrypted prose before the real MCP t
       const reply=result=>({sessionId:'content-preflight',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
       if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
       if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:(await import('../host-runtime/scripts/trelio-assistant-transport.mjs')).ASSISTANT_MCP_TOOLS.map(name=>({name,description:'Native preflight fixture',inputSchema:{type:'object'}}))});
       assert.equal(input.payload.method,'tools/call');remoteCalls++;
       if(loseResponse)throw new Error('SYNTHETIC_LOST_MUTATION_RESULT');
       return reply({content:[{type:'text',text:'native result'}]});
@@ -1080,7 +1176,7 @@ test('production content preflight refuses encrypted prose before the real MCP t
     'create_task','update_task_title','update_task_description','update_task_custom_field',
     'create_task_control','update_task_control','create_checklist','update_checklist','create_subtask',
     'create_task_relation','cancel_agent_workspace_run','repair_assistant_workspace_result','search_agent_guidance']){
-    await assert.rejects(client.callTool(name,args),{code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+    await assert.rejects(client.callTool(name,name==='request_assistant_action'?{...args,operation:'update_task_control',fields:{}}:args),{code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
   }
   // URLs, Secret metadata and provider argv can also contain protected company
   // text. They must not reach native HTTP merely to receive its capability deny.
@@ -1229,6 +1325,7 @@ test('native encrypted refusal is consumed once by the trusted materializer unde
     const response=result=>({sessionId:'encrypted-read',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
     if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
     if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='tools/list')return response({tools:[{name:'get_task',description:'Native exact read',inputSchema:{type:'object'}}]});
     assert.equal(input.payload.method,'tools/call');writes++;
     return response({isError:true,content:[{type:'text',text:'ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED'}],
       structuredContent:{code:'ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED',localRead:mode==='foreign'

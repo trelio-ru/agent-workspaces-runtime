@@ -821,6 +821,23 @@ schemas, widen authority or expose unknown/new server tools. Setup tools remain
 available before pairing. A successful finish emits `tools/list_changed` so the
 client can refresh the catalog without storing an OAuth token or rewriting config.
 
+Before the protected-content callback can stage anything, each call reads the
+CURRENT tools/list in that SAME MCP session and original deadline. A bounded
+structural inventory traversal checks native closed object keys, required fields,
+container/scalar types, published syntax patterns, enum/const alternatives and local schema refs. It uses
+that exact schema, never a mirrored tool map/cache, external resolver, value
+coercion or echoed input. Hook-owned root fields share the existing model-schema
+projection. Freshly added native fields work without a host schema update;
+removed fields cannot reuse earlier discovery as staging authority. Generic owner-action fields use the SAME live operation schema with wrapper-only metadata removed. Generic
+skill_run parameters additionally use the SAME pure Workspace continuation
+parser before encryption; no task pass is fabricated for local validation.
+
+This privacy preflight is deliberately not domain authorization or a replacement
+JSON-Schema/Zod validator: native format/refinement/proof/ACL/CAS checks remain
+mandatory. Invalid shapes never reach payload preparation or tools/call. Catalogue
+reads carry no caller arguments, and failure/lost mutation response never retries
+a business call or refreshes its original budget.
+
 The dedicated device bearer is read from the same protected slot on every
 invocation. Shared Remote MCP protocol/session/HTTP primitives provide bounded
 JSON/SSE, fixed HTTPS with pinned DNS validation, no redirects and cleanup. The

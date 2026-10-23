@@ -86,6 +86,8 @@ publication tooling также остаются вне этого публичн
 - Assistant stdio получает read schemas только из dedicated backend catalog;
   fixed host allowlist и общий bounded MCP transport не создают domain authority.
   Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.
+  Fresh native input inventory checks closed fields/container types BEFORE managed staging;
+  generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
   Before pairing discovery не читает credential; paired ACL/I/O ошибки не пустой
   catalog. [Контракт](docs/assistant-scheduler.md#assistant-read-mcp-proxy).
 
