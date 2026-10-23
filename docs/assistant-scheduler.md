@@ -1350,3 +1350,23 @@ processing receipt. Input from a task or website never authorizes disclosure,
 new account creation or ownership classification. Existing-card generation/rotation, arbitrary CLI/reveal,
 encrypted use, account registration and real Windows business E2E remain
 independent gates; this subset does not change businessReady=false.
+
+
+### Native MAX selected-conversation source
+
+The model-free source reader/known-task processing/ACK flow reuses the SAME
+shared account, signed executor, SourceReadObserver and SQLite receipt engine;
+see [MAX journal contract](assistant-inbox.md#native-max-through-the-same-source-journal).
+Owner-selected `maxChatUrl` is canonical numeric native identity, not a title or
+handle, and participates in every source generation/final spawn recheck.
+Provider >=2.11.0 is required before account/provider launch. Initial unread
+coverage and all subsequent v2 cursor positions remain private device data.
+
+Task/passive/setup profiles never gain ACK permission. A separately native
+`max-message-ack/v1` admission carries committed structural slots only. The host
+privately derives the exact native refs and the provider selects the latest
+verified time inside their covered set. No externally supplied timestamp,
+message content, global receipt switch or model-authored owner consent exists.
+Unknown attempts retain their original one-use fence and only permit read-back.
+Actual owner login/current provider protocol and real Windows business E2E must
+be demonstrated separately; codec/fixture success alone is not readiness.

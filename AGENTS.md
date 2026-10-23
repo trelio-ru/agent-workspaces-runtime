@@ -514,6 +514,11 @@ publication tooling также остаются вне этого публичн
   MAX reuses the same handoff path; only a fresh short native probe verifies
   its structural login, never owner identity/streams/processing readiness.
   Login never proves owner identity, enables intake/ACK or clears hook trust.
+  MAX native sources require owner-selected numeric maxChatUrl and reviewed
+  provider >=2.11.0. SAME journal/read observer/receipt/ACK engine; native IDs,
+  complete unread time-range, one exact browser frame and verify-only unknown
+  recovery, never names, a global receipt switch or numeric-ID range guesses.
+  No local source/codec fixture proves a real MAX/Windows business E2E.
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
   Independent task creation uses the SAME proxy/native creator with a sealed
   owner decision and project ACL; no inherited pass/chat/route or sender proof.

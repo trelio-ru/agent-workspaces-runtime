@@ -781,7 +781,7 @@ test('routing outage cannot roll back a committed provider page or become author
 });
 
 
-for(const scenario of ['telegram','email','email-history'])test(`${scenario} committed processing ACK survives a lost write with read-only recovery`,async t=>{
+for(const scenario of ['telegram','email','email-history','max'])test(`${scenario} committed processing ACK survives a lost write with read-only recovery`,async t=>{
   const history=scenario==='email-history',provider=history?'email':scenario;
   const eventId=provider==='email'?`uid:17:${history?5:11}`:'message:123:1';
   let mode='unknown',calls=[],f;
@@ -805,6 +805,7 @@ for(const scenario of ['telegram','email','email-history'])test(`${scenario} com
     return {acknowledged:mode==='confirmed',notAttempted:true,code:null};
   };
   f=await externalFixture(t,{acknowledgeSource,sourceHealth});if(provider==='email')f.row.skillId='email-imap-smtp';
+  if(provider==='max'){f.row.skillId='max-web';f.row.maxChatUrl='https://web.max.ru/123';}
   const key=provider+'-conversation/v1.'+'a'.repeat(64),route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,
     conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
   f.options.client.sourceRoutes=async()=>[route];

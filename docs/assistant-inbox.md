@@ -531,3 +531,53 @@ messages read on another device. Historical flags are observed per page, not as
 an atomic snapshot at enrollment. Already-read/deleted old mail is not claimed
 as recovered. Body, address/subject, owner identity and guessed task mappings
 still do not enter SQLite, and history capture alone never marks mail read.
+
+
+## Native MAX through the same source journal
+
+The native registration optionally selects one canonical numeric `maxChatUrl`
+(`https://web.max.ru/<signed-64-bit-chat-id>`), including its generation/CAS.
+A missing selector preserves the old refusal before provider launch. No title,
+handle, default conversation, human catalogue or legacy-session import is used.
+Each selected conversation is an ordinary source; no new queue/schema is needed.
+
+Reviewed signed MAX provider >=2.11.0 runs through the SAME account catalogue,
+package verifier/cache and subprocess engine. It observes only the same
+browser's native history and correlates genuine sender/message IDs with the
+selected DOM history. Initial polling requires a complete native unread interval;
+subsequent v2 opaque cursor positions are independent of read flags elsewhere.
+Malformed/changed scope, missing anchors, incomplete historical windows or
+unknown native wire shapes preserve the old position instead of skipping.
+
+`max-conversation/v1.<hash>` is a scoped routing hint, never linked owner proof.
+Only a fresh existing native route may select the permanent task chat. Unknown
+conversations remain unrouted, non-waking, unprocessed and unacked. MAX owner
+intake requires its separately verified native binding; username/DOM/forwarded
+author text cannot create one. Native outgoing messages are context, not wakes.
+
+The SAME SourceReadObserver admits exact `read-reference --chat URL --message-id
+ID --expected-revision REV --expected-conversation-key KEY`. Full native text,
+original account/source generation/task route/revision, no unrelated messages or
+read-state changes and a fresh live pass are required before recording a read
+slot. Body text and sender identity never enter the private SQLite journal.
+Explicit original processing slots plus accepted material still precede ACK.
+
+The SAME native committed receipt admits `max-message-ack/v1` for those exact
+slots. The signed provider privately rechecks every covered ID/revision, freezes
+the complete native unread TIME prefix and permits only one matching native
+`READ_MESSAGE` browser frame after a fresh history/identity. Opaque numeric IDs
+do not define that time range; equal-time neighbours require coverage as well.
+The general human send/reply receipt switch stays closed. No direct socket or
+HTTP request, broad read-all, reaction receipt, fresh authority or extra message
+is synthesized. A changed native attachment/body or incomplete range refuses.
+
+The durable attempt fence is written before signed child launch. A lost/unknown
+result never permits automatic repetition; restart uses the same original slots
+and verify-only native history. Positive read-back on one sibling never implies
+others were acknowledged. Pause/resume and lost health reports retain the same
+shared generation/receipt/unknown-outcome rules as Telegram/email.
+
+Synthetic signed-child, private SQLite and native wire fixtures verify this
+composition. They do not establish live MAX login, current server compatibility,
+production publication or Windows business E2E; those remain independent release
+gates and `businessReady` stays false until the entire product passes them.

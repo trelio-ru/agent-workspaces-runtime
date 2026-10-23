@@ -715,30 +715,30 @@ test('a new wake beyond a full unread context page is delivered once, with exact
   assert.equal(f.inbox.claimAcknowledgements(f.external),null);
 });
 
-test('actual body observer uses original SQLite refs and native source/route before and after, but never processes by itself',async t=>{
+for(const provider of ['telegram','max'])test(`${provider} actual body observer uses original SQLite refs and native source/route before and after, but never processes by itself`,async t=>{
   const {createAssistantSourceReadObserver}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
-  const f=routedFixture(t);f.inbox.routeExternalEvents(f.external,f.mapping);
+  const max=provider==='max',f=routedFixture(t,provider);f.inbox.routeExternalEvents(f.external,f.mapping);
   const work=await f.inbox.claimDelivery({authorize:authorized});f.inbox.startDelivery(work.deliveryId);
   const identity={origin:f.canonical.origin,assistantId:f.canonical.assistantId,deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:f.canonical.companyId,
     taskId:f.taskId,passId:randomUUID(),deliveryId:work.deliveryId,threadId:randomUUID(),bindingId:f.route.bindingId,bindingRevision:f.route.bindingRevision};
   const source={id:f.external.bindingId,deviceId:identity.deviceId,localAccountId:f.external.accountId,projectId:null,
-    revision:2,state:'active',skillId:'telegram-mtproto'};
+    revision:2,state:'active',skillId:max?'max-web':'telegram-mtproto',...(max?{maxChatUrl:'https://web.max.ru/123'}:{})};
   let live=true,available=true,routes=true,reads=0;
   const client={readTaskPass:async()=>({...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+600000).toISOString()}),
     sourceAccounts:async()=>{reads++;return available?[source]:[];},sourceRoutes:async()=>routes?[f.route]:[]};
   const observer=createAssistantSourceReadObserver({identity,client,host:{readActivePass:async()=>pass},withInbox:async action=>action(f.inbox)});
-  const input={artifact:{skillId:'telegram-mtproto'},executionContext:{companyId:pass.companyId,projectId:randomUUID(),account:{id:f.external.accountId}},
-    runtimeArguments:['read-reference','--chat','123','--message-id','4','--expected-revision','b'.repeat(64),
+  const input={artifact:{skillId:max?'max-web':'telegram-mtproto'},executionContext:{companyId:pass.companyId,projectId:randomUUID(),account:{id:f.external.accountId}},
+    runtimeArguments:['read-reference','--chat',max?'https://web.max.ru/123':'123','--message-id','4','--expected-revision','b'.repeat(64),
       '--expected-conversation-key',f.route.conversationKey]};
-  const result={stdout:JSON.stringify({schemaVersion:1,protocol:'telegram-message-read/v1',
+  const result={stdout:JSON.stringify({schemaVersion:1,protocol:max?'max-message-read/v1':'telegram-message-read/v1',
     reference:{id:'message:123:4',revision:'b'.repeat(64),conversationKey:f.route.conversationKey},
-    message:{text:'PRIVATE_BODY_CANARY',textTruncated:false},coverage:{textComplete:true,attachmentsContentRead:false,contextIncluded:false},
+    message:{text:'PRIVATE_BODY_CANARY',textTruncated:false},coverage:{textComplete:true,attachmentsContentRead:false,contextIncluded:false,...(max?{nativeMessageVerified:true,otherMessagesIncluded:false}:{})},
     readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}})};
   const selected=[{sourceId:source.id,sourceRevision:2,routeId:f.route.id,eventOrdinal:0}];
   await assert.rejects(observer.confirmProcessing(pass,selected),/SOURCE_READ_REQUIRED/);
   for(const args of [[...input.runtimeArguments,'--context','1'],input.runtimeArguments.slice(0,-2),
-    input.runtimeArguments.map(value=>value==='123'?'999':value)])await assert.rejects(observer.prepare({...input,runtimeArguments:args}),/SOURCE_READ_REQUIRED/);
+    input.runtimeArguments.map(value=>value===(max?'https://web.max.ru/123':'123')?(max?'https://web.max.ru/999':'999'):value)])await assert.rejects(observer.prepare({...input,runtimeArguments:args}),/SOURCE_READ_REQUIRED/);
   await assert.rejects(observer.prepare({...input,executionContext:{...input.executionContext,account:{id:randomUUID()}}}),/SOURCE_READ_REQUIRED/);
   let ticket=await observer.prepare(input);
   const incomplete=JSON.parse(result.stdout);incomplete.coverage.textComplete=false;

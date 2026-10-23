@@ -3,7 +3,7 @@
 import { createAssistantInbox } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
-import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
+import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 
@@ -193,7 +193,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   // Report/CAS failures do not replay work or discard its original fence; a
   // later poll can reconcile a durably confirmed completion after a lost report.
   const observeAcknowledgementHealth=async(row,signal,observation=null)=>{
-    if(!sourceHealth||!['telegram-mtproto','email-imap-smtp'].includes(row.skillId))return;
+    if(!sourceHealth||!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId))return;
     try{
       const code=inbox.externalAcknowledgementHealth(externalSourceFor(identity,row));if(code===null)return;
       const snapshot=observation??await sourceHealth.read(row,signal);lease();
@@ -228,9 +228,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         observation=snapshot;
       }catch{emit('ASSISTANT_COORDINATOR_SOURCE_HEALTH_UNAVAILABLE');}
       lease(); // Diagnostic failure cannot hide expiry of the original poll lease.
-      // MAX requires an exact native conversation selector. The current
-      // registration has none; guessing/opening a default chat is forbidden.
-      if(row.skillId==='max-web')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      // MAX requires its owner-configured exact native numeric chat URL.
+      // Missing/changed selectors never open a guessed/default conversation.
+      if(row.skillId==='max-web'&&(!assistantMaxChatUrl(row.maxChatUrl)||streamId!==null))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(streamId!==null && poll.cursor===null && typeof poll.initialCursor!=='string')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const email=row.skillId==='email-imap-smtp';
       const initialEmail=email&&streamId===null&&poll.cursor===null;
@@ -241,7 +241,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // no restart, source resume or provider upgrade resets a forward cursor.
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
         accountId:row.localAccountId,cursor:email&&streamId!==null?poll.cursor??poll.initialCursor:poll.cursor,
-        ...(email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
+        ...(row.skillId==='max-web'?{chat:row.maxChatUrl,...(poll.cursor===null?{initialUnread:true}:{})}:email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
           ...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})})},signal);lease();
       // A native Channel constructor supplies a positive channel ID, not an
       // untyped chat number. Apply Telethon's documented marked representation
@@ -306,7 +306,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return sources[0].scope;
   };
   const routeExternalSource=async(row,signal,pending=inbox.pendingExternalRoutes(externalSourceFor(identity,row)))=>{
-    if(!['telegram-mtproto','email-imap-smtp'].includes(row.skillId)||typeof client.sourceRoutes!=='function')return;
+    if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)||typeof client.sourceRoutes!=='function')return;
     const source=externalSourceFor(identity,row);
     if(!pending.length)return;
     const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
@@ -332,7 +332,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const rows=await client.sourceAccounts(job.scope.companyId,signal);lease();
     for(const sourceId of new Set(external.map(event=>JSON.parse(event.event_scope_json).bindingId))){
       const events=external.filter(event=>JSON.parse(event.event_scope_json).bindingId===sourceId),row=rows.find(value=>value.id===sourceId);
-      if(!row||row.state!=='active'||!['telegram-mtproto','email-imap-smtp'].includes(row.skillId)
+      if(!row||row.state!=='active'||!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)
         ||events.some(event=>!sameSource(externalSourceFor(identity,row),JSON.parse(event.event_scope_json))
           ||event.route_source_revision!==row.revision||!event.conversation_key))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
       const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
@@ -469,7 +469,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Routing is its own native read. A failed lookup neither rolls back an
       // already committed provider page nor masquerades as an empty inventory.
       const routingDue=[...externalRegistrations.values()].flatMap(row=>{
-        if(!['telegram-mtproto','email-imap-smtp'].includes(row.skillId)||inbox.status(externalSourceFor(identity,row)).state!=='active')return [];
+        if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)||inbox.status(externalSourceFor(identity,row)).state!=='active')return [];
         const pending=inbox.pendingExternalRoutes(externalSourceFor(identity,row));return pending.length?[{row,pending}]:[];
       }).sort((a,b)=>a.pending[0].route_checked_at-b.pending[0].route_checked_at||a.row.id.localeCompare(b.row.id)).slice(0,4);
       for(const {row,pending} of routingDue){
@@ -480,7 +480,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         }
       }
       const acknowledgementDue=acknowledgeSource?[...externalRegistrations.values()].flatMap(row=>{
-        if(!['telegram-mtproto','email-imap-smtp'].includes(row.skillId))return [];
+        if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId))return [];
         const ordinal=inbox.externalAcknowledgementDue(externalSourceFor(identity,row));return ordinal===null?[]:[{row,ordinal}];
       }).sort((a,b)=>a.ordinal-b.ordinal).slice(0,4):[];
       for(const {row} of acknowledgementDue){
