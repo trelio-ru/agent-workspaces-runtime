@@ -4,7 +4,7 @@ import { randomUUID, randomBytes, generateKeyPairSync, verify, webcrypto, create
 import fs from 'node:fs/promises';
 import { createAssistantHttp, createAssistantDeviceClient, createAssistantPairingClient, AssistantTransportError, createAssistantMcpClient, assistantModelInputSchema, prepareAssistantCompanyEncryption, validateAssistantEncryptedTaskRead, materializeAssistantEncryptedTask, withAssistantManagedContentArguments } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { buildAgentDeviceRegistrationRecord, verifyCompanyEncryptionRecord, hpkeSeal, encryptCompanyPayload, buildCompanyEncryptedTextMarker, canonicalJson,
-  encryptFileToCompanyContainer, decryptCompanyPayload } from '../host-runtime/scripts/trelio-company-encryption.mjs';
+  encryptFileToCompanyContainer, decryptCompanyPayload, unlockRememberedAgentEncryptionDevice } from '../host-runtime/scripts/trelio-company-encryption.mjs';
 
 const memoryStore = () => {
   const values=new Map(); const key=input=>JSON.stringify(input);
@@ -91,7 +91,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
   const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
   const client={companies:async()=>available?[{companyId,companySlug:'encrypted',encryptionState:'encrypted'}]:[],
     readTaskPass:async()=>({state:'leased',passId:pass.passId,threadId:pass.threadId,leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
-  const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null;
+  const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null,commentFileDefinition=null;
   const input={identity,host,client,
     store,companyId,companySlug:'encrypted',lockDirectory:root,lock:async(_file,action)=>action()};
   const previousFetch=globalThis.fetch;
@@ -120,8 +120,17 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',
         phase:'preparation',companyId,target,nativeTool:preparation.nativeTool,arguments:preparation.arguments,
         ...(preparation.customField?{customField:preparation.customField}:{}),
-        ...(preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
-      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY/);
+        ...(preparation.commentFiles?{commentFiles:preparation.commentFiles}:{}),
+        ...(preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
+      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY/);
+      if(preparation.commentFileDefinition){
+        assert.equal(preparation.nativeTool,'create_comment');
+        assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt']);
+        assert.equal(body.payloads.length,0,'source discovery has no plaintext path or body and stages nothing');
+        assert.equal(preparation.commentFileDefinition.runId,commentFileDefinition.runId);
+        assert.equal(preparation.commentFileDefinition.ordinal,0);
+        return json(commentFileDefinition);
+      }
       if(preparation.customFieldDefinition){
         assert.equal(preparation.nativeTool,'update_task_custom_field');
         assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt','fieldId']);
@@ -198,6 +207,54 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     const richPayload=[...staged.values()].find(payload=>payload.entityId!==[...staged.keys()][0]);
     const richOpened=await decryptCompanyPayload({encryptedPayload:richPayload,scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
     assert.equal(richOpened.values.body_json.type,'doc');
+    const filesRoot=await fs.mkdtemp(path.join(root,'accepted-files-'));
+    try{
+      const runId=randomUUID(),workspaceId=randomUUID(),projectionId=randomUUID(),manifestFileId=randomUUID(),sourceFileId=randomUUID(),attachmentId=randomUUID();
+      const filePath='DELIVERABLE_PATH_CANARY/FILE_NAME_CANARY.txt',workspaceHead='a'.repeat(40);
+      const manifest={schemaVersion:1,kind:'agent-workspace-browser-manifest',workspaceId,workspaceHead,projectionId,
+        files:[{id:sourceFileId,path:filePath,contentType:'text/plain',sizeBytes:7,plaintextSha256:'b'.repeat(64)}]};
+      const sourcePath=path.join(filesRoot,'manifest.json'),destinationPath=path.join(filesRoot,'manifest.trelioe1');
+      await fs.writeFile(sourcePath,JSON.stringify(manifest),{mode:0o600});
+      await encryptFileToCompanyContainer({sourcePath,destinationPath,scopePublicEncryptionJwk,
+        aad:{companyId,scopeId,scopeEpoch:1,entityType:'agent_workspace_browser_manifest',entityId:manifestFileId,entityRevision:1,schemaVersion:1},
+        originalName:'manifest',mimeType:'application/json',writerDeviceId:cryptoDeviceId,signingPrivateKey:(await unlockRememberedAgentEncryptionDevice(persisted)).privateKeys.signingPrivateKey});
+      const cipher=await fs.readFile(destinationPath);
+      commentFileDefinition={schemaVersion:1,runId,workspaceId,workspaceHead,projectionId,projectionFileCount:1,manifestFileId,
+        attachmentId,publicUrl:`${identity.origin}/api/companies/encrypted/projects/e-${randomUUID()}/tasks/30/attachments/${attachmentId}/download`,
+        ciphertextSha256:createHash('sha256').update(cipher).digest('hex'),ciphertextBase64:cipher.toString('base64')};
+      const fileArgs={clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),bodyText:'RICH_BODY_CANARY',acceptedFiles:[{runId,filePath}]};
+      let published=0;
+      const publish=async wire=>{
+        published++;assert.equal(wire.acceptedFiles,undefined);assert.equal(wire.encryptedFiles,undefined);
+        assert.equal(wire.encryptedContent.commentFiles.length,1);
+        assert.equal(wire.encryptedContent.commentFiles[0].sourceFileId,sourceFileId);
+        assert.match(wire.encryptedContent.commentFiles[0].filePath,/^~e1:/u);
+        assert.match(wire.encryptedContent.commentFiles[0].fileName,/^~e1:/u);
+        assert.match(wire.encryptedContent.commentFiles[0].contentType,/^~e1:/u);
+        assert.doesNotMatch(JSON.stringify(wire),/RICH_BODY_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY/);
+        const {encryptedContent,...business}=wire;
+        assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',
+          companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'create_comment',arguments:business,
+          commentFiles:encryptedContent.commentFiles},encryptedContent.signature),true);
+        const opened=await decryptCompanyPayload({encryptedPayload:staged.get(wire.bodyJson.$trelioE2ee.id),scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+        assert.equal(opened.values.body_json.content[0].content[0].text,'RICH_BODY_CANARY');
+        const linked=opened.values.body_json.content.at(-1).content[0];
+        assert.equal(linked.text,'FILE_NAME_CANARY.txt');assert.equal(linked.marks[0].attrs.taskAttachmentId,attachmentId);
+        assert.equal(linked.marks[0].attrs.href,commentFileDefinition.publicUrl);
+        return {content:[],structuredContent:{receiptId:randomUUID()}};
+      };
+      await withAssistantManagedContentArguments({...input,name:'create_comment',args:fileArgs},publish);
+      await withAssistantManagedContentArguments({...input,name:'create_comment',args:fileArgs},publish);
+      assert.equal(published,2,'an explicit retry compares persisted ciphertext but does not internally replay a domain request');
+      const validProjection=commentFileDefinition.projectionId;commentFileDefinition.projectionId=randomUUID();
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'create_comment',args:fileArgs},async()=>assert.fail('wrong projection reached MCP')));
+      commentFileDefinition.projectionId=validProjection;
+      for(const filePath of ['WORKSPACE_CONTEXT.md','worklog/private.md','assistants/someone/WORK.md']){
+        await assert.rejects(withAssistantManagedContentArguments({...input,name:'create_comment',args:{...fileArgs,acceptedFiles:[{runId,filePath}]}},async()=>assert.fail('private context attachment reached MCP')));
+      }
+      await assert.rejects(withAssistantManagedContentArguments({...input,name:'create_comment',args:{...fileArgs,encryptedFiles:[]}},publish),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+      assert.equal(published,2);
+    }finally{commentFileDefinition=null;await fs.rm(filesRoot,{recursive:true,force:true});}
     const previewed=await withAssistantManagedContentArguments({...input,name:'get_assistant_owner_question',args:{questionId:randomUUID()}},async()=>({content:[],
       structuredContent:{managedEncryptedContent:{schemaVersion:1,companyId,recipientDeviceId:cryptoDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,
         context:{questionText:`Complete document: ${buildCompanyEncryptedTextMarker(richPayload.entityId,'body_json')}`},encryptedPayloads:[richPayload]}}}));

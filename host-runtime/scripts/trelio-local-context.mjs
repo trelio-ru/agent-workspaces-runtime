@@ -1870,7 +1870,7 @@ export const buildLocalProposalPublicationDocument = ({
     buildLocalMarkdownDocument(bodyMarkdown),
     publicationContext?.mentionableMembers,
   );
-  const attachmentParagraphs = selectedIds.map((attachmentId) => {
+  const selectedAttachments = selectedIds.map((attachmentId) => {
     const attachment = attachmentById.get(attachmentId);
     const fileName = String(attachment?.fileName ?? "").trim();
     if (!fileName) {
@@ -1890,6 +1890,20 @@ export const buildLocalProposalPublicationDocument = ({
       encodeURIComponent(attachmentId),
       "download",
     ].join("/"), taskOrigin).toString();
+    return { id: attachmentId, fileName, publicUrl: href };
+  });
+  return appendLocalTaskCommentAttachmentLinks(markdownDocument, selectedAttachments);
+};
+
+/** SAME local publication composer for human-reviewed and delegated comments.
+ * The caller has native-selected attachment IDs/URLs and authenticated names.
+ * Compose links before protecting the whole rich-text body; a ciphertext JSON
+ * marker cannot safely receive server-appended paragraphs afterwards. */
+export const appendLocalTaskCommentAttachmentLinks = (document, attachments) => {
+  if (!document || document.type !== "doc" || !Array.isArray(document.content)) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "A rich-text document is required for attachment links.");
+  }
+  const attachmentParagraphs = attachments.map(({ id, fileName, publicUrl }) => {
     return {
       type: "paragraph",
       content: [{
@@ -1898,9 +1912,9 @@ export const buildLocalProposalPublicationDocument = ({
         marks: [{
           type: "link",
           attrs: {
-            href,
+            href: publicUrl,
             taskAttachmentKind: "file",
-            taskAttachmentId: attachmentId,
+            taskAttachmentId: id,
             download: fileName,
           },
         }],
@@ -1908,8 +1922,8 @@ export const buildLocalProposalPublicationDocument = ({
     };
   });
   return {
-    ...markdownDocument,
-    content: [...markdownDocument.content, ...attachmentParagraphs],
+    ...document,
+    content: [...document.content, ...attachmentParagraphs],
   };
 };
 
@@ -2344,7 +2358,9 @@ export const protectLocalActionArguments = async ({
       const statusDictionaryLabel = (field === "title" || field === "name" || field === "label")
         && Object.hasOwn(current, "code")
         && (Object.hasOwn(current, "color") || Object.hasOwn(current, "isFinal"));
-      const protectedField = LOCAL_ACTION_PROTECTED_FIELDS.has(field)
+      const acceptedCommentPath = nativeTool === "create_comment" && field === "filePath"
+        && /^\$\.encryptedFiles\[\d+\]$/u.test(objectPath);
+      const protectedField = (LOCAL_ACTION_PROTECTED_FIELDS.has(field) || acceptedCommentPath)
         && !statusDictionaryLabel
         && !isEmptyLocalActionValue(child)
         && !isEncryptedLocalActionMarker(child)
@@ -2358,7 +2374,7 @@ export const protectLocalActionArguments = async ({
       if (protectedField) protectedEntries.push([field, child,
         // The existing `reason` input is already encrypted by older hosts.
         // They fail closed on the new field contract without sending plaintext.
-        nativeTool === "delete_workspace" && field === "reason"
+        acceptedCommentPath ? "file_path" : nativeTool === "delete_workspace" && field === "reason"
           ? "deletion_reason"
           : field === "options" && ["ask_assistant_owner", "resolve_assistant_intake"].includes(nativeTool)
             ? "answer_options_json"

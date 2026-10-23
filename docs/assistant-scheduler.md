@@ -908,6 +908,18 @@ unchanged. The backend retains source-file ACL, validation, action policy and
 receipt authority. The host does not fetch file bytes, select an answer or create
 its own domain schema; the owner UI always supplies the free-text Other option.
 
+Encrypted accepted-file publication opens only the native-selected own accepted
+Run's signed manifest, through the SAME managed preparation cell and common
+TRELIOE1 codec. Original paths remain local; the common human manifest selector
+rejects context/worklog files and the assistant additionally excludes its state
+directory. Structural Run/ordinal/request IDs select native attachment IDs/URLs.
+The SAME local human link composer appends these links BEFORE whole-body field
+protection. Names/path/MIME enter only host-owned signed `encryptedContent.commentFiles`; the
+native writer retains source/retirement/head/CAS/size/quota/atomic-reference and
+receipt authority. A historical accepted Run never borrows a newer projection.
+No general file endpoint, plaintext path/digest, human proposal/approval alias,
+second blob copy, vault or replay is introduced. Legacy plain forwarding is unchanged.
+
 Independent `create_task` and fresh `get_task_create_meta` use that SAME proxy
 and the backend's current schemas. The metadata target is the protected pass's
 project; creation needs an exact persisted owner decision, explicit status and
@@ -1535,7 +1547,7 @@ created/waiting-owner terminal response may be read back without pretending its
 old lease is still executable. Local choice/Other and UTF-8 checks precede
 encryption; an owner answer still grants no sensitive action permission.
 
-Interactive source setup, private Secret intent metadata, accepted-file publication
+Interactive source setup and private Secret intent metadata
 retain separate encrypted guards. Unsupported arguments
 fail before remote tools/call. Ciphertext uses the native-selected approved data
 plane; a failure never falls back to canonical HTTP. Real HPKE/signed native and

@@ -544,6 +544,7 @@ publication tooling также остаются вне этого публичн
   injected exact ciphertext hydration, not human payload resolve or a second
   executor. See [contract](docs/assistant-scheduler.md#encrypted-source-and-exact-public-task-skill).
 - Assistant reads/writes, native guidance, relation intents, accepted file refs/read/delete and question choices forward live dedicated schemas/closed names only; no human approval flags or retries. [Contract](docs/assistant-scheduler.md#task-local-domain-actions).
+  Encrypted comment files reuse native-selected signed own-Run manifests and the SAME local human link composer before whole-body sealing; native atomic references/receipts remain authoritative, never server append to opaque JSON.
   Content-bearing calls also require the SAME fresh managed company-mode
   preflight before remote MCP; unsupported encrypted content refuses locally,
   never after exposing prose to HTTP. Native ACL/CAS and sealed adapters remain

@@ -14,6 +14,8 @@ export class AssistantTransportError extends Error {
 }
 const fail = (code, status) => { throw new AssistantTransportError(code, status); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const HEAD = /^[0-9a-f]{40,64}$/u;
+const SHA256 = /^[0-9a-f]{64}$/u;
 const id = value => { if (typeof value !== 'string' || !UUID.test(value)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT'); return value.toLowerCase(); };
 /** One catalogue for source polling and task execution on this managed device.
  * Company/member bindings remain inside the common catalogue. Neither profile
@@ -539,9 +541,15 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   if(!supportsAssistantManagedContent(name)||!object(args)||typeof send!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   // Ignore model-authored transport hints before signing; all private metadata
   // comes from the genuine current OS/pass context below.
-  const business=managedBusinessArguments(args);rejectBorrowedManagedMarkers(business);
-  if(Object.hasOwn(business,'acceptedFiles')||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
+  let business=managedBusinessArguments(args);rejectBorrowedManagedMarkers(business);
+  if(Object.hasOwn(business,'encryptedFiles')||Object.hasOwn(business,'acceptedFiles')&&name!=='create_comment'
+    ||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
     ||name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+  if(business.acceptedFiles!==undefined&&(!Array.isArray(business.acceptedFiles)||business.acceptedFiles.length<1
+    ||business.acceptedFiles.length>10||business.acceptedFiles.some(file=>!object(file)
+      ||Object.keys(file).sort().join(',')!=='filePath,runId'||!UUID.test(file.runId)||typeof file.filePath!=='string'
+      ||!file.filePath||file.filePath.length>1024||file.filePath.replaceAll('\\','/').toLowerCase().split('/').filter(Boolean)[0]==='assistants')
+    ||new Set(business.acceptedFiles.map(file=>`${file.runId}\0${file.filePath}`)).size!==business.acceptedFiles.length))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
   // Content-dependent refinements cannot be evaluated on opaque markers by
   // the native Zod validator. Preserve its question/choice contract BEFORE
   // sealing; these local guards grant no action or owner decision authority.
@@ -583,12 +591,12 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const common=await import('./trelio-workspace.mjs'),local=await import('./trelio-local-context.mjs'),
         crypto=await import('./trelio-company-encryption.mjs');
       const current=async()=>{await assertCurrent();await assertPass();};
-      let customField=null;
+      let customField=null,commentFiles=null;
       const binding=async(phase,wire,action)=>{
         await current();
         return crypto.signCompanyEncryptionRecord(context.device.privateKeys.signingPrivateKey,
           {protocol:'assistant-managed-content/v1',phase,companyId:pass.companyId,target,nativeTool:name,
-            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{})});
+            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{})});
       };
       const hydrate=async bundle=>{
         await current();
@@ -607,7 +615,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const stage=async(protectedValue,{actionPreview=false,ownerActionContent}={})=>{
         const wire=Object.fromEntries(Object.entries(protectedValue.value).filter(([key])=>key!=='ownerDecisionId'));
         const action=actionPreview?{preview:true}:ownerActionContent?{content:ownerActionContent}:undefined;
-        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(actionPreview?{actionPreview:true}:{}),
+        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(actionPreview?{actionPreview:true}:{}),
           ...(ownerActionContent?{ownerActionContent}:{}),signature:await binding('preparation',wire,action)};
         const request=async(origin,selectedToken,pathname,options)=>{
           await current();
@@ -628,6 +636,56 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         }
         return null;
       };
+      if(business.acceptedFiles){
+        const descriptors=[],links=[];
+        for(const [ordinal,file]of business.acceptedFiles.entries()){
+          // Select the exact own accepted Run with STRUCTURAL arguments only.
+          // No original path/body/name enters this preparatory HTTP request.
+          const selected={clientRequestId:business.clientRequestId,expectedTaskUpdatedAt:business.expectedTaskUpdatedAt};
+          const definition={runId:file.runId,ordinal},action={commentFileDefinition:definition};
+          const preparation={nativeTool:name,arguments:selected,commentFileDefinition:definition,
+            signature:await binding('preparation',selected,action)};
+          const response=await requestPayloads(context.requestOrigin,token,'/api/agent-workspaces/encryption/payloads',
+            {method:'POST',headers:{'content-type':'application/json'},signal,managedTarget:target,assertPass:current,
+              body:JSON.stringify({companySlug:company.companySlug,writerDeviceId:context.runtime.device.id,payloads:[],preparation})});
+          const bytes=await common.readBoundedResponseBuffer(response,16*1024*1024,'Assistant accepted file manifest');let result;
+          try{result=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
+          catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}finally{bytes.fill(0);}
+          if(!object(result)||result.schemaVersion!==1||result.runId!==file.runId
+            ||!UUID.test(result.workspaceId)||!HEAD.test(result.workspaceHead)||!UUID.test(result.projectionId)
+            ||!UUID.test(result.manifestFileId)||!UUID.test(result.attachmentId)
+            ||!Number.isSafeInteger(result.projectionFileCount)||result.projectionFileCount<1
+            ||typeof result.ciphertextSha256!=='string'||!SHA256.test(result.ciphertextSha256)
+            ||typeof result.ciphertextBase64!=='string'||result.ciphertextBase64.length>14*1024*1024
+            ||typeof result.publicUrl!=='string')fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          let url;try{url=new URL(result.publicUrl);}catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}
+          if(url.origin!==new URL(identity.origin).origin||url.search||url.hash
+            ||!url.pathname.endsWith(`/attachments/${result.attachmentId}/download`))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          const ciphertext=Buffer.from(result.ciphertextBase64,'base64');delete result.ciphertextBase64;let opened;
+          try{
+            await current();
+            opened=await crypto.decryptFileFromCompanyContainerBytes({bytes:ciphertext,
+              scopePrivateKey:context.scopePrivateEncryptionKey.privateKey,scopePrivateJwk:context.scopePrivateEncryptionKey.privateJwk,
+              expectedCiphertextSha256:result.ciphertextSha256,maximumPlaintextBytes:8*1024*1024});
+            const aad=opened.header?.aad;
+            if(aad?.companyId!==pass.companyId||aad?.scopeId!==context.runtime.scope.id||aad?.scopeEpoch!==context.runtime.scope.epoch
+              ||aad?.entityType!=='agent_workspace_browser_manifest'||aad?.entityId!==result.manifestFileId
+              ||aad?.entityRevision!==1||aad?.schemaVersion!==1||aad?.purpose!=='file')fail('ASSISTANT_MCP_INVALID_RESPONSE');
+            const manifest=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(opened.bytes));
+            const [selectedFile]=local.selectEncryptedProposalFilesFromManifest({manifest,projectionId:result.projectionId,
+              projectionFileCount:result.projectionFileCount,workspaceId:result.workspaceId,acceptedHead:result.workspaceHead,
+              filePaths:[file.filePath]});
+            descriptors.push({runId:file.runId,sourceFileId:selectedFile.sourceFileId,filePath:selectedFile.filePath,
+              fileName:selectedFile.fileName,contentType:selectedFile.contentType});
+            links.push({id:result.attachmentId,fileName:selectedFile.fileName,publicUrl:result.publicUrl});
+            await current();
+          }finally{ciphertext.fill(0);opened?.bytes.fill(0);}
+        }
+        const normalized=local.normalizeLocalActionRichTextInputs(business);
+        if(normalized.bodyText!==undefined||normalized.bodyMarkdown!==undefined)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+        normalized.bodyJson=local.appendLocalTaskCommentAttachmentLinks(normalized.bodyJson??{type:'doc',content:[]},links);
+        delete normalized.acceptedFiles;business={...normalized,encryptedFiles:descriptors};
+      }
       if(name==='update_task_custom_field'){
         // Ask the SAME native preparation cell for one active field's OPEN
         // type/settings. Never send `value` (even malformed input) in this read.
@@ -658,6 +716,13 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         if(name==='request_assistant_action'&&business.operation==='create_private_secret')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,
           ...(customField?{customFieldTypeForId:id=>id===customField.id?customField.fieldType:null}:{})});
+        // All new host metadata stays inside the ALREADY hidden envelope.
+        // Older model-schema projectors know that envelope; a new root field
+        // would otherwise expose a path-bearing input before their preflight.
+        if(protectedValue.value.encryptedFiles){
+          commentFiles=protectedValue.value.encryptedFiles;
+          delete protectedValue.value.encryptedFiles;
+        }
         wire=protectedValue.value;
         if(name==='request_assistant_action'){
           const preview=await stage(protectedValue,{actionPreview:true}),opened=await hydrate(preview);
@@ -673,7 +738,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
           action={...ownerActionContent,snapshot:rawSnapshot};
         }else await stage(protectedValue);
       }
-      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),
+      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),
         ...(!readonly?{signature:await binding('publication',wire,action)}:{}),...(action?{action}:{})};
       await current();
       const authority=Object.fromEntries(Object.entries(args).filter(([key])=>['taskPass','intakePass','runtimeSessionProof'].includes(key)));
