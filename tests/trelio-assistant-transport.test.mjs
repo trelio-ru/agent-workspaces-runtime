@@ -1173,7 +1173,7 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile, assistantTas
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
+const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null}={}) => {
   const identity={schemaVersion:1,origin:encryptedTool||encryptedInspection||workspaceRun||encryptedAttachment?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
@@ -1194,6 +1194,7 @@ const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=f
   const runIdentity=workspaceRun?{workspaceId:randomUUID(),runId:randomUUID()}:null;
   const profile=await createAssistantWorkspaceProfile({identity,store,host,client,workspaceRun:runIdentity,encryptedTaskRead:descriptor,encryptedInspection:inspectionDescriptor,secretBrowserFill,secretGeneration,
     secretSkill:typeof secretSkill==='function'?secretSkill({pass,runtime}):secretSkill,
+    remoteMcp:typeof remoteMcp==='function'?remoteMcp({pass,runtime}):remoteMcp,
     lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
   return {identity,pass,keys,store,credential,runtime,profile,descriptor,inspectionDescriptor,runIdentity,host,client,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
@@ -2496,4 +2497,53 @@ test('protected active pass narrows SAME native MCP session view without grantin
  await assert.rejects(client.callTool('get_task',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
  active={kind:'task'};views.length=0;assert.deepEqual((await client.listTools()).map(tool=>tool.name),['get_assistant_status','get_task']);
  assert.ok(views.every(value=>value==='task'));await assert.rejects(client.callTool('resolve_assistant_intake',{}),/CAPABILITY_UNAVAILABLE/);
+});
+
+
+test('managed Remote MCP reuses credential paths and exact native attempt fence without human namespace access',async()=>{
+  let input,receipts=0;
+  const f=await workspaceProfileFixture({remoteMcp:({pass})=>{
+    input={companyId:pass.companyId,projectId:null,skillId:'synthetic-remote',releaseId:randomUUID(),
+      toolName:'update_record',arguments:{private:'SYNTHETIC_UNSENT'},ownerDecisionId:randomUUID(),clientRequestId:randomUUID()};
+    return {input,consumed:false,authorize:async()=>{receipts++;return {structuredContent:{schemaVersion:1,
+      receiptId:randomUUID(),ownerDecisionId:input.ownerDecisionId,attemptAdmitted:true,providerOutcome:'not_observed',replayAllowed:false}};}};
+  }});
+  const {resolveRemoteMcpCredentialFile}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const localIdentity={companyId:f.pass.companyId,projectId:null,memberId:randomUUID(),skillId:input.skillId};
+  const normal=resolveRemoteMcpCredentialFile(localIdentity,{homeDirectory:'/synthetic-home',environment:{}});
+  await withWorkspaceExecutionProfile(f.profile,async()=>{
+    const managed=resolveRemoteMcpCredentialFile(localIdentity,{homeDirectory:'/synthetic-home',environment:{}});
+    assert.notEqual(managed,normal);assert.ok(managed.includes(f.identity.assistantId));assert.ok(managed.includes(f.identity.deviceId));
+    assert.throws(()=>resolveRemoteMcpCredentialFile({...localIdentity,companyId:randomUUID()}),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+    const selected={releaseId:input.releaseId,localIdentity};
+    await f.profile.authorizeRemoteMcpWrite(selected,input.toolName,input.arguments,input);
+    await assert.rejects(f.profile.authorizeRemoteMcpWrite(selected,input.toolName,input.arguments,input),{code:'ASSISTANT_REMOTE_MCP_WRITE_DENIED'});
+    assert.equal(receipts,1);
+  });
+  f.close();await assert.rejects(f.profile.assertRemoteMcpCurrent(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+});
+
+test('same selected skill hydrator opens only native Remote MCP config/title with the current managed recipient',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {hydrateAssistantEncryptedSkill}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const companyId=randomUUID(),assistantId=randomUUID(),scopeId=randomUUID(),deviceId=randomUUID(),entityId=randomUUID(),envelopeId=randomUUID();
+  const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+  const fields={remote_mcp_config_json:{schemaVersion:1,endpoint:'https://selected.example/mcp',allowedTools:['read_context']},title:'SYNTHETIC_REMOTE_PRIVATE_TITLE'};
+  const aad={companyId,scopeId,scopeEpoch:1,entityType:'api.browser_mutation',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+  const payload={...aad,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad,payload:{values:fields}})};
+  const fingerprint='managed-remote-fingerprint';
+  const opened={runtime:{company:{id:companyId},viewer:{userId:assistantId},device:{id:deviceId,fingerprint},
+    envelope:{id:envelopeId},scope:{id:scopeId,epoch:1}},scopePrivateEncryptionKey:{privateKey:pair.privateKey,privateJwk}};
+  const bundle={schemaVersion:1,companyId,recipientDeviceId:deviceId,envelopeId,scopeId,scopeEpoch:1,encryptedPayloads:[payload]};
+  const raw={releaseId:randomUUID(),company:{id:companyId,slug:'encrypted'},skill:{id:'synthetic-remote',title:buildCompanyEncryptedTextMarker(entityId,'title')},
+    remoteMcp:{contentProtection:'company_e2ee_v1',config:null},assistantEncryption:bundle};
+  // Construct markers with the actual shared codec, not an assumed wire shape.
+  raw.remoteMcp.config=(await import('../host-runtime/scripts/trelio-company-encryption.mjs')).buildCompanyEncryptedJsonMarker(entityId,'remote_mcp_config_json');
+  let current=0;const input={raw,bundle,common,origin:'https://trelio.ru',token:'opaque-test-handle',companyId,assistantId,fingerprint,
+    openCompany:async()=>opened,assertCurrent:async()=>{current++;}};
+  const result=await hydrateAssistantEncryptedSkill(input);assert.deepEqual(result.rawResolution.remoteMcp.config,fields.remote_mcp_config_json);
+  assert.equal(result.rawResolution.skill.title,fields.title);assert.equal(result.rawResolution.assistantEncryption,undefined);assert.equal(current,2);
+  await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,recipientDeviceId:randomUUID()}}),{code:'ASSISTANT_SOURCE_BINDING_CHANGED'});
+  await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,encryptedPayloads:[payload,{...payload,entityId:randomUUID()}]}}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
 });

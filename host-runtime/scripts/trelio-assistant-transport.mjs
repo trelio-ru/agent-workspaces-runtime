@@ -450,10 +450,10 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
  * Source and task profiles authenticate independently; neither obtains the
  * ordinary arbitrary company payload resolver or a human encryption identity.
  * The native bundle is bounded before opening and never kept in SQLite. */
-const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,token,companyId,assistantId,
+export const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,token,companyId,assistantId,
   fingerprint,openCompany,assertCurrent,signal}) => {
   if(bundle===undefined){
-    if(common.collectAgentEncryptedReferences({config:raw?.companyConnection?.config,guidance:raw?.assistantGuidance}).size)
+    if(common.collectAgentEncryptedReferences({config:raw?.remoteMcp?.config??raw?.companyConnection?.config,guidance:raw?.assistantGuidance,...(raw?.remoteMcp?{skillTitle:raw?.skill?.title}:{})}).size)
       fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
     return {rawResolution:raw,companyEncryption:null};
   }
@@ -469,9 +469,9 @@ const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,token,co
     ||opened.runtime.scope?.id!==bundle.scopeId||opened.runtime.scope?.epoch!==bundle.scopeEpoch
     ||opened.runtime.device?.fingerprint!==fingerprint)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
   const selected=readAssistantEncryptedSnapshotBundle({schemaVersion:1,context:raw,encryptedPayloads:bundle.encryptedPayloads},opened,companyId);
-  const config=raw.companyConnection?.config??null,reference=config===null?null:common.parseAgentEncryptedContentReference(config);
-  const expected=common.collectAgentEncryptedReferences({config,...(raw.assistantGuidance?{guidance:raw.assistantGuidance}:{})});
-  if(config!==null&&reference?.field!=='config_json'||expected.size>8||selected.payloads.size!==expected.size
+  const config=raw.remoteMcp?(raw.remoteMcp.contentProtection==='company_e2ee_v1'?raw.remoteMcp.config:null):raw.companyConnection?.config??null,reference=config===null?null:common.parseAgentEncryptedContentReference(config);
+  const expected=common.collectAgentEncryptedReferences({config,...(raw.assistantGuidance?{guidance:raw.assistantGuidance}:{}),...(raw.remoteMcp?{skillTitle:raw.skill?.title}:{})});
+  if(config!==null&&reference?.field!==(raw.remoteMcp?'remote_mcp_config_json':'config_json')||expected.size>8||selected.payloads.size!==expected.size
     ||[...expected.keys()].some(entityId=>!selected.payloads.has(entityId)))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   const value={...raw};delete value.sourceEncryption;delete value.assistantEncryption;
   // Always hydrate the exact native guidance too: a null connection does not
@@ -485,7 +485,8 @@ const hydrateAssistantEncryptedSkill = async ({raw,bundle,common,origin,token,co
 };
 
 const validateAssistantEncryptedSkillRead = (value,pass=null) => {
-  if(!object(value)||Object.keys(value).sort().join(',')!=='arguments,companyId,nativeTool,projectId,releaseId,schemaVersion,skillId'
+  if(!object(value)||Object.keys(value).filter(key=>key!=='executionKind').sort().join(',')!=='arguments,companyId,nativeTool,projectId,releaseId,schemaVersion,skillId'
+    ||value.executionKind!==undefined&&value.executionKind!=='remote_mcp'
     ||value.schemaVersion!==1||value.nativeTool!=='get_agent_skill'||!UUID.test(value.companyId??'')
     ||value.projectId!==null&&!UUID.test(value.projectId??'')||!UUID.test(value.releaseId??'')
     ||typeof value.skillId!=='string'||!value.skillId.length||value.skillId.length>120||!object(value.arguments)
@@ -500,7 +501,7 @@ const validateAssistantEncryptedSkillRead = (value,pass=null) => {
 /** Closed content surface implemented with the SAME local protector, payload
  * collision comparison, managed OS identity and native data-plane routes. This
  * list is a transport capability, never a replacement domain schema or ACL. */
-const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
+const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['call_remote_agent_skill_tool','cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
   'create_task','create_comment','update_comment','update_task_title','update_task_description','create_task_control',
   'update_task_control','create_checklist','update_checklist','create_subtask','create_task_relation','update_task_status',
   'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',
@@ -859,7 +860,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
  * are resolved from the existing private slot through a callback, never a
  * model-visible getter or a human-token fallback. */
 export const createAssistantWorkspaceProfile = async ({identity,client,store,host,lockDirectory,
-  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,lock=withRuntimeStateLock,now=Date.now}) => {
+  sourceReads=null,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,lock=withRuntimeStateLock,now=Date.now}) => {
   const uuid=UUID, same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
   const nativePrefix='/api/agent-workspaces', assistantPrefix='/api/digital-assistants/runtime/workspace';
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
@@ -1181,6 +1182,33 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         || Date.parse(record.state.expiresAt)<=now())fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
       return pass.threadId;
     },
+    // The SAME remote credential engine keeps a managed namespace even on
+    // macOS/libsecret, where the physical file path alone is not a vault key.
+    remoteMcpCredentialNamespace: `assistant:${identity.assistantId}:${identity.deviceId}`,
+    resolveRemoteMcpCredentialDirectory(selected, configDirectory) {
+      if (!remoteMcp || selected.companyId !== pass.companyId || selected.companyId !== remoteMcp.input.companyId
+        || selected.skillId !== remoteMcp.input.skillId || (selected.projectId ?? null) !== (remoteMcp.input.projectId ?? null))
+        fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      return path.join(assistantSkillCatalogueDirectory(configDirectory, identity), selected.skillId,
+        id(selected.companyId), id(selected.memberId));
+    },
+    async assertRemoteMcpCurrent(signal) { if (!remoteMcp) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED'); await assertLivePass(signal); },
+    async authorizeRemoteMcpWrite(fresh, name, args, raw, { signal } = {}) {
+      if (!remoteMcp || remoteMcp.consumed || typeof remoteMcp.authorize !== 'function'
+        || fresh.releaseId !== remoteMcp.input.releaseId || fresh.localIdentity.companyId !== pass.companyId
+        || fresh.localIdentity.skillId !== remoteMcp.input.skillId || name !== remoteMcp.input.toolName
+        || JSON.stringify(args) !== JSON.stringify(remoteMcp.input.arguments)
+        || raw.ownerDecisionId !== remoteMcp.input.ownerDecisionId || raw.clientRequestId !== remoteMcp.input.clientRequestId)
+        fail('ASSISTANT_REMOTE_MCP_WRITE_DENIED');
+      await assertLivePass(signal);
+      remoteMcp.consumed = true; // fence BEFORE sending; never replay unknown admission
+      const result = await remoteMcp.authorize();
+      const receipt = result?.structuredContent;
+      if (result?.isError || receipt?.schemaVersion !== 1 || !UUID.test(receipt.receiptId ?? '')
+        || receipt.ownerDecisionId !== remoteMcp.input.ownerDecisionId || receipt.attemptAdmitted !== true
+        || receipt.providerOutcome !== 'not_observed' || receipt.replayAllowed !== false) fail('ASSISTANT_REMOTE_MCP_WRITE_DENIED');
+      await assertLivePass(signal);
+    },
     async resolveSkillCatalogueDirectory(configDirectory){
       await assertIdentity();
       return assistantSkillCatalogueDirectory(configDirectory,identity);
@@ -1321,21 +1349,25 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         // The handler still checks the surrounding encrypted task recipient.
         if(lifecycle)url=new URL(url.pathname+url.search,identity.origin);
       }else if(requestOrigin===identity.origin && (url.pathname==='/api/agent-skills/runtime/resolve' && method==='POST'
-        || url.pathname==='/api/agent-skills/runtime/package' && method==='GET')){
+        || url.pathname==='/api/agent-skills/runtime/package' && method==='GET'
+        || (remoteMcp||skillRead?.executionKind==='remote_mcp') && url.pathname==='/api/agent-skills/remote-mcp/resolve' && method==='POST')){
         if(inspection)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
-        // The signed-skill engine is shared. Only its two existing read
-        // endpoints gain this narrower device/task profile; consent, setup,
-        // remote MCP and secret routes remain denied before credential I/O.
+        // Signed-skill and Remote MCP declaration reads share this narrower
+        // device/task profile. The latter is admitted only during its exact
+        // selected read/operation; consent, setup and Secret delivery retain
+        // their independent native gates before private I/O.
         let input;
         try{input=method==='GET'?Object.fromEntries(url.searchParams):JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
         if(!object(input) || input.companyId!==pass.companyId
           || method==='GET' && new Set(url.searchParams.keys()).size!==[...url.searchParams.keys()].length)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         if(skillRead && (input.skillId!==skillRead.skillId||input.expectedReleaseId!==skillRead.releaseId
           ||(input.projectId??null)!==skillRead.projectId))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        if(remoteMcp && (input.skillId!==remoteMcp.input.skillId||input.expectedReleaseId!==remoteMcp.input.releaseId
+          ||(input.projectId??null)!==(remoteMcp.input.projectId??null)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         if(privateSkill && (input.skillId!==privateSkill.skill.skillId || input.expectedReleaseId!==privateSkill.skill.releaseId
           || (input.projectId??null)!==(privateSkill.skill.projectId??null)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
-        route={proofTool:method==='POST'?'assistant-skill:resolve':'assistant-skill:package'};
+        route={proofTool:url.pathname==='/api/agent-skills/remote-mcp/resolve'?'assistant-skill:remote-resolve':method==='POST'?'assistant-skill:resolve':'assistant-skill:package'};
       }else{
         if(!pathname.startsWith(nativePrefix+'/'))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);
@@ -1413,7 +1445,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
             &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){
             skillFingerprint=stored.record.fingerprint;headers.set('x-trelio-assistant-source-encryption-fingerprint',skillFingerprint);
           }
-          if(skillRead && route.proofTool==='assistant-skill:resolve')headers.set('x-trelio-assistant-skill-guidance','1');
+          if(skillRead && ['assistant-skill:resolve','assistant-skill:remote-resolve'].includes(route.proofTool))headers.set('x-trelio-assistant-skill-guidance','1');
         }
         if(privateSkill && route.proofTool.startsWith('assistant-skill:'))headers.set('x-trelio-assistant-secret-checkout',
           JSON.stringify({grantId:privateSkill.grantId,runId:privateSkill.runId}));
@@ -1561,13 +1593,25 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
   const selected=validateAssistantEncryptedSkillRead(descriptor),profile=common.currentWorkspaceExecutionProfile();
   if(profile?.kind!=='digital_assistant'||typeof profile.hydrateSkillRuntimeResolution!=='function')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const token=await common.requireToken(origin);
-  const response=await common.request(origin,token,'/api/agent-skills/runtime/resolve',{method:'POST',signal,
+  const response=await common.request(origin,token,selected.executionKind==='remote_mcp'?'/api/agent-skills/remote-mcp/resolve':'/api/agent-skills/runtime/resolve',{method:'POST',signal,
     headers:{'content-type':'application/json'},body:JSON.stringify({companyId:selected.companyId,projectId:selected.projectId,
       skillId:selected.skillId,expectedReleaseId:selected.releaseId})});
   const raw=await readAssistantEncryptedSnapshotResponse(response,common);
-  if(raw.releaseId!==selected.releaseId||raw.company?.id!==selected.companyId||raw.artifact?.skillId!==selected.skillId
+  if(raw.releaseId!==selected.releaseId||raw.company?.id!==selected.companyId||(selected.executionKind==='remote_mcp'?raw.localIdentity?.skillId:raw.artifact?.skillId)!==selected.skillId
     ||(raw.localIdentity?.projectId??null)!==selected.projectId||!raw.assistantGuidance)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
   const {rawResolution}=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
+  if (selected.executionKind === 'remote_mcp') {
+    const native = rawResolution.assistantGuidance, remote = native?.structuredContent?.remoteMcpExecution;
+    if (!remote || remote.releaseId !== selected.releaseId || native.structuredContent.skill?.id !== selected.skillId)
+      fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+    native.content = [{ type:'text', text:'Current skill instructions and assistant execution capability are in structuredContent.' }];
+    native.structuredContent = { ...native.structuredContent, runtimeExecution:null,
+      remoteMcpExecution:{...remote,updatePolicy:'fresh_current_pass',localMcpServer:'trelio-assistant',
+        tools:{connect:'connect_remote_agent_skill',doctor:'doctor_remote_agent_skill',call:'call_remote_agent_skill_tool'}},
+      assistantExecution:{state:'shared_remote_mcp',automaticFallbackAllowed:false} };
+    const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
+    return compactLocalNativeMcpResult('get_agent_skill',native,selected.arguments);
+  }
   const resolved=common.normalizeResolvedSkillRuntimeArtifact(rawResolution);
   if(resolved.artifact.contentProtection!=='plain'||resolved.trust.level!=='platform_verified'
     ||resolved.trust.artifactLevel!=='platform_verified'||resolved.trust.requiresDeviceConsent
@@ -1900,6 +1944,7 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...ASSISTANT_MCP_READ_TOOLS,
   // Native task-local mapping only. Live schema/proof/CAS remain backend-owned;
   // exposing the name does not read a provider body or create a new task.
   'bind_assistant_source_conversation',
+  'connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool',
   'ask_assistant_owner', 'request_assistant_action', 'complete_assistant_pass', 'prepare_assistant_workspace_run', 'continue_assistant_workspace_action',
   // Native server cancellation needs no local file/CLI adapter. Its live
   // dedicated schema and pass/own-Run checks remain backend authority; adding
@@ -2031,15 +2076,19 @@ export const validateAssistantNativeInputShape=(nativeSchema,raw,{omittedRootFie
   if(!walk(root,input))fail('ASSISTANT_MCP_INPUT_INVALID');
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment,
-  materializeEncryptedTask, materializeEncryptedSkill, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, timeoutMs = 30_000 }) => {
+  materializeEncryptedTask, materializeEncryptedSkill, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, presentationProfile='task', timeoutMs = 30_000 }) => {
+  if (!['task','remote_mcp','skill_setup'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
   const selectedTools=async()=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return pass?.kind==='source_intake'?['get_assistant_intake_context','resolve_assistant_intake']:ASSISTANT_MCP_TOOLS;
+    return pass?.kind==='source_intake'?['get_assistant_intake_context','resolve_assistant_intake']:presentationProfile==='remote_mcp'
+      ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
+      :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
+      :ASSISTANT_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name));
   };
-  const perform = async (action, signal) => {
-    const deadline = AbortSignal.timeout(timeoutMs);
+  const perform = async (action, signal, operationTimeoutMs = timeoutMs) => {
+    const deadline = AbortSignal.timeout(operationTimeoutMs);
     const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     try {
       const protocol = await import("./trelio-remote-mcp.mjs");
@@ -2052,13 +2101,14 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // This only narrows a single native MCP session's presentation. Every
       // handler retains its genuine pass/proof/ACL checks independently.
       const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: active?.kind==='source_intake'
-        ?{'x-trelio-assistant-capability-profile':'source_intake'}:{},
+        ?{'x-trelio-assistant-capability-profile':'source_intake'}:["remote_mcp","skill_setup"].includes(presentationProfile)?{'x-trelio-assistant-capability-profile':presentationProfile}:{},
         authentication: { type: "assistant_device" } };
       const session = await protocol.createRemoteSession(config, credential, request, { signal: boundedSignal });
       try { return await action({ protocol, config, credential, session, request, signal: boundedSignal }); }
       finally { await protocol.closeRemoteSession(config, credential, session.sessionId, request, { signal: boundedSignal }); }
     } catch (error) {
       if (error instanceof AssistantTransportError) throw error;
+      if (/^REMOTE_MCP_[A-Z_]{1,100}$/u.test(error?.code ?? '')) fail(error.code);
       // Raw HTTP/JSON-RPC errors may contain paths or upstream detail. Preserve
       // the private credential and queue; never login or retry a tools/call.
       fail("ASSISTANT_MCP_UNAVAILABLE");
@@ -2155,7 +2205,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         return { content: value.content.map(({ type, text }) => ({ type, text })),
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
-      }, signal);
+      }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs);
     },
   };
 };

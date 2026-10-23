@@ -54,6 +54,7 @@ import {
 } from "./trelio-component-versions.mjs";
 
 import {
+  currentWorkspaceExecutionProfile,
   renderLocalFormPage, renderLocalFormMessage, LOCAL_FORM_CSP,
   AGENT_SKILL_LARGE_PACKAGE_HOST_MINIMUM_VERSION,
   AGENT_SKILL_LEGACY_MAX_PACKAGE_BYTES,
@@ -472,6 +473,14 @@ export const resolveRemoteMcpCredentialFile = (identity, options = {}) => {
   const pathModule = (options.platform ?? process.platform) === "win32"
     ? path.win32
     : path.posix;
+  // A trusted managed profile selects only its own namespace. The SAME PAT
+  // writer/OAuth vault is reused; no human credential/session is read/imported.
+  const profile = currentWorkspaceExecutionProfile();
+  if (profile?.kind === "digital_assistant") {
+    if (typeof profile.resolveRemoteMcpCredentialDirectory !== "function") throw new RemoteMcpHostError("REMOTE_MCP_PROFILE_DENIED", "Managed Remote MCP namespace required.");
+    return pathModule.join(profile.resolveRemoteMcpCredentialDirectory(identity, resolveTrelioConfigHome(options)),
+      "remote-mcp", "secrets", "personal-credential.json");
+  }
   return pathModule.join(
     resolveTrelioConfigHome(options),
     "integrations",
@@ -810,6 +819,10 @@ export const resolveRemoteMcpDeclaration = async (
   { signal, forceRefresh = false } = {},
 ) => {
   const input = normalizeToolInput(rawInput);
+  const executionProfile = currentWorkspaceExecutionProfile();
+  // Device task passes are short, live authority, never twelve-hour human
+  // admissions. Every declaration read rechecks the same native pass/ACL.
+  if (executionProfile?.kind === "digital_assistant") forceRefresh = true;
   let admissionKey;
   let admissionToken;
   let admissionHit = false;
@@ -863,7 +876,15 @@ export const resolveRemoteMcpDeclaration = async (
           signal: operationSignal,
         },
       );
-      const rawResolution = await response.json();
+      let rawResolution = await response.json();
+      if (executionProfile?.kind === "digital_assistant") {
+        if (typeof executionProfile.hydrateSkillRuntimeResolution !== "function") throw new RemoteMcpHostError("REMOTE_MCP_PROFILE_DENIED", "Managed hydration required.");
+        const common = await import("./trelio-workspace.mjs");
+        rawResolution = (await executionProfile.hydrateSkillRuntimeResolution(rawResolution, common, operationSignal)).rawResolution;
+        const config = validateRemoteMcpPublicationConfig(rawResolution.remoteMcp?.config);
+        return validateResolvedRemoteMcp({ ...rawResolution, remoteMcp: { ...rawResolution.remoteMcp,
+          config, configFingerprint: fingerprintRemoteMcpConfig(config) } });
+      }
       // Decide before hydration/normalization: these may remove the wire marker.
       // A decrypted company declaration must never enter the admission cache.
       admissionCacheable = canCacheSkillAdmission(rawResolution);
@@ -948,6 +969,7 @@ const savePersonalCredential = async (
   { signal } = {},
 ) => {
   throwIfAborted(signal);
+  await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
   const credential = String(secret || "").trim();
   if (
     credential.length < 8
@@ -994,12 +1016,14 @@ const useOAuthVault = async (operation) => {
 
 const loadPersonalCredential = async (origin, resolved, { signal } = {}) => {
   throwIfAborted(signal);
+  await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
   if (resolved.remoteMcp.config.authentication.type === "none") {
     return null;
   }
 
   if (resolved.remoteMcp.config.authentication.type === "oauth2_pkce") {
     const vault = createRemoteMcpOAuthVault({
+      namespace: currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null,
       credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
     });
     const session = await useOAuthVault(() => vault.read(origin, resolved));
@@ -1106,6 +1130,7 @@ const forgetPersonalCredential = async (origin, resolved, { signal } = {}) => {
   throwIfAborted(signal);
   if (resolved.remoteMcp.config.authentication.type === "oauth2_pkce") {
     const vault = createRemoteMcpOAuthVault({
+      namespace: currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null,
       credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
     });
     return useOAuthVault(() => vault.remove(origin, resolved));
@@ -1876,6 +1901,7 @@ export const callRemoteTool = async (
     httpRequest = remoteMcpHttpRequest,
     confirmWrite = confirmRemoteWriteAction,
     refreshDeclaration = resolveRemoteMcpDeclaration,
+    beforeWrite = null,
   } = {},
 ) => {
   throwIfAborted(signal);
@@ -1938,8 +1964,10 @@ export const callRemoteTool = async (
     );
   }
 
-  // The preview session is closed before waiting for a separate local click.
-  // Re-read both Trelio authority and the provider's live tools afterwards:
+  // Close preview before the authorization profile's independent review.
+  // Human clients use the same local click; managed clients defer one-use
+  // native owner consume until the final boundary below. Re-read both the
+  // Trelio authority and provider tools after selecting that authorization:
   // assignment, ACL or tool annotations may change during the review window.
   if (!isWrite) throw new RemoteMcpHostError(
     "REMOTE_MCP_TOOL_NOT_ALLOWED", "Remote MCP write policy не подтверждена.",
@@ -1977,6 +2005,11 @@ export const callRemoteTool = async (
       "REMOTE_MCP_TOOL_NOT_ALLOWED",
       "Remote MCP tool перестал быть разрешённым изменением после подтверждения.",
     );
+    // Profiles may replace the LOCAL click with a native sealed owner decision,
+    // never with a model boolean/free text. Consume that exact one-use receipt
+    // only after fresh declaration AND provider-tool checks, immediately before
+    // the sole external invocation. A lost receipt stops without retry.
+    if (beforeWrite) await beforeWrite(fresh, toolName, JSON.parse(frozenArgumentsText), { signal });
     const response = await httpRequest({
       config: fresh.remoteMcp.config,
       credential: freshCredential,
@@ -5909,6 +5942,15 @@ export const handleToolCall = async (
           confirmed: input.confirmed,
         }));
   }
+  return executeRemoteMcpTool(origin, name, rawArguments, { signal });
+};
+
+/** Shared operation boundary for human and managed callers. Authentication,
+ * namespace, pass and exact owner decisions belong to the selected profile;
+ * HTTP/OAuth/PAT/forms/tool-policy/doctor/call remain one implementation. */
+export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal } = {}) => {
+  if (!["connect_remote_agent_skill", "doctor_remote_agent_skill", "call_remote_agent_skill_tool", "forget_remote_agent_skill_credential"].includes(name))
+    throw new RemoteMcpHostError("REMOTE_MCP_UNKNOWN_LOCAL_TOOL", "Unknown Remote MCP operation.");
   const resolved = await resolveRemoteMcpDeclaration(
     origin,
     rawArguments,
@@ -5943,7 +5985,9 @@ export const handleToolCall = async (
       });
       await doctorWithCredential(resolved, session.accessToken, { signal });
       throwIfAborted(signal);
+      await currentWorkspaceExecutionProfile()?.assertRemoteMcpCurrent?.(signal);
       const vault = createRemoteMcpOAuthVault({
+      namespace: currentWorkspaceExecutionProfile()?.remoteMcpCredentialNamespace ?? null,
         credentialFile: resolveRemoteMcpCredentialFile(resolved.localIdentity),
       });
       await useOAuthVault(() => vault.write(origin, resolved, session));
@@ -5986,7 +6030,14 @@ export const handleToolCall = async (
         resolved,
         toolName,
         toolArguments,
-        { signal },
+        { signal,
+          ...(currentWorkspaceExecutionProfile()?.kind === "digital_assistant" ? {
+            confirmWrite: async () => { if (typeof currentWorkspaceExecutionProfile()?.authorizeRemoteMcpWrite !== "function")
+              throw new RemoteMcpHostError("REMOTE_MCP_OWNER_DECISION_REQUIRED", "Exact owner decision required."); },
+            beforeWrite: (fresh, selectedName, selectedArguments, options) => currentWorkspaceExecutionProfile().authorizeRemoteMcpWrite(
+              fresh, selectedName, selectedArguments, rawArguments, options),
+          } : {}),
+        },
       )),
       trust: "untrusted_external_data",
     });

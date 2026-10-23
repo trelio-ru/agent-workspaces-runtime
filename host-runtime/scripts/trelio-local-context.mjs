@@ -2189,6 +2189,14 @@ export const protectLocalActionArguments = async ({
       : "";
   const createEntityId = (objectPath, purpose = "content") => {
     if (!stableRequestId) return crypto.randomUUID();
+    if (nativeTool === "call_remote_agent_skill_tool" && objectPath === "$"
+      || nativeTool === "request_assistant_action" && normalizedArguments.operation === "call_remote_agent_skill_tool" && objectPath === "$.fields") {
+      // Owner planning nests the SAME full arguments under fields. Final
+      // admission must derive the identical immutable payload, not invent a
+      // second marker that could not match the sealed native owner intent.
+      return deriveLocalActionEntityId(companyEncryption,
+        `call_remote_agent_skill_tool\0${stableRequestId}\0${purpose}\0$`);
+    }
     if (LOCAL_AGENT_PROCEDURE_CHANGE_TOOLS.has(nativeTool)) {
       // apply receives the exact plan nested under `plan`, while plan receives
       // the draft at the top level. Map both shapes onto one logical path so
@@ -2396,9 +2404,11 @@ export const protectLocalActionArguments = async ({
         && (Object.hasOwn(current, "color") || Object.hasOwn(current, "isFinal"));
       const acceptedCommentPath = nativeTool === "create_comment" && field === "filePath"
         && /^\$\.encryptedFiles\[\d+\]$/u.test(objectPath);
+      const remoteArguments = field === "arguments" && (nativeTool === "call_remote_agent_skill_tool" && objectPath === "$"
+        || nativeTool === "request_assistant_action" && normalizedArguments.operation === "call_remote_agent_skill_tool" && objectPath === "$.fields");
       const skillArguments = nativeTool === "continue_assistant_workspace_action" && normalizedArguments.operation === "skill_run"
         && objectPath === "$.parameters" && field === "encryptedArguments";
-      const protectedField = (skillArguments || acceptedCommentPath || LOCAL_ACTION_PROTECTED_FIELDS.has(field))
+      const protectedField = (remoteArguments || skillArguments || acceptedCommentPath || LOCAL_ACTION_PROTECTED_FIELDS.has(field))
         && !statusDictionaryLabel
         && !isEmptyLocalActionValue(child)
         && !isEncryptedLocalActionMarker(child)
@@ -2410,7 +2420,7 @@ export const protectLocalActionArguments = async ({
           || nativeTool === "upsert_registry_rows"
         );
       if (protectedField) protectedEntries.push([field, child,
-        skillArguments ? "skill_arguments_json" :
+        remoteArguments ? "remote_arguments_json" : skillArguments ? "skill_arguments_json" :
         // The existing `reason` input is already encrypted by older hosts.
         // They fail closed on the new field contract without sending plaintext.
         acceptedCommentPath ? "file_path" : nativeTool === "delete_workspace" && field === "reason"

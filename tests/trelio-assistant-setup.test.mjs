@@ -703,3 +703,44 @@ test('private generation accepts only structural sealed coordinates in its SAME 
     await assert.rejects(validateAssistantWorkspacePlan({...raw,localAction:{...raw.localAction,parameters:{...parameters,...extra}}}));
   }
 });
+
+test('native Remote MCP instruction selects only the small presentation view and existing list-changed notification',async()=>{
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+    {jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'get_agent_skill',arguments:{skillId:'synthetic-remote'}}},
+    {jsonrpc:'2.0',id:3,method:'tools/list'},
+    {jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'get_assistant_status',arguments:{}}},
+    {jsonrpc:'2.0',id:5,method:'tools/list'}];
+  const output=new PassThrough();let raw='';output.on('data',chunk=>{raw+=chunk;});const views=[];
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createMcp:async({presentationProfile})=>{views.push(presentationProfile);return {
+      listTools:async()=>[],callTool:async(name)=>name==='get_agent_skill'?{content:[],structuredContent:{
+        assistantExecution:{state:'shared_remote_mcp'},remoteMcpExecution:{localMcpServer:'trelio-assistant'}}}:{content:[],structuredContent:{schemaVersion:1}},
+    };}});
+  assert.deepEqual(views,['task','remote_mcp','remote_mcp','task']);
+  const messages=raw.trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(messages.filter(message=>message.method==='notifications/tools/list_changed').length,2);
+  assert.equal(messages.filter(message=>message.id).length,5);
+});
+
+test('same task chat can wait for an exact remote owner decision, call once, and return to its task work tools',async()=>{
+  const ids={question:'synthetic-question',request:'synthetic-request'},calls=[],views=[];let read=0,attempts=0;
+  const actions=[['get_agent_skill',{skillId:'synthetic-remote'}],['get_task',{}],
+    ['request_assistant_action',{operation:'call_remote_agent_skill_tool',fields:{toolName:'update_record',arguments:{exact:'original'}}}],
+    ['get_assistant_owner_question',{questionId:ids.question}],['get_assistant_owner_question',{questionId:ids.question}],
+    ['call_remote_agent_skill_tool',{toolName:'update_record',arguments:{exact:'original'},ownerDecisionId:ids.question,clientRequestId:ids.request}],
+    ['get_assistant_status',{}],['prepare_assistant_workspace_run',{clientRequestId:ids.request}]];
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},...actions.map(([name,args],index)=>({jsonrpc:'2.0',id:index+2,method:'tools/call',params:{name,arguments:args}}))];
+  const output=new PassThrough();let raw='';output.on('data',chunk=>{raw+=chunk;});
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createMcp:async({presentationProfile})=>{views.push(presentationProfile);return {callTool:async(name,args)=>{
+      calls.push(name);
+      if(name==='get_agent_skill')return {content:[],structuredContent:{assistantExecution:{state:'shared_remote_mcp'},remoteMcpExecution:{localMcpServer:'trelio-assistant'}}};
+      if(name==='get_assistant_owner_question')return {content:[],structuredContent:{id:ids.question,state:++read===1?'pending':'answered',action:{state:read===1?'pending':'approved'}}};
+      if(name==='call_remote_agent_skill_tool'){assert.equal(read,2);assert.equal(args.ownerDecisionId,ids.question);assert.equal(args.clientRequestId,ids.request);attempts++;}
+      return {content:[],structuredContent:{schemaVersion:1}};
+    }};}});
+  assert.deepEqual(calls,actions.map(([name])=>name));assert.equal(attempts,1);
+  assert.deepEqual(views,['task','remote_mcp','remote_mcp','remote_mcp','remote_mcp','remote_mcp','remote_mcp','task']);
+  const messages=raw.trim().split('\n').map(line=>JSON.parse(line));assert.equal(messages.filter(message=>message.method==='notifications/tools/list_changed').length,2);
+  assert.equal(messages.filter(message=>message.id).length,9);
+});

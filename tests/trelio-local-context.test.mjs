@@ -4786,3 +4786,22 @@ test("public screenshot staging preserves bytes and forwards only inspected plai
     await assert.rejects(() => buildLocalTaskAttachmentStreamRequest({ ...request, rawArguments: { ...request.rawArguments, contentType: "image/svg+xml" } }), /JPEG/u);
   } finally { await fs.rm(staging.temporaryDirectory, { recursive: true, force: true }); await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test('Remote MCP owner planning and final admission protect the same complete argument object',async()=>{
+  const device=await createAgentEncryptionDevice();
+  const companyEncryption={runtime:{company:{id:'11111111-1111-4111-8111-111111111111',slug:'acme'},
+    scope:{id:'22222222-2222-4222-8222-222222222222',epoch:1,publicEncryptionJwk:device.publicEncryptionJwk},
+    device:{id:'33333333-3333-4333-8333-333333333333'}},device,
+    scopePrivateEncryptionKey:{privateKey:device.privateKeys.encryptionPrivateKey,privateJwk:device.privateBundle.encryptionPrivateJwk}};
+  const fields={companyId:companyEncryption.runtime.company.id,skillId:'synthetic-remote',releaseId:'44444444-4444-4444-8444-444444444444',
+    toolName:'update_record',arguments:{unclassifiedProviderKey:'SYNTHETIC_REMOTE_PRIVATE',nested:[{url:'https://private.example/value',value:'arbitrary company prose'}]}};
+  const clientRequestId='55555555-5555-4555-8555-555555555555';
+  const plan=await protectLocalActionArguments({nativeTool:'request_assistant_action',companyEncryption,
+    arguments:{operation:'call_remote_agent_skill_tool',fields,reason:'SYNTHETIC_REMOTE_REASON',clientRequestId}});
+  const final=await protectLocalActionArguments({nativeTool:'call_remote_agent_skill_tool',companyEncryption,
+    arguments:{...fields,clientRequestId}});
+  assert.deepEqual(plan.value.fields.arguments,final.value.arguments,'the original owner decision seals one native immutable argument marker');
+  assert.ok(!JSON.stringify(plan.value).includes('SYNTHETIC_REMOTE_PRIVATE'));
+  assert.ok(!JSON.stringify(final.value).includes('private.example'));
+  assert.deepEqual(Object.values(final.expectedPayloadValues).map(value=>value.remote_arguments_json),[fields.arguments]);
+});

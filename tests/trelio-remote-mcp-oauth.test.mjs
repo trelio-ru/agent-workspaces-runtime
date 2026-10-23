@@ -279,3 +279,18 @@ test("OAuth Windows vault writes only DPAPI ciphertext and rejects another finge
   assert.equal((await vault.read("https://trelio.ru", resolved("c".repeat(64)))).clientId, "synthetic-client");
   assert.equal(await vault.read("https://trelio.ru", resolved("d".repeat(64))), null);
 });
+
+test('same OAuth vault isolates human and managed devices even for identical provider identity', async () => {
+  const items=new Map(), keychain={read:async(s,a)=>items.get(`${s}:${a}`)||null,
+    write:async(s,a,v)=>{items.set(`${s}:${a}`,v);},remove:async(s,a)=>{items.delete(`${s}:${a}`);}};
+  const make=namespace=>createRemoteMcpOAuthVault({platform:'darwin',credentialFile:'/unused/same.json',keychain,namespace});
+  const human=make(null),first=make('assistant:synthetic:device-one'),second=make('assistant:synthetic:device-two');
+  const declaration=resolved('f'.repeat(64)), session={issuer,clientId:'synthetic-client',accessToken:'synthetic-only-token',refreshToken:null,expiresAt:Date.now()+60000};
+  await human.write('https://trelio.ru',declaration,session);
+  assert.equal(await first.read('https://trelio.ru',declaration),null);
+  await first.write('https://trelio.ru',declaration,session);
+  assert.equal(await second.read('https://trelio.ru',declaration),null);
+  await first.remove('https://trelio.ru',declaration);
+  assert.equal((await human.read('https://trelio.ru',declaration)).clientId,session.clientId);
+  assert.equal(items.size,1);
+});

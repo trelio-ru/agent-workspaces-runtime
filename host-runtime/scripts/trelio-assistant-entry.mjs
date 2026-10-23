@@ -41,6 +41,7 @@ export const ASSISTANT_ENCRYPTION_SETUP_TOOL=Object.freeze({name:'prepare_assist
 const sourceToolNames=()=>[ASSISTANT_SOURCE_SETUP_TOOL.name,ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_EMAIL_VERIFY_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name,ASSISTANT_MAX_VERIFY_TOOL.name];
 const hostSetupToolNames=()=>[...sourceToolNames(),ASSISTANT_ENCRYPTION_SETUP_TOOL.name];
 const interactiveSourceTool=name=>[ASSISTANT_EMAIL_SETUP_TOOL.name,ASSISTANT_TELEGRAM_SETUP_TOOL.name,ASSISTANT_MAX_SETUP_TOOL.name].includes(name);
+const interactiveAssistantTool=name=>interactiveSourceTool(name)||name==='connect_remote_agent_skill';
 const sourceSetupArguments=args=>{
   if(!args || Object.getPrototypeOf(args)!==Object.prototype || Object.keys(args).sort().join(',')!=='companyId,sourceId'
     || !new RegExp(UUID,'u').test(args.companyId??'') || args.sourceId!==null&&!new RegExp(UUID,'u').test(args.sourceId??''))
@@ -69,7 +70,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
 const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
 const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
 const safeError = error => assistantHealthFailure(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code)
-  || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error?.code) || /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
+  || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error?.code) || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
 export const callAssistantSetupTool = async (setup, name, args) => {
@@ -173,7 +174,7 @@ export const createProductionAssistantHook = async () => {
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
     {withPrivateProcessSession}]=await Promise.all([
@@ -189,7 +190,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
-    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,lockDirectory:path.join(directory,'runtime-locks')});
+    const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
@@ -227,7 +228,7 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
 /** Schema discovery before enrollment needs no credential/private worker.
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
-export const createProductionAssistantMcp = async () => {
+export const createProductionAssistantMcp = async ({presentationProfile='task'}={}) => {
   const common = await import('./trelio-workspace.mjs');
   const directory = path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants');
   try { await fs.lstat(path.join(directory, 'identity.json')); }
@@ -240,7 +241,7 @@ export const createProductionAssistantMcp = async () => {
   const identity = await host.readIdentity();
   if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
   const sourceClient=createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})});
-  return createAssistantMcpClient({ ...identity, store,
+  return createAssistantMcpClient({ ...identity, store, presentationProfile,
     withWorkspaceArguments:withAssistantEncryptedWorkspaceArguments,
     readActivePass:host.readActivePass,
     materializeSourceIntake:async({result,arguments:args,signal})=>{
@@ -303,16 +304,16 @@ export const createProductionAssistantMcp = async () => {
 
 // Long-lived stdio is deliberately only a facade. A fresh child resolves the
 // current signed implementation for each invocation without reconnecting Codex.
-export const createForwardingAssistantMcp = async () => {
+export const createForwardingAssistantMcp = async ({presentationProfile='task'}={}) => {
   // Preserve secret-free pre-enrollment discovery. A source-only or not-yet
   // paired installation must not require a loader, private worker or network.
   const common=await import('./trelio-workspace.mjs');
   try {await fs.lstat(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
   catch(error){if(error.code==='ENOENT')return null;throw error;}
   const workspace = await createAssistantWorkspaceExecutor();
-  return {listTools:signal=>requestCurrentAssistantRuntime({operation:'list'},{signal}),
+  return {listTools:signal=>requestCurrentAssistantRuntime({operation:'list',...(['remote_mcp','skill_setup'].includes(presentationProfile)?{presentationProfile}:{})},{signal}),
     async callTool(name,args,signal) {
-      const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:args},{signal});
+      const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:args,...(['remote_mcp','skill_setup'].includes(presentationProfile)?{presentationProfile}:{})},{signal});
       if(name!=='continue_assistant_workspace_action' || result?.isError)return result;
       // These are native metadata/preparation/creation receipts, not local command
       // plans. The next returned secret_browser_fill continuation executes in
@@ -335,7 +336,7 @@ export const createForwardingAssistantMcp = async () => {
 export const runAssistantSetupMcp = async ({ input = process.stdin, output = process.stdout,
   createSetup = createProductionAssistantSetup, createMcp = createForwardingAssistantMcp,
   maintenanceRequest = requestCurrentAssistantRuntime, scheduleMaintenance = setInterval } = {}) => {
-  let setup, initialized = false, busy = false, maintenance = null, maintenanceController = null, catalogRevision = null;
+  let setup, initialized = false, busy = false, maintenance = null, maintenanceController = null, catalogRevision = null, presentationProfile = 'task';
   const controller=new AbortController();
   const tick=()=>{
     if(busy || maintenance || controller.signal.aborted)return;
@@ -363,7 +364,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     const { withPrivateProcessSession, runtimeHookSignal } = await import('./trelio-hook-private-session.mjs');
     // One deadline covers journal/DPAPI, initialization, request, body and
     // cleanup. A long-lived stdio process never caches a private worker/token.
-    return withPrivateProcessSession(async () => action(await createMcp(), runtimeHookSignal()),
+    return withPrivateProcessSession(async () => action(await createMcp({presentationProfile}), runtimeHookSignal()),
       AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000));
   };
   const dispatch = async message => {
@@ -400,10 +401,24 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
           if (!message.params.arguments || Object.getPrototypeOf(message.params.arguments) !== Object.prototype) {
             throw Object.assign(new Error(), { code: 'ASSISTANT_TASK_INPUT_INVALID' });
           }
-          return respond(await withProxy((proxy, signal) => {
+          const result=await withProxy((proxy, signal) => {
             if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
             return proxy.callTool(message.params.name, message.params.arguments, signal);
-          },{interactiveSourceSetup:interactiveSourceTool(message.params.name)}));
+          },{interactiveSourceSetup:interactiveAssistantTool(message.params.name)});
+          // Reuse the existing catalogue-change notification. A native exact
+          // skill read selects a SMALL presentation only, never another pass,
+          // principal, scope, provider or retry policy. Returning status in the
+          // remote view restores ordinary task tools without touching domain.
+          let next=presentationProfile;
+          if(message.params.name==='get_agent_skill' && !result?.isError
+            && result?.structuredContent?.assistantExecution?.state==='shared_remote_mcp'
+            && result.structuredContent.remoteMcpExecution?.localMcpServer==='trelio-assistant') next='remote_mcp';
+          if(message.params.name==='get_agent_skill' && !result?.isError
+            && result?.structuredContent?.assistantExecution?.state==='shared_runtime_setup')next='skill_setup';
+          if(message.params.name==='get_assistant_status' && !result?.isError)next='task';
+          respond(result);
+          if(next!==presentationProfile){presentationProfile=next;catalogRevision=null;reply({jsonrpc:'2.0',method:'notifications/tools/list_changed'});}
+          return;
         }
         if (!codes.has(message.params?.name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
         // The adapter is constructed once but every paired status revalidates
@@ -585,17 +600,18 @@ export const maintainAssistantHost = async ({client,probe,update,versions,signal
  * Secrets/content travel only inside protected runtime or bounded stdin pipes. */
 const validateAssistantRuntimeRequest = request => {
   if(!request || !['list','call','health','health_check','background_tick'].includes(request.operation)
-    || Object.keys(request).some(key=>!['operation','name','arguments'].includes(key))
+    || Object.keys(request).some(key=>!['operation','name','arguments','presentationProfile'].includes(key))
+    || request.presentationProfile!==undefined && (!['list','call'].includes(request.operation)||!['remote_mcp','skill_setup'].includes(request.presentationProfile))
     || request.operation==='call' && (typeof request.name!=='string' || !/^[a-z][a-z0-9_]{0,99}$/u.test(request.name)
       || !request.arguments || Object.getPrototypeOf(request.arguments)!==Object.prototype)
-    || request.operation!=='call' && Object.keys(request).length!==1) fail('ASSISTANT_REQUEST_INVALID');
+    || request.operation!=='call' && Object.keys(request).length!==(request.presentationProfile===undefined?1:2)) fail('ASSISTANT_REQUEST_INVALID');
   return request;
 };
 
 export const requestCurrentAssistantRuntime = async (request, {environment=process.env,spawnProcess=spawn,
   resolveLoader=resolveHostRuntimeLoader,signal,timeoutMs}={}) => {
   validateAssistantRuntimeRequest(request);
-  const interactive=request.operation==='call'&&interactiveSourceTool(request.name);
+  const interactive=request.operation==='call'&&interactiveAssistantTool(request.name);
   timeoutMs??=interactive?11*60_000:120_000;
   if(!Number.isSafeInteger(timeoutMs) || timeoutMs<50 || timeoutMs>(request.operation==='background_tick'?35*60_000:interactive?11*60_000:180_000))fail('ASSISTANT_REQUEST_INVALID');
   const input=JSON.stringify(request);
@@ -929,7 +945,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code:blocked});
       fail(blocked==='plugin_update_required'?'ASSISTANT_PLUGIN_UPDATE_REQUIRED':'ASSISTANT_RUNTIME_UPDATE_REQUIRED');
     }
-    const proxy=await proxyFor();
+    const proxy=await proxyFor({presentationProfile:request.presentationProfile??'task'});
     if(!proxy)return request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED');
     try {
       let result;
@@ -967,7 +983,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       if(code)await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code}).catch(()=>undefined);
       throw error; // Never repeat the original business invocation.
     }
-  },{interactiveSourceSetup}).then(result=>result ?? (request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED')));
+  },{interactiveSourceSetup:interactiveSourceSetup||request.operation==='call'&&request.name==='connect_remote_agent_skill'}).then(result=>result ?? (request.operation==='list'?[]:fail('ASSISTANT_HOST_NOT_CONFIGURED')));
 };
 
 /** Internal server plan, never an arbitrary command/directory selected by a
@@ -1043,6 +1059,21 @@ export const validateAssistantWorkspacePlan = async raw => {
 export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal},send,
   {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs'),
     withManagedContent=withProductionAssistantManagedContent}={})=>{
+  if (['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)) {
+    // Live native schema was checked before this local composition. All three
+    // operations reuse the SAME resolver/credential UI/vault/doctor/HTTP engine.
+    // Only its last write boundary may spend the exact native owner decision.
+    const selected=structuredClone(args);
+    return withProfile(async({identity})=>{
+      const common=await loadCommon(),profile=common.currentWorkspaceExecutionProfile();
+      await profile.assertRemoteMcpCurrent(signal);
+      const {executeRemoteMcpTool}=await import('./trelio-remote-mcp.mjs');
+      const result=await executeRemoteMcpTool(identity.origin,name,selected,{signal});
+      await profile.assertRemoteMcpCurrent(signal);
+      return result;
+    },{signal,remoteMcp:{input:selected,consumed:false,
+      authorize:()=>withManagedContent({name:'call_remote_agent_skill_tool',args:selected,signal},send)}});
+  }
   if(supportsAssistantManagedContent(name,args))return withManagedContent({name,args,signal},send);
   if(name==='complete_assistant_pass')return withAssistantEncryptedMaterial({args,signal},send,{withProfile,loadCommon});
   if(name!=='continue_assistant_workspace_action' || !['checkpoint','finish','pause'].includes(args.operation))

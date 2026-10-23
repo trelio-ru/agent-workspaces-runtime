@@ -754,7 +754,7 @@ The existing isolated action worker calls `runWorkspaceCommand` under the same
 assistant Workspace HTTP profile. Only native `runtime/resolve` and
 `runtime/package` gain this task profile: fixed origin/company, genuine device
 grant, exact pass/project, observed model/effort and fresh operation proof.
-Setup/consent/Remote MCP/secret endpoints never fall through to human OAuth.
+Setup/consent/secret endpoints never fall through to human OAuth. The Remote MCP declaration endpoint uses its separate genuine task profile below.
 
 The common engine verifies/materializes the signed artifact, selects the
 account and starts the normal Node/Python provider. Human admission caching is
@@ -762,8 +762,8 @@ disabled for this profile; live resolve runs again immediately before launch
 and must retain the artifact/hash. A cached package never preserves revoked
 task/device/policy authority. Only public, verified, non-revoked, plain and
 secret-free runtimes/configurations are currently admitted. Protected setup,
-owner account onboarding, Remote MCP and encrypted execution remain independent
-readiness gaps; this increment does not change `businessReady=false`.
+owner account onboarding and unverified code remain independent
+readiness gates; this increment does not change `businessReady=false`.
 
 The same account catalogue uses an assistant/device namespace with native
 company bindings. Task calls do not migrate human legacy accounts, mutate
@@ -1561,7 +1561,7 @@ SAME task pass/proof/runtime resolver/native detail builder and response project
 Only the current assistant's personal skill rule is selected. Its ciphertext and
 config are locally opened before projection. The usual skill_run continuation
 and SAME signed loader/process engine require independent native task authority;
-private/unverified/secret-backed/Remote MCP/setup remain closed. The final resolve
+private/unverified/secret-backed/setup remain independently gated. Remote MCP declarations use the separate adapter below. The final resolve
 rehydrates and compares current config/local identity before a single provider
 launch. Config/recipient/release/assignment changes do not cause a retry.
 
@@ -1765,3 +1765,49 @@ ciphertext; the SAME local decoder opens only granted fields and discards all
 provider output. The native encrypted secret-backed company connection setup
 still has its own closed owner/config capability; this use adapter alone does
 not enable or declassify that setup flow.
+### Managed Remote MCP profile
+
+The genuine assistant reuses `trelio-remote-mcp.mjs` declaration resolution,
+credential form, S256/OAuth callback, refresh vault, doctor, policy/tool/schema
+selection, HTTP/session and call implementation. There is no second provider,
+HTTP executor, vault, human session import or automatic login. PAT/OAuth input
+and provider consent remain an explicit human action in the existing protected
+local UI. macOS/libsecret vault accounts as well as PAT/DPAPI paths include the
+managed assistant/device namespace; identical company/member/skill identities
+cannot read a human or another device's stored session.
+
+The SAME `/api/agent-skills/remote-mcp/resolve` accepts only the current genuine
+device/task pass, native skill/project/member/release access and fresh observed
+proof. Human 12-hour admission caching is disabled. Encrypted declarations and
+private titles are native-selected field markers (`remote_mcp_config_json`,
+`title`) plus at most eight exact payloads/256 KiB for the current managed
+recipient/envelope/epoch. The shared skill hydrator opens only these bytes and
+native-selected guidance; no general company payload resolver is enabled.
+Native send and local delivery recheck current assignment/recipient/release.
+Public/unverified executable admission, company connections and Secret grants
+remain independent; this adapter cannot bypass their gates.
+
+A native `get_agent_skill` Remote MCP result changes only presentation to the
+existing session-fixed `remote_mcp` capability view. It exposes the SAME live
+connect/doctor/call schemas, task core and owner question/action tools. The
+existing stdio `notifications/tools/list_changed` refreshes discovery; no plugin
+restart or new authority/session is manufactured. `get_assistant_status` returns
+the ordinary task view. Wrong/dropped/swapped headers and hidden methods fail;
+both complete native inventories and model projections keep the 65,536-byte
+bound. The `skill_setup` presentation seam follows the same narrowing for native
+setup/consent; missing native operations are not advertised. Input/output/HTTP
+bounds remain unchanged and schemas are never copied into the host.
+
+Reads retain exact allowed tools and live provider read-only annotations.
+A write uses `request_assistant_action` for `call_remote_agent_skill_tool` with
+FULL arguments and native declaration snapshot. Owner free text is not approval.
+After fresh declaration AND provider-tool checks the common call engine spends
+the exact sealed native decision immediately before its sole external request.
+The committed structural receipt means `attemptAdmitted`, `providerOutcome:
+not_observed`, `replayAllowed:false`; it never claims delivery or business success.
+Lost consume responses, provider errors or unknown results do not replay consume
+or `tools/call`. `get_assistant_owner_question` can read the applied receipt;
+provider read-back/reconciliation requires a separately allowed read. Full
+arguments remain in company-protected intent/`remote_arguments_json`, never in
+SQLite, generic metadata, logs, argv or environment. Planning/final admission use
+the same immutable marker derived from the original clientRequestId.

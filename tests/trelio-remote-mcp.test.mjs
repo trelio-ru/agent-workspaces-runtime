@@ -5647,3 +5647,30 @@ test("private skill planning rejects UTF-8 overflow before credentials or provid
     changeReason: "Test", executionKind: "markdown",
   }), error => error.code === "AGENT_SKILL_INSTRUCTIONS_TOO_LARGE");
 });
+
+test('shared Remote MCP engine consumes native write fence only after both live inventories and never replays a lost receipt',async()=>{
+  const resolved={releaseId,localIdentity:{companyId,projectId:null,memberId,skillId:'synthetic-remote'},
+    remoteMcp:{config:oauthWriteConfig,configFingerprint:fingerprintRemoteMcpConfig(oauthWriteConfig)}};
+  const events=[],tools=[{name:'get_order',annotations:{readOnlyHint:true,destructiveHint:false}},
+    {name:'update_order',annotations:{readOnlyHint:false,destructiveHint:false}}];
+  const options={loadCredential:async()=>null,confirmWrite:async()=>{events.push('native-decision-selected');},
+    refreshDeclaration:async()=>{events.push('fresh-native');return resolved;},
+    httpRequest:async({payload})=>{
+      if(!payload)return {sessionId:null,message:null};
+      events.push(payload.method);
+      const result=payload.method==='initialize'?{protocolVersion:'2025-03-26'}:
+        payload.method==='tools/list'?{tools}:payload.method==='tools/call'?{content:[]}:null;
+      return {sessionId:null,message:result?{jsonrpc:'2.0',id:payload.id,result}:null};
+    }};
+  await assert.rejects(callRemoteTool('https://trelio.ru',resolved,'update_order',{id:'synthetic'},{...options,
+    beforeWrite:async()=>{events.push('consume');throw new Error('uncertain native receipt');}}),/uncertain native receipt/u);
+  assert.equal(events.filter(event=>event==='tools/list').length,2);
+  assert.equal(events.filter(event=>event==='consume').length,1);
+  assert.equal(events.includes('tools/call'),false);
+  events.length=0;
+  await callRemoteTool('https://trelio.ru',resolved,'update_order',{id:'synthetic'},{...options,
+    beforeWrite:async(_fresh,_name,args)=>{events.push('consume');args.id='caller-mutation';}});
+  assert.equal(events.filter(event=>event==='tools/call').length,1);
+  assert.ok(events.indexOf('consume')>events.lastIndexOf('tools/list'));
+  assert.ok(events.indexOf('consume')<events.indexOf('tools/call'));
+});
