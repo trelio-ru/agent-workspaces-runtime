@@ -16,11 +16,13 @@ import {
   ensureCompanyEncryptionContext,
   request,
   requireToken,
+  renderLocalFormPage,
 } from "./trelio-workspace.mjs";
 import {
   buildLocalAgentSecretWrite,
   buildLocalSecretRequestFingerprint,
   normalizeAgentSecretNewCard,
+  protectNewSecretMetadata,
 } from "./trelio-secret-chat.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -386,5 +388,159 @@ export const handleAssistantGeneratedPrivateSecret = async ({ origin, input, sco
       // this protected invocation; no file, clipboard or model output is used.
       for (const key of Object.keys(values)) delete values[key];
     }
+  });
+};
+
+/** NEW company card through the SAME generator, metadata/value codec and
+ * genuine Secret HTTP profile. Only neutral metadata enters this local path.
+ * Preflight proves current ACL/Run and reads a committed receipt before key or
+ * human input. No response failure retries begin/save or reopens a form. */
+export const handleAssistantCompanySecretCreation = async ({origin,input,scope,token,withGenerationKey,
+  companyEncryption=null,onContext=()=>undefined,sendRequest=request,collectValues}) => {
+  const receipt=result=>{
+    const secret=result?.receipt?.secret;
+    if(result?.completed!==true||result.receipt?.created!==true||!UUID.test(secret?.id??'')||secret.holder!=='company'
+      ||secret.companyId!==scope.companyId||secret.scopeType!=='task'||secret.scopeId!==scope.taskId
+      ||secret.currentVersion!==(input.plan.valueSource==='empty'?0:1)||secret.hasValue!==(input.plan.valueSource!=='empty')
+      ||secret.storageMode!==(companyEncryption?'company_e2ee':'trelio')
+      ||result.receipt.setupPath!==undefined&&(typeof result.receipt.setupPath!=='string'
+        ||!new RegExp(`^/[a-z0-9][a-z0-9_-]{0,119}/agent-secrets/${secret.id}/setup/$`,'u').test(result.receipt.setupPath)))invalid();
+    return {created:true,secret:{id:secret.id,holder:'company',companyId:scope.companyId,scopeType:'task',scopeId:scope.taskId,
+      storageMode:secret.storageMode,currentVersion:secret.currentVersion,hasValue:secret.hasValue},setupPath:result.receipt.setupPath};
+  };
+  const read=async()=>{
+    const query=new URLSearchParams(Object.entries(input).map(([key,value])=>[key,key==='plan'?JSON.stringify(value):value]));
+    return (await sendRequest(origin,token,'/api/agent-secrets/generated-save-context?'+query)).json();
+  };
+  const context=await read();
+  if(context?.completed===true)return receipt(context);
+  if(context?.pending===true)throw new AgentSecretGenerateError('ASSISTANT_SECRET_INPUT_ATTEMPT_UNCERTAIN',
+    'Предыдущий ввод или сохранение не подтверждены. Проверьте исходный запрос; форма повторно не открывается.');
+  if(!isRecord(context)||context.schemaVersion!==1||context.completed!==false||!UUID.test(context.secretId??'')
+    ||context.runId!==input.runId||['assistantUserId','deviceId','companyId','taskId'].some(key=>context[key]!==scope[key])
+    ||context.valueSource!==input.plan.valueSource||context.scopeType!=='task'||context.scopeId!==scope.taskId
+    ||context.storageMode!==(companyEncryption?'company_e2ee':'trelio')||!isRecord(context.metadata)
+    ||context.metadata.name!=='Company secret'||typeof withGenerationKey!=='function')invalid();
+  await onContext(context);
+  const endpoint=`/api/agent-secrets/secrets/${context.secretId}/value-from-bridge`;
+  const post=async body=>(await sendRequest(origin,token,endpoint,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(body)})).json();
+  const newSecret={...context.metadata,scopeType:'task',scopeId:scope.taskId};
+  const save=async(values,key)=>{
+    let localWrite;
+    if(input.plan.valueSource==='empty'){
+      const protectedMetadata=companyEncryption?await protectNewSecretMetadata(newSecret,context,companyEncryption):null;
+      localWrite={companySlug:context.companySlug,contentProtection:companyEncryption?'company_e2ee_v1':'server_keyring_v1',
+        requestFingerprint:buildLocalSecretRequestFingerprint({key,source:'assistant_generated',binding:{...scope,...input,secretId:context.secretId,metadata:newSecret}}),
+        fieldKeys:[],values:{},newSecret:protectedMetadata?.card??newSecret,
+        ...(protectedMetadata?{encryptedPayloads:[protectedMetadata.payload]}:{})};
+    }else{
+      const transport=await buildLocalAgentSecretWrite({input:{runId:input.runId,clientRequestId:input.clientRequestId,expectedCurrentVersion:0,newSecret},
+        context,companyEncryption,token,values,source:input.plan.valueSource==='generated'?'generated':'protected_input',fingerprintKey:key});
+      // Human API permission flags are NOT authority here. The native adapter
+      // independently checks the original persisted owner decision and source.
+      localWrite=transport.localWrite;
+    }
+    const {newSecret:card,...write}=localWrite;
+    return receipt(await post({...input,secretId:context.secretId,stage:'save',expectedCurrentVersion:0,...write,
+      name:card.name,publicDescription:card.publicDescription,templateType:card.templateType,fields:card.fields}));
+  };
+  try{return await withGenerationKey(async key=>{
+    if(input.plan.valueSource==='protected_input'){
+      if(context.protectedInputStorageSupported!==true)invalid();
+      const started=await post({...input,secretId:context.secretId,stage:'begin'});
+      if(started?.started!==true||started.secretId!==context.secretId)throw new AgentSecretGenerateError('ASSISTANT_SECRET_INPUT_ATTEMPT_UNCERTAIN',
+        'Ввод не допущен либо уже был начат. Форма повторно не открывается.');
+      const collect=collectValues??collectAgentSecretThroughProtectedForm;
+      let result;
+      await collect({origin,fields:context.fields,holder:'company',persistValues:async values=>{
+        // Reread original pending attempt after human delay. Neither a stale
+        // form nor logout/Run expiry can skip the native final ACL/owner CAS.
+        const current=await read();
+        if(current?.completed===true){result=receipt(current);return;}
+        if(current?.pending!==true||current.secretId!==context.secretId)invalid();
+        result=await save(values,key);
+      }});
+      if(!result)invalid();return result;
+    }
+    const policy=input.plan.valueSource==='generated'?normalizeGeneratedPasswordPolicy(context.fields,context.generatedFields):null;
+    const values=policy?generateAgentSecretPasswordValues({key,policy,seed:canonicalJson({...scope,...input,secretId:context.secretId,fields:context.fields,policy})}):{};
+    try{return await save(values,key);}finally{for(const field of Object.keys(values))delete values[field];}
+  });
+  }catch(error){
+    // An observed transport/form failure is never a writer retry. A single
+    // exact structural read-back may prove that the original atomic write
+    // committed; otherwise keep the pending latch and original failure.
+    try{const recovered=await read();if(recovered?.completed===true)return receipt(recovered);}catch{}
+    throw error;
+  }
+};
+
+/** Human-entered values use the SAME protected loopback and renderer as PAT
+ * setup. This is an internal host callback, never an MCP value/file producer.
+ * Native callers must first persist their exact one-use capture-attempt latch,
+ * then pass only the native-reviewed schema. A form opening is not a save.
+ * Both corporate and personal holders share this implementation; their native
+ * ACL, owner intent, AAD and atomic writer remain separate and authoritative. */
+export const collectAgentSecretThroughProtectedForm = async ({
+  origin, fields, holder, persistValues, ...formOptions
+}) => {
+  const fail = () => { throw new AgentSecretGenerateError("AGENT_SECRET_PROTECTED_INPUT_INVALID",
+    "Проверьте полную схему и заполните обязательные поля. Значения не передаются в чат."); };
+  if (!["company", "assistant"].includes(holder) || typeof persistValues !== "function"
+    || !Array.isArray(fields) || fields.length < 1 || fields.length > 50
+    || fields.some(field => !isRecord(field) || !FIELD_KEY.test(field.key || "") || ["nonce", "decision"].includes(field.key)
+      || !boundedString(field.label, 120) || typeof field.required !== "boolean"
+      || !["username", "password", "token", "text", "key", "certificate", "totp"].includes(field.type))
+    || new Set(fields.map(field => field.key)).size !== fields.length) fail();
+  // Existing loopback input is capped at 32 KiB of URL-encoded data. Keep its
+  // bound, rather than enlarging a credential transport for this adapter:
+  // at most 8 KiB JSON plus percent encoding, 50 fixed keys, nonce/decision.
+  const maximumValueBytes = 8 * 1024;
+  const { collectCredentialThroughLoopback } = await import("./trelio-remote-mcp.mjs");
+  const allowed = new Set(["nonce", "decision", ...fields.map(field => field.key)]);
+  return collectCredentialThroughLoopback(origin, {}, {
+    ...formOptions,
+    allowCancel: true,
+    terminalPersistenceFailure: true,
+    renderForm: ({ nonce, errorMessage }) => renderLocalFormPage({
+      title: "Сохранить доступы",
+      description: holder === "company" ? "Новый секрет компании для этой задачи" : "Новый личный секрет ассистента",
+      sections: [{ paragraphs: ["Введите значения здесь. Они не попадут в чат. Общий размер – до 8 КиБ.",
+        "Эта форма не извлекает данные из браузера, аккаунтов или файлов."],
+      ...(errorMessage ? { notice: { tone: "error", text: "Проверьте обязательные поля и общий размер значений." } } : {}),
+      fields: fields.map(field => ({ name: field.key, label: field.label,
+        type: ["certificate", "key", "text"].includes(field.type) ? "textarea"
+          : field.type === "username" ? "text" : "password",
+        required: field.required, maxLength: maximumValueBytes, autocomplete: "off" })),
+      }],
+      form: { action: "/credential", nonce, actions: [
+        { label: "Сохранить", name: "decision", value: "save" },
+        { label: "Отмена", name: "decision", value: "cancel", variant: "secondary", formNoValidate: true },
+      ] },
+    }),
+    parseSubmission: form => {
+      if (form.get("decision") !== "save" || [...form.keys()].some(key => !allowed.has(key))
+        || [...allowed].some(key => form.getAll(key).length > 1)) fail();
+      const values = Object.create(null);
+      for (const field of fields) {
+        // Password whitespace and newlines are meaningful; never trim values.
+        const value = form.get(field.key);
+        if (field.required && (typeof value !== "string" || value.length === 0)) fail();
+        values[field.key] = value === null || value === "" ? null : value;
+      }
+      if (Buffer.byteLength(JSON.stringify(values), "utf8") > maximumValueBytes) fail();
+      return values;
+    },
+    doctorCredential: async () => {},
+    persistCredential: async (_origin, _resolved, values) => {
+      try { await persistValues(values); }
+      finally {
+        // Immutable JS/browser strings cannot be zeroed. Drop all host object
+        // references immediately; no draft, disk, mirror or model output.
+        for (const key of Object.keys(values)) delete values[key];
+      }
+    },
+    successTitle: "Сохранено",
+    successMessage: "Trelio подтвердил сохранение секрета. Эту вкладку можно закрыть.",
   });
 };

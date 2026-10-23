@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { randomUUID, webcrypto } from "node:crypto";
 import test from "node:test";
+import http from "node:http";
 
 import {
   buildGeneratedAgentSecretWrite,
   generateDeterministicPassword,
   handleGeneratedAgentSecretSave,
   normalizeGeneratedAgentSecretInput,
+  collectAgentSecretThroughProtectedForm,
+  handleAssistantCompanySecretCreation,
 } from "../host-runtime/scripts/trelio-secret-generate.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { handleTrelioLocalActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
@@ -212,4 +215,193 @@ test("generic local action intercepts generation before provider lookup", async 
     },
   });
   assert.equal(rejected.structuredContent.code, "AGENT_SECRET_GENERATE_INPUT_INVALID");
+});
+
+// Actual loopback requests exercise the shared guard/renderer rather than a
+// fake collector. Synthetic values never leave this disposable test process.
+const protectedFormRequest = (url, body) => new Promise((resolve, reject) => {
+  const target = new URL(url);
+  const incoming = http.request(target, { method: body === undefined ? "GET" : "POST",
+    ...(body === undefined ? {} : { headers: { origin: target.origin,
+      "content-type": "application/x-www-form-urlencoded", "sec-fetch-site": "same-origin",
+      "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", "sec-fetch-user": "?1" } }),
+  }, response => {
+    let html = "";
+    response.setEncoding("utf8");
+    response.on("data", chunk => { html += chunk; });
+    response.on("end", () => resolve({ status: response.statusCode, html, headers: response.headers }));
+  });
+  incoming.on("error", reject);
+  incoming.end(body);
+});
+const capturedFields = [{ key: "username", label: "Логин", type: "username", required: true },
+  { key: "password", label: "Пароль", type: "password", required: true }];
+const protectedFormOptions = { origin: "https://trelio.example", fields: capturedFields,
+  holder: "company", browserPlatform: "darwin", handoffTimeoutMs: 200, setupTimeoutMs: 1500 };
+const protectedFormBody = (url, values = {}) => new URLSearchParams({
+  nonce: new URL(url).searchParams.get("nonce"), decision: "save",
+  username: "synthetic-login", password: "  synthetic-secret  ", ...values,
+}).toString();
+
+test("protected company/private input saves once through the same local form without returning values", async () => {
+  for (const holder of ["company", "assistant"]) {
+    let writes = 0, captured;
+    const result = await collectAgentSecretThroughProtectedForm({ ...protectedFormOptions, holder,
+      persistValues: async values => {
+        writes++;
+        assert.deepEqual({ ...values }, { username: "synthetic-login", password: "  synthetic-secret  " });
+        captured = values;
+      },
+      openBrowserFn: async url => {
+        const form = await protectedFormRequest(url);
+        assert.equal(form.status, 200);
+        assert.match(form.headers["content-security-policy"], /form-action 'self'/u);
+        assert.equal(form.headers["cache-control"], "no-store");
+        assert.equal(form.html.includes("synthetic-secret"), false);
+        assert.equal(form.html.includes('autocomplete="off"'), true);
+        const saved = await protectedFormRequest(new URL("/credential", url), protectedFormBody(url));
+        assert.equal(saved.status, 200);
+        assert.match(saved.html, /Trelio подтвердил сохранение/u);
+        assert.equal(saved.html.includes("synthetic-secret"), false);
+      },
+    });
+    assert.equal(result, undefined);
+    assert.equal(writes, 1);
+    assert.equal(Object.keys(captured).length, 0);
+  }
+});
+
+test("protected input keeps validation retry separate from an unknown write and closes the mutation latch", async () => {
+  let writes = 0, candidate;
+  await assert.rejects(collectAgentSecretThroughProtectedForm({ ...protectedFormOptions,
+    persistValues: async values => { writes++; candidate = values; throw new Error("synthetic-secret-upstream-error"); },
+    openBrowserFn: async url => {
+      await protectedFormRequest(url);
+      const endpoint = new URL("/credential", url);
+      const invalid = await protectedFormRequest(endpoint, protectedFormBody(url, { password: "" }));
+      assert.equal(invalid.status, 400);
+      assert.match(invalid.html, /Проверьте обязательные поля/u);
+      assert.equal(writes, 0);
+      const unknown = await protectedFormRequest(endpoint, protectedFormBody(url));
+      assert.equal(unknown.status, 409);
+      assert.match(unknown.html, /Сохранение не подтверждено/u);
+      assert.equal(unknown.html.includes("synthetic-secret"), false);
+      assert.equal(unknown.html.includes("<form"), false);
+      // The listener is closed at completion. Even a racing second request
+      // may only encounter the existing one-flight latch or a closed socket.
+      try { assert.equal((await protectedFormRequest(endpoint, protectedFormBody(url))).status, 409); }
+      catch (error) { assert.ok(["ECONNREFUSED", "ECONNRESET"].includes(error.code)); }
+    },
+  }), error => error.code === "PROTECTED_FORM_SAVE_UNCONFIRMED" && !error.message.includes("synthetic-secret"));
+  assert.equal(writes, 1);
+  assert.equal(Object.keys(candidate).length, 0);
+});
+
+test("protected input cancel and unopened/expired forms never report a saved Secret", async () => {
+  let writes = 0;
+  await assert.rejects(collectAgentSecretThroughProtectedForm({ ...protectedFormOptions,
+    persistValues: async () => { writes++; },
+    openBrowserFn: async url => {
+      await protectedFormRequest(url);
+      const cancelled = await protectedFormRequest(new URL("/credential", url),
+        new URLSearchParams({ nonce: new URL(url).searchParams.get("nonce"), decision: "cancel" }).toString());
+      assert.equal(cancelled.status, 200);
+      assert.equal(cancelled.html.includes("Сохранено"), false);
+    },
+  }), error => error.code === "PROTECTED_FORM_CANCELLED");
+  await assert.rejects(collectAgentSecretThroughProtectedForm({ ...protectedFormOptions, setupTimeoutMs: 30,
+    persistValues: async () => { writes++; }, openBrowserFn: async url => { await protectedFormRequest(url); },
+  }), error => error.code === "REMOTE_MCP_CREDENTIAL_SETUP_TIMEOUT");
+  assert.equal(writes, 0);
+});
+
+test("protected input rejects duplicate/unknown fields and the existing transport bound before native persistence", async () => {
+  let writes = 0;
+  await collectAgentSecretThroughProtectedForm({ ...protectedFormOptions,
+    persistValues: async () => { writes++; },
+    openBrowserFn: async url => {
+      await protectedFormRequest(url);
+      const endpoint = new URL("/credential", url);
+      for (const body of [protectedFormBody(url) + "&password=duplicate",
+        protectedFormBody(url) + "&secretId=not-native-authority",
+        protectedFormBody(url, { password: "x".repeat(8192) })]) {
+        const refused = await protectedFormRequest(endpoint, body);
+        assert.equal(refused.status, 400);
+        assert.equal(writes, 0);
+        assert.equal(refused.html.includes("synthetic-secret"), false);
+      }
+      assert.equal((await protectedFormRequest(endpoint, protectedFormBody(url))).status, 200);
+    },
+  });
+  assert.equal(writes, 1);
+  for (const schema of [[{ ...capturedFields[0], key: "nonce" }], [capturedFields[0], capturedFields[0]]]) {
+    await assert.rejects(collectAgentSecretThroughProtectedForm({ ...protectedFormOptions, fields: schema,
+      persistValues: async () => { writes++; }, openBrowserFn: async () => { throw new Error("must-not-open"); },
+    }), error => error.code === "AGENT_SECRET_PROTECTED_INPUT_INVALID");
+  }
+  assert.equal(writes, 1);
+});
+
+
+test("company NEW generation/empty/input share the Secret codec, exact receipts and no human flags",async()=>{
+  for(const encrypted of [false,true])for(const valueSource of ["empty","generated","protected_input"]){
+    const encryption=encrypted?await encryptionFixture():null;
+    const scope={assistantUserId:randomUUID(),deviceId:randomUUID(),companyId,taskId:randomUUID()};
+    const input={holder:"company",clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),ownerDecisionId:randomUUID(),runId,
+      plan:{metadataMode:"neutral",cardType:"password",scopeType:"task",runId,valueSource,
+        ...(valueSource==="generated"?{generatedFields:[{key:"password",generator:"password",length:24}]}:{})}};
+    const schema=[{key:"password",label:"Password",type:"password",required:true}];
+    const context={schemaVersion:1,completed:false,...scope,secretId,runId,companySlug,companyMemberId,scopeType:"task",scopeId:scope.taskId,
+      storageMode:encrypted?"company_e2ee":"trelio",encryptionState:encrypted?"encrypted":"plain",currentVersion:0,generatedSecretStorageSupported:true,
+      protectedInputStorageSupported:true,valueSource,metadata:{name:"Company secret",publicDescription:"",templateType:"custom",fields:schema},fields:schema,
+      ...(valueSource==="generated"?{generatedFields:input.plan.generatedFields}:{})};
+    const receipt={created:true,secret:{id:secretId,holder:"company",companyId,scopeType:"task",scopeId:scope.taskId,
+      storageMode:context.storageMode,currentVersion:valueSource==="empty"?0:1,hasValue:valueSource!=="empty"},setupPath:`/${companySlug}/agent-secrets/${secretId}/setup/`};
+    let pending=false,saved=false,forms=0,selected=0;const writes=[];
+    const options={origin:"https://trelio.ru",input,scope,token:"OPAQUE_HANDLE_MUST_NOT_BE_KEY",companyEncryption:encryption,
+      withGenerationKey:action=>action(Buffer.from("synthetic-device-credential")),onContext:async current=>{assert.equal(current.secretId,secretId);selected++;},
+      collectValues:async({persistValues})=>{forms++;await persistValues({password:"synthetic-user-entered-password"});},
+      sendRequest:async(_origin,_token,pathname,options={})=>{
+        if(!options.method)return {json:async()=>saved?{completed:true,receipt}:pending?{pending:true,secretId}:context};
+        const body=JSON.parse(options.body);writes.push(body);assert.equal(body.holder,"company");assert.equal(body.ownerDecisionId,input.ownerDecisionId);
+        assert.equal(body.userExplicitlyRequestedGeneratedPersistentStorage,undefined);assert.equal(body.userExplicitlyRequestedPersistentStorage,undefined);
+        if(body.stage==="begin"){pending=true;return {json:async()=>({started:true,secretId})};}
+        saved=true;return {json:async()=>({completed:true,receipt})};
+      }};
+    assert.deepEqual(await handleAssistantCompanySecretCreation(options),receipt);assert.equal(selected,1);
+    assert.equal(forms,valueSource==="protected_input"?1:0);assert.equal(writes.length,valueSource==="protected_input"?2:1);
+    const write=writes.at(-1);assert.equal(write.newSecret,undefined);assert.equal(write.fields[0].key,"password");
+    if(encrypted){
+      assert.match(write.name,/^~e1:/u);assert.ok(!JSON.stringify(write).includes("synthetic-user-entered-password"));
+      const metadata=write.encryptedPayloads.find(p=>p.entityType==="agent_secret.metadata");
+      const opened=await decryptCompanyPayload({encryptedPayload:metadata,scopePrivateKey:encryption.scopePrivateEncryptionKey.privateKey,scopePrivateJwk:encryption.scopePrivateEncryptionKey.privateJwk});
+      assert.equal(opened.values.name,"Company secret");assert.equal(write.encryptedPayloads.length,valueSource==="empty"?1:2);
+    }else assert.equal(write.name,"Company secret");
+    const before=writes.length;
+    assert.deepEqual(await handleAssistantCompanySecretCreation({...options,withGenerationKey:()=>assert.fail("receipt before key")}),receipt);
+    assert.equal(writes.length,before);assert.equal(forms,valueSource==="protected_input"?1:0);
+  }
+});
+
+test("company protected input never reopens on pending or retries an unknown save and immediately reads its receipt",async()=>{
+  const scope={assistantUserId:randomUUID(),deviceId:randomUUID(),companyId,taskId:randomUUID()};
+  const input={holder:"company",clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),ownerDecisionId:randomUUID(),runId,
+    plan:{metadataMode:"neutral",cardType:"password",scopeType:"task",runId,valueSource:"protected_input"}};
+  let writes=0;
+  await assert.rejects(handleAssistantCompanySecretCreation({origin:"https://trelio.ru",input,scope,token:"opaque",withGenerationKey:()=>assert.fail(),
+    sendRequest:async()=>({json:async()=>({pending:true,secretId})})}),e=>e.code==="ASSISTANT_SECRET_INPUT_ATTEMPT_UNCERTAIN");
+  const schema=[{key:"password",label:"Password",type:"password",required:true}];
+  const context={schemaVersion:1,completed:false,...scope,secretId,runId,companySlug,companyMemberId,scopeType:"task",scopeId:scope.taskId,
+    storageMode:"trelio",encryptionState:"plain",currentVersion:0,generatedSecretStorageSupported:true,protectedInputStorageSupported:true,
+    valueSource:"protected_input",metadata:{name:"Company secret",publicDescription:"",templateType:"custom",fields:schema},fields:schema};
+  const receipt={created:true,secret:{id:secretId,holder:"company",companyId,scopeType:"task",scopeId:scope.taskId,storageMode:"trelio",currentVersion:1,hasValue:true}};
+  let pending=false,saved=false,reads=0,forms=0;
+  const result=await handleAssistantCompanySecretCreation({origin:"https://trelio.ru",input,scope,token:"opaque",
+    withGenerationKey:action=>action(Buffer.from("synthetic-device-key")),collectValues:async({persistValues})=>{forms++;await persistValues({password:"original-value"});},
+    sendRequest:async(_origin,_token,_path,options={})=>{
+      if(!options.method){reads++;return {json:async()=>saved?{completed:true,receipt}:pending?{pending:true,secretId}:context};}
+      writes++;const body=JSON.parse(options.body);if(body.stage==="begin"){pending=true;return {json:async()=>({started:true,secretId})};}
+      saved=true;throw new Error("synthetic unknown response after commit");
+    }});
+  assert.equal(result.secret.id,secretId);assert.equal(writes,2);assert.equal(forms,1);assert.equal(reads,3);
 });

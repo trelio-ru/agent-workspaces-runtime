@@ -2585,3 +2585,38 @@ test('skill consent owner request crosses actual MCP without a fake ordinary too
     await client.callTool('request_assistant_action',args);assert.equal(calls,1);
   }finally{f.close();}
 });
+
+
+test('company NEW Secret profile binds native derived card ID, exact original plan and one-use proofs before any value HTTP',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {handleAssistantCompanySecretCreation}=await import('../host-runtime/scripts/trelio-secret-generate.mjs');
+  const runId=randomUUID(),input={holder:'company',runId,clientRequestId:randomUUID(),ownerDecisionId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString(),
+    plan:{metadataMode:'neutral',cardType:'password',scopeType:'task',runId,valueSource:'generated',generatedFields:[{key:'password',generator:'password',length:24}]}};
+  const f=await workspaceProfileFixture({secretGeneration:{...input,workspaceId:randomUUID()}});
+  const scope={assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.pass.companyId,taskId:f.pass.taskId};
+  const cardId=randomUUID(),fields=[{key:'password',label:'Password',type:'password',required:true}];
+  const prepared={schemaVersion:1,completed:false,...scope,secretId:cardId,runId,companySlug:'fixture',companyMemberId:randomUUID(),scopeType:'task',scopeId:scope.taskId,
+    storageMode:'trelio',encryptionState:'plain',currentVersion:0,generatedSecretStorageSupported:true,valueSource:'generated',metadata:{name:'Company secret',publicDescription:'',templateType:'custom',fields},
+    fields,generatedFields:input.plan.generatedFields};
+  const receipt={created:true,secret:{id:cardId,holder:'company',companyId:scope.companyId,scopeType:'task',scopeId:scope.taskId,storageMode:'trelio',currentVersion:1,hasValue:true},
+    setupPath:`/fixture/agent-secrets/${cardId}/setup/`};
+  const prior=globalThis.fetch;let writes=0;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));
+    const method=options.method??'GET',tool=method==='GET'?'assistant_secret_generate_context':'assistant_secret_generate_write';
+    assert.equal(verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),f.keys.publicKey,Buffer.from(proof.signature,'base64url')),true);
+    if(method==='PUT'){writes++;assert.equal(url.pathname,`/api/agent-secrets/secrets/${cardId}/value-from-bridge`);
+      const body=JSON.parse(options.body);assert.equal(body.secretId,cardId);assert.equal(body.plan.valueSource,'generated');
+      assert.equal(body.values.password.length,24);assert.equal(body.userExplicitlyRequestedGeneratedPersistentStorage,undefined);}
+    return new Response(JSON.stringify(method==='GET'?prepared:{completed:true,receipt}),{headers:{'content-type':'application/json'}});
+  };
+  try{
+    const result=await withWorkspaceExecutionProfile(f.profile,async()=>handleAssistantCompanySecretCreation({origin:f.identity.origin,input,scope,
+      token:await common.requireToken(f.identity.origin),withGenerationKey:f.profile.withSecretGenerationKey,onContext:f.profile.selectCompanySecretContext}));
+    assert.deepEqual(result,receipt);assert.equal(writes,1);
+    const token=await f.profile.requireToken(f.identity.origin);
+    await assert.rejects(f.profile.prepareRequest({origin:f.identity.origin,token,pathname:`/api/agent-secrets/secrets/${randomUUID()}/value-from-bridge`,
+      options:{method:'PUT',body:JSON.stringify({...input,stage:'save',secretId:randomUUID()})},buildHeaders:(_token,input)=>new Headers(input)}));
+    await assert.rejects(f.profile.selectCompanySecretContext({...prepared,companyId:randomUUID()}));
+  }finally{globalThis.fetch=prior;}
+});

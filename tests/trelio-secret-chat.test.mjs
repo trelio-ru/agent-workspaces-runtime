@@ -6,6 +6,8 @@ import {
   buildKnownAgentSecretChatWrite,
   handleKnownAgentSecretChatSave,
   normalizeKnownAgentSecretChatInput,
+  buildLocalAgentSecretWrite,
+  buildLocalSecretRequestFingerprint,
 } from "../host-runtime/scripts/trelio-secret-chat.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { BridgePairingRequiredError, BridgePluginUpgradeRequiredError } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -53,6 +55,45 @@ const encryptionFixture = async () => {
     },
   };
 };
+
+test("protected human input reuses company Secret codecs without chat flags or assistant-content markers", async () => {
+  const input = { runId, clientRequestId: "synthetic-protected-input", expectedCurrentVersion: 0,
+    newSecret: createInput().newSecret };
+  const values = { username: "synthetic-input-user", password: "synthetic-input-password", optional: null };
+  const key = Buffer.from("synthetic-protected-device-material");
+  const encryption = await encryptionFixture();
+  for (const encrypted of [false, true]) {
+    const context = { ...contextFor(encrypted), allowAgentSaveChatSecrets: false, protectedInputStorageSupported: true };
+    const make = () => buildLocalAgentSecretWrite({ input, values, source: "protected_input", context,
+      companyEncryption: encrypted ? encryption : null, token: { opaqueHandle: true }, fingerprintKey: key });
+    const write = await make(), second = await make();
+    assert.equal(write.userExplicitlyRequestedPersistentStorage, undefined);
+    assert.equal(write.userExplicitlyRequestedGeneratedPersistentStorage, undefined);
+    assert.equal(write.localWrite.requestFingerprint, second.localWrite.requestFingerprint);
+    assert.equal(key.toString(), "synthetic-protected-device-material");
+    assert.equal(write.localWrite.contentProtection, encrypted ? "company_e2ee_v1" : "server_keyring_v1");
+    if (encrypted) {
+      assert.equal(JSON.stringify(write).includes("synthetic-input-password"), false);
+      assert.equal(JSON.stringify(write).includes(createInput().newSecret.name), false);
+      const payload = write.localWrite.encryptedPayloads.find(value => value.entityType === "agent_secret.value");
+      assert.equal(payload.entityId, secretId);
+      assert.equal(payload.entityRevision, 1);
+      const opened = await decryptCompanyPayload({ encryptedPayload: payload,
+        scopePrivateKey: encryption.scopePrivateEncryptionKey.privateKey,
+        scopePrivateJwk: encryption.scopePrivateEncryptionKey.privateJwk });
+      assert.deepEqual({ ...opened.values.values_json }, { username: values.username, password: values.password });
+    } else assert.deepEqual(write.localWrite.values, values);
+    await assert.rejects(buildLocalAgentSecretWrite({ input, values, source: "protected_input",
+      context: { ...context, protectedInputStorageSupported: false }, companyEncryption: encrypted ? encryption : null,
+      fingerprintKey: key }), error => error.code === "AGENT_SECRET_CHAT_INPUT_INVALID");
+  }
+  assert.notEqual(buildLocalSecretRequestFingerprint({ key, source: "protected_input", binding: values }),
+    buildLocalSecretRequestFingerprint({ key, source: "generated", binding: values }));
+  await assert.rejects(buildLocalAgentSecretWrite({ input, values, source: "protected_input",
+    context: { ...contextFor(false), protectedInputStorageSupported: true },
+    companyEncryption: null, token: "a-token-is-not-protected-device-material" }),
+  error => error.code === "AGENT_SECRET_CHAT_INPUT_INVALID");
+});
 
 test("local chat input requires exact storage intent and a complete bounded target", () => {
   for (const input of [

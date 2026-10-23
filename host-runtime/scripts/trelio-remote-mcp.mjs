@@ -2364,6 +2364,11 @@ export const collectCredentialThroughLoopback = async (
     successMessage = "Remote MCP подключён. Эту вкладку можно закрыть.",
     successTitle = "Подключено",
     allowCancel = false,
+    // Native Secret saves are mutations, unlike a rejected credential probe.
+    // Their caller first commits its ordinary structural attempt latch. Once
+    // persist starts, a lost reply must close this form without another POST.
+    // This trusted option does not supply native write authority or a retry.
+    terminalPersistenceFailure = false,
     onListening = () => {},
     signal,
   } = {},
@@ -2481,12 +2486,14 @@ export const collectCredentialThroughLoopback = async (
       }
       credentialSubmissionInFlight = true;
 
+      let persistenceStarted = false;
       try {
         const credential = parseSubmission(form);
         await doctorCredential(resolved, credential, { signal });
         // A cancelled tool call must never turn a completed remote doctor into
         // a late local secret write after Codex has already abandoned the call.
         throwIfAborted(signal);
+        persistenceStarted = true;
         await persistCredential(origin, resolved, credential, { signal });
         throwIfAborted(signal);
         credentialStored = true;
@@ -2494,6 +2501,18 @@ export const collectCredentialThroughLoopback = async (
         if (signal?.aborted) {
           outgoing.destroy();
           fail(normalizeAbortReason(signal));
+          return;
+        }
+        if (terminalPersistenceFailure && persistenceStarted) {
+          // Keep the one-flight latch set even when upstream committed but its
+          // reply vanished. Neither exception text nor submitted bytes belong
+          // in HTML; recovery uses the caller's exact native receipt read.
+          writeLoopbackHtml(outgoing, 409, renderLocalFormMessage(
+            "Сохранение не подтверждено",
+            "Проверьте результат сохранения в Trelio. Повторный ввод в этой форме закрыт.", "warning"), {
+            onFinished: () => fail(new RemoteMcpHostError("PROTECTED_FORM_SAVE_UNCONFIRMED",
+              "Сохранение не подтверждено. Нужна проверка точной квитанции без повторной записи.")),
+          });
           return;
         }
         credentialSubmissionInFlight = false;

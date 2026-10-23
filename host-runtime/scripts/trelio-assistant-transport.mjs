@@ -547,6 +547,15 @@ export const assistantNeutralPrivateMetadata=value=>{
     &&value.generatedFields.every(row=>object(row)&&Object.keys(row).sort().join(',')==='generator,key,length'
       &&row.key==='password'&&row.generator==='password'&&Number.isSafeInteger(row.length)&&row.length>=16&&row.length<=128);
 };
+/** Value-free NEW company intent. This is a syntax/privacy check only;
+ * native scope/create ACL, original owner decision and Run remain authority. */
+export const assistantNeutralCompanySecret=value=>{
+  if(!object(value)||value.metadataMode!=='neutral'||!['opaque','login','password'].includes(value.cardType)
+    ||value.scopeType!=='task'||!UUID.test(value.runId??'')||!['empty','generated','protected_input'].includes(value.valueSource)
+    ||Object.keys(value).some(key=>!['metadataMode','cardType','scopeType','runId','valueSource','generatedFields'].includes(key)))return false;
+  return value.valueSource==='generated'?assistantNeutralPrivateMetadata({metadataMode:'neutral',cardType:value.cardType,
+    runId:value.runId,generatedFields:value.generatedFields}):value.generatedFields===undefined;
+};
 const managedBusinessArguments=raw=>Object.fromEntries(Object.entries(raw).filter(([key])=>
   !['taskPass','intakePass','runtimeSessionProof','encryptedContent'].includes(key)));
 const rejectBorrowedManagedMarkers=(value,depth=0)=>{
@@ -619,7 +628,8 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
 
   if(Object.hasOwn(business,'encryptedFiles')||Object.hasOwn(business,'acceptedFiles')&&name!=='create_comment'
     ||object(business.fields)&&Object.hasOwn(business.fields,'acceptedFiles')
-    ||name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+    ||name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)
+    ||name==='request_assistant_action'&&business.operation==='create_company_secret'&&!assistantNeutralCompanySecret(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   if(business.acceptedFiles!==undefined&&(!Array.isArray(business.acceptedFiles)||business.acceptedFiles.length<1
     ||business.acceptedFiles.length>10||business.acceptedFiles.some(file=>!object(file)
       ||Object.keys(file).sort().join(',')!=='filePath,runId'||!UUID.test(file.runId)||typeof file.filePath!=='string'
@@ -815,7 +825,8 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const readonly=secretMetadata||['get_assistant_owner_question','get_assistant_intake_context'].includes(name);
       let wire=business,action;
       if(!readonly){
-        if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+        if(name==='request_assistant_action'&&business.operation==='create_private_secret'&&!assistantNeutralPrivateMetadata(business.fields)
+          ||name==='request_assistant_action'&&business.operation==='create_company_secret'&&!assistantNeutralCompanySecret(business.fields))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         const protectedValue=await local.protectLocalActionArguments({nativeTool:name,arguments:business,companyEncryption:context,
           ...(customField?{customFieldTypeForId:id=>id===customField.id?customField.fieldType:null}:{})});
         // All new host metadata stays inside the ALREADY hidden envelope.
@@ -908,12 +919,16 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     || Object.keys(secretBrowserFill).sort().join(',')!=='grantId,runId,workspaceId'
     || Object.values(secretBrowserFill).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateFill=secretBrowserFill===null?null:Object.freeze({...secretBrowserFill});
+  const companyGeneration=secretGeneration?.holder==='company';
   if(secretGeneration!==null && (!object(secretGeneration)
-    || Object.keys(secretGeneration).filter(key=>key!=='neutralPlan').sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId,workspaceId'
+    || (companyGeneration?Object.keys(secretGeneration).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,holder,ownerDecisionId,plan,runId,workspaceId'
+      ||!assistantNeutralCompanySecret(secretGeneration.plan)||secretGeneration.plan.runId!==secretGeneration.runId
+      :Object.keys(secretGeneration).filter(key=>key!=='neutralPlan').sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,ownerDecisionId,runId,workspaceId')
     || ['clientRequestId','ownerDecisionId','runId','workspaceId'].some(key=>!uuid.test(secretGeneration[key]??''))
     || typeof secretGeneration.expectedTaskUpdatedAt!=='string' || !Number.isFinite(Date.parse(secretGeneration.expectedTaskUpdatedAt))
     ||secretGeneration.neutralPlan!==undefined&&!assistantNeutralPrivateMetadata({metadataMode:'neutral',runId:secretGeneration.runId,...secretGeneration.neutralPlan})))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const privateGeneration=secretGeneration===null?null:Object.freeze({...secretGeneration});
+  let selectedCompanySecretId=null;
   if(secretSkill!==null && (!object(secretSkill)
     || Object.keys(secretSkill).sort().join(',')!=='companySlug,environmentVariable,fieldKey,grantId,runId,skill,workspaceId'
     || !/^[a-z0-9][a-z0-9_-]{0,159}$/u.test(secretSkill.companySlug??'')
@@ -1057,6 +1072,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         if(Object.keys(p).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,neutralPlan,ownerDecisionId,runId'
           ||!assistantNeutralPrivateMetadata({metadataMode:'neutral',runId:p.runId,...p.neutralPlan})
           ||Object.keys(p.neutralPlan).sort().join(',')!=='cardType,generatedFields'
+          ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
+          ||args.runIdentity.runId!==p.runId||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      }else if(args.operation==='secret_company_create'){
+        if(Object.keys(p).sort().join(',')!=='clientRequestId,expectedTaskUpdatedAt,holder,ownerDecisionId,plan,runId'
+          ||p.holder!=='company'||!assistantNeutralCompanySecret(p.plan)||p.plan.runId!==p.runId
           ||!object(args.runIdentity)||Object.keys(args.runIdentity).sort().join(',')!=='runId,workspaceId'
           ||args.runIdentity.runId!==p.runId||Object.values(args.runIdentity).some(value=>!uuid.test(value??'')))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
       }else fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
@@ -1262,6 +1282,14 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await assertIdentity();
       return assistantSkillCatalogueDirectory(configDirectory,identity);
     },
+    async selectCompanySecretContext(context){
+      if(!companyGeneration||!privateGeneration||!object(context)||context.completed!==false
+        ||!uuid.test(context.secretId??'')||context.runId!==privateGeneration.runId
+        ||['companyId','taskId'].some(key=>context[key]!==pass[key])
+        ||context.assistantUserId!==identity.assistantId||context.deviceId!==identity.deviceId
+        ||selectedCompanySecretId&&selectedCompanySecretId!==context.secretId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass();selectedCompanySecretId=context.secretId;
+    },
     async withSecretGenerationKey(action){
       if(!privateGeneration || typeof action!=='function')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertLivePass();
@@ -1339,6 +1367,25 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         rewritten=assistantPrefix+url.pathname.slice(nativePrefix.length);route={proofTool:'assistant_workspace_data_plane_read'};
       }else if(attachmentSelection){
         fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+      }else if(companyGeneration&&privateGeneration&&requestOrigin===(lifecycle?.requestOrigin??identity.origin)
+        &&(url.pathname==='/api/agent-secrets/generated-save-context'||selectedCompanySecretId&&url.pathname===`/api/agent-secrets/secrets/${selectedCompanySecretId}/value-from-bridge`)){
+        const {workspaceId:_workspace,...expected}=privateGeneration;
+        if(method==='GET'&&url.pathname==='/api/agent-secrets/generated-save-context'&&options.body===undefined
+          &&[...url.searchParams.keys()].length===Object.keys(expected).length&&new Set(url.searchParams.keys()).size===Object.keys(expected).length
+          &&Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===(key==='plan'?JSON.stringify(value):value))){
+          route={proofTool:'assistant_secret_generate_context'};
+        }else if(method==='PUT'&&!url.search&&selectedCompanySecretId){
+          let input;try{input=JSON.parse(options.body);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
+          const begin=input?.stage==='begin';
+          const allowed=Object.keys(expected).concat(['secretId','stage'],begin?[]:['expectedCurrentVersion','requestFingerprint','companySlug','contentProtection','values','fieldKeys','name','publicDescription','templateType','fields','encryptedPayloads']);
+          if(!object(input)||Object.keys(input).some(key=>!allowed.includes(key))||input.secretId!==selectedCompanySecretId
+            ||!Object.entries(expected).every(([key,value])=>(key==='plan'?JSON.stringify(input[key]):input[key])===(key==='plan'?JSON.stringify(value):value))
+            ||begin&&privateGeneration.plan.valueSource!=='protected_input'
+            ||!begin&&(input.stage!=='save'||input.expectedCurrentVersion!==0||!/^[a-f0-9]{64}$/u.test(input.requestFingerprint??'')
+              ||!object(input.values)||!Array.isArray(input.fields)||!Array.isArray(input.fieldKeys)))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+          route={proofTool:'assistant_secret_generate_write'};
+        }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
+        rewritten=url.pathname;if(lifecycle)url=new URL(url.pathname+url.search,identity.origin);
       }else if(privateGeneration && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && (url.pathname==='/api/agent-secrets/generated-save-context'
           || url.pathname===`/api/agent-secrets/secrets/${privateGeneration.clientRequestId}/value-from-bridge`)){
@@ -2235,6 +2282,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           // alias. Its SAME pure structural parser closes generic fields before
           // any plain send or encrypted preparation HTTP.
           normalizeAssistantSkillConsentFields(argumentsSnapshot.fields);
+        }else if(name==='request_assistant_action'&&argumentsSnapshot.operation==='create_company_secret'){
+          if(!assistantNeutralCompanySecret(argumentsSnapshot.fields))fail('ASSISTANT_MCP_INPUT_INVALID');
         }else if(name==='request_assistant_action'&&argumentsSnapshot.operation!=='create_private_secret'){
           // Native action planning reuses the ordinary operation's schema for
           // its generic fields record. Apply that SAME live inventory here;

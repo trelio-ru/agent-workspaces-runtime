@@ -270,6 +270,9 @@ publication tooling также остаются вне этого публичн
   навыков не объединяются.
 - Локальные формы и private skills используют общий [renderer](docs/local-forms.md):
   декларативные поля/QR/status, без собственной HTML/CSS-копии и secret prefill.
+  Protected input новых Secret использует тот же loopback и Secret writer;
+  после persist failure форма терминальна, exact native receipt читается без
+  повторной записи. Открытие формы не является сохранением или входом.
 - Визуальные browser-навыки следуют [контракту](docs/visual-browser.md):
   Protected automatic sign-in uses signed recipes and host-owned encrypted
   credentials, never model values; see [authentication](docs/visual-browser.md#protected-authentication).
@@ -729,3 +732,9 @@ publication tooling также остаются вне этого публичн
   and SAME atomic catalogue intent receipt/CAS, preserving sessions/old bindings;
   no human import, pre-existing binding adoption, provider login or extra vault.
   See `docs/assistant-inbox.md` schema v9 and the scheduler companion contract.
+
+NEW company Secret uses the SAME neutral sealed intent/generator/metadata/value
+writer. `secret_company_create` binds holder, current task Run and original
+valueSource; protected input records one native begin before the SAME local
+form. Unknown begin/save permits exact receipt GET only, never automatic form
+or value retry. Private legacy holder/AAD and company ACL remain separate.

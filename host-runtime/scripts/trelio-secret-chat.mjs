@@ -181,7 +181,7 @@ export const protectNewSecretMetadata = async (card, context, companyEncryption)
  * key never leaves the caller; native assistant ownership supplies a different
  * domain/binding without inventing human consent flags or a second codec. */
 export const buildLocalSecretRequestFingerprint = ({ key, source, binding }) => {
-  if (!Buffer.isBuffer(key) || !key.length || !["chat", "generated", "assistant_generated"].includes(source)) invalid();
+  if (!Buffer.isBuffer(key) || !key.length || !["chat", "generated", "assistant_generated", "protected_input"].includes(source)) invalid();
   return crypto.createHmac("sha256", key).update(`trelio:local-secret-${source}:v1\0`)
     .update(canonicalJson(binding)).digest("hex");
 };
@@ -193,6 +193,7 @@ export const buildLocalAgentSecretWrite = async ({
   token,
   values,
   source,
+  fingerprintKey,
 }) => {
   const encrypted = context.storageMode === "company_e2ee";
   if (
@@ -200,7 +201,9 @@ export const buildLocalAgentSecretWrite = async ({
     || context.encryptionState !== (encrypted ? "encrypted" : "plain")
     || (source === "chat" && context.allowAgentSaveChatSecrets !== true)
     || (source === "generated" && context.generatedSecretStorageSupported !== true)
-    || !["chat", "generated"].includes(source)
+    || (source === "protected_input" && context.protectedInputStorageSupported !== true)
+    || (source === "protected_input" && !encrypted && !Buffer.isBuffer(fingerprintKey))
+    || !["chat", "generated", "protected_input"].includes(source)
     || !UUID.test(context.secretId || "") || !UUID.test(context.companyId || "")
     || !UUID.test(context.companyMemberId || "")
     || (input.secretId && input.secretId !== context.secretId)
@@ -215,15 +218,22 @@ export const buildLocalAgentSecretWrite = async ({
   const writeContext = { ...context, fields, currentVersion: input.expectedCurrentVersion };
   if (
     !isRecord(values) || Object.keys(values).length < 1 || Object.keys(values).length > 50
-    || Object.entries(values).some(([key, value]) => !FIELD_KEY.test(key) || !boundedString(value, 65536))
+    || Object.entries(values).some(([key, value]) => !FIELD_KEY.test(key)
+      || !(source === "protected_input" && value === null) && !boundedString(value, 65536))
   ) invalid();
+  if (source === "protected_input" && (Object.keys(values).length !== fields.length
+    || fields.some(field => !(field.key in values) || field.required && values[field.key] === null))) invalid();
   if (Buffer.byteLength(JSON.stringify({ version: 1, values }), "utf8") > 65536) invalid();
   // Fingerprint the logical plaintext before randomized encryption. The key is
   // never sent to Trelio, so a persisted replay row is not a password oracle.
   // Scope-key derivation also keeps an E2EE retry stable across paired devices.
   const key = encrypted
     ? Buffer.from(companyEncryption.scopePrivateEncryptionKey?.privateJwk?.d || "", "base64url")
-    : Buffer.from(token || "", "utf8");
+    // Genuine device auth uses an opaque token handle, never its string as
+    // secret material. A trusted caller supplies the SAME OS-protected key;
+    // clone it so our cleanup cannot corrupt the caller's native key copy.
+    : fingerprintKey === undefined ? Buffer.from(token || "", "utf8")
+      : Buffer.isBuffer(fingerprintKey) ? Buffer.from(fingerprintKey) : Buffer.alloc(0);
   if (!key.length) invalid();
   let fingerprint;
   try {
@@ -246,9 +256,8 @@ export const buildLocalAgentSecretWrite = async ({
   return {
     secretId: context.secretId, runId: input.runId,
     expectedCurrentVersion: input.expectedCurrentVersion, clientRequestId: input.clientRequestId,
-    ...(source === "chat"
-      ? { userExplicitlyRequestedPersistentStorage: true }
-      : { userExplicitlyRequestedGeneratedPersistentStorage: true }),
+    ...(source === "chat" ? { userExplicitlyRequestedPersistentStorage: true }
+      : source === "generated" ? { userExplicitlyRequestedGeneratedPersistentStorage: true } : {}),
     localWrite: {
       ...valueWrite, companySlug: context.companySlug, requestFingerprint: fingerprint,
       ...(input.newSecret ? { newSecret: metadata?.card ?? input.newSecret } : {}),

@@ -1839,3 +1839,25 @@ provider read-back/reconciliation requires a separately allowed read. Full
 arguments remain in company-protected intent/`remote_arguments_json`, never in
 SQLite, generic metadata, logs, argv or environment. Planning/final admission use
 the same immutable marker derived from the original clientRequestId.
+
+
+### NEW company Secret host continuation
+
+The same protected Secret profile admits `secret_company_create` only from an
+original `create_company_secret` owner decision: neutral card type, exact active
+task Run and `empty|generated|protected_input` source. Native context selects the
+ordinary task-scoped corporate card and audience. Model values/paths/credentials
+are absent; native derived card ID is selected from that exact response before
+PUT. SAME managed device key/password engine, company Secret metadata/value
+codec and atomic native writer serve both plain and E2EE companies. Human
+permission flags emitted by legacy generic composers are discarded, never used
+as assistant authority. Company card values are not moved into the personal pool.
+
+Protected input uses the shared local form with a native one-shot `begin` in the
+existing operation ledger before showing it. It reads the original pending
+attempt again after human delay, then submits once. Unknown begin/save performs
+one exact structural receipt read-back; it never retries HTTP writes, reopens a
+form or collects replacement bytes. A committed receipt returns before key/input;
+pending is an explicit unresolved attempt, not readiness or success. Only native
+card/version/ACL/audit/decision/receipt atomic commit confirms storage. No extra
+runtime module, vault, executor, clipboard/file import or source body journal.

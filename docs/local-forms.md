@@ -111,6 +111,31 @@ provider readiness. Native OS dialogs, страницы самого provider и
 proposal Apps остаются их собственными surfaces. Этот API не перекрашивает
 чужую страницу и не разрешает обойти существующее согласование.
 
+## Ввод значения нового Agent Secret ассистента
+
+Внутренний `collectAgentSecretThroughProtectedForm` в существующем Secret
+module использует этот renderer и общий `collectCredentialThroughLoopback`.
+Native adapter сначала проверяет exact sealed owner intent, текущие
+task/device/pass/own Run и фиксирует одноразовую попытку в обычном operation
+ledger. Только затем человек вводит значения. Личный и company holder
+используют одну форму; scope, ACL, metadata, AAD и writer выбирает native adapter.
+Форма не извлекает credentials из аккаунта, браузера, файла или model input.
+
+До отправки локально проверяются exact поля, required state, дубли и общий
+размер JSON до 8 КиБ. Прежний общий loopback limit 32 КиБ не увеличивается.
+Поле не получает prefill; password whitespace сохраняется. Значения живут
+только в браузерном POST и protected host invocation. E2EE записывается
+обычными `agent_secret.metadata`/`agent_secret.value` codecs; assistant-content
+markers для value и metadata не подходят. Plain fingerprint использует
+существующий защищённый OS device key, не opaque token handle.
+
+Открытие формы, отмена и timeout не подтверждают сохранение. После начала
+persist callback ошибка терминальна: one-flight latch остаётся установленным,
+HTML не содержит exception и формы для повторной записи. Продолжение читает
+только exact native structural receipt. Pending/unknown состояние не
+разрешает writer replay или новую форму под прежним intent. Страница успеха
+допустима лишь после положительной квитанции общего atomic writer.
+
 ## Проверки
 
 `tests/trelio-local-form.test.mjs` проверяет единый style всех встроенных форм,
