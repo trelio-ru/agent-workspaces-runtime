@@ -624,7 +624,17 @@ that same native path. Inaccessible rows without a running pass defer without
 blocking unrelated companies. The bounded existing page skips a policy-blocked
 or unanswered row after recording its next check, so every five-minute worker
 can reach later companies; no event is processed/ACKed or cycle moved for that
-row. An unknown active pass keeps its global fence.
+row. Each worker visits a pending receipt once, allowing ordinary task-chat
+provision before routing that newly created task. Unknown provisioning is read
+back before any source/model policy deferral and retains its global fence,
+even without a returned thread ID. A positive native cancelled receipt stops
+the owned running turn; created/waiting/ignored still await their normal final
+marker. After crash/restart, a source pause, expired lease or positive backend
+cancellation cannot replace the exact original Codex completed/failed read-back.
+The protected pass stays held until that native terminal marker. A closed created
+receipt whose fresh task binding/ACL/transport read fails retains its receipt and
+typed cause, backs off new company work and never recreates, routes or ACKs the
+original event. An unknown active pass keeps its global fence.
 
 Schema upgrade is additive, preserves all original cursors/deliveries/read/ACK
 proofs and does not invent owner evidence for historical rows. Tests use genuine

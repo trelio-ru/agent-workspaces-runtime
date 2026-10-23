@@ -900,7 +900,7 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
 
 test('owner command intake composes SAME SQLite/native provision, per-event task routing and restart dedup',async t=>{
   const database=new DatabaseSync(':memory:');
-  let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0;
+  let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0,intakeReads=0;
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
   const ownerIdentityId=randomUUID(),accountId=randomUUID(),sourceId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
   const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
@@ -922,7 +922,7 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
         sourceRevision:0,eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:new Date(clock+1800000).toISOString(),
         taskId:null,receiptId:null,execution,readConfirmed:false});
       return structuredClone(intakes.get(input.intakeId));
-    },readSourceIntake:async input=>structuredClone(intakes.get(input.intakeId)),
+    },readSourceIntake:async input=>{intakeReads++;return structuredClone(intakes.get(input.intakeId));},
     claimTaskHost:async input=>({bindingId:input.bindingId,provisionId:input.provisionId,threadId:null}),reportSchedule:async input=>({sequence:input.sequence}),
   };
   const native={ready:async()=>true,readDelivery:async(_thread,id)=>turns.get(id)??{state:'uncertain'},
@@ -946,7 +946,9 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,1);
   assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(created,1);assert.equal(active,null);
   const firstTask=[...tasks.keys()][0];
+  const readsBefore=intakeReads;
   assert.equal((await coordinator.workOnce()).kind,'provision','native task enters ordinary permanent chat provision');
+  assert.equal(intakeReads-readsBefore,1,'created receipt without a task chat is read only once before ordinary provision');
   await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u)); // Task business is deliberately not mocked as success.
   const event=database.prepare('SELECT * FROM assistant_inbox_events WHERE task_id=?').get(firstTask);
   assert.ok(event?.route_id);assert.equal(event.processed,0);assert.equal(event.acked,0,'creating a task never earns ACK');
@@ -963,7 +965,8 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
 });
 
 
-for(const firstState of ['policy_blocked','waiting_owner'])test(`${firstState} owner intake retains its event while another company intake and ordinary task proceed`,async t=>{
+for(const firstState of ['policy_blocked','waiting_owner','unknown_provision','unknown_provision_no_thread',
+  'created_revoked','created_changed','created_denied','created_network'])test(`${firstState} owner intake retains its event while another company intake and ordinary task proceed`,async t=>{
   const f=fixture(t);await f.coordinator.close();
   const companyB=randomUUID(),memberB=randomUUID(),taskB=randomUUID(),bindingB=randomUUID(),ownerId=randomUUID();
   const second={id:bindingB,taskId:taskB,state:'accepted',revision:0},account=randomUUID(),receipts=new Map();
@@ -972,7 +975,13 @@ for(const firstState of ['policy_blocked','waiting_owner'])test(`${firstState} o
   f.options.client.companies=async()=>[{companyId:f.companyId,memberId:f.memberId,execution:f.execution},
     {companyId:companyB,memberId:memberB,execution:{state:'ready',configuration:execution}}];
   f.options.client.tasks=async id=>({bindings:[id===companyB?second:f.authority],nextCursor:null});
-  f.options.client.task=async id=>({... (id===companyB?second:f.authority),execution:id===companyB?{state:'ready',configuration:execution}:f.execution});
+  f.options.client.task=async id=>{
+    if(id===f.companyId&&['created_denied','created_network'].includes(firstState))throw Object.assign(new Error('fixture'),
+      {code:firstState==='created_denied'?'ASSISTANT_ACCESS_DENIED':'ASSISTANT_TRANSPORT_UNAVAILABLE',status:firstState==='created_denied'?403:503});
+    return {...(id===companyB?second:f.authority),execution:id===companyB?{state:'ready',configuration:execution}:f.execution};
+  };
+  if(firstState==='created_revoked')f.authority.state='revoked';
+  if(firstState==='created_changed')f.authority.revision=1;
   const sources=[f.companyId,companyB].map(companyId=>({id:randomUUID(),companyId,deviceId:f.identity.deviceId,
     localAccountId:account,projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true}));
   f.options.client.sourceAccounts=async companyId=>sources.filter(row=>row.companyId===companyId);
@@ -981,7 +990,9 @@ for(const firstState of ['policy_blocked','waiting_owner'])test(`${firstState} o
     const value={schemaVersion:1,id:input.intakeId,companyId:companyB,sourceId:input.sourceId,sourceRevision:0,
       eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:'2099-01-01T00:00:00.000Z',
       taskId:null,receiptId:null,execution,readConfirmed:false};receipts.set(input.intakeId,value);return value;};
-  f.options.client.readSourceIntake=async input=>receipts.get(input.intakeId);
+  let firstReads=0;
+  f.options.client.readSourceIntake=async input=>{if(input.companyId===f.companyId)firstReads++;return receipts.get(input.intakeId);};
+  f.options.client.sourceRoutes=async()=>{throw new Error('invalid created binding must never reach route/ACK');};
   let active=null,intakeRuns=0;
   f.options.passHost={readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
     releasePass:async receipt=>{assert.equal(receipt.id,active.passId);active=null;}};
@@ -998,26 +1009,134 @@ for(const firstState of ['policy_blocked','waiting_owner'])test(`${firstState} o
       taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'b'.repeat(64)}`}]});
     f.advance(1);
   }
-  if(firstState==='waiting_owner'){
+  let recovering=null;
+  if(firstState==='waiting_owner'||firstState.startsWith('unknown_provision')||firstState.startsWith('created_')){
     const pending=inbox.ownerIntakes().find(row=>row.scope.companyId===f.companyId);
     inbox.prepareOwnerIntake(pending.id);inbox.startOwnerIntakeProvision(pending.id);
-    inbox.bindOwnerIntakeThread(pending.id,randomUUID());inbox.readyOwnerIntake(pending.id);inbox.startOwnerIntake(pending.id);
-    const row=inbox.ownerIntake(pending.id),receiptId=randomUUID();
-    inbox.finishOwnerIntake(row.id,{state:'waiting_owner',receiptId});
+    if(firstState!=='unknown_provision_no_thread')inbox.bindOwnerIntakeThread(pending.id,randomUUID());
+    if(firstState.startsWith('unknown_provision')){recovering=inbox.ownerIntake(pending.id);inbox.deferOwnerIntake(pending.id);}
+    else{inbox.readyOwnerIntake(pending.id);inbox.startOwnerIntake(pending.id);
+    const row=inbox.ownerIntake(pending.id),receiptId=randomUUID(),state=firstState.startsWith('created_')?'created':'waiting_owner';
+    inbox.finishOwnerIntake(row.id,{state,receiptId});
     receipts.set(row.id,{schemaVersion:1,id:row.id,companyId:f.companyId,sourceId:row.scope.bindingId,sourceRevision:0,
-      eventId:row.original_event_id,threadId:row.thread_id,state:'waiting_owner',leaseExpiresAt:'2099-01-01T00:00:00.000Z',
-      taskId:null,receiptId,execution,readConfirmed:true});
-    f.advance(300000); // The oldest unanswered question is due on this worker.
+      eventId:row.original_event_id,threadId:row.thread_id,state,leaseExpiresAt:'2099-01-01T00:00:00.000Z',
+      taskId:state==='created'?f.taskId:null,receiptId,execution,readConfirmed:true,
+      ...(state==='created'?{route:{id:randomUUID(),bindingId:f.authority.id,bindingRevision:0}}:{})});
+    f.advance(300000); // The oldest unanswered/closed receipt is due on this worker.
+    }
   }
+  let recoveryReads=0;const read=f.options.native.readDelivery;
+  f.options.native.readDelivery=async(thread,id,options)=>{if(id===recovering?.provision_id)recoveryReads++;return read(thread,id,options);};
   const coordinator=createAssistantCoordinator(f.options);try{await coordinator.pollOnce();
+  if(recovering){
+    assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(intakeRuns,0);assert.equal(f.counts().provisions,0);
+    assert.equal(inbox.ownerIntake(recovering.id).native_started,1,'policy change cannot erase the original unknown invocation');
+    assert.equal(recoveryReads,recovering.thread_id?1:0);
+    if(!recovering.thread_id)return; // No read-back target means no automatic replacement chat.
+    f.deliveries.set(recovering.provision_id,{state:'completed',threadId:recovering.thread_id,receipt:`codex:${recovering.thread_id}:${randomUUID()}`});
+  }
   assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(intakeRuns,1);assert.equal(active,null);
   const retained=inbox.ownerIntakes().find(row=>row.scope.companyId===f.companyId);
-  assert.equal(retained.state,firstState==='waiting_owner'?'waiting_owner':'pending');
-  assert.equal(retained.native_started,firstState==='waiting_owner'?1:0);
-  assert.equal(typeof retained.thread_id,firstState==='waiting_owner'?'string':'object');
+  assert.equal(retained.state,firstState==='waiting_owner'?'waiting_owner':firstState.startsWith('created_')?'complete':recovering?'ready':'pending');
+  assert.equal(retained.native_started,firstState==='waiting_owner'||firstState.startsWith('created_')?1:0);
+  assert.equal(typeof retained.thread_id,firstState==='waiting_owner'||firstState.startsWith('created_')||recovering?'string':'object');
+  if(recovering)assert.equal(recoveryReads,2,'only exact positive read-back permits the other company to continue');
   assert.ok(retained.next_check_at>0);
+  if(firstState.startsWith('created_')){
+    assert.equal(firstReads,1,'positive created receipt with lost binding is deferred once, never recreated');
+    assert.ok(f.notifications.some(value=>value.code===(firstState==='created_denied'?'ASSISTANT_ACCESS_DENIED'
+      :firstState==='created_network'?'ASSISTANT_TRANSPORT_UNAVAILABLE':'ASSISTANT_INTAKE_CHANGED')),'typed ACL/transport cause survives the shared followup');
+    assert.equal(retained.settled,0,'inaccessible positive receipt remains available for later exact reconciliation');
+  }
   assert.equal((await coordinator.workOnce()).kind,'provision');
   assert.equal(coordinator.status().length,1);assert.equal(coordinator.status()[0].companyId,companyB);
   assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE source_key=?').get(retained.source_key).processed,0);
+  }finally{await coordinator.close();}
+});
+
+
+for(const nativeState of ['failed','completed'])test(`positive native cancellation dominates ${nativeState} owned turn and releases only its exact receipt`,async t=>{
+ const f=fixture(t);await f.coordinator.close();const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID();
+ const row={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
+  skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};let outcome,active=null,stopped=false;
+ f.options.client.companies=async()=>[{companyId:f.companyId,memberId:f.memberId,execution:f.execution}];
+ f.options.client.tasks=async()=>({bindings:[],nextCursor:null});f.options.client.sourceAccounts=async()=>[row];
+ f.options.client.ownerIdentities=async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]});
+ f.options.client.beginSourceIntake=async input=>(outcome={schemaVersion:1,id:input.intakeId,companyId:f.companyId,sourceId,sourceRevision:0,
+  eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:'2099-01-01T00:00:00.000Z',taskId:null,receiptId:null,
+  execution:f.execution.configuration,readConfirmed:false});
+ f.options.client.readSourceIntake=async()=>structuredClone(outcome);
+ f.options.passHost={readActivePass:async()=>active,activatePass:async value=>{active=value;},
+  releasePass:async value=>{assert.equal(value.id,active.passId);assert.equal(value.receiptId,outcome.receiptId);active=null;}};
+ f.options.workspaceForIntake=async()=>process.cwd();f.options.watchIntervalMs=100;
+ f.options.native.run=async(_input,options)=>{options.startInvocation();Object.assign(outcome,{state:'cancelled',receiptId:randomUUID()});
+  await new Promise(resolve=>options.signal.addEventListener('abort',()=>{stopped=true;resolve();},{once:true}));return {state:nativeState};};
+ const inbox=createAssistantInbox({database:f.database,now:f.options.now}),source={origin:f.identity.origin,assistantId:f.identity.assistantId,
+  companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
+ inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+ inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),
+  taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+ const coordinator=createAssistantCoordinator(f.options);try{
+  await coordinator.pollOnce();assert.equal((await coordinator.workOnce()).state,'cancelled');assert.equal(stopped,true);assert.equal(active,null);
+  const closed=f.database.prepare('SELECT state,outcome_state,outcome_receipt FROM assistant_owner_intakes').get();
+  assert.equal(closed.state,'complete');assert.equal(closed.outcome_state,'cancelled');assert.equal(closed.outcome_receipt,outcome.receiptId);
+  assert.equal(await coordinator.workOnce(),null);assert.equal(f.counts().provisions,1,'cancelled original is not provisioned again');
+  assert.deepEqual({...f.database.prepare('SELECT processed,acked FROM assistant_inbox_events').get()},{processed:0,acked:0});
+ }finally{await coordinator.close();}
+});
+
+
+for(const recovery of ['source_paused','lease_expired','release_pending'])test(`${recovery} after restart retains the original pass until exact native terminal read-back`,async t=>{
+  const f=fixture(t);await f.coordinator.close();
+  const companyA=randomUUID(),memberA=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID();
+  const source={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:companyA,provider:'telegram',accountId,bindingId:sourceId};
+  const sourceRow={id:sourceId,companyId:companyA,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
+    skillId:'telegram-mtproto',state:recovery==='source_paused'?'paused':'active',revision:0,ownerTaskIntakeAllowed:true};
+  f.options.client.companies=async()=>[{companyId:companyA,memberId:memberA,execution:f.execution},
+    {companyId:f.companyId,memberId:f.memberId,execution:f.execution}];
+  f.options.client.tasks=async companyId=>({bindings:companyId===f.companyId?[f.authority]:[],nextCursor:null});
+  f.options.client.sourceAccounts=async companyId=>companyId===companyA?[sourceRow]:[];
+  f.options.workspaceForIntake=async()=>process.cwd();
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  inbox.register(source);inbox.observeExternalSourceRevision(source,0);
+  inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),
+    taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+  let row=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(row.id);inbox.startOwnerIntakeProvision(row.id);
+  inbox.bindOwnerIntakeThread(row.id,randomUUID());inbox.readyOwnerIntake(row.id);inbox.startOwnerIntake(row.id);
+  inbox.uncertainOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
+  let active={schemaVersion:1,kind:'source_intake',assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:companyA,
+    sourceId,sourceRevision:0,passId:row.id,deliveryId:row.delivery_id,eventId:row.original_event_id,threadId:row.thread_id};
+  let outcome={schemaVersion:1,id:row.id,companyId:companyA,sourceId,sourceRevision:0,eventId:row.original_event_id,
+    threadId:row.thread_id,state:'leased',leaseExpiresAt:new Date(f.options.now()-1).toISOString(),taskId:null,receiptId:null,
+    execution:f.execution.configuration,readConfirmed:true};
+  if(recovery==='release_pending'){
+    Object.assign(outcome,{state:'cancelled',receiptId:randomUUID()});inbox.finishOwnerIntake(row.id,outcome);
+  }
+  let terminal=false,nativeReads=0,cancellations=0,releases=0;
+  f.options.native.readDelivery=async(thread,id)=>{
+    assert.equal(thread,row.thread_id);assert.equal(id,row.delivery_id);nativeReads++;
+    return terminal?{state:'failed',receipt:`codex:${thread}:${randomUUID()}`}:{state:'running'};
+  };
+  f.options.client.readSourceIntake=async()=>structuredClone(outcome);
+  f.options.client.cancelSourceIntake=async()=>{cancellations++;Object.assign(outcome,{state:'cancelled',receiptId:outcome.receiptId??randomUUID()});return structuredClone(outcome);};
+  f.options.passHost={readActivePass:async()=>active,activatePass:async()=>{throw new Error('old pass must not be replaced');},
+    releasePass:async value=>{assert.equal(value.id,row.id);assert.equal(value.receiptId,outcome.receiptId);assert.equal(terminal,true);releases++;active=null;}};
+  let coordinator=createAssistantCoordinator(f.options);
+  try{
+    await coordinator.pollOnce();assert.equal((await coordinator.workOnce()).state,'blocked');
+    assert.equal(f.counts().provisions,0);assert.equal(releases,0);assert.equal(active.passId,row.id);
+    assert.equal(inbox.ownerIntake(row.id).state,recovery==='release_pending'?'complete':'uncertain');
+    assert.equal(nativeReads,1);assert.equal(cancellations,recovery==='release_pending'?0:1);
+    // A fresh coordinator sees the SAME positive backend cancellation, but it
+    // still cannot substitute that domain receipt for the original live turn.
+    await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+    assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(releases,0);assert.equal(f.counts().provisions,0);
+    terminal=true;
+    assert.equal((await coordinator.workOnce()).kind,'provision','only terminal read-back releases unrelated task work');
+    assert.equal(releases,1);assert.equal(active,null);assert.equal(f.counts().provisions,1);
+    const closed=inbox.ownerIntake(row.id);assert.equal(closed.state,'complete');assert.equal(closed.outcome_state,'cancelled');
+    assert.equal(closed.outcome_receipt,outcome.receiptId);
+    assert.deepEqual({...f.database.prepare('SELECT processed,acked FROM assistant_inbox_events WHERE event_key=?').get(row.event_key)},
+      {processed:0,acked:0});
   }finally{await coordinator.close();}
 });

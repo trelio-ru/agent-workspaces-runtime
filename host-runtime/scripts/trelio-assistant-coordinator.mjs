@@ -589,16 +589,44 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,eventKeys:[row.event_key],routes,intakeId:row.id});
     inbox.settleOwnerIntake(row.id);
   };
-  const deferredIntake=Object.freeze({state:'deferred',kind:'source_intake'});
-  const workIntake=async signal=>{
+  const deferredIntake=row=>Object.freeze({state:'deferred',kind:'source_intake',intakeId:row.id});
+  const blockedIntake=()=>{emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};};
+  const nativeIntakeStopped=async(row,signal)=>{
+    // Native domain cancellation revokes mutation authority, but cannot prove
+    // that an orphaned Codex invocation stopped after a host crash. Only this
+    // exact original turn marker (or the current owned adapter's awaited stop)
+    // permits releasing the global pass and starting unrelated native work.
+    const result=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+    return ['completed','failed'].includes(result.state);
+  };
+  const workIntake=async(signal,visited)=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
     if(saved&&saved.kind!=='source_intake')return null;
     const candidates=inbox.ownerIntakes(),rowSaved=saved?inbox.ownerIntake(saved.passId):null;
-    let row=rowSaved??candidates.find(value=>['started','uncertain'].includes(value.state)||value.next_check_at<=now());
+    // Preserve a closed receipt's read-only ACL/transport backoff across ticks.
+    // Otherwise its previously accepted task could immediately re-enter normal
+    // provision and fail the SAME fresh read ahead of other companies. This
+    // defers new work only; it never changes task authority or native fences.
+    for(const candidate of candidates)if(candidate.state==='complete'&&candidate.next_check_at>now())
+      blockedCompanies.add(candidate.scope.companyId);
+    if(rowSaved&&visited.has(rowSaved.id))fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+    let row=rowSaved??candidates.find(value=>!visited.has(value.id)&&(['started','uncertain'].includes(value.state)
+      ||value.state==='provisioning'&&value.native_started===1||value.next_check_at<=now()));
     if(!row)return null;
     if(await native.ready(identity,signal)!==true)fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     row=inbox.ownerIntake(row.id);
+    if(row.state==='provisioning'&&row.native_started===1){
+      // An unknown tool-free provision is still a real native invocation.
+      // Recover its exact original marker BEFORE source/policy backoff; a new
+      // policy cannot turn uncertainty into permission to start another chat.
+      if(!row.thread_id){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
+      const result=await native.readDelivery(row.thread_id,row.provision_id,{signal});lease();
+      if(result.state!=='completed'){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
+      inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
+    }
+    if(saved&&row.native_started===1&&['complete','waiting_owner'].includes(row.state)
+      &&!await nativeIntakeStopped(row,signal))return blockedIntake();
     if(row.state==='waiting_owner'){
       try{await intakeSource(row,signal);}catch(error){
         // The old question cannot survive a stopped generation. Close that
@@ -608,28 +636,38 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           if(!['created','ignored','redirected','cancelled'].includes(closed.state))throw error;
           await settleIntake(row,closed,signal);
         }catch(closing){if(saved)throw closing;inbox.deferOwnerIntake(row.id);}
-        return deferredIntake;
+        return deferredIntake(row);
       }
     }
     if(row.state==='complete'||row.state==='waiting_owner'){
       let outcome;try{outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();}
-      catch(error){if(saved)throw error;inbox.deferOwnerIntake(row.id);return deferredIntake;}
+      catch(error){if(saved)throw error;inbox.deferOwnerIntake(row.id);return deferredIntake(row);}
       if(outcome.state==='leased'&&row.state==='waiting_owner'){
         inbox.resumeOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
       }else{
-        await settleIntake(row,outcome,signal);if(outcome.state==='waiting_owner')inbox.deferOwnerIntake(row.id);return deferredIntake;
+        try{await settleIntake(row,outcome,signal);}
+        catch(error){
+          // A positive created receipt is immutable even if its later task
+          // binding was revoked or a fresh ACL/network read failed. With no
+          // remaining native pass, defer that receipt once rather than block
+          // every other company or recreate/route/ACK the original command.
+          if(await passHost.readActivePass())throw error;
+          blockedCompanies.add(row.scope.companyId);inbox.deferOwnerIntake(row.id);emit(errorCode(error));return deferredIntake(row);
+        }
+        if(outcome.state==='waiting_owner')inbox.deferOwnerIntake(row.id);return deferredIntake(row);
       }
     }
     let source;
     try{source=await intakeSource(row,signal);}
     catch(error){
-      if(saved?.passId===row.id){
+      if(saved?.passId===row.id||['started','uncertain'].includes(row.state)){
         const outcome=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(!['created','ignored','redirected','cancelled'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
-        inbox.finishOwnerIntake(row.id,outcome);await passHost.releasePass(outcome);
-        // A source stop cannot authorize further task ACL/route reads. Keep the
-        // original ref unprocessed/unacked, while releasing only a positively
-        // closed native pass so unrelated companies can continue.
+        if(!await nativeIntakeStopped(row,signal))return blockedIntake();
+        inbox.finishOwnerIntake(row.id,outcome);if(saved)await passHost.releasePass(outcome);
+        // Source revocation does not prove an old native process stopped.
+        // Release only AFTER exact terminal read-back, without further task
+        // ACL/route reads. Original refs stay unprocessed/unacked.
         if(outcome.state==='created'||outcome.state==='redirected')inbox.settleOwnerIntake(row.id);
       }else if(row.state==='ready'){
         try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
@@ -637,37 +675,35 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           inbox.finishOwnerIntake(row.id,closed);if(['created','redirected'].includes(closed.state))inbox.settleOwnerIntake(row.id);
         }catch{inbox.deferOwnerIntake(row.id);}
       }else inbox.deferOwnerIntake(row.id);
-      return deferredIntake;
+      return deferredIntake(row);
     }
     if(['started','uncertain'].includes(row.state)){
       const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
       const nativeResult=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
       if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
-        await settleIntake(row,outcome,signal);return deferredIntake;
+        await settleIntake(row,outcome,signal);return deferredIntake(row);
       }
       if(Date.parse(outcome.leaseExpiresAt)<=now()){
         const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(closed.state!=='cancelled')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
-        await settleIntake(row,closed,signal);emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return deferredIntake;
+        if(!['completed','failed'].includes(nativeResult.state))return blockedIntake();
+        await settleIntake(row,closed,signal);emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return deferredIntake(row);
       }
-      emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};
+      return blockedIntake();
     }
     const company=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
     if(company?.execution?.state!=='ready'){
       // No native turn/pass has started. Preserve this original event and
       // back off only its row; another company's due intake/task may proceed.
       blockedCompanies.add(row.scope.companyId);inbox.deferOwnerIntake(row.id);
-      emit('ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED');return deferredIntake;
+      emit('ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED');return deferredIntake(row);
     }
     let execution=assistantExecutionConfiguration(company.execution.configuration);
     const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
     if(row.state==='pending'){inbox.prepareOwnerIntake(row.id);row=inbox.ownerIntake(row.id);}
     if(row.state==='provisioning'){
-      let result;
-      if(row.native_started){
-        if(!row.thread_id){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
-        result=await native.readDelivery(row.thread_id,row.provision_id,{signal});lease();
-      }else result=await native.provision({deliveryId:row.provision_id,cwd,execution},{signal,
+      if(row.native_started)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      const result=await native.provision({deliveryId:row.provision_id,cwd,execution},{signal,
         startInvocation:()=>{lease();inbox.startOwnerIntakeProvision(row.id);},onThreadStarted:threadId=>inbox.bindOwnerIntakeThread(row.id,threadId)});
       if(result.state!=='completed')fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
       inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
@@ -683,20 +719,29 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,passId:row.id,deliveryId:row.delivery_id,
       eventId:row.original_event_id,threadId:row.thread_id},identity);
     await passHost.activatePass(pass);
-    let started=false,watching=false;
+    let started=false,watching=false,cancelledOutcome=null;
     const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     const watch=setInterval(()=>{if(watching)return;watching=true;
       void client.readSourceIntake(intakeLocator(row),combined).then(value=>{
-        if(value.state==='leased'&&Date.parse(value.leaseExpiresAt)<=now())controller.abort();
+        // Explicit native cancellation is the one closed outcome that stops a
+        // running intake immediately. Created/waiting/ignored still need its
+        // ordinary final marker; only this positive original receipt releases
+        // the pass after the owned native adapter has stopped.
+        if(value.state==='cancelled'){
+          if(!uuid.test(value.receiptId??''))fail('ASSISTANT_INTAKE_CHANGED');
+          cancelledOutcome=value;controller.abort();
+        }else if(value.state==='leased'&&Date.parse(value.leaseExpiresAt)<=now())controller.abort();
       }).catch(()=>controller.abort()).finally(()=>{watching=false;});},watchIntervalMs);
     try{
       const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
           intakeId:row.id,eventId:row.original_event_id}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
+      if(cancelledOutcome){await settleIntake(inbox.ownerIntake(row.id),cancelledOutcome,signal);return {state:'cancelled',kind:'source_intake'};}
       const outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
       if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
       await settleIntake(inbox.ownerIntake(row.id),outcome,combined);return {state:'completed',kind:'source_intake'};
     }catch(error){
+      if(cancelledOutcome){await settleIntake(inbox.ownerIntake(row.id),cancelledOutcome,signal);return {state:'cancelled',kind:'source_intake'};}
       if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);
       throw error;
     }finally{clearInterval(watch);controller.abort();}
@@ -836,9 +881,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Walk the bounded existing page so its oldest row cannot starve every
       // later company on each five-minute worker. Unknown/started work still
       // returns blocked and preserves the protected active-pass fence.
+      const visitedIntakes=new Set();
       for(let attempt=0;attempt<100;attempt++){
-        const intake=await workIntake(signal);
-        if(intake?.state==='deferred')continue;
+        const intake=await workIntake(signal,visitedIntakes);
+        // A positive created receipt may still await ordinary task provision.
+        // Inspect it once on THIS worker, then allow that provision instead of
+        // rereading the same zero-backoff receipt up to the page limit.
+        if(intake?.state==='deferred'){visitedIntakes.add(intake.intakeId);continue;}
         if(intake)return intake;
         break;
       }

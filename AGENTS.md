@@ -675,6 +675,8 @@ publication tooling также остаются вне этого публичн
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an
   explicit source generation is required before retrying an unfinished intake.
+  Recovery also requires the original native terminal marker; domain cancellation
+  cannot replace it. Closed ACL/transport failures defer, never recreate or ACK.
   Additional company bind uses immutable owner origin-source/revision admission
   and SAME atomic catalogue intent receipt/CAS, preserving sessions/old bindings;
   no human import, pre-existing binding adoption, provider login or extra vault.
