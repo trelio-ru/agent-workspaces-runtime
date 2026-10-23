@@ -815,7 +815,7 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
   }finally{globalThis.fetch=savedFetch;}
 });
 
-test('private authentication composes the real Run CLI, signed package and one-use checkout without returning provider output',async()=>{
+for(const encryptedCase of [false,true])test(`private authentication composes real Run, signed recipe and one-use env without output (encrypted=${encryptedCase})`,async()=>{
   const {createAssistantWorkspaceProfile,assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const taskIdentity={schemaVersion:1,origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
@@ -825,25 +825,51 @@ test('private authentication composes the real Run CLI, signed package and one-u
     expiresAt:new Date(Date.now()+300000).toISOString(),privateKeyPkcs8:privateKey.export({type:'pkcs8',format:'der'}).toString('base64url'),
     observation:{schemaVersion:1,clientFamily:'codex',modelId:'gpt-6.1-sol',effortLevel:'high',evidenceLevel:'local_observed',source:'codex_hook'}}};
   const taskHost={readIdentity:async()=>taskIdentity,readActivePass:async()=>pass};
-  const taskStore={get:async slot=>slot.kind==='runtime'?runtime:{assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,credential,expiresAt:1}};
+  const cryptoSlots=new Map();
+  const taskStore={get:async slot=>slot.kind==='company_encryption'?cryptoSlots.get(slot.id)??null:slot.kind==='runtime'?runtime:
+    {assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,credential,expiresAt:1},
+    put:async(slot,value)=>{assert.equal(slot.kind,'company_encryption');cryptoSlots.set(slot.id,value);}};
   const client={readTaskPass:async()=>({...pass,state:'leased',leaseExpiresAt:new Date(Date.now()+300000).toISOString()})};
   const runId=randomUUID(),workspaceId=randomUUID(),grantId=randomUUID(),secretId=randomUUID(),currentRelease=randomUUID(),currentArtifact=randomUUID();
   const skill={companyId:pass.companyId,skillId:'private-auth-fixture',releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['authenticate']};
   const binding={grantId,runId,workspaceId,companySlug:'fixture',fieldKey:'value',environmentVariable:'TRELIO_TEST_AUTH_TOKEN',skill};
+  let managed=null,encryptionRuntime=null,encryptedWire=null,configMarker=null;
+  if(encryptedCase){
+    const {resolveAssistantCompanyEncryptionDevice}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+    const {hpkeSeal,encryptCompanyPayload,buildCompanyEncryptedTextMarker}=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
+    managed=await resolveAssistantCompanyEncryptionDevice({identity:taskIdentity,companyId:pass.companyId,store:taskStore,
+      lockDirectory:path.join(directory,'private-auth-crypto-locks'),assertCurrent:async()=>{},lock:(_file,action)=>action()});
+    const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+    const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+    const scopeId=randomUUID(),recipientDeviceId=randomUUID(),entityId=randomUUID();
+    const aad={suite:'trelio-e2ee-v1',companyId:pass.companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:recipientDeviceId};
+    const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+      plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+    const envelope={id:randomUUID(),...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+    const header={companyId:pass.companyId,scopeId,scopeEpoch:1,entityType:'agent_skill_connection',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+    const payload={...header,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:header,
+      payload:{values:{config_json:{region:'PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY'}}}})};
+    encryptionRuntime={state:'encrypted',suite:'trelio-e2ee-v1',company:{id:pass.companyId,slug:'fixture',name:'Fixture'},
+      viewer:{userId:taskIdentity.assistantId},accessState:'ready',device:{id:recipientDeviceId,fingerprint:managed.fingerprint},
+      scope:{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk},envelope};
+    encryptedWire={schemaVersion:1,companyId:pass.companyId,recipientDeviceId,envelopeId:envelope.id,scopeId,scopeEpoch:1,encryptedPayloads:[payload]};
+    configMarker=buildCompanyEncryptedTextMarker(entityId,'config_json');
+  }
   const profile=await createAssistantWorkspaceProfile({identity:taskIdentity,client,store:taskStore,host:taskHost,secretSkill:binding,
     sourceReads:{prepare:async()=>assert.fail('authentication is never business body evidence')},
     lockDirectory:path.join(directory,'private-auth-locks'),lock:(_file,action)=>action()});
   const root=path.join(assistantTaskStorageDirectory(engine.resolveWorkspaceBridgeConfigDirectory(),{...taskIdentity,companyId:pass.companyId,taskId:pass.taskId}),'workspaces',workspaceId);
   const cwd=path.join(root,'workspace');await engine.ensurePrivateDirectory(cwd);
   await engine.writePrivateJsonFile(path.join(root,'.trelio-run.json'),{schemaVersion:3,origin:taskIdentity.origin,runId,workspaceId,workspaceDirectory:cwd,
-    company:{id:pass.companyId,slug:'fixture'},encryption:{enabled:false}});
-  const sourceDir=path.join(directory,'private-auth-package');await fs.mkdir(sourceDir);
-  const marker=path.join(directory,'private-auth-child'),value='DISPOSABLE_PRIVATE_AUTH_CANARY';
+    company:{id:pass.companyId,slug:'fixture'},encryption:{enabled:encryptedCase,...(encryptedCase?{dataPlaneOrigin:'https://e2ee.trelio.ru'}:{})}});
+  const sourceDir=path.join(directory,'private-auth-package-'+encryptedCase);await fs.mkdir(sourceDir);
+  const marker=path.join(directory,'private-auth-child-'+encryptedCase),value='DISPOSABLE_PRIVATE_AUTH_CANARY';
   await fs.writeFile(path.join(sourceDir,'trelio-secret-setup.json'),JSON.stringify({schemaVersion:2,commands:[{
     id:'authenticate',purpose:'authenticate',arguments:skill.arguments,bindingKey:'service_token',fieldKey:binding.fieldKey,environmentVariable:binding.environmentVariable}]}));
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
     assert.deepEqual(process.argv.slice(2),['authenticate']);assert.equal(process.env.CODEX_THREAD_ID,${JSON.stringify(pass.threadId)});
-    assert.equal(process.env.TRELIO_TEST_AUTH_TOKEN,${JSON.stringify(value)});assert.equal(process.env.TRELIO_MCP_ACCESS_TOKEN,undefined);
+    assert.equal(process.env.TRELIO_TEST_AUTH_TOKEN,${JSON.stringify(value)});
+    ${encryptedCase?"assert.equal(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON).region,'PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY');":''}assert.equal(process.env.TRELIO_MCP_ACCESS_TOKEN,undefined);
     let stdin='';for await(const c of process.stdin)stdin+=c;assert.equal(stdin,'');
     fs.appendFileSync(${JSON.stringify(marker)},'1');console.log(process.env.TRELIO_TEST_AUTH_TOKEN,Buffer.from(process.env.TRELIO_TEST_AUTH_TOKEN).toString('base64'));
     console.error('PRIVATE_PROVIDER_DIAGNOSTIC');`);
@@ -856,28 +882,40 @@ test('private authentication composes the real Run CLI, signed package and one-u
     artifact:{id:currentArtifact,skillId:skill.skillId,runtimeVersion:'1.0.0',packageFormat:'trelio-agent-skill-package/v1',contentProtection:'plain',
       packageSha256:createHash('sha256').update(bytes).digest('hex'),packageSizeBytes:bytes.length,packageSignature:sign(null,bytes,privateKey).toString('base64'),
       signingKeyId:'private-auth-test',signingPublicKeySpki:publicKey.export({type:'spki',format:'der'}).toString('base64'),minimumHostVersion:'3.10.1',manifest:{}}};
+  if(encryptedCase){dto.assistantEncryption=encryptedWire;dto.companyConnection={id:randomUUID(),status:'configured',configured:true,
+    config:configMarker,secretBindings:[]};dto.localIdentity.connectionId=dto.companyConnection.id;}
   const metadata={grantId,runId,secretId,secretVersion:1,storageMode:'trelio',deliveryMode:'env',executable:'trelio-workspace',fieldKeys:['value'],
     environmentVariable:binding.environmentVariable,expiresAt:new Date(Date.now()+300000).toISOString()};
   const rules='# Synthetic platform rules\n',sha256=createHash('sha256').update(rules).digest('hex'),revisionId=randomUUID();
-  let consumed=0,resolutions=0,lateRefusal=false,encrypted=false,fetchFailure;const savedFetch=globalThis.fetch,nonces=new Set();
+  let consumed=0,resolutions=0,lateRefusal=false,encrypted=encryptedCase,cryptoMode='valid',fetchFailure;const savedFetch=globalThis.fetch,nonces=new Set();
   const fixtureFetch=async(url,options)=>{
-    assert.equal(url.origin,taskIdentity.origin);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
+    assert.ok([taskIdentity.origin,'https://e2ee.trelio.ru'].includes(url.origin));assert.doesNotMatch(String(options.body??''),/PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
     const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
+    if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-routing')return new Response(JSON.stringify({schemaVersion:1,
+      company:{id:pass.companyId,slug:'fixture',name:'Fixture'},encryptionState:encrypted?'encrypted':'plain',
+      encryptedDataPlaneOrigin:encrypted?'https://e2ee.trelio.ru':null}));
     if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-compatibility')return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{
       status:options.headers.get('x-trelio-agent-rules-sha256')===sha256?'current':'update_required',revisionId,version:1,sha256,rulesMarkdown:rules}}));
-    if(url.pathname===`/api/digital-assistants/runtime/workspace/workspaces/${workspaceId}/runs/${runId}`)return new Response(JSON.stringify({run:{id:runId,workspaceId}}));
+    if(url.pathname===`/api/digital-assistants/runtime/workspace/workspaces/${workspaceId}/runs/${runId}`)return new Response(JSON.stringify(encryptedCase?{schemaVersion:1,context:{run:{id:runId,workspaceId}},encryptedPayloads:[]}:{run:{id:runId,workspaceId}}));
     if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
       assert.equal(url.searchParams.get('companySlug'),'fixture');assert.equal(options.headers.get('x-trelio-assistant-encryption-protocol'),'1');
+      if(encryptedCase){if(!url.searchParams.has('fingerprint'))return new Response(JSON.stringify({state:'encrypted',suite:'trelio-e2ee-v1',company:encryptionRuntime.company,viewer:{userId:taskIdentity.assistantId},accessState:'device_required',device:null,scope:null,envelope:null}));
+        assert.equal(url.searchParams.get('fingerprint'),managed.fingerprint);
+        const value=structuredClone(encryptionRuntime);if(cryptoMode==='recipient')value.envelope.recipientId=randomUUID();
+        return new Response(JSON.stringify(value));}
       return new Response(JSON.stringify({suite:'trelio-e2ee-v1',state:encrypted?'encrypted':'plain',
         company:{id:pass.companyId,slug:'fixture'},viewer:{userId:taskIdentity.assistantId}}));}
     if(url.pathname===`/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context`){
+      assert.equal(url.origin,taskIdentity.origin);if(encryptedCase)assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
       assert.equal(url.searchParams.get('purpose'),'signed_skill');return new Response(JSON.stringify(metadata));}
     if(url.pathname==='/api/agent-skills/runtime/resolve'){
       resolutions++;assert.deepEqual(JSON.parse(options.headers.get('x-trelio-assistant-secret-checkout')),{grantId,runId});
       if(lateRefusal && resolutions%2===0)return new Response(JSON.stringify({code:'ASSISTANT_OWNER_PAUSED',message:'private'}),{status:409});
+      if(encryptedCase)assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
       return new Response(JSON.stringify(dto));}
     if(url.pathname==='/api/agent-skills/runtime/package')return new Response(bytes);
     assert.equal(url.pathname,`/api/agent-secrets/checkout-grants/${grantId}/consume`);
+    assert.equal(url.origin,taskIdentity.origin);if(encryptedCase)assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
     assert.deepEqual(JSON.parse(options.body),{runId,purpose:'signed_skill'});assert.equal(consumed,0,'the existing one-use native grant cannot replay');consumed++;
     return new Response(JSON.stringify({...metadata,environmentVariables:null,values:{value}}));
   };
@@ -886,16 +924,21 @@ test('private authentication composes the real Run CLI, signed package and one-u
     localAction:{schemaVersion:1,operation:'secret_skill_run',runIdentity:{runId,workspaceId},parameters:{grantId,companySlug:binding.companySlug,fieldKey:binding.fieldKey,environmentVariable:binding.environmentVariable,skill}}};
   let bridgeFailure;
   const run=async()=>{bridgeFailure=null;try{return await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{
-    withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost}),loadCommon:async()=>({...engine,
+    withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost,prepareWorkspaceRun:profile.prepareWorkspaceRun}),loadCommon:async()=>({...engine,
       runWorkspaceCommand:async(...args)=>{try{return await engine.runWorkspaceCommand(...args);}catch(error){bridgeFailure=error;throw error;}}}),
   }));}catch(error){throw bridgeFailure??error;}};
   try{
     // A native refusal after signature/cache preparation must precede consume.
-    encrypted=true;await assert.rejects(run());assert.equal(consumed,0);assert.equal(resolutions,0,'encrypted mode cannot reach package/value preparation');encrypted=false;
+    if(!encryptedCase){encrypted=true;await assert.rejects(run());assert.equal(consumed,0);assert.equal(resolutions,0,'missing managed recipient cannot reach package/value preparation');encrypted=false;}
+    else{cryptoMode='recipient';await assert.rejects(run());assert.equal(consumed,0);assert.equal(resolutions,0);cryptoMode='valid';}
     lateRefusal=true;await assert.rejects(run());assert.equal(fetchFailure,undefined);assert.equal(consumed,0);await assert.rejects(fs.readFile(marker),{code:'ENOENT'});
     lateRefusal=false;const result=await run();assert.equal(consumed,1);assert.equal(await fs.readFile(marker,'utf8'),'1');
     assert.deepEqual(JSON.parse(result.stdout),{schemaVersion:1,state:'command_completed',verificationRequired:true});
-    assert.doesNotMatch(JSON.stringify(result),/DISPOSABLE_PRIVATE|PRIVATE_PROVIDER|RElTUE9TQUJM/);
+    assert.doesNotMatch(JSON.stringify(result),/DISPOSABLE_PRIVATE|PRIVATE_PROVIDER|RElTUE9TQUJM|PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY/);
+    if(encryptedCase){const token=await profile.requireToken(taskIdentity.origin);
+      await assert.rejects(profile.prepareRequest({origin:'https://e2ee.trelio.ru',token,
+        pathname:`/api/agent-workspaces/runs/${runId}/heartbeat`,options:{method:'POST',body:'{}'},buildHeaders:()=>new Headers()}),/ORIGIN_DENIED/);
+      assert.equal(consumed,1,'private auth never inherits encrypted Workspace write authority');}
   }finally{globalThis.fetch=savedFetch;}
 });
 

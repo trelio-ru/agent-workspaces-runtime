@@ -1374,8 +1374,18 @@ operations under the observed task pass:
   `trelio-workspace skill run` path reuses signature/cache/account/interpreter
   and process preparation; native resolution is repeated before one late
   consume. The company encryption registry is readable only for the returned
-  slug, with exact native assistant identity/company ID checks; encrypted mode
-  never reaches values/provider/key fallback. One field lives in RAM and the
+  slug, with exact native assistant identity/company ID checks. Encrypted USE
+  of an existing owner-configured card uses that SAME own-Run reader, managed
+  OS key/HPKE/config hydrator and consumer. Encrypted prepare sends only public
+  commandId/UUID/machine fields; host-owned fingerprint is injected after the
+  fresh mode/pass check. Native expands signed public argv and pins immutable
+  skill/release/artifact/package hash/command/project in the SAME grant. Resolve
+  and consume recheck that recipe/current recipient/pass/Run; legacy NULL recipe
+  is plain-only. Model-provided arbitrary argv/extra prose fail BEFORE HTTP.
+  The native local plan executes directly and never round-trips its argv through
+  another model MCP call. Private auth cannot inherit Workspace writes. Global
+  personal values still use their SAME assistant AAD/keyring; encrypted metadata
+  creation, browser fill and company Secret export/adoption remain closed. One field lives in RAM and the
   child-only environment, never shell/stdin/file/argv. Provider stdout/stderr
   are discarded entirely, not substring-redacted. Its structural
   `command_completed, verificationRequired:true` receipt requires an independent

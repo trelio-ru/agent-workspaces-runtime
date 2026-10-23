@@ -1030,7 +1030,7 @@ test('production content preflight refuses encrypted prose before the real MCP t
   const f=await workspaceProfileFixture();let mode='encrypted',inventoryReads=0,remoteCalls=0,loseResponse=false;
   const canary='SYNTHETIC_PRIVATE_COMPANY_CONTENT';
   f.client.companies=async()=>{inventoryReads++;return [{companyId:f.pass.companyId,encryptionState:mode}];};
-  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode});
+  const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments});
   const client=createAssistantMcpClient({...f.identity,store:f.store,
     withWorkspaceArguments:(input,send)=>withAssistantEncryptedWorkspaceArguments(input,send,{withProfile,
       withManagedContent:(input,send)=>withAssistantCompanyContentArguments(input,send,{withProfile})}),
@@ -1078,6 +1078,26 @@ test('production content preflight refuses encrypted prose before the real MCP t
   assert.equal(remoteCalls,5,'a lost response does not replay the original mutation');
   loseResponse=false;mode='encrypted';const before=inventoryReads;
   await client.callTool('get_task',{});assert.equal(remoteCalls,6);assert.equal(inventoryReads,before,'structural native reads retain their existing encrypted materializer');
+});
+
+test('encrypted private preparation sends only signed command coordinates with an owned fingerprint; arbitrary vectors never reach HTTP',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture();f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:'encrypted'}];
+  const fingerprint='a'.repeat(43),canary='PRIVATE_AUTH_COMPANY_QUERY_CANARY';
+  await f.store.put({origin:f.identity.origin,kind:'company_encryption',id:f.pass.companyId,deviceId:f.identity.deviceId},
+    {assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.pass.companyId,record:{fingerprint}});
+  const parameters={secretId:randomUUID(),runId:randomUUID(),fieldKey:'value',environmentVariable:'TRELIO_AUTH_TOKEN',
+    skill:{companyId:f.pass.companyId,skillId:'auth-fixture',releaseId:randomUUID(),runtimeSessionId:f.runtime.state.runtimeSessionId,commandId:'authenticate'}};
+  let calls=0;const wire=[],invoke=p=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',
+    args:{schemaVersion:1,operation:'secret_skill_prepare',parameters:p}},async args=>{calls++;wire.push(JSON.stringify(args));return args;},
+    {withProfile:action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments})});
+  const result=await invoke(parameters);assert.equal(result.parameters.encryptionFingerprint,fingerprint);assert.equal(calls,1);
+  for(const changed of [{...parameters,reason:canary},{...parameters,encryptionFingerprint:canary},
+    {...parameters,skill:{...parameters.skill,arguments:['authenticate','--query',canary]}},
+    {...parameters,skill:{...parameters.skill,commandId:canary}}, {...parameters,skill:{...parameters.skill,companyId:randomUUID()}}])
+    await assert.rejects(invoke(changed),/ENCRYPTED_CONTENT_REQUIRED/);
+  assert.equal(calls,1);assert.equal(wire.join('').includes(canary),false);
+  f.close();await assert.rejects(invoke(parameters),/PASS_REVIEW_REQUIRED/);assert.equal(calls,1);
 });
 
 test('content mode never falls back to plain on missing inventory, transition, stale pass or changed identity',async()=>{

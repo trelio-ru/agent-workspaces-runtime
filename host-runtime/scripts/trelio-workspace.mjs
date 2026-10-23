@@ -16891,7 +16891,10 @@ const executeSecretCheckout = async (options, positional) => withRun(async ({
     if(commandArguments[0]!=='trelio-workspace' || parsed.command!=='skill' || parsed.positional[0]!=='run')
       denyWorkspaceExecutionProfile();
     let attempted=false;
-    await skillCommand(workspaceOrigin,parsed.options,parsed.positional,{privateSecretSetup:{
+    // Signed public packages use the native control-plane resolver. The Run's
+    // ciphertext origin is selected independently; never send its origin as a
+    // new skill identity or borrow another credential after a failed request.
+    await skillCommand(normalizeOrigin(metadata.origin),parsed.options,parsed.positional,{privateSecretSetup:{
       ...binding,async prepareEnvironment(){
         if(attempted)denyWorkspaceExecutionProfile();attempted=true;
         await profile.authorizePrivateSkillCheckout({grantId,runId:metadata.runId,commandArguments});

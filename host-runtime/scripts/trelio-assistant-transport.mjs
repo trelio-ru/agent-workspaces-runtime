@@ -844,8 +844,9 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   if(materialWorkspaceId!==null && !uuid.test(materialWorkspaceId??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   if(workspaceRun!==null && (!object(workspaceRun) || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
     || Object.values(workspaceRun).some(value=>!uuid.test(value??''))))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-  const ownRun=workspaceRun===null?null:Object.freeze({...workspaceRun});
-  if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,ownRun,materialWorkspaceId,skillRead].filter(Boolean).length>1)
+  const explicitRun=workspaceRun===null?null:Object.freeze({...workspaceRun});
+  const ownRun=explicitRun??(privateSkill?Object.freeze({runId:privateSkill.runId,workspaceId:privateSkill.workspaceId}):null);
+  if([privateFill,privateGeneration,privateSkill,encryptedRead,inspection,explicitRun,materialWorkspaceId,skillRead].filter(Boolean).length>1)
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null,encryptedSkillCompany=null,skillFingerprint=null;
   let lifecycle=null,lifecycleEncryption=null;
@@ -870,6 +871,26 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     async readCompanyContentMode(signal){
       return (await readAssistantCompanyContentMode({identity,host,client,signal})).encryptionState;
     },
+    async preparePrivateSkillArguments(parameters,signal){
+      // No provider argv is sent to obtain a native refusal. Only an existing
+      // signed command ID and public structural refs can reach encrypted MCP;
+      // the native parser expands its immutable public recipe afterwards.
+      if(!object(parameters)||Object.keys(parameters).sort().join(',')!=='environmentVariable,fieldKey,runId,secretId,skill'
+        ||!uuid.test(parameters.secretId??'')||!uuid.test(parameters.runId??'')
+        ||!/^[a-z][a-z0-9_]{0,63}$/u.test(parameters.fieldKey??'')
+        ||!/^TRELIO_[A-Z0-9_]{1,100}$/u.test(parameters.environmentVariable??'')||!object(parameters.skill))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      const skill=parameters.skill,keys=Object.keys(skill).sort().join(',');
+      if(!['commandId,companyId,projectId,releaseId,runtimeSessionId,skillId','commandId,companyId,releaseId,runtimeSessionId,skillId'].includes(keys)
+        ||skill.companyId!==pass.companyId||!uuid.test(skill.releaseId??'')||!uuid.test(skill.runtimeSessionId??'')
+        ||skill.projectId!==undefined&&!uuid.test(skill.projectId??'')||!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(skill.skillId??'')
+        ||skill.skillId.length>120||!/^[a-z][a-z0-9-]{0,47}$/u.test(skill.commandId??''))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+      await assertLivePass(signal);
+      const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
+      if(stored?.assistantId!==identity.assistantId||stored.deviceId!==identity.deviceId||stored.companyId!==pass.companyId
+        ||!/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record?.fingerprint??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      await assertLivePass(signal);
+      return {...structuredClone(parameters),encryptionFingerprint:stored.record.fingerprint};
+    },
     async prepareWorkspaceMaterial(){
       if(!materialWorkspaceId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertLivePass();
@@ -888,6 +909,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     },
     async prepareWorkspaceRun(){
       if(!ownRun)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      lifecycle=null;lifecycleEncryption=null;inspectionPayloads=null;
       await assertLivePass();
       const common=await import('./trelio-workspace.mjs');
       const routing=await common.resolveBridgeDataPlaneRouting({origin:identity.origin,token:handle,workspaceId:ownRun.workspaceId});
@@ -936,7 +958,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(requestOrigin!==identity.origin || companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
       managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity,companyId,store,
-        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany,lock});
+        lockDirectory,assertCurrent:()=>assertLivePass(),allowCreate:!encryptedSkillCompany&&!privateSkill,lock});
       return managedEncryptionDevice;
     },
     async hydrateSkillRuntimeResolution(raw,common,signal){
@@ -1084,12 +1106,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         const keys=[...url.searchParams.keys()];
         if(new Set(keys).size!==keys.length || keys.some(key=>!['companySlug','fingerprint'].includes(key))
           || url.searchParams.get('companySlug')!==(encryptedRead?.companySlug??privateSkill?.companySlug??inspection?.companySlug??lifecycle?.company.slug??encryptedSkillCompany?.slug)
-          || privateSkill && url.searchParams.has('fingerprint')
+          || privateSkill && !lifecycle && url.searchParams.has('fingerprint')
           || url.searchParams.has('fingerprint') && url.searchParams.get('fingerprint')!==managedEncryptionDevice?.fingerprint)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         // SAME native registry reader. A private authentication invocation may
         // discover only its server-bound company's current encryption state.
-        // Common withRun compares company ID and rejects encrypted use before
-        // consuming any field; registration/grants/key fallback stay closed.
+        // Common withRun compares the exact company and own managed recipient
+        // before protected use; registration/grants/key fallback stay closed.
         rewritten='/api/digital-assistants/runtime/encryption/runtime';
         // The SAME managed registry is a fixed canonical control-plane route.
         // Ciphertext Workspace snapshots/bundles remain on the server-selected
@@ -1132,7 +1154,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           route={proofTool:outcome?'assistant_secret_browser_outcome':'assistant_secret_browser_consume'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
-      }else if(privateSkill && requestOrigin===identity.origin
+      }else if(privateSkill && requestOrigin===(lifecycle?.requestOrigin??identity.origin)
         && url.pathname.startsWith(`/api/agent-secrets/checkout-grants/${privateSkill.grantId}/`)){
         const base=`/api/agent-secrets/checkout-grants/${privateSkill.grantId}`;
         if(method==='GET' && url.pathname===base+'/browser-fill-context' && options.body===undefined
@@ -1146,6 +1168,10 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           route={proofTool:'assistant_secret_skill_consume'};
         }else fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         rewritten=url.pathname;
+        // Personal values live in the SAME global private keyring. This is a
+        // fixed native control-plane endpoint, not a company plaintext retry.
+        // The handler still checks the surrounding encrypted task recipient.
+        if(lifecycle)url=new URL(url.pathname+url.search,identity.origin);
       }else if(requestOrigin===identity.origin && (url.pathname==='/api/agent-skills/runtime/resolve' && method==='POST'
         || url.pathname==='/api/agent-skills/runtime/package' && method==='GET')){
         if(inspection)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
@@ -1187,6 +1213,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
             || !url.pathname.startsWith(nativePrefix+`/workspaces/${inspection.workspaceId}/`)
             || !inspectionEncryption : requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
         }else if(lifecycle){
+          if(privateSkill&&method!=='GET')fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           if(!assistantWorkspaceEncryptedLifecycleRoute(method,route.routePattern))fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           const suffix=url.pathname.slice(nativePrefix.length);
           const runPath=suffix.startsWith(`/runs/${ownRun.runId}/`);
@@ -1231,7 +1258,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         }
         headers.delete('x-trelio-assistant-source-encryption-fingerprint');
         headers.delete('x-trelio-assistant-skill-guidance');
-        if(route.proofTool.startsWith('assistant-skill:')){
+        if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')){
           const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
           if(stored?.assistantId===identity.assistantId&&stored.deviceId===identity.deviceId&&stored.companyId===pass.companyId
             &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){
@@ -1400,9 +1427,10 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
   if(!execution||execution.releaseId!==selected.releaseId||native.structuredContent.skill?.id!==selected.skillId)
     fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   native.content=[{type:'text',text:'Current skill instructions and assistant execution capability are in structuredContent.'}];
+  const privateAuthentication=native.structuredContent.assistantExecution?.privateAuthentication;
   native.structuredContent={...native.structuredContent,runtimeExecution:{...execution,localAction:{...execution.localAction,
     server:'trelio-assistant',tool:'continue_assistant_workspace_action'}},remoteMcpExecution:null,
-    assistantExecution:{state:'shared_runtime',automaticFallbackAllowed:false}};
+    assistantExecution:{state:'shared_runtime',automaticFallbackAllowed:false,...(privateAuthentication?{privateAuthentication}:{})}};
   const {compactLocalNativeMcpResult}=await import('./trelio-mcp-results.mjs');
   return compactLocalNativeMcpResult('get_agent_skill',native,selected.arguments);
 };

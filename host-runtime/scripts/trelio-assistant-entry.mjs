@@ -194,6 +194,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
       readCompanyContentMode:profile.readCompanyContentMode,
+      preparePrivateSkillArguments:profile.preparePrivateSkillArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
   },signal);
@@ -1088,9 +1089,14 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
     || name==='prepare_assistant_workspace_run'
     || name==='continue_assistant_workspace_action'
       && ['inspect','open','status','heartbeat','secret_list','secret_generate'].includes(args.operation))return send(args);
-  return withProfile(async({readCompanyContentMode})=>{
+  return withProfile(async({readCompanyContentMode,preparePrivateSkillArguments})=>{
     if(typeof readCompanyContentMode!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     if(await readCompanyContentMode(signal)!=='plain'){
+      if(name==='continue_assistant_workspace_action'&&args.operation==='secret_skill_prepare'){
+        if(typeof preparePrivateSkillArguments!=='function')throw new AssistantTransportError('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        const parameters=await preparePrivateSkillArguments(args.parameters,signal);
+        signal?.throwIfAborted();return send({...args,parameters});
+      }
       // This narrow adapter carries only original native message selectors and
       // account/HMAC refs. Reuse the SAME source observer parser, not a second
       // provider grammar. Arbitrary search/send prose still needs a separate
@@ -1286,7 +1292,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     const inspecting=plan.localAction.operation==='inspect';
     const skill=plan.localAction.operation==='skill_run';
     const runLifecycle=['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation);
-    const encryption=runLifecycle?await prepareWorkspaceRun():null;
+    const encryption=runLifecycle||plan.localAction.operation==='secret_skill_run'?await prepareWorkspaceRun():null;
     if(plan.encryptedLifecycle && (!encryption || encryption.requestOrigin!==plan.encryptedLifecycle.requestOrigin
       || encryption.runtime.company.id!==plan.encryptedLifecycle.companyId))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     if(!skill && !(inspecting && plan.encryptedInspection)){
