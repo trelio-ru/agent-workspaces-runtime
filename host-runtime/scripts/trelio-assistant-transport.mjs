@@ -500,7 +500,7 @@ const validateAssistantEncryptedSkillRead = (value,pass=null) => {
 /** Closed content surface implemented with the SAME local protector, payload
  * collision comparison, managed OS identity and native data-plane routes. This
  * list is a transport capability, never a replacement domain schema or ACL. */
-const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
+const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['cancel_agent_workspace_run','ask_assistant_owner','request_assistant_action','resolve_assistant_intake',
   'create_task','create_comment','update_comment','update_task_title','update_task_description','create_task_control',
   'update_task_control','create_checklist','update_checklist','create_subtask','create_task_relation','update_task_status',
   'update_task_urgency','update_task_due_date','update_task_assignee','set_task_participants','clear_task_control',

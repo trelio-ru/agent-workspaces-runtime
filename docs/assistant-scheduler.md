@@ -1687,3 +1687,22 @@ repeated notifications for retained mentions. Removal/re-addition behaves like
 ordinary comments. New hosts always send the set (including empty arrays); legacy
 missing metadata grants no selected-ID notification authority. No plaintext body,
 new company directory, group membership cache or notification executor is added.
+
+### Encrypted own-Run cancellation
+
+The SAME generic managed protector builds the existing audit payload type
+agent_workspace.cancellation with cancellation_reason. Human audit upload reuses
+that same payload/signature builder; the assistant never calls human OAuth, the
+human cancellation retry loop or local cleanup. Only nativeTool=cancel_agent_workspace_run
+selects this fixed type. The existing opaque HMAC ID derivation binds the
+immutable staging intent to its exact Run without a plaintext reason digest or
+local journal. On a collision, SAME selected-cipher read-back and local expected
+value comparison confirm only the original intent; another reason fails before
+the business call. No domain mutation is automatically retried.
+
+The native preparation and final MCP tool independently repeat the genuine
+task/pass/device, own initiator, Run state, current recipient and signature.
+Shared mutation authority repeats scope/model/target checks before native commit.
+The common cancellation service owns fencing, status and exact same-marker
+read-back; accepted history, files, goal and cycle remain intact. Successful
+ciphertext staging alone is never a cancellation receipt.

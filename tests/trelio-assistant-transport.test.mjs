@@ -124,7 +124,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         ...(preparation.commentFiles?{commentFiles:preparation.commentFiles}:{}),
         ...(preparation.commentMentions?{commentMentions:preparation.commentMentions}:{}),
         ...(preparation.commentDefinition?{action:{commentDefinition:true}}:preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
-      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY/);
+      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY|CANCEL_REASON_CANARY|CANCEL_DIFFERENT_CANARY/);
       if(preparation.commentFileDefinition){
         assert.equal(preparation.nativeTool,'create_comment');
         assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt']);
@@ -405,6 +405,31 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       {...vectorArgs,parameters:{...vectorArgs.parameters,encryptedArguments:vector}},
       {...vectorArgs,parameters:{...vectorArgs.parameters,arguments:[]}}])
       await assert.rejects(withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',args},async()=>assert.fail('invalid vector reached native MCP')));
+    const cancellation={runId:randomUUID(),reason:'CANCEL_REASON_CANARY'};
+    let cancellationCalls=0,cancellationMarker=null;
+    const cancelSend=async wire=>{
+      cancellationCalls++;
+      assert.doesNotMatch(JSON.stringify(wire),/CANCEL_REASON_CANARY/);
+      assert.match(wire.reason,/^~e1:[0-9a-f-]{36}:cancellation_reason~$/u);
+      if(cancellationMarker)assert.equal(wire.reason,cancellationMarker,'same Run/intent keeps its immutable opaque audit reference');
+      cancellationMarker=wire.reason;
+      const {encryptedContent,...argumentsValue}=wire;
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',
+        phase:'publication',companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},
+        nativeTool:'cancel_agent_workspace_run',arguments:argumentsValue},encryptedContent.signature),true);
+      if(cancellationCalls===1)throw new Error('SYNTHETIC_CANCELLATION_RESPONSE_LOST');
+      return {content:[],structuredContent:{run:{id:cancellation.runId,status:'cancelled'}}};
+    };
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'cancel_agent_workspace_run',args:cancellation},cancelSend),/RESPONSE_LOST/);
+    assert.equal(cancellationCalls,1,'no automatic business retry follows a lost cancellation response');
+    await withAssistantManagedContentArguments({...input,name:'cancel_agent_workspace_run',args:cancellation},cancelSend);
+    assert.equal(cancellationCalls,2,'explicit recovery opens the SAME selected stored ciphertext and compares the original reason locally');
+    const cancellationPayload=staged.get(cancellationMarker.slice(4,40));
+    assert.equal(cancellationPayload.entityType,'agent_workspace.cancellation');
+    assert.equal(cancellationPayload.aad.entityType,'agent_workspace.cancellation');
+    await assert.rejects(withAssistantManagedContentArguments({...input,name:'cancel_agent_workspace_run',
+      args:{...cancellation,reason:'CANCEL_DIFFERENT_CANARY'}},cancelSend));
+    assert.equal(cancellationCalls,2,'a different reason cannot silently adopt the staged immutable intent');
     const intake={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId,
       sourceId:randomUUID(),sourceRevision:3,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
     let intakeState='leased',intakeReads=0;

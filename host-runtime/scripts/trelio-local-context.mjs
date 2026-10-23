@@ -1980,6 +1980,7 @@ const buildLocalActionEncryptedPayload = async ({
   entityId,
   values,
   source,
+  entityType = LOCAL_ACTION_ENTITY_TYPE,
 }) => {
   const encrypted = await encryptCompanyPayload({
     payload: {
@@ -1993,7 +1994,7 @@ const buildLocalActionEncryptedPayload = async ({
       companyId: companyEncryption.runtime.company.id,
       scopeId: companyEncryption.runtime.scope.id,
       scopeEpoch: companyEncryption.runtime.scope.epoch,
-      entityType: LOCAL_ACTION_ENTITY_TYPE,
+      entityType,
       entityId,
       entityRevision: 1,
       purpose: "content",
@@ -2003,7 +2004,7 @@ const buildLocalActionEncryptedPayload = async ({
     ...encrypted,
     scopeId: companyEncryption.runtime.scope.id,
     scopeEpoch: companyEncryption.runtime.scope.epoch,
-    entityType: LOCAL_ACTION_ENTITY_TYPE,
+    entityType,
     entityId,
     entityRevision: 1,
     writerDeviceId: companyEncryption.runtime.device.id,
@@ -2129,6 +2130,20 @@ export const protectLocalActionArguments = async ({
   const expectedPayloadValues = {};
   let objectSequence = 0;
   let normalizedArguments = normalizeLocalActionRichTextInputs(rawArguments);
+  if(nativeTool==='cancel_agent_workspace_run'){
+    // The existing audit writer and generic managed protector share exactly
+    // one payload/signature codec. Run identity fixes the opaque local intent
+    // ID; no reason hash, plaintext journal or human cancellation route exists.
+    const runId=normalizeUuid(normalizedArguments.runId,'runId');
+    const reason=normalizeBoundedString(normalizedArguments.reason,'reason',2000);
+    const entityId=deriveLocalActionEntityId(companyEncryption,`cancel_agent_workspace_run\0${runId}`);
+    const values={cancellation_reason:reason};
+    const payload=await buildLocalActionEncryptedPayload({companyEncryption,entityId,
+      entityType:'agent_workspace.cancellation',values,source:{kind:'agent_workspace.cancellation'}});
+    return {value:{...normalizedArguments,reason:buildCompanyEncryptedTextMarker(entityId,'cancellation_reason')},
+      payloads:[payload],expectedPayloadValues:{[entityId]:values}};
+  }
+
   if (
     nativeTool === "plan_agent_procedure_change"
     && !Object.hasOwn(normalizedArguments, "clientRequestId")
@@ -3195,7 +3210,10 @@ export const uploadLocalActionPayloads = async ({
             continue;
           }
           const expected = expectedPayloadValues[payload.entityId];
-          if (existing.entityType !== LOCAL_ACTION_ENTITY_TYPE || !expected) throw error;
+          if (!expected || existing.entityType !== payload.entityType
+            || ![LOCAL_ACTION_ENTITY_TYPE,"agent_workspace.cancellation"].includes(existing.entityType)
+            || existing.entityType === "agent_workspace.cancellation"
+              && Object.keys(expected).sort().join(",") !== "cancellation_reason") throw error;
           const opened = await decryptCompanyPayload({
             encryptedPayload: existing,
             scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
@@ -3410,37 +3428,8 @@ const uploadWorkspaceAuditPayload = async ({
   signal,
 }) => {
   const entityId = crypto.randomUUID();
-  const encrypted = await encryptCompanyPayload({
-    payload: {
-      suite: COMPANY_ENCRYPTION_SUITE,
-      version: 1,
-      source: { kind: entityType },
-      values: { [field]: value },
-    },
-    scopePublicEncryptionJwk: companyEncryption.runtime.scope.publicEncryptionJwk,
-    aad: {
-      companyId: companyEncryption.runtime.company.id,
-      scopeId: companyEncryption.runtime.scope.id,
-      scopeEpoch: companyEncryption.runtime.scope.epoch,
-      entityType,
-      entityId,
-      entityRevision: 1,
-      purpose: "content",
-    },
-  });
-  const payload = {
-    ...encrypted,
-    scopeId: companyEncryption.runtime.scope.id,
-    scopeEpoch: companyEncryption.runtime.scope.epoch,
-    entityType,
-    entityId,
-    entityRevision: 1,
-    writerDeviceId: companyEncryption.runtime.device.id,
-  };
-  payload.signature = await signCompanyEncryptionRecord(
-    companyEncryption.device.privateKeys.signingPrivateKey,
-    buildEncryptedPayloadSignatureRecord(payload),
-  );
+  const payload=await buildLocalActionEncryptedPayload({companyEncryption,entityId,entityType,
+    values:{[field]:value},source:{kind:entityType}});
   await request(
     resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
     token,
