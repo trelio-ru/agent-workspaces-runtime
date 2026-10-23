@@ -629,7 +629,10 @@ provision before routing that newly created task. Unknown provisioning is read
 back before any source/model policy deferral and retains its global fence,
 even without a returned thread ID. A positive native cancelled receipt stops
 the owned running turn; created/waiting/ignored still await their normal final
-marker. After crash/restart, a source pause, expired lease or positive backend
+marker. An abort/kill request or resolved/rejected CLI adapter is not a terminal
+marker; started cancellation rereads that original native delivery independently.
+Before the durable native-start CAS, cancellation closes only the never-started
+preparation. After crash/restart, a source pause, expired lease or positive backend
 cancellation cannot replace the exact original Codex completed/failed read-back.
 The protected pass stays held until that native terminal marker. A closed created
 receipt whose fresh task binding/ACL/transport read fails retains its receipt and

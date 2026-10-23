@@ -1055,7 +1055,7 @@ for(const firstState of ['policy_blocked','waiting_owner','unknown_provision','u
 });
 
 
-for(const nativeState of ['failed','completed'])test(`positive native cancellation dominates ${nativeState} owned turn and releases only its exact receipt`,async t=>{
+for(const nativeState of ['failed','completed','unknown','not_started'])test(`positive native cancellation dominates ${nativeState} owned turn and releases only its exact receipt`,async t=>{
  const f=fixture(t);await f.coordinator.close();const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID();
  const row={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
   skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};let outcome,active=null,stopped=false;
@@ -1069,15 +1069,26 @@ for(const nativeState of ['failed','completed'])test(`positive native cancellati
  f.options.passHost={readActivePass:async()=>active,activatePass:async value=>{active=value;},
   releasePass:async value=>{assert.equal(value.id,active.passId);assert.equal(value.receiptId,outcome.receiptId);active=null;}};
  f.options.workspaceForIntake=async()=>process.cwd();f.options.watchIntervalMs=100;
- f.options.native.run=async(_input,options)=>{options.startInvocation();Object.assign(outcome,{state:'cancelled',receiptId:randomUUID()});
-  await new Promise(resolve=>options.signal.addEventListener('abort',()=>{stopped=true;resolve();},{once:true}));return {state:nativeState};};
+ f.options.native.run=async(input,options)=>{if(nativeState!=='not_started')options.startInvocation();Object.assign(outcome,{state:'cancelled',receiptId:randomUUID()});
+  await new Promise(resolve=>options.signal.addEventListener('abort',()=>{stopped=true;resolve();},{once:true}));
+  if(!['unknown','not_started'].includes(nativeState))f.deliveries.set(input.deliveryId,{state:nativeState,receipt:`codex:${input.threadId}:${randomUUID()}`});
+  return {state:nativeState==='unknown'?'failed':nativeState};};
  const inbox=createAssistantInbox({database:f.database,now:f.options.now}),source={origin:f.identity.origin,assistantId:f.identity.assistantId,
   companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
  inbox.register(source);inbox.observeExternalSourceRevision(source,0);
  inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),
   taskId:null,wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
  const coordinator=createAssistantCoordinator(f.options);try{
-  await coordinator.pollOnce();assert.equal((await coordinator.workOnce()).state,'cancelled');assert.equal(stopped,true);assert.equal(active,null);
+  await coordinator.pollOnce();assert.equal((await coordinator.workOnce()).state,nativeState==='unknown'?'blocked':'cancelled');assert.equal(stopped,true);
+  if(nativeState==='unknown'){
+    assert.ok(active,'an aborted adapter is not a native terminal marker');
+    const original=inbox.ownerIntake(active.passId);assert.equal(original.state,'uncertain');
+    assert.equal((await coordinator.workOnce()).state,'blocked');
+    f.deliveries.set(original.delivery_id,{state:'failed',receipt:`codex:${original.thread_id}:${randomUUID()}`});
+    assert.equal(await coordinator.workOnce(),null,'only the exact native terminal read-back releases cancellation');
+  }
+  assert.equal(active,null);
+  if(nativeState==='not_started')assert.equal(f.deliveries.size,1,'only the completed tool-free provision exists, no model turn invented');
   const closed=f.database.prepare('SELECT state,outcome_state,outcome_receipt FROM assistant_owner_intakes').get();
   assert.equal(closed.state,'complete');assert.equal(closed.outcome_state,'cancelled');assert.equal(closed.outcome_receipt,outcome.receiptId);
   assert.equal(await coordinator.workOnce(),null);assert.equal(f.counts().provisions,1,'cancelled original is not provisioned again');

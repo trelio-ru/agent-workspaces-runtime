@@ -594,8 +594,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   const nativeIntakeStopped=async(row,signal)=>{
     // Native domain cancellation revokes mutation authority, but cannot prove
     // that an orphaned Codex invocation stopped after a host crash. Only this
-    // exact original turn marker (or the current owned adapter's awaited stop)
-    // permits releasing the global pass and starting unrelated native work.
+    // exact original turn marker permits releasing the global pass and
+    // starting unrelated native work, including after an owned adapter abort.
     const result=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
     return ['completed','failed'].includes(result.state);
   };
@@ -663,10 +663,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(saved?.passId===row.id||['started','uncertain'].includes(row.state)){
         const outcome=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(!['created','ignored','redirected','cancelled'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
-        if(!await nativeIntakeStopped(row,signal))return blockedIntake();
+        if(row.native_started===1&&!await nativeIntakeStopped(row,signal))return blockedIntake();
         inbox.finishOwnerIntake(row.id,outcome);if(saved)await passHost.releasePass(outcome);
         // Source revocation does not prove an old native process stopped.
-        // Release only AFTER exact terminal read-back, without further task
+        // A started invocation needs exact terminal read-back; a never-started
+        // preparation does not invent a marker. Continue without further task
         // ACL/route reads. Original refs stay unprocessed/unacked.
         if(outcome.state==='created'||outcome.state==='redirected')inbox.settleOwnerIntake(row.id);
       }else if(row.state==='ready'){
@@ -720,13 +721,26 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       eventId:row.original_event_id,threadId:row.thread_id},identity);
     await passHost.activatePass(pass);
     let started=false,watching=false,cancelledOutcome=null;
+    const settleOwnedCancellation=async()=>{
+      // The native CLI adapter may reject immediately after requesting kill;
+      // that promise alone is not proof of child/turn termination. Reconcile
+      // the original marker with the independent outer signal before release.
+      // Before the synchronous durable start CAS there is no model invocation;
+      // a cancelled preparation can close without inventing a turn marker.
+      if(started&&!await nativeIntakeStopped(inbox.ownerIntake(row.id),signal)){
+        if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);
+        return blockedIntake();
+      }
+      await settleIntake(inbox.ownerIntake(row.id),cancelledOutcome,signal);
+      return {state:'cancelled',kind:'source_intake'};
+    };
     const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     const watch=setInterval(()=>{if(watching)return;watching=true;
       void client.readSourceIntake(intakeLocator(row),combined).then(value=>{
         // Explicit native cancellation is the one closed outcome that stops a
         // running intake immediately. Created/waiting/ignored still need its
         // ordinary final marker; only this positive original receipt releases
-        // the pass after the owned native adapter has stopped.
+        // the pass after the exact original native terminal read-back.
         if(value.state==='cancelled'){
           if(!uuid.test(value.receiptId??''))fail('ASSISTANT_INTAKE_CHANGED');
           cancelledOutcome=value;controller.abort();
@@ -736,12 +750,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
           intakeId:row.id,eventId:row.original_event_id}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
-      if(cancelledOutcome){await settleIntake(inbox.ownerIntake(row.id),cancelledOutcome,signal);return {state:'cancelled',kind:'source_intake'};}
+      if(cancelledOutcome)return settleOwnedCancellation();
       const outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
       if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
       await settleIntake(inbox.ownerIntake(row.id),outcome,combined);return {state:'completed',kind:'source_intake'};
     }catch(error){
-      if(cancelledOutcome){await settleIntake(inbox.ownerIntake(row.id),cancelledOutcome,signal);return {state:'cancelled',kind:'source_intake'};}
+      if(cancelledOutcome)return settleOwnedCancellation();
       if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);
       throw error;
     }finally{clearInterval(watch);controller.abort();}
