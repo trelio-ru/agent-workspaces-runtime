@@ -744,3 +744,99 @@ test('same task chat can wait for an exact remote owner decision, call once, and
   const messages=raw.trim().split('\n').map(line=>JSON.parse(line));assert.equal(messages.filter(message=>message.method==='notifications/tools/list_changed').length,2);
   assert.equal(messages.filter(message=>message.id).length,9);
 });
+
+test('maintainer QA configuration is exact, hash-pinned and never a production origin or credential container',async t=>{
+  const fs=await import('node:fs/promises'),os=await import('node:os'),path=await import('node:path');
+  const {createHash}=await import('node:crypto');
+  const {normalizeAssistantQaConfiguration,readAssistantQaConfiguration}=await import('../scripts/assistant-qa-pilot.mjs');
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-qa-config-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const configuration={schemaVersion:1,origin:'https://assistant-qa.example.test',configurationDirectory:path.join(directory,'state'),
+    pluginRoot:path.join(directory,'shell'),runtimeVersion:'3.18.0',packageSha256:'a'.repeat(64)};
+  assert.equal(normalizeAssistantQaConfiguration(configuration).origin,configuration.origin);
+  for(const override of [{origin:'https://trelio.ru'},{origin:'https://e2ee.trelio.ru.'},{origin:'http://qa.example.test'},
+    {origin:'https://user:password@qa.example.test'},{origin:'https://qa.example.test/path'},
+    {credential:'PRIVATE'},{configurationDirectory:'relative'},{runtimeVersion:'3.18.0-candidate'},{runtimeVersion:'3.17.0'},
+    {origin:'https://10.86.0.1'}])
+    assert.throws(()=>normalizeAssistantQaConfiguration({...configuration,...override}));
+  const file=path.join(directory,'instance.json'),bytes=Buffer.from(JSON.stringify(configuration));await fs.writeFile(file,bytes,{mode:0o600});
+  const hash=createHash('sha256').update(bytes).digest('hex');assert.deepEqual(await readAssistantQaConfiguration(file,hash),configuration);
+  await fs.writeFile(file,JSON.stringify({...configuration,origin:'https://other.example.test'}));
+  await assert.rejects(readAssistantQaConfiguration(file,hash),error=>error.code==='ASSISTANT_QA_PILOT_UNAVAILABLE');
+  const link=path.join(directory,'link.json');await fs.symlink(file,link);
+  await assert.rejects(readAssistantQaConfiguration(link,hash));
+});
+
+test('QA launcher composes the same protected factories and fresh bounded worker with one immutable instance',async()=>{
+  const path=await import('node:path'),os=await import('node:os');
+  const {EventEmitter}=await import('node:events');
+  const entry=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {createAssistantQaPilot}=await import('../scripts/assistant-qa-pilot.mjs');
+  const configuration={schemaVersion:1,origin:'https://assistant-qa.example.test',configurationDirectory:path.join(os.tmpdir(),'qa-private-instance'),
+    pluginRoot:path.join(os.tmpdir(),'qa-installed-shell'),runtimeVersion:'3.18.0',packageSha256:'a'.repeat(64)};
+  const identity={schemaVersion:1,origin:configuration.origin,assistantId:randomUUID(),deviceId:randomUUID()};
+  const status={structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+    authorizedByUserId:randomUUID(),stage:'non-production-pilot',businessReady:true,
+    availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}};
+  const calls=[],spawns=[];let current=identity,nativeStatus=status,entryOptions;
+  // Constructor/OS adapters here are deliberately controlled wiring fixtures.
+  // They do not claim genuine grant, signature, provider or Windows evidence;
+  // those stay in native PG, signed-child/HPKE and the real Windows acceptance.
+  const modules={entry:{...entry,
+    runAssistantEntry:async(_args,options)=>{entryOptions=options;return options.maintenanceRequest({operation:'list'});},
+    withProductionAssistantWorkspace:async(action,options)=>{calls.push(['profile',options]);return options.context((client,host)=>action({identity:client.identity,host}));},
+    createProductionAssistantMcp:async options=>{calls.push(['mcp',options]);return {callTool:async()=>nativeStatus};},
+    withProductionAssistantManagedContent:async(request,send,options)=>{calls.push(['managed',options]);return options.context(()=>send(request.args));}},
+    transport:{createAssistantHttp:()=>{},createAssistantDeviceClient:input=>({identity:{origin:input.origin,assistantId:input.assistantId,deviceId:input.deviceId}}),
+      createAssistantMcpClient:()=>({callTool:async(name,args)=>{calls.push(['native-status',name,args]);return nativeStatus;}})},
+    privateRuntime:{createAssistantPrivateStore:options=>{calls.push(['store',options.directory]);return {}; }},
+    hook:{createAssistantHostState:options=>{calls.push(['host',options.directory]);return {readIdentity:async()=>current};}},
+    common:{resolveWorkspaceBridgeConfigDirectory:()=>path.join(os.tmpdir(),'production-private-root'),assertPrivatePathKind:async()=>{}},
+    session:{withPrivateProcessSession:async action=>action()},setup:{},finish:{}};
+  const spawnProcess=(executable,args,options)=>{
+    const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};
+    let input='';child.stdin.on('data',chunk=>{input+=chunk;});child.stdin.on('finish',()=>setImmediate(()=>{
+      spawns.push({executable,args,options,input});child.stdout.end(JSON.stringify({value:[]}));child.emit('close',0);
+    }));return child;
+  };
+  const file=path.join(os.tmpdir(),'qa-instance.json'),hash='b'.repeat(64),launcher=path.join(os.tmpdir(),'maintainer-launcher.mjs');
+  const pilot=await createAssistantQaPilot({configuration,configurationFile:file,configurationSha256:hash,modules,spawnProcess,launcher});
+  await pilot.withProfile(async value=>{
+    assert.equal(value.identity.origin,configuration.origin);assert.equal(value.host.configurationDirectory,configuration.configurationDirectory);
+  });
+  const mcp=await pilot.createMcp();assert.ok(mcp);
+  const selected=calls.find(row=>row[0]==='mcp')[1];assert.equal(selected.context,pilot.context);assert.equal(selected.withProfile,pilot.withProfile);
+  await selected.withManagedContent({name:'ask_assistant_owner',args:{questionText:'fixture only'}},async value=>value);
+  assert.equal(calls.find(row=>row[0]==='managed')[1].context,pilot.context);
+  assert.ok(calls.filter(row=>row[0]==='store').every(row=>row[1]===path.join(configuration.configurationDirectory,'digital-assistants','credentials')));
+  assert.ok(calls.filter(row=>row[0]==='native-status').every(row=>row[1]==='get_assistant_status'));
+  await pilot.run(['mcp']);assert.equal(spawns.length,1);
+  assert.deepEqual(spawns[0].args,[launcher,'--configuration',file,'--sha256',hash,'bridge','assistant','request']);
+  assert.deepEqual(JSON.parse(spawns[0].input),{operation:'list'},'QA configuration is not a model/native request field');
+  assert.equal(typeof entryOptions.createHook,'function');assert.equal(typeof entryOptions.executePlan,'function');
+  nativeStatus={...status,structuredContent:{...status.structuredContent,stage:'release-gated'}};
+  await assert.rejects(pilot.context(()=>assert.fail('wrong native stage executed business work')));
+  nativeStatus=status;current={...identity,origin:'https://trelio.ru'};
+  await assert.rejects(pilot.context(()=>assert.fail('production identity was adopted')));
+  await assert.rejects(createAssistantQaPilot({configuration:{...configuration,configurationDirectory:modules.common.resolveWorkspaceBridgeConfigDirectory()},
+    configurationFile:file,configurationSha256:hash,modules}),error=>error.code==='ASSISTANT_QA_PILOT_UNAVAILABLE');
+});
+
+test('trusted Workspace context retains attachment reader and isolates actual account/inspection profile paths',async()=>{
+  const {withProductionAssistantWorkspace}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const identity={schemaVersion:1,origin:'https://assistant-qa.example.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  const configurationDirectory=path.join(os.tmpdir(),'qa-profile-context');
+  const host=Object.freeze({configurationDirectory,readIdentity:async()=>identity,readActivePass:async()=>pass});
+  const client={identity};
+  await withProductionAssistantWorkspace(async current=>{
+    assert.equal(current.identity.origin,identity.origin);assert.equal(current.host.configurationDirectory,configurationDirectory);
+    assert.equal(typeof current.prepareAttachmentRead,'function','the SAME encrypted attachment reader survives factory composition');
+    const profile=common.currentWorkspaceExecutionProfile();
+    const accounts=await profile.resolveSkillCatalogueDirectory(path.join(os.tmpdir(),'unselected-production-state'));
+    const inspection=await profile.resolveInspectionDirectory(path.join(os.tmpdir(),'unselected-production-state'));
+    assert.ok(accounts.startsWith(configurationDirectory+path.sep));assert.ok(inspection.startsWith(configurationDirectory+path.sep));
+    assert.doesNotMatch(accounts+inspection,/unselected-production-state/);
+  },{context:async action=>action(client,host,{})});
+});

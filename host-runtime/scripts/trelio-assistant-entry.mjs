@@ -2,6 +2,10 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-host-runtime-recovery.mjs';
+// Internal source-tree harness compatibility only, not a model capability or
+// an environment switch. An older signed worker must not silently ignore its
+// trusted JS callbacks and reopen the production journal during QA acceptance.
+export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -97,14 +101,16 @@ export const callAssistantSetupTool = async (setup, name, args) => {
 /** This profile never imports/starts the human local MCP, reads its OAuth, or
  * migrates Codex configuration. Setup primitives load only for an actual
  * setup call; paired schema discovery uses the separate protected read adapter. */
-export const createProductionAssistantSetup = async () => {
+export const createProductionAssistantSetup = async ({expectedOrigin='https://trelio.ru',configurationDirectory,createBackground=createProductionAssistantBackground}={}) => {
   const [{ createAssistantPrivateStore }, { createAssistantHttp }, common, { withPrivateProcessSession }, { createAssistantHostState }] = await Promise.all([
     import('./trelio-assistant-private.mjs'), import('./trelio-assistant-transport.mjs'), import('./trelio-workspace.mjs'),
     import('./trelio-hook-private-session.mjs'), import('./trelio-assistant-hook.mjs'),
   ]);
-  const origin = 'https://trelio.ru';
-  const store = createAssistantPrivateStore({ directory: path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants', 'credentials') });
-  const hostState = createAssistantHostState({ directory: path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants'), store });
+  const origin = expectedOrigin;
+  const config=configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory();
+  if(!path.isAbsolute(config))fail('ASSISTANT_HOST_STATE_INVALID');
+  const store = createAssistantPrivateStore({ directory: path.join(config, 'digital-assistants', 'credentials') });
+  const hostState = createAssistantHostState({ directory: path.join(config, 'digital-assistants'), store });
   const setup = createAssistantSetup({ origin, store, http: createAssistantHttp({ origin }) });
   // As in the common bridge, share one native worker only inside this tool
   // invocation. A long-lived MCP must not retain its ACL results or pipes.
@@ -113,7 +119,7 @@ export const createProductionAssistantSetup = async () => {
       const result = await action(...args);
       if (result.state === 'paired') await hostState.saveIdentity({ origin, assistantId: result.assistantId, deviceId: result.deviceId });
       return result;
-    })])), background: async operation => (await createProductionAssistantBackground())(operation) };
+    })])), background: async operation => (await createBackground())(operation) };
 };
 
 /** OS registration is composed only after an explicit setup call, never from
@@ -135,7 +141,7 @@ export const createProductionAssistantBackground = async () => {
 const productionSourceReads=async({common,identity,client,host,signal})=>{
   const [{openAssistantDatabase},{createAssistantInbox},{createAssistantSourceReadObserver}]=await Promise.all([
     import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs'),import('./trelio-assistant-transport.mjs')]);
-  const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime',
+  const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime',
     identity.assistantId.toLowerCase(),identity.deviceId.toLowerCase());
   const withInbox=async action=>{
     signal?.throwIfAborted();
@@ -150,50 +156,34 @@ const productionSourceReads=async({common,identity,client,host,signal})=>{
 /** The host identity is selected by completed protected pairing, never tool
  * arguments or an inherited human thread. Every invocation gets its own native
  * ACL/DPAPI lifetime and the common non-sliding hook clock. */
-export const createProductionAssistantHook = async () => {
-  const [{ createAssistantPrivateStore }, { createAssistantHttp, createAssistantDeviceClient }, common,
-    { createAssistantHostState, createAssistantTaskHook }] = await Promise.all([
-    import('./trelio-assistant-private.mjs'), import('./trelio-assistant-transport.mjs'), import('./trelio-workspace.mjs'),
-    import('./trelio-assistant-hook.mjs'),
-  ]);
-  const directory = path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants');
-  const store = createAssistantPrivateStore({ directory: path.join(directory, 'credentials') });
-  const hostState = createAssistantHostState({ directory, store });
-  const identity = await hostState.readIdentity();
-  if (!identity) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
-  if (identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
-  const client = createAssistantDeviceClient({ ...identity, store, http: createAssistantHttp({ origin: identity.origin }) });
+export const createProductionAssistantHook = async ({context=productionContext}={}) => context(async(client,hostState,store)=>{
+  const common=await import('./trelio-workspace.mjs');
+  const {createAssistantTaskHook}=await import('./trelio-assistant-hook.mjs');
+  const identity=client.identity;
+  const directory=path.join(hostState.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
   const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
   const reads=await productionSourceReads({common,identity,client,host:hostState,signal:runtimeHookSignal()});
-  return createAssistantTaskHook({ identity, client, store, readActivePass: hostState.readActivePass,
-    confirmSourceProcessing:reads.confirmProcessing,
-    lockDirectory: path.join(directory, 'runtime-locks') });
-};
+  return createAssistantTaskHook({identity,client,store,readActivePass:hostState.readActivePass,
+    confirmSourceProcessing:reads.confirmProcessing,lockDirectory:path.join(directory,'runtime-locks')});
+});
 
 /** Invoke the shared Workspace engine under this device/pass only. The
  * protected native worker is scoped to one action; no human OAuth slot or
  * process-global auth state is selected. This helper is not a model tool and
  * does not itself open the businessReady gate. */
-export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null}={}) => {
+export const withProductionAssistantWorkspace = async (action, {signal,encryptedTaskRead=null,encryptedInspection=null,encryptedSkillRead=null,workspaceRun=null,materialWorkspaceId=null,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,skillAccountSetup=null,context=productionContext}={}) => {
   if(typeof action!=='function')throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
-  const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
-    {withPrivateProcessSession}]=await Promise.all([
-    import('./trelio-workspace.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),
-    import('./trelio-assistant-transport.mjs'),import('./trelio-hook-private-session.mjs'),
-  ]);
-  return withPrivateProcessSession(async()=>{
-    const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
-    const store=createAssistantPrivateStore({directory:path.join(directory,'credentials')});
-    const host=createAssistantHostState({directory,store});
-    const identity=await host.readIdentity();
-    if(!identity || identity.origin!=='https://trelio.ru')throw Object.assign(new Error(),{code:'ASSISTANT_HOST_STATE_INVALID'});
-    const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
+  const [common,transport]=await Promise.all([import('./trelio-workspace.mjs'),import('./trelio-assistant-transport.mjs')]);
+  return context(async(client,host,store)=>{
+    const identity=client.identity;
+    const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
     const sourceReads=await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
     const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
       prepareWorkspaceMaterial:profile.prepareWorkspaceMaterial,
+      prepareAttachmentRead:profile.prepareAttachmentRead,
       readCompanyContentMode:profile.readCompanyContentMode,
       preparePrivateSkillArguments:profile.preparePrivateSkillArguments,
       preparePrivateBrowserArguments:profile.preparePrivateBrowserArguments,
@@ -202,30 +192,24 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       prepareSkillAccountSetupArguments:profile.prepareSkillAccountSetupArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
-  },signal);
+  },{signal});
 };
 
 /** Same private process/OS identity composition as the Workspace engine,
  * without constructing a fake task profile for a taskless source intake. The
  * fixed companies reader selects current mode; unsupported transitions never
  * send original prose to a remote tools/call. */
-export const withProductionAssistantManagedContent=async({name,args,signal},send)=>{
-  const [common,{createAssistantPrivateStore},{createAssistantHostState},transport,
-    {withPrivateProcessSession}]=await Promise.all([
-    import('./trelio-workspace.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),
-    import('./trelio-assistant-transport.mjs'),import('./trelio-hook-private-session.mjs')]);
-  return withPrivateProcessSession(async()=>{
-    const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
-    const store=createAssistantPrivateStore({directory:path.join(directory,'credentials')}),host=createAssistantHostState({directory,store});
-    const identity=await host.readIdentity();
-    if(!identity||identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
-    const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
+export const withProductionAssistantManagedContent=async({name,args,signal},send,{context=productionContext,withProfile=withProductionAssistantWorkspace}={})=>{
+  const [common,transport]=await Promise.all([import('./trelio-workspace.mjs'),import('./trelio-assistant-transport.mjs')]);
+  return context(async(client,host,store)=>{
+    const identity=client.identity;
+    const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
     const company=await transport.readAssistantCompanyContentMode({identity,host,client,signal});
     if(company.encryptionState==='plain')return send(args);
     let selectedArguments=args;
     if(name==='request_assistant_action'&&args.operation==='setup_skill_account'){
       const fields=transport.normalizeAssistantSkillAccountSetupFields(args.fields);
-      const inspected=await withProductionAssistantWorkspace(async current=>{
+      const inspected=await withProfile(async current=>{
         if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
         return transport.inspectAssistantSkillAccountSetupForOwner({origin:identity.origin,companyId:company.companyId,fields,signal,common});
       },{signal,encryptedSkillRead:{schemaVersion:1,nativeTool:'get_agent_skill',companyId:company.companyId,
@@ -234,7 +218,7 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
     }
     if(name==='request_assistant_action'&&args.operation==='accept_skill_runtime'){
       if(typeof args.reason!=='string'||Buffer.byteLength(args.reason.trim(),'utf8')>1400)fail('ASSISTANT_SKILL_CONSENT_REASON_TOO_LONG');
-      const inspected=await withProductionAssistantWorkspace(async current=>{
+      const inspected=await withProfile(async current=>{
         if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
         const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
         const pass=validateAssistantActivePass(await current.host.readActivePass(),identity);
@@ -250,27 +234,26 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
     }
     return transport.withAssistantManagedContentArguments({identity,host,client,store,lockDirectory:path.join(directory,'runtime-locks'),
       name,args:selectedArguments,signal},send);
-  },signal);
+  },{signal});
 };
 
 /** Schema discovery before enrollment needs no credential/private worker.
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
-export const createProductionAssistantMcp = async ({presentationProfile='task'}={}) => {
+export const createProductionAssistantMcp = async ({presentationProfile='task',context=productionContext,withProfile=withProductionAssistantWorkspace,withManagedContent=withProductionAssistantManagedContent}={}) => {
   const common = await import('./trelio-workspace.mjs');
-  const directory = path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants');
-  try { await fs.lstat(path.join(directory, 'identity.json')); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  const [{ createAssistantPrivateStore }, { createAssistantHostState }, { createAssistantMcpClient, createAssistantDeviceClient, createAssistantHttp, readAssistantOwnerIntakeMessage }] = await Promise.all([
-    import('./trelio-assistant-private.mjs'), import('./trelio-assistant-hook.mjs'), import('./trelio-assistant-transport.mjs'),
-  ]);
-  const store = createAssistantPrivateStore({ directory: path.join(directory, 'credentials') });
-  const host = createAssistantHostState({ directory, store });
-  const identity = await host.readIdentity();
-  if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
-  const sourceClient=createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})});
+  // Preserve credential-free production discovery. A trusted maintainer context
+  // owns its own private root; no tool, CLI envelope or environment selects it.
+  if(context===productionContext){
+    try{await fs.lstat(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
+    catch(error){if(error.code==='ENOENT')return null;throw error;}
+  }
+  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage}=await import('./trelio-assistant-transport.mjs');
+  return context(async(sourceClient,host,store)=>{
+  const identity=sourceClient.identity;
+  const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
   return createAssistantMcpClient({ ...identity, store, presentationProfile,
-    withWorkspaceArguments:withAssistantEncryptedWorkspaceArguments,
+    withWorkspaceArguments:(request,send)=>withAssistantEncryptedWorkspaceArguments(request,send,{withProfile,withManagedContent}),
     readActivePass:host.readActivePass,
     materializeSourceIntake:async({result,arguments:args,signal})=>{
       const [{validateAssistantActivePass},{buildRuntimeSessionProof,withRuntimeStateLock},{openAssistantDatabase}]=await Promise.all([
@@ -305,7 +288,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task'}=
       delete value.sourceRead;
       return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
     },
-    materializeEncryptedTask: ({descriptor,signal}) => withProductionAssistantWorkspace(async current => {
+    materializeEncryptedTask: ({descriptor,signal}) => withProfile(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
       }
@@ -313,13 +296,13 @@ export const createProductionAssistantMcp = async ({presentationProfile='task'}=
       return materializeAssistantEncryptedTask({origin:identity.origin,descriptor:current.encryptedTaskRead,signal,
         assertCurrent:current.assertEncryptedTaskReadCurrent});
     },{signal,encryptedTaskRead:descriptor}),
-    materializeEncryptedSkill: ({descriptor,signal}) => withProductionAssistantWorkspace(async current => {
+    materializeEncryptedSkill: ({descriptor,signal}) => withProfile(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key]))
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
       const {materializeAssistantEncryptedSkill}=await import('./trelio-assistant-transport.mjs');
       return materializeAssistantEncryptedSkill({origin:identity.origin,descriptor,signal});
     },{signal,encryptedSkillRead:descriptor}),
-    materializeAttachment: ({result,attachmentId,signal}) => withProductionAssistantWorkspace(async current => {
+    materializeAttachment: ({result,attachmentId,signal}) => withProfile(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
       }
@@ -328,20 +311,21 @@ export const createProductionAssistantMcp = async ({presentationProfile='task'}=
         prepareEncryptedRead:value=>current.prepareAttachmentRead(value)});
     },{signal}),
   });
+  });
 };
 
 // Long-lived stdio is deliberately only a facade. A fresh child resolves the
 // current signed implementation for each invocation without reconnecting Codex.
-export const createForwardingAssistantMcp = async ({presentationProfile='task'}={}) => {
+export const createForwardingAssistantMcp = async ({presentationProfile='task',request=requestCurrentAssistantRuntime,createWorkspace=createAssistantWorkspaceExecutor,configurationDirectory}={}) => {
   // Preserve secret-free pre-enrollment discovery. A source-only or not-yet
   // paired installation must not require a loader, private worker or network.
   const common=await import('./trelio-workspace.mjs');
-  try {await fs.lstat(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
+  try {await fs.lstat(path.join(configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
   catch(error){if(error.code==='ENOENT')return null;throw error;}
-  const workspace = await createAssistantWorkspaceExecutor();
-  return {listTools:signal=>requestCurrentAssistantRuntime({operation:'list',...(['remote_mcp','skill_setup'].includes(presentationProfile)?{presentationProfile}:{})},{signal}),
+  const workspace = await createWorkspace();
+  return {listTools:signal=>request({operation:'list',...(['remote_mcp','skill_setup'].includes(presentationProfile)?{presentationProfile}:{})},{signal}),
     async callTool(name,args,signal) {
-      const result=await requestCurrentAssistantRuntime({operation:'call',name,arguments:args,...(['remote_mcp','skill_setup'].includes(presentationProfile)?{presentationProfile}:{})},{signal});
+      const result=await request({operation:'call',name,arguments:args,...(['remote_mcp','skill_setup'].includes(presentationProfile)?{presentationProfile}:{})},{signal});
       if(name!=='continue_assistant_workspace_action' || result?.isError)return result;
       // These are native metadata/preparation/creation receipts, not local command
       // plans. The next returned secret_browser_fill continuation executes in
@@ -744,7 +728,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   };
   const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
-  const configDirectory=dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();
+  const configDirectory=dependencies.configurationDirectory??dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();
   const root=dependencies.directory??path.join(configDirectory,'digital-assistants','runtime');
   if(!path.isAbsolute(root)) fail('ASSISTANT_HOST_STATE_INVALID');
   const ensureDirectory=dependencies.ensureDirectory??(directory=>privateInvocation(()=>common.ensurePrivateDirectory(directory)));
@@ -917,6 +901,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 };
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
+  backgroundTick=runAssistantBackgroundTick,requestRuntime=requestCurrentAssistantRuntime,upgradeRuntime=prepareHostRuntimeUpgrade,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
   prepareEncryption=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantCompanyEncryption(input),
   configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
@@ -925,15 +910,15 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   verifyMaxSource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantMaxSource(input),
   verifySource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
-  if(request.operation==='background_tick')return runAssistantBackgroundTick();
+  if(request.operation==='background_tick')return backgroundTick();
   if(request.operation==='health') {
     const canUpdate=await context(async (_client,host)=>!await host.readActivePass());
     if(canUpdate===null)return null;
     try {
-      if(canUpdate)await prepareHostRuntimeUpgrade({timeoutMs:30_000});
+      if(canUpdate)await upgradeRuntime({timeoutMs:30_000});
       // Downloading is not activation. A new worker selected by the verified
       // pointer proves the actual loaded version before reporting recovery.
-      return await requestCurrentAssistantRuntime({operation:'health_check'});
+      return await requestRuntime({operation:'health_check'});
     } catch(error) {
       const direct=assistantHealthFailure(error);
       return context(client=>maintainAssistantHost({client,versions:versions(),
@@ -1017,7 +1002,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
 /** Internal server plan, never an arbitrary command/directory selected by a
  * model. Parse it before private I/O; the child repeats live pass/Run admission
  * before accessing local files, including the nominally local status action. */
-export const validateAssistantWorkspacePlan = async raw => {
+export const validateAssistantWorkspacePlan = async (raw,{expectedOrigin='https://trelio.ru'}={}) => {
   if(!raw || Object.getPrototypeOf(raw)!==Object.prototype || Object.keys(raw).some(key=>!['prepared','localAction','scope','encryptedInspection','encryptedLifecycle'].includes(key))
     || raw.prepared!==true || !raw.scope || Object.keys(raw.scope).sort().join(',')!=='assistantUserId,companyId,deviceId,passId,taskId'
     || Object.values(raw.scope).some(value=>typeof value!=='string' || !new RegExp(UUID,'u').test(value)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
@@ -1028,13 +1013,13 @@ export const validateAssistantWorkspacePlan = async raw => {
       || snapshot.encryptedLifecycle?.workspaceId!==(action.operation==='open'?action.parameters?.workspaceId:action.runIdentity?.workspaceId))
       fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
     await validateAssistantEncryptedInspection({descriptor:snapshot.encryptedLifecycle,
-      identity:{origin:'https://trelio.ru'},pass:snapshot.scope});
+      identity:{origin:expectedOrigin},pass:snapshot.scope});
   }
   if(Object.hasOwn(snapshot,'encryptedInspection')){
     if(action?.operation!=='inspect' || snapshot.encryptedInspection?.workspaceId!==action.parameters?.workspaceId)
       fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
     await validateAssistantEncryptedInspection({descriptor:snapshot.encryptedInspection,
-      identity:{origin:'https://trelio.ru'},pass:snapshot.scope});
+      identity:{origin:expectedOrigin},pass:snapshot.scope});
   }
   if(!action || !['inspect','open','status','heartbeat','checkpoint','finish','pause','skill_run','secret_browser_fill','secret_generate','secret_company_create','secret_input','secret_skill_run'].includes(action.operation)
     || Object.keys(action).some(key=>!['schemaVersion','operation','parameters','runIdentity'].includes(key))
@@ -1312,7 +1297,7 @@ export const withAssistantEncryptedMaterial = async ({args,signal},send,
     const manifest=transport.assistantEncryptedMaterialProofPayload({...pass,...args,...witness,
       references:assistantSourceProcessingReferences(args.processedSourceReferences??[])});
     const {buildRuntimeSessionProof,withRuntimeStateLock}=await import('./trelio-runtime-session.mjs');
-    const directory=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime-locks');
+    const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','runtime-locks');
     // Native reads acquire the ordinary state lock themselves. Complete their
     // fresh envelope check before taking that lock for this one local signature.
     await common.currentWorkspaceExecutionProfile().assertWorkspaceInspectionCurrent();
@@ -1329,9 +1314,9 @@ export const withAssistantEncryptedMaterial = async ({args,signal},send,
     });
   },{signal,materialWorkspaceId:args.workspaceId});
 };
-const assistantPlanTaskScope=plan=>({origin:'https://trelio.ru',assistantId:plan.scope.assistantUserId,deviceId:plan.scope.deviceId,
+const assistantPlanTaskScope=(plan,expectedOrigin='https://trelio.ru')=>({origin:expectedOrigin,assistantId:plan.scope.assistantUserId,deviceId:plan.scope.deviceId,
   companyId:plan.scope.companyId,taskId:plan.scope.taskId});
-const assistantWorkspaceRoot=(config,plan)=>path.join(assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan)),
+const assistantWorkspaceRoot=(config,plan,expectedOrigin)=>path.join(assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin)),
   'workspaces',plan.runIdentity.workspaceId.toLowerCase());
 /** No silent move/reset of prototype writable folders or permanent chat cwd.
  * Presence requires explicit outcome recovery. This exact lstat reads no files;
@@ -1348,7 +1333,7 @@ const rejectLegacyAssistantTaskStorage=async(config,scope)=>{
  * signed child. It cannot keep an expired async auth profile or a human token.
  * Finishing survives cancellation of a short MCP wait, as in the human host. */
 export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWorkspaceProcess,configDirectory,
-  finishOptions={},heartbeatOptions={}}={}) => {
+  finishOptions={},heartbeatOptions={},expectedOrigin='https://trelio.ru'}={}) => {
   const common=await import('./trelio-workspace.mjs');
   const {createWorkspaceFinishOperations}=await import('./trelio-workspace-finish-progress.mjs');
   const {createWorkspaceRunHeartbeatManager}=await import('./trelio-local-context.mjs');
@@ -1365,11 +1350,11 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       return {stdout:value.stdout??'',stderr:value.stderr??''};
     }});
   return {async execute(raw,{signal}={}) {
-    const plan=await validateAssistantWorkspacePlan(raw);
+    const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
     // Accepted inspection has no Run, renewal, progress registry or writable
     // task directory. The common reader selects its isolated cache in the child.
     if(['inspect','skill_run'].includes(plan.localAction.operation))return runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal});
-    const root=assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
+    const root=assistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
     const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
     const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
     const previous=plans.get(directory);
@@ -1390,7 +1375,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       const entry=await heartbeat.beginAction(directory,plan.localAction.operation);
       try {
         const result=await runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal:actionSignal,onProgress});
-        if(plan.localAction.operation==='open')heartbeat.start({origin:'https://trelio.ru',...plan.runIdentity,workspaceDirectory:directory});
+        if(plan.localAction.operation==='open')heartbeat.start({origin:expectedOrigin,...plan.runIdentity,workspaceDirectory:directory});
         else heartbeat.markActionSuccess(entry,plan.localAction.operation,plan.localAction.parameters);
         return result;
       } finally {heartbeat.endAction(entry);}
@@ -1414,8 +1399,8 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
  * executable. Payload is bounded stdin; stdout is the common action result,
  * and only ordinary fixed progress frames are observed before completion. */
 export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolveLoader=resolveHostRuntimeLoader,
-  runProcess,environment=process.env}={}) => {
-  const plan=await validateAssistantWorkspacePlan(raw);
+  runProcess,environment=process.env,expectedOrigin='https://trelio.ru'}={}) => {
+  const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
   const input=JSON.stringify({prepared:true,scope:plan.scope,localAction:plan.localAction});
   const loader=await resolveLoader({environment});
   const {runWorkspaceFinishProcess}=await import('./trelio-workspace-finish-progress.mjs');
@@ -1448,13 +1433,13 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
  * algorithms (safe materialization, dirty state, recovery, checkpoint and
  * acceptance) remain the common engine. No module is copied into this adapter. */
 export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProductionAssistantWorkspace,
-  loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs')}={}) => {
-  const plan=await validateAssistantWorkspacePlan(raw);
+  loadCommon=()=>import('./trelio-workspace.mjs'),loadContext=()=>import('./trelio-local-context.mjs'),expectedOrigin='https://trelio.ru'}={}) => {
+  const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
   return withProfile(async({identity,client,store,host,withSecretGenerationKey,selectCompanySecretContext,prepareWorkspaceRun})=>{
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
     const active=validateAssistantActivePass(await host.readActivePass(),identity);
-    if(identity.origin!=='https://trelio.ru' || identity.assistantId!==plan.scope.assistantUserId || identity.deviceId!==plan.scope.deviceId
+    if(identity.origin!==expectedOrigin || identity.assistantId!==plan.scope.assistantUserId || identity.deviceId!==plan.scope.deviceId
       || ['companyId','taskId','passId'].some(key=>active[key]!==plan.scope[key]))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     // A profile HTTP read consumes its own observed one-use proof and native
     // canonical target/own-Run checks, even for local status or heartbeat.
@@ -1478,11 +1463,11 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       const selected=plan.localAction.operation==='secret_skill_run'?plan.localAction.parameters.skill.runtimeSessionId:plan.localAction.parameters.runtimeSessionId;
       if(runtime?.ended || runtime?.state?.runtimeSessionId!==selected)fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
     }
-    const config=common.resolveWorkspaceBridgeConfigDirectory();
-    if(!inspecting)await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan));
+    const config=host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory();
+    if(!inspecting)await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan,expectedOrigin));
     // Signed skill commands use the same task-local cwd, but need no invented
     // Workspace/Run. Their native resolver repeats task admission before launch.
-    const root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan)):assistantWorkspaceRoot(config,plan),directory=path.join(root,'workspace');
+    const root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin)):assistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
     // The common opener claims a new root itself. Precreating that final
     // --dir makes it look like an unrelated existing directory and correctly
     // trips its ownership guard. Prepare ONLY its private parent for open;

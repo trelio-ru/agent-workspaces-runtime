@@ -229,8 +229,9 @@ try {
  */
 export const createAssistantWindowsBackground = ({ readIdentity, verifyContact,
   platform = process.platform, environment = process.env, executable = process.execPath,
-  resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal } = {}) => {
-  if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function') fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+  resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[] } = {}) => {
+  if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function'
+    || !Array.isArray(loaderArguments) || loaderArguments.length>4 || loaderArguments.some(value=>typeof value!=='string'||value.length>4096||/[\x00-\x1f\x7f]/u.test(value))) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
   return async operation => {
     const started = performance.now();
     const remaining = () => {
@@ -242,12 +243,12 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact,
     if (platform !== 'win32') fail('ASSISTANT_BACKGROUND_PLATFORM_UNSUPPORTED');
     remaining();
     const identity = await readIdentity();
-    if (!identity || identity.origin !== 'https://trelio.ru' || !UUID.test(identity.assistantId ?? '')
+    if (!identity || identity.origin !== expectedOrigin || !UUID.test(identity.assistantId ?? '')
       || !UUID.test(identity.deviceId ?? '')) fail('ASSISTANT_HOST_NOT_CONFIGURED');
     const loader = await resolveLoader({ environment });
     if (!windowsPath(executable) || !windowsPath(loader)) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
     const plan = { schemaVersion: 1, operation, assistantId: identity.assistantId.toLowerCase(), deviceId: identity.deviceId.toLowerCase(),
-      command: executable, arguments: `${quoteAssistantWindowsArgument(loader)} bridge assistant background`,
+      command: executable, arguments: `${[loader,...loaderArguments].map(quoteAssistantWindowsArgument).join(' ')} bridge assistant background`,
       workingDirectory: path.win32.dirname(executable) };
     if (operation === 'install' || operation === 'start') await verifyContact();
     // Recheck after the potentially slow network operation. Pairing another

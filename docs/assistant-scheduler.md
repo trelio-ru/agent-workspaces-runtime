@@ -593,6 +593,78 @@ onboarding remain separate release gates. No existing pilot machine or user
 configuration is changed by these source changes. Automatic restart of Codex
 remains backlog-only.
 
+### Source-tree QA acceptance launcher
+
+`scripts/assistant-qa-pilot.mjs` is a maintainer-only launcher outside the signed
+package. It supplies one immutable trusted JavaScript composition to the SAME
+setup, native MCP, hook, managed content/Workspace, source/ACK, private account,
+coordinator, bounded child and Task Scheduler implementations. Production factory
+calls retain their fixed `https://trelio.ru` origin and ordinary private journal.
+No model tool, request schema, provider argument or runtime environment variable
+can select this QA context. There is no second executor, provider implementation,
+crypto engine, state journal, scheduler or consent mechanism.
+
+The private JSON configuration has exactly `schemaVersion:1`, `origin`,
+`configurationDirectory`, `pluginRoot`, `runtimeVersion`, `packageSha256`.
+It contains no credential, human OAuth/session, provider value or company text.
+Origin must be a non-production HTTPS origin; production apex/www/encrypted
+origins and non-loopback IP literals refuse. Its private directory must not be
+the production directory, its ancestor or descendant. New enrollment is mandatory:
+copying an existing production/human identity or credential is not supported.
+All company/device/pass/recipient/Hook/owner/action authority remains native.
+
+The launcher reads an exact private regular file with an explicit SHA-256.
+Every fresh request/Workspace child repeats that hash and uses the installed
+shell's **existing `selectHostRuntime` signature/tree verifier**. The selected
+immutable signed package must match the exact configured runtime version/hash;
+source-tree code or an unsigned package never substitutes for it. The normal
+loader-supplied public component versions come from that shell/selection. The
+launcher does not download, install, publish, sign, activate or edit a runtime
+pointer. Candidate delivery through the normal signed publication/updater must
+already have been separately reviewed and completed; no per-device candidate
+channel is implied by this helper.
+
+Example command shape, with operator-selected public paths and hash:
+
+```text
+node <source-checkout>/scripts/assistant-qa-pilot.mjs --configuration <absolute-private-instance.json> --sha256 <exact-file-sha256> mcp
+```
+
+The same prefix plus `hook`, `background`, `background-install|status|start|remove`
+selects the existing entry. The Windows task receives that same fixed prefix;
+there are still no saved passwords, SYSTEM/autologin, force overwrite or Codex
+restart. Codex MCP/hook commands for the isolated QA profile must point to this
+reviewed prefix; a human separately enables Hook trust and performs ChatGPT/
+provider input in the normal UI. The launcher does not rewrite Codex configuration
+or automate those decisions. Requests to fresh worker children carry only the
+original native DTO on stdin; the configuration path/hash are trusted launcher
+coordinates, never MCP fields or credentials.
+
+QA admission is read from the genuine dedicated native `get_assistant_status`
+for that assistant/device and must have `stage:non-production-pilot` with all
+ordinary business capabilities. The shared `assistantCoordinatorReadiness`
+predicate is unchanged. Missing/disabled QA status or changed identity refuses;
+there is no local `readStatus` result override. Task-pass/runtime-registration/
+source-intake structural receipts still correctly say `businessReady:false`:
+neither a lease nor observed registration proves a business outcome. Protected
+API calls still require the same one-use proof, native ACL and current recipient.
+
+For QA E2EE, leave the alternate data-plane setting empty or equal to that
+canonical QA origin. The common data-plane resolver deliberately does not allow
+an arbitrary second QA origin; production's exact `trelio.ru` → `e2ee.trelio.ru`
+exception stays unchanged. All private account/inspection/browser/key locks and
+SQLite paths use the same isolated configuration root through the trusted host
+context, including nested owner review and source bodies.
+
+Constructor/closed-worker tests establish this composition boundary; the signed
+provider/HPKE fixtures exercise plain and encrypted profiles at a QA HTTPS origin.
+They do **not** establish real Windows, genuine external account login, actual
+notification/owner decision, provider ACK, recovery or next-run acceptance.
+Those live gates still require a prepared isolated QA backend, approved fresh
+signed artifacts, real owner enrollment/device and human-controlled Windows
+profile. Only their complete evidence can justify a separate production readiness
+release change; the QA native flag or launcher cannot open production readiness.
+
 ### Per-user Windows autostart
 
 `install_assistant_background`, `get_assistant_background_status` and

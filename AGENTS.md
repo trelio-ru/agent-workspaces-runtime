@@ -577,6 +577,8 @@ publication tooling также остаются вне этого публичн
   invocations per call. Supervisor updates only between cycles; full backend
   readiness gates business work. Task folders use compact full-identity hashes; prototype writable roots require review. OS installation and Windows E2E remain explicit
   gates: [contract](docs/assistant-scheduler.md#protected-background-host-composition).
+- Maintainer QA launcher is source-tree-only: SAME verifier/factories, exact QA
+  origin/configuration hash, isolated state; no model/env origin override or readiness mock.
 - Explicit Windows autostart uses current paired identity/SID, least-privilege
   InteractiveToken and exact native Task Scheduler read-back. No saved password,
   autologon, force overwrite, active-pass termination or readiness inference.

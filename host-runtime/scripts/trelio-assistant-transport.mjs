@@ -392,7 +392,7 @@ export const prepareAssistantCompanyEncryption = async ({identity,host,client,st
     ||/[\x00-\x20\x7f]/u.test(companySlug)||!identity
     ||typeof host?.readIdentity!=='function'||typeof client?.companies!=='function')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const common=await import('./trelio-workspace.mjs');
-  lockDirectory??=path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','encryption-locks');
+  lockDirectory??=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','encryption-locks');
   if(!path.isAbsolute(lockDirectory))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   // All inventory, key-store and HTTP phases share ONE budget; progress and
   // repeated read-only checks never extend the caller's request deadline.
@@ -1442,7 +1442,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     },
     async resolveSkillCatalogueDirectory(configDirectory){
       await assertIdentity();
-      return assistantSkillCatalogueDirectory(configDirectory,identity);
+      return assistantSkillCatalogueDirectory(host.configurationDirectory??configDirectory,identity);
     },
     async selectCompanySecretContext(context){
       if(!newCreation||!privateGeneration||!object(context)||context.completed!==false
@@ -1475,6 +1475,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return Object.freeze({fieldKey:privateSkill.fieldKey,environmentVariable:privateSkill.environmentVariable});
     },
     async resolveSecretBrowserStorage({configDirectory,grantId,runId}){
+      configDirectory=host.configurationDirectory??configDirectory;
       if(!privateFill || privateFill.grantId!==grantId || privateFill.runId!==runId
         || !path.isAbsolute(configDirectory??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertIdentity();
@@ -1484,6 +1485,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return {directory:path.join(root,'native'),profileDirectory:path.join(root,'profile')};
     },
     async resolveInspectionDirectory(configDirectory){
+      configDirectory=host.configurationDirectory??configDirectory;
       // Accepted files are shared company content, but the accompanying
       // personal profile belongs to this exact assistant/device/task. Never
       // overwrite the ordinary user's or another assistant's inspection cache.
@@ -3283,7 +3285,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const common=await import('./trelio-workspace.mjs');
       const {resolveAssistantCompanyEncryptionDevice}=await import('./trelio-assistant-private.mjs');
       managedEncryptionDevice=await resolveAssistantCompanyEncryptionDevice({identity:expected,companyId,store,
-        lockDirectory:path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','encryption-locks'),assertCurrent,allowCreate:false});
+        lockDirectory:path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','encryption-locks'),assertCurrent,allowCreate:false});
       if(managedEncryptionDevice.fingerprint!==encryptionFingerprint)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
       return managedEncryptionDevice;
     },
@@ -3298,7 +3300,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     },
     async resolveSkillCatalogueDirectory(configDirectory){
       await assertCurrent();
-      return assistantSkillCatalogueDirectory(configDirectory,expected);
+      return assistantSkillCatalogueDirectory(host.configurationDirectory??configDirectory,expected);
     },
     async authorizeAccountCreation(command,context){
       await assertCurrent();

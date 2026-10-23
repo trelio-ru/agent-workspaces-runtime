@@ -16,7 +16,9 @@ const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
 const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
-const origin='https://trelio.ru',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
+// Exercise the SAME source/config/ACK engine against a non-production HTTPS
+// origin; these are signed protocol fixtures, not live Windows acceptance.
+const origin='https://assistant-qa.example.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
 const identity={schemaVersion:1,origin,assistantId,deviceId},scope={companyId,projectId:null,skillId:'telegram-mtproto'};
 const credential=`tda_${'k'.repeat(43)}`;
 let reads=0,liveIdentity=identity;
@@ -682,7 +684,7 @@ test('email/MAX wire projections discard content and cannot promote a sender to 
 for (const policyVersion of [1,2]) test(`task skills use the SAME signed package, native command and process engine with fresh pass admission (policy v${policyVersion})`,async()=>{
   const {createAssistantWorkspaceProfile}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
-  const taskIdentity={schemaVersion:1,origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  const taskIdentity={schemaVersion:1,origin:policyVersion===2?'https://assistant-qa.example.test':'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
   const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
@@ -754,8 +756,13 @@ for (const policyVersion of [1,2]) test(`task skills use the SAME signed package
   };
   const plan={prepared:true,scope:{assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
     localAction:{schemaVersion:1,operation:'skill_run',parameters:{companyId:pass.companyId,skillId:'task-runtime-fixture',releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read','hello world']}}};
-  const run=raw=>engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(raw,{withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost})}));
+  const run=raw=>engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(raw,{expectedOrigin:taskIdentity.origin,withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost})}));
   try{
+    if(policyVersion===2){
+      await assert.rejects(engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{
+        withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost})})),error=>error.code==='ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      assert.equal(resolutions,0,'default production composition refuses a QA principal before native/package I/O');
+    }
     await assert.rejects(run(plan),error=>error.code==='ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED'||error.message.includes('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED'));
     assert.equal(resolutions,1);assert.equal(downloads,0);assert.equal(observedStarts,0);
     await assert.rejects(fs.readFile(calls),{code:'ENOENT'},'no provider/cache/package access while native consent is missing');
@@ -867,7 +874,8 @@ for(const mode of ["private-plain","private-encrypted","company-encrypted"])test
   const encryptedCase=mode!=="private-plain",companyCase=mode==="company-encrypted";
   const {createAssistantWorkspaceProfile,assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
-  const taskIdentity={schemaVersion:1,origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  const dataPlaneOrigin=mode==='private-encrypted'?'https://assistant-qa.example.test':'https://e2ee.trelio.ru';
+  const taskIdentity={schemaVersion:1,origin:mode==='private-encrypted'?'https://assistant-qa.example.test':'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
   const runtime={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,state:{runtimeSessionId:randomUUID(),
@@ -915,7 +923,7 @@ for(const mode of ["private-plain","private-encrypted","company-encrypted"])test
   const root=path.join(assistantTaskStorageDirectory(engine.resolveWorkspaceBridgeConfigDirectory(),{...taskIdentity,companyId:pass.companyId,taskId:pass.taskId}),'workspaces',workspaceId);
   const cwd=path.join(root,'workspace');await engine.ensurePrivateDirectory(cwd);
   await engine.writePrivateJsonFile(path.join(root,'.trelio-run.json'),{schemaVersion:3,origin:taskIdentity.origin,runId,workspaceId,workspaceDirectory:cwd,
-    company:{id:pass.companyId,slug:'fixture'},encryption:{enabled:encryptedCase,...(encryptedCase?{dataPlaneOrigin:'https://e2ee.trelio.ru'}:{})}});
+    company:{id:pass.companyId,slug:'fixture'},encryption:{enabled:encryptedCase,...(encryptedCase?{dataPlaneOrigin:dataPlaneOrigin}:{})}});
   const sourceDir=path.join(directory,'private-auth-package-'+mode);await fs.mkdir(sourceDir);
   const marker=path.join(directory,'private-auth-child-'+mode);
   await fs.writeFile(path.join(sourceDir,'trelio-secret-setup.json'),JSON.stringify({schemaVersion:2,commands:[{
@@ -944,11 +952,11 @@ for(const mode of ["private-plain","private-encrypted","company-encrypted"])test
   let consumed=0,resolutions=0,lateRefusal=false,encrypted=encryptedCase,cryptoMode='valid',fetchFailure,browserMode=false,browserConsumed=0;
   let generation=null,generationWrites=0,generationCommitted=false,generationUncertain=false;const savedFetch=globalThis.fetch,nonces=new Set();
   const fixtureFetch=async(url,options)=>{
-    assert.ok([taskIdentity.origin,'https://e2ee.trelio.ru'].includes(url.origin));assert.doesNotMatch(String(options.body??''),/PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
+    assert.ok([taskIdentity.origin,dataPlaneOrigin].includes(url.origin));assert.doesNotMatch(String(options.body??''),/PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY|scopePrivateEncryptionJwk/);assert.equal(options.headers.get('authorization'),`Bearer ${credential}`);
     const proof=JSON.parse(options.headers.get('x-trelio-assistant-proof'));assert.ok(!nonces.has(proof.nonce));nonces.add(proof.nonce);
     if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-routing')return new Response(JSON.stringify({schemaVersion:1,
       company:{id:pass.companyId,slug:'fixture',name:'Fixture'},encryptionState:encrypted?'encrypted':'plain',
-      encryptedDataPlaneOrigin:encrypted?'https://e2ee.trelio.ru':null}));
+      encryptedDataPlaneOrigin:encrypted?dataPlaneOrigin:null}));
     if(url.pathname==='/api/digital-assistants/runtime/workspace/bridge-compatibility')return new Response(JSON.stringify({supported:true,minimumVersion:'0.0.0',agentRules:{
       status:options.headers.get('x-trelio-agent-rules-sha256')===sha256?'current':'update_required',revisionId,version:1,sha256,rulesMarkdown:rules}}));
     if(url.pathname===`/api/digital-assistants/runtime/workspace/workspaces/${workspaceId}/runs/${runId}`)return new Response(JSON.stringify(encryptedCase?{schemaVersion:1,context:{run:{id:runId,workspaceId}},encryptedPayloads:[]}:{run:{id:runId,workspaceId}}));
@@ -1001,7 +1009,7 @@ for(const mode of ["private-plain","private-encrypted","company-encrypted"])test
   const plan={prepared:true,scope:{assistantUserId:taskIdentity.assistantId,deviceId:taskIdentity.deviceId,companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId},
     localAction:{schemaVersion:1,operation:'secret_skill_run',runIdentity:{runId,workspaceId},parameters:{grantId,companySlug:binding.companySlug,fieldKey:binding.fieldKey,environmentVariable:binding.environmentVariable,skill}}};
   let bridgeFailure;
-  const run=async()=>{bridgeFailure=null;try{return await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{
+  const run=async()=>{bridgeFailure=null;try{return await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{expectedOrigin:taskIdentity.origin,
     withProfile:action=>action({identity:taskIdentity,client,store:taskStore,host:taskHost,prepareWorkspaceRun:profile.prepareWorkspaceRun}),loadCommon:async()=>({...engine,
       runWorkspaceCommand:async(...args)=>{try{return await engine.runWorkspaceCommand(...args);}catch(error){bridgeFailure=error;throw error;}}}),
   }));}catch(error){throw bridgeFailure??error;}};
@@ -1014,7 +1022,7 @@ for(const mode of ["private-plain","private-encrypted","company-encrypted"])test
     assert.deepEqual(JSON.parse(result.stdout),{schemaVersion:1,state:'command_completed',verificationRequired:true});
     assert.doesNotMatch(JSON.stringify(result),/DISPOSABLE_PRIVATE|PRIVATE_PROVIDER|RElTUE9TQUJM|PRIVATE_AUTH_ENCRYPTED_CONFIG_CANARY/);
     if(encryptedCase&&!companyCase){const token=await profile.requireToken(taskIdentity.origin);
-      await assert.rejects(profile.prepareRequest({origin:'https://e2ee.trelio.ru',token,
+      await assert.rejects(profile.prepareRequest({origin:'https://unapproved.example.test',token,
         pathname:`/api/agent-workspaces/runs/${runId}/heartbeat`,options:{method:'POST',body:'{}'},buildHeaders:()=>new Headers()}),/ORIGIN_DENIED/);
       assert.equal(consumed,1,'private auth never inherits encrypted Workspace write authority');
       // The browser adapter uses that SAME genuine encrypted Run/HPKE key and
@@ -1026,7 +1034,7 @@ for(const mode of ["private-plain","private-encrypted","company-encrypted"])test
         secretBrowserFill:{grantId,runId,workspaceId},lockDirectory:path.join(directory,'private-browser-locks'),lock:(_file,action)=>action()});
       await engine.withWorkspaceExecutionProfile(browser,async()=>{
         cryptoMode='recipient';await assert.rejects(browser.prepareWorkspaceRun());assert.equal(browserConsumed,0);cryptoMode='valid';
-        const encryption=await browser.prepareWorkspaceRun();assert.equal(encryption.requestOrigin,'https://e2ee.trelio.ru');
+        const encryption=await browser.prepareWorkspaceRun();assert.equal(encryption.requestOrigin,dataPlaneOrigin);
         const token=await engine.requireToken(taskIdentity.origin),prefix=`/api/agent-secrets/checkout-grants/${grantId}`;
         const context=await (await engine.request(encryption.requestOrigin,token,`${prefix}/browser-fill-context?runId=${runId}`)).json();
         assert.equal(context.deliveryMode,'browser');assert.equal(context.targetUrlSha256,'b'.repeat(64));
@@ -1490,7 +1498,7 @@ for(const encrypted of [false,true])test(`MAX native source and committed ACK re
     const plan={prepared:true,scope:{assistantUserId:assistantId,deviceId,companyId,taskId:pass.taskId,passId:pass.passId},localAction:{
       schemaVersion:1,operation:'skill_run',parameters:{companyId,skillId:scope.skillId,releaseId,runtimeSessionId:runtime.state.runtimeSessionId,
         arguments:['read-reference','--chat',chat,'--message-id','11','--expected-revision',revision,'--expected-conversation-key',key,'--local-account',accountId]}}};
-    const body=await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client:taskClient,host:taskHost,store:taskStore})}));
+    const body=await engine.withWorkspaceExecutionProfile(profile,()=>executeAssistantWorkspacePlan(plan,{expectedOrigin:identity.origin,withProfile:action=>action({identity,client:taskClient,host:taskHost,store:taskStore})}));
     assert.equal(JSON.parse(body.stdout).message.text,'EXACT_BODY_CANARY');
     const selected=[{sourceId,sourceRevision:0,routeId,eventOrdinal:0}];
     assert.deepEqual(await observer.confirmProcessing(pass,selected),selected);
@@ -1787,10 +1795,10 @@ test('encrypted company runtime is inspected through its exact managed bundle be
     assert.equal(await fs.readFile(childMarker,'utf8'),'ss','an owner setup UUID never adopts an unbound other-company account');
     const live=await make(false),plan={prepared:true,scope:{assistantUserId:assistantId,deviceId,companyId,taskId:pass.taskId,passId:pass.passId},localAction:{schemaVersion:1,operation:'skill_run',
       parameters:{companyId,skillId,releaseId:currentRelease,runtimeSessionId:runtime.state.runtimeSessionId,arguments:['read']}}};
-    const executed=await engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})}));
+    const executed=await engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{expectedOrigin:identity.origin,withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})}));
     assert.equal(executed.stdout.trim(),'PRIVATE_COMPANY_CHILD_OK');assert.equal(await fs.readFile(childMarker,'utf8'),'ss1');
     variant='latehash';resolveCount=0;
-    await assert.rejects(engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})})),/AGENT_SKILL_RELEASE_CHANGED/);
+    await assert.rejects(engine.withWorkspaceExecutionProfile(live,()=>executeAssistantWorkspacePlan(plan,{expectedOrigin:identity.origin,withProfile:action=>action({identity,client,store:nativeStore,host:taskHost})})),/AGENT_SKILL_RELEASE_CHANGED/);
     assert.equal(await fs.readFile(childMarker,'utf8'),'ss1','changed live ciphertext cannot execute the already verified plaintext cache');
     variant='public';
     const publicSetup=await createSetup({...Object.fromEntries(Object.entries(accountSetup).filter(([key])=>key!=='inspectedCommand')),
