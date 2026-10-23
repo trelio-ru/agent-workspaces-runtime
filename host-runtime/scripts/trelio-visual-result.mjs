@@ -3,7 +3,18 @@ import { randomUUID } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import path from 'node:path';
 import { BROWSER_MAIL_REQUEST_KIND, parseBrowserMailHandle } from './trelio-browser-session.mjs';
-import { validVisualUploadFiles } from './trelio-visual-uploads.mjs';
+// Keep path-only validation at the pure MCP boundary; file IO belongs to the
+// existing private browser attachment lifecycle, never a model projection.
+export function validVisualUploadFiles(files) {
+  return Array.isArray(files) && files.length >= 1 && files.length <= 32
+    && files.every(file => typeof file === 'string' && file.length <= 4096
+      && path.isAbsolute(file) && !/[\x00-\x1f]/u.test(file)
+      // Never authenticate to an SMB server or open a device/alternate data
+      // stream merely because a model supplied something shaped like a path.
+      && (process.platform !== 'win32' || /^[a-z]:[\\/]/iu.test(file)
+        && !file.slice(2).includes(':')))
+    && new Set(files.map(file => path.resolve(file))).size === files.length;
+}
 
 // A browser picture is a binary MCP block, never a base64 string in an ordinary
 // text result. This boundary is provider-neutral and accepts no page prose,

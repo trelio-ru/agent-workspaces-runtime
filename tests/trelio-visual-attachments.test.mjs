@@ -6,10 +6,9 @@ import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { crc32 } from 'node:zlib';
 import { visualAttachmentFormat, MAX_ATTACHMENT_BYTES } from '../host-runtime/scripts/trelio-visual-browser.mjs';
-import { saveVisualAttachment } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { saveVisualAttachment, freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { validateVisualResult, parseVisualSkillOutput, visualMcpResult } from '../host-runtime/scripts/trelio-visual-result.mjs';
 import { validVisualArguments } from '../host-runtime/scripts/trelio-visual-result.mjs';
-import { freezeVisualUploads } from '../host-runtime/scripts/trelio-visual-uploads.mjs';
 
 // A tiny stored ZIP builder keeps the fixture public, deterministic and free
 // of Office tooling, downloaded documents and corporate source/code samples.
