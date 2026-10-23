@@ -2563,3 +2563,25 @@ test('native skill consent is a closed structural receipt with owned encrypted i
   mode='encrypted';const result=await invoke(base);assert.equal(result.parameters.encryptionFingerprint,'c'.repeat(43));
   assert.equal(sent,2);assert.equal(prepared,1);assert.equal(JSON.stringify(result).includes('CONSENT_PRIVATE_CANARY'),false);
 });
+
+
+test('skill consent owner request crosses actual MCP without a fake ordinary tool and rejects nested canaries before tools call',async()=>{
+  const f=await workspaceProfileFixture();let calls=0;const canary='PRIVATE_SKILL_CONSENT_NESTED_CANARY';
+  const fields={skillId:'company-runtime',projectId:null,releaseId:randomUUID(),publicationId:randomUUID(),runtimeArtifactId:randomUUID(),
+    packageSha256:'a'.repeat(64),instructionsSha256:'b'.repeat(64)};
+  const client=createAssistantMcpClient({...f.identity,store:f.store,httpRequest:async input=>{
+    const reply=result=>({sessionId:'consent-preflight',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+    if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+    if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+    if(input.payload.method==='tools/list')return reply({tools:[{name:'request_assistant_action',description:'Native owner action',inputSchema:{type:'object'}}]});
+    assert.equal(input.payload.method,'tools/call');calls++;assert.equal(JSON.stringify(input.payload).includes(canary),false);
+    assert.deepEqual(input.payload.params.arguments.fields,fields);return reply({structuredContent:{questionId:randomUUID()},content:[]});
+  }});
+  const args={operation:'accept_skill_runtime',fields,reason:'Review exact current package',clientRequestId:randomUUID(),expectedTaskUpdatedAt:new Date().toISOString()};
+  try{
+    for(const extra of [{extra:canary},{deviceId:randomUUID()},{binding:{text:canary}}])
+      await assert.rejects(client.callTool('request_assistant_action',{...args,fields:{...fields,...extra}}));
+    assert.equal(calls,0);
+    await client.callTool('request_assistant_action',args);assert.equal(calls,1);
+  }finally{f.close();}
+});

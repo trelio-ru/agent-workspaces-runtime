@@ -19,19 +19,24 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 /** Structural coordinates of an existing native consent, never the package,
  * preview prose, a caller-selected device or a human bridge token. The native
  * common builder independently selects every coordinate before its write. */
-export const normalizeAssistantSkillConsentParameters=value=>{
-  const keys=['skillId','projectId','releaseId','publicationId','runtimeArtifactId','packageSha256','instructionsSha256',
-    'clientRequestId','ownerDecisionId','expectedTaskUpdatedAt'];
+export const normalizeAssistantSkillConsentFields=value=>{
+  const keys=['skillId','projectId','releaseId','publicationId','runtimeArtifactId','packageSha256','instructionsSha256'];
   if(!object(value)||Object.keys(value).sort().join(',')!==keys.sort().join(',')
     ||typeof value.skillId!=='string'||!value.skillId.trim()||value.skillId.length>120||value.skillId!==value.skillId.trim()
     ||value.projectId!==null&&!UUID.test(value.projectId??'')
-    ||['releaseId','publicationId','runtimeArtifactId','clientRequestId','ownerDecisionId'].some(key=>!UUID.test(value[key]??''))
-    ||['packageSha256','instructionsSha256'].some(key=>!SHA256.test(value[key]??''))
-    ||typeof value.expectedTaskUpdatedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(value.expectedTaskUpdatedAt)
-    ||!Number.isFinite(Date.parse(value.expectedTaskUpdatedAt)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    ||['releaseId','publicationId','runtimeArtifactId'].some(key=>!UUID.test(value[key]??''))
+    ||['packageSha256','instructionsSha256'].some(key=>!SHA256.test(value[key]??'')))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   return structuredClone(value);
 };
-
+export const normalizeAssistantSkillConsentParameters=value=>{
+  if(!object(value))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  const {clientRequestId,ownerDecisionId,expectedTaskUpdatedAt,...fields}=value;
+  normalizeAssistantSkillConsentFields(fields);
+  if(!UUID.test(clientRequestId??'')||!UUID.test(ownerDecisionId??'')
+    ||typeof expectedTaskUpdatedAt!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(expectedTaskUpdatedAt)
+    ||!Number.isFinite(Date.parse(expectedTaskUpdatedAt)))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+  return structuredClone(value);
+};
 /** A closed structural exception, never a generic encrypted mutation bypass.
  * The live native schema/proof still owns the operation. This small presend
  * predicate merely proves there is no company prose to protect or leak: a
@@ -2188,7 +2193,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         const definitions=catalog.filter(tool=>tool?.name===name);
         if(definitions.length!==1)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         validateAssistantNativeInputShape(definitions[0].inputSchema,argumentsSnapshot);
-        if(name==='request_assistant_action'&&argumentsSnapshot.operation!=='create_private_secret'){
+        if(name==='request_assistant_action'&&argumentsSnapshot.operation==='accept_skill_runtime'){
+          // This native-only owner action has no ordinary human task mutation
+          // alias. Its SAME pure structural parser closes generic fields before
+          // any plain send or encrypted preparation HTTP.
+          normalizeAssistantSkillConsentFields(argumentsSnapshot.fields);
+        }else if(name==='request_assistant_action'&&argumentsSnapshot.operation!=='create_private_secret'){
           // Native action planning reuses the ordinary operation's schema for
           // its generic fields record. Apply that SAME live inventory here;
           // wrapper metadata is omitted, never supplied/faked by the model.
