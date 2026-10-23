@@ -274,6 +274,36 @@ const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, st
   return secret.credential;
 };
 
+/** Fresh structural privacy preflight shared by task and taskless content.
+ * Native mode and the original lease bracket each other; neither absent keys
+ * nor cached local metadata may turn encrypted/unknown company into plain.
+ * This grants no mutation/owner authority and consumes no business proof.
+ */
+export const readAssistantCompanyContentMode=async({identity,host,client,signal})=>{
+  const pass=validateAssistantActivePass(await host.readActivePass(),identity);
+  const intake=pass.kind==='source_intake',locator=intake
+    ?{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}
+    :{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+  const assertCurrent=async()=>{
+    signal?.throwIfAborted();
+    if(JSON.stringify(await host.readIdentity())!==JSON.stringify(identity)
+      || JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))
+      fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+    const live=intake?await client.readSourceIntake(locator,signal):await client.readTaskPass(locator,signal);
+    if(live.state!=='leased'||live.threadId!==pass.threadId||!Number.isFinite(Date.parse(live.leaseExpiresAt))
+      || Date.parse(live.leaseExpiresAt)<=Date.now()
+      || (intake ? live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
+        : ['passId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])))
+      fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+  };
+  await assertCurrent();
+  const matches=(await client.companies(signal)).filter(company=>company.companyId===pass.companyId);
+  if(matches.length!==1 || ![null,'plain','encrypted'].includes(matches[0].encryptionState))
+    fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  await assertCurrent();
+  return Object.freeze({...matches[0],encryptionState:matches[0].encryptionState??'plain'});
+};
+
 /** Public-key onboarding through the SAME company-encryption workflow. This
  * narrow async profile has TWO fixed endpoints only, no task pass/model proof,
  * payload/Workspace/Secret route, owner OAuth, scope-key grant or decryption.
@@ -690,17 +720,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     encryptedTaskRead:encryptedRead,
     companyEncryptionUserId:identity.assistantId,
     async readCompanyContentMode(signal){
-      // This is a transport privacy preflight, not mutation authority. Obtain
-      // current mode from the SAME native device inventory and bracket it with
-      // the original exact pass checks. Never infer plain from missing company,
-      // a failed inventory, an old task mirror or absent local encryption keys.
-      await assertLivePass(signal);
-      const companies=await client.companies(signal);
-      const matches=companies.filter(company=>company.companyId===pass.companyId);
-      if(matches.length!==1 || ![null,'plain','encrypted'].includes(matches[0].encryptionState))
-        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-      await assertLivePass(signal);
-      return matches[0].encryptionState??'plain';
+      return (await readAssistantCompanyContentMode({identity,host,client,signal})).encryptionState;
     },
     async prepareWorkspaceMaterial(){
       if(!materialWorkspaceId)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');

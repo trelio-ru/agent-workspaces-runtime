@@ -888,13 +888,14 @@ test('every supported source exact-body command requires the common native read 
 });
 
 test('production content preflight refuses encrypted prose before the real MCP tools/call boundary',async()=>{
-  const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {withAssistantEncryptedWorkspaceArguments,withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture();let mode='encrypted',inventoryReads=0,remoteCalls=0,loseResponse=false;
   const canary='SYNTHETIC_PRIVATE_COMPANY_CONTENT';
   f.client.companies=async()=>{inventoryReads++;return [{companyId:f.pass.companyId,encryptionState:mode}];};
   const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode});
   const client=createAssistantMcpClient({...f.identity,store:f.store,
-    withWorkspaceArguments:(input,send)=>withAssistantEncryptedWorkspaceArguments(input,send,{withProfile}),
+    withWorkspaceArguments:(input,send)=>withAssistantEncryptedWorkspaceArguments(input,send,{withProfile,
+      withManagedContent:(input,send)=>withAssistantCompanyContentArguments(input,send,{withProfile})}),
     httpRequest:async input=>{
       wire.push(JSON.stringify(input.payload??{}));
       const reply=result=>({sessionId:'content-preflight',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
@@ -943,7 +944,26 @@ test('content mode never falls back to plain on missing inventory, transition, s
   f.changeIdentity(f.identity);f.client.companies=async()=>{f.close();return [{companyId:f.pass.companyId,encryptionState:'plain'}];};
   await assert.rejects(invoke(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
   assert.equal(sent,0,'no failed or late authority check exposes prose to send');
+});
 
+test('the SAME content mode preflight uses an intake lease without inventing a task pass',async()=>{
+  const {readAssistantCompanyContentMode}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const identity={schemaVersion:1,origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const pass={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,
+    companyId:randomUUID(),sourceId:randomUUID(),sourceRevision:3,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
+  const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
+  let reads=0,closed=false;
+  const client={readTaskPass:async()=>assert.fail('taskless intake never borrows a task'),
+    readSourceIntake:async locator=>{
+      reads++;assert.deepEqual(locator,{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId});
+      return {state:closed?'closed':'leased',threadId:pass.threadId,eventId:pass.eventId,sourceRevision:pass.sourceRevision,
+        leaseExpiresAt:new Date(Date.now()+600000).toISOString()};
+    },companies:async()=>[{companyId:pass.companyId,encryptionState:'encrypted'}]};
+  assert.equal((await readAssistantCompanyContentMode({identity,host,client})).encryptionState,'encrypted');
+  assert.equal(reads,2);
+  client.companies=async()=>{closed=true;return [{companyId:pass.companyId,encryptionState:'plain'}];};
+  await assert.rejects(readAssistantCompanyContentMode({identity,host,client}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  assert.equal(reads,4,'a late source stop cannot release prose through a cached plain mode');
 });
 
 test('native encrypted refusal is consumed once by the trusted materializer under the original MCP deadline',async()=>{

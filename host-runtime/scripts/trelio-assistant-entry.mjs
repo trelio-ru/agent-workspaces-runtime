@@ -213,12 +213,9 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
     const store=createAssistantPrivateStore({directory:path.join(directory,'credentials')}),host=createAssistantHostState({directory,store});
     const identity=await host.readIdentity();
     if(!identity||identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
-    const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
-    const pass=validateAssistantActivePass(await host.readActivePass(),identity);
     const client=transport.createAssistantDeviceClient({...identity,store,http:transport.createAssistantHttp({origin:identity.origin})});
-    const company=(await client.companies(signal)).find(row=>row.companyId===pass.companyId);
-    if(!company||!['plain','encrypted',null].includes(company.encryptionState))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-    if(company.encryptionState!=='encrypted')return send(args);
+    const company=await transport.readAssistantCompanyContentMode({identity,host,client,signal});
+    if(company.encryptionState==='plain')return send(args);
     return transport.withAssistantManagedContentArguments({identity,host,client,store,lockDirectory:path.join(directory,'runtime-locks'),
       name,args,signal},send);
   },signal);
