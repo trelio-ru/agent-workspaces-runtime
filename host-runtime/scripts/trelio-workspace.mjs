@@ -8157,13 +8157,14 @@ export const runMaterializedAgentSkill = async ({
   const taskCapture = captureMode === 'assistant_task';
   const sourceSetupCapture = captureMode === 'assistant_source_setup';
   const sourceAckCapture = captureMode === 'assistant_source_ack';
+  const sourceIntakeCapture = captureMode === 'assistant_source_intake';
   const profile = currentWorkspaceExecutionProfile();
   const privateSetup = privateSecretSetup !== null;
   if(privateSetup && (!taskCapture || profile?.kind!=='digital_assistant'
     || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
     || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
     throw Object.assign(new Error('Private setup requires its exact task profile.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-  if (!['monitor','assistant_task','assistant_source_setup','assistant_source_ack'].includes(captureMode)
+  if (!['monitor','assistant_task','assistant_source_setup','assistant_source_ack','assistant_source_intake'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
     || sourceSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
@@ -8172,9 +8173,11 @@ export const runMaterializedAgentSkill = async ({
     || sourceAckCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
       || typeof profile.authorizeSourceAcknowledgement !== 'function'
       || typeof profile.startSourceAcknowledgement !== 'function')
+    || sourceIntakeCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
+      || typeof profile.authorizeSourceIntake !== 'function' || typeof profile.startSourceIntake !== 'function')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && !sourceAckCapture && runtimeArguments[0] !== 'monitor'
+    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture ? 10 * 60_000 : 180_000)
@@ -8204,6 +8207,12 @@ export const runMaterializedAgentSkill = async ({
     const remaining = await profile.authorizeSourceAcknowledgement({artifact,executionContext,runtimeArguments});
     if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 60000)
       throw Object.assign(new Error('Invalid acknowledgement budget.'), {code:'ASSISTANT_SOURCE_ACK_REQUIRED'});
+    timeoutMs = Math.min(timeoutMs,remaining);
+  }
+  if (sourceIntakeCapture) {
+    const remaining = await profile.authorizeSourceIntake({artifact,executionContext,runtimeArguments});
+    if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 60000)
+      throw Object.assign(new Error('Invalid owner intake budget.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
     timeoutMs = Math.min(timeoutMs,remaining);
   }
   if (taskCapture) {
@@ -8288,6 +8297,10 @@ export const runMaterializedAgentSkill = async ({
       remaining = budget - (performance.now() - runtimeStartedClock);
       if (signal?.aborted || remaining <= 0) throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED',
         'Истёк срок native ACK.', {operation:'skill_run'});
+    }
+    if(sourceIntakeCapture){
+      await profile.startSourceIntake();remaining=budget-(performance.now()-runtimeStartedClock);
+      if(signal?.aborted||remaining<=0)throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED','Owner intake expired.',{operation:'skill_run'});
     }
     let result;
     try {
@@ -8939,15 +8952,23 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   let accountCreation = null;
   if (assistant && command?.operation && command.operation !== "list") {
     // A task/read profile cannot authorize setup. The native source-owner
-    // profile may admit one exact new EMPTY entry only after live server
-    // consent; it repeats identity/deadline/scope and never admits bind/import.
+    // profile may admit one exact new EMPTY entry or owner-reviewed extra-company
+    // bind; it repeats identity/deadline/scope and never admits legacy import.
     if (profile.kind !== "digital_assistant_source" || typeof profile.authorizeAccountCreation !== "function")
       throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
     accountCreation = await profile.authorizeAccountCreation(command,{companyId:executionContext.companyId,projectId:executionContext.projectId??null,
       skillId:artifact.skillId,memberId:executionContext.localIdentity?.memberId,connectionId:executionContext.localIdentity?.connectionId??null});
-    if (!accountCreation || Object.keys(accountCreation).join(',') !== 'creationRequestId'
-      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(accountCreation.creationRequestId))
-      throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"), {code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+    const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+    if(command.operation==='bind'){
+      if(!accountCreation||Object.keys(accountCreation).sort().join(',')!=='bindingOrigin,bindingRequestId'
+        ||!uuid.test(accountCreation.bindingRequestId)||!accountCreation.bindingOrigin
+        ||Object.keys(accountCreation.bindingOrigin).sort().join(',')!=='companyId,memberId'
+        ||!uuid.test(accountCreation.bindingOrigin.companyId)||!uuid.test(accountCreation.bindingOrigin.memberId))
+        throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"),{code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
+      const bindingOriginScope=accountScope({origin,skillId:artifact.skillId,...accountCreation.bindingOrigin}).company;
+      accountCreation={bindingRequestId:accountCreation.bindingRequestId,bindingOriginScope};
+    }else if(!accountCreation||Object.keys(accountCreation).join(',')!=='creationRequestId'||!uuid.test(accountCreation.creationRequestId))
+      throw Object.assign(new Error("ASSISTANT_SKILL_SETUP_REQUIRED"),{code:"ASSISTANT_SKILL_SETUP_REQUIRED"});
   }
   if (command?.help) {
     output({ ok: true, help: command.help }); return { handled: true };

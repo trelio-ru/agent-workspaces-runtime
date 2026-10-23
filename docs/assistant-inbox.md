@@ -581,3 +581,50 @@ Synthetic signed-child, private SQLite and native wire fixtures verify this
 composition. They do not establish live MAX login, current server compatibility,
 production publication or Windows business E2E; those remain independent release
 gates and `businessReady` stays false until the entire product passes them.
+
+
+## Verified owner intake (schema v9)
+
+The SAME private inbox now retains structural `assistant_owner_intakes` records
+beside original refs/cursors. Only incoming, original Telegram/MAX refs with a
+fresh linked native owner binding become candidates. Poll compares identity
+bindings before and after the signed reader; the queue persists the binding UUID,
+not a sender ID/body/username. Email never enters this branch. An original native
+account/event/revision is initially considered once across configured companies.
+
+Intake provisions/reuses one restricted chat per source/owner binding through the
+SAME native Codex adapter and observed session/proof engine. Its taskless pass is
+an explicit discriminator, never fabricated task/binding metadata. Only native
+context/resolve tools are visible. Private host reads the exact original through
+the SAME signed account/process engine, repeats source/pass/owner checks and
+confirms native read before returning original text in RAM. Quoted/forwarded,
+outgoing, via-bot and mismatched native senders cannot create tasks.
+
+Clear owner commands use the SAME native creator/BOTH ACL and commit task,
+accepted new assignment, receipt and per-event route atomically. Ordinary task
+provision subsequently creates its permanent chat. Multiple commands in one owner
+conversation remain independent events/tasks; no whole-conversation route is
+installed. Created refs are still unread/unprocessed: only ordinary independent
+body read plus committed task material outcome can earn the existing native ACK.
+
+Ambiguity uses the SAME owner question/notification/answer core with an exact
+source/intake target, Other+text and no fake task. Waiting releases only a native
+positive receipt; an answer reopens the same intake with a fresh native model
+snapshot and original-body read. Company redirection closes the old receipt,
+retains original-event UUID and starts an independently authorized pass using the
+selected configured company/model. Unknown outcomes retain their original fence.
+
+Native cancellation is serialized with create and returns either the already
+committed receipt or a positive cancelled receipt. The host never guesses closure
+from a failed read. Only that positive cancellation and a later explicit source
+generation can clone an unfinished original candidate; old receipt remains
+immutable, original-event UUID is retained and native global created-event
+uniqueness prevents duplicate tasks. A paused waiting question is cancelled by
+that same native path. Inaccessible rows without a running pass defer without
+blocking unrelated companies; an unknown active pass keeps its global fence.
+
+Schema upgrade is additive, preserves all original cursors/deliveries/read/ACK
+proofs and does not invent owner evidence for historical rows. Tests use genuine
+SQLite transactions/restarts, signed native children and a separate native
+PostgreSQL/HTTP/MCP composition. They do not prove live Windows business E2E or
+an encrypted source content plane.

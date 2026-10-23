@@ -165,3 +165,20 @@ test('completion signs only an independently confirmed original selection with t
   assert.equal(empty.hookSpecificOutput.updatedInput.sourceProcessingProof,undefined);
   const read=await hook(event,'get_task');assert.equal(read.hookSpecificOutput.updatedInput.sourceProcessingProof,undefined);
 });
+
+test('taskless intake hook has genuine observed one-use proof and cannot borrow task or sensitive tools',async()=>{
+ const f=fixture(),{companyId,passId,deliveryId,threadId}=f.pass;
+ const pass={schemaVersion:1,kind:'source_intake',assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
+  companyId,passId,deliveryId,threadId,sourceId:crypto.randomUUID(),sourceRevision:0,eventId:crypto.randomUUID()};
+ f.setActive(pass);f.client.readSourceIntake=async()=>({...pass,id:passId,state:'leased',leaseExpiresAt:new Date(Date.now()+600000).toISOString()});
+ f.client.registerIntakeRuntime=async input=>{const result={runtimeSessionId:crypto.randomUUID(),passId,observation:input.observation,
+   expiresAt:new Date(Date.now()+300000).toISOString(),runtimeRefreshSupported:true};f.records.set(input.publicKeySpki,result);return result;};
+ const event={hook_event_name:'PreToolUse',session_id:threadId,tool_input:{taskPass:{passId:'UNTRUSTED'},intakePass:{sourceId:'UNTRUSTED'},runtimeSessionProof:{signature:'UNTRUSTED'}}};
+ const tool='get_assistant_intake_context',result=await f.hook(event,tool),output=result.hookSpecificOutput.updatedInput;
+ assert.deepEqual(output.intakePass,{companyId,sourceId:pass.sourceId,intakeId:passId});assert.equal(output.taskPass,undefined);
+ const proof=output.runtimeSessionProof,[key]=[...f.records.keys()];
+ assert.equal(crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
+   crypto.createPublicKey({key:Buffer.from(key,'base64url'),format:'der',type:'spki'}),Buffer.from(proof.signature,'base64url')),true);
+ for(const denied of ['get_assistant_task','create_task','apply_assistant_task_action','confirm_assistant_intake_read'])await assert.rejects(f.hook(event,denied),/CAPABILITY_UNAVAILABLE/);
+ await assert.rejects(f.hook({...event,session_id:crypto.randomUUID()},tool),/TASK_MISMATCH/);
+});

@@ -1739,3 +1739,24 @@ test('private generation composes native sealed preflight, SAME protected key/pa
   const missing=await workspaceProfileFixture();
   await assert.rejects(missing.profile.withSecretGenerationKey(()=>assert.fail('key leaked without native plan')));
 });
+
+test('protected active pass narrows SAME native MCP session view without granting taskless task access',async()=>{
+ const origin='https://view.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore(),credential=`tda_${'v'.repeat(43)}`;
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+ let active={kind:'source_intake'},calls=0;const views=[];
+ const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>active,httpRequest:async input=>{
+  views.push(input.config.headers['x-trelio-assistant-capability-profile']??'task');
+  const response=result=>({sessionId:'view-fixture',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+  if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+  if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+  if(input.payload.method==='tools/list')return response({tools:(active.kind==='source_intake'
+   ?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']:['get_assistant_status','get_task'])
+    .map(name=>({name,description:'Native bounded view',inputSchema:{type:'object',properties:{intakePass:{},runtimeSessionProof:{}}}}))});
+  calls++;return response({content:[],structuredContent:{}});
+ }});
+ assert.deepEqual((await client.listTools()).map(tool=>tool.name),['get_assistant_intake_context','resolve_assistant_intake']);
+ assert.ok(views.every(value=>value==='source_intake'));
+ await assert.rejects(client.callTool('get_task',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
+ active={kind:'task'};views.length=0;assert.deepEqual((await client.listTools()).map(tool=>tool.name),['get_assistant_status','get_task']);
+ assert.ok(views.every(value=>value==='task'));await assert.rejects(client.callTool('resolve_assistant_intake',{}),/CAPABILITY_UNAVAILABLE/);
+});

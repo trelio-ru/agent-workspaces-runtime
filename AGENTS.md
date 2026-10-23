@@ -667,3 +667,15 @@ publication tooling также остаются вне этого публичн
 - Saving rate-limit fixtures budget all sequential CLI calls plus setup/cleanup
   separately; each original process deadline and no-duplicate assertion remains
   enforced. Diagnose timeout with closed stage/counters, never private output.
+
+
+- Verified owner source intake is taskless, uses the SAME observer/proof/native
+  creator/question/account engines and never fabricates task authority. Native
+  incoming/original linked sender ID is separate from model command assessment.
+  Keep per-event routes and original-event dedup across company redirects;
+  native create alone does not earn ACK. Positive native cancellation plus an
+  explicit source generation is required before retrying an unfinished intake.
+  Additional company bind uses immutable owner origin-source/revision admission
+  and SAME atomic catalogue intent receipt/CAS, preserving sessions/old bindings;
+  no human import, pre-existing binding adoption, provider login or extra vault.
+  See `docs/assistant-inbox.md` schema v9 and the scheduler companion contract.

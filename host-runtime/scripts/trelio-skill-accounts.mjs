@@ -180,6 +180,14 @@ function validateState(value) {
       requests.add(receipt.requestId);
     }
   }
+  // Owner-authorized extra company bindings share this SAME atomic catalogue.
+  // Receipts remain outside account records and never enter provider env.
+  if(value.bindingIntents!==undefined){
+    requireThat(object(value.bindingIntents)&&Object.keys(value.bindingIntents).length<=512,'ACCOUNT_CATALOGUE_INVALID');
+    for(const [request,receipt] of Object.entries(value.bindingIntents))requireThat(UUID.test(request)&&object(receipt)
+      &&Object.keys(receipt).sort().join(',')==='accountId,originScope,scope'&&ids.has(receipt.accountId)
+      &&HASH.test(receipt.originScope)&&HASH.test(receipt.scope),'ACCOUNT_CATALOGUE_INVALID');
+  }
   for (const [scope, binding] of Object.entries(value.bindings)) {
     requireThat(HASH.test(scope) && object(binding) && Array.isArray(binding.accountIds) &&
       new Set(binding.accountIds).size === binding.accountIds.length &&
@@ -335,16 +343,31 @@ export function createAccountCatalogue({ directory, scope, io }) {
         id, name, comment, bound: current.accountIds.includes(id), default: current.defaultAccountId === id,
       })) };
     },
-    async change({ operation, id, name, comment, expectedRevision, creationRequestId = null }) {
+    async change({ operation, id, name, comment, expectedRevision, creationRequestId = null, bindingRequestId = null, bindingOriginScope = null }) {
       requireThat(['create', 'update', 'bind', 'unbind', 'default'].includes(operation), 'ACCOUNT_OPERATION_INVALID');
       requireThat(['create', 'update'].includes(operation) || name === undefined && comment === undefined, 'ACCOUNT_ARGUMENTS_INVALID');
       requireThat(operation !== 'update' || name !== undefined || comment !== undefined, 'ACCOUNT_ARGUMENTS_INVALID');
       requireThat(Number.isSafeInteger(expectedRevision) && expectedRevision>=0, 'ACCOUNT_CATALOGUE_CONFLICT');
       requireThat(creationRequestId === null || operation === 'create' && UUID.test(creationRequestId), 'ACCOUNT_ARGUMENTS_INVALID');
+      requireThat(bindingRequestId===null&&bindingOriginScope===null || operation==='bind'&&UUID.test(bindingRequestId)&&HASH.test(bindingOriginScope),'ACCOUNT_ARGUMENTS_INVALID');
+      const bindingIntent=bindingRequestId===null?null:{accountId:id,originScope:bindingOriginScope,scope:scope.company};
       const creation = creationRequestId === null ? null : {requestId:creationRequestId,scope:scope.company,
         intentHash:hash([id,accountText(name,120),accountText(comment??'',2000,{empty:true})])};
       return transaction(state => {
         const current = binding(state);
+        if(bindingIntent){
+          find(state,id);
+          requireThat(state.bindings[bindingOriginScope]?.accountIds.includes(id),'ACCOUNT_NOT_BOUND');
+          const previous=state.bindingIntents?.[bindingRequestId];
+          if(previous){
+            requireThat(['accountId','originScope','scope'].every(key=>previous[key]===bindingIntent[key]),'ACCOUNT_ID_CONFLICT');
+            requireThat(current.accountIds.includes(id),'ACCOUNT_NOT_BOUND');
+            return {id,replayed:true};
+          }
+          // Already-bound metadata without this intent is not an owned retry.
+          requireThat(!current.accountIds.includes(id),'ACCOUNT_ID_CONFLICT');
+          requireThat(Object.keys(state.bindingIntents??{}).length<512,'ACCOUNT_LIMIT');
+        }
         if (creation) requireThat(!Object.entries(state.creations??{}).some(([key,receipt]) => key!==id && receipt.requestId===creation.requestId), 'ACCOUNT_ID_CONFLICT');
         const previous = creation && state.accounts.find(account => account.id === id);
         if (previous) {
@@ -378,6 +401,7 @@ export function createAccountCatalogue({ directory, scope, io }) {
             if (comment !== undefined) item.comment = accountText(comment, 2000, { empty: true });
           } else if (operation === 'bind') {
             if (!current.accountIds.includes(id)) current.accountIds.push(id);
+            if(bindingIntent){state.bindingIntents??={};state.bindingIntents[bindingRequestId]=bindingIntent;}
           } else if (operation === 'unbind') {
             current.accountIds = current.accountIds.filter(v => v !== id);
             if (current.defaultAccountId === id) current.defaultAccountId = null;
@@ -386,7 +410,7 @@ export function createAccountCatalogue({ directory, scope, io }) {
           } else throw new SkillAccountError('ACCOUNT_OPERATION_INVALID');
         }
         state.bindings[scope.company] = current;
-        return { id, ...(creation?{replayed:false}:{}) };
+        return { id, ...(creation||bindingIntent?{replayed:false}:{}) };
       });
     },
     async select(id = null) {

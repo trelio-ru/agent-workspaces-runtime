@@ -1404,3 +1404,39 @@ message content, global receipt switch or model-authored owner consent exists.
 Unknown attempts retain their original one-use fence and only permit read-back.
 Actual owner login/current provider protocol and real Windows business E2E must
 be demonstrated separately; codec/fixture success alone is not readiness.
+
+
+### Taskless verified owner intake and additional account bindings
+
+Taskless source intake reuses the SAME Codex native provision/resume/model/effort,
+observed hook/session/proof, MCP transport and signed account/process engine. A
+private `kind:source_intake` journal admits only context/resolve native tools;
+normal task/Workspace/Secret tools cannot run under it. Native original-body
+confirmation is host-only and not a model tool. Genuine owner linked native IDs,
+current incoming/original message flags and source/project/company ACL are
+independent of natural command assessment. Clear owner commands need no second
+approval; ambiguous context uses the SAME owner questions with Other+text.
+See the schema-v9 inbox contract for cancellation, restart and per-event routing.
+
+Owner-selected existing managed accounts can gain an additional company binding
+through the SAME native source registration and `prepare_assistant_source_account`.
+An immutable origin source/revision supplies SAME device/provider/account evidence;
+BOTH owner/assistant memberships and project permissions are rechecked on each
+native admission and after package materialization. The SAME account catalogue
+atomically commits `bind` with a top-level native intent receipt and revision CAS.
+It verifies the origin binding still exists, preserves all account/session bytes
+and old bindings, never imports human legacy sessions and never launches a provider
+or repeats login. An existing target binding without this exact receipt cannot be
+adopted. A lost response may read back only that same intent/current binding.
+Receipt metadata never enters account records/provider environment. Public CLI
+cannot supply native receipt/origin overrides. These source operations remain
+plain-only until their independent encrypted adapter is connected.
+
+Intake uses a presentation-only `x-trelio-assistant-capability-profile:source_intake`
+view on the SAME `/mcp/assistant`. It is fixed at session initialization and only
+narrows discovery: task view omits intake tools; intake view exposes status and
+two native intake tools. A view change fails rather than upgrading that session.
+The protected pass discriminator chooses it, never model arguments. Header alone
+supplies no native authority; strict original schema/proof/device/source checks
+remain in each handler. Both full raw catalogues retain the common 65,536-byte
+bound, with no schema copies, new endpoint or second executor.

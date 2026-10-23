@@ -15,11 +15,14 @@ const exactObject=(value,keys)=>value && Object.getPrototypeOf(value)===Object.p
   && Object.keys(value).length===keys.length && keys.every(key=>Object.hasOwn(value,key));
 const sameObservation=(left,right)=>left && right && ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'].every(key=>left[key]===right[key]);
 const passKeys=['schemaVersion','assistantId','deviceId','companyId','taskId','passId','deliveryId','threadId','bindingId','bindingRevision'];
+const intakeKeys=['schemaVersion','kind','assistantId','deviceId','companyId','sourceId','sourceRevision','passId','deliveryId','eventId','threadId'];
 export const validateAssistantActivePass=(value,identity)=>{
-  if(!exactObject(value,passKeys) || value.schemaVersion!==1 || value.assistantId!==identity.assistantId || value.deviceId!==identity.deviceId
-    || passKeys.filter(key=>key.endsWith('Id')).some(key=>!uuid.test(value[key]??''))
-    || !Number.isSafeInteger(value.bindingRevision) || value.bindingRevision<0) fail('ASSISTANT_ACTIVE_PASS_REQUIRED');
-  return Object.freeze(Object.fromEntries(passKeys.map(key=>[key,value[key]])));
+  const intake=value?.kind==='source_intake',keys=intake?intakeKeys:passKeys;
+  if(!exactObject(value,keys) || value.schemaVersion!==1 || value.assistantId!==identity.assistantId || value.deviceId!==identity.deviceId
+    || keys.filter(key=>key.endsWith('Id')).some(key=>!uuid.test(value[key]??''))
+    || !Number.isSafeInteger(intake?value.sourceRevision:value.bindingRevision) || (intake?value.sourceRevision:value.bindingRevision)<0)
+    fail('ASSISTANT_ACTIVE_PASS_REQUIRED');
+  return Object.freeze(Object.fromEntries(keys.map(key=>[key,value[key]])));
 };
 
 export const createAssistantTaskHook=({identity,client,store,readActivePass,lockDirectory,
@@ -33,17 +36,21 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
     assertRuntimeHookBudget();
     const pass=validateAssistantActivePass(await readActivePass(),identity);
     if(event.session_id.toLowerCase()!==pass.threadId.toLowerCase()) fail('ASSISTANT_HOOK_TASK_MISMATCH');
-    const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+    const intake=pass.kind==='source_intake';
+    const locator=intake?{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}
+      :{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
     const slot={origin:identity.origin,kind:'runtime',id:pass.passId};
     return lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
       assertRuntimeHookBudget();
       const active=validateAssistantActivePass(await readActivePass(),identity);
       if(JSON.stringify(active)!==JSON.stringify(pass)) fail('ASSISTANT_HOOK_TASK_MISMATCH');
-      const live=await client.readTaskPass(locator,runtimeHookSignal());
+      const live=await client[intake?'readSourceIntake':'readTaskPass'](locator,runtimeHookSignal());
       const ending=event.hook_event_name==='SessionEnd';
-      if((live.state!=='leased' && !(ending && live.state==='closed')) || live.threadId!==pass.threadId || live.deliveryId!==pass.deliveryId
-        || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision
-        || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || live.state!=='closed' && Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if((live.state!=='leased' && !(ending && (intake?['ignored','created','waiting_owner','redirected','cancelled'].includes(live.state):live.state==='closed')))
+        || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
+          :live.deliveryId!==pass.deliveryId || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision)
+        || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || live.state==='leased' && Date.parse(live.leaseExpiresAt)<=now())
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       let record=await store.get(slot);
       if(record && (record.schemaVersion!==1 || record.passId!==pass.passId || record.threadId!==pass.threadId)) fail('ASSISTANT_HOOK_STATE_INVALID');
       if(event.hook_event_name==='SessionEnd') {
@@ -52,7 +59,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
           // not let the next hook sign with a remotely ended key. A later
           // initial registration safely retires any unended predecessor.
           await store.put(slot,{...record,ended:true});
-          await client.endRuntime({...locator,runtimeSessionId:record.state.runtimeSessionId},runtimeHookSignal());
+          await client[intake?'endIntakeRuntime':'endRuntime']({...locator,runtimeSessionId:record.state.runtimeSessionId},runtimeHookSignal());
         }
         // Retain the same pass journal/key until host completion/recovery; an
         // ended native turn does not authorize a new business invocation.
@@ -62,7 +69,10 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
         ? {hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:TRELIO_COMPACTION_RECOVERY_CONTEXT}} : {};
       if(event.hook_event_name!=='PreToolUse' || !/^[a-z][a-z0-9_]{0,159}$/u.test(toolName??'')) fail('ASSISTANT_HOOK_INVALID_INPUT');
       if(!event.tool_input || Object.getPrototypeOf(event.tool_input)!==Object.prototype) fail('ASSISTANT_HOOK_INVALID_INPUT');
+      if(intake && !['get_assistant_intake_context','resolve_assistant_intake'].includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+      if(!intake && ['get_assistant_intake_context','resolve_assistant_intake'].includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
       const supplied=structuredClone(event.tool_input);
+      delete supplied.intakePass;delete supplied.taskPass;delete supplied.runtimeSessionProof;
       delete supplied.sourceProcessingProof;
       delete supplied.encryptedMaterialWitness;
       const observation=await observe({hookInput:event});assertRuntimeHookBudget();
@@ -82,7 +92,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
         const publicKeySpki=crypto.createPublicKey(privateKey).export({type:'spki',format:'der'}).toString('base64url');
         record={schemaVersion:1,passId:pass.passId,threadId:pass.threadId,...(state?{state}:{}),pending:{observation,privateKeyPkcs8}};
         await store.put(slot,record);
-        const registered=await client.registerRuntime({...locator,clientSessionId:pass.threadId,observation,publicKeySpki,
+        const registered=await client[intake?'registerIntakeRuntime':'registerRuntime']({...locator,clientSessionId:pass.threadId,observation,publicKeySpki,
           ...(state && Date.parse(state.expiresAt)>now()?{previousRuntimeSessionId:state.runtimeSessionId}:{})},runtimeHookSignal());
         if(registered.passId!==pass.passId || !uuid.test(registered.runtimeSessionId??'')
           || !sameObservation(registered.observation,observation) || !Number.isFinite(Date.parse(registered.expiresAt))
@@ -121,7 +131,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       }
       return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow',updatedInput:{...supplied,
         ...(sourceProcessingProof?{sourceProcessingProof}:{}),
-        taskPass:locator,runtimeSessionProof:buildRuntimeSessionProof({state,toolName,now:new Date(now())})}}};
+        ...(intake?{intakePass:locator}:{taskPass:locator}),runtimeSessionProof:buildRuntimeSessionProof({state,toolName,now:new Date(now())})}}};
     });
   };
 };
@@ -174,8 +184,11 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const slot={origin:identity.origin,kind:'pass',id:identity.deviceId};
       const old=await store.get(slot);if(!old)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       const pass=validateAssistantActivePass(old,identity);
-      if(outcome?.schemaVersion!==1 || outcome.state!=='confirmed' || !uuid.test(outcome.receiptId??'')
-        || ['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>outcome[key]!==pass[key])) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      const intake=pass.kind==='source_intake';
+      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','waiting_owner','redirected','cancelled'].includes(outcome.state):outcome.state!=='confirmed')
+        || !uuid.test(outcome.receiptId??'') || (intake?outcome.id!==pass.passId || outcome.sourceId!==pass.sourceId || outcome.eventId!==pass.eventId
+          :['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>outcome[key]!==pass[key])))
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       // The backend already ended these signing sessions. Remove their local
       // private key before freeing the active journal; a crash between removals
       // leaves a recoverable closed pass rather than a retained signing key.

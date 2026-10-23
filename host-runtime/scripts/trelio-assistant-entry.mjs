@@ -206,15 +206,50 @@ export const createProductionAssistantMcp = async () => {
   const directory = path.join(common.resolveWorkspaceBridgeConfigDirectory(), 'digital-assistants');
   try { await fs.lstat(path.join(directory, 'identity.json')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  const [{ createAssistantPrivateStore }, { createAssistantHostState }, { createAssistantMcpClient }] = await Promise.all([
+  const [{ createAssistantPrivateStore }, { createAssistantHostState }, { createAssistantMcpClient, createAssistantDeviceClient, createAssistantHttp, readAssistantOwnerIntakeMessage }] = await Promise.all([
     import('./trelio-assistant-private.mjs'), import('./trelio-assistant-hook.mjs'), import('./trelio-assistant-transport.mjs'),
   ]);
   const store = createAssistantPrivateStore({ directory: path.join(directory, 'credentials') });
   const host = createAssistantHostState({ directory, store });
   const identity = await host.readIdentity();
   if (!identity || identity.origin !== 'https://trelio.ru') throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_STATE_INVALID' });
+  const sourceClient=createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})});
   return createAssistantMcpClient({ ...identity, store,
     withWorkspaceArguments:withAssistantEncryptedWorkspaceArguments,
+    readActivePass:host.readActivePass,
+    materializeSourceIntake:async({result,arguments:args,signal})=>{
+      const [{validateAssistantActivePass},{buildRuntimeSessionProof,withRuntimeStateLock},{openAssistantDatabase}]=await Promise.all([
+        import('./trelio-assistant-hook.mjs'),import('./trelio-runtime-session.mjs'),import('./trelio-assistant-private.mjs')]);
+      const pass=validateAssistantActivePass(await host.readActivePass(),identity),descriptor=result.structuredContent?.sourceRead;
+      if(pass.kind!=='source_intake'||!descriptor||descriptor.intakeId!==pass.passId||descriptor.eventId!==pass.eventId
+        ||descriptor.sourceId!==pass.sourceId||descriptor.sourceRevision!==pass.sourceRevision||descriptor.threadId!==pass.threadId
+        ||descriptor.companyId!==pass.companyId||args.intakePass?.intakeId!==pass.passId)
+        throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+      const opened=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
+      let reference;
+      try{
+        const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
+        const row=createAssistantInbox({database:opened.database}).ownerIntake(pass.passId);
+        if(row.original_event_id!==pass.eventId||row.scope.bindingId!==pass.sourceId||row.scope.accountId!==descriptor.localAccountId
+          ||row.source_revision!==pass.sourceRevision||row.thread_id!==pass.threadId||!['started','uncertain'].includes(row.state))
+          throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+        reference={eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key};
+      }finally{await opened.close();}
+      const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(row=>row.id===pass.sourceId);
+      const message=await readAssistantOwnerIntakeMessage({identity,client:sourceClient,host,store,pass,source,reference,signal});
+      await withRuntimeStateLock(path.join(directory,'runtime-locks',`${pass.passId}.json`),async()=>{
+        const latest=validateAssistantActivePass(await host.readActivePass(),identity);
+        const saved=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
+        if(JSON.stringify(latest)!==JSON.stringify(pass)||saved?.ended||!saved?.state||saved.threadId!==pass.threadId)
+          throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+        await sourceClient.confirmIntakeRead({intakePass:args.intakePass,ownerIdentityId:message.ownerIdentityId,
+          senderExternalUserId:message.ownerExternalUserId,runtimeSessionProof:buildRuntimeSessionProof({state:saved.state,
+            toolName:'confirm_assistant_intake_read',now:new Date()})},signal);
+      });
+      const value={...result.structuredContent,ownerMessage:{text:message.text,verifiedNativeOwner:true}};
+      delete value.sourceRead;
+      return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+    },
     materializeEncryptedTask: ({descriptor,signal}) => withProductionAssistantWorkspace(async current => {
       if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])) {
         throw Object.assign(new Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
@@ -582,7 +617,8 @@ const productionContext = async (action, { signal, interactiveSourceSetup=false 
 };
 
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
-  'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule'];
+  'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
+  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
 /** The actual dedicated backend must open the whole business profile. A local
  * executable, successful pairing, timer, or human MCP cannot turn this on.
@@ -699,6 +735,12 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
         report:(row,observation,signal)=>invoke(live=>live.reportSourceHealth({companyId:row.companyId,sourceId:row.id,...observation},signal))},
       native:{...observedNative,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
+      workspaceForIntake:async scope=>{
+        if(!scope||Object.keys(scope).sort().join(',')!=='companyId,sourceId'
+          ||![scope.companyId,scope.sourceId].every(value=>new RegExp(UUID,'u').test(value??'')))fail('ASSISTANT_HOST_STATE_INVALID');
+        const directory=path.join(deviceRoot,'intake',scope.companyId,scope.sourceId,'chat');
+        await ensureDirectory(directory);return directory;
+      },
       workspaceForTask:async scope=>{
         if(scope.origin!==stableIdentity.origin || scope.assistantId!==stableIdentity.assistantId
           || !new RegExp(UUID,'u').test(scope.companyId??'') || !new RegExp(UUID,'u').test(scope.taskId??'')) fail('ASSISTANT_HOST_STATE_INVALID');

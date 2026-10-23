@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource}=
+const {createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 const origin='https://source.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
@@ -25,8 +25,11 @@ const store={get:async slot=>{
   reads++;assert.deepEqual(slot,{origin,kind:'device',id:assistantId});
   return {assistantId,deviceId,credential,expiresAt:1};
 }};
-let setupFixture=null,ackFixture=null;
+let setupFixture=null,ackFixture=null,intakeFixture=null;
 const admission=()=>{
+  if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='max-web'?'max':'telegram',
+    protocol:scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',acknowledgement:ackFixture.admission};
@@ -39,7 +42,7 @@ const admission=()=>{
     maximumDurationMs:interactive?600000:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:interactive?'2026-10-21T00:10:00.000Z':'2026-10-21T00:02:00.000Z',
     ...(setupFixture?{accountSetup:{schemaVersion:1,sourceId:setupFixture.id,sourceRevision:setupFixture.revision,
-      localAccountId:setupFixture.localAccountId,operation:operation??'create'}}:{})};
+      localAccountId:setupFixture.localAccountId,operation:operation??(setupFixture.bindFromSourceId?'bind':'create'),...(setupFixture.bindingOrigin?{bindingOrigin:setupFixture.bindingOrigin}:{})}}:{})};
 };
 const previousCursor='previous.'+'c'.repeat(64),nextCursor='next.'+'d'.repeat(64);
 const event={id:'message:123:5',revision:'a'.repeat(64),kind:'new',chatId:'123',messageId:'5',topicId:null,
@@ -78,7 +81,7 @@ globalThis.fetch=async(url,options)=>{
   if(url.pathname===`${prefix}/resolve`){
     resolveCalls++;assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{...scope,expectedReleaseId:null,
       ...(setupFixture?{accountSetup:{sourceId:setupFixture.id,expectedRevision:setupFixture.revision,
-        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{})});
+        ...(setupFixture.operation?{operation:setupFixture.operation}:{})}}:{}),...(ackFixture?{sourceAcknowledgement:ackFixture.intent}:{}),...(intakeFixture?{sourceIntake:intakeFixture.intent}:{})});
     return resolveOverride?.()??new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}});
   }
   assert.equal(url.pathname,`${prefix}/package`);downloadCalls++;
@@ -1201,4 +1204,62 @@ test('MAX native projection binds exact numeric chat, native identity and unchan
   assert.equal(project(empty).baselineOnly,true);
   assert.throws(()=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify({...raw,events:[],nextCursor:cursor('12'),coverage:{...raw.coverage,historicalBackfill:false,initialUnreadOnly:undefined}})},
     {skillId:'max-web',chat,cursor:cursor(),nativeMax:true}),/INVALID_RESPONSE/);
+});
+
+test('owner intake rereads one exact signed original, rechecks native owner and never acknowledges or imports',async t=>{
+ const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
+ for(const provider of ['telegram-mtproto','max-web']){
+  scope.skillId=provider;const max=provider==='max-web',sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),ownerIdentityId=randomUUID();
+  const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,ownerTaskIntakeAllowed:true,...(max?{maxChatUrl:'https://web.max.ru/77'}:{})};
+  const pass={schemaVersion:1,kind:'source_intake',assistantId,deviceId,companyId,sourceId,sourceRevision:0,passId:intakeId,deliveryId:randomUUID(),eventId,threadId};
+  const ref={eventId,id:'message:77:8',revision:'b'.repeat(64),conversationKey:`${max?'max':'telegram'}-conversation/v1.${'a'.repeat(64)}`};
+  intakeFixture={intent:{intakeId,sourceId,expectedRevision:0},admission:{schemaVersion:1,intakeId,sourceId,sourceRevision:0,localAccountId:accountId,
+    eventId,threadId,ownerIdentityId,ownerExternalUserId:'123456',...(max?{maxChatUrl:source.maxChatUrl}:{})}};
+  const dir=path.join(directory,`intake-${provider}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
+  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+    assert.deepEqual(process.argv.slice(2),${JSON.stringify(['read-reference','--chat',max?source.maxChatUrl:'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey])});
+    assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);fs.appendFileSync(${JSON.stringify(marker)},'read;');process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
+  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:provider,runtimeVersion:'2.99.42',sourceDirectory:dir,
+    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
+  const root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+  const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:provider,companyId,memberId}),io:{ensureDirectory:engine.ensurePrivateDirectory,
+    read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+  await catalogue.change({operation:'create',id:accountId,name:'Synthetic owner intake',expectedRevision:(await catalogue.list()).revision});
+  const message={schemaVersion:1,protocol:max?'max-message-read/v1':'telegram-message-read/v1',reference:{...ref,senderNamespace:max?'max_user_id':'telegram_user_id',
+    senderUserId:'123456',outgoing:false,forwarded:false,viaBot:false},message:{text:'Prepare the weekly plan',textTruncated:false,replyContext:null,replyText:'UNTRUSTED_QUOTE'},
+    coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false,nativeMessageVerified:true},readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}};
+  const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
+  const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
+  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,ownerIdentityId,ownerExternalUserId:'123456'});
+  for(const patch of [{senderUserId:'654321'},{outgoing:true},{forwarded:true},...(!max?[{viaBot:true}]:[])]){
+    await fs.writeFile(output,JSON.stringify({...message,reference:{...message.reference,...patch}}));
+    await assert.rejects(readAssistantOwnerIntakeMessage(input),/OWNER_UNVERIFIED/);
+  }
+  assert.match(await fs.readFile(marker,'utf8'),/^read;+/);assert.equal((await catalogue.list()).accounts.length>=1,true);
+ }
+});
+
+test('additional company binding reuses same catalogue, preserves sessions and reads back only its exact native intent',async t=>{
+ const saved={...scope};t.after(()=>{Object.assign(scope,saved);setupFixture=null;resolveOverride=null;});scope.skillId='telegram-mtproto';
+ const originCompany=randomUUID(),originMember=randomUUID(),accountId=randomUUID();
+ const dir=path.join(directory,'bind-package');await fs.mkdir(dir);await fs.writeFile(path.join(dir,'main.mjs'),"throw new Error('A bind must never launch a provider');");
+ artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:dir,
+   entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+ const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope}),root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+ const io={ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')};
+ const original=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId:originCompany,memberId:originMember}),io});
+ await original.change({operation:'create',id:accountId,name:'Preserved account',expectedRevision:(await original.list()).revision});
+ setupFixture={...scope,id:randomUUID(),deviceId,localAccountId:accountId,revision:0,state:'active',provisionLocalAccount:false,
+  bindFromSourceId:randomUUID(),bindingOrigin:{companyId:originCompany,memberId:originMember,connectionId:null},executionVerified:false};
+ const input={identity,host,store,client:{identity,sourceAccounts:async()=>[setupFixture]},companyId,sourceId:setupFixture.id};
+ const first=await prepareAssistantSourceAccount(input);assert.equal(first.replayed,false);assert.equal(first.loginVerified,false);
+ assert.equal((await prepareAssistantSourceAccount(input)).replayed,true);
+ assert.equal((await original.select(accountId)).name,'Preserved account');
+ const target=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),io});
+ assert.equal((await target.select(accountId)).name,'Preserved account');
+ const before=await target.list();setupFixture={...setupFixture,id:randomUUID()};
+ await assert.rejects(prepareAssistantSourceAccount({...input,sourceId:setupFixture.id}),/ACCOUNT_ID_CONFLICT/);
+ assert.deepEqual(await target.list(),before,'another native intent cannot adopt a pre-existing binding');
 });

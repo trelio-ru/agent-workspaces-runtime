@@ -717,7 +717,9 @@ for(const provider of ['telegram','email'])test(`${provider} native routes reuse
   let routingCalls=0;
   f.options.client.sourceRoutes=async input=>{
     routingCalls++;assert.equal(input.companyId,f.companyId);assert.equal(input.sourceId,f.row.id);
-    assert.equal(input.sourceRevision,0);assert.ok(input.conversationKeys.every(value=>value===key||value===unknown));
+    assert.equal(input.sourceRevision,0);
+    if(input.routeIds){assert.deepEqual(input.routeIds,[route.id]);return [route];}
+    assert.ok(input.conversationKeys.every(value=>value===key||value===unknown));
     return input.conversationKeys.includes(key)?[route]:[];
   };
   try{
@@ -894,4 +896,68 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
     assert.equal(observations.at(-1),'ready','only ALL original conversations being positive can clear the source incident');
     assert.equal(f.counts().provisions,1);
   }finally{await f.coordinator.close();}
+});
+
+test('owner command intake composes SAME SQLite/native provision, per-event task routing and restart dedup',async t=>{
+  const database=new DatabaseSync(':memory:');
+  let clock=Date.now(),poll=0,created=0,active=null,provisions=0,intakeTurns=0;
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
+  const ownerIdentityId=randomUUID(),accountId=randomUUID(),sourceId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
+  const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+  const row={id:sourceId,companyId,deviceId:identity.deviceId,localAccountId:accountId,projectId:null,skillId:'telegram-mtproto',
+    state:'active',revision:0,ownerTaskIntakeAllowed:true,executionVerified:false};
+  const tasks=new Map(),intakes=new Map(),turns=new Map();
+  const client={identity,heartbeat:async()=>{},companies:async()=>[{companyId,memberId,execution:{state:'ready',configuration:execution}}],
+    tasks:async()=>({bindings:[...tasks.values()],nextCursor:null}),task:async(_company,id)=>({...tasks.get(id),execution:{state:'ready',configuration:execution}}),
+    poll:async()=>({events:[],nextCursor:'0',hasMore:false}),acknowledge:async()=>({acknowledged:0}),sourceAccounts:async()=>[{...row}],
+    ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
+    sourceRoutes:async input=>{
+      if(input.conversationKeys)return []; // Never a whole-owner-dialog route.
+      return [...intakes.values()].filter(value=>value.route&&input.routeIds.includes(value.route.id))
+        .map(value=>({...value.route,taskId:value.taskId}));
+    },
+    beginSourceIntake:async input=>{
+      assert.equal(input.ownerIdentityId,ownerIdentityId);assert.equal(input.senderExternalUserId,'123');
+      if(!intakes.has(input.intakeId))intakes.set(input.intakeId,{schemaVersion:1,id:input.intakeId,companyId,sourceId,
+        sourceRevision:0,eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:new Date(clock+1800000).toISOString(),
+        taskId:null,receiptId:null,execution,readConfirmed:false});
+      return structuredClone(intakes.get(input.intakeId));
+    },readSourceIntake:async input=>structuredClone(intakes.get(input.intakeId)),
+    claimTaskHost:async input=>({bindingId:input.bindingId,provisionId:input.provisionId,threadId:null}),reportSchedule:async input=>({sequence:input.sequence}),
+  };
+  const native={ready:async()=>true,readDelivery:async(_thread,id)=>turns.get(id)??{state:'uncertain'},
+    provision:async(input,options)=>{provisions++;options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
+      const result={state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};turns.set(input.deliveryId,result);return result;},
+    run:async(input,options)=>{
+      assert.ok(input.intakeContext,'the fixture stops before normal task business work');intakeTurns++;options.startInvocation();
+      const current=intakes.get(input.intakeContext.intakeId),taskId=randomUUID(),bindingId=randomUUID();created++;
+      tasks.set(taskId,{id:bindingId,taskId,state:'accepted',revision:0});
+      Object.assign(current,{state:'created',taskId,receiptId:randomUUID(),readConfirmed:true,route:{id:randomUUID(),sourceId,
+        sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key}});
+      const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};turns.set(input.deliveryId,result);return result;
+    }};
+  const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
+    releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
+    timeZone:'Europe/Moscow',now:()=>clock,readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
+      events:poll===1?[]:[{id:`message:123:${poll}`,revision:String(poll).repeat(64),conversationKey:key,kind:'new',outgoing:false,
+        forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
+  let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();database.close();});
+  await coordinator.pollOnce();clock+=300000;await coordinator.pollOnce();
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,1);
+  assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(created,1);assert.equal(active,null);
+  const firstTask=[...tasks.keys()][0];
+  assert.equal((await coordinator.workOnce()).kind,'provision','native task enters ordinary permanent chat provision');
+  await coordinator.workOnce().catch(error=>assert.match(error.code,/SETUP_REQUIRED|UNAVAILABLE/u)); // Task business is deliberately not mocked as success.
+  const event=database.prepare('SELECT * FROM assistant_inbox_events WHERE task_id=?').get(firstTask);
+  assert.ok(event?.route_id);assert.equal(event.processed,0);assert.equal(event.acked,0,'creating a task never earns ACK');
+  await coordinator.close();coordinator=createAssistantCoordinator(options);
+  const countBefore=created;await coordinator.workOnce().catch(()=>{});assert.equal(created,countBefore,'restart never repeats native create');
+  // A second independent command in the SAME private owner conversation gets
+  // another task, while reusing the restricted intake chat. No conversation
+  // route can hijack it into the first task.
+  clock+=300000;await coordinator.pollOnce();
+  await coordinator.workOnce().catch(()=>{});
+  assert.equal(created,2);assert.equal(intakeTurns,2);assert.equal(provisions,2,'one intake chat plus first permanent task chat');
+  assert.equal(new Set([...intakes.values()].map(value=>value.threadId)).size,1);
+  assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes WHERE outcome_state=\'created\'').get().n,2);
 });

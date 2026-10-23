@@ -125,5 +125,5 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   inbox = createAssistantInbox({ database: db });
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.taskState(source, taskId).state, 'paused');
-  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 8);
+  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 9);
 });

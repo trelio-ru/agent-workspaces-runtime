@@ -25,7 +25,7 @@ const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:ide
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
@@ -239,6 +239,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // commit. Only a never-started email source requests a new seed. Child
       // pages use that ORIGINAL seed until their own first committed cursor;
       // no restart, source resume or provider upgrade resets a forward cursor.
+      // Native linked ID is observed before AND after the signed metadata
+      // read. A username, quoted author or saved inbox label supplies no owner
+      // candidate. Only its structural binding UUID is persisted with refs.
+      const ownerBefore=row.ownerTaskIntakeAllowed===true&&['telegram-mtproto','max-web'].includes(row.skillId)
+        ?await client.ownerIdentities(signal):null;
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,
         accountId:row.localAccountId,cursor:email&&streamId!==null?poll.cursor??poll.initialCursor:poll.cursor,
         ...(row.skillId==='max-web'?{chat:row.maxChatUrl,...(poll.cursor===null?{initialUnread:true}:{})}:email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
@@ -275,8 +280,13 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Polling is not routing, owner-command authority or content handling.
       // Keep new refs unrouted and non-waking. No provider ACK is attempted;
       // body read, native mapping and committed processing remain required.
+      const ownerAfter=ownerBefore?await client.ownerIdentities(signal):null;lease();
+      if(ownerBefore&&ownerAfter.bindingRevision!==ownerBefore.bindingRevision)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+      const owner=ownerAfter?.identities.find(item=>item.provider===externalProviders[row.skillId]);
       const page={...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
-        events:[...result.events,...deletions].map(({id,revision,conversationKey,kind,outgoing})=>({id,revision,taskId:null,wake:false,
+        events:[...result.events,...deletions].map(({id,revision,conversationKey,kind,outgoing,forwarded,viaBot,senderNamespace,senderUserId})=>({id,revision,taskId:null,wake:false,
+          ...(owner&&senderNamespace===(row.skillId==='max-web'?'max_user_id':'telegram_user_id')&&senderUserId===owner.externalUserId&&kind==='new'&&outgoing===false&&forwarded===false&&(row.skillId==='max-web'||viaBot===false)&&conversationKey
+            ?{ownerIdentityId:owner.bindingId}:{}),
           ...(conversationKey?{conversationKey,providerWake:row.skillId==='email-imap-smtp'||kind!=='delete' && outgoing===false}:{})}))};
       if(streamId===null)inbox.commitPage(source,{...page,streams});
       else inbox.commitStreamPage(source,{...page,streamId});
@@ -336,7 +346,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         ||events.some(event=>!sameSource(externalSourceFor(identity,row),JSON.parse(event.event_scope_json))
           ||event.route_source_revision!==row.revision||!event.conversation_key))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
       const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
-        conversationKeys:[...new Set(events.map(event=>event.conversation_key))]},signal);lease();
+        routeIds:[...new Set(events.map(event=>event.route_id))]},signal);lease();
       if(events.some(event=>!routes.some(route=>route.id===event.route_id&&route.conversationKey===event.conversation_key
         &&route.taskId===job.taskId&&route.bindingId===binding.id&&route.bindingRevision===binding.revision)))
         fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
@@ -534,10 +544,163 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ...(result.outcome.processedSourceReferences?{processedSourceReferences:result.outcome.processedSourceReferences}:{})}:null);
     if(result.outcome) await passHost.releasePass(result.outcome);
   };
+  const intakeSource=async(row,signal)=>{
+    const selected=(await client.sourceAccounts(row.scope.companyId,signal)).find(source=>source.id===row.scope.bindingId);lease();
+    if(!selected||selected.state!=='active'||selected.ownerTaskIntakeAllowed!==true||selected.revision!==row.source_revision
+      ||!sameSource(externalSourceFor(identity,selected),row.scope))fail('ASSISTANT_INTAKE_CHANGED');
+    return selected;
+  };
+  const intakeLocator=row=>({companyId:row.scope.companyId,sourceId:row.scope.bindingId,intakeId:row.id});
+  const settleIntake=async(row,outcome,signal)=>{
+    if(outcome.id!==row.id||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||!uuid.test(outcome.receiptId??''))
+      fail('ASSISTANT_INTAKE_CHANGED');
+    if(['ready','started','uncertain','waiting_owner'].includes(row.state))inbox.finishOwnerIntake(row.id,outcome);
+    row=inbox.ownerIntake(row.id);
+    const activePass=await passHost.readActivePass();
+    if(activePass){
+      if(activePass.kind!=='source_intake'||activePass.passId!==row.id)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
+      await passHost.releasePass(outcome);
+    }
+    if(['waiting_owner','ignored','cancelled'].includes(outcome.state))return;
+    if(outcome.state==='redirected'){
+      const target=outcome.redirect;
+      if(!target||target.sourceId===row.scope.bindingId)fail('ASSISTANT_INTAKE_CHANGED');
+      const current=(await client.sourceAccounts(target.companyId,signal)).find(source=>source.id===target.sourceId);lease();
+      if(!current||current.state!=='active'||current.revision!==target.sourceRevision||current.ownerTaskIntakeAllowed!==true
+        ||current.localAccountId!==row.scope.accountId||externalProviders[current.skillId]!==row.scope.provider)fail('ASSISTANT_INTAKE_CHANGED');
+      const scope=externalSourceFor(identity,current);inbox.register(scope);inbox.observeExternalSourceRevision(scope,current.revision);
+      inbox.redirectOwnerIntake(row.id,{scope,sourceRevision:current.revision,receiptId:outcome.receiptId});
+      inbox.settleOwnerIntake(row.id);return;
+    }
+    if(outcome.state!=='created'||!outcome.route||!uuid.test(outcome.taskId??''))fail('ASSISTANT_INTAKE_CHANGED');
+    const companies=await client.companies(signal),company=companies.find(value=>value.companyId===row.scope.companyId);lease();
+    if(!company)fail('ASSISTANT_INTAKE_CHANGED');
+    const canonical=sourceFor(identity,company);inbox.register(canonical);
+    const binding=await client.task(row.scope.companyId,outcome.taskId,signal);lease();apply(canonical,binding);
+    if(binding.state!=='accepted'||binding.id!==outcome.route.bindingId||binding.revision!==outcome.route.bindingRevision)
+      fail('ASSISTANT_INTAKE_CHANGED');
+    // The original event route is installed only AFTER the ordinary task host
+    // has provisioned its permanent chat. No fabricated task/chat is created by
+    // this router, and no other message in the owner conversation is claimed.
+    if(!findSchedule(canonical,outcome.taskId))return;
+    const routes=await client.sourceRoutes({companyId:row.scope.companyId,sourceId:row.scope.bindingId,
+      sourceRevision:row.source_revision,routeIds:[outcome.route.id]},signal);lease();
+    if(routes.length!==1||routes[0].taskId!==outcome.taskId)fail('ASSISTANT_INTAKE_CHANGED');
+    inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,eventKeys:[row.event_key],routes,intakeId:row.id});
+    inbox.settleOwnerIntake(row.id);
+  };
+  const workIntake=async signal=>{
+    if(!passHost||typeof workspaceForIntake!=='function')return null;
+    const saved=await passHost.readActivePass();
+    if(saved&&saved.kind!=='source_intake')return null;
+    const candidates=inbox.ownerIntakes(),rowSaved=saved?inbox.ownerIntake(saved.passId):null;
+    let row=rowSaved??candidates.find(value=>['started','uncertain'].includes(value.state)||value.next_check_at<=now());
+    if(!row)return null;
+    if(await native.ready(identity,signal)!==true)fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    row=inbox.ownerIntake(row.id);
+    if(row.state==='waiting_owner'){
+      try{await intakeSource(row,signal);}catch(error){
+        // The old question cannot survive a stopped generation. Close that
+        // exact native lease; only its positive cancelled receipt may seed a
+        // later owner-resumed generation. Unknown never becomes a new attempt.
+        try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+          if(!['created','ignored','redirected','cancelled'].includes(closed.state))throw error;
+          await settleIntake(row,closed,signal);
+        }catch(closing){if(saved)throw closing;inbox.deferOwnerIntake(row.id);}
+        return null;
+      }
+    }
+    if(row.state==='complete'||row.state==='waiting_owner'){
+      let outcome;try{outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();}
+      catch(error){if(saved)throw error;inbox.deferOwnerIntake(row.id);return null;}
+      if(outcome.state==='leased'&&row.state==='waiting_owner'){
+        inbox.resumeOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
+      }else{
+        await settleIntake(row,outcome,signal);if(outcome.state==='waiting_owner')inbox.deferOwnerIntake(row.id);return null;
+      }
+    }
+    let source;
+    try{source=await intakeSource(row,signal);}
+    catch(error){
+      if(saved?.passId===row.id){
+        const outcome=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+        if(!['created','ignored','redirected','cancelled'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
+        inbox.finishOwnerIntake(row.id,outcome);await passHost.releasePass(outcome);
+        // A source stop cannot authorize further task ACL/route reads. Keep the
+        // original ref unprocessed/unacked, while releasing only a positively
+        // closed native pass so unrelated companies can continue.
+        if(outcome.state==='created'||outcome.state==='redirected')inbox.settleOwnerIntake(row.id);
+      }else if(row.state==='ready'){
+        try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+          if(!['created','ignored','redirected','cancelled'].includes(closed.state))throw error;
+          inbox.finishOwnerIntake(row.id,closed);if(['created','redirected'].includes(closed.state))inbox.settleOwnerIntake(row.id);
+        }catch{inbox.deferOwnerIntake(row.id);}
+      }else inbox.deferOwnerIntake(row.id);
+      return null;
+    }
+    if(['started','uncertain'].includes(row.state)){
+      const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
+      const nativeResult=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+      if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
+        await settleIntake(row,outcome,signal);return null;
+      }
+      if(Date.parse(outcome.leaseExpiresAt)<=now()){
+        const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+        if(closed.state!=='cancelled')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+        await settleIntake(row,closed,signal);emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return null;
+      }
+      emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};
+    }
+    const company=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
+    if(company?.execution?.state!=='ready')fail('ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED');
+    let execution=assistantExecutionConfiguration(company.execution.configuration);
+    const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+    if(row.state==='pending'){inbox.prepareOwnerIntake(row.id);row=inbox.ownerIntake(row.id);}
+    if(row.state==='provisioning'){
+      let result;
+      if(row.native_started){
+        if(!row.thread_id){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
+        result=await native.readDelivery(row.thread_id,row.provision_id,{signal});lease();
+      }else result=await native.provision({deliveryId:row.provision_id,cwd,execution},{signal,
+        startInvocation:()=>{lease();inbox.startOwnerIntakeProvision(row.id);},onThreadStarted:threadId=>inbox.bindOwnerIntakeThread(row.id,threadId)});
+      if(result.state!=='completed')fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
+      inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
+    }
+    if(row.state!=='ready')fail('ASSISTANT_INTAKE_CHANGED');
+    const owner=(await client.ownerIdentities(signal)).identities.find(value=>value.provider===row.scope.provider);lease();
+    if(!owner||owner.bindingId!==row.owner_identity_id)fail('ASSISTANT_INTAKE_OWNER_UNVERIFIED');
+    const admitted=await client.beginSourceIntake({...intakeLocator(row),sourceRevision:row.source_revision,eventId:row.original_event_id,
+      threadId:row.thread_id,ownerIdentityId:owner.bindingId,senderExternalUserId:owner.externalUserId,conversationKey:row.conversation_key},signal);lease();
+    if(admitted.state!=='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    execution=assistantExecutionConfiguration(admitted.execution);
+    const pass=validateAssistantActivePass({schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,
+      companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,passId:row.id,deliveryId:row.delivery_id,
+      eventId:row.original_event_id,threadId:row.thread_id},identity);
+    await passHost.activatePass(pass);
+    let started=false,watching=false;
+    const controller=new AbortController(),combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
+    const watch=setInterval(()=>{if(watching)return;watching=true;
+      void client.readSourceIntake(intakeLocator(row),combined).then(value=>{
+        if(value.state==='leased'&&Date.parse(value.leaseExpiresAt)<=now())controller.abort();
+      }).catch(()=>controller.abort()).finally(()=>{watching=false;});},watchIntervalMs);
+    try{
+      const result=await native.run({threadId:row.thread_id,deliveryId:row.delivery_id,cwd,execution,
+        intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
+          intakeId:row.id,eventId:row.original_event_id}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
+      const outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
+      if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+      await settleIntake(inbox.ownerIntake(row.id),outcome,combined);return {state:'completed',kind:'source_intake'};
+    }catch(error){
+      if(started&&inbox.ownerIntake(row.id).state==='started')inbox.uncertainOwnerIntake(row.id);
+      throw error;
+    }finally{clearInterval(watch);controller.abort();}
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
-      const pass=validateAssistantActivePass(saved,identity), row=inbox.readDelivery(pass.deliveryId);
+      const pass=validateAssistantActivePass(saved,identity);
+      if(pass.kind==='source_intake')return true;
+      const row=inbox.readDelivery(pass.deliveryId);
       if(row.taskId!==pass.taskId || row.scope.companyId!==pass.companyId || row.scope.assistantId!==identity.assistantId
         || row.kind!=='task') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
       if(row.state==='complete') {
@@ -660,7 +823,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // SQLite lease, so a tick and manual kick cannot both provision the task.
     active=(async()=>{
       blockedCompanies=new Set();
-      lease(); if(await reconcile(signal)) return {state:'blocked'};
+      lease();
+      const saved=passHost?await passHost.readActivePass():null;
+      if(saved?.kind!=='source_intake'&&await reconcile(signal))return {state:'blocked'};
+      const intake=await workIntake(signal);if(intake)return intake;
+      if(await reconcile(signal)) return {state:'blocked'};
       // Readiness includes the dedicated assistant MCP/plugin admission. A
       // working executable or human OAuth alone cannot enable business work.
       if(await native.ready(identity,signal)!==true) fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');

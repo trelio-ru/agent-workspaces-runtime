@@ -122,7 +122,10 @@ const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyI
     if (!object(row) || responseId(row.companyId) !== companyId || responseId(row.deviceId) !== deviceId
       || !['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)
       || !['active','paused','revoked'].includes(row.state) || row.executionVerified !== false
+      || row.bindFromSourceId!=null&&!UUID.test(row.bindFromSourceId)
       || row.provisionLocalAccount !== undefined && typeof row.provisionLocalAccount !== 'boolean'
+      || row.ownerTaskIntakeAllowed !== undefined && typeof row.ownerTaskIntakeAllowed !== 'boolean'
+      || row.ownerTaskIntakeAllowed === true && !(row.skillId==='telegram-mtproto'||row.skillId==='max-web'&&assistantMaxChatUrl(row.maxChatUrl)&&row.maxChatUrl!=='https://web.max.ru/0')
       || row.interactiveSetupAllowed !== undefined && typeof row.interactiveSetupAllowed !== 'boolean'
       || row.maxChatUrl != null && (row.skillId!=='max-web'||!assistantMaxChatUrl(row.maxChatUrl))
       || row.interactiveSetupAllowed === true && (row.provisionLocalAccount !== true || !['email-imap-smtp','telegram-mtproto','max-web'].includes(row.skillId))
@@ -134,7 +137,8 @@ const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyI
       projectId:row.projectId === null ? null : responseId(row.projectId), skillId:row.skillId,
       state:row.state, revision:row.revision, provisionLocalAccount:row.provisionLocalAccount === true,
       ...(row.interactiveSetupAllowed===true?{interactiveSetupAllowed:true}:{}),
-      ...(row.maxChatUrl!=null?{maxChatUrl:row.maxChatUrl}:{}),executionVerified:false });
+      ...(row.ownerTaskIntakeAllowed===true?{ownerTaskIntakeAllowed:true}:{}),
+      ...(row.maxChatUrl!=null?{maxChatUrl:row.maxChatUrl}:{}),...(row.bindFromSourceId!=null?{bindFromSourceId:row.bindFromSourceId}:{}),executionVerified:false });
   }));
 };
 export const validateAssistantPassOutcome = (value, expected) => {
@@ -200,6 +204,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
     ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']], ['registerRuntime',['POST','/runtime/session/register']],
     ['endRuntime',['POST','/runtime/session/end']],
+    ...['begin','read','session/register','session/end','read-confirm','cancel'].map((suffix,index)=>[['intakeBegin','intakeRead','intakeRegister','intakeEnd','intakeReadConfirm','intakeCancel'][index],['POST',`/runtime/source-skills/intake/${suffix}`]]),
   ]);
   return async (operation, body, credential = null, signal = null) => {
     const route = routes.get(operation);
@@ -819,7 +824,7 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
       ||row.localAccountId!==ref.scope.accountId)fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
     if(!routeRequired)return row;
     const routes=await client.sourceRoutes({companyId:pass.companyId,sourceId:row.id,sourceRevision:row.revision,
-      conversationKeys:[ref.conversation_key]},signal);
+      routeIds:[ref.routeId]},signal);
     if(!routes.some(route=>route.id===ref.routeId&&route.bindingId===pass.bindingId&&route.bindingRevision===pass.bindingRevision
       &&route.taskId===pass.taskId))fail('ASSISTANT_SOURCE_SCOPE_CHANGED');
     return row;
@@ -895,12 +900,44 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
 
 /** Host-private client. Model tools receive only projections from these named
  * operations; no method returns the credential or delegates an arbitrary URL. */
+const intakeLocator=input=>({companyId:id(input.companyId),sourceId:id(input.sourceId),intakeId:id(input.intakeId)});
+const intakeProjection=(value,expected)=>{
+  if(!object(value)||value.schemaVersion!==1||value.id!==expected.intakeId||value.sourceId!==expected.sourceId||value.companyId!==expected.companyId
+    ||!['leased','ignored','created','waiting_owner','redirected','cancelled'].includes(value.state)||typeof value.readConfirmed!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {schemaVersion:1,id:id(value.id),companyId:id(value.companyId),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
+    eventId:id(value.eventId),threadId:id(value.threadId),state:value.state,leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
+    taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
+    readConfirmed:value.readConfirmed,execution:executionConfiguration(value.execution),
+    ...(value.redirect?{redirect:{sourceId:id(value.redirect.sourceId),companyId:id(value.redirect.companyId),sourceRevision:revision(value.redirect.sourceRevision)}}:{}),
+    ...(value.route?{route:{id:id(value.route.id),sourceId:id(value.route.sourceId),sourceRevision:revision(value.route.sourceRevision),
+      bindingId:id(value.route.bindingId),bindingRevision:revision(value.route.bindingRevision),conversationKey:text(value.route.conversationKey,96)}}:{})};
+};
+
 export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, store, http }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== 'function' || typeof http !== 'function') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const call = async (operation, body, signal) => http(operation, body,
     await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store }), signal);
 
+  const registerObservedRuntime=async(input,signal,intake=false)=>{
+      if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
+        || input.observation.source!=='codex_hook' || input.observation.evidenceLevel!=='local_observed'
+        || !/^[a-z0-9._:+/-]{1,255}$/iu.test(input.observation.modelId??'')
+        || ![null,'low','medium','high','xhigh','max','ultra'].includes(input.observation.effortLevel)
+        || !Number.isFinite(Date.parse(input.observation.observedAt)) || !/^[A-Za-z0-9_-]{40,256}$/u.test(input.publicKeySpki??'')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const value=await call(intake?'intakeRegister':'registerRuntime',{companyId:id(input.companyId),...(intake?{sourceId:id(input.sourceId),intakeId:id(input.intakeId)}:{taskId:id(input.taskId),passId:id(input.passId)}),
+        clientSessionId:id(input.clientSessionId),observation:input.observation,publicKeySpki:input.publicKeySpki,
+        ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{})},signal);
+      if(value.schemaVersion!==1 || value.passId!==(intake?input.intakeId:input.passId) || value.conversation?.conversationId!==input.clientSessionId
+        || value.conversation?.provider!=='codex' || value.conversation?.openProtocol!=='codex-thread-v1'
+        || !Number.isFinite(Date.parse(value.expiresAt)) || value.runtimeRefreshSupported!==true
+        || !object(value.observation)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      for(const key of ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'])
+        if(value.observation[key]!==input.observation[key]) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {schemaVersion:1,passId:id(value.passId),runtimeSessionId:id(value.runtimeSessionId),expiresAt:isoTimestamp(value.expiresAt),
+        observation:Object.fromEntries(['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source','observedAt'].map(key=>[key,key==='observedAt'?isoTimestamp(value.observation[key]):value.observation[key]])),
+        runtimeRefreshSupported:true};
+  };
   return {
     identity: Object.freeze({ origin, assistantId, deviceId }),
     async ownerIdentities(signal) {
@@ -916,25 +953,25 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       return projectAssistantSourceAccounts(await call('sourceAccounts',{companyId},signal),{assistantId,deviceId,companyId});
     },
     async sourceRoutes(input, signal) {
-      // Only opaque provider/account HMACs cross this fixed boundary. The
-      // native server rechecks owner/source/task/device authority on EVERY read;
-      // an old SQLite mapping or a model-authored key never grants body access.
+      // Exact route IDs also admit independently created owner-command events;
+      // a model-authored conversation key still grants no task/body authority.
+      const ids=input?.routeIds,keys=input?.conversationKeys;
       const key=value=>['telegram','email','max'].some(provider=>assistantConversationKeyMatches(provider,value));
-      if(!object(input)||Object.keys(input).sort().join(',')!=='companyId,conversationKeys,sourceId,sourceRevision'
+      if(!object(input)||Object.keys(input).sort().join(',')!==(ids?'companyId,routeIds,sourceId,sourceRevision':'companyId,conversationKeys,sourceId,sourceRevision')
         ||!Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
-        || !Array.isArray(input.conversationKeys)||!input.conversationKeys.length||input.conversationKeys.length>100
-        || input.conversationKeys.some(value=>!key(value))||new Set(input.conversationKeys).size!==input.conversationKeys.length)
+        ||(ids!==undefined)===(keys!==undefined)||!Array.isArray(ids??keys)||!(ids??keys).length||(ids??keys).length>100
+        ||(ids??keys).some(value=>ids?!UUID.test(value??''):!key(value))||new Set(ids??keys).size!==(ids??keys).length)
         fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const body={companyId:id(input.companyId),sourceId:id(input.sourceId),sourceRevision:revision(input.sourceRevision),
-        conversationKeys:[...input.conversationKeys]};
+        ...(ids?{routeIds:ids.map(id)}:{conversationKeys:[...keys]})};
       const value=await call('sourceRoutes',body,signal);
       if(value.schemaVersion!==1||value.sourceId!==body.sourceId||value.sourceRevision!==body.sourceRevision
-        ||!Array.isArray(value.routes)||value.routes.length>body.conversationKeys.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        ||!Array.isArray(value.routes)||value.routes.length>(ids??keys).length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       const seen=new Set();
       return value.routes.map(row=>{
         if(!object(row)||row.sourceId!==body.sourceId||row.sourceRevision!==body.sourceRevision
-          ||!body.conversationKeys.includes(row.conversationKey)||seen.has(row.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-        seen.add(row.conversationKey);
+          ||(ids?!body.routeIds.includes(row.id):!keys.includes(row.conversationKey))||seen.has(ids?row.id:row.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        seen.add(ids?row.id:row.conversationKey);
         return {id:id(row.id),sourceId:body.sourceId,sourceRevision:body.sourceRevision,conversationKey:row.conversationKey,
           bindingId:id(row.bindingId),bindingRevision:revision(row.bindingRevision),taskId:id(row.taskId)};
       });
@@ -1067,24 +1104,26 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         bindingRevision:revision(input.bindingRevision),deliveryId:id(input.deliveryId),threadId:id(input.threadId)};
       return validateAssistantPassOutcome(await call('passOutcome',body,signal),{assistantId,deviceId,...body});
     },
-    async registerRuntime(input,signal) {
-      if(!object(input.observation) || input.observation.schemaVersion!==1 || input.observation.clientFamily!=='codex'
-        || input.observation.source!=='codex_hook' || input.observation.evidenceLevel!=='local_observed'
-        || !/^[a-z0-9._:+/-]{1,255}$/iu.test(input.observation.modelId??'')
-        || ![null,'low','medium','high','xhigh','max','ultra'].includes(input.observation.effortLevel)
-        || !Number.isFinite(Date.parse(input.observation.observedAt)) || !/^[A-Za-z0-9_-]{40,256}$/u.test(input.publicKeySpki??'')) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-      const value=await call('registerRuntime',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
-        clientSessionId:id(input.clientSessionId),observation:input.observation,publicKeySpki:input.publicKeySpki,
-        ...(input.previousRuntimeSessionId?{previousRuntimeSessionId:id(input.previousRuntimeSessionId)}:{})},signal);
-      if(value.schemaVersion!==1 || value.passId!==input.passId || value.conversation?.conversationId!==input.clientSessionId
-        || value.conversation?.provider!=='codex' || value.conversation?.openProtocol!=='codex-thread-v1'
-        || !Number.isFinite(Date.parse(value.expiresAt)) || value.runtimeRefreshSupported!==true
-        || !object(value.observation)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      for(const key of ['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source'])
-        if(value.observation[key]!==input.observation[key]) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return {schemaVersion:1,passId:id(value.passId),runtimeSessionId:id(value.runtimeSessionId),expiresAt:isoTimestamp(value.expiresAt),
-        observation:Object.fromEntries(['schemaVersion','clientFamily','modelId','effortLevel','evidenceLevel','source','observedAt'].map(key=>[key,key==='observedAt'?isoTimestamp(value.observation[key]):value.observation[key]])),
-        runtimeRefreshSupported:true};
+    registerRuntime:(input,signal)=>registerObservedRuntime(input,signal),
+    registerIntakeRuntime:(input,signal)=>registerObservedRuntime(input,signal,true),
+    async beginSourceIntake(input,signal){
+      const body={...intakeLocator(input),sourceRevision:revision(input.sourceRevision),eventId:id(input.eventId),threadId:id(input.threadId),
+        ownerIdentityId:id(input.ownerIdentityId),senderExternalUserId:text(input.senderExternalUserId,19),conversationKey:text(input.conversationKey,96)};
+      if(!/^[1-9]\d{0,18}$/u.test(body.senderExternalUserId)||!(/^(telegram|max)-conversation\/v1\.[0-9a-f]{64}$/u).test(body.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      return intakeProjection(await call('intakeBegin',body,signal),body);
+    },
+    async cancelSourceIntake(input,signal){const body=intakeLocator(input);return intakeProjection(await call('intakeCancel',body,signal),body);},
+    async readSourceIntake(input,signal){
+      const body=intakeLocator(input);return intakeProjection(await call('intakeRead',body,signal),body);
+    },
+    async endIntakeRuntime(input,signal){
+      const value=await call('intakeEnd',{...intakeLocator(input),runtimeSessionId:id(input.runtimeSessionId)},signal);
+      if(value.ended!==true)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');return {ended:true};
+    },
+    async confirmIntakeRead(input,signal){
+      const value=await call('intakeReadConfirm',input,signal);
+      if(value.schemaVersion!==1||value.intakeId!==input.intakePass?.intakeId||value.readConfirmed!==true)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {readConfirmed:true};
     },
     async endRuntime(input,signal) {
       const value=await call('endRuntime',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
@@ -1209,7 +1248,7 @@ export const assistantModelInputSchema = source => {
     // might also describe nested business data. Require a reviewed host path
     // instead of rewriting those definitions or exposing managed arguments.
     if(Object.hasOwn(node,'$ref'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
-    for(const key of ['taskPass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness']){
+    for(const key of ['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness']){
       if(object(node.properties))delete node.properties[key];
       if(Array.isArray(node.required))node.required=node.required.filter(value=>value!==key);
     }
@@ -1226,9 +1265,13 @@ export const assistantModelInputSchema = source => {
   return schema;
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment,
-  materializeEncryptedTask, withWorkspaceArguments, timeoutMs = 30_000 }) => {
+  materializeEncryptedTask, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, timeoutMs = 30_000 }) => {
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
+  const selectedTools=async()=>{
+    const pass=typeof readActivePass==='function'?await readActivePass():null;
+    return pass?.kind==='source_intake'?['get_assistant_intake_context','resolve_assistant_intake']:ASSISTANT_MCP_TOOLS;
+  };
   const perform = async (action, signal) => {
     const deadline = AbortSignal.timeout(timeoutMs);
     const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
@@ -1239,7 +1282,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       if (boundedSignal.aborted) fail("ASSISTANT_MCP_UNAVAILABLE");
       // A trusted internal authentication profile, not a personal PAT/OAuth
       // declaration. The public provider-config validator still rejects it.
-      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: {},
+      const active=typeof readActivePass==='function'?await readActivePass():null;
+      // This only narrows a single native MCP session's presentation. Every
+      // handler retains its genuine pass/proof/ACL checks independently.
+      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: active?.kind==='source_intake'
+        ?{'x-trelio-assistant-capability-profile':'source_intake'}:{},
         authentication: { type: "assistant_device" } };
       const session = await protocol.createRemoteSession(config, credential, request, { signal: boundedSignal });
       try { return await action({ protocol, config, credential, session, request, signal: boundedSignal }); }
@@ -1255,27 +1302,29 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
     async listTools(signal) {
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
         const tools = await protocol.listRemoteTools(config, credential, session, request, { signal });
-        const seen = new Set();
-        const selected = tools.filter(tool => ASSISTANT_MCP_TOOLS.includes(tool?.name)
+        const allowed=await selectedTools(),seen = new Set();
+        const selected = tools.filter(tool => allowed.includes(tool?.name)
           && (tool.name !== "download_attachment" || typeof materializeAttachment === "function")).map(tool => {
           if (seen.has(tool.name) || typeof tool.description !== "string" || tool.description.length > 4096
             || !object(tool.inputSchema) || tool.inputSchema.type !== "object") fail("ASSISTANT_MCP_INVALID_RESPONSE");
           seen.add(tool.name);
           // Do not proxy remote App metadata, URLs or OAuth security schemes.
           return { name: tool.name, description: tool.description, inputSchema: assistantModelInputSchema(tool.inputSchema),
-            annotations: { readOnlyHint: ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: tool.annotations?.destructiveHint===true,
+            annotations: { readOnlyHint: tool.name==='get_assistant_intake_context'||ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: tool.annotations?.destructiveHint===true,
               idempotentHint: tool.annotations?.idempotentHint===true, openWorldHint: false } };
         });
-        if (!seen.has("get_assistant_status") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        if (!seen.has(allowed.includes("get_assistant_status")?"get_assistant_status":"get_assistant_intake_context") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         return selected;
       }, signal);
     },
     async callTool(name, args, signal) {
-      if (!ASSISTANT_MCP_TOOLS.includes(name) || name === "download_attachment" && typeof materializeAttachment !== "function" || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
+      if (![...ASSISTANT_MCP_TOOLS,"get_assistant_intake_context","resolve_assistant_intake"].includes(name) || name === "download_attachment" && typeof materializeAttachment !== "function" || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
       // Snapshot once before asynchronous private/network I/O, as in the shared
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
+        const allowed=await selectedTools();
+        if(!allowed.includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
         const send=async wireArguments=>{
           // The public input bound was checked before protection. Ciphertext
           // adds only the standard bounded envelope/base64 overhead; this is
@@ -1288,11 +1337,16 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         };
         const value=typeof withWorkspaceArguments==='function'
           ? await withWorkspaceArguments({name,args:argumentsSnapshot,signal},send) : await send(argumentsSnapshot);
+
         if (!object(value) || !Array.isArray(value.content) || value.content.length > 20
           || value.content.some(item => !object(item) || item.type !== "text" || typeof item.text !== "string")
           || (value.structuredContent !== undefined && !object(value.structuredContent))
           || (value.isError !== undefined && typeof value.isError !== "boolean")
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        if(name==='get_assistant_intake_context'&&value.isError!==true){
+          if(typeof materializeSourceIntake!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          return materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal});
+        }
         // Binary plans never enter model context. The trusted production
         // callback composes the common device/pass HTTP profile and private
         // local-file primitive under this same non-renewable MCP deadline.
@@ -1845,7 +1899,7 @@ const validateAssistantAcknowledgementArguments=(args,skillId)=>{
  * pass/model observation, human vault or renewal cache. The server rechecks the
  * live device, MCP grant, scope, assignment, current release and package on each
  * fixed endpoint. A local format header and a callback are not authorization. */
-export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,
+export const createAssistantSourceRuntimeProfile = async ({identity,host,store,scope,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,
   monotonic=()=>performance.now(),startedAt=monotonic()}) => {
   scope=sourceScope(scope);
   if(accountSetup!==null){
@@ -1878,6 +1932,19 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     if(sourceAcknowledgement.verifyOnly&&acknowledgementExecution.runtimeArguments.at(-1)!=='--verify-only')
       fail('ASSISTANT_SOURCE_ACK_REQUIRED');
   }else if(acknowledgementExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  if(sourceIntake!==null){
+    if(accountSetup||sourceAcknowledgement||!['telegram-mtproto','max-web'].includes(scope.skillId)||!object(sourceIntake)
+      ||Object.keys(sourceIntake).sort().join(',')!=='expectedRevision,intakeId,sourceId'||!object(intakeExecution)
+      ||Object.keys(intakeExecution).sort().join(',')!=='accountId,beforeInvoke,eventId,runtimeArguments,threadId'
+      ||typeof intakeExecution.beforeInvoke!=='function')fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    sourceIntake=Object.freeze({intakeId:id(sourceIntake.intakeId),sourceId:id(sourceIntake.sourceId),expectedRevision:revision(sourceIntake.expectedRevision)});
+    const args=intakeExecution.runtimeArguments;
+    if(!Array.isArray(args)||args.length!==9||args[0]!=='read-reference'||args[1]!=='--chat'||!(scope.skillId==='max-web'?assistantMaxChatUrl(args[2])&&args[2]!=='https://web.max.ru/0':(/^-?[1-9]\d{0,18}$/u).test(args[2]))
+      ||args[3]!=='--message-id'||!(scope.skillId==='max-web'?(/^[1-9]\d{0,18}$/u):(/^[1-9]\d{0,9}$/u)).test(args[4])||args[5]!=='--expected-revision'||!(/^[0-9a-f]{64}$/u).test(args[6])
+      ||args[7]!=='--expected-conversation-key'||!assistantConversationKeyMatches(scope.skillId==='max-web'?'max':'telegram',args[8]))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    intakeExecution=Object.freeze({accountId:id(intakeExecution.accountId),eventId:id(intakeExecution.eventId),threadId:id(intakeExecution.threadId),
+      runtimeArguments:Object.freeze([...args]),beforeInvoke:intakeExecution.beforeInvoke});
+  }else if(intakeExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
   // The closed setup operation also admits one independent MAX probe after
   // the human handoff. Probe retains the short read budget; it cannot reopen
@@ -1893,7 +1960,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     || typeof monotonic!=='function' || !Number.isFinite(startedAt)) fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const expected={schemaVersion:1,origin,assistantId,deviceId};
   let active=true,resolveSent=false,packageSent=false,packagePath=null,budgetMs=maximumBudgetMs;
-  let creation=null,creationUsed=false;
+  let creation=null,creationUsed=false,intakeAdmission=null,intakeUsed=false,intakeStarted=false;
   let interactiveSetup=null,interactiveUsed=false,acknowledgement=null,acknowledgementUsed=false,acknowledgementStarted=false;
   const handle=Object.freeze(Object.create(null));
   const assertCurrent=async()=>{
@@ -1917,15 +1984,16 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     async authorizeAccountCreation(command,context){
       await assertCurrent();
       // The private native response, not a local boolean/model assertion,
-      // supplies authority. This profile can consume precisely one EMPTY
-      // catalogue create: never import, bind, rename, login or launch a provider.
-      if(!creation || creationUsed || command.operation!=='create' || command.id!==creation.accountId
-        || command.name!==scope.skillId || (command.comment??'')!==''
+      // supplies authority. Consume one exact EMPTY create or an independently
+      // reviewed extra-company bind; never import, rename or launch a provider.
+      if(!creation || creationUsed || command.operation!==creation.operation || command.id!==creation.accountId
+        || creation.operation==='create'&&(command.name!==scope.skillId || (command.comment??'')!=='')
+        ||creation.operation==='bind'&&(command.name!==undefined||command.comment!==undefined)
         || context.companyId!==scope.companyId || (context.projectId??null)!==scope.projectId
         || context.skillId!==scope.skillId || context.memberId!==creation.memberId
         || (context.connectionId??null)!==creation.connectionId)fail('ASSISTANT_SKILL_SETUP_REQUIRED');
       creationUsed=true;
-      return Object.freeze({creationRequestId:accountSetup.sourceId});
+      return creation.operation==='bind'?Object.freeze({bindingRequestId:accountSetup.sourceId,bindingOrigin:creation.bindingOrigin}):Object.freeze({creationRequestId:accountSetup.sourceId});
     },
     async authorizeInteractiveSourceSetup({artifact,executionContext:context,runtimeArguments}){
       await assertCurrent();
@@ -1969,6 +2037,21 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       // before a single child starts. No callback retry on an unknown failure.
       acknowledgementStarted=true;await acknowledgementExecution.beforeInvoke();await assertCurrent();
     },
+    async authorizeSourceIntake({artifact,executionContext:context,runtimeArguments}){
+      await assertCurrent();const approved=intakeAdmission;
+      if(!approved||intakeUsed||artifact?.id!==approved.artifactId||artifact.skillId!==scope.skillId
+        ||context?.companyId!==scope.companyId||(context.projectId??null)!==scope.projectId||context.releaseId!==approved.releaseId
+        ||context.account?.id!==intakeExecution.accountId||context.localIdentity?.memberId!==approved.memberId
+        ||(context.localIdentity?.connectionId??null)!==approved.connectionId
+        ||JSON.stringify(runtimeArguments)!==JSON.stringify(intakeExecution.runtimeArguments))fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      intakeUsed=true;return Math.floor(Math.min(60000,budgetMs-(monotonic()-startedAt)));
+    },
+    async startSourceIntake(){
+      await assertCurrent();if(!intakeAdmission||!intakeUsed||intakeStarted)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      intakeStarted=true;await intakeExecution.beforeInvoke();await assertCurrent();
+    },
+    async readIntakeOwner(){await assertCurrent();if(!intakeStarted)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      return {ownerIdentityId:intakeAdmission.ownerIdentityId,ownerExternalUserId:intakeAdmission.ownerExternalUserId};},
     async requireToken(requestOrigin){
       if(requestOrigin!==origin)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
       await assertCurrent();return handle;
@@ -1979,7 +2062,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       if(pathname===`${ASSISTANT_SOURCE_PREFIX}/resolve` && method==='POST' && !resolveSent){
         let body;try{body=JSON.parse(options.body);}catch{fail('ASSISTANT_SOURCE_ORIGIN_DENIED');}
         if(!object(body) || JSON.stringify(body)!==JSON.stringify({...scope,expectedReleaseId:null,
-          ...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{})})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
+          ...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})})) fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
         // Fence dispatch even when a local read/network response fails. Another
         // poll needs a fresh profile, not an implicit retry under this lease.
         resolveSent=true;
@@ -2000,14 +2083,14 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(sourceAcknowledgement
+        || admission.provider!==protocol.provider || admission.protocol!==(sourceIntake?(scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
           ?(scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1'):setupCommand?interactiveProtocol:protocol.protocol)
-        || admission.command!==(sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
+        || admission.command!==(sourceIntake?'read-reference':sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.expiresAt)
-        || !Number.isFinite(issued) || !Number.isFinite(expires) || (sourceAcknowledgement?expires-issued<=0||expires-issued>maximumBudgetMs:expires-issued!==maximumBudgetMs)
+        || !Number.isFinite(issued) || !Number.isFinite(expires) || ((sourceAcknowledgement||sourceIntake)?expires-issued<=0||expires-issued>maximumBudgetMs:expires-issued!==maximumBudgetMs)
         || resolution.localIdentity?.companyId!==scope.companyId || resolution.localIdentity?.projectId!==scope.projectId
         || resolution.artifact.skillId!==scope.skillId || resolution.artifact.contentProtection!=='plain'
         || resolution.trust.level!=='platform_verified' || resolution.trust.artifactLevel!=='platform_verified'
@@ -2038,16 +2121,32 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
           memberId:id(resolution.localIdentity.memberId),connectionId:resolution.localIdentity.connectionId??null,slots:approved.slots,
           ...(approved.verifyOnly?{verifyOnly:true}:{})});
       }else if(admission.acknowledgement!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+      if(sourceIntake){
+        const approved=admission.intake;
+        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId','ownerExternalUserId','ownerIdentityId','schemaVersion','sourceId','sourceRevision','threadId',...(scope.skillId==='max-web'?['maxChatUrl']:[])].sort().join(',')
+          ||approved.schemaVersion!==1||approved.intakeId!==sourceIntake.intakeId||approved.sourceId!==sourceIntake.sourceId
+          ||approved.sourceRevision!==sourceIntake.expectedRevision||approved.localAccountId!==intakeExecution.accountId
+          ||approved.eventId!==intakeExecution.eventId||approved.threadId!==intakeExecution.threadId
+          ||scope.skillId==='max-web'&&(!assistantMaxChatUrl(approved.maxChatUrl)||approved.maxChatUrl!==intakeExecution.runtimeArguments[2])
+          ||!UUID.test(approved.ownerIdentityId??'')||!(/^[1-9]\d{0,18}$/u).test(approved.ownerExternalUserId??''))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+        intakeAdmission=Object.freeze({artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId),memberId:id(resolution.localIdentity.memberId),
+          connectionId:resolution.localIdentity.connectionId??null,ownerIdentityId:approved.ownerIdentityId,ownerExternalUserId:approved.ownerExternalUserId});
+      }else if(admission.intake!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
-        if(!object(approved) || Object.keys(approved).sort().join(',')!=='localAccountId,operation,schemaVersion,sourceId,sourceRevision'
-          || approved.schemaVersion!==1 || approved.operation!==(setupCommand?accountSetup.operation:'create') || approved.sourceId!==accountSetup.sourceId
+        if(!object(approved) || Object.keys(approved).sort().join(',')!==['localAccountId','operation','schemaVersion','sourceId','sourceRevision',...(approved.operation==='bind'?['bindingOrigin']:[])].sort().join(',')
+          || approved.schemaVersion!==1 || (setupCommand?approved.operation!==accountSetup.operation:!['create','bind'].includes(approved.operation)) || approved.sourceId!==accountSetup.sourceId
           || approved.sourceRevision!==accountSetup.expectedRevision || !UUID.test(approved.localAccountId??'')
           || !UUID.test(resolution.localIdentity.memberId??''))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
         const bound={accountId:id(approved.localAccountId),memberId:id(resolution.localIdentity.memberId),
           connectionId:resolution.localIdentity.connectionId??null};
         if(setupCommand)interactiveSetup=Object.freeze({...bound,artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId)});
-        else creation=Object.freeze(bound);
+        else {
+          if(approved.operation==='bind'&&(!object(approved.bindingOrigin)||Object.keys(approved.bindingOrigin).sort().join(',')!=='companyId,connectionId,memberId'
+            ||!UUID.test(approved.bindingOrigin.companyId)||!UUID.test(approved.bindingOrigin.memberId)||approved.bindingOrigin.connectionId!==null
+            ||approved.bindingOrigin.companyId===scope.companyId))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+          creation=Object.freeze({...bound,operation:approved.operation,...(approved.operation==='bind'?{bindingOrigin:{companyId:approved.bindingOrigin.companyId,memberId:approved.bindingOrigin.memberId}}:{})});
+        }
       }else if(admission.accountSetup!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       // The wire date pair bounds duration, not local wall time. Original
       // monotonic start already charged transport latency before this response.
@@ -2205,7 +2304,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
  * owner's empty-account setup. It is not an executor or an admission cache.
  * Setup refreshes native authority after materialization, charging both reads
  * to the ORIGINAL monotonic budget; no account/provider mutation is retried. */
-export const withAssistantSourcePackage = async ({identity,host,store,scope,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,signal},action) => {
+export const withAssistantSourcePackage = async ({identity,host,store,scope,accountSetup=null,sourceAcknowledgement=null,acknowledgementExecution=null,sourceIntake=null,intakeExecution=null,signal},action) => {
   scope=sourceScope(scope);
   if(sourceAcknowledgement!==null)sourceAcknowledgement=normalizeAssistantSourceAcknowledgement(sourceAcknowledgement);
   if(typeof action!=='function')fail('ASSISTANT_SOURCE_INVALID_INPUT');
@@ -2225,7 +2324,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
       if(combined.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
       const token=await profile.requireToken(identity.origin);
       const response=await engine.request(identity.origin,token,`${ASSISTANT_SOURCE_PREFIX}/resolve`,{
-        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{})}),
+        method:'POST',body:JSON.stringify({...scope,expectedReleaseId:null,...(accountSetup?{accountSetup}:{}),...(sourceAcknowledgement?{sourceAcknowledgement}:{}),...(sourceIntake?{sourceIntake}:{})}),
         headers:{'content-type':'application/json'},signal:combined,maximumErrorResponseBytes:16_384});
       const bytes=await engine.readBoundedResponseBuffer(response,512*1024,'Source resolution');
       let raw;try{raw=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}finally{bytes.fill(0);}
@@ -2233,7 +2332,7 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
       await profile.bindResolution(resolution,raw.sourceAdmission);raw=null;
       return {resolution,token};
     };
-    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,accountSetup,sourceAcknowledgement,acknowledgementExecution,startedAt});
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
     const initial=await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const {resolution,token}=await resolve();
       const materialized=await engine.materializeResolvedAgentSkillRuntime({origin:identity.origin,token,resolution,
@@ -2242,15 +2341,15 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,acco
       const capabilities=materialized.artifact.parsedPackage.capabilities;
       if(!['network','local-session','local-accounts-v1'].every(value=>capabilities.includes(value))
         || capabilities.includes('secret-checkout'))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
-      if(!accountSetup&&!sourceAcknowledgement)return {result:await action({engine,profile,materialized,resolution,signal:combined})};
+      if(!accountSetup&&!sourceAcknowledgement&&!sourceIntake)return {result:await action({engine,profile,materialized,resolution,signal:combined})};
       return {materialized,resolution};
     });
-    if(!accountSetup&&!sourceAcknowledgement)return initial.result;
+    if(!accountSetup&&!sourceAcknowledgement&&!sourceIntake)return initial.result;
     // Exit the first async profile before entering the fresh one. The common
     // engine deliberately refuses nested profile replacement; retain that
     // device/human-isolation guard and its closed tombstone semantics.
     profile.close();
-    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,accountSetup,sourceAcknowledgement,acknowledgementExecution,startedAt});
+    profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope,accountSetup,sourceAcknowledgement,acknowledgementExecution,sourceIntake,intakeExecution,startedAt});
     return await engine.withWorkspaceExecutionProfile(profile,async()=>{
       const fresh=await resolve();
       if(fresh.resolution.artifact.id!==initial.resolution.artifact.id
@@ -2275,7 +2374,7 @@ export const prepareAssistantSourceAccount = async ({identity,host,store,client,
   // a model-authored local JSON or an existing UUID can supply neither.
   const rows=await client.sourceAccounts(companyId,signal);
   const source=rows.find(row=>row.id===sourceId);
-  if(!source || source.state!=='active' || source.provisionLocalAccount!==true)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
+  if(!source || source.state!=='active' || source.provisionLocalAccount!==true&&!source.bindFromSourceId)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
   const scope={companyId,projectId:source.projectId,skillId:source.skillId};
   try{
     return await withAssistantSourcePackage({identity,host,store,scope,signal,
@@ -2299,8 +2398,8 @@ export const prepareAssistantSourceAccount = async ({identity,host,store,client,
       // company. Only the native-authorized server-generated account UUID and
       // a fixed platform label enter this common host command. No provider is
       // launched: account commands are handled by the catalogue itself.
-      const result=await prepare(['account','create','--id',source.localAccountId,'--name',scope.skillId,
-        '--expected-revision',String(listed.revision)]);
+      const result=await prepare(['account',source.bindFromSourceId?'bind':'create','--id',source.localAccountId,
+        ...(!source.bindFromSourceId?['--name',scope.skillId]:[]),'--expected-revision',String(listed.revision)]);
       if(result.id!==source.localAccountId || typeof result.replayed!=='boolean'
         || !result.accounts.some(account=>account.id===source.localAccountId&&account.bound===true))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       return Object.freeze({sourceId,localAccountId:source.localAccountId,state:'prepared',replayed:result.replayed,loginVerified:false});
@@ -2398,7 +2497,9 @@ export const verifyAssistantMaxSource = input => configureAssistantInteractiveSo
  * a poll; a successful provider read cannot resurrect stale desired state. */
 export const sameAssistantSourceRegistration = (left,right) => Boolean(left && right)
   && ['id','companyId','deviceId','localAccountId','projectId','skillId','state','revision'].every(key=>left[key]===right[key])
-  &&(left.maxChatUrl??null)===(right.maxChatUrl??null);
+  &&(left.maxChatUrl??null)===(right.maxChatUrl??null)
+  &&(left.bindFromSourceId??null)===(right.bindFromSourceId??null)
+  &&(left.ownerTaskIntakeAllowed===true)===(right.ownerTaskIntakeAllowed===true);
 
 /** Independently verify incoming access AFTER a saved local configuration.
  * This reuses the exact passive reader and normal native/account/signature
@@ -2610,4 +2711,62 @@ export const acknowledgeAssistantSource=async({identity,host,store,client,source
       return projectAssistantSourceAcknowledgement(result,{target,verifyOnly});
     });
   }catch(error){rethrowAssistantSourceError(error,{signal});}
+};
+
+/** One original incoming owner command, through the SAME signed package,
+ * account selector and process engine. This taskless read grants no task pass,
+ * neighboring history, provider sending, read-state mutation or human vault.
+ * The private journal ref is selected by the trusted host, never tool text. */
+export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,pass,source,reference,signal})=>{
+  pass=validateAssistantActivePass(pass,identity);
+  if(pass.kind!=='source_intake'||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision
+    ||!['telegram-mtproto','max-web'].includes(source.skillId)||source.state!=='active'||source.ownerTaskIntakeAllowed!==true
+    ||reference.eventId!==pass.eventId||!(source.skillId==='max-web'?(/^message:-?[1-9]\d{0,18}:[1-9]\d{0,18}$/u):(/^message:-?[1-9]\d{0,18}:[1-9]\d{0,9}$/u)).test(reference.id??'')
+    ||!(/^[0-9a-f]{64}$/u).test(reference.revision??'')||!assistantConversationKeyMatches(source.skillId==='max-web'?'max':'telegram',reference.conversationKey))
+    fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const [,chat,messageId]=reference.id.split(':');
+  if(source.skillId==='max-web'&&source.maxChatUrl!==`https://web.max.ru/${chat}`)fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const args=['read-reference','--chat',source.skillId==='max-web'?source.maxChatUrl:chat,'--message-id',messageId,'--expected-revision',reference.revision,
+    '--expected-conversation-key',reference.conversationKey];
+  const check=async()=>{
+    const active=validateAssistantActivePass(await host.readActivePass(),identity);
+    if(JSON.stringify(active)!==JSON.stringify(pass))fail('ASSISTANT_INTAKE_CHANGED');
+    const current=await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal);
+    if(current.state!=='leased'||current.threadId!==pass.threadId||current.eventId!==pass.eventId||current.sourceRevision!==pass.sourceRevision
+      ||Date.parse(current.leaseExpiresAt)<=Date.now())fail('ASSISTANT_INTAKE_CHANGED');
+    const rows=await client.sourceAccounts(pass.companyId,signal);
+    if(!sameAssistantSourceRegistration(source,rows.find(row=>row.id===source.id)))fail('ASSISTANT_INTAKE_CHANGED');
+  };
+  await check();
+  const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
+  return withAssistantSourcePackage({identity,host,store,scope,signal,
+    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision},
+    intakeExecution:{accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,runtimeArguments:args,beforeInvoke:check}},
+  async({engine,profile,materialized,resolution,signal:combined})=>{
+    if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,source.skillId==='max-web'?'2.11.0':'2.13.1'))fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
+    const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection};
+    const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+      executionContext,runtimeArguments:['read-reference','--local-account',source.localAccountId,...args.slice(1)]});
+    if(selected.handled||selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
+    executionContext.account=selected.account;
+    const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+      executionContext,runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_intake',captureOutput:true,captureExitCode:true,
+      timeoutMs:Math.min(60_000,await profile.remainingMs()),signal:combined});
+    let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_READ_INVALID');}
+    const owner=await profile.readIntakeOwner(),ref=value?.reference;
+    if(result.exitCode!==0||!object(value)||value.schemaVersion!==1||value.protocol!==(source.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1')
+      ||!object(ref)||ref.id!==reference.id||ref.revision!==reference.revision||ref.conversationKey!==reference.conversationKey
+      ||ref.senderNamespace!==(source.skillId==='max-web'?'max_user_id':'telegram_user_id')||ref.senderUserId!==owner.ownerExternalUserId
+      ||ref.outgoing!==false||ref.forwarded!==false||source.skillId==='telegram-mtproto'&&ref.viaBot!==false
+      ||source.skillId==='max-web'&&value.coverage?.nativeMessageVerified!==true
+      ||!object(value.message)||typeof value.message.text!=='string'||Buffer.byteLength(value.message.text)>65536
+      ||value.message.textTruncated!==false||source.skillId==='telegram-mtproto'&&value.message.replyContext!==null||value.coverage?.textComplete!==true
+      ||value.coverage.contextIncluded!==false||value.coverage.attachmentsContentRead!==false||value.readState?.mode!=='history-only'
+      ||value.readState.marksRead!==false||value.readState.readReceiptsSent!==false||value.readState.viewsRegistered!==false)
+      fail('ASSISTANT_INTAKE_OWNER_UNVERIFIED');
+    await check();
+    // Native identity is returned ONLY to the private confirmation callback.
+    // The model gets the original text after native read-confirm succeeds.
+    return {text:value.message.text,...owner};
+  });
 };
