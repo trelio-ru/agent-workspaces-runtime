@@ -2416,10 +2416,12 @@ export const protectLocalActionArguments = async ({
         || nativeTool === "request_assistant_action" && normalizedArguments.operation === "call_remote_agent_skill_tool" && objectPath === "$.fields");
       const skillArguments = nativeTool === "continue_assistant_workspace_action" && normalizedArguments.operation === "skill_run"
         && objectPath === "$.parameters" && field === "encryptedArguments";
+      const secretRecipe = nativeTool==='continue_assistant_workspace_action'&&normalizedArguments.operation==='secret_skill_prepare'
+        &&objectPath==='$.secretRecipe'&&field==='command';
       const signupField = (nativeTool === "request_assistant_action" && normalizedArguments.operation === "create_external_account" && objectPath === "$.fields"
         || nativeTool === "continue_assistant_workspace_action" && normalizedArguments.operation === "external_account_admit" && objectPath === "$.parameters")
         ? ({siteOrigin:"external_origin",purpose:"external_purpose",signupPlan:"external_signup_plan"})[field] : undefined;
-      const protectedField = (signupField || remoteArguments || skillArguments || acceptedCommentPath || LOCAL_ACTION_PROTECTED_FIELDS.has(field))
+      const protectedField = (signupField || remoteArguments || skillArguments || secretRecipe || acceptedCommentPath || LOCAL_ACTION_PROTECTED_FIELDS.has(field))
         && !statusDictionaryLabel
         && !isEmptyLocalActionValue(child)
         && !isEncryptedLocalActionMarker(child)
@@ -2431,7 +2433,7 @@ export const protectLocalActionArguments = async ({
           || nativeTool === "upsert_registry_rows"
         );
       if (protectedField) protectedEntries.push([field, child,
-        signupField ?? (remoteArguments ? "remote_arguments_json" : skillArguments ? "skill_arguments_json" :
+        signupField ?? (remoteArguments ? "remote_arguments_json" : skillArguments ? "skill_arguments_json" : secretRecipe ? "skill_setup_command_json" :
         // The existing `reason` input is already encrypted by older hosts.
         // They fail closed on the new field contract without sending plaintext.
         acceptedCommentPath ? "file_path" : nativeTool === "delete_workspace" && field === "reason"

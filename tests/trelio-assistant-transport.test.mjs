@@ -90,7 +90,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
   // The exact native shape is also consumed by the production hook validator.
   const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
   const client={companies:async()=>available?[{companyId,companySlug:'encrypted',encryptionState:'encrypted'}]:[],
-    readTaskPass:async()=>({state:'leased',passId:pass.passId,threadId:pass.threadId,leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
+    readTaskPass:async()=>({...pass,state:'leased',leaseExpiresAt:new Date(Date.now()+600000).toISOString()})};
   const mentionMemberId=randomUUID(),mentionGroupId=randomUUID();
   const staged=new Map();let preparations=0,resolves=0,businessCalls=0,customFieldDefinition=null,commentFileDefinition=null;
   const input={identity,host,client,
@@ -123,8 +123,9 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         ...(preparation.customField?{customField:preparation.customField}:{}),
         ...(preparation.commentFiles?{commentFiles:preparation.commentFiles}:{}),
         ...(preparation.commentMentions?{commentMentions:preparation.commentMentions}:{}),
+        ...(preparation.secretRecipe?{secretRecipe:preparation.secretRecipe}:{}),
         ...(preparation.commentDefinition?{action:{commentDefinition:true}}:preparation.commentFileDefinition?{action:{commentFileDefinition:preparation.commentFileDefinition}}:preparation.customFieldDefinition?{action:{customFieldDefinition:true}}:preparation.actionPreview?{action:{preview:true}}:preparation.ownerActionContent?{action:{content:preparation.ownerActionContent}}:{})},signature),true);
-      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY|CANCEL_REASON_CANARY|CANCEL_DIFFERENT_CANARY/);
+      assert.doesNotMatch(options.body,/MANAGED_QUESTION_CANARY|RICH_BODY_CANARY|FIRST_OPTION_CANARY|FIELD_VALUE_CANARY|SECRET_NUMBER_CANARY|SECRET_CHECKBOX_CANARY|UNKNOWN_OPTION_CANARY|UNKNOWN_USER_CANARY|UNKNOWN_GROUP_CANARY|SECRET_NESTED_CANARY|FILE_NAME_CANARY|DELIVERABLE_PATH_CANARY|ARGV_TEXT_CANARY|PRIVATE_RECIPE_ARGV_CANARY|CANCEL_REASON_CANARY|CANCEL_DIFFERENT_CANARY/);
       if(preparation.commentFileDefinition){
         assert.equal(preparation.nativeTool,'create_comment');
         assert.deepEqual(Object.keys(preparation.arguments).sort(),['clientRequestId','expectedTaskUpdatedAt']);
@@ -421,6 +422,40 @@ test('managed key readiness opens a real recipient envelope and verifies the com
       {...vectorArgs,parameters:{...vectorArgs.parameters,encryptedArguments:vector}},
       {...vectorArgs,parameters:{...vectorArgs.parameters,arguments:[]}}])
       await assert.rejects(withAssistantManagedContentArguments({...input,name:'continue_assistant_workspace_action',args},async()=>assert.fail('invalid vector reached native MCP')));
+    // Isolate the managed carrier between two independently exercised native
+    // contracts: actual signed/TRELIOE1 inspector/child (source-reader suite)
+    // and actual PostgreSQL P256/grant/consume (backend dispatch suite).
+    const command={id:'login',purpose:'authenticate',arguments:['login','PRIVATE_RECIPE_ARGV_CANARY'],bindingKey:'credential',fieldKey:'value',environmentVariable:'TRELIO_SERVICE_PASSWORD'};
+    const privateArgs={schemaVersion:1,operation:'secret_skill_prepare',parameters:{secretId:randomUUID(),runId:randomUUID(),fieldKey:command.fieldKey,
+      environmentVariable:command.environmentVariable,skill:{companyId,skillId:'signed-fixture',releaseId:randomUUID(),runtimeSessionId:randomUUID(),commandId:command.id}}};
+    const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+    const privateSkillPreparation={parameters:{...privateArgs.parameters,encryptionFingerprint:registered.fingerprint},privateRuntime:true,recipe:command};
+    let privateCalls=0;
+    const {withProductionAssistantManagedContent}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    let inspections=0;host.configurationDirectory=root;
+    const protectedPrivate=await withProductionAssistantManagedContent({name:'continue_assistant_workspace_action',args:privateArgs},async wire=>{
+      privateCalls++;assert.doesNotMatch(JSON.stringify(wire),/PRIVATE_RECIPE_ARGV_CANARY/);
+      assert.equal(Object.hasOwn(wire,'secretRecipe'),false,'host metadata stays inside the existing hidden envelope');
+      const {encryptedContent,...business}=wire,recipe=encryptedContent.secretRecipe;
+      assert.equal(await verifyCompanyEncryptionRecord(registered.publicSigningJwk,{protocol:'assistant-managed-content/v1',phase:'publication',companyId,
+        target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'continue_assistant_workspace_action',arguments:business,secretRecipe:recipe},encryptedContent.signature),true);
+      const marker=recipe.command.$trelioE2ee;
+      const opened=await decryptCompanyPayload({encryptedPayload:staged.get(marker.id),scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
+      assert.deepEqual(opened.values.skill_setup_command_json,command,'whole original recipe uses the existing payload codec');
+      return {content:[],structuredContent:{prepared:true,localAction:{schemaVersion:1,operation:'secret_skill_run',runIdentity:{workspaceId:randomUUID(),runId:privateArgs.parameters.runId},
+        parameters:{grantId:randomUUID(),fieldKey:command.fieldKey,environmentVariable:command.environmentVariable,
+          skill:{...privateArgs.parameters.skill,arguments:recipe.command}}}}};
+    },{context:action=>action({...client,identity},host,store),withProfile:async(action,options)=>{
+      assert.equal(options.encryptedSkillRead.projectId,null);inspections++;
+      return action({identity,preparePrivateSkillArguments:async(parameters,_signal,config)=>{
+        assert.equal(config.inspectRecipe,true);assert.deepEqual(parameters,privateArgs.parameters);return privateSkillPreparation;}});
+    }});
+    assert.deepEqual(protectedPrivate.structuredContent.localAction.parameters.skill.arguments,command.arguments);
+    assert.equal(privateCalls,1,'only one native preparation, never a consume or provider launch');assert.equal(inspections,1);
+    delete host.configurationDirectory;
+    // The production facade owns an empty lock directory; remove that exact
+    // fixture directory before the independent no-canary self-test assertions.
+    await fs.rm(path.join(root,'digital-assistants'),{recursive:true,force:true});
     const cancellation={runId:randomUUID(),reason:'CANCEL_REASON_CANARY'};
     let cancellationCalls=0,cancellationMarker=null;
     const cancelSend=async wire=>{

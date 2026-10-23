@@ -109,6 +109,8 @@ const readSkillSetupDescriptor = (parsedPackage) => {
 };
 
 /** Read only bytes whose package signature and per-file hashes were verified. */
+export const readSkillSecretSetupCommands = parsedPackage =>
+  structuredClone(readSkillSetupDescriptor(parsedPackage)?.commands.filter(command=>command.purpose==='authenticate')??[]);
 export const readSkillSecretSetupCommand = (parsedPackage, runtimeArguments) =>
   readSkillSetupDescriptor(parsedPackage)?.commands.find(command => JSON.stringify(command.arguments) === JSON.stringify(runtimeArguments)) ?? null;
 

@@ -24,7 +24,7 @@ const reportFinishProgress = (stage, counts = {}) => {
   writeFinishProgress({ stage, ...counts });
 };
 
-import { readSkillSecretSetupCommand, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
+import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -7148,6 +7148,8 @@ export const inspectEncryptedAgentSkillRuntimeForConsent = async ({
   companyEncryption,
   humanInputCommandId = null,
   inspectHumanInputCommands = false,
+  secretCommandId = null,
+  inspectSecretCommands = false,
 }) => {
   const response = await request(origin, token, packageUrl);
   const encryptedPackageBytes = await readBoundedResponseBuffer(
@@ -7210,6 +7212,8 @@ export const inspectEncryptedAgentSkillRuntimeForConsent = async ({
     return {
       capabilities: [...parsedPackage.capabilities].sort(),
       packageSizeBytes: parsedPackage.packageSizeBytes,
+      ...(secretCommandId===null?{}:{secretCommand:readSkillSecretSetupCommands(parsedPackage).find(command=>command.id===secretCommandId)??null}),
+      ...(inspectSecretCommands?{secretCommands:readSkillSecretSetupCommands(parsedPackage)}:{}),
       ...(humanInputCommandId === null ? {} : { humanInputCommand: readSkillHumanInputSetupCommand(parsedPackage, humanInputCommandId) }),
       ...(inspectHumanInputCommands ? { humanInputCommands: readSkillHumanInputSetupCommands(parsedPackage) } : {}),
     };

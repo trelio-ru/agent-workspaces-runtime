@@ -206,7 +206,16 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
     const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
     const company=await transport.readAssistantCompanyContentMode({identity,host,client,signal});
     if(company.encryptionState==='plain')return send(args);
-    let selectedArguments=args;
+    let selectedArguments=args,privateSkillPreparation=null;
+    if(name==='continue_assistant_workspace_action'&&args.operation==='secret_skill_prepare'){
+      const skill=args.parameters?.skill;
+      privateSkillPreparation=await withProfile(async current=>{
+        if(['origin','assistantId','deviceId'].some(key=>current.identity[key]!==identity[key])
+          ||typeof current.preparePrivateSkillArguments!=='function')fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        return current.preparePrivateSkillArguments(args.parameters,signal,{inspectRecipe:true});
+      },{signal,encryptedSkillRead:{schemaVersion:1,nativeTool:'get_agent_skill',companyId:company.companyId,
+        projectId:skill?.projectId??null,skillId:skill?.skillId,releaseId:skill?.releaseId,arguments:{sections:['instructions','execution']}}});
+    }
     if(name==='request_assistant_action'&&args.operation==='setup_skill_account'){
       const fields=transport.normalizeAssistantSkillAccountSetupFields(args.fields);
       const inspected=await withProfile(async current=>{
@@ -233,7 +242,7 @@ export const withProductionAssistantManagedContent=async({name,args,signal},send
       selectedArguments={...args,reason:`${args.reason.trim()}\n\nЛокальная проверка подписанного зашифрованного пакета: ${inspected.capabilities.join(', ')||'нет заявленных возможностей'}; ${inspected.packageSizeBytes} байт. Пакет не запускался.`};
     }
     return transport.withAssistantManagedContentArguments({identity,host,client,store,lockDirectory:path.join(directory,'runtime-locks'),
-      name,args:selectedArguments,signal},send);
+      name,args:selectedArguments,signal,privateSkillPreparation},send);
   },{signal});
 };
 

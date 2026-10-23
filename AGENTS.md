@@ -69,7 +69,7 @@ publication tooling также остаются вне этого публичн
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
 
-- Managed skill consent/setup reuse SAME owner engine, signed inspector, account catalogue and bounded protected-input process; no model argv/import/unattended login.
+- Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login.
   Public signed human-input setup also selects the bounded setup view without
   pending device consent. Test task discovery → existing list change → exact
   owner decision → advertised setup → task view; never add a hidden-call alias.

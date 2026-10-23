@@ -2057,3 +2057,25 @@ verifies the native scope descriptor and restores the leaves for the SAME local
 ranking/hydration code. Native procedure IDs and scope cannot be substituted.
 Creation metadata reuses the native human projection and SAME scoped authority
 builder. No new journal, content field, cache, index, outbox or crypto engine.
+
+
+### Company-private recipe and company Secret intersection
+
+A current company-unverified runtime may use an existing configured company
+Secret binding only with BOTH independent native executable device consent and
+the ordinary card ACL/own active Run/one-use grant. It remains unverified code.
+The public verified predicate and the shared human settings writer are unchanged.
+New opaque private connection setup is unavailable in that common writer, so
+this adapter covers valid configured/migrated connections without inventing an
+editor or plaintext fallback.
+
+For encrypted private artifacts, the SAME bounded signature/TRELIOE1/manifest
+inspector selects one signed v2 authenticate command. The existing managed
+protector seals the whole recipe into `skill_setup_command_json`; its P256
+preparation/publication includes the exact structural descriptor. The native
+grant retains only versioned ciphertext inventory/reference and current
+fingerprint. Only after that exact native response may the host restore its
+locally inspected argv. The SAME account/package/process/secret-exec engine
+checks it again and consumes one native grant late; provider output is discarded.
+Changed recipe, consent, recipient, connection/binding/config, ACL or Run refuses
+before consume. Inspection is never login or business-processing evidence.

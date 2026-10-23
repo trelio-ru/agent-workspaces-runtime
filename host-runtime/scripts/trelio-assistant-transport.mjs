@@ -576,7 +576,7 @@ const ASSISTANT_MANAGED_CONTENT_TOOLS=new Set(['call_remote_agent_skill_tool','c
   'update_task_custom_field','delete_attachment','delete_checklist','complete_checklist_item','delete_task_relation',
   'get_assistant_owner_question','get_assistant_intake_context']);
 export const supportsAssistantManagedContent=(name,args)=>ASSISTANT_MANAGED_CONTENT_TOOLS.has(name)
-  ||name==='continue_assistant_workspace_action'&&(args?.operation==='skill_run'||args?.operation==='external_account_admit'
+  ||name==='continue_assistant_workspace_action'&&(args?.operation==='skill_run'||args?.operation==='secret_skill_prepare'||args?.operation==='external_account_admit'
     ||args?.operation==='secret_list'&&args.parameters?.holder==='company');
 /** Local privacy/shape boundary, never native owner authority. This mirrors
  * only this closed value-free plan; the live native schema and decision still
@@ -664,7 +664,7 @@ const managedCustomFieldValue=(definition,value)=>{
 /** One bounded tools/call exchange. Staging has no domain effect and consumes
  * no observed nonce. The ordinary send callback still executes exactly once
  * with its independent live native pass/proof/CAS and sealed owner decision. */
-export const withAssistantManagedContentArguments=async({identity,host,client,store,lockDirectory,name,args,signal},send)=>{
+export const withAssistantManagedContentArguments=async({identity,host,client,store,lockDirectory,name,args,signal,privateSkillPreparation=null},send)=>{
   if(!supportsAssistantManagedContent(name,args)||!object(args)||typeof send!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
   // Ignore model-authored transport hints before signing; all private metadata
   // comes from the genuine current OS/pass context below.
@@ -676,6 +676,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
     ||Object.keys(business.parameters).some(key=>!['holder','offset','limit'].includes(key))
     ||business.parameters.offset!==undefined&&(!Number.isSafeInteger(business.parameters.offset)||business.parameters.offset<0)
     ||business.parameters.limit!==undefined&&(!Number.isSafeInteger(business.parameters.limit)||business.parameters.limit<1||business.parameters.limit>50)))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+  const secretSkill=name==='continue_assistant_workspace_action'&&business.operation==='secret_skill_prepare';
   const skillArguments=name==='continue_assistant_workspace_action'&&business.operation==='skill_run';
   let originalSkillArguments=null;
   if(skillArguments){
@@ -747,12 +748,27 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const common=await import('./trelio-workspace.mjs'),local=await import('./trelio-local-context.mjs'),
         crypto=await import('./trelio-company-encryption.mjs');
       const current=async()=>{await assertCurrent();await assertPass();};
-      let customField=null,commentFiles=null,commentMentions=null,commentAttachmentLinks=[];
+      let customField=null,commentFiles=null,commentMentions=null,commentAttachmentLinks=[],secretRecipe=null,privateRecipeArguments=null;
+      if(secretSkill){
+        if(!object(privateSkillPreparation)||business.schemaVersion!==1||business.runIdentity!==undefined
+          ||Object.keys(business).some(key=>!['schemaVersion','operation','parameters'].includes(key)))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+        const prepared=privateSkillPreparation;
+        await current();business.parameters=prepared.parameters;
+        if(prepared.parameters?.encryptionFingerprint!==context.device.fingerprint)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        if(!prepared.privateRuntime)return send({...args,parameters:prepared.parameters});
+        const command=prepared.recipe;
+        if(!object(command)||command.id!==business.parameters.skill.commandId||command.purpose!=='authenticate'
+          ||command.fieldKey!==business.parameters.fieldKey||command.environmentVariable!==business.parameters.environmentVariable
+          ||!Array.isArray(command.arguments))fail('ASSISTANT_SECRET_SKILL_COMMAND_DENIED');
+        privateRecipeArguments=structuredClone(command.arguments);
+        business.secretRecipe={commandId:command.id,bindingKey:command.bindingKey,fieldKey:command.fieldKey,
+          environmentVariable:command.environmentVariable,command};
+      }
       const binding=async(phase,wire,action)=>{
         await current();
         return crypto.signCompanyEncryptionRecord(context.device.privateKeys.signingPrivateKey,
           {protocol:'assistant-managed-content/v1',phase,companyId:pass.companyId,target,nativeTool:name,
-            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{})});
+            arguments:managedBusinessArguments(wire),...(action?{action}:{}),...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),...(secretRecipe?{secretRecipe}:{})});
       };
       const hydrate=async bundle=>{
         await current();
@@ -771,7 +787,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
       const stage=async(protectedValue,{actionPreview=false,ownerActionContent}={})=>{
         const wire=Object.fromEntries(Object.entries(protectedValue.value).filter(([key])=>key!=='ownerDecisionId'));
         const action=actionPreview?{preview:true}:ownerActionContent?{content:ownerActionContent}:undefined;
-        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),...(actionPreview?{actionPreview:true}:{}),
+        const preparation={nativeTool:name,arguments:wire,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),...(secretRecipe?{secretRecipe}:{}),...(actionPreview?{actionPreview:true}:{}),
           ...(ownerActionContent?{ownerActionContent}:{}),signature:await binding('preparation',wire,action)};
         const request=async(origin,selectedToken,pathname,options)=>{
           await current();
@@ -903,6 +919,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         // All new host metadata stays inside the ALREADY hidden envelope.
         // Older model-schema projectors know that envelope; a new root field
         // would otherwise expose a path-bearing input before their preflight.
+        if(protectedValue.value.secretRecipe){secretRecipe=protectedValue.value.secretRecipe;delete protectedValue.value.secretRecipe;}
         if(protectedValue.value.encryptedFiles){
           commentFiles=protectedValue.value.encryptedFiles;
           delete protectedValue.value.encryptedFiles;
@@ -922,12 +939,25 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
           action={...ownerActionContent,snapshot:rawSnapshot};
         }else await stage(protectedValue);
       }
-      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),
+      const encryptedContent={schemaVersion:1,fingerprint:context.device.fingerprint,...(customField?{customField}:{}),...(commentFiles?{commentFiles}:{}),...(commentMentions?{commentMentions}:{}),...(secretRecipe?{secretRecipe}:{}),
         ...(!readonly?{signature:await binding('publication',wire,action)}:{}),...(action?{action}:{})};
       await current();
       const authority=Object.fromEntries(Object.entries(args).filter(([key])=>['taskPass','intakePass','runtimeSessionProof'].includes(key)));
       const result=await send({...authority,...wire,encryptedContent}); // exactly ONE domain invocation
       if(result?.isError===true)return result;
+      if(secretRecipe){
+        const value=structuredClone(result.structuredContent),action=value?.localAction,p=action?.parameters;
+        if(value?.prepared!==true||action?.operation!=='secret_skill_run'||!object(p)||!UUID.test(p.grantId??'')
+          ||action.runIdentity?.runId!==business.parameters.runId||p.fieldKey!==secretRecipe.fieldKey
+          ||p.environmentVariable!==secretRecipe.environmentVariable||p.skill?.skillId!==business.parameters.skill.skillId
+          ||p.skill.releaseId!==business.parameters.skill.releaseId||p.skill.companyId!==pass.companyId
+          ||JSON.stringify(p.skill.arguments)!==JSON.stringify(secretRecipe.command))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        // Native committed the exact cipher recipe/inventory into its grant.
+        // Restore only the locally inspected original vector, then the SAME
+        // grant/recipe/account/process adapter independently checks it again.
+        p.skill.arguments=privateRecipeArguments;
+        return {...result,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+      }
       const terminal=result?.structuredContent?.managedEncryptedContent?.context?.state??result?.structuredContent?.state;
       if(name==='resolve_assistant_intake'&&['ignored','created','routed','waiting_owner','redirected'].includes(terminal))publicationTerminal=terminal;
       const bundle=result?.structuredContent?.managedEncryptedContent;
@@ -1157,7 +1187,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       await assertLivePass(signal);
       return {...selected,encryptionFingerprint:stored.record.fingerprint};
     },
-    async preparePrivateSkillArguments(parameters,signal){
+    async preparePrivateSkillArguments(parameters,signal,{inspectRecipe=false}={}){
       // No provider argv is sent to obtain a native refusal. Only an existing
       // signed command ID and public structural refs can reach encrypted MCP;
       // the native parser expands its immutable public recipe afterwards.
@@ -1175,7 +1205,11 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(stored?.assistantId!==identity.assistantId||stored.deviceId!==identity.deviceId||stored.companyId!==pass.companyId
         ||!/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record?.fingerprint??''))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       await assertLivePass(signal);
-      return {...structuredClone(parameters),encryptionFingerprint:stored.record.fingerprint};
+      const selected={...structuredClone(parameters),encryptionFingerprint:stored.record.fingerprint};
+      if(!inspectRecipe)return selected;
+      const inspected=await inspectAssistantPrivateSkillRecipe({origin:identity.origin,parameters,signal});
+      await assertLivePass(signal);
+      return {parameters:selected,...inspected};
     },
     async preparePrivateBrowserArguments(args,signal){
       const {normalizeSecretBrowserGrantTarget,normalizeSecretBrowserFieldSelector}=await import('./trelio-secret-browser.mjs');
@@ -1930,6 +1964,8 @@ export const createAssistantSourceReadObserver=({identity,client,host,withInbox,
 /** Native encrypted get_agent_skill uses the SAME signed runtime resolver and
  * response projector. Only instructions/config ciphertext is opened locally;
  * package execution still needs its separate task proof and signed loader. */
+const nativeCompanySecretGuidance=raw=>Array.isArray(raw?.companyConnection?.secretBindings)
+  &&raw.companyConnection.secretBindings.length>0&&raw.assistantGuidance?.structuredContent?.assistantExecution?.privateAuthentication;
 export const materializeAssistantEncryptedSkill = async ({origin,descriptor,signal,common}) => {
   common??=await import('./trelio-workspace.mjs');
   const selected=validateAssistantEncryptedSkillRead(descriptor),profile=common.currentWorkspaceExecutionProfile();
@@ -1960,22 +1996,33 @@ export const materializeAssistantEncryptedSkill = async ({origin,descriptor,sign
     &&['company_unverified','platform_verified'].includes(resolved.trust.artifactLevel);
   if(!(companyRuntime||resolved.artifact.contentProtection==='plain'&&resolved.trust.level==='platform_verified'
     &&resolved.trust.artifactLevel==='platform_verified'&&!resolved.trust.requiresDeviceConsent)
-    ||resolved.companyConnection?.secretBindings.length)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+    ||!companyRuntime&&resolved.companyConnection?.secretBindings.length&&!nativeCompanySecretGuidance(rawResolution))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   const setupRequested=selected.arguments.sections?.includes('connection')===true;
   let inspected=null;
-  if(pending||setupRequested&&resolved.artifact.contentProtection==='company_e2ee_v1'){
+  if(pending||resolved.artifact.contentProtection==='company_e2ee_v1'&&(setupRequested||resolved.companyConnection?.secretBindings.length)){
     if(resolved.artifact.contentProtection!=='company_e2ee_v1'||!companyEncryption)fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
     // SAME verifier, bounded encrypted download, TRELIOE1/AAD decrypt, complete
     // manifest equality and ephemeral cleanup. This is inspection, never an
     // executable cache or a provider launch, before exact owner approval.
     inspected=await common.inspectEncryptedAgentSkillRuntimeForConsent({origin,token,packageUrl:resolved.packageUrl,
-      artifact:resolved.artifact,companyEncryption,inspectHumanInputCommands:setupRequested});
+      artifact:resolved.artifact,companyEncryption,inspectHumanInputCommands:setupRequested,inspectSecretCommands:Boolean(resolved.companyConnection?.secretBindings.length)});
   }
   const native=rawResolution.assistantGuidance,execution=native?.structuredContent?.runtimeExecution;
   if(!execution||execution.releaseId!==selected.releaseId||native.structuredContent.skill?.id!==selected.skillId)
     fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
   native.content=[{type:'text',text:'Current skill instructions and assistant execution capability are in structuredContent.'}];
-  const privateAuthentication=native.structuredContent.assistantExecution?.privateAuthentication;
+  const privateAuthentication=inspected?.secretCommands?.length?{
+    state:'available',verificationRequired:true,providerOutputReturned:false,
+    commands:inspected.secretCommands.flatMap(command=>{
+      const binding=resolved.companyConnection?.secretBindings.find(row=>row.key===command.bindingKey&&row.status==='active'&&row.hasValue),
+        nativeBinding=native.structuredContent?.assistantExecution?.privateAuthentication?.bindings?.find(row=>row.key===command.bindingKey);
+      if(!binding||!UUID.test(nativeBinding?.secretId??''))return [];
+      return [{id:command.id,localAction:{server:'trelio-assistant',tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,
+        operation:'secret_skill_prepare',parameters:{secretId:nativeBinding.secretId,runId:'<active own task Run UUID>',fieldKey:command.fieldKey,
+          environmentVariable:command.environmentVariable,skill:{companyId:selected.companyId,...(selected.projectId?{projectId:selected.projectId}:{}),
+            skillId:selected.skillId,releaseId:selected.releaseId,runtimeSessionId:native.structuredContent.runtimeSessionId??execution.localAction.arguments.parameters.runtimeSessionId,
+            commandId:command.id}}}}}];
+    })}:native.structuredContent.assistantExecution?.privateAuthentication;
   const runtimeConsent=native.structuredContent.assistantExecution?.runtimeConsent;
   const accountSetup=setupRequested&&inspected?.humanInputCommands?.length
     ?{state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup',
@@ -2014,6 +2061,31 @@ export const inspectAssistantSkillAccountSetupForOwner=async({origin,companyId,f
     fail('ASSISTANT_SKILL_SETUP_REQUIRED');
   return {command:inspected.humanInputCommand,artifactId:resolved.artifact.id,packageSha256:resolved.artifact.packageSha256,
     privateRuntime:resolved.artifact.contentProtection==='company_e2ee_v1'};
+};
+
+/** The SAME complete signed package/manifest inspector selects one private
+ * authenticate recipe. Neither model argv nor a declaration field can replace
+ * signature/consent, native company binding, Secret ACL or late consumption. */
+export const inspectAssistantPrivateSkillRecipe=async({origin,parameters,signal,common})=>{
+  common??=await import('./trelio-workspace.mjs');
+  const profile=common.currentWorkspaceExecutionProfile(),skill=parameters.skill;
+  if(profile?.kind!=='digital_assistant'||typeof profile.hydrateSkillRuntimeResolution!=='function')fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  const token=await common.requireToken(origin);
+  const response=await common.request(origin,token,'/api/agent-skills/runtime/resolve',{method:'POST',signal,headers:{'content-type':'application/json'},
+    body:JSON.stringify({companyId:skill.companyId,projectId:skill.projectId??null,skillId:skill.skillId,expectedReleaseId:skill.releaseId})});
+  const raw=await readAssistantEncryptedSnapshotResponse(response,common),hydrated=await profile.hydrateSkillRuntimeResolution(raw,common,signal);
+  const resolved=common.normalizeResolvedSkillRuntimeArtifact(hydrated.rawResolution);
+  if(resolved.releaseId!==skill.releaseId||resolved.company.id!==skill.companyId||resolved.artifact.skillId!==skill.skillId
+    ||(resolved.localIdentity?.projectId??null)!==(skill.projectId??null))fail('ASSISTANT_SECRET_SKILL_COMMAND_DENIED');
+  if(resolved.artifact.contentProtection==='plain')return {privateRuntime:false};
+  if(resolved.trust.level!=='company_unverified'||!resolved.trust.requiresDeviceConsent||!UUID.test(resolved.trust.consentId??''))
+    fail('ASSISTANT_SKILL_OWNER_CONSENT_REQUIRED');
+  const inspected=await common.inspectEncryptedAgentSkillRuntimeForConsent({origin,token,packageUrl:resolved.packageUrl,
+    artifact:resolved.artifact,companyEncryption:hydrated.companyEncryption,secretCommandId:skill.commandId});
+  const command=inspected.secretCommand,binding=resolved.companyConnection?.secretBindings.find(row=>row.key===command?.bindingKey&&row.status==='active'&&row.hasValue);
+  if(!inspected.capabilities.includes('secret-checkout')||!command||command.purpose!=='authenticate'||!binding
+    ||command.fieldKey!==parameters.fieldKey||command.environmentVariable!==parameters.environmentVariable)fail('ASSISTANT_SECRET_SKILL_COMMAND_DENIED');
+  return {privateRuntime:true,recipe:command,artifactId:resolved.artifact.id,packageSha256:resolved.artifact.packageSha256};
 };
 
 /** Fresh encrypted private-package inspection for the owner question. The
