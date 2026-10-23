@@ -12,7 +12,7 @@ import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
  * Run.
  */
 import { diagnosePublicTrelioService } from "./trelio-public-service-diagnostic.mjs";
-import { buildTrelioConnectionRecovery } from "./trelio-installation-diagnostic.mjs";
+import { buildTrelioBootstrapVerification } from "./trelio-installation-diagnostic.mjs";
 import { writeFinishProgress } from "./trelio-workspace-finish-progress.mjs";
 
 // Only an actual CLI finish emits these content-free frames. Imported helpers
@@ -1324,7 +1324,7 @@ const doctor = async (options) => {
   // local MCP schema itself is unavailable to the current model. This remains
   // anonymous and does not reconnect MCP, read bearer tokens or repair config.
   report.publicService = await diagnosePublicTrelioService(normalizeOrigin(options.origin || DEFAULT_ORIGIN));
-  report.connectionRecovery = buildTrelioConnectionRecovery(report.publicService);
+  Object.assign(report, buildTrelioBootstrapVerification({ local: report, publicService: report.publicService }));
 
   if (options.json === true) {
     process.stdout.write(`${JSON.stringify(report)}\n`);

@@ -21,7 +21,7 @@ export const buildTrelioConnectionRecovery = (publicService, requiredActions = [
     ? "verify_current_client_tools" : "public_service_not_confirmed",
   connectionRetried: false,
   restartRequired: requiresClientRestart(requiredActions),
-  instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema нет, используй штатный reconnect только при наличии такой функции клиента, затем проверь доступ снова; не придумывай команды. Не повторяй doctor как reconnect и не объявляй старый 5xx текущей ошибкой. Нет matching evidence или exact requiredAction – не советуй restart/new chat, login, pairing или переустановку. Сохрани конкретный client tool-exposure blocker; отсутствие функции reconnect не доказывает необходимость restart.",
+  instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema действительно отсутствует в текущем ходе, перейди к client recovery для фактического клиента: это наблюдение о выдаче tools, не доказательство failed startup. Не заканчивай повтором doctor или общим отказом без следующего шага. Не объявляй старый 5xx текущей ошибкой. Без наблюдаемого client blocker или exact requiredAction не советуй restart; login, pairing и переустановка требуют своих отдельных оснований. Не придумывай команды или API reconnect.",
 });
 
 const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
@@ -114,7 +114,13 @@ const buildCodexMcpRecoveryInspection = (restartRequired) => ({
     ? ["fully_quit_and_reopen_application"]
     : ["toggle_trelio_plugin", "fully_quit_and_reopen_application"],
   archiveRecoveryAllowed: false,
-  appliesTo: "diagnosed_stale_or_failed_mcp_connection",
+  appliesTo: "observed_client_tool_exposure_gap_or_failed_mcp_connection",
+  evidence: {
+    state: "not_checked",
+    accepted: ["direct_schema_absent_in_current_turn", "diagnosed_stale_or_failed_mcp_connection"],
+    insufficient: ["empty_nested_ALL_TOOLS", "public_probe_timeout", "cli_inventory"],
+    instructions: "Сначала проверь реально доступную direct schema текущего хода. Отсутствие только в ALL_TOOLS не является отсутствием инструмента. Если direct schema отсутствует даже при server ready, предложи восстановление выдачи tools; не приписывай серверу тайм-аут и не требуй ещё один doctor. Наличие schema ведёт к обычному direct read; его ACL/OAuth/hook-отказ разбирается по точному коду, а не через toggle.",
+  },
   preferred: {
     method: "config/mcpServer/reload",
     owner: "existing_codex_app_server",
@@ -126,12 +132,12 @@ const buildCodexMcpRecoveryInspection = (restartRequired) => ({
     method: "toggle_trelio_plugin",
     state: restartRequired ? "not_applicable" : "client_action_required",
     automatic: false,
-    instructions: "При подтверждённом зависшем/неудачном MCP startup предложи два варианта: выключить и включить сам плагин Trelio Agent Workspaces в настройках Codex/ChatGPT → Плагины либо полностью выйти из приложения и открыть его снова. Сначала предложи переключение плагина как вариант без полного выхода. Нужен переключатель всего плагина, не отдельного MCP-сервера; дождись выключения, затем включения и вернись в прежний чат. Шаг выполняет пользователь либо доступный штатный client tool; local runtime не автоматизирует UI и не редактирует config ради имитации reload. Если переключателя нет или проверка после переключения не прошла, используй полный выход. Exact requiredAction с restartRequired=true требует полного выхода: переключение его не заменяет. Не удаляй/переустанавливай плагин, не меняй OAuth, pairing или hook trust.",
+    instructions: "При наблюдаемом отсутствии direct schema в текущем ходе либо подтверждённом зависшем/неудачном MCP startup предложи два варианта: выключить и включить сам плагин Trelio Agent Workspaces в настройках Codex/ChatGPT → Плагины либо полностью выйти из приложения и открыть его снова. Сначала предложи переключение плагина как вариант без полного выхода. Нужен переключатель всего плагина, не отдельного MCP-сервера; дождись выключения, затем включения и вернись в прежний чат. Шаг выполняет пользователь либо доступный штатный client tool; local runtime не автоматизирует UI и не редактирует config ради имитации reload. Если переключателя нет или проверка после переключения не прошла, используй полный выход. Exact requiredAction с restartRequired=true требует полного выхода: переключение его не заменяет. Не удаляй/переустанавливай плагин, не меняй OAuth, pairing или hook trust.",
   },
   restartAlternative: {
     method: "fully_quit_and_reopen_application",
     automatic: false,
-    instructions: "Полностью завершить Codex/ChatGPT обычной командой выхода, открыть заново и вернуться в тот же чат. Закрытие окна или создание нового чата в прежнем процессе не являются полным выходом. Предложи этот вариант при подтверждённом stale/failed MCP либо обязательном process restart; не повторяй уже выполненный restart без нового evidence и не завершай процессы автоматически.",
+    instructions: "Полностью завершить Codex/ChatGPT обычной командой выхода, открыть заново и вернуться в тот же чат. Закрытие окна или создание нового чата в прежнем процессе не являются полным выходом. Предложи этот вариант при наблюдаемом отсутствии direct schema, подтверждённом stale/failed MCP либо обязательном process restart; не повторяй уже выполненный restart без нового evidence и не завершай процессы автоматически.",
   },
   verification: {
     checks: ["same_thread_preserved", "linked_schedules_preserved", "fresh_mcp_starting_then_ready", "safe_direct_read_in_target_thread"],
@@ -348,6 +354,51 @@ const buildLocalSummary = (local, clientKind) => ({
   issues: Array.isArray(local.issues) ? local.issues : [],
 });
 
+// Both entrypoints must fence the same local failures before recommending a
+// read. In particular a cold Windows worker failure is not repaired by a
+// successful public HTTPS probe. Git remains irrelevant to a remote read.
+const buildLocalRequiredActions = (local) => {
+  const actions = [];
+  if (local.hookStartup?.status === "attention") actions.push({
+    code: "REVIEW_WINDOWS_HOOK_STARTUP_DIAGNOSTIC",
+    authority: "read_only_diagnosis",
+    reasonCode: "WINDOWS_HOOK_STARTUP_NOT_READY",
+    nextStep: "Сохрани local.hookStartup: готовность worker и публичный HTTPS измерены независимо. Spawn не доказывает готовность PowerShell; поздняя готовность не укладывается в лимит hook. Сравнения зависят от прогрева. Причину уточняй по локальному отчёту, не повторяя protected read и не меняя Hooks, trust, OAuth, pairing, ACL или сертификаты. Успех диагностики не доказывает успех исходного вызова.",
+  });
+  if (local.node?.status !== "ready") actions.push(buildNodeAction(local));
+  if (local.git?.status !== "ready") actions.push(buildGitAction(local));
+  if (local.plugin?.status !== "ready") actions.push(buildPluginAction(local));
+  return actions;
+};
+
+/**
+ * The frozen shell's bootstrap command has no clientKind/scope arguments and is
+ * precisely what remains available when the local MCP tool is missing. Return
+ * the SAME read and client-recovery plans here instead of a weaker doctor-only
+ * paragraph. Do not infer the actual client from inherited Codex/Claude
+ * environment or from co-installed manifests: the caller selects the
+ * matching conditional branch. No disk config, owner IPC or business state is
+ * read or changed by this pure projection; execution/evidence stay with the
+ * current client, and an unknown routing check is never reported as ready.
+ */
+export const buildTrelioBootstrapVerification = ({ local, publicService }) => {
+  const requiredActions = buildLocalRequiredActions(local);
+  return {
+    connectionRecovery: {
+      ...buildTrelioConnectionRecovery(publicService, requiredActions),
+      clientInspection: "clientRecoveryByKind",
+    },
+    readVerification: buildDiagnosticReadVerification({
+      clientKind: null, publicService, requiredActions,
+    }),
+    clientRecoveryByKind: {
+      clientKind: "not_checked",
+      selection: "Используй только ветку фактического клиента. CLI не определяет clientKind, direct toolset или effective routing. Codex: обычный прямой MCP-вызов вне functions.exec; ветка codex применяется только после проверки её evidence. Для другого клиента используй его штатные возможности, не инструкции Codex.",
+      codex: buildCodexMcpRecoveryInspection(requiresClientRestart(requiredActions)),
+    },
+  };
+};
+
 /**
  * Keep the result explicitly short of claiming end-to-end readiness. A local
  * doctor cannot see OAuth bearer usability or the client's hook-trust choice;
@@ -379,17 +430,8 @@ export const buildTrelioInstallationDiagnostic = ({
     );
   }
 
-  const requiredActions = [];
+  const requiredActions = buildLocalRequiredActions(local);
   const startupBlocked = local.hookStartup?.status === "attention";
-  if (startupBlocked) requiredActions.push({
-    code: "REVIEW_WINDOWS_HOOK_STARTUP_DIAGNOSTIC",
-    authority: "read_only_diagnosis",
-    reasonCode: "WINDOWS_HOOK_STARTUP_NOT_READY",
-    nextStep: "Сохрани local.hookStartup: готовность worker и публичный HTTPS измерены независимо. Spawn не доказывает готовность PowerShell; поздняя готовность не укладывается в лимит hook. Сравнения зависят от прогрева. Причину уточняй по локальному отчёту, не повторяя protected read и не меняя Hooks, trust, OAuth, pairing, ACL или сертификаты. Успех диагностики не доказывает успех исходного вызова.",
-  });
-  if (local.node?.status !== "ready") requiredActions.push(buildNodeAction(local));
-  if (local.git?.status !== "ready") requiredActions.push(buildGitAction(local));
-  if (local.plugin?.status !== "ready") requiredActions.push(buildPluginAction(local));
   if (clientKind === "codex" && codexLegacyMcpMigration?.status === "removed") {
     requiredActions.push(buildRemovedLegacyMcpRestartAction());
   } else if (clientKind === "codex" && codexLegacyMcpMigration?.status === "blocked") {

@@ -1640,6 +1640,18 @@ Diagnostic runtime автоматически проверяет anonymous GET `
 exceptions не выходят из probe. Этот алгоритм работает независимо от folder
 blocker и не выполняется в чистом onboarding/folder plan.
 
+CLI bootstrap с прежним `bridge doctor --json` также возвращает
+`readVerification` и `clientRecoveryByKind`. Они строятся теми же pure builders,
+что `liveVerification.read` и `clientInspection.mcpRecovery` MCP-диагностики:
+общие local prerequisite guards, безопасный следующий read и проверка результата.
+CLI без scope выбирает `list_companies`; это ещё не protected readiness.
+Старый `connectionRecovery` сохраняется и ссылается на `clientRecoveryByKind`.
+Новых flags, plugin shell и обходного proxy не требуется. Клиент CLI неизвестен:
+`clientKind=not_checked`, ветка `codex` условная, выбирается только для фактического
+Codex. Inherited environment и наличие manifest не устанавливают clientKind,
+effective routing, tool exposure или необходимость restart. Оба пути сохраняют
+`readResult=not_checked` и `connectionRetried=false` до клиентской проверки.
+
 `liveVerification.connectionRecovery` явно сохраняет `connectionRetried=false`:
 doctor и public probes не переподключают remote MCP. `available/recovered`
 требует проверки direct schema и одного безопасного обычного чтения в текущем
@@ -1659,7 +1671,8 @@ blocker, без циклического повторения doctor и без �
 desktop IPC. Штатный reload относится ко всем загруженным чатам, не к одному
 серверу; его доступность остаётся `not_checked` до client inspection.
 
-При диагностированном stale/failed MCP и недоступном owner API агент предлагает
+При наблюдаемом отсутствии direct schema в текущем ходе либо диагностированном
+stale/failed MCP и недоступном owner API агент предлагает
 два варианта: в настройках Codex/ChatGPT → Плагины выключить и включить **сам
 Trelio Agent Workspaces** либо полностью выйти из Codex/ChatGPT и открыть его
 заново. Сначала предлагается toggle как вариант без полного выхода; пользователь
@@ -1669,6 +1682,16 @@ Trelio Agent Workspaces** либо полностью выйти из Codex/Chat
 через `config/batchWrite` с `reloadUserConfig=true`, обновляя загруженные чаты.
 Если переключателя нет либо проверка не прошла, используется полный выход.
 Закрытие окна и новый чат внутри прежнего процесса его не заменяют.
+
+`mcpRecovery.evidence` разделяет допустимые основания и недостаточные наблюдения.
+Отсутствие direct schema при `server ready` позволяет предложить восстановление
+выдачи tools в прежнем чате, но не утверждать, что соединение упало или истёк
+тайм-аут. Пустой nested `ALL_TOOLS`, public timeout и CLI inventory этого не
+доказывают. При наличии schema сначала выполняется обычный read; его точный
+ACL/OAuth/hook-отказ не заменяется советом переключить плагин. Сборка условного
+плана автоматическая; actual toolset и owner API недоступны отдельному runtime,
+поэтому dispatch, выбор matching branch и выполнение client action остаются
+текущему клиенту. Повтор doctor вместо этого шага не является восстановлением.
 
 `userOptions` строится runtime: при exact requiredAction с
 `restartRequired=true` остаётся только полный выход, а toggle получает

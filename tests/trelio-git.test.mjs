@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import test from "node:test";
@@ -269,6 +270,8 @@ test("real Git runtime completes init, add and commit on the current OS", async 
 });
 
 test("bridge doctor exposes machine-readable local prerequisite status", async (context) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "trelio-doctor-recovery-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
   const server = http.createServer((request, response) => {
     assert.equal(request.headers.authorization, undefined);
     if (request.url === "/mcp") { response.writeHead(405).end(); return; }
@@ -289,6 +292,13 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
       encoding: "utf8",
       env: {
         ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        CODEX_HOME: path.join(home, ".codex"),
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        APPDATA: path.join(home, "AppData", "Roaming"),
+        LOCALAPPDATA: path.join(home, "AppData", "Local"),
+        TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1",
         // Production loader supplies the exact installed shell root. Tests do
         // the same explicitly now that runtime and plugin sources are separate.
         TRELIO_PLUGIN_ROOT: pluginDirectory,
@@ -304,6 +314,21 @@ test("bridge doctor exposes machine-readable local prerequisite status", async (
   assert.equal(report.publicService.state, "available");
   assert.equal(report.connectionRecovery.connectionRetried, false);
   assert.equal(report.connectionRecovery.restartRequired, false);
+  // This is the old, already-published shell command, with no new flags or
+  // local MCP available. It must return an actionable client continuation,
+  // not just anonymous reachability and another instruction to run doctor.
+  assert.equal(report.readVerification.readResult, "not_checked");
+  assert.equal(report.readVerification.state, "client_read_required");
+  assert.deepEqual(report.readVerification.nextCall, { toolName: "list_companies", arguments: {} });
+  assert.equal(report.clientRecoveryByKind.clientKind, "not_checked");
+  const recovery = report.clientRecoveryByKind.codex;
+  assert.deepEqual(recovery.userOptions, ["toggle_trelio_plugin", "fully_quit_and_reopen_application"]);
+  assert.ok(recovery.evidence.accepted.includes("direct_schema_absent_in_current_turn"));
+  assert.equal(recovery.connectionRetried, false);
+  assert.equal(recovery.archiveRecoveryAllowed, false);
+  assert.equal(recovery.sameThreadFallback.automatic, false);
+  assert.ok(recovery.verification.checks.includes("safe_direct_read_in_target_thread"));
+  assert.equal(report.connectionRecovery.clientInspection, "clientRecoveryByKind");
   assert.equal(report.node.status, "ready");
   assert.equal(report.git.status, "ready");
   assert.equal(report.git.smokeTest, "ready");

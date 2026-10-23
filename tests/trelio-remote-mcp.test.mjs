@@ -44,6 +44,7 @@ import {
   validateRemoteMcpPublicationConfig,
 } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { diagnosePublicTrelioService } from "../host-runtime/scripts/trelio-public-service-diagnostic.mjs";
+import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 // Ordinary diagnostic fixtures must never probe the real public service.
 const handleToolCall = (origin, name, args, options = {}) => handleToolCallProduction(origin, name, args, {
   publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }), ...options,
@@ -3213,7 +3214,11 @@ test("Codex recovery offers plugin toggle or full exit without archive or execut
   assert.equal(recovery.restartRequired, false);
   assert.deepEqual(recovery.userOptions, ["toggle_trelio_plugin", "fully_quit_and_reopen_application"]);
   assert.equal(recovery.archiveRecoveryAllowed, false);
-  assert.equal(recovery.appliesTo, "diagnosed_stale_or_failed_mcp_connection");
+  assert.equal(recovery.appliesTo, "observed_client_tool_exposure_gap_or_failed_mcp_connection");
+  assert.equal(recovery.evidence.state, "not_checked");
+  assert.deepEqual(recovery.evidence.accepted, ["direct_schema_absent_in_current_turn", "diagnosed_stale_or_failed_mcp_connection"]);
+  assert.ok(recovery.evidence.insufficient.includes("empty_nested_ALL_TOOLS"));
+  assert.match(recovery.evidence.instructions, /даже при server ready/u);
   const fallback = recovery.sameThreadFallback;
   assert.equal(fallback.method, "toggle_trelio_plugin");
   assert.equal(fallback.state, "client_action_required");
@@ -3232,6 +3237,43 @@ test("Codex recovery offers plugin toggle or full exit without archive or execut
   assert.equal(payload.requiredActions.length, 0);
   assert.doesNotMatch(JSON.stringify(recovery), /archive_unarchive|set_thread_archived|navigate_to_codex_page/u);
   assert.doesNotMatch(JSON.stringify(recovery), /"(?:arguments|argumentsAfterConfirmation|targetThreadId|confirmed)":/u);
+});
+
+test("bootstrap doctor shares the MCP recovery plan without claiming a client or a successful read", async () => {
+  const publicService = { state: "recovered", attempts: [] };
+  const bootstrap = buildTrelioBootstrapVerification({ local: readyLocalInstallationDiagnosis, publicService });
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "codex", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async () => readyLocalInstallationDiagnosis,
+    codexRoutingPlan: async () => ({ status: "ready" }),
+    codexHookSettingsRead: async () => ({ status: "observed", effectiveState: "unknown" }),
+    publicServiceDiagnosis: async () => publicService,
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.deepEqual(bootstrap.clientRecoveryByKind.codex, payload.clientInspection.mcpRecovery);
+  assert.equal(bootstrap.clientRecoveryByKind.clientKind, "not_checked");
+  assert.equal(bootstrap.readVerification.readResult, "not_checked");
+  assert.deepEqual(bootstrap.readVerification.nextCall, payload.liveVerification.read.nextCall);
+  assert.equal(bootstrap.connectionRecovery.connectionRetried, false);
+  assert.doesNotMatch(JSON.stringify(bootstrap.clientRecoveryByKind), /"(?:arguments|confirmed|targetThreadId)":/u);
+});
+
+test("bootstrap public recovery cannot erase local failures or assert model exposure", () => {
+  for (const scenario of ["git", "node", "plugin", "worker", "service"]) {
+    const local = structuredClone(readyLocalInstallationDiagnosis);
+    if (["git", "node", "plugin"].includes(scenario)) local[scenario].status = "action_required";
+    if (scenario === "worker") local.hookStartup = { status: "attention" };
+    const result = buildTrelioBootstrapVerification({
+      local, publicService: { state: scenario === "service" ? "unavailable" : "recovered" },
+    });
+    assert.equal(result.readVerification.readResult, "not_checked");
+    assert.equal(result.readVerification.state, scenario === "git" ? "client_read_required"
+      : scenario === "service" ? "public_service_not_confirmed" : "prerequisite_action_required");
+    assert.equal(result.readVerification.nextCall?.toolName ?? null, scenario === "git" ? "list_companies" : null);
+    assert.equal(result.clientRecoveryByKind.codex.evidence.state, "not_checked");
+    assert.equal(result.connectionRecovery.connectionRetried, false);
+  }
 });
 
 test("native Codex recovery inspection is absent from onboarding and other clients", async () => {

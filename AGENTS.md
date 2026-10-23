@@ -131,7 +131,9 @@ publication tooling также остаются вне этого публичн
   not_checked до client response; request target не меняет folder scope.
   Public availability/recovery измеряется bounded anonymous probes; doctor
   не считается reconnect. Restart/new chat требует отдельного evidence.
-  Stale MCP: предложи переключить сам плагин либо полностью выйти из приложения;
+  CLI bootstrap возвращает тот же read/recovery plan, без clientKind из env.
+  Наблюдаемое отсутствие direct schema даже при ready или stale/failed MCP:
+  предложи переключить сам плагин либо полностью выйти из приложения;
   exact required restart не заменяется toggle. Archive не recovery. См. тот же контракт.
 - Диагностика сохранённых Codex hooks читает только пользовательский config
   и возвращает enabled отдельно от наличия trusted_hash. Наличие hash не
