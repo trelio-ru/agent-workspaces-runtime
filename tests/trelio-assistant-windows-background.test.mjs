@@ -168,6 +168,26 @@ test('replacement keeps busy, changed, ambiguous and malformed registrations clo
   await assert.rejects(changed.inspect(identity), { code: 'ASSISTANT_HOST_REBIND_REQUIRED' });
 });
 
+test('the actual bounded native pipe selects the strict replacement receipt before its factory read-back', async () => {
+  const snapshot = { schemaVersion: 1, assistantId: identity.assistantId, deviceId: identity.deviceId,
+    principalSid: 'S-1-5-21-1-2-3-1001', definitionSha256: 'a'.repeat(64) };
+  const wire = (value, operation = 'replacement_inspect') => runAssistantWindowsBackgroundNative({ operation,
+    assistantId: identity.assistantId, deviceId: identity.deviceId }, { environment: { SystemRoot: 'C:\\Windows' },
+    spawnProcess: () => {
+      const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.kill = () => {};
+      child.stdin.on('finish', () => queueMicrotask(() => { child.stdout.write(JSON.stringify(value)); child.emit('close', value.code ? 1 : 0); }));
+      return child;
+    } });
+  const captured = { schemaVersion: 1, state: 'registered', snapshot };
+  assert.deepEqual(await wire(captured), captured);
+  const absent = { schemaVersion: 1, state: 'not_installed', snapshot: null };
+  assert.deepEqual(await wire(absent, 'replacement_remove'), absent);
+  await assert.rejects(wire({ code: 'ASSISTANT_BACKGROUND_BUSY' }, 'replacement_remove'), { code: 'ASSISTANT_BACKGROUND_BUSY' });
+  for (const invalid of [registered(), { ...captured, rawXml: 'PRIVATE' }, { ...absent, state: 'running' }])
+    await assert.rejects(wire(invalid), { code: 'ASSISTANT_BACKGROUND_READBACK_FAILED' });
+  await assert.rejects(wire(captured, 'replacement_remove'), { code: 'ASSISTANT_BACKGROUND_READBACK_FAILED' });
+});
+
 test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and removes only its own fixture', { skip: process.platform !== 'win32' }, async t => {
   // Hosted Windows only; never an assistant/user VM or live service. A tiny
   // native Node action proves Task Scheduler invocation independently of Codex,

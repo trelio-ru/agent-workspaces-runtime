@@ -473,6 +473,17 @@ export const validateAssistantBackgroundReplacementSnapshot = (snapshot, previou
   return Object.freeze(Object.fromEntries(keys.map(key => [key, snapshot[key]])));
 };
 
+const projectAssistantBackgroundReplacementResult = (result, previous, removing = false) => {
+  if (codes.has(result?.code)) fail(result.code);
+  if (!result || Object.getPrototypeOf(result) !== Object.prototype
+    || Object.keys(result).sort().join(',') !== 'schemaVersion,snapshot,state' || result.schemaVersion !== 1
+    || !UUID.test(previous?.assistantId ?? '') || !UUID.test(previous?.deviceId ?? '')
+    || !['not_installed', 'registered', 'running', 'queued'].includes(result.state)
+    || (result.state === 'not_installed') !== (result.snapshot === null)
+    || removing && result.state !== 'not_installed') fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+  return { schemaVersion: 1, state: result.state, snapshot: validateAssistantBackgroundReplacementSnapshot(result.snapshot, previous) };
+};
+
 /** Trusted pairing composition only: the owner has separately authorized the
  * exact old/new identities before remove is called. Inspect has no mutation;
  * remove never stops a running/queued task, executes a captured path, imports
@@ -512,13 +523,7 @@ export const createAssistantWindowsBackgroundReplacement = ({ readIdentity,
       assistantId: selected.assistantId, deviceId: selected.deviceId,
       command: '', arguments: '', workingDirectory: '', snapshot }, { environment, signal, timeoutMs: remaining() });
     await assertCurrent();
-    if (codes.has(result?.code)) fail(result.code);
-    if (!result || Object.getPrototypeOf(result) !== Object.prototype
-      || Object.keys(result).sort().join(',') !== 'schemaVersion,snapshot,state' || result.schemaVersion !== 1
-      || !['not_installed', 'registered', 'running', 'queued'].includes(result.state)
-      || (result.state === 'not_installed') !== (result.snapshot === null)
-      || operation === 'replacement_remove' && result.state !== 'not_installed') fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
-    return { schemaVersion: 1, state: result.state, snapshot: validateAssistantBackgroundReplacementSnapshot(result.snapshot, selected) };
+    return projectAssistantBackgroundReplacementResult(result, selected, operation === 'replacement_remove');
   };
   return { inspect: previous => invoke(previous, 'replacement_inspect'),
     remove: (previous, snapshot) => invoke(previous, 'replacement_remove', snapshot) };
@@ -571,7 +576,13 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
     child.once('close', code => {
       let value; try { value = JSON.parse(output); } catch { return finish('ASSISTANT_BACKGROUND_READBACK_FAILED'); }
       if (code !== 0 && !codes.has(value?.code)) return finish('ASSISTANT_BACKGROUND_UNAVAILABLE');
-      try { finish(null, projectAssistantBackgroundResult(value)); } catch (error) { finish(error.code); }
+      // Both operations use the SAME bounded native pipe. The internal
+      // replacement receipt deliberately has no public readiness/install fields;
+      // it must reach its own strict projector rather than being mistaken for
+      // a malformed ordinary registration response. Never pass raw JSON through.
+      try { finish(null, ['replacement_inspect', 'replacement_remove'].includes(plan.operation)
+        ? projectAssistantBackgroundReplacementResult(value, plan, plan.operation === 'replacement_remove')
+        : projectAssistantBackgroundResult(value)); } catch (error) { finish(error.code); }
     });
     child.stdin.end(JSON.stringify(plan));
   } catch { finish('ASSISTANT_BACKGROUND_UNAVAILABLE'); }
