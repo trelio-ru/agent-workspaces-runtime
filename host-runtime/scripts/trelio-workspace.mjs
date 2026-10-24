@@ -50,7 +50,7 @@ import {
 } from "./trelio-host-runtime-recovery.mjs";
 import { TRELIO_PRE_TOOL_USE_MATCHER, inspectTrelioHookToolRouting } from "./trelio-hook-tool-identity.mjs";
 import { diagnoseWindowsHookStartup } from "./trelio-hook-startup-diagnostic.mjs";
-import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
+import { constants as fsConstants, createReadStream, createWriteStream, watch as watchDirectory } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -3351,6 +3351,105 @@ export const retainLoadedCodexPluginInstallation = async ({
   }
   await assertRetainedCodexPluginEntry(retained);
   return retained;
+};
+
+/**
+ * Keep the exact shell selected by the loader usable for this MCP lifetime.
+ * The signed runtime lives outside Codex's cache, but the client's already
+ * approved hook commands and skill paths still point into that cache. A
+ * marketplace refresh may prune those paths without stopping this process.
+ * Preserve bytes, never select a newer shell or change hook trust/config.
+ * The caller starts this only AFTER writing initialize, outside its queues.
+ */
+export const startLoadedCodexPluginPreservation = ({
+  environment = process.env,
+  retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+  checkIntervalMs = 1_000,
+  onError = () => process.stderr.write("Trelio: exact plugin preservation failed; automatic repair stopped.\n"),
+} = {}) => {
+  const loadedPluginDirectory = environment.TRELIO_PLUGIN_ROOT;
+  const loadedPluginVersion = environment.TRELIO_PLUGIN_VERSION;
+  // Exact cache layout, not inherited CODEX_* variables, establishes the
+  // client. Claude, source checkouts and dedicated assistant shells must not
+  // copy themselves into the human Codex plugin cache or touch its store.
+  try {
+    if (!loadedPluginDirectory) throw new Error("No loader-selected shell.");
+    assertCodexPluginVersionPath(loadedPluginDirectory, loadedPluginVersion);
+    const cacheRoot = path.resolve(environment.CODEX_HOME || path.join(os.homedir(), ".codex"), "plugins", "cache");
+    const expectedRoot = path.join(cacheRoot, CODEX_MARKETPLACE_NAME, "trelio-agent-workspaces", loadedPluginVersion);
+    if (!sameLocalPath(loadedPluginDirectory, expectedRoot)) throw new Error("Not the exact Codex cache.");
+  } catch {
+    return { ready: Promise.resolve(null), close: async () => {} };
+  }
+
+  let stopped = false;
+  let watcher = null;
+  let timer = null;
+  let pendingCheck = null;
+  const stop = () => {
+    stopped = true;
+    watcher?.close();
+    if (timer) clearInterval(timer);
+  };
+  const failed = (error) => {
+    if (stopped) return;
+    stop();
+    onError(error);
+  };
+  const ready = retainLoadedCodexPluginInstallation({
+    loadedPluginDirectory, loadedPluginVersion, retentionDirectory,
+  }).then((entry) => {
+    if (stopped) return entry;
+    const check = () => {
+      if (stopped || pendingCheck) return;
+      // A cheap existence check covers watcher event coalescing and parent
+      // recreation. Hash/copy only after loss; never hash the package each tick.
+      pendingCheck = (async () => {
+        try {
+          const current = await fs.lstat(entry.installedPath);
+          if (!current.isDirectory() || current.isSymbolicLink()) {
+            throw new Error("Loaded plugin path changed type.");
+          }
+          return;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+        }
+        if (!stopped) await restoreOneRetainedCodexPlugin(entry);
+      })().catch((error) => {
+        // Another refresh may remove the destination while a second live MCP
+        // verifies the concurrently restored tree. Only that known cache path
+        // disappearing is retryable on the next observation. Missing retained
+        // bytes, integrity failures and permissions still stop preservation.
+        const relative = typeof error.path === "string"
+          ? path.relative(path.dirname(entry.installedPath), path.resolve(error.path)) : "..";
+        const first = relative.split(path.sep)[0];
+        const cacheDisappeared = error.code === "ENOENT"
+          && (first === entry.version || first.startsWith(`.${entry.version}.trelio-retain-`));
+        if (!cacheDisappeared) failed(error);
+      }).finally(() => { pendingCheck = null; });
+    };
+    // Watch the marketplace parent, which survives removal of the version
+    // AND its immediate plugin directory. Ignore event filenames: only our
+    // previously verified exact destination is ever inspected/restored.
+    watcher = watchDirectory(path.dirname(path.dirname(entry.installedPath)), check);
+    watcher.on("error", failed);
+    watcher.unref();
+    timer = setInterval(check, checkIntervalMs);
+    timer.unref();
+    check(); // Close the copy -> watch race if refresh happened meanwhile.
+    return entry;
+  });
+  // Failures are visible and terminal; permission/integrity failures never
+  // become an endless repair loop or a reason to overwrite different bytes.
+  ready.catch(failed);
+  return {
+    ready,
+    close: async () => {
+      stop();
+      await ready.catch(() => {});
+      await pendingCheck;
+    },
+  };
 };
 
 const runCodexPluginMutationWithRetention = async (

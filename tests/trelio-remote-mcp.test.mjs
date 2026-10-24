@@ -905,6 +905,7 @@ const createStdioHarness = (callTool, options = {}) => {
     outputStream,
     origin: "https://trelio.test",
     callTool,
+    preservePlugin: () => ({ close: async () => {} }),
     // Unit harnesses must never inspect or rewrite the developer's real Codex
     // config. Dedicated startup-migration tests override this exact stub.
     legacyMcpMigration: async () => ({

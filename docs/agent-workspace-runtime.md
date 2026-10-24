@@ -106,6 +106,39 @@ retained reason/title; обычное удаление сохраняет обя
 Backend/native descriptions определяют исключения над generic bootstrap.
 Backend/runtime source выпускается независимо от plugin release/minimum/trust.
 
+<a id="codex-plugin-preservation"></a>
+
+## Сохранение открытых Codex-сессий при обновлении плагина
+
+Signed runtime находится вне plugin cache, но уже загруженные клиентом команды
+hooks и пути skills остаются привязаны к exact старой shell. При запуске обычного
+Codex MCP после записи успешного `initialize` runtime сохраняет immutable-копию
+loader-selected `TRELIO_PLUGIN_ROOT` / `TRELIO_PLUGIN_VERSION`. Snapshot не входит
+в handshake или очередь tools/call и не задерживает появление инструментов.
+
+Пока тот же MCP жив, watcher родительского marketplace и дешёвая проверка раз
+в секунду замечают удаление exact каталога. Runtime восстанавливает только
+заранее сохранённые bytes на прежний путь, проверяя manifest, полный SHA-256,
+regular files, размеры и private storage. Новая установленная версия, config,
+OAuth, pairing, hooks/trust и модель открытого чата не меняются. Это сохранение
+уже используемого кода, а не установка или публикация другой версии. Проверка
+не повторяет исходные business actions и не создаёт runtime proof.
+
+Source checkout, Claude и отдельный assistant shell не удовлетворяют точному
+Codex layout и не создают retention store. Integrity/type/permission failure
+останавливает восстановление с отдельным stderr-сигналом; другая версия или
+непроверенные bytes не подставляются. После EOF MCP прекращает наблюдение и
+не восстанавливает удалённую установку. Внешний updater может создать короткое
+окно отсутствия файлов до уведомления watcher; отсутствие proof в этом окне
+сохраняет обычный fail-closed отказ, а не обход admission. Повторная очистка
+cache обрабатывается тем же живым MCP без restart.
+
+Обязательная regression `tests/trelio-plugin-preservation.test.mjs` запускает
+production `runStdioHost`, удаляет старую shell внешним действием, создаёт новую,
+проверяет старые skill bytes и исполняет прежний hook на том же соединении.
+Отдельно проверяются медленный snapshot вне handshake, повреждённая копия,
+не-Codex root и прекращение восстановления после закрытия транспорта.
+
 ## Запуск локального bridge
 
 Local MCP facade запускает bundled bridge через текущий `process.execPath` и

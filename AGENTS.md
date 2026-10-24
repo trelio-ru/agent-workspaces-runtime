@@ -610,6 +610,12 @@ publication tooling также остаются вне этого публичн
 - Публичный ABI между ними включает signed package format, три entrypoint mode
   `bridge|hook|mcp`, descriptor fields, `minimumPluginVersion`, environment
   variables, headers и typed upgrade errors.
+- Открытый Codex MCP сохраняет точную loader-selected shell после записи initialize
+  и восстанавливает только её проверенные bytes при внешней очистке cache.
+  Lifecycle работает и для signed runtime: независимый runtime не делает
+  hook/skill paths независимыми от plugin cache. Нужен production MCP regression
+  внешнего обновления, cleanup после EOF и сохранение trust; см.
+  [контракт](docs/agent-workspace-runtime.md#codex-plugin-preservation).
 - Production loader передаёт exact `TRELIO_PLUGIN_ROOT`,
   `TRELIO_PLUGIN_VERSION`, `TRELIO_HOST_RUNTIME_VERSION` и immutable runtime
   source directory. Runtime не предполагает совместное source tree.

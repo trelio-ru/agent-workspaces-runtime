@@ -165,6 +165,8 @@ jobs:
           architecture: arm64
       - name: Verify native ARM64 ACL and DPAPI
         run: node tests/trelio-windows-native-private.test.mjs
+      - name: Preserve ARM64 open Codex sessions during plugin updates
+        run: node tests/trelio-plugin-preservation.test.mjs
       - name: Verify native ARM64 assistant autostart
         run: node tests/trelio-assistant-windows-background.test.mjs
 
@@ -284,6 +286,7 @@ jobs:
           node tests/trelio-remote-mcp-oauth.test.mjs
           node tests/trelio-agent-diagnostics.test.mjs
           node tests/trelio-antigravity.test.mjs
+          node tests/trelio-plugin-preservation.test.mjs
           node tests/trelio-remote-mcp.test.mjs
           node tests/trelio-runtime-policy.test.mjs
           node tests/trelio-hook-tool-identity.test.mjs
@@ -495,6 +498,9 @@ jobs:
 
       - name: Run Windows hook timeout regressions
         run: node tests/trelio-runtime-session-timeout.test.mjs
+
+      - name: Preserve open Codex sessions during external plugin updates
+        run: node tests/trelio-plugin-preservation.test.mjs
 
       - name: Run Windows Remote MCP handshake regression
         run: >-

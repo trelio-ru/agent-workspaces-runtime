@@ -72,6 +72,7 @@ import {
   openBrowser,
   parseAndValidateAgentSkillPackage,
   readPrivateJsonFile,
+  startLoadedCodexPluginPreservation,
   request,
   requireToken,
   resolveWorkspaceBridgeConfigDirectory,
@@ -6624,6 +6625,7 @@ export const runStdioHost = async ({
   statFile = fs.lstat,
   diagnosticReporter = createAgentDiagnosticReporter({ origin, environment }),
   startupTrace = createMcpStartupTrace({ environment }),
+  preservePlugin = startLoadedCodexPluginPreservation,
 } = {}) => {
   startupTrace("stdio_start");
   // Antigravity's exact native shell selects text delivery. No client/model
@@ -6648,6 +6650,8 @@ export const runStdioHost = async ({
   let outputQueue = Promise.resolve();
   let runtimeDelegate = null;
   let runtimeDelegatePromise = null;
+  let pluginPreservation = null;
+  let transportClosed = false;
 
   const enqueueResponse = (response, isInitialize = false) => {
     if (!response) {
@@ -6660,6 +6664,12 @@ export const runStdioHost = async ({
       outputStream.write(`${JSON.stringify(response)}\n`);
       // Only the write boundary is known here, not receipt by the MCP client.
       if (isInitialize) startupTrace("initialize_response");
+      if (isInitialize && response.result && !pluginPreservation && !transportClosed) {
+        // The cache belongs to the shell even when execution has moved to a
+        // signed runtime. Keep the original hook/skill paths alive, but never
+        // put filesystem snapshot work into initialize or tool dispatch.
+        pluginPreservation = preservePlugin({ environment });
+      }
     });
     return outputQueue;
   };
@@ -6880,6 +6890,8 @@ export const runStdioHost = async ({
 
   // EOF means the MCP transport disappeared. Abort every active operation so
   // loopback listeners, sockets and opener children cannot outlive the host.
+  transportClosed = true;
+  const closingPluginPreservation = pluginPreservation?.close();
   for (const controller of activeToolCalls.values()) {
     controller.abort(createCancellationError());
   }
@@ -6888,6 +6900,7 @@ export const runStdioHost = async ({
     pending.reject(new Error("MCP transport closed before the client answered."));
   }
   await Promise.allSettled([...inFlightDispatches]);
+  await closingPluginPreservation;
   if (runtimeDelegatePromise) {
     await runtimeDelegatePromise.catch(() => null);
   }
