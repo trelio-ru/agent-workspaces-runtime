@@ -384,21 +384,21 @@ int assistantConsoleIcon() {
     presentationSkipped("shared_console"); FreeLibrary(user32); return 0;
   }
   const auto before = foreground();
-  HICON small = create(AssistantConsoleIcon, static_cast<DWORD>(sizeof(AssistantConsoleIcon)), TRUE, 0x00030000,
+  HICON smallIcon = create(AssistantConsoleIcon, static_cast<DWORD>(sizeof(AssistantConsoleIcon)), TRUE, 0x00030000,
     metrics(SM_CXSMICON), metrics(SM_CYSMICON), LR_DEFAULTCOLOR);
-  HICON large = create(AssistantConsoleIcon, static_cast<DWORD>(sizeof(AssistantConsoleIcon)), TRUE, 0x00030000,
+  HICON largeIcon = create(AssistantConsoleIcon, static_cast<DWORD>(sizeof(AssistantConsoleIcon)), TRUE, 0x00030000,
     metrics(SM_CXICON), metrics(SM_CYICON), LR_DEFAULTCOLOR);
-  if (!small || !large) { if (small) destroy(small); if (large) destroy(large); FreeLibrary(user32); throw Failure{}; }
+  if (!smallIcon || !largeIcon) { if (smallIcon) destroy(smallIcon); if (largeIcon) destroy(largeIcon); FreeLibrary(user32); throw Failure{}; }
   DWORD_PTR oldSmall = 0, oldLarge = 0, gotSmall = 0, gotLarge = 0;
   auto message = [&](UINT type, WPARAM kind, LPARAM value, DWORD_PTR& result) {
     return send(window, type, kind, value, SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &result) != 0;
   };
   const bool stillOwned = exclusiveParentConsole(parentId) && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT;
-  const bool smallSet = stillOwned && message(WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small), oldSmall);
-  const bool largeSet = smallSet && message(WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(large), oldLarge);
+  const bool smallSet = stillOwned && message(WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon), oldSmall);
+  const bool largeSet = smallSet && message(WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon), oldLarge);
   const bool verified = largeSet && message(WM_GETICON, ICON_SMALL, 0, gotSmall)
     && message(WM_GETICON, ICON_BIG, 0, gotLarge)
-    && gotSmall == reinterpret_cast<DWORD_PTR>(small) && gotLarge == reinterpret_cast<DWORD_PTR>(large);
+    && gotSmall == reinterpret_cast<DWORD_PTR>(smallIcon) && gotLarge == reinterpret_cast<DWORD_PTR>(largeIcon);
   if (verified) {
     write(before == foreground() ? "{\"schemaVersion\":1,\"state\":\"applied\",\"verified\":true,\"foregroundUnchanged\":true}\n"
       : "{\"schemaVersion\":1,\"state\":\"applied\",\"verified\":true,\"foregroundUnchanged\":false}\n");
@@ -409,13 +409,13 @@ int assistantConsoleIcon() {
   }
   // Restore only handles still owned by this presentation attempt, never a
   // later icon installed by somebody else. No window activation/show occurs.
-  if (smallSet && message(WM_GETICON, ICON_SMALL, 0, gotSmall) && gotSmall == reinterpret_cast<DWORD_PTR>(small)) {
+  if (smallSet && message(WM_GETICON, ICON_SMALL, 0, gotSmall) && gotSmall == reinterpret_cast<DWORD_PTR>(smallIcon)) {
     DWORD_PTR ignored = 0; message(WM_SETICON, ICON_SMALL, static_cast<LPARAM>(oldSmall), ignored);
   }
-  if (largeSet && message(WM_GETICON, ICON_BIG, 0, gotLarge) && gotLarge == reinterpret_cast<DWORD_PTR>(large)) {
+  if (largeSet && message(WM_GETICON, ICON_BIG, 0, gotLarge) && gotLarge == reinterpret_cast<DWORD_PTR>(largeIcon)) {
     DWORD_PTR ignored = 0; message(WM_SETICON, ICON_BIG, static_cast<LPARAM>(oldLarge), ignored);
   }
-  destroy(small); destroy(large); FreeLibrary(user32);
+  destroy(smallIcon); destroy(largeIcon); FreeLibrary(user32);
   if (!verified) throw Failure{};
   return 0;
 }
