@@ -255,7 +255,8 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
     eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`}));
   const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()],sourceReferences};
   let starts=0,reads=0,launches=0,confirmed=0,input='';
-  const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,SHOULD_NOT_PASS:'private' },
+  const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,
+    ComSpec:'C:\\Windows\\System32\\cmd.exe',PATHEXT:'.COM;.EXE;.BAT;.CMD',OPENAI_API_KEY:'private',SHOULD_NOT_PASS:'private' },
     onAuthenticationConfirmed:async()=>{confirmed++;throw new Error('PRIVATE health report failed');},
     startInvocation:() => { if (starts++) throw new Error('private state error'); },
     readMetadata:async () => ({ threadId,cwd }), readDelivery:async () => ++reads===1 ? { state:'uncertain' }
@@ -264,6 +265,9 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
       launches++; assert.deepEqual(args,['exec','resume',threadId,...modelArgs,'--json','--skip-git-repo-check','-']);
       assert.equal(spawnOptions.shell,false); assert.equal(spawnOptions.cwd,expectedCwd);
       assert.equal(spawnOptions.env.SHOULD_NOT_PASS,undefined);
+      assert.equal(spawnOptions.env.OPENAI_API_KEY,undefined);
+      assert.equal(spawnOptions.env.ComSpec,process.platform==='win32'?'C:\\Windows\\System32\\cmd.exe':undefined);
+      assert.equal(spawnOptions.env.PATHEXT,process.platform==='win32'?'.COM;.EXE;.BAT;.CMD':undefined);
       assert.ok(!args.some(arg => /bypass|ignore-rules|ignore-user-config|approval|sandbox/u.test(arg)));
       assert.ok(!args.some(arg=>/message:|uid:|conversation\/v1/u.test(arg)),'source refs stay in stdin, never native argv');
       const child=fakeChild(); child.stdin.on('data',chunk=>{ input+=chunk.toString(); });

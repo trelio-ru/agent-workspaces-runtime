@@ -131,6 +131,19 @@ Only the structural delivery marker and platform instruction go through stdin;
 no prompt/content/credential is placed in argv. Stderr and raw JSON diagnostics
 are suppressed; native content is parsed in bounded memory, never cached/logged.
 
+The SAME common Codex environment projector keeps only its public OS/profile
+allowlist. On Windows that includes `ComSpec` and `PATHEXT`, with one canonical
+case per name; conflicting aliases do not select an interpreter. Codex's own
+MCP resolver needs them to select/launch the existing `.cmd` companion instead
+of trying the extensionless POSIX file (Windows error 193). This changes neither
+the plugin manifest nor native command, `shell:false`, authentication, trust,
+configuration or process-start/uncertain-delivery fences. Arbitrary environment,
+credentials and inherited chat IDs remain excluded; POSIX projection is unchanged.
+The Windows gate uses hash-pinned public Codex 0.164.0 with an isolated fixture
+profile and synthetic stdio MCP: legacy projection reproduces error 193, fixed
+projection reaches `initialize`/`tools/list` through the native resolver. It
+makes no model turn or tool call and is not a real assistant business outcome.
+
 The host passes a one-use synchronous `startInvocation` callback that performs the
 inbox's leased -> started CAS. Missing history cannot authorize a second attempt.
 After CLI exit, the adapter must find exactly one matching native user-message

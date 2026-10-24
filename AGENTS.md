@@ -600,6 +600,9 @@ publication tooling также остаются вне этого публичн
   select/verify its exact existing relocated copy, never cache scanning/newest.
   The optional official standalone current/bin layout needs complete companions.
   No Store execution, PATH/ACL edit or install; discovery proves no business result.
+  SAME narrowed child environment preserves Windows ComSpec/PATHEXT with canonical
+  case for native MCP CMD discovery; no broad env/shell/auth fallback. Native CI
+  uses pinned public CLI + isolated synthetic MCP, never an account/model turn.
 - Background composition keeps one native pass per signed worker and private
   invocations per call. Supervisor updates only between cycles; full backend
   readiness gates business work. Task folders use compact full-identity hashes; prototype writable roots require review. OS installation and Windows E2E remain explicit

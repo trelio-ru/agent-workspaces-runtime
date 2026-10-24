@@ -1,18 +1,100 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
+import { spawn } from 'node:child_process';
 import { PassThrough } from "node:stream";
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { readCodexConversationTitle, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { readCodexConversationTitle, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { synchronizeRunCodexTitle } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
+
+test('Windows Codex process environment retains only canonical public CMD discovery variables', () => {
+  for (const [comspec, pathext] of [['ComSpec','PATHEXT'],['COMSPEC','PathExt'],['comspec','pathext']]) {
+    const input={PATH:'C:\\Windows\\System32',USERPROFILE:'C:\\Users\\Fixture',
+      [comspec]:'C:\\Windows\\System32\\cmd.exe',[pathext]:'.COM;.EXE;.BAT;.CMD',
+      OPENAI_API_KEY:'excluded',TRELIO_TOKEN:'excluded',CODEX_THREAD_ID:'excluded',ARBITRARY:'excluded'};
+    assert.deepEqual(buildCodexEnvironment(input,{platform:'win32'}),{
+      PATH:input.PATH,USERPROFILE:input.USERPROFILE,ComSpec:input[comspec],PATHEXT:input[pathext]});
+    assert.deepEqual(buildCodexEnvironment(input,{platform:'darwin'}),{PATH:input.PATH,USERPROFILE:input.USERPROFILE});
+  }
+  assert.deepEqual(buildCodexEnvironment({ComSpec:'one',COMSPEC:'other',PATHEXT:'.EXE',pathext:'.CMD'},{platform:'win32'}),{},
+    'conflicting aliases never select an arbitrary public interpreter/discovery value');
+});
+
+test('actual Windows Codex discovers a synthetic CMD MCP server only with the public process variables',
+  {skip:process.platform!=='win32',timeout:90000},async t=>{
+  const executable=process.env.TRELIO_TEST_CODEX_CLI;
+  assert.ok(executable&&path.isAbsolute(executable),'the native CI wrapper supplies its pinned public Codex binary');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'trelio cmd mcp '));
+  t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100}));
+  const launcher=path.join(root,'synthetic-mcp'),server=path.join(root,'server.mjs');
+  await fs.writeFile(launcher,'#!/bin/sh\nexit 99\n');
+  await fs.writeFile(launcher+'.cmd',`@echo off\r\n"${process.execPath}" "${server}"\r\n`);
+  // This fixture advertises exactly one harmless tool and never implements a
+  // tool call. End-of-input exits even when its owning CLI connection closes.
+  await fs.writeFile(server,`process.stdin.setEncoding('utf8');let pending='';
+process.stdin.on('end',()=>process.exit(0));
+process.stdin.on('data',chunk=>{pending+=chunk;let n;while((n=pending.indexOf('\\n'))>=0){
+const line=pending.slice(0,n);pending=pending.slice(n+1);if(!line.trim())continue;const q=JSON.parse(line);if(q.id===undefined)continue;
+const result=q.method==='initialize'?{protocolVersion:q.params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'synthetic-cmd-mcp',version:'1.0.0'}}
+:q.method==='tools/list'?{tools:[{name:'fixture_ping',description:'Synthetic read-only fixture',inputSchema:{type:'object',properties:{},additionalProperties:false}}]}:{};
+process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');}});
+`);
+  const inventory=async(environment)=>new Promise((resolve,reject)=>{
+    let child,waiting=null,nextId=0,pending='',bytes=0,done=false;
+    const finish=(error,value)=>{
+      if(done)return;done=true;clearTimeout(timer);
+      // Give the CLI EOF so it disposes its own MCP client; the synthetic child
+      // also exits on EOF. Never stop another process or expose native stderr.
+      const settle=()=>{clearTimeout(cleanup);if(error)reject(new Error(error));else resolve(value);};
+      const cleanup=setTimeout(()=>child?.kill(),2000);cleanup.unref();
+      if(!child?.pid||child.exitCode!==null){settle();return;}
+      child.once('exit',settle);child.stdin.end();child.stdout.resume();
+    };
+    const timer=setTimeout(()=>finish('closed native MCP fixture timeout'),35000);
+    const request=(method,params)=>new Promise((yes,no)=>{waiting={id:++nextId,yes,no};child.stdin.write(JSON.stringify({id:nextId,method,params})+'\n');});
+    child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,shell:false,windowsHide:true,stdio:['pipe','pipe','ignore']});
+    child.on('error',()=>finish('closed native MCP fixture launch failure'));
+    child.on('exit',()=>{if(!done)finish('closed native MCP fixture early exit');});
+    child.stdin.on('error',()=>finish('closed native MCP fixture input failure'));child.stdout.setEncoding('utf8');
+    child.stdout.on('data',chunk=>{
+      if(done)return;bytes+=Buffer.byteLength(chunk);pending+=chunk;
+      if(bytes>8*1024*1024)return finish('closed native MCP fixture output bound');
+      let n;while(!done&&(n=pending.indexOf('\n'))>=0){
+        let value;try{value=JSON.parse(pending.slice(0,n));}catch{return finish('closed native MCP fixture invalid JSON');}pending=pending.slice(n+1);
+        if(waiting&&value.id===waiting.id){const current=waiting;waiting=null;if(value.error)return finish('closed native MCP fixture RPC failure');current.yes(value.result);}
+      }
+    });
+    void(async()=>{
+      await request('initialize',{clientInfo:{name:'trelio_cmd_mcp_fixture',version:'1.0.0'}});
+      child.stdin.write(JSON.stringify({method:'initialized'})+'\n');
+      const response=await request('mcpServerStatus/list',{serverName:'synthetic_cmd',detail:'toolsAndAuthOnly',limit:10});
+      const row=response?.data?.find(item=>item.name==='synthetic_cmd');
+      if(!row)return finish('closed native MCP fixture missing server');
+      finish(null,{hasError:typeof row.toolsError==='string',badExeFormat:/\bos error 193\b/i.test(row.toolsError??''),
+        toolPresent:Object.hasOwn(row.tools??{},'fixture_ping')});
+    })().catch(()=>finish('closed native MCP fixture protocol failure'));
+  });
+  const source={...process.env,HOME:root,USERPROFILE:root,APPDATA:path.join(root,'AppData'),LOCALAPPDATA:path.join(root,'Local'),
+    ComSpec:process.env.ComSpec??process.env.COMSPEC,PATHEXT:process.env.PATHEXT};
+  for(const [mode,fixed] of [['legacy',false],['fixed',true]]){
+    const home=path.join(root,mode);await fs.mkdir(home);
+    await fs.writeFile(path.join(home,'config.toml'),`[mcp_servers.synthetic_cmd]\ncommand = ${JSON.stringify(launcher)}\nstartup_timeout_sec = 20\n`);
+    const environment=buildCodexEnvironment({...source,CODEX_HOME:home});
+    if(!fixed){delete environment.ComSpec;delete environment.PATHEXT;}
+    const observed=await inventory(environment);
+    assert.equal(observed.hasError,!fixed,'native startup error is projected only as a closed boolean');
+    assert.equal(observed.toolPresent,fixed,'only the fixed sanitized environment reaches synthetic MCP initialize/tools/list');
+    if(!fixed)assert.equal(observed.badExeFormat,true,'legacy environment reproduces native Windows error 193');
+  }
+});
 
 const desktopCopyFixture=()=>{
   const w=path.win32,key=value=>w.normalize(value).toLowerCase(),root='C:\\Program Files\\WindowsApps\\OpenAI.Codex_fixture';

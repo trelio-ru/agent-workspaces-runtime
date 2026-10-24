@@ -6,9 +6,28 @@ import crypto from 'node:crypto';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const ENV_KEYS = ["PATH", "HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "CODEX_HOME"];
-const titleEnvironment = (environment) => Object.fromEntries(ENV_KEYS
-  .filter((key) => typeof environment[key] === "string")
-  .map((key) => [key, environment[key]]));
+const titleEnvironment = (environment, { platform = process.platform } = {}) => {
+  const selected = Object.fromEntries(ENV_KEYS
+    .filter((key) => typeof environment[key] === "string")
+    .map((key) => [key, environment[key]]));
+  if (platform === "win32") {
+    // Codex starts bundled MCP processes itself. Its ordinary Windows .cmd
+    // discovery/interpreter needs these public OS process variables even when
+    // the model child receives a narrowed environment. Losing them can select
+    // the extensionless POSIX launcher and fail with Windows error 193 before
+    // MCP initialize. This preserves the same launcher, never shell:true or a
+    // second resolver, and still excludes credentials and inherited chat IDs.
+    for (const canonical of ["ComSpec", "PATHEXT"]) {
+      const values = Object.entries(environment)
+        .filter(([key, value]) => key.toLowerCase() === canonical.toLowerCase() && typeof value === "string")
+        .map(([, value]) => value);
+      // A native Windows environment has case-insensitive names. Normalize to
+      // one child key; an inconsistent synthetic map must not choose an alias.
+      if (values.length && new Set(values).size === 1) selected[canonical] = values[0];
+    }
+  }
+  return selected;
+};
 
 /** A fixed public AppModel query in the SAME signed worker. It accepts no
  * package/path/PID selector and never enters the ACL/DPAPI request protocol.

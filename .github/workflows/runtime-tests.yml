@@ -477,7 +477,10 @@ jobs:
         run: node tests/trelio-hook-signed-chain.test.mjs
 
       - name: Run Windows Codex conversation metadata tests
-        run: node tests/trelio-codex-conversation.test.mjs
+        # Includes actual pinned CLI → extensionless CMD MCP startup under the
+        # SAME sanitized public environment; no model/account/user config.
+        shell: pwsh
+        run: ./.github/scripts/run-windows-codex-mcp-fixture.ps1
 
       - name: Run Windows instruction delivery regressions
         run: |
