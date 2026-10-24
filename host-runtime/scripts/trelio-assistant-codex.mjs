@@ -162,8 +162,15 @@ export const readAssistantCodexMetadata = (threadId, options) => readNative(id(t
  * Read account state and model/list under the original RPC deadline.
  * Do not cache account data, return labels, inspect credentials or pick a model
  * which merely resembles the exact owner choice. */
-export const readAssistantCodexExecutionAvailability = async (configuration, options = {}) => {
-  const execution = assistantExecutionConfiguration(configuration);
+export const readAssistantCodexExecutionAvailability = async (configuration, options = {}) =>
+  (await readAssistantCodexExecutionAvailabilitySet([configuration],options))[0];
+
+/** The status adjunct checks native-selected company pairs in ONE existing
+ * RPC process/deadline. This is the same preflight as a normal launch, not a
+ * second catalogue cache, token validation or permission to start a turn. */
+export const readAssistantCodexExecutionAvailabilitySet = async (configurations, options = {}) => {
+  if(!Array.isArray(configurations)||!configurations.length||configurations.length>256)fail('ASSISTANT_CODEX_INVALID_INPUT');
+  const executions=configurations.map(assistantExecutionConfiguration);
   return readNative(null, async (_thread, request) => {
     // A catalogue can exist while Codex is signed out. Refuse before the
     // durable native-start boundary only when the documented native response
@@ -178,17 +185,20 @@ export const readAssistantCodexExecutionAvailability = async (configuration, opt
     if (account.requiresOpenaiAuth && account.account === null) fail('ASSISTANT_CODEX_AUTH_REQUIRED');
     let cursor = null;
     const seen = new Set();
+    const wanted=new Set(executions.map(execution=>execution.modelId)),supported=new Map();
     for (let page = 0; page < 10; page++) {
       const value = await request('model/list', { limit: 100, includeHidden: false, ...(cursor === null ? {} : { cursor }) });
       if (!Array.isArray(value?.data) || value.data.length > 100) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-      const matches = value.data.filter(model => model?.model === execution.modelId && model.hidden !== true);
-      if (matches.length > 1) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-      if (matches.length === 1) {
-        const efforts = matches[0].supportedReasoningEfforts;
-        if (!Array.isArray(efforts) || efforts.length > 16) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-        return efforts.some(item => item?.reasoningEffort === execution.effortLevel);
+      for(const model of value.data.filter(model=>wanted.has(model?.model)&&model.hidden!==true)){
+        if(supported.has(model.model))fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+        const efforts = model.supportedReasoningEfforts;
+        if (!Array.isArray(efforts) || efforts.length > 16
+          || efforts.some(item=>!item||!['none','minimal','low','medium','high','xhigh','max','ultra'].includes(item.reasoningEffort))
+          || new Set(efforts.map(item=>item.reasoningEffort)).size!==efforts.length) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+        supported.set(model.model,efforts);
       }
-      if (value.nextCursor === null) return false;
+      if(supported.size===wanted.size||value.nextCursor===null)return executions.map(execution=>
+        supported.get(execution.modelId)?.some(item=>item?.reasoningEffort===execution.effortLevel)??false);
       if (typeof value.nextCursor !== 'string' || !value.nextCursor.length || value.nextCursor.length > 1024 || seen.has(value.nextCursor)) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
       cursor = value.nextCursor; seen.add(cursor);
     }

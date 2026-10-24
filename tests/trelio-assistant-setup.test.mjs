@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
@@ -9,7 +10,7 @@ import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-s
 import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,readProductionAssistantDispatchStatus,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const memorySetupHost=(store,{afterWrite}={})=>{
   const files=new Map();let queued=Promise.resolve();
@@ -711,12 +712,72 @@ test('one background worker keeps model-free polling alive during a single nativ
   let resolveWork,workCalls=0,pollCalls=0,waits=0,closed=0;
   const work=new Promise(resolve=>{resolveWork=resolve;});
   const result=await runAssistantBackgroundTick({createHost:async()=>({coordinator:{
-    pollOnce:async()=>{pollCalls++;},workOnce:()=>{workCalls++;return work;},
+    pollOnce:async()=>{pollCalls++;},workOnce:()=>{workCalls++;return work;},dispatchStatus:async()=>({state:'idle'}),
   },close:async()=>{closed++;}}),wait:async(milliseconds)=>{
     assert.equal(milliseconds,30_000);if(++waits===2)resolveWork({state:'completed'});
   }});
   assert.equal(workCalls,1);assert.ok(pollCalls>=2);assert.equal(closed,1);
-  assert.deepEqual(result,{schemaVersion:1,state:'checked'});
+  assert.deepEqual(result,{schemaVersion:1,state:'checked',dispatch:{state:'idle'}});
+});
+
+test('background tick projects a company model block instead of reporting a false idle',async()=>{
+  const dispatch={schemaVersion:1,state:'blocked',reasons:['model_selection_required'],pendingEvents:1};let closed=0;
+  const result=await runAssistantBackgroundTick({createHost:async()=>({coordinator:{pollOnce:async()=>{},
+    workOnce:async()=>null,dispatchStatus:async()=>dispatch},close:async()=>{closed++;}})});
+  assert.deepEqual(result,{schemaVersion:1,state:'blocked',dispatch});assert.equal(closed,1);
+});
+
+test('paired background dispatch status is SELECT-only, preserves the journal and fails closed for missing/incomplete/foreign state',async t=>{
+  const {openAssistantDatabase}=await import('../host-runtime/scripts/trelio-assistant-private.mjs');
+  const {createAssistantCoordinator}=await import('../host-runtime/scripts/trelio-assistant-coordinator.mjs');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-dispatch-status-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
+  const execution={state:'unconfigured',configuration:null};let current=identity,reads=0,opens=0;
+  const company={companyId,memberId,execution};
+  const client={identity,companies:async()=>{reads++;return [company];},poll:()=>assert.fail('status cannot poll'),
+    tasks:()=>assert.fail('status cannot reconcile bindings'),acknowledge:()=>assert.fail('status cannot ACK'),claimTaskHost:()=>assert.fail('status cannot claim'),
+    reportHealth:()=>assert.fail('read-only status cannot clear an auth/hook health latch')};
+  const context=async action=>action(client,{readIdentity:async()=>current});
+  const options={context,configurationDirectory:root,openDatabase:async(...args)=>{opens++;return openAssistantDatabase(...args);}};
+  let result=await readProductionAssistantDispatchStatus(options);
+  assert.equal(result.state,'blocked');assert.deepEqual(result.reasons,['model_selection_required','not_checked']);assert.equal(result.pendingEvents,null);
+  await assert.rejects(fs.stat(path.join(root,'digital-assistants')),{code:'ENOENT'},'status cannot initialize a missing queue');
+  const directory=path.join(root,'digital-assistants','runtime',identity.assistantId,identity.deviceId);
+  const opened=await openAssistantDatabase(directory);
+  const coordinator=createAssistantCoordinator({database:opened.database,client,native:{ready:async()=>true},workspaceForTask:async()=>root,timeZone:'UTC'});
+  await coordinator.close();await opened.close();
+  const before=await fs.readFile(path.join(directory,'inbox.sqlite'));
+  result=await readProductionAssistantDispatchStatus(options);
+  assert.equal(result.state,'blocked');assert.equal(result.pendingEvents,0);assert.deepEqual(result.reasons,['model_selection_required']);
+  assert.deepEqual(await fs.readFile(path.join(directory,'inbox.sqlite')),before);
+  execution.state='ready';execution.configuration={modelId:'gpt-6.1-sol',effortLevel:'xhigh',revision:2};
+  let nativeReads=0;
+  for(const nativeResult of [true,false,'auth','unknown','malformed']){
+    const status=await readProductionAssistantDispatchStatus({...options,readExecutionAvailability:async(choices)=>{
+      nativeReads++;assert.deepEqual(choices,[execution.configuration]);
+      if(nativeResult==='auth')throw Object.assign(new Error('PRIVATE'),{code:'ASSISTANT_CODEX_AUTH_REQUIRED'});
+      if(nativeResult==='unknown')throw new Error('PRIVATE');
+      return nativeResult==='malformed'?'PRIVATE':[nativeResult];
+    }});
+    assert.equal(status.nativeExecution.state,nativeResult===true?'model_supported':nativeResult===false?'model_unavailable'
+      :nativeResult==='auth'?'auth_required':'unknown');
+    assert.equal(status.state,nativeResult===true?'idle':[false,'auth'].includes(nativeResult)?'blocked':'unknown');
+    assert.ok(!JSON.stringify(status).includes('PRIVATE'));
+  }
+  assert.equal(nativeReads,5);execution.state='unconfigured';execution.configuration=null;
+  const unsupported=await openAssistantDatabase(directory);
+  unsupported.database.exec('UPDATE assistant_inbox_meta SET version=99');await unsupported.close();
+  const unsupportedBytes=await fs.readFile(path.join(directory,'inbox.sqlite'));
+  result=await readProductionAssistantDispatchStatus(options);
+  assert.equal(result.state,'unknown');assert.equal(result.pendingEvents,null,'unsupported schema cannot be interpreted as an empty queue');
+  assert.deepEqual(await fs.readFile(path.join(directory,'inbox.sqlite')),unsupportedBytes,'diagnostics never migrate or repair unsupported state');
+  const restored=await openAssistantDatabase(directory);restored.database.exec('UPDATE assistant_inbox_meta SET version=11');await restored.close();
+  const beforeDenied=opens;client.companies=async()=>{throw Object.assign(new Error('PRIVATE DETAIL'),{code:'ASSISTANT_ACCESS_DENIED'});};
+  result=await readProductionAssistantDispatchStatus(options);assert.equal(result.state,'unknown');assert.equal(result.pendingEvents,null);
+  assert.equal(opens,beforeDenied,'native denial must precede any journal read');
+  client.companies=async()=>[company];current={...identity,deviceId:randomUUID()};
+  result=await readProductionAssistantDispatchStatus(options);assert.equal(result.state,'unknown');assert.equal(result.pendingEvents,null);
+  assert.ok(!JSON.stringify(result).includes(companyId));assert.ok(!JSON.stringify(result).includes('PRIVATE'));assert.ok(reads>=2);
 });
 
 test('background supervisor resolves a fresh worker only between cycles and preserves uncertain delivery recovery',async()=>{

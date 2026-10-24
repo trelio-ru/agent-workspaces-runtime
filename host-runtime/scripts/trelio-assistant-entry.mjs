@@ -66,7 +66,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
     inputSchema: schema({ enrollmentId: enrollment }), annotations: { readOnlyHint: true, idempotentHint: true } },
   { name: 'install_assistant_background', description: 'Register the paired assistant supervisor for this Windows user at sign-in. Requires an explicit setup request. No automatic logon, saved password, elevation, Codex restart or readiness assertion. Does not start it now.',
     inputSchema: schema({}), annotations: { idempotentHint: true } },
-  { name: 'get_assistant_background_status', description: 'Read back this paired Windows user\'s exact Task Scheduler registration and OS running state. Does not prove business readiness, source delivery or a working desktop.',
+  { name: 'get_assistant_background_status', description: 'Read back this paired Windows user\'s exact Task Scheduler registration and OS running state, plus a content-free dispatch diagnostic. Missing company model or reasoning is a configuration block, even with no queued events. Unknown is not idle. Does not prove delivery or business readiness.',
     inputSchema: schema({}), annotations: { readOnlyHint: true, idempotentHint: true } },
   { name: 'start_assistant_background', description: 'Start the exact registered paired Windows supervisor after setup. Reuses an already running instance. Native task/pass/owner/model/hook admission still gates every business action; registration or OS running state is not a successful pilot.',
     inputSchema: schema({}), annotations: { idempotentHint: true } },
@@ -137,7 +137,66 @@ export const createProductionAssistantBackground = async () => {
     signal,
     readIdentity: () => productionContext(client => client.identity, { signal }),
     verifyContact: () => productionContext(client => client.heartbeat(), { signal }),
+    readDispatchStatus: ({signal:diagnosticSignal}) => readProductionAssistantDispatchStatus({signal:diagnosticSignal}),
   });
+};
+
+/** The existing status tool may inspect the SAME private inbox only after a
+ * fresh native company/device check. It does not construct a coordinator or
+ * writable inbox: no migrations, polls, leases, schedule writes or ACKs occur.
+ * Missing local state keeps counts null; a known native model block is still
+ * shown before the first poll. Pairing changes discard the entire observation.
+ */
+export const readProductionAssistantDispatchStatus = async ({context=productionContext,
+  configurationDirectory,openDatabase,readExecutionAvailability,now=Date.now,signal}={}) => {
+  const {assistantDispatchDiagnostics}=await import('./trelio-assistant-coordinator.mjs');
+  const unchecked=()=>({state:'not_checked',checkedConfigurations:0,unsupportedConfigurations:null,failureCode:null});
+  try{
+    const observed=await context(async(client,host)=>{
+      const identity=client.identity;
+      if(!identity||!new RegExp(UUID,'u').test(identity.assistantId??'')||!new RegExp(UUID,'u').test(identity.deviceId??''))
+        fail('ASSISTANT_HOST_NOT_CONFIGURED');
+      const companies=await client.companies(signal);
+      const [{openAssistantDatabase},{readAssistantInboxDispatchSummary},common]=await Promise.all([
+        import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs'),import('./trelio-workspace.mjs')]);
+      const directory=path.join(configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),
+        'digital-assistants','runtime',identity.assistantId.toLowerCase(),identity.deviceId.toLowerCase());
+      let opened,summary=null;
+      try{
+        opened=await (openDatabase??openAssistantDatabase)(directory,{readOnly:true});
+        summary=readAssistantInboxDispatchSummary({database:opened.database,identity,companies});
+      }catch(error){
+        // Only positively absent state is an uninitialized queue. ACL, corrupt
+        // schema or I/O never becomes empty or an idle/healthy observation.
+        if(error?.code!=='ASSISTANT_PRIVATE_STATE_NOT_INITIALIZED')throw error;
+      }finally{await opened?.close();}
+      let diagnostic=assistantDispatchDiagnostics({companies,summary,now:now()});
+      let nativeExecution=unchecked();
+      // A single shared RPC reads account/model metadata for ALL current native
+      // ready pairs under the original status signal. No model selection,
+      // model turn, health report, login, hook trust or retry is performed.
+      const choices=companies.filter(company=>company.execution?.state==='ready').map(company=>company.execution.configuration);
+      if(choices.length&&diagnostic.state!=='unknown'){
+        try{
+          const check=readExecutionAvailability??(await import('./trelio-assistant-codex.mjs')).readAssistantCodexExecutionAvailabilitySet;
+          const supported=await check(choices,{signal});
+          if(!Array.isArray(supported)||supported.length!==choices.length||supported.some(value=>typeof value!=='boolean'))fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+          const unavailable=supported.filter(value=>!value).length;
+          nativeExecution={state:unavailable?'model_unavailable':'model_supported',checkedConfigurations:choices.length,unsupportedConfigurations:unavailable,
+            failureCode:unavailable?'ASSISTANT_CODEX_MODEL_UNAVAILABLE':null};
+        }catch(error){nativeExecution={state:error?.code==='ASSISTANT_CODEX_AUTH_REQUIRED'?'auth_required':'unknown',checkedConfigurations:0,unsupportedConfigurations:null,
+          failureCode:['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_CODEX_UNAVAILABLE','ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_INVALID_EXECUTION']
+            .includes(error?.code)?error.code:'ASSISTANT_CODEX_READ_UNAVAILABLE'};}
+        if(['model_unavailable','auth_required'].includes(nativeExecution.state))diagnostic={...diagnostic,state:'blocked',
+          reasons:[...diagnostic.reasons,nativeExecution.state==='auth_required'?'codex_auth_required':'native_model_unavailable']};
+        else if(nativeExecution.state==='unknown'&&diagnostic.state!=='blocked')diagnostic={...diagnostic,state:'unknown',reasons:['not_checked']};
+      }
+      const current=await host.readIdentity();
+      if(['origin','assistantId','deviceId'].some(key=>current?.[key]!==identity[key]))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      return {...diagnostic,nativeExecution};
+    },{signal});
+    return observed??{...assistantDispatchDiagnostics({now:now()}),nativeExecution:unchecked()};
+  }catch{return {...assistantDispatchDiagnostics({now:now()}),nativeExecution:unchecked()};}
 };
 
 /** Reopen only the EXISTING same device inbox under the ordinary private
@@ -929,7 +988,8 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
     if(signal?.aborted)await host.coordinator.close();
     const result=await work;if(result.error)throw result.error;
     if(pollFailure)throw pollFailure; // Preserve a source outage after settling the one native pass.
-    return {schemaVersion:1,state:result.value===null?'idle':'checked'};
+    const dispatch=await host.coordinator.dispatchStatus(signal);
+    return {schemaVersion:1,state:['blocked','unknown','queued'].includes(dispatch.state)?dispatch.state:result.value===null?'idle':'checked',dispatch};
   } finally {await host.close();}
 };
 

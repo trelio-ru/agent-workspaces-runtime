@@ -766,3 +766,23 @@ Processing and provider ACK remain separate ordinary task outcomes.
 
 Synthetic SQLite, hook, signed-child and coordinator tests cover this composition;
 they do not establish a live Windows/business messenger acceptance.
+
+## Schema v11: closed delivery diagnostics
+
+The SAME delivery row gains nullable `failure_code` and `failure_stage`. The
+normal coordinator records an explicit allowlisted implementation code and
+`native_claim|native_preflight|native_started|readback` atomically with its
+existing uncertain-state transition. `native_started` is observed only at the
+one-use invocation boundary; preparing a host/pass claim does not prove that a
+Codex process or model turn started. Raw messages, stack traces and arbitrary
+code prefixes are never retained. Historical rows gain null metadata without
+changing IDs, receipts, leases, events, cursors or native-start fences.
+
+`readAssistantInboxDispatchSummary` is a fixed SELECT-only reader, not the
+writable factory. It accepts v10 and v11, performs no DDL/migration/recovery and
+returns only aggregate current-task counts plus an optional closed failure.
+Unsupported or failed reads are unknown, never empty. Fresh native companies
+select exact current Trelio scopes; unresolved device-global delivery/intake
+fences stay visible even after that company's removal. No identifier/content is
+exported and no queued state is inferred from unknown/unrouted references or a
+future cycle. See [background status](assistant-scheduler.md#background-dispatch-diagnostics).

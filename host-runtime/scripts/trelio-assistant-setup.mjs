@@ -423,10 +423,10 @@ try {
  * this with its completed protected pairing journal and current loaded shell.
  * Runtime-to-runtime injection is internal test composition, not a tool ABI.
  */
-export const createAssistantWindowsBackground = ({ readIdentity, verifyContact,
+export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,
   platform = process.platform, environment = process.env, executable = process.execPath,
   resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[] } = {}) => {
-  if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function'
+  if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function' || readDispatchStatus!==null&&typeof readDispatchStatus!=='function'
     || !Array.isArray(loaderArguments) || loaderArguments.length>4 || loaderArguments.some(value=>typeof value!=='string'||value.length>4096||/[\x00-\x1f\x7f]/u.test(value))) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
   return async operation => {
     const started = performance.now();
@@ -453,7 +453,16 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact,
     if (['origin', 'assistantId', 'deviceId'].some(key => current?.[key] !== identity[key])) fail('ASSISTANT_HOST_REBIND_REQUIRED');
     const result = await runNative(plan, { environment, timeoutMs: remaining(), signal });
     remaining();
-    return projectAssistantBackgroundResult(result);
+    const projected=projectAssistantBackgroundResult(result);
+    if(operation!=='status'||!readDispatchStatus)return projected;
+    // Network diagnostics cannot consume a new 45-second OS-status budget.
+    // Keep the original deadline and reserve time for the final identity read.
+    const diagnosticSignal=AbortSignal.timeout(Math.max(1,Math.min(10_000,remaining()-1_000)));
+    const dispatch=await readDispatchStatus({signal:signal?AbortSignal.any([signal,diagnosticSignal]):diagnosticSignal});
+    remaining();
+    const finalIdentity=await readIdentity();
+    if(['origin','assistantId','deviceId'].some(key=>finalIdentity?.[key]!==identity[key]))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    return {...projected,dispatch};
   };
 };
 

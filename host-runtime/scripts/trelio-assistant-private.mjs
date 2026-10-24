@@ -173,11 +173,16 @@ export const resolveAssistantCompanyEncryptionDevice = async ({ identity, compan
  * existing entry before opening and again after SQLite creates files. Multiple
  * connections use the inbox's transactional leases, not a stale PID file that
  * would prevent safe crash recovery or guess process identity after PID reuse. */
-export const openAssistantDatabase = async directory => {
+export const openAssistantDatabase = async (directory, { readOnly = false } = {}) => {
   if (!path.isAbsolute(directory ?? '')) fail('ASSISTANT_PRIVATE_INVALID_INPUT');
+  if (typeof readOnly !== 'boolean') fail('ASSISTANT_PRIVATE_INVALID_INPUT');
   let db;
   try {
-    await ensurePrivateDirectory(directory);
+    // Status uses the SAME private path/ACL checks, but must not create a
+    // journal, migrate it, recover leases or alter SQLite pragmas. Absence is
+    // reported explicitly rather than creating an empty queue that looks idle.
+    if (readOnly) await assertPrivatePathKind(directory, 'directory');
+    else await ensurePrivateDirectory(directory);
     const databasePath = path.join(directory, 'inbox.sqlite');
     for (const suffix of ['', '-wal', '-shm', '-journal']) {
       try { await assertPrivatePathKind(databasePath + suffix, 'file'); }
@@ -187,13 +192,13 @@ export const openAssistantDatabase = async directory => {
     // briefly expose a new DB. No path or arbitrary SQL is model-visible.
     const flags = constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY
       | (process.platform === 'win32' ? 0 : constants.O_NOFOLLOW || 0);
-    const handle = await fs.open(databasePath, flags, 0o600); await handle.close();
+    if (!readOnly) { const handle = await fs.open(databasePath, flags, 0o600); await handle.close(); }
     await assertPrivatePathKind(databasePath, 'file');
     const { DatabaseSync } = await import('node:sqlite');
-    db = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true });
+    db = new DatabaseSync(databasePath, { enableForeignKeyConstraints: true, readOnly });
     // DELETE avoids persistent WAL/SHM handles outside this single coordinator.
     // The private parent protects a transient rollback journal as well.
-    db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
+    if (!readOnly) db.exec('PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
     await assertPrivatePathKind(directory, 'directory');
     await assertPrivatePathKind(databasePath, 'file');
     let closed = false;
@@ -202,6 +207,7 @@ export const openAssistantDatabase = async directory => {
     } };
   } catch (error) {
     try { db?.close(); } catch { /* Keep the original typed setup failure. */ }
+    if (readOnly && error?.code === 'ENOENT') fail('ASSISTANT_PRIVATE_STATE_NOT_INITIALIZED');
     if (error instanceof AssistantPrivateError) throw error;
     fail('ASSISTANT_PRIVATE_UNAVAILABLE');
   }

@@ -78,6 +78,14 @@ publication tooling также остаются вне этого публичн
   create/resume; native model/list и explicit flags, без fallback. Policy block
   пропускается без ack/roll-forward, не останавливает другие компании и не
   снимает unknown-outcome fence. [Контракт](docs/assistant-scheduler.md#company-model-selection).
+  Existing background status keeps OS state and appends a content-free native
+  execution/SELECT-only inbox aggregate: missing model blocks even an empty
+  queue, denied/incomplete reads stay unknown/null. No diagnostic poll, claim,
+  migration, ACK or active-process inference from retained uncertain markers.
+  SAME journal v11 retains only closed original delivery code/stage, atomically
+  with uncertainty; old causes stay null. Status batches native-selected pairs
+  through ONE existing account/model RPC under its original deadline, without
+  a model turn, health write, default selection or readiness claim.
 
 - Продление device authorization проверяется сервером на каждом fixed endpoint;
   локальная дата pairing не запрещает контакт после owner renewal. Отказ не

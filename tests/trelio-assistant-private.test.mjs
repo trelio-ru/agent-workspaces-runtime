@@ -131,12 +131,22 @@ test('real SQLite private opener survives restart and rejects symlinks without r
   await first.close();
   const second=await openAssistantDatabase(directory);
   assert.equal(second.database.prepare('SELECT value FROM fixture').get().value,7); await second.close();
+  const before=await fs.readFile(path.join(directory,'inbox.sqlite'));
+  const readonly=await openAssistantDatabase(directory,{readOnly:true});
+  assert.equal(readonly.database.prepare('SELECT value FROM fixture').get().value,7);
+  assert.throws(()=>readonly.database.exec('INSERT INTO fixture VALUES(8)'),/readonly/u);
+  await readonly.close();assert.deepEqual(await fs.readFile(path.join(directory,'inbox.sqlite')),before);
+  const absent=path.join(root,'not-initialized');
+  await assert.rejects(openAssistantDatabase(absent,{readOnly:true}),{code:'ASSISTANT_PRIVATE_STATE_NOT_INITIALIZED'});
+  await assert.rejects(fs.stat(absent),{code:'ENOENT'});
   if (process.platform!=='win32') {
     assert.equal((await fs.stat(directory)).mode&0o777,0o700);
     assert.equal((await fs.stat(path.join(directory,'inbox.sqlite'))).mode&0o777,0o600);
     const link=path.join(root,'linked'); await fs.symlink(directory,link);
     await assert.rejects(openAssistantDatabase(link),/PRIVATE_UNAVAILABLE/);
+    await assert.rejects(openAssistantDatabase(link,{readOnly:true}),/PRIVATE_UNAVAILABLE/);
     await fs.chmod(path.join(directory,'inbox.sqlite'),0o644);
     await assert.rejects(openAssistantDatabase(directory),/PRIVATE_UNAVAILABLE/);
+    await assert.rejects(openAssistantDatabase(directory,{readOnly:true}),/PRIVATE_UNAVAILABLE/);
   }
 });

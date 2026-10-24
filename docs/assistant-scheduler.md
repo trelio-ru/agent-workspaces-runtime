@@ -220,6 +220,74 @@ block; lifecycle/revocation/owner task approval and uncertain delivery remain
 independent. These source tests and a read-only macOS native model/list probe do
 not establish an activated service or Windows end-to-end business readiness.
 
+### Background dispatch diagnostics
+
+The existing `get_assistant_background_status` keeps its exact OS registration
+`state` and adds a separate content-free `dispatch` observation. The schema is
+version1 with `state:idle|queued|blocked|active|unknown`, closed `reasons`,
+`checkedAt` and aggregate `pendingEvents`, `acceptedTasks`, `waitingOwnerTasks`,
+`unprovisionedTasks`, `uncertainDeliveries` counts. No company/task/event IDs,
+labels, text, cursors, credentials, pass handles or arbitrary selectors are
+returned. This observation is diagnostic, never model/pass/owner authority.
+
+The SAME private journal schema11 adds nullable `failure_code` and
+`failure_stage` on the existing delivery row. Marking it uncertain commits the
+closed original failure and phase atomically; the generic outward uncertain
+error and native-start/replay fence are unchanged. Phases are
+`native_claim|native_preflight|native_started|readback`; only the actual
+one-use `startInvocation` boundary selects `native_started`. The last unfinished
+delivery's `failure:{code,stage}` is projected without any identifier or raw
+message. Codes use an explicit implementation allowlist, never prefix/message
+parsing. Old v10 rows remain readable with `failure:null`; only ordinary writable
+coordinator startup performs the forward migration, with every event, lease,
+receipt, cursor and native-start bit retained. Unknown historical causes are
+never reconstructed from a later observation.
+
+After protected pairing, the SAME native company inventory supplies fresh
+execution state. Missing model/effort yields `model_selection_required` even
+before the first queue event; incompatible policy yields `model_policy_blocked`.
+A successfully empty company inventory yields `configuration_required`.
+Denied, malformed or incomplete inventory returns `unknown/not_checked` with
+null counts, never an empty/idle inference. A positively absent local inbox
+also keeps counts null; a known native configuration block remains visible.
+
+Queue counts use a fixed SELECT-only reader in the SAME inbox module and the
+SAME private opener in SQLite read-only mode. No directory/database creation,
+migration, lease recovery, poll, task sync/claim, cursor/schedule write or ACK is
+performed. Only exact current native Trelio source scopes contribute task counts.
+`queued` means accepted task-bound pending events or an unprovisioned accepted
+task, never an unrouted external reference or future cycle. A retained native
+started/uncertain marker, including an old company/intake, is a device-global
+`delivery_uncertain` block and is never called an active process. `waiting_owner`
+stays independent. Only an actually active coordinator invocation may report
+`active`. Network diagnostics share the original OS-status deadline and cannot
+erase the independently observed OS state or an authentication/hook incident.
+
+For fresh native `ready` company choices, status also returns
+`nativeExecution:{state,checkedConfigurations,unsupportedConfigurations,failureCode}`.
+All selected pairs share ONE existing App Server `account/read` + bounded
+`model/list` RPC process and the original status deadline. No default model,
+model turn, login, provider input, credential/account label, trust, health write
+or catalogue cache is added. `model_supported` means only catalogue support of
+the exact model/effort; it does not prove usable login. Explicit native missing
+authentication gives `auth_required`; a definite unsupported pair gives
+`model_unavailable`; malformed/unavailable RPC stays `unknown` with an exact
+closed implementation code. These current observations do not supply the
+missing historical cause of a legacy delivery and cannot clear any health latch.
+
+The ordinary `background_tick` returns the same diagnostic and reports
+`blocked`/`unknown` instead of collapsing all absent launches to `idle`.
+Polling and durable page/cursor commit remain model-free. If native model
+admission refuses a launch, that original committed event remains unprocessed
+through SQLite close/reopen. Saving a valid pair lets ordinary scheduling
+process that same event in the permanent chat without a replacement mention.
+Trelio notification read acknowledgement may already have occurred after its
+durable task-inbox commit; it does not remove the queued event or prove business
+processing. External provider body/material/selected-slot ACK guards are unchanged.
+These file-backed SQLite/native-composition tests do not prove the presence or
+processing of a specific production comment; live acceptance needs its actual
+native read-back.
+
 ## Host coordinator and enrollment
 
 `trelio-assistant-coordinator.mjs` connects the private database, scheduler,

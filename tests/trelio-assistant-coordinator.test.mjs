@@ -2,12 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createAssistantInbox } from '../host-runtime/scripts/trelio-assistant-inbox.mjs';
 import { createAssistantCoordinator } from '../host-runtime/scripts/trelio-assistant-coordinator.mjs';
 import { createAssistantOutgoingConversationObserver } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 
-const fixture = t => {
-  const database=new DatabaseSync(':memory:');t.after(()=>database.close());
+const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={}) => {
+  if(ownsDatabase)t.after(()=>database.close());
   let clock=Date.parse('2026-01-01T09:00:00Z'),cursor=0,starts=0,provisions=0,runs=0,acks=0;
   const assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID();
   const authority={id:bindingId,taskId,state:'accepted',revision:0};
@@ -18,7 +21,7 @@ const fixture = t => {
   const continuation={goalState:'active',cadence:'every_30_minutes',timeZone:'Europe/Moscow'};
   const identity={origin:'https://assistant.test',assistantId,deviceId};
   const client={identity,heartbeat:async()=>({assistantId,deviceId}),
-    companies:async()=>{if(inventoryFailure)throw Object.assign(new Error('transport'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});return[{companyId,memberId}];},
+    companies:async()=>{if(inventoryFailure)throw Object.assign(new Error('transport'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});return[{companyId,memberId,execution}];},
     tasks:async()=>({bindings:[{...authority}],nextCursor:null}),task:async()=>({...authority,execution}),
     poll:async(_company,position)=>{
       const start=position===null?0:Number(position); const page=events.slice(start);
@@ -73,6 +76,98 @@ const fixture = t => {
     activePass:()=>activePass,
     counts:()=>({starts,provisions,runs,acks}),advance:ms=>{clock+=ms;},failNative:value=>{nativeFailure=value;},failInventory:value=>{inventoryFailure=value;}};
 };
+
+test('missing model is blocked before events and retains the original mention through a real SQLite reopen until owner configuration',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-model-dispatch-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
+  const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
+  const chosen={...f.execution.configuration};f.execution.state='unconfigured';f.execution.configuration=null;
+  try{
+    let diagnostic=await coordinator.dispatchStatus();
+    assert.equal(diagnostic.state,'blocked');assert.deepEqual(diagnostic.reasons,['model_selection_required']);
+    assert.equal(diagnostic.pendingEvents,0,'an initialized empty inbox still has an explicit model block');
+    const original={id:randomUUID(),revision:'original-mention',taskId:f.taskId,wake:true};f.events.push(original);
+    await coordinator.pollOnce();assert.equal(await coordinator.workOnce(),null);
+    diagnostic=await coordinator.dispatchStatus();
+    assert.equal(diagnostic.state,'blocked');assert.equal(diagnostic.pendingEvents,1);assert.equal(diagnostic.unprovisionedTasks,1);
+    assert.deepEqual(f.counts(),{starts:0,provisions:0,runs:0,acks:1});
+    const saved={...database.prepare('SELECT event_key,event_id,event_revision,processed FROM assistant_inbox_events').get()};
+    assert.equal(saved.event_id,original.id);assert.equal(saved.processed,0);
+    await coordinator.close();database.close();database=new DatabaseSync(file);
+    coordinator=createAssistantCoordinator({...f.options,database});
+    assert.equal((await coordinator.dispatchStatus()).pendingEvents,1,'a new coordinator reads the SAME original durable event');
+    f.execution.state='ready';f.execution.configuration=chosen;
+    assert.equal((await coordinator.dispatchStatus()).state,'queued','ready permits ordinary work; status itself cannot claim it');
+    assert.deepEqual(f.counts(),{starts:0,provisions:0,runs:0,acks:1});
+    await coordinator.pollOnce();assert.equal((await coordinator.workOnce()).kind,'provision');
+    assert.equal((await coordinator.workOnce()).state,'completed');
+    const completed={...database.prepare('SELECT event_key,event_id,event_revision,processed FROM assistant_inbox_events').get()};
+    assert.deepEqual(completed,{...saved,processed:1});assert.equal(f.events.length,1,'no replacement mention is required');
+    f.advance(300000);await coordinator.pollOnce();
+    assert.deepEqual(f.counts(),{starts:2,provisions:1,runs:1,acks:1});
+    assert.equal((await coordinator.dispatchStatus()).pendingEvents,0);
+  }finally{await coordinator.close();database.close();}
+});
+
+test('dispatch diagnostics distinguish policy, missing company configuration and unknown inventory without exporting IDs',async t=>{
+  const f=fixture(t);
+  try{
+    f.execution.state='policy_blocked';
+    assert.deepEqual((await f.coordinator.dispatchStatus()).reasons,['model_policy_blocked']);
+    f.failInventory(true);const unknown=await f.coordinator.dispatchStatus();
+    assert.equal(unknown.state,'unknown');assert.equal(unknown.pendingEvents,null);assert.deepEqual(unknown.reasons,['not_checked']);
+    f.failInventory(false);f.options.client.companies=async()=>[];
+    const empty=await f.coordinator.dispatchStatus();assert.equal(empty.state,'blocked');assert.deepEqual(empty.reasons,['configuration_required']);
+    assert.ok(!JSON.stringify(empty).includes(f.companyId));assert.ok(!JSON.stringify(empty).includes(f.taskId));
+  }finally{await f.coordinator.close();}
+});
+
+test('dispatch never calls a retained native outcome active or turns unknown references/future timers into queued work',async t=>{
+  const f=fixture(t);
+  try{
+    await f.coordinator.pollOnce();assert.equal((await f.coordinator.dispatchStatus()).state,'queued');
+    await f.coordinator.workOnce();
+    assert.equal((await f.coordinator.dispatchStatus()).state,'idle','a future cycle alone is not currently queued work');
+    const source=f.database.prepare('SELECT source_key FROM assistant_inbox_sources').get().source_key;
+    f.database.prepare(`INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,task_id,wake)
+      VALUES(?,?,?,?,NULL,0)`).run(randomUUID(),source,randomUUID(),'unknown');
+    assert.equal((await f.coordinator.dispatchStatus()).state,'idle','unrouted unknown refs grant no queued task');
+    f.events.push({id:randomUUID(),revision:'mention',taskId:f.taskId,wake:true});f.advance(300000);
+    await f.coordinator.pollOnce();f.failNative(true);
+    await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+    let result=await f.coordinator.dispatchStatus();assert.equal(result.state,'blocked');
+    assert.equal(result.uncertainDeliveries,1);assert.deepEqual(result.reasons,['delivery_uncertain']);
+    const before={...f.counts()};f.options.client.companies=async()=>[];
+    result=await f.coordinator.dispatchStatus();assert.equal(result.state,'blocked');
+    assert.equal(result.uncertainDeliveries,1,'removed company inventory cannot erase the global native fence');
+    assert.deepEqual(result.reasons,['configuration_required','delivery_uncertain']);assert.deepEqual(f.counts(),before);
+  }finally{await f.coordinator.close();}
+});
+
+test('the SAME uncertain delivery row retains a closed original claim/preflight/native cause without changing its retry fence',async t=>{
+  for(const [stage,code] of [['native_claim','ASSISTANT_SCOPE_REQUIRED'],['native_preflight','ASSISTANT_CODEX_MODEL_UNAVAILABLE'],
+    ['native_started','ASSISTANT_CODEX_READ_UNAVAILABLE'],['native_preflight','ASSISTANT_PRIVATE_CANARY_NOT_A_REAL_CODE']]){
+    const f=fixture(t);
+    if(stage==='native_claim')f.options.client.claimTaskHost=async()=>{throw Object.assign(new Error('PRIVATE RAW CAUSE'),{code});};
+    else f.options.native.provision=async(_input,options)=>{
+      if(stage==='native_started')options.startInvocation();
+      throw Object.assign(new Error('PRIVATE RAW CAUSE'),{code});
+    };
+    try{
+      await f.coordinator.pollOnce();
+      await assert.rejects(f.coordinator.workOnce(),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});
+      const status=await f.coordinator.dispatchStatus(),failure=status.failure;
+      assert.deepEqual(failure,{code:code.endsWith('NOT_A_REAL_CODE')?'ASSISTANT_COORDINATOR_UNAVAILABLE':code,stage});
+      const saved=f.database.prepare('SELECT state,native_started,failure_code,failure_stage FROM assistant_inbox_deliveries').get();
+      assert.equal(saved.state,'uncertain');assert.equal(saved.native_started,stage==='native_started'?1:0);
+      assert.equal(saved.failure_code,failure.code);assert.equal(saved.failure_stage,stage);
+      const before={...saved};await f.coordinator.dispatchStatus();
+      assert.deepEqual({...f.database.prepare('SELECT state,native_started,failure_code,failure_stage FROM assistant_inbox_deliveries').get()},before);
+      assert.ok(!JSON.stringify(status).includes('PRIVATE'));assert.equal(f.counts().starts,0);
+    }finally{await f.coordinator.close();}
+  }
+});
 
 test('real SQLite coordinator provisions one chat and wakes only on a mention or due cycle', async t=>{
   const f=fixture(t);await f.coordinator.pollOnce();

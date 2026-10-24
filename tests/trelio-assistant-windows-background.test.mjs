@@ -51,6 +51,20 @@ test('unpaired, wrong origin, revoked, unsupported OS and rebind failures preced
   assert.equal(calls, 0);
 });
 
+test('the existing OS status keeps its running state and appends dispatch only after native registration and identity checks',async()=>{
+  let diagnosticReads=0,current=identity;
+  const running={...registered(),state:'running'};
+  const dispatch={schemaVersion:1,state:'blocked',reasons:['model_selection_required'],pendingEvents:0};
+  const options={platform:'win32',executable:'C:\\node.exe',readIdentity:async()=>current,verifyContact:async()=>{},
+    resolveLoader:async()=>'C:\\loader.mjs',runNative:async()=>running,
+    readDispatchStatus:async()=>{diagnosticReads++;return dispatch;}};
+  const manage=createAssistantWindowsBackground(options);
+  const result=await manage('status');assert.equal(result.state,'running');assert.deepEqual(result.dispatch,dispatch);
+  assert.equal(diagnosticReads,1);await manage('start');assert.equal(diagnosticReads,1,'start is not a status/poll request');
+  await assert.rejects(createAssistantWindowsBackground({...options,readDispatchStatus:async()=>{
+    current={...identity,deviceId:randomUUID()};return dispatch;}})('status'),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+});
+
 test('setup tools and exact CLI commands expose no arbitrary principal, identity or executable', async () => {
   const setup = { background: async operation => ({ operation }) };
   for (const [name, operation] of [['install_assistant_background', 'install'], ['get_assistant_background_status', 'status'], ['start_assistant_background', 'start']]) {

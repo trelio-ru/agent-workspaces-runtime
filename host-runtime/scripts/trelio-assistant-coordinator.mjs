@@ -1,6 +1,6 @@
 /** Model-free coordinator. Provider authority and native execution stay behind
  * explicit trusted adapters; SQLite records no messages, secrets or prompts. */
-import { createAssistantInbox } from './trelio-assistant-inbox.mjs';
+import { createAssistantInbox, readAssistantInboxDispatchSummary, assistantDeliveryFailure } from './trelio-assistant-inbox.mjs';
 import { createAssistantScheduler } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
 import { validateAssistantPassOutcome, sameAssistantSourceRegistration as sameRegistration, assistantMaxChatUrl, ASSISTANT_SOURCE_MONITOR_ERROR_CODES } from './trelio-assistant-transport.mjs';
@@ -23,6 +23,45 @@ const externalProviders=Object.freeze({'telegram-mtproto':'telegram','email-imap
 const EMAIL_INITIAL_UNREAD_STREAM='email-initial-unread/v1';
 const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:identity.assistantId,companyId:row.companyId,
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
+
+/** Presentation only: native company execution remains authority at every
+ * launch. Missing model selection blocks even an empty initial queue. Failed
+ * or incomplete reads never become an empty/idle snapshot. No IDs, labels,
+ * cursor, pass, notification or provider content leave this aggregate. */
+export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Date.now(),active=false}={}) => {
+  const counts=['pendingEvents','acceptedTasks','waitingOwnerTasks','unprovisionedTasks','uncertainDeliveries'];
+  const result={schemaVersion:1,state:'unknown',reasons:['not_checked'],checkedAt:new Date(now).toISOString(),
+    ...Object.fromEntries(counts.map(key=>[key,null])),failure:null};
+  if(!Array.isArray(companies)||companies.length>256||new Set(companies.map(row=>row?.companyId)).size!==companies.length)return result;
+  const reasons=[];
+  for(const row of companies){
+    if(!uuid.test(row?.companyId??'')||!uuid.test(row?.memberId??''))return result;
+    if(row.execution?.state==='unconfigured')reasons.push('model_selection_required');
+    else if(row.execution?.state==='policy_blocked')reasons.push('model_policy_blocked');
+    else if(row.execution?.state==='ready'){
+      try{assistantExecutionConfiguration(row.execution.configuration);}catch{return result;}
+    }else return result;
+  }
+  if(!companies.length)reasons.push('configuration_required');
+  const complete=summary&&Object.keys(summary).sort().join(',')===[...counts,'failure'].sort().join(',')
+    &&counts.every(key=>Number.isSafeInteger(summary[key])&&summary[key]>=0&&summary[key]<=50_000);
+  if(complete){
+    let failure=null;
+    try{
+      if(summary.failure!==null){
+        if(!summary.failure||Object.keys(summary.failure).sort().join(',')!=='code,stage')return result;
+        failure=assistantDeliveryFailure(summary.failure.code,summary.failure.stage);
+      }
+    }catch{return result;}
+    Object.assign(result,Object.fromEntries(counts.map(key=>[key,summary[key]])),{failure});
+    if(summary.uncertainDeliveries)reasons.push('delivery_uncertain');
+    if(summary.waitingOwnerTasks)reasons.push('waiting_owner');
+  }else reasons.push('not_checked');
+  result.reasons=[...new Set(reasons)];
+  result.state=reasons.some(reason=>reason!=='not_checked')?'blocked':!complete?'unknown':active?'active'
+    :summary.pendingEvents||summary.unprovisionedTasks?'queued':'idle';
+  return Object.freeze(result);
+};
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
   passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
@@ -863,7 +902,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   const perform = async (job,signal) => {
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
-    let checking=false,started=false,taskPass=null;
+    let checking=false,started=false,taskPass=null,failureStage='native_claim';
     const watch=setInterval(()=>{
       if(checking) return; checking=true;
       void (async()=>{
@@ -885,7 +924,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
       if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
-      const options={signal:combined,startInvocation:()=>{lease();inbox.startDelivery(job.deliveryId);started=true;}};
+      const options={signal:combined,startInvocation:()=>{lease();inbox.startDelivery(job.deliveryId);started=true;failureStage='native_started';}};
       let result;
       if(job.kind==='provision') {
         inbox.prepareProvision(job.deliveryId);started=true;
@@ -895,11 +934,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(claim.threadId!==null) {
           // A restored local snapshot may lag the server's already registered
           // chat. Adopt only exact positive native read-back on this host.
-          result=await native.readDelivery(claim.threadId,job.deliveryId,{signal:combined});
+          failureStage='readback';result=await native.readDelivery(claim.threadId,job.deliveryId,{signal:combined});
           if(result.state!=='completed') fail('ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED');
           options.startInvocation();inbox.bindProvisionedThread(job.deliveryId,claim.threadId);
           result={...result,threadId:claim.threadId};
         } else {
+        failureStage='native_preflight';
         result=await native.provision({deliveryId:job.deliveryId,cwd,execution},{...options,
           onThreadStarted:threadId=>inbox.bindProvisionedThread(job.deliveryId,threadId)});
         }
@@ -920,6 +960,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // Origin belongs to host identity, not the exact pass ABI.
         await passHost.activatePass(taskPass);
         execution=assistantExecutionConfiguration(admitted.execution);
+        failureStage='native_preflight';
         result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
             ...(admitted.workMode==='discussion'?{workMode:'discussion'}:{}),
@@ -934,13 +975,14 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             ...(job.events.some(event=>event.owner_question_id) ? {ownerQuestionIds:[...new Set(job.events
               .flatMap(event=>event.owner_question_id?[event.owner_question_id]:[]))]} : {})}},options);
       }
+      failureStage='readback';
       if(result.state!=='completed') fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
       const threadId=job.kind==='provision'?result.threadId:findSchedule(job.scope,job.taskId)?.threadId;
       await commitCompletion(job,threadId,result.receipt,combined);
       return {state:'completed',kind:job.kind};
     } catch(error) {
       if(started) {
-        if(inbox.readDelivery(job.deliveryId).state!=='complete') inbox.markDeliveryUncertain(job.deliveryId);
+        if(inbox.readDelivery(job.deliveryId).state!=='complete') inbox.markDeliveryUncertain(job.deliveryId,assistantDeliveryFailure(error?.code,failureStage));
       } else inbox.abandonUnstartedDelivery(job.deliveryId);
       const code=started?'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN':errorCode(error);
       emit(code); throw new AssistantCoordinatorError(code);
@@ -1014,6 +1056,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       return schedule.setCadence(scopeFor(source,taskId),input);
     },
     status() { return schedule.list(); },
+    async dispatchStatus(signal) {
+      // This is deliberately not pollOnce/syncTasks: status cannot advance a
+      // cursor, claim a delivery, process/ACK an event or alter model choices.
+      try{
+        const companies=await client.companies(combinedSignal(signal));
+        const summary=readAssistantInboxDispatchSummary({database,identity,companies});
+        return assistantDispatchDiagnostics({companies,summary,now:now(),active:active!==null});
+      }catch{return assistantDispatchDiagnostics({now:now()});}
+    },
     async run(signal) {
       if(!signal) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
       while(!signal.aborted && !closed) {

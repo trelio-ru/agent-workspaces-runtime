@@ -65,6 +65,25 @@ const MAX_PAGE = 100;
 const MAX_PENDING = 10_000;
 const MAX_EVENTS = 50_000;
 const MAX_STREAMS = 10_000;
+// Fixed implementation codes only. Never retain Error.message, stack, provider
+// prose or an arbitrary code prefix in this content-free diagnostic journal.
+const DELIVERY_FAILURE_CODES=new Set(['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_CODEX_DELIVERY_NOT_STARTED',
+  'ASSISTANT_CODEX_DELIVERY_UNCERTAIN','ASSISTANT_CODEX_INVALID_EXECUTION','ASSISTANT_CODEX_INVALID_INPUT',
+  'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_UNAVAILABLE',
+  'ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE','ASSISTANT_ACCESS_DENIED',
+  'ASSISTANT_TASK_ACCESS_DENIED','ASSISTANT_COMPANY_ACCESS_DENIED','ASSISTANT_HOST_REBIND_REQUIRED',
+  'ASSISTANT_MODEL_SELECTION_REQUIRED','ASSISTANT_MODEL_POLICY_BLOCKED','ASSISTANT_SCOPE_REQUIRED',
+  'ASSISTANT_PASS_REVIEW_REQUIRED','ASSISTANT_PASS_REQUIRED','TRELIO_RUNTIME_HOOK_REQUIRED',
+  'ASSISTANT_TRANSPORT_UNAVAILABLE','ASSISTANT_TRANSPORT_INVALID_RESPONSE','ASSISTANT_COORDINATOR_AUTHORITY_REQUIRED',
+  'ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED','ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED',
+  'ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED','ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED',
+  'ASSISTANT_COORDINATOR_SETUP_REQUIRED','ASSISTANT_COORDINATOR_TASK_STOPPED','ASSISTANT_COORDINATOR_THREAD_CONFLICT',
+  'ASSISTANT_COORDINATOR_THREAD_REQUIRED','ASSISTANT_COORDINATOR_UNAVAILABLE']);
+const DELIVERY_FAILURE_STAGES=['native_claim','native_preflight','native_started','readback'];
+export const assistantDeliveryFailure = (code,stage) => {
+  if(!DELIVERY_FAILURE_STAGES.includes(stage))inputError();
+  return Object.freeze({code:DELIVERY_FAILURE_CODES.has(code)?code:'ASSISTANT_COORDINATOR_UNAVAILABLE',stage});
+};
 
 /** Shared private/wire projection of a selected original delivery manifest.
  * No provider ID/body/revision digest can enter a native processing receipt.
@@ -80,6 +99,64 @@ export const assistantSourceProcessingReferences=value=>{
     return Object.freeze({sourceId:uuid(row.sourceId),sourceRevision:integer(row.sourceRevision,0,2_147_483_647),
       routeId:uuid(row.routeId),eventOrdinal});
   });
+};
+
+/** Fixed SELECT-only view of the SAME journal. Status never constructs the
+ * writable inbox (which performs migrations/recovery), reads event identifiers
+ * or exports source/task rows. One read transaction keeps the aggregate counts
+ * consistent while a separate coordinator commits a page or completion. Only
+ * the fresh native company's exact Trelio member/device scopes participate;
+ * historical or foreign device sources cannot become current queue evidence.
+ */
+export const readAssistantInboxDispatchSummary = ({ database: db, identity, companies }) => {
+  if (!db || typeof db.prepare !== 'function' || !Array.isArray(companies) || companies.length > 256) inputError();
+  const scopes=companies.map(company=>scopeOf({origin:identity.origin,assistantId:identity.assistantId,
+    companyId:company.companyId,provider:'trelio',accountId:company.memberId,bindingId:identity.deviceId}));
+  const get=(sql,...values)=>db.prepare(sql).get(...values);
+  db.exec('BEGIN');
+  try {
+    const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
+    const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
+    if(versions.length!==1||![10,11].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+      fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    // Scheduler keys already index the canonical task scope. Keep this bounded
+    // structural map inside the reader instead of a quadratic JSON join for
+    // every accepted task in a full ten-thousand-task journal.
+    const plans=db.prepare('SELECT task_key,source_json FROM assistant_schedule_tasks LIMIT 10001').all();
+    if(plans.length>10_000)fail('ASSISTANT_INBOX_FULL');
+    const scheduled=new Map(plans.map(plan=>[plan.task_key,plan.source_json]));
+    const result={pendingEvents:0,acceptedTasks:0,waitingOwnerTasks:0,unprovisionedTasks:0,uncertainDeliveries:0};
+    for(const scope of scopes){
+      const source=get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=? AND state=\'active\'',scope.key);
+      if(!source)continue;
+      if(source.scope_json!==JSON.stringify(scope))fail('ASSISTANT_INBOX_CONFLICT');
+      // Only native task-bound accepted work can be called queued. Unknown or
+      // unrouted external references and future timers invent no task demand.
+      result.pendingEvents+=get(`SELECT count(*) AS n FROM assistant_inbox_events e
+        JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
+        WHERE e.source_key=? AND e.processed=0 AND t.state='accepted'`,scope.key).n;
+      const accepted=db.prepare('SELECT task_id FROM assistant_inbox_tasks WHERE source_key=? AND state=\'accepted\' LIMIT 10001').all(scope.key);
+      if(accepted.length>10_000)fail('ASSISTANT_INBOX_FULL');
+      result.acceptedTasks+=accepted.length;
+      result.waitingOwnerTasks+=get('SELECT count(*) AS n FROM assistant_inbox_tasks WHERE source_key=? AND state=\'waiting_owner\'',scope.key).n;
+      const sourceJson=JSON.stringify(Object.fromEntries(Object.entries(scope).filter(([key])=>key!=='key')));
+      result.unprovisionedTasks+=accepted.filter(task=>scheduled.get(digest({origin:scope.origin,assistantId:scope.assistantId,
+        companyId:scope.companyId,taskId:task.task_id}))!==sourceJson).length;
+    }
+    // The desktop fence is device-global, including a company removed since
+    // the native operation began. A fresh company inventory cannot erase an
+    // uncertain operation. A retained marker is never live-process evidence;
+    // expiry/status cannot release it or authorize a retry elsewhere.
+    result.uncertainDeliveries=get(`SELECT count(*) AS n FROM assistant_inbox_deliveries
+      WHERE state IN ('started','uncertain') OR state='leased' AND native_started=1`).n
+      +get(`SELECT count(*) AS n FROM assistant_owner_intakes WHERE settled=0
+        AND (state='uncertain' OR native_started=1 AND state!='complete')`).n;
+    if(Object.values(result).some(value=>!Number.isSafeInteger(value)||value<0||value>50_000))fail('ASSISTANT_INBOX_FULL');
+    const last=versions[0].version===11?get(`SELECT failure_code,failure_stage FROM assistant_inbox_deliveries
+      WHERE state IN ('started','uncertain') AND failure_code IS NOT NULL ORDER BY rowid DESC LIMIT 1`):null;
+    result.failure=last?assistantDeliveryFailure(last.failure_code,last.failure_stage):null;
+    db.exec('COMMIT');return Object.freeze(result);
+  } catch(error){db.exec('ROLLBACK');throw error;}
 };
 
 /**
@@ -106,7 +183,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -241,8 +318,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         WHERE kind='route_existing' AND state!='complete';
       INSERT OR IGNORE INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal)
         SELECT id,original_event_id,event_key,account_key,native_event_id,native_revision,0 FROM assistant_owner_intakes;`);
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=10');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (10)');
+    if(!versions.length||versions[0].version<11){
+      // Additive diagnostic metadata only: keep every delivery ID, native-start
+      // bit, cursor, event, receipt and lease unchanged. Legacy causes are null.
+      db.exec(`ALTER TABLE assistant_inbox_deliveries ADD COLUMN failure_code TEXT;
+        ALTER TABLE assistant_inbox_deliveries ADD COLUMN failure_stage TEXT;`);
+    }
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=11');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (11)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -1053,11 +1136,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run('UPDATE assistant_inbox_deliveries SET expires_at=? WHERE delivery_id=?', time() + LEASE_MS, id);
       });
     },
-    markDeliveryUncertain(id) {
+    markDeliveryUncertain(id,failure=null) {
+      if(failure!==null){
+        object(failure,['code','stage']);
+        if(Object.keys(failure).length!==2||!DELIVERY_FAILURE_CODES.has(failure.code)
+          ||!DELIVERY_FAILURE_STAGES.includes(failure.stage))inputError();
+      }
       return transaction(() => {
         const row = delivery(id);
         if (!['started','uncertain'].includes(row.state)) fail('ASSISTANT_INBOX_STALE_DELIVERY');
-        run("UPDATE assistant_inbox_deliveries SET state='uncertain' WHERE delivery_id=?", id);
+        run("UPDATE assistant_inbox_deliveries SET state='uncertain',failure_code=coalesce(?,failure_code),failure_stage=coalesce(?,failure_stage) WHERE delivery_id=?",
+          failure?.code??null,failure?.stage??null,id);
       });
     },
     abandonUnstartedDelivery(id) {

@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const modelArgs = ['--model',execution.modelId,'--config','model_reasoning_effort="high"'];
@@ -119,6 +119,27 @@ test('native model/list discovers account effort support with bounded pagination
   const loop={...options,spawnProcess:nativeRpc(request=>({result:request.method==='account/read'
     ? {account:{type:'apiKey'},requiresOpenaiAuth:true} : {data:[],nextCursor:'same-cursor'}}))};
   await assert.rejects(readAssistantCodexExecutionAvailability(execution,loop),/READ_UNAVAILABLE/);
+});
+
+test('all native-selected company pairs share one read-only account/model RPC process and original deadline',async()=>{
+  let children=0,accounts=0,pages=0;const methods=[];
+  const rpc=nativeRpc(request=>{
+    methods.push(request.method);
+    if(request.method==='account/read'){accounts++;return {result:{account:{type:'chatgpt',email:'PRIVATE'},requiresOpenaiAuth:true}};}
+    assert.equal(request.method,'model/list');pages++;
+    if(!request.params.cursor)return {result:{data:[{model:execution.modelId,supportedReasoningEfforts:[{reasoningEffort:'high'}]}],nextCursor:'next'}};
+    return {result:{data:[{model:'gpt-other',supportedReasoningEfforts:[{reasoningEffort:'ultra'}]}],nextCursor:null}};
+  });
+  const choices=[execution,{...execution,effortLevel:'max'}, {...execution,modelId:'gpt-other',effortLevel:'ultra'}];
+  const result=await readAssistantCodexExecutionAvailabilitySet(choices,{executable:process.execPath,environment:{},
+    spawnProcess:(...args)=>{children++;return rpc(...args);}});
+  assert.deepEqual(result,[true,false,true]);assert.equal(children,1);assert.equal(accounts,1);assert.equal(pages,2);
+  assert.deepEqual(methods,['account/read','model/list','model/list']);assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+  await assert.rejects(readAssistantCodexExecutionAvailabilitySet(Array.from({length:257},()=>execution),
+    {spawnProcess:()=>assert.fail('oversized native configuration inventory started a process')}),/INVALID_INPUT/);
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(readAssistantCodexExecutionAvailabilitySet(choices,{signal:controller.signal,executable:process.execPath,
+    spawnProcess:()=>assert.fail('expired status budget started a process')}),/UNAVAILABLE/);
 });
 
 test('only explicit native missing authentication reports login, before any model lookup or invocation',async()=>{
