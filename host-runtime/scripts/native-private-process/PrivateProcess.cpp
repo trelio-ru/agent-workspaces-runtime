@@ -7,6 +7,7 @@
 #include <aclapi.h>
 #include <wincrypt.h>
 #include <tlhelp32.h>
+#include <appmodel.h>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -432,9 +433,52 @@ int assistantConsoleIcon() {
   return 0;
 }
 
+// Fixed PUBLIC metadata query, separate from readiness/private requests and
+// console presentation. AppModel selects only this user's registered Codex
+// main package. Ambiguity during an update is unavailable, never "newest".
+// The returned path is data: this mode never launches, copies or changes it.
+int codexPackagePath() {
+  constexpr PCWSTR family = L"OpenAI.Codex_2p2nqsd0c76g0";
+  UINT32 count = 0, length = 0;
+  LONG status = FindPackagesByPackageFamily(family, PACKAGE_FILTER_HEAD,
+    &count, nullptr, &length, nullptr, nullptr);
+  if (status == ERROR_SUCCESS && count == 0) {
+    write("{\"schemaVersion\":1,\"state\":\"unavailable\"}\n"); return 0;
+  }
+  require(status == ERROR_INSUFFICIENT_BUFFER && count == 1 && length > 0 && length < 32768);
+  std::vector<PWSTR> names(count);
+  std::vector<WCHAR> buffer(length);
+  std::vector<UINT32> properties(count);
+  require(FindPackagesByPackageFamily(family, PACKAGE_FILTER_HEAD, &count,
+    names.data(), &length, buffer.data(), properties.data()) == ERROR_SUCCESS && count == 1);
+  require(!(properties[0] & (PACKAGE_PROPERTY_FRAMEWORK | PACKAGE_PROPERTY_RESOURCE |
+    PACKAGE_PROPERTY_BUNDLE | PACKAGE_PROPERTY_DEVELOPMENT_MODE)));
+  UINT32 pathLength = 0;
+  require(GetPackagePathByFullName(names[0], &pathLength, nullptr) == ERROR_INSUFFICIENT_BUFFER
+    && pathLength > 1 && pathLength < 32768);
+  std::vector<WCHAR> packagePath(pathLength);
+  require(GetPackagePathByFullName(names[0], &pathLength, packagePath.data()) == ERROR_SUCCESS);
+  int utf8Length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, packagePath.data(),
+    -1, nullptr, 0, nullptr, nullptr);
+  require(utf8Length > 1 && utf8Length < 16384);
+  Text utf8;
+  utf8.value.resize(static_cast<size_t>(utf8Length));
+  require(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, packagePath.data(), -1,
+    utf8.value.data(), utf8Length, nullptr, nullptr) == utf8Length);
+  Text encoded;
+  encode(reinterpret_cast<const BYTE*>(utf8.value.data()), static_cast<DWORD>(utf8Length - 1), encoded);
+  write("{\"schemaVersion\":1,\"state\":\"available\",\"pathBase64\":\"");
+  write(encoded.value); write("\"}\n"); return 0;
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 1) {
-    if (argc != 2 || std::string_view(argv[1]) != "--assistant-console-icon") return 1;
+    if (argc != 2) return 1;
+    if (std::string_view(argv[1]) == "--codex-package-path") {
+      try { return codexPackagePath(); }
+      catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\"}\n"); } catch (...) {} return 0; }
+    }
+    if (std::string_view(argv[1]) != "--assistant-console-icon") return 1;
     try { return assistantConsoleIcon(); }
     catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\"}\n"); } catch (...) {} return 1; }
   }

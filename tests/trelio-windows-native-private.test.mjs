@@ -104,6 +104,21 @@ test('hosted native artifacts match reviewed source and PE architectures', windo
   await validateWindowsPrivateWorker(fileURLToPath(new URL('../host-runtime/scripts/native-private-process',import.meta.url)));
 });
 
+test('native fixed current-user Codex AppModel query has no private protocol or caller selector',windows,async()=>{
+  const options=windowsPrivateWorkerOptions();
+  const result=await run(options.executable,['--codex-package-path'],'',{...process.env,PATH:'',PSModulePath:'nonexistent'});
+  assert.equal(result.code,0);assert.equal(result.stderr,'');const value=JSON.parse(result.stdout);
+  assert.equal(value.schemaVersion,1);assert.ok(['available','unavailable'].includes(value.state));
+  assert.deepEqual(Object.keys(value).sort(),value.state==='available'?['pathBase64','schemaVersion','state']:['schemaVersion','state']);
+  if(value.state==='available'){
+    const bytes=Buffer.from(value.pathBase64,'base64');assert.equal(bytes.toString('base64'),value.pathBase64);
+    assert.match(bytes.toString('utf8'),/^[a-z]:\\/iu);
+  }
+  const denied=await run(options.executable,['--codex-package-path','caller-path']);assert.notEqual(denied.code,0);assert.equal(denied.stdout,'');
+  // Hosted Windows normally has no registered Store Codex: absence is actual
+  // API evidence, not a positive installed-CLI or account acceptance claim.
+});
+
 // x64 Windows can execute x86 too. The separate hosted ARM64 gate exercises
 // the third published binary natively; packaging requires all three hashes.
 for (const arch of process.arch === 'x64' ? ['x64','ia32'] : [process.arch]) {

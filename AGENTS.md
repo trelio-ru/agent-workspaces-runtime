@@ -593,6 +593,11 @@ publication tooling также остаются вне этого публичн
   prose or a cached catalogue. Only a fresh completed turn with exact read-back
   clears its current login latch; unrelated health incidents and delivery fences
   remain independent. [Contract](docs/assistant-scheduler.md#company-model-selection).
+- Codex discovery shares that original deadline. A fixed public mode of the SAME
+  native binary selects the current-user Codex package; vendor four-file hashes
+  select/verify its exact existing relocated copy, never cache scanning/newest.
+  The optional official standalone current/bin layout needs complete companions.
+  No Store execution, PATH/ACL edit or install; discovery proves no business result.
 - Background composition keeps one native pass per signed worker and private
   invocations per call. Supervisor updates only between cycles; full backend
   readiness gates business work. Task folders use compact full-identity hashes; prototype writable roots require review. OS installation and Windows E2E remain explicit

@@ -275,6 +275,38 @@ authentication gives `auth_required`; a definite unsupported pair gives
 closed implementation code. These current observations do not supply the
 missing historical cause of a legacy delivery and cannot clear any health latch.
 
+The shared Codex executable resolver keeps explicit PATH priority. On Windows,
+the SAME signed native worker has a separate fixed public `--codex-package-path`
+mode. AppModel selects one current-user main package from the exact
+`OpenAI.Codex_2p2nqsd0c76g0` family; absence/ambiguity/development package/error
+returns unavailable. No input, package/path/PID selector, private readiness/ACL/
+DPAPI call, shell, process scan or OS mutation belongs to that mode.
+
+The vendor desktop relocation contract selects one existing copy from the four
+ordered packaged resources: `codex.exe`, `codex-code-mode-host.exe`,
+`codex-windows-sandbox-setup.exe`, `codex-command-runner.exe`. Its destination is
+`%LOCALAPPDATA%\OpenAI\Codex\bin\<hash16>`, where hash16 is the first sixteen
+hex digits of SHA256 over each filename, NUL, lowercase file SHA256 hex, NUL in
+that exact order. The resolver hashes the current packaged sources and exact
+selected copies, checking regular/non-reparse paths, sizes, stable file stats
+and fresh native package read-back under the original caller deadline. It never
+lists cache versions, chooses newest, copies a file or launches the protected
+Store executable. This selector was inspected in the installed vendor public
+app resource and independently matched the real Windows copy; that does not
+establish a successful assistant task or resolve an older uncertain delivery.
+
+The other fixed fallback is the documented per-user standalone command directory
+`%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`. It resolves the official
+`CODEX_HOME`/`.codex` standalone `current` and visible `bin` junctions to one
+direct release child, verifies regular runtime companion files, and rechecks the
+selection before returning. Missing, incomplete, escaped or concurrently
+retargeted layouts fail closed without scans, installation, PATH edits, shell
+execution or ACL changes. Store application internals are not a fallback: an
+installed Store package and readable binary do not prove permission to execute
+that internal CLI. Discovery shares the original caller deadline. A resolved
+path still requires the ordinary native RPC/turn checks; synthetic filesystem
+fixtures establish no real account or Windows business readiness.
+
 The ordinary `background_tick` returns the same diagnostic and reports
 `blocked`/`unknown` instead of collapsing all absent launches to `idle`.
 Polling and durable page/cursor commit remain model-free. If native model

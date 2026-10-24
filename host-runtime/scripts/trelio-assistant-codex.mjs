@@ -86,7 +86,7 @@ export const assistantIntakeContext=value=>{
 };
 const context = async options => {
   const environment = options.environment ?? process.env;
-  const executable = options.executable ?? await resolveCodexExecutable(environment);
+  const executable = options.executable ?? await resolveCodexExecutable(environment,{signal:options.signal});
   if (!executable || options.signal?.aborted) fail('ASSISTANT_CODEX_UNAVAILABLE');
   return { executable, env: buildCodexEnvironment(environment), spawnProcess: options.spawnProcess ?? spawn };
 };
@@ -96,6 +96,10 @@ const context = async options => {
  * stderr, title or company content is returned by this boundary. */
 const readNative = async (threadId, project, options = {}) => {
   if (threadId !== null) threadId = id(threadId);
+  // Discovery shares the original metadata deadline. A late filesystem result
+  // cannot start a fresh RPC budget or a process after its caller has stopped.
+  const deadline=AbortSignal.timeout(options.readTimeoutMs??15_000);
+  options={...options,signal:options.signal?AbortSignal.any([options.signal,deadline]):deadline};
   const { executable, env, spawnProcess } = await context(options);
   return new Promise((resolve, reject) => {
     let child, timer, done = false, pending = '', bytes = 0, requestId = 1;
