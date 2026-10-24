@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
-import { assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { executeAssistantRuntimeRequest, assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
@@ -160,4 +160,18 @@ test('retained dispatch failures report one closed reason and only the committed
   await reportAssistantDispatchRecovery({readHealth:async()=>({code:'dispatch_review_required',revision:1}),
     reportHealth:async()=>{throw new Error('PRIVATE');}});
   assert.ok(!JSON.stringify(f.reports).includes('PRIVATE'));
+});
+
+for(const permitted of [false,true])test(`health offers a retained pass only the coordinator-fenced signed update (allowed=${permitted})`,async()=>{
+  let updates=0,closed=0,checks=0,boundaries=0;
+  const result=await executeAssistantRuntimeRequest({operation:'health'},{
+    context:async action=>action({}, {readActivation:async()=>null,readActivePass:async()=>({retained:true})}),
+    createRuntimeHost:async()=>({coordinator:{updateRuntimeAtBoundary:async update=>{
+      boundaries++;if(permitted)await update();return permitted;
+    }},close:async()=>{closed++;}}),
+    upgradeRuntime:async options=>{assert.equal(options.timeoutMs,30000);updates++;},
+    requestRuntime:async request=>{assert.deepEqual(request,{operation:'health_check'});checks++;return {state:'checked'};},
+  });
+  assert.deepEqual(result,{state:'checked'});assert.equal(boundaries,1);assert.equal(closed,1);assert.equal(checks,1);
+  assert.equal(updates,permitted?1:0);
 });

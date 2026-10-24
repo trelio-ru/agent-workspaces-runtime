@@ -1683,3 +1683,69 @@ for(const nativeState of ['uncertain','running','failed'])test(`terminal review 
   assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(reviews,0);assert.equal(f.counts().runs,1);
   assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);await f.coordinator.close();
 });
+
+for(const state of ['completed','running','uncertain','failed','missing_turn','read_error'])test(`signed update retained-pass boundary: ${state}`,async t=>{
+  const f=fixture(t);let updates=0;
+  const ordinaryRun=f.options.native.run;
+  f.options.native.run=async(...args)=>{const result=await ordinaryRun(...args);result.turnId=randomUUID();return result;};
+  f.options.client.readBusinessOutcome=async()=>{throw Object.assign(new Error('no outcome'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});};
+  f.events.push({id:randomUUID(),revision:'update-boundary',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  await assert.rejects(f.coordinator.workOnce());
+  const pass=f.activePass(),before=f.database.prepare('SELECT * FROM assistant_inbox_deliveries').all();
+  const counts=f.counts();
+  const previousRead=f.options.native.readDelivery;
+  f.options.native.readDelivery=async(thread,marker)=>{
+    assert.equal(thread,pass.threadId);assert.equal(marker,pass.deliveryId);
+    if(state==='read_error')throw new Error('native read unavailable');
+    const result=await previousRead(thread,marker);
+    return {...result,state:state==='missing_turn'?'completed':state,...(state==='missing_turn'?{turnId:null}:{})};
+  };
+  try{
+    const operation=()=>f.coordinator.updateRuntimeAtBoundary(async()=>{
+      updates++;assert.equal(await f.coordinator.workOnce(),null,'same-process work cannot overlap download');
+      const other=createAssistantCoordinator({...f.options});
+      try{await assert.rejects(other.workOnce(),{code:'ASSISTANT_COORDINATOR_BUSY'});}
+      finally{await other.close();}
+    });
+    if(state==='read_error')await assert.rejects(operation());
+    else assert.equal(await operation(),state==='completed');
+    assert.equal(updates,state==='completed'?1:0);
+    assert.deepEqual(f.activePass(),pass);assert.deepEqual(f.counts(),counts);
+    assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries').all(),before,
+      'code maintenance neither resets start/history nor claims business completion');
+  }finally{await f.coordinator.close();}
+});
+
+test('retained update boundary refuses a renewed continuation with an unknown start',async t=>{
+  const f=fixture(t);f.options.client.readBusinessOutcome=async()=>{throw new Error('no outcome');};
+  f.events.push({id:randomUUID(),revision:'update-boundary',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();await assert.rejects(f.coordinator.workOnce());
+  const pass=f.activePass();
+  f.database.prepare('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?').run(JSON.stringify([{
+    passId:pass.passId,expectedLeaseRevision:0,clientRequestId:randomUUID(),terminalTurnId:randomUUID(),terminalMarkerId:pass.deliveryId,
+    reviewId:randomUUID(),resumeAttempted:true,resumed:false,started:false}]),pass.deliveryId);
+  try{assert.equal(await f.coordinator.updateRuntimeAtBoundary(()=>assert.fail('unknown start cannot update')),false);}
+  finally{await f.coordinator.close();}
+});
+
+for(const change of ['new_marker','identity'])test(`retained update refuses ${change} after an earlier completed turn`,async t=>{
+  const f=fixture(t);f.options.client.readBusinessOutcome=async()=>{throw new Error('no outcome');};
+  f.events.push({id:randomUUID(),revision:'update-race',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();await assert.rejects(f.coordinator.workOnce());
+  const pass=f.activePass(),newMarker=randomUUID();
+  if(change==='new_marker')f.database.prepare('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?')
+    .run(JSON.stringify([{passId:pass.passId,expectedLeaseRevision:0,clientRequestId:randomUUID(),terminalTurnId:randomUUID(),
+      terminalMarkerId:pass.deliveryId,reviewId:newMarker,resumeAttempted:true,resumed:true,started:true}]),pass.deliveryId);
+  f.options.native.readDelivery=async(thread,marker)=>{
+    assert.equal(thread,pass.threadId);
+    if(change==='new_marker'){assert.equal(marker,newMarker);return {state:'uncertain'};}
+    f.options.passHost.readActivePass=async()=>({...pass,deviceId:randomUUID()});
+    return {state:'completed',turnId:randomUUID()};
+  };
+  try{
+    const attempt=()=>f.coordinator.updateRuntimeAtBoundary(()=>assert.fail('changed boundary must not download'));
+    if(change==='identity')await assert.rejects(attempt(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    else assert.equal(await attempt(),false);
+  }finally{await f.coordinator.close();}
+});

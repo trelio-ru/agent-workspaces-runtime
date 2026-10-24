@@ -65,6 +65,14 @@ Only ordinary exact business outcome/native receipt completes original events,
 advances schedule or clears health. No new model tool, shell ABI, executor, vault,
 queue or pass-close shortcut exists. Old supervisors select the current signed
 worker between ticks without a Codex restart.
+A retained pass does not block its own repair update indefinitely. Health may
+load the signed update only after the SAME private coordinator lease fences work
+and the exact currently journaled native marker has positive completed/turn-ID
+evidence. A pending renewed/unknown start, running/failed/ambiguous history or
+changed identity/journal refuses. Downloading preserves every pass/start/history
+bit and never clears business health; the next worker independently selects the
+verified package. No model invocation, Codex restart or owner question occurs.
+
 
 ## Cycles
 

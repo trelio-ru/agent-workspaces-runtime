@@ -1197,6 +1197,43 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   return {
     pollOnce,workOnce,
+    async updateRuntimeAtBoundary(update,signal) {
+      if(typeof update!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+      if(closed||active||polling)return false;
+      // A retained pass is not itself a running process. Keep the SAME private
+      // coordinator lease while checking its exact current native marker and
+      // downloading the signed update. No new turn, journal reset, outcome or
+      // health-clear is authorized by this code-maintenance boundary.
+      active=(async()=>{
+        lease();signal=combinedSignal(signal);
+        const saved=passHost?await passHost.readActivePass():null;
+        if(!saved)return false;
+        const pass=validateAssistantActivePass(saved,identity);
+        if(pass.kind==='source_intake')return false;
+        const row=inbox.readDelivery(pass.deliveryId);
+        const plan=findSchedule(row.scope,pass.taskId);
+        if(!plan||plan.threadId!==pass.threadId||row.kind!=='task'||!row.nativeStarted||row.taskId!==pass.taskId
+          ||row.scope.origin!==identity.origin||row.scope.companyId!==pass.companyId||row.scope.assistantId!==identity.assistantId)return false;
+        const intent=inbox.readPassContinuation(pass.deliveryId);
+        // A lease renewal with an unknown new-start result stays read only.
+        // Never mistake the old completed marker for that newer invocation.
+        if(intent&&!intent.started&&(intent.resumeAttempted||intent.resumed))return false;
+        const marker=intent?(intent.started?intent.reviewId:intent.terminalMarkerId):pass.deliveryId;
+        const terminal=await native.readDelivery(pass.threadId,marker,{signal});lease();
+        if(terminal.state!=='completed'||!uuid.test(terminal.turnId??''))return false;
+        const unchanged=async()=>{
+          lease();
+          if(JSON.stringify(await passHost.readActivePass())!==JSON.stringify(saved)
+            ||JSON.stringify(inbox.readPassContinuation(pass.deliveryId))!==JSON.stringify(intent)
+            ||JSON.stringify(inbox.readDelivery(pass.deliveryId))!==JSON.stringify(row)
+            ||JSON.stringify(findSchedule(row.scope,pass.taskId))!==JSON.stringify(plan))
+            fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          if(signal.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
+        };
+        await unchanged();await update();await unchanged();return true;
+      })();
+      try{return await active;}finally{active=null;}
+    },
     async setCadence(source,taskId,input,signal) {
       if(!await authorize({scope:source,taskId},signal)) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       return schedule.setCadence(scopeFor(source,taskId),input);

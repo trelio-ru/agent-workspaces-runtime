@@ -1168,6 +1168,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,
   backgroundTick=runAssistantBackgroundTick,requestRuntime=requestCurrentAssistantRuntime,upgradeRuntime=prepareHostRuntimeUpgrade,
+  createRuntimeHost=createAssistantRuntimeHost,
   versions=requireTrelioComponentVersions,prepareSource=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantSourceAccount(input),
   prepareEncryption=async input=>(await import('./trelio-assistant-transport.mjs')).prepareAssistantCompanyEncryption(input),
   configureSource=async input=>(await import('./trelio-assistant-transport.mjs')).configureAssistantEmailSource(input),
@@ -1190,6 +1191,15 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
     if(canUpdate===null)return null;
     try {
       if(canUpdate)await upgradeRuntime({timeoutMs:30_000});
+      else {
+        // The current worker verifies an idle terminal boundary under the
+        // existing SQLite lease. A completed retained pass must not deadlock
+        // the very signed update which repairs its recovery flow. Active,
+        // unknown and unstarted continuations remain pinned and untouched.
+        const runtime=await createRuntimeHost();
+        try{await runtime.coordinator.updateRuntimeAtBoundary(()=>upgradeRuntime({timeoutMs:30_000}));}
+        finally{await runtime.close();}
+      }
       // Downloading is not activation. A new worker selected by the verified
       // pointer proves the actual loaded version before reporting recovery.
       return await requestRuntime({operation:'health_check'});

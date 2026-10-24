@@ -591,7 +591,7 @@ publication tooling также остаются вне этого публичн
 
 - Terminal continuation: SAME pass/ledger, automatic new marker/monotonic start; original history and sensitive approvals intact; unknown never replay. See scheduler contract.
 - Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
-- Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
+- Assistant maintenance: fixed signed worker, no replay/health shortcut; terminal retained-pass updates require the SAME coordinator lease/native evidence. MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
 - Native account preflight diagnoses login only from explicit missing auth, not
   prose or a cached catalogue. Only a fresh completed turn with exact read-back
   clears its current login latch; unrelated health incidents and delivery fences
