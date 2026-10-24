@@ -577,6 +577,22 @@ test('fixed HTTPS requests omit cookies, refuse redirects and redact raw failure
   await assert.rejects(broken('companies',undefined,`tda_${'a'.repeat(43)}`),error=>error.message==='ASSISTANT_TRANSPORT_UNAVAILABLE');
 });
 
+test('fixed control-plane task admission carries the current loader version independently of model body fields',async()=>{
+  const {getHostRuntimeVersion}=await import('../host-runtime/scripts/trelio-component-versions.mjs');
+  const paths=['task','task/claim','schedule','task-pass/begin'];let calls=0;
+  const http=createAssistantHttp({origin:'https://assistant.test',fetchImpl:async(url,options)=>{
+    assert.equal(url,'https://assistant.test/api/digital-assistants/runtime/'+paths[calls++]);
+    assert.equal(options.headers['x-trelio-host-runtime-version'],getHostRuntimeVersion());
+    assert.notEqual(options.headers['x-trelio-host-runtime-version'],'999.0.0');
+    assert.equal(options.headers.authorization,`Bearer tda_${'a'.repeat(43)}`);
+    assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');
+    return new Response('{}',{headers:{'content-type':'application/json'}});
+  }});
+  for(const operation of ['task','claim','report','passBegin'])await http(operation,
+    {hostRuntimeVersion:'999.0.0','x-trelio-host-runtime-version':'999.0.0'},`tda_${'a'.repeat(43)}`);
+  assert.equal(calls,4,'one request per explicit operation, no version negotiation/retry');
+});
+
 test('device client loads only its exact private slot and projects server content away', async () => {
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),memberId=randomUUID();
   const store=memoryStore(); await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'a'.repeat(43)}`,expiresAt:10000});

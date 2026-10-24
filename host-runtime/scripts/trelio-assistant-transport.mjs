@@ -1,5 +1,6 @@
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
+import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
 import { validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { createHash, randomBytes } from 'node:crypto';
@@ -336,7 +337,12 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
       const response = await fetchImpl(`${origin}/api/digital-assistants${route[1]}${query}`, {
         method: route[0], redirect: 'error', credentials: 'omit', cache: 'no-store',
         signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-        headers: { accept: 'application/json', ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        // Compatibility metadata comes only from the SAME signed loader component
+        // identity. No task/model body can advertise another implementation.
+        // Native discussion rollout gates it before reserving a chat/pass; it
+        // never substitutes device authorization, task ACL or observed proof.
+        headers: { accept: 'application/json', 'x-trelio-host-runtime-version':getHostRuntimeVersion(),
+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           ...(credential ? { authorization: `Bearer ${credential}` } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
