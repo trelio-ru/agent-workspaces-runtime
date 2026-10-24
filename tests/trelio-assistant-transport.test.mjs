@@ -1355,6 +1355,12 @@ test('production content preflight refuses encrypted prose before the real MCP t
   const {withAssistantEncryptedWorkspaceArguments,withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture();let mode='encrypted',inventoryReads=0,remoteCalls=0,loseResponse=false;
   const canary='SYNTHETIC_PRIVATE_COMPANY_CONTENT';
+  // Advertise this fixture's actual task-view methods, not the union of all
+  // mutually exclusive presentation views (which is not a native catalogue).
+  const preflightNames=['get_assistant_status','get_task','create_comment','update_comment','ask_assistant_owner','request_assistant_action',
+    'create_task','update_task_title','update_task_description','update_task_custom_field','create_task_control','update_task_control',
+    'create_checklist','update_checklist','create_subtask','create_task_relation','cancel_agent_workspace_run','repair_assistant_workspace_result',
+    'search_agent_guidance','continue_assistant_workspace_action'];
   f.client.companies=async()=>{inventoryReads++;return [{companyId:f.pass.companyId,encryptionState:mode}];};
   const wire=[],withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments,preparePrivateBrowserArguments:f.profile.preparePrivateBrowserArguments,preparePrivateCardArguments:f.profile.preparePrivateCardArguments});
   const client=createAssistantMcpClient({...f.identity,store:f.store,
@@ -1365,7 +1371,7 @@ test('production content preflight refuses encrypted prose before the real MCP t
       const reply=result=>({sessionId:'content-preflight',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
       if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
       if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
-      if(input.payload.method==='tools/list')return reply({tools:(await import('../host-runtime/scripts/trelio-assistant-transport.mjs')).ASSISTANT_MCP_TOOLS.map(name=>({name,description:'Native preflight fixture',inputSchema:{type:'object'}}))});
+      if(input.payload.method==='tools/list')return reply({tools:preflightNames.map(name=>({name,description:'Native preflight fixture',inputSchema:{type:'object'}}))});
       assert.equal(input.payload.method,'tools/call');remoteCalls++;
       if(loseResponse)throw new Error('SYNTHETIC_LOST_MUTATION_RESULT');
       return reply({content:[{type:'text',text:'native result'}]});
@@ -1628,6 +1634,197 @@ test('encrypted guidance keeps original query only in memory across the real MCP
   try{await client.callTool('search_agent_guidance',original);assert.equal(calls,1);assert.equal(materializations,1);
     assert.doesNotMatch(wire.join(''),/GUIDANCE_QUERY_PRIVATE_CANARY|GUIDANCE_HINT_PRIVATE_CANARY/);
   }finally{f.close();}
+});
+
+test('company read negotiation hides only the closed host branch and keeps original query off MCP HTTP',async()=>{
+  const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture({encryptedTool:'get_task'});
+  const canonical={type:'object',properties:{queries:{type:'array',items:{type:'string'}},companySlugs:{type:'array',items:{type:'string'}},
+    taskPass:{},runtimeSessionProof:{}},required:['queries'],additionalProperties:false};
+  const local={type:'object',properties:{localContextRead:{type:'boolean',const:true},taskPass:{},runtimeSessionProof:{}},
+    required:['localContextRead','taskPass','runtimeSessionProof'],additionalProperties:false};
+  const schema={type:'object',anyOf:[canonical,local],additionalProperties:true};
+  const projected=assistantModelInputSchema(schema);
+  assert.equal(projected.anyOf.length,1);
+  assert.deepEqual(Object.keys(projected.anyOf[0].properties),['queries','companySlugs']);
+  assert.deepEqual(projected.anyOf[0].required,['queries']);
+  assert.equal(schema.anyOf.length,2,'projection never mutates the wire validators');
+  assert.throws(()=>assistantModelInputSchema({...schema,anyOf:[canonical,{...local,properties:{...local.properties,arbitrary:{}}}]}),
+    {code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+  const privateQuery='COMPANY_SOURCE_PRIVATE_QUERY_CANARY',args={queries:[privateQuery],companySlugs:['encrypted'],
+    taskPass:{companyId:f.pass.companyId,taskId:f.pass.taskId,passId:f.pass.passId},runtimeSessionProof:{synthetic:true}};
+  let calls=0,materialized=0,mode='encrypted';const wire=[];
+  const descriptor={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'encrypted',taskId:f.pass.taskId,
+    passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+  const client=createAssistantMcpClient({...f.identity,store:f.store,presentationProfile:'company_context',
+    withWorkspaceArguments:(input,send)=>withAssistantCompanyContentArguments(input,send,{companyContextRead:true,
+      withProfile:action=>action({readCompanyContentMode:async()=>mode})}),
+    materializeEncryptedCompanyContext:async input=>{materialized++;assert.deepEqual(input.arguments,args);
+      assert.deepEqual(input.descriptor,descriptor);return {content:[],structuredContent:{results:[{title:privateQuery}]}};},
+    httpRequest:async input=>{
+      wire.push(JSON.stringify(input.payload??{}));
+      const reply=result=>({sessionId:'company-read',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'search',description:'Native canonical search',inputSchema:schema}]});
+      calls++;assert.deepEqual(input.payload.params.arguments,{localContextRead:true,taskPass:args.taskPass,runtimeSessionProof:args.runtimeSessionProof});
+      return reply({isError:true,content:[{type:'text',text:'ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED'}],structuredContent:{
+        code:'ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',localRead:descriptor}});
+    }});
+  try{
+    const result=await client.callTool('search',args);assert.match(JSON.stringify(result),new RegExp(privateQuery));
+    assert.equal(calls,1);assert.equal(materialized,1);assert.doesNotMatch(wire.join(''),new RegExp(privateQuery));
+    await assert.rejects(client.callTool('search',{...args,localContextRead:true}),{code:'ASSISTANT_MCP_INPUT_INVALID'});
+    mode='encrypting';await assert.rejects(client.callTool('search',args),{code:'ASSISTANT_ENCRYPTED_CONTENT_REQUIRED'});
+    assert.equal(calls,1,'a mode transition never retries with the held plaintext query');
+  }finally{f.close();}
+});
+
+test('encrypted company source search uses the SAME HPKE mirror with isolated device namespace and fresh recipient',async()=>{
+  if(process.env.TRELIO_ASSISTANT_COMPANY_CONTEXT_FIXTURE!=='1'){
+    const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-read-'));
+    const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{fileURLToPath}=await import('node:url');
+    const env={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'AppData','Local'),
+      TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_COMPANY_CONTEXT_FIXTURE:'1'};
+    delete env.NODE_TEST_CONTEXT;
+    try{
+      const child=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted company source search',fileURLToPath(import.meta.url)],
+        {env,timeout:30000,maxBuffer:1024*1024});
+      assert.match(child.stdout,/ASSISTANT_COMPANY_CONTEXT_SEARCH_VERIFIED/u);
+    }catch(error){
+      const lines=String(error.stdout??'').split('\n').filter(line=>/^\s*(?:error: [^|]|code: |at |stack:|TestContext\.|async )/u.test(line));
+      throw new Error(lines.slice(0,15).join('\n')||'Managed company source child failed');
+    }finally{await fs.rm(root,{recursive:true,force:true});}
+    return;
+  }
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {materializeAssistantEncryptedCompanyContext}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=await workspaceProfileFixture({encryptedTool:'get_task'});
+  const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
+  const descriptor={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'encrypted',taskId:f.pass.taskId,
+    passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+  const profile=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
+    encryptedCompanyContext:descriptor,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,action)=>action()});
+  const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),entityId=randomUUID(),projectId=randomUUID();
+  const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const publicJwk=await webcrypto.subtle.exportKey('jwk',pair.publicKey),privateJwk=await webcrypto.subtle.exportKey('jwk',pair.privateKey);
+  const aad={suite:'trelio-e2ee-v1',companyId:f.pass.companyId,scopeId,scopeEpoch:1,recipientType:'agent_device',recipientId:cryptoDeviceId};
+  const sealed=await hpkeSeal({recipientPublicEncryptionJwk:managed.publicEncryptionJwk,
+    plaintext:Buffer.from(JSON.stringify({suite:'trelio-e2ee-v1',version:1,scopePrivateEncryptionJwk:privateJwk})),aad});
+  const envelope={id:randomUUID(),...aad,hpkeEnc:sealed.enc,ciphertext:sealed.ciphertext,aad};
+  const header={companyId:f.pass.companyId,scopeId,scopeEpoch:1,entityType:'project',entityId,entityRevision:1,schemaVersion:1,purpose:'content'};
+  const canary='Synthetic Company Read Source Canary';
+  const payload={...header,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:header,
+    payload:{values:{title:canary,rules:'Synthetic source rules'}}})};
+  const marker=field=>buildCompanyEncryptedTextMarker(entityId,field);
+  const company={id:f.pass.companyId,slug:'encrypted',name:'Synthetic'},projectSlug=`e-${projectId}`;
+  const manifest={schemaVersion:2,provider:'local_company_context',generation:'d'.repeat(64),company,viewer:{memberId:randomUUID(),companyRole:'user'},viewerGroupIds:[],
+    projects:[{id:projectId,slug:projectSlug,name:marker('title'),isArchived:false},
+      {id:randomUUID(),slug:`e-${randomUUID()}`,name:marker('title'),isArchived:false}],tasks:[],acceptedWorkspaces:[],workspaces:[],contextDocuments:[],
+    searchDocuments:[{id:`project:encrypted/${projectSlug}`,type:'project',title:marker('title'),stableKey:`encrypted/${projectSlug}/project`,
+      referenceValues:[projectId,projectSlug],fields:[{source:'project',text:marker('title')}],metadata:{projectId,projectSlug},revisionToken:'f'.repeat(64)}],
+    instructions:{company:{compiledMarkdown:marker('rules')},projects:[],userProfile:null},agentSkills:{company:[],projects:[]},agentProcedures:[]};
+  const rulesMarkdown='Synthetic current platform rules\n',rulesSha=createHash('sha256').update(rulesMarkdown).digest('hex'),rulesId=randomUUID();
+  const sourceTaskId=randomUUID(),workspaceId=randomUUID(),workspaceHead='a'.repeat(40),projectionId=randomUUID(),manifestFileId=randomUUID(),fileId=randomUUID();
+  const originalName='SOURCE_PRIVATE_FILENAME_CANARY.pdf',filePath=`originals/${originalName}`,original=Buffer.from('ORIGINAL_PRIVATE_BYTES_CANARY\0');
+  const cryptoRoot=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-source-containers-'));
+  const container=async(id,type,value)=>{
+    const sourcePath=path.join(cryptoRoot,`${id}.source`),destinationPath=path.join(cryptoRoot,`${id}.cipher`);
+    await fs.writeFile(sourcePath,value,{mode:0o600});
+    await encryptFileToCompanyContainer({sourcePath,destinationPath,scopePublicEncryptionJwk:publicJwk,
+      aad:{companyId:f.pass.companyId,scopeId,scopeEpoch:1,entityType:type,entityId:id,entityRevision:1,schemaVersion:1},
+      originalName:type.endsWith('_file')?originalName:'manifest',mimeType:type.endsWith('_file')?'application/pdf':'application/json',
+      writerDeviceId:cryptoDeviceId,signingPrivateKey:managed.privateKeys.signingPrivateKey});
+    return fs.readFile(destinationPath);
+  };
+  const manifestCipher=await container(manifestFileId,'agent_workspace_browser_manifest',JSON.stringify({schemaVersion:1,
+    kind:'agent-workspace-browser-manifest',projectionId,workspaceId,workspaceHead,
+    files:[{id:fileId,path:filePath,contentType:'application/pdf',sizeBytes:original.length}]}));
+  const fileCipher=await container(fileId,'agent_workspace_browser_file',original);
+  const exact={schemaVersion:1,company,viewer:{memberId:randomUUID(),companyRole:'user'},viewerGroupIds:[],projects:manifest.projects.slice(0,1),
+    tasks:[{id:sourceTaskId,projectId,projectSlug,number:1,revisionToken:'a'.repeat(64),payload:{company,project:manifest.projects[0],
+      task:{id:sourceTaskId,title:marker('title'),status:{code:'active',name:'Active'},participants:[],controls:[]}}}],
+    instructions:manifest.instructions,workspaces:[],workspaceEntries:[],contextDocuments:[]};
+  const previous=globalThis.fetch,requests=[];let mode='valid',manifestReads=0,fileReads=0,activityReads=0;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);requests.push({path:url.pathname,body:options.body??''});
+    assert.equal(options.headers.get('authorization'),`Bearer ${f.credential}`);assert.equal(options.headers.get('cookie'),null);
+    const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+    if(url.pathname.endsWith('/bridge-compatibility'))return json({supported:true,minimumVersion:'0.0.0',encryptedDataPlane:{enabled:true,routingVersion:1},
+      agentRules:{status:options.headers.get('x-trelio-agent-rules-sha256')===rulesSha?'current':'update_required',revisionId:rulesId,version:1,sha256:rulesSha,rulesMarkdown}});
+    if(url.pathname.endsWith('/bridge-routing'))return json({schemaVersion:1,company,encryptionState:'encrypted',encryptedDataPlaneOrigin:descriptor.requestOrigin});
+    if(url.pathname==='/api/digital-assistants/runtime/encryption/runtime'){
+      const found=url.searchParams.has('fingerprint'),selected={...envelope,...(mode==='recipient'?{id:randomUUID()}: {})};
+      return json({state:'encrypted',suite:'trelio-e2ee-v1',company,viewer:{userId:f.identity.assistantId},accessState:found?'ready':'device_required',
+        device:found?{id:cryptoDeviceId,fingerprint:managed.fingerprint}:null,scope:found?{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk}:null,envelope:found?selected:null});
+    }
+    assert.equal(url.origin,descriptor.requestOrigin);
+    assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),cryptoDeviceId);
+    const binary=/\/files\/([^/]+)\/encrypted-content$/u.exec(url.pathname);
+    if(binary){
+      fileReads++;assert.ok([manifestFileId,fileId].includes(binary[1]),'only the chosen manifest/file may be fetched');
+      const bytes=binary[1]===manifestFileId?manifestCipher:fileCipher;
+      return new Response(bytes,{headers:{'content-type':'application/octet-stream','content-length':String(bytes.length),
+        'x-trelio-workspace-id':workspaceId,'x-trelio-workspace-head':workspaceHead,
+        'x-trelio-ciphertext-sha256':createHash('sha256').update(bytes).digest('hex')}});
+    }
+    if(url.pathname.endsWith(`/workspaces/${workspaceId}/read-snapshot`))return json({schemaVersion:1,encryptedPayloads:[payload],context:{company,
+      workspace:{id:workspaceId,acceptedHead:workspaceHead},agentInstructionsSnapshot:{compiledMarkdown:marker('rules')},userProfileSnapshot:null}});
+    if(url.pathname.endsWith(`/workspaces/${workspaceId}`))return json({schemaVersion:1,encryptedPayloads:[],context:{company,
+      workspace:{id:workspaceId,acceptedHead:workspaceHead},encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount:1}}}});
+    if(url.pathname.endsWith('/reads/get_task_activity')){
+      activityReads++;assert.deepEqual(JSON.parse(options.body).arguments,{companySlug:'encrypted',projectSlug,taskNumber:1,offset:1,limit:1});
+      return json({schemaVersion:1,encryptedPayloads:[payload],context:{comments:[{id:randomUUID(),bodyText:marker('rules')}],
+        pagination:{offset:1,limit:1,hasMore:true,nextOffset:2}}});
+    }
+    if(url.pathname.endsWith('/tasks/read')){
+      assert.deepEqual(JSON.parse(options.body).tasks,[{projectSlug,taskNumber:1}]);
+      return json({schemaVersion:1,encryptedPayloads:[payload],context:exact});
+    }
+    assert.ok(url.pathname.endsWith('/company-context/encrypted/manifest'));manifestReads++;
+    const selected=structuredClone(payload);if(mode==='aad')selected.aad.companyId=randomUUID();
+    if(mode==='closed')f.close();
+    return json({schemaVersion:1,context:manifest,encryptedPayloads:mode==='missing'?[]:[selected]});
+  };
+  const run=()=>common.withWorkspaceExecutionProfile(profile,async()=>{
+    await profile.prepareCompanyContextRead();
+    const root=common.resolveCompanyContextMirrorDirectory();
+    assert.match(root,new RegExp(`${f.identity.assistantId}.*${f.identity.deviceId}`));
+    return materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,descriptor,name:'search',arguments:{queries:[canary]},
+      assertCurrent:profile.prepareCompanyContextRead});
+  });
+  const read=async(nativeTool,input)=>{
+    const selected={...descriptor,nativeTool};
+    const sourceProfile=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
+      encryptedCompanyContext:selected,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,action)=>action()});
+    return common.withWorkspaceExecutionProfile(sourceProfile,async()=>{
+      await sourceProfile.prepareCompanyContextRead();
+      return materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,descriptor:selected,name:nativeTool,arguments:input,
+        assertCurrent:sourceProfile.prepareCompanyContextRead});
+    });
+  };
+  try{
+    const result=await run();assert.match(JSON.stringify(result),new RegExp(canary));assert.ok(manifestReads>=2);
+    const source=await read('get_task',{companySlug:'encrypted',projectSlug,taskNumber:1});
+    assert.match(JSON.stringify(source),new RegExp(canary));assert.match(JSON.stringify(source),/Synthetic source rules/);
+    const page=await read('list_projects',{offset:1,limit:1});
+    assert.equal(page.structuredContent.items.length,1);assert.equal(page.structuredContent.offset,1);
+    assert.doesNotMatch(JSON.stringify(source),/proposalProvider|codexThreadTitleReminder/);
+    const activity=await read('get_task_activity',{projectSlug,taskNumber:1,offset:1,limit:1});
+    assert.match(JSON.stringify(activity),/Synthetic source rules/);assert.equal(activity.structuredContent.pagination.nextOffset,2);
+    assert.equal(activityReads,1);
+    const file=await read('get_agent_workspace_file',{workspaceId,workspaceHead,filePath,delivery:'local-file'});
+    assert.deepEqual(await fs.readFile(file.structuredContent.localFilePath),original);assert.equal(fileReads,2);
+    assert.match(JSON.stringify(file),/Synthetic source rules/,'the source file carries its own read authority, never a new pass');
+    assert.doesNotMatch(JSON.stringify(requests),new RegExp(canary));
+    assert.doesNotMatch(JSON.stringify(requests),/SOURCE_PRIVATE_FILENAME_CANARY|ORIGINAL_PRIVATE_BYTES_CANARY/);
+    assert.deepEqual(await f.host.readActivePass(),f.pass,'source discovery never rebinds the task/pass');
+    for(const failure of ['aad','missing','recipient']){mode=failure;await assert.rejects(run());}
+    mode='valid';await assert.rejects(common.withWorkspaceExecutionProfile(profile,()=>materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,
+      descriptor,name:'search',arguments:{queries:[canary],companySlugs:['foreign']},assertCurrent:profile.prepareCompanyContextRead})),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+    mode='closed';await assert.rejects(run(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    console.log('ASSISTANT_COMPANY_CONTEXT_SEARCH_VERIFIED');
+  }finally{globalThis.fetch=previous;await fs.rm(cryptoRoot,{recursive:true,force:true});}
 });
 
 test('encrypted task reads compose the SAME managed keys, HPKE, native exact projection and selected ciphertext without a mirror',async()=>{
@@ -2311,6 +2508,124 @@ test('assistant original file uses fixed binary delivery, exact digest and nativ
   }finally{await fs.rm(root,{recursive:true,force:true});}
 });
 
+test('plain company original Workspace file composes actual production MCP callback and common downloader without human keys',async()=>{
+  if(process.env.TRELIO_ASSISTANT_PLAIN_FILE_FIXTURE!=='1'){
+    const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-plain-file-process-'));
+    const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{fileURLToPath}=await import('node:url');
+    const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'AppData','Local'),
+      TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_PLAIN_FILE_FIXTURE:'1'};delete childEnv.NODE_TEST_CONTEXT;
+    try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','plain company original Workspace file',fileURLToPath(import.meta.url)],
+      {env:childEnv,timeout:30000,maxBuffer:1024*1024});assert.match(result.stdout,/ASSISTANT_PLAIN_SOURCE_FILE_VERIFIED/);
+    }catch(error){throw new Error(String(error.stdout??'').split('\n').filter(line=>/error:|code:|not ok|Expected|actual|expected/.test(line)).slice(0,15).join('\n')||'Plain source file child failed');}
+    finally{await fs.rm(root,{recursive:true,force:true});}return;
+  }
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {materializeProductionAssistantCompanyFile}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const f=await workspaceProfileFixture(),workspaceId=randomUUID(),workspaceHead='b'.repeat(40),filePath='sources/original.pdf';
+  const bytes=Buffer.from('PLAIN_ORIGINAL_SOURCE_BYTES\0'),rulesMarkdown='Synthetic shared platform rule',rulesId=randomUUID(),
+    rulesSha=createHash('sha256').update(rulesMarkdown).digest('hex');
+  let mode='plain',stale=false,late=false,fileReads=0,sourceProfiles=0;const requests=[];
+  f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:mode}];
+  const original=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    url=new URL(url);requests.push(url.pathname);assert.equal(options.headers.get('authorization'),`Bearer ${f.credential}`);
+    assert.equal(options.headers.get('cookie'),null);const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+    if(url.pathname.endsWith('/bridge-compatibility'))return json({supported:true,agentRules:{status:options.headers.get('x-trelio-agent-rules-sha256')===rulesSha?'current':'update_required',
+      revisionId:rulesId,version:1,sha256:rulesSha,rulesMarkdown}});
+    if(url.pathname.endsWith('/read-snapshot'))return json({company:{id:f.pass.companyId,slug:'synthetic'},workspace:{id:workspaceId,acceptedHead:stale?'a'.repeat(40):workspaceHead},
+      agentInstructionsSnapshot:{compiledMarkdown:'SOURCE_READ_AUTHORITY'},userProfileSnapshot:null});
+    assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/workspaces/${workspaceId}/file`);
+    assert.equal(url.searchParams.get('head'),workspaceHead);assert.equal(url.searchParams.get('path'),filePath);fileReads++;
+    if(late)f.close();return new Response(bytes,{headers:{'x-trelio-accepted-head':workspaceHead,'content-type':'application/pdf'}});
+  };
+  const withProfile=async(action,options={})=>{
+    const profile=options.sourceWorkspaceFile?await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
+      sourceWorkspaceFile:options.sourceWorkspaceFile,lockDirectory:os.tmpdir(),lock:(_file,callback)=>callback()}):f.profile;
+    if(options.sourceWorkspaceFile)sourceProfiles++;
+    return withWorkspaceExecutionProfile(profile,()=>action({identity:f.identity,readCompanyContentMode:profile.readCompanyContentMode,
+      assertPlainSourceFileRead:profile.assertPlainSourceFileRead}));
+  };
+  try{
+    const args={workspaceId,workspaceHead,filePath,delivery:'local-file'};
+    const nativeResult={content:[],structuredContent:{delivery:'local-file',bridge:{action:{arguments:{schemaVersion:1,operation:'download_file',
+      parameters:{workspaceId,workspaceHead,filePath}}}}}};
+    const read=(result=nativeResult)=>materializeProductionAssistantCompanyFile({identity:f.identity,result,arguments:args,withProfile});
+    const result=await read();
+    assert.deepEqual(await fs.readFile(result.structuredContent.localFilePath),bytes);assert.equal(sourceProfiles,1);assert.equal(fileReads,1);
+    assert.equal(result.structuredContent.agentInstructionsSnapshot.compiledMarkdown,'SOURCE_READ_AUTHORITY');
+    assert.equal(requests.some(value=>value.includes('/encryption/')||value.includes('/payloads/resolve')),false,'plain source never discovers human keys');
+    assert.deepEqual(await f.host.readActivePass(),f.pass);
+    await assert.rejects(read({...nativeResult,structuredContent:{...nativeResult.structuredContent,bridge:{action:{arguments:{schemaVersion:1,operation:'download_file',parameters:{workspaceId:randomUUID(),workspaceHead,filePath}}}}}}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+    stale=true;await assert.rejects(read(),/WORKSPACE_OUTDATED/);assert.equal(fileReads,1);stale=false;
+    late=true;await assert.rejects(read(),/PASS_REVIEW_REQUIRED/);
+    console.log('ASSISTANT_PLAIN_SOURCE_FILE_VERIFIED');
+  }finally{globalThis.fetch=original;f.close();}
+});
+
+test('company registry slot reuses the fixed private-file profile and refuses sibling, mode and late-pass changes',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs'),attachments=await import('../host-runtime/scripts/trelio-local-attachments.mjs');
+  const {materializeAssistantAttachment}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=await workspaceProfileFixture(),root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-registry-file-'));
+  let mode='plain',late=false,requests=0,publications=0;
+  f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:mode}];
+  const selection={registryId:randomUUID(),rowId:randomUUID(),expectedRowRevision:3,columnKey:'documents',documentIndex:0};
+  const bytes=Buffer.from('PUBLISHED_ONE_FILE_CANARY'),descriptor={schemaVersion:1,delivery:'assistant-registry-local-file',companyId:f.pass.companyId,
+    companySlug:'synthetic',...selection,originalName:'published.txt',mimeType:'text/plain',sizeBytes:bytes.length,
+    sha256:createHash('sha256').update(bytes).digest('hex'),revision:'b'.repeat(64)};
+  const profile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
+    sourceRegistryDocument:descriptor,lockDirectory:root,lock:(_file,action)=>action()});
+  const original=globalThis.fetch;
+  globalThis.fetch=async(url,options)=>{
+    requests++;url=new URL(url);assert.equal(url.origin,f.identity.origin);
+    assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/company-context/synthetic/registry-documents/${selection.registryId}/${selection.rowId}/documents/0`);
+    assert.equal(url.searchParams.get('rowRevision'),'3');assert.equal(url.searchParams.get('revision'),descriptor.revision);
+    assert.equal(JSON.parse(options.headers.get('x-trelio-assistant-pass')).taskId,f.pass.taskId);
+    if(late)f.close();
+    return new Response(bytes,{headers:{'content-type':'application/octet-stream','content-length':String(bytes.length),
+      'x-trelio-attachment-sha256':descriptor.sha256,'x-trelio-attachment-revision':descriptor.revision}});
+  };
+  const local={...attachments,materializeLocalAttachment:async input=>{publications++;return attachments.materializeLocalAttachment({...input,root});}};
+  const run=(changes={})=>withWorkspaceExecutionProfile(profile,()=>materializeAssistantAttachment({origin:f.identity.origin,
+    result:{content:[],structuredContent:{...descriptor,...changes}},registryDocument:selection,common,attachments:local,
+    assertCurrent:()=>profile.assertCompanyContextCurrent()}));
+  try{
+    const result=await run();assert.deepEqual(await fs.readFile(result.structuredContent.localFilePath),bytes);assert.equal(publications,1);
+    for(const change of [{rowId:randomUUID()},{documentIndex:1},{workspaceId:randomUUID()},{downloadUrl:'https://foreign.test'}])await assert.rejects(run(change));
+    const token=await profile.requireToken(f.identity.origin),before=requests;
+    await assert.rejects(profile.prepareRequest({origin:f.identity.origin,token,
+      pathname:`/api/agent-workspaces/workspaces/${randomUUID()}/read-snapshot`,options:{},buildHeaders:()=>({})}),/ORIGIN_DENIED/);
+    mode='encrypted';await assert.rejects(run(),/ENCRYPTED_CONTENT_REQUIRED/);assert.equal(requests,before);mode='plain';
+    late=true;await assert.rejects(run(),/PASS_REVIEW_REQUIRED/);assert.equal(publications,1);
+  }finally{globalThis.fetch=original;f.close();await fs.rm(root,{recursive:true,force:true});}
+});
+
+test('knowledge-page original uses the fixed plain source profile and common private file writer',async()=>{
+  const common=await import('../host-runtime/scripts/trelio-workspace.mjs'),attachments=await import('../host-runtime/scripts/trelio-local-attachments.mjs');
+  const {materializeAssistantAttachment}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const f=await workspaceProfileFixture(),root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-knowledge-file-'));
+  f.client.companies=async()=>[{companyId:f.pass.companyId,encryptionState:'plain'}];
+  const selection={pageId:randomUUID(),attachmentId:randomUUID()},bytes=Buffer.from('KNOWLEDGE_PLAIN_ORIGINAL');
+  const descriptor={schemaVersion:1,delivery:'assistant-knowledge-local-file',companyId:f.pass.companyId,companySlug:'synthetic',
+    knowledgePageId:selection.pageId,attachmentId:selection.attachmentId,originalName:'knowledge.txt',mimeType:'text/plain',sizeBytes:bytes.length,
+    sha256:createHash('sha256').update(bytes).digest('hex'),revision:'c'.repeat(64)};
+  const profile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
+    sourceAttachment:descriptor,lockDirectory:root,lock:(_file,action)=>action()});
+  const original=globalThis.fetch;let reads=0;
+  globalThis.fetch=async(url,options)=>{reads++;url=new URL(url);
+    assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/company-context/synthetic/knowledge-pages/${selection.pageId}/attachments/${selection.attachmentId}`);
+    assert.equal(JSON.parse(options.headers.get('x-trelio-assistant-pass')).taskId,f.pass.taskId);
+    return new Response(bytes,{headers:{'content-type':'application/octet-stream','content-length':String(bytes.length),
+      'x-trelio-attachment-sha256':descriptor.sha256,'x-trelio-attachment-revision':descriptor.revision}});};
+  const run=knowledgeAttachment=>withWorkspaceExecutionProfile(profile,()=>materializeAssistantAttachment({origin:f.identity.origin,
+    result:{content:[],structuredContent:descriptor},attachmentId:selection.attachmentId,knowledgeAttachment,common,
+    attachments:{...attachments,materializeLocalAttachment:input=>attachments.materializeLocalAttachment({...input,root})},
+    assertCurrent:()=>profile.assertCompanyContextCurrent()}));
+  try{const result=await run(selection);assert.deepEqual(await fs.readFile(result.structuredContent.localFilePath),bytes);
+    await assert.rejects(run({...selection,pageId:randomUUID()}));assert.equal(reads,1);
+    assert.deepEqual(await f.host.readActivePass(),f.pass);
+  }finally{globalThis.fetch=original;f.close();await fs.rm(root,{recursive:true,force:true});}
+});
+
 test('encrypted original attachment reuses genuine managed HPKE and SAME local-file delivery for both native AAD namespaces',async()=>{
   const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
   const attachments=await import('../host-runtime/scripts/trelio-local-attachments.mjs');
@@ -2340,28 +2655,34 @@ test('encrypted original attachment reuses genuine managed HPKE and SAME local-f
         accessState:found?'ready':'device_required',device:found?{id:cryptoDeviceId,fingerprint:managed.fingerprint}:null,
         scope:found?{id:scopeId,epoch:mode==='epoch'?2:1,publicEncryptionJwk:publicJwk}:null,envelope:found?envelope:null});
     }
-    assert.equal(url.origin,'https://e2ee.trelio.ru');assert.equal(url.pathname,`/api/digital-assistants/runtime/workspace/scopes/task/${f.pass.taskId}/attachments/${selected.attachmentId}`);
+    assert.equal(url.origin,'https://e2ee.trelio.ru');assert.equal(url.pathname,selected.knowledgePageId?`/api/digital-assistants/runtime/workspace/company-context/encrypted/knowledge-pages/${selected.knowledgePageId}/attachments/${selected.attachmentId}`:`/api/digital-assistants/runtime/workspace/scopes/task/${selected.taskId}/attachments/${selected.attachmentId}`);
     assert.equal(url.searchParams.get('revision'),selected.revision);assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),cryptoDeviceId);
     downloads++;if(mode==='late-close')f.close();
     return new Response(body,{headers:{'content-length':String(body.length),'content-type':'application/octet-stream',
       'x-trelio-attachment-sha256':selected.sha256,'x-trelio-attachment-revision':selected.revision}});
   };
   try{
-    for(const entityType of ['file.task_attachments','agent_workspace_browser_file']){
+    for(const entityType of ['file.task_attachments','agent_workspace_browser_file','file.company_page_attachments']){
       const attachmentId=randomUUID(),aad={suite:'trelio-e2ee-v1',companyId:f.pass.companyId,scopeId,scopeEpoch:1,entityType,entityId:randomUUID(),entityRevision:1,schemaVersion:1,purpose:'file'};
       const target=path.join(root,`${attachmentId}.cipher`);
       await encryptFileToCompanyContainer({sourcePath:source,destinationPath:target,scopePublicEncryptionJwk:publicJwk,aad,originalName:'../../PRIVATE_NAME_CANARY.txt',mimeType:'text/plain'});
       body=await fs.readFile(target);selected={schemaVersion:2,delivery:'assistant-encrypted-local-file',companyId:f.pass.companyId,companySlug:'encrypted',
-        requestOrigin:'https://e2ee.trelio.ru',taskId:f.pass.taskId,attachmentId,sizeBytes:body.length,sha256:createHash('sha256').update(body).digest('hex'),revision:'a'.repeat(64),aad};
+        requestOrigin:'https://e2ee.trelio.ru',...(entityType==='file.company_page_attachments'?{knowledgePageId:randomUUID()}:{taskId:entityType==='agent_workspace_browser_file'?randomUUID():f.pass.taskId}),attachmentId,sizeBytes:body.length,sha256:createHash('sha256').update(body).digest('hex'),revision:'a'.repeat(64),aad};
       // A fresh download profile cannot silently switch its selected source.
-      const profile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,lockDirectory:root,lock:(_file,action)=>action()});
+      const profile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
+        ...(selected.taskId!==f.pass.taskId?{sourceAttachment:selected}:{}),lockDirectory:root,lock:(_file,action)=>action()});
       const run=changes=>withWorkspaceExecutionProfile(profile,()=>materializeAssistantAttachment({origin:f.identity.origin,attachmentId,
         result:{structuredContent:{...selected,...changes},content:[{type:'text',text:'REMOTE_UNTRUSTED_CANARY'}]},common,attachments:materializer,
+        ...(selected.knowledgePageId?{knowledgeAttachment:{pageId:selected.knowledgePageId,attachmentId}}:{}),
         prepareEncryptedRead:value=>profile.prepareAttachmentRead(value)}));
       assert.equal(body.includes(secret),false);assert.doesNotMatch(JSON.stringify(selected),/PRIVATE_NAME|PRIVATE_ORIGINAL/);
       const result=await run(),output=result.structuredContent;
       assert.equal(output.delivery,'local-file');assert.deepEqual(await fs.readFile(output.localFilePath),secret);
       assert.equal(output.originalName,'../../PRIVATE_NAME_CANARY.txt');assert.equal(output.mimeType,'text/plain');
+      if(selected.taskId!==f.pass.taskId){
+        await assert.rejects(f.profile.prepareAttachmentRead(selected),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+        assert.deepEqual(await f.host.readActivePass(),f.pass,'source file never changes writable task authority');
+      }
       assert.doesNotMatch(JSON.stringify(result.content),/REMOTE_UNTRUSTED/);
       for(const key of ['aad','requestOrigin','companySlug','dataBase64','downloadUrl'])assert.equal(Object.hasOwn(output,key),false);
       const before=downloads,publications=writes;
@@ -2369,13 +2690,15 @@ test('encrypted original attachment reuses genuine managed HPKE and SAME local-f
       for(const change of [{unreviewed:'PRIVATE'},{requestOrigin:'https://evil.test'},{aad:{...aad,unknown:'PRIVATE'}},{sizeBytes:26*1024*1024}])await assert.rejects(run(change));
       assert.equal(downloads,before,'invalid descriptors do not perform binary I/O');
       const unrelatedAad={...selected,aad:{...aad,entityId:randomUUID()}};
-      const other=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,lockDirectory:root,lock:(_file,action)=>action()});
+      const other=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
+        ...(selected.taskId!==f.pass.taskId?{sourceAttachment:unrelatedAad}:{}),lockDirectory:root,lock:(_file,action)=>action()});
       await assert.rejects(withWorkspaceExecutionProfile(other,()=>materializeAssistantAttachment({origin:f.identity.origin,attachmentId,
-        result:{structuredContent:unrelatedAad,content:[]},common,attachments:materializer,prepareEncryptedRead:value=>other.prepareAttachmentRead(value)})),/SOURCE_CHANGED/);
+        result:{structuredContent:unrelatedAad,content:[]},common,attachments:materializer,
+        ...(selected.knowledgePageId?{knowledgeAttachment:{pageId:selected.knowledgePageId,attachmentId}}:{}),prepareEncryptedRead:value=>other.prepareAttachmentRead(value)})),/SOURCE_CHANGED/);
       assert.equal(writes,publications,'a valid digest and ready scope do not admit a different native-selected full header AAD');
       const originalBody=body;body=Buffer.from(body);body[body.length-1]^=1;await assert.rejects(run(),/SOURCE_CHANGED/);body=originalBody;
       assert.equal(writes,publications);mode='epoch';await assert.rejects(run());mode='valid';assert.equal(writes,publications);
-      if(entityType==='agent_workspace_browser_file'){mode='late-close';await assert.rejects(run());assert.equal(writes,publications);}
+      if(entityType==='file.company_page_attachments'){mode='late-close';await assert.rejects(run());assert.equal(writes,publications);}
     }
   }finally{globalThis.fetch=savedFetch;await fs.rm(root,{recursive:true,force:true});}
 });

@@ -60,12 +60,14 @@ import {
   ensureBridgeCompatibility,
   ensureCompanyEncryptionContext,
   ensurePrivateDirectory,
+  currentWorkspaceExecutionProfile,
   hydrateAgentCompanyEncryptedJson,
   materializeRuntimeControlFiles,
   normalizeOrigin,
   parseWorkspaceObjectPointer,
   readEncryptedWorkspaceSearchDocuments,
   readPrivateJsonFile,
+  readJsonResponse as readJson,
   request,
   requireToken,
   resolveBridgeDataPlaneRouting,
@@ -283,6 +285,7 @@ const localCompanyProviderCache = new Map();
 // storage.  A new MCP process has an empty map and performs its own bounded
 // refresh/decrypt cycle.
 const localCompanyMirrorSessionCache = new Map();
+const companyContextSessionKey = (origin, companySlug) => `${resolveCompanyContextMirrorDirectory()}\n${origin}\n${companySlug}`;
 // Startup freshness and plaintext residency are deliberately separate.  A
 // mirror that ages out of RAM can be decrypted again from the already fresh
 // encrypted generation without another network sync in the same MCP process.
@@ -438,7 +441,7 @@ const invalidateLocalCompanyMirrorSession = async ({
   companySlug,
   companyEncryption,
 }) => {
-  const sessionKey = `${origin}\n${companySlug}`;
+  const sessionKey = companyContextSessionKey(origin, companySlug);
   const paths = resolveMirrorPaths({
     origin,
     companyId: companyEncryption.runtime.company.id,
@@ -823,8 +826,6 @@ export const buildStableCompanyMirror = async ({ previous, readManifest, buildCa
     { stage: failureStage, reason: failureReason, attempts: 3 },
   );
 };
-
-const readJson = async (response) => response.json();
 
 const buildEncryptedPayloadSignatureRecord = (payload) => ({
   suite: payload.suite,
@@ -3485,8 +3486,9 @@ const resolveLocalCompanyProvider = async ({
   allowCached = false,
   requirePlain = false,
 }) => {
-  const cacheKey = `${origin}\n${companySlug}`;
-  if (allowCached && !requirePlain && localCompanyProviderCache.has(cacheKey)) {
+  const cacheKey = companyContextSessionKey(origin, companySlug);
+  const managed = currentWorkspaceExecutionProfile()?.kind === "digital_assistant";
+  if (!managed && allowCached && !requirePlain && localCompanyProviderCache.has(cacheKey)) {
     return localCompanyProviderCache.get(cacheKey);
   }
   const token = await requireToken(origin, { onStatus: () => undefined, signal });
@@ -3515,7 +3517,10 @@ const resolveLocalCompanyProvider = async ({
       companyEncryption,
       requestOrigin: resolveCompanyEncryptionRequestOrigin(origin, companyEncryption),
     };
-    localCompanyProviderCache.set(cacheKey, provider);
+    // A managed profile/opaque token dies with ONE invocation. Persist only
+    // the SAME encrypted generation, never its decrypted RAM/token/key object
+    // in the interactive human's long-lived provider/session cache.
+    if (!managed) localCompanyProviderCache.set(cacheKey, provider);
     return provider;
   }
   return {
@@ -6645,7 +6650,11 @@ export const handleNativeLocalContextRead = (mirror, nativeTool, rawArguments) =
     return fetchMirrorResult(mirror, input.id, input.knownInstructionLayerKeys);
   }
   if (nativeTool === "list_projects") {
-    return listCompanyContextMirror(mirror, "projects", 0, 100);
+    // Match native active discovery and its requested page. Administrator
+    // mirrors may contain archives for historical search, but that does not
+    // turn list_projects into an unpaged archive dump.
+    return listCompanyContextMirror({ ...mirror, projects: (mirror.projects ?? []).filter(project => !project.isArchived) },
+      "projects", input.offset ?? 0, input.limit ?? 20);
   }
   if (nativeTool === "list_project_tasks") return listTasksFromMirror(mirror, input);
   if (nativeTool === "list_my_tasks") return listTasksFromMirror(mirror, input, { personal: true });
@@ -8164,6 +8173,8 @@ export const readTaskSectionsWithRevisionRefresh = async ({
 };
 
 const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }) => {
+  const managed = currentWorkspaceExecutionProfile()?.kind === "digital_assistant";
+  forceSync ||= managed;
   const provider = await resolveLocalCompanyProvider({
     origin,
     companySlug,
@@ -8172,7 +8183,7 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }
   });
   if (provider.nativeProvider) return provider;
   const { token, companyEncryption, requestOrigin } = provider;
-  const sessionKey = `${origin}\n${companySlug}`;
+  const sessionKey = companyContextSessionKey(origin, companySlug);
   const paths = resolveMirrorPaths({
     origin,
     companyId: companyEncryption.runtime.company.id,
@@ -8226,6 +8237,7 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }
     requireFresh: forceSync,
     signal,
   });
+  if (managed) return { ...synced, token, companyEncryption, requestOrigin };
   if (synced.syncInProgress) {
     // A readable fallback keeps this single request available while another
     // process owns the writer, but it is not proof of startup freshness. Do
@@ -8300,6 +8312,19 @@ export const handleTrelioLocalContextOperation = async (
   if (operation === "native_read") {
     const nativeTool = String(rawInput?.nativeTool || "").trim();
     const input = rawInput?.arguments;
+    const profile = currentWorkspaceExecutionProfile();
+    if (profile?.canReadCompanyContextExact?.(nativeTool)) {
+      if (!input || typeof input !== "object" || Array.isArray(input))
+        throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "An exact native read input is required.");
+      // Only a historical protected alias needs a search generation. Current
+      // native e-UUID locators and UUID-only source/history reads go straight
+      // through their SAME exact native callbacks, not an approximate mirror.
+      const needsAlias = typeof input.projectSlug === "string" && !/^e-[0-9a-f-]{36}$/u.test(input.projectSlug);
+      const ready = needsAlias ? await getReadyMirror({ origin, companySlug, signal }) : null;
+      if (ready?.nativeProvider) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed.");
+      const selected = ready ? canonicalizeLocalActionProjectSlugs(input, ready.mirror) : input;
+      return profile.readCompanyContextExact({ nativeTool, input: selected, signal });
+    }
     if (usesFreshExactTaskRead(nativeTool, input)) {
       if (input?.companySlug && input.companySlug !== companySlug) {
         throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact read belongs to another company.");
@@ -8331,7 +8356,7 @@ export const handleTrelioLocalContextOperation = async (
         pathname = `/api/agent-workspaces/scopes/task/${taskId}`;
       }
       const rawOverview = await readJson(await request(
-        origin,
+        provider.requestOrigin,
         provider.token,
         pathname,
         { signal },
@@ -8352,6 +8377,17 @@ export const handleTrelioLocalContextOperation = async (
         ? await readUnfiledResponseContext(origin, companySlug,
             { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
       return unfiledQueue ? { ...overview, unfiledQueue } : overview;
+    }
+    if (nativeTool === "list_agent_workspace_revisions") {
+      const workspaceId = normalizeUuid(input?.workspaceId, "workspaceId");
+      const query = new URLSearchParams();
+      for (const key of ["cursor", "limit", "head"]) if (input[key] !== undefined) query.set(key, String(input[key]));
+      const raw = await readJson(await request(provider.requestOrigin, provider.token,
+        `/api/agent-workspaces/workspaces/${workspaceId}/revisions${query.size ? `?${query}` : ""}`, { signal }));
+      if (raw?.company?.id !== provider.companyEncryption.runtime.company.id)
+        throw new TrelioLocalContextError("LOCAL_WORKSPACE_COMPANY_MISMATCH", "Workspace history belongs to another company.");
+      return hydrateAgentCompanyEncryptedJson({ value: raw, origin, token: provider.token,
+        companyEncryption: provider.companyEncryption, signal });
     }
   }
 
@@ -8671,7 +8707,7 @@ export const handleTrelioLocalProposalOperation = async (
   return buildProposalLocalResult(origin, hydrated);
 };
 
-const canonicalizeLocalActionProjectSlugs = (value, mirror) => {
+export const canonicalizeLocalActionProjectSlugs = (value, mirror) => {
   if (Array.isArray(value)) {
     return value.map((item) => canonicalizeLocalActionProjectSlugs(item, mirror));
   }

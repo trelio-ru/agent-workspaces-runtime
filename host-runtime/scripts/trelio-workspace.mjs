@@ -403,9 +403,17 @@ const COMPANY_CONTEXT_MIRROR_DIRECTORY = path.join(
   CONFIG_DIRECTORY,
   "company-context-mirrors",
 );
-export const resolveCompanyContextMirrorDirectory = () => (
-  COMPANY_CONTEXT_MIRROR_DIRECTORY
-);
+export const resolveCompanyContextMirrorDirectory = () => {
+  const profile = currentWorkspaceExecutionProfile();
+  if (!profile) return COMPANY_CONTEXT_MIRROR_DIRECTORY;
+  // A managed invocation may reuse the common encrypted mirror algorithm, but
+  // never the interactive person's cache. Its trusted profile selects a fixed
+  // device namespace; model input cannot supply a directory or fallback root.
+  if (typeof profile.resolveCompanyContextMirrorDirectory !== "function") denyWorkspaceExecutionProfile();
+  const directory = profile.resolveCompanyContextMirrorDirectory(CONFIG_DIRECTORY);
+  if (typeof directory !== "string" || !path.isAbsolute(directory)) denyWorkspaceExecutionProfile();
+  return directory;
+};
 export const resolveCompanyContextMutationMarkerPath = ({ origin, companyId }) => {
   if (!UUID_PATTERN.test(String(companyId || ""))) {
     throw new Error("Company context mutation marker requires one exact company id.");
@@ -11366,7 +11374,7 @@ const writeContextIndex = async (
   }
 };
 
-const readJsonResponse = async (response) => {
+export const readJsonResponse = async (response) => {
   const profile = currentWorkspaceExecutionProfile();
   // The same Run engine parses all JSON. A dedicated encrypted profile may
   // unwrap ONLY its server-selected bounded ciphertext snapshot in process;

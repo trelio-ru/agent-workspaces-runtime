@@ -102,6 +102,7 @@ publication tooling также остаются вне этого публичн
   Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.
   Fresh native input inventory checks closed fields/container types BEFORE managed staging;
   generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
+  V2 company-context reads reuse SAME native schemas/ACL and mirror/exact/file engines; source authority never replaces the writable pass. See the company-context scheduler contract.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
   Before pairing discovery не читает credential. Confirmed local device mismatch

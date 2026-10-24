@@ -6,6 +6,7 @@ import { chunkWorkspaceText } from "./trelio-workspace-text-chunks.mjs";
 import { isUtf8 } from "node:buffer";
 import {
   request, requireToken, ensureBridgeCompatibility, ensureCompanyEncryptionContext,
+  readJsonResponse, currentWorkspaceExecutionProfile, resolveCompanyContextMirrorDirectory,
   resolveBridgeDataPlaneRouting, hydrateAgentCompanyEncryptedJson,
   ensurePrivateDirectory, hardenWindowsPrivatePath, resolveWorkspaceBridgeConfigDirectory,
 } from "./trelio-workspace.mjs";
@@ -76,8 +77,8 @@ const openEncryptedFile = async ({ origin, token, companyEncryption, workspaceId
 
 /** Names and paths leave this function only on the trusted device. HTTP uses opaque UUIDs. */
 export const readEncryptedWorkspaceFileManifest = async (input) => {
-  const overview = await (await request(input.origin, input.token,
-    `/api/agent-workspaces/workspaces/${input.workspaceId}`, { signal: input.signal })).json();
+  const overview = await readJsonResponse(await request(input.origin, input.token,
+    `/api/agent-workspaces/workspaces/${input.workspaceId}`, { signal: input.signal }));
   const projection = overview?.encryption?.browserProjection;
   if (overview?.company?.id !== input.companyEncryption.runtime.company.id) fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
   if (overview?.workspace?.acceptedHead && overview.workspace.acceptedHead !== input.workspaceHead) fail("WORKSPACE_OUTDATED");
@@ -122,7 +123,8 @@ export const readEncryptedWorkspaceSelectedFile = async (input, file) => {
 
 /** Stream authenticated bytes into bounded index pieces without writing plaintext. */
 export const readEncryptedWorkspaceSearchChunks = async (input, file) => {
-  const config = resolveWorkspaceBridgeConfigDirectory();
+  const config = currentWorkspaceExecutionProfile()?.kind === "digital_assistant"
+    ? resolveCompanyContextMirrorDirectory() : resolveWorkspaceBridgeConfigDirectory();
   await ensurePrivateDirectory(config);
   const root = path.join(config, "search-staging");
   await ensurePrivateDirectory(root);
@@ -199,7 +201,7 @@ export const readEncryptedWorkspaceSearchChunks = async (input, file) => {
 };
 
 /** One exact file; fresh ACL/head and authority are read even for repeated downloads. */
-export const downloadAcceptedWorkspaceFile = async (origin, rawLocator, { signal } = {}) => {
+export const downloadAcceptedWorkspaceFile = async (origin, rawLocator, { signal, assertPlainCompanyRead } = {}) => {
   const locator = validateWorkspaceFileLocator(rawLocator);
   const token = await requireToken(origin);
   const compatibility = await ensureBridgeCompatibility(origin, token);
@@ -207,11 +209,17 @@ export const downloadAcceptedWorkspaceFile = async (origin, rawLocator, { signal
     ? await resolveBridgeDataPlaneRouting({ origin, token, workspaceId: locator.workspaceId })
     : { requestOrigin: origin };
   const requestOrigin = routing.requestOrigin;
-  const rawSnapshot = await (await request(requestOrigin, token,
-    `/api/agent-workspaces/workspaces/${locator.workspaceId}/read-snapshot`, { signal })).json();
+  const rawSnapshot = await readJsonResponse(await request(requestOrigin, token,
+    `/api/agent-workspaces/workspaces/${locator.workspaceId}/read-snapshot`, { signal }));
   if (rawSnapshot?.workspace?.id !== locator.workspaceId
     || rawSnapshot.workspace.acceptedHead !== locator.workspaceHead) fail("WORKSPACE_OUTDATED");
-  const companyEncryption = await ensureCompanyEncryptionContext({ origin, requestOrigin, token, company: rawSnapshot.company });
+  // The trusted managed plain-source wrapper already reads its genuine native
+  // company mode/pass before every request. It cannot open an encrypted file:
+  // a changed mode refuses instead of falling back to human key discovery.
+  // Ordinary human and encrypted callers retain the unchanged crypto path.
+  const companyEncryption = typeof assertPlainCompanyRead === 'function'
+    ? (await assertPlainCompanyRead(rawSnapshot.company, signal), null)
+    : await ensureCompanyEncryptionContext({ origin, requestOrigin, token, company: rawSnapshot.company });
   const snapshot = await hydrateAgentCompanyEncryptedJson({ value: rawSnapshot, origin: requestOrigin, token, companyEncryption });
   const input = { ...locator, origin: requestOrigin, token, companyEncryption, signal };
   let bytes;
@@ -233,6 +241,10 @@ export const downloadAcceptedWorkspaceFile = async (origin, rawLocator, { signal
       bytes = await readBoundedBytes(response, LOCAL_ATTACHMENT_MAX_BYTES, signal);
     }
     const originalName = locator.filePath.split("/").at(-1);
+    // A managed company read repeats its original recipient/pass after slow
+    // storage/decryption and before publishing a private plaintext receipt.
+    // Human delivery stays unchanged; no model boolean creates this callback.
+    await currentWorkspaceExecutionProfile()?.assertCompanyContextCurrent?.(signal);
     const file = await materializeLocalAttachment({ bytes, originalName, signal });
     return {
       schemaVersion: 1, delivery: "local-file", ...locator, originalName, contentType, ...file,

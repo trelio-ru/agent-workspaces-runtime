@@ -1059,6 +1059,54 @@ native membership/project ACL, published-only authority and the assistant's own
 personal skill rules. Unsupported dedicated execution does not permit a human
 bridge, OAuth or provider fallback.
 
+### Owner-approved company-context read view
+
+The v2 genuine device profile can select the existing session-fixed
+`company_context` presentation from an ordinary live task-work pass. V1 remains
+task-only: its renew/contact never widens scopes, and an owner-reviewed native
+upgrade plus fresh discovery is required. This is not a human MCP alias or a new
+worker/session authority. Discussion-only passes cannot enter company context.
+The view contains the SAME native search/fetch/inventory/exact-read handlers and
+deferred contracts, original task/KB attachment downloads and one exact published
+registry-file selector; task writers/owner setup/source intake are not appended.
+Raw and model catalogues each retain 65 536 bytes, transport retains 4 MiB.
+
+Every source keeps its native company/project/object ACL and current effective
+scopes. Admin membership expands only ordinary results. Before any source
+content the native and local profiles bind the current company/pass/device;
+a found task never changes assignment, permanent chat, writable task/Workspace
+or pinned execution rules. Source authority/provenance is returned as data;
+only known human `proposalProvider`/`codexThreadTitleReminder` instructions are
+omitted. Destination disclosure remains independent of source read access.
+
+The production pre-send boundary obtains the fresh native schema/mode first.
+For encrypted content it replaces all original arguments with one closed
+host-only `localContextRead:true` branch and the original managed admission.
+The model sees only the native business schema and cannot select that branch.
+Queries/paths/filters remain invocation RAM, then the SAME mirror matcher/exact
+reader/hydrator uses only native ACL-selected ciphertext and the managed
+assistant/device namespace. Exact pages, payload digests, current recipient,
+envelope/epoch and pass/scopes are checked before and after I/O; no plaintext
+HTTP/index/outbox, general resolver, human keys or mode-failure fallback exists.
+
+Original Workspace files reuse the SAME accepted-head/path reader and private
+file primitive without a Run/lease or source write grant. Task and KB originals
+reuse the SAME immutable media descriptor/header/stream and HPKE/TRELIOE1
+materializer; the KB AAD stays `file.company_page_attachments`. Native page and
+attachment UUIDs select one fixed stream; encrypted names/MIME stay inside its
+container until local opening. Late authority/digest/AAD/epoch changes prevent
+private publication. All local originals retain the shared 24 MiB/one-hour
+owner-private file contract, not a promise of remote deletion or durable saving.
+
+Registry publication is narrower than Workspace access: exact registry/row UUID,
+row revision, document column/index select ONE pinned published file through the
+SAME native publication service. No Workspace snapshot/path/head/key or siblings
+are delivered. Plain bytes use the common private-file primitive; encrypted
+published-registry delivery currently returns a typed unavailable result before
+source/Git read because the shared human service lacks an independent per-file
+ciphertext descriptor/AAD contract. Ordinary encrypted Workspace access cannot
+be substituted for that missing publication capability.
+
 ### Managed company runtime consent
 
 A company-authored/unverified signed runtime in a stable plain or encrypted company uses the
