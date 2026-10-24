@@ -228,3 +228,45 @@ test("EPERM cache restoration needs identical published bytes and preserves real
     }
   }
 });
+
+test("a positively observed concurrent destination pruned during verification is rechecked", async () => {
+  const f = await fixture();
+  const errors = [];
+  const preservation = startLoadedCodexPluginPreservation({ ...f, checkIntervalMs: 20, onError: error => errors.push(error) });
+  const rename = fs.rename;
+  const lstat = fs.lstat;
+  let pruneOnObservation = false;
+  let pruned = false;
+  try {
+    await preservation.ready;
+    fs.rename = async (source, destination) => {
+      await rename(source, destination);
+      if (destination === f.plugin && !pruned) {
+        // Emulate Windows' losing rename after another MCP has published the
+        // same bytes. The next external update then prunes that winner while
+        // this observer is still verifying it, before its next timer check.
+        pruneOnObservation = true;
+        throw Object.assign(new Error("synthetic concurrent publication"), { code: "EPERM" });
+      }
+    };
+    fs.lstat = async (target, ...options) => {
+      const metadata = await lstat(target, ...options);
+      if (target === f.plugin && pruneOnObservation) {
+        pruneOnObservation = false;
+        pruned = true;
+        await fs.rm(f.plugin, { recursive: true });
+      }
+      return metadata;
+    };
+    await fs.rm(f.plugin, { recursive: true });
+    await waitUntil(() => pruned);
+    await waitUntil(async () => fs.readFile(path.join(f.plugin, "scripts/hook.mjs"), "utf8").then(text => text.includes("exact-old-hook"), () => false));
+    await preservation.close();
+    assert.deepEqual(errors, [], "a proven second deletion must not stop the live observer");
+  } finally {
+    await preservation.close();
+    fs.rename = rename;
+    fs.lstat = lstat;
+    await fs.rm(f.root, { recursive: true, force: true });
+  }
+});

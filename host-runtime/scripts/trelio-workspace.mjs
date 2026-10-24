@@ -3003,7 +3003,7 @@ const assertCodexPluginVersionPath = (pluginDirectory, version) => {
 const inspectImmutableCodexPluginTree = async (
   pluginDirectory,
   expectedVersion,
-  { requireCodexVersionPath = true } = {},
+  { requireCodexVersionPath = true, onRootValidated } = {},
 ) => {
   const absoluteDirectory = requireCodexVersionPath
     ? assertCodexPluginVersionPath(pluginDirectory, expectedVersion)
@@ -3012,6 +3012,7 @@ const inspectImmutableCodexPluginTree = async (
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
     throw new Error("Каталог Trelio plugin для retention имеет небезопасный тип.");
   }
+  onRootValidated?.();
 
   const treeHash = crypto.createHash("sha256");
   let fileCount = 0;
@@ -3239,9 +3240,21 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
       // permission failure, absent destination or different tree still fails.
       if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) throw error;
       let concurrent;
+      let concurrentRootValidated = false;
       try {
-        concurrent = await inspectImmutableCodexPluginTree(entry.installedPath, entry.version);
+        concurrent = await inspectImmutableCodexPluginTree(entry.installedPath, entry.version, {
+          onRootValidated: () => { concurrentRootValidated = true; },
+        });
       } catch (verificationError) {
+        // A second external prune can start after a competing MCP published
+        // its tree but before we finish checking it. A positively observed
+        // regular directory followed by ENOENT proves that deletion race.
+        // Let the live observer recheck the known cache path next time; do not
+        // replay rename. An absent destination alone cannot prove this and
+        // must retain the original permission failure below.
+        if (concurrentRootValidated && verificationError.code === "ENOENT") {
+          throw verificationError;
+        }
         // In particular, an absent target does not turn a real EPERM into a
         // retryable ENOENT. Preserve the rename refusal unless its exact
         // independently verified postcondition was actually achieved.
