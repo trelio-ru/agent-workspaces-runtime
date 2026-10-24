@@ -386,7 +386,8 @@ test('reviewed continuation uses a NEW stdin marker in the same chat, with recei
         child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);}));return child;}};
   assert.equal((await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},options)).state,'completed');
   assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
-  assert.match(input,/ONE owner-reviewed continuation/);assert.ok(input.includes(priorTurnId));assert.match(input,/Do not repeat the previous command/);
+  assert.match(input,/ONE automatic recovery continuation/);assert.ok(input.includes(priorTurnId));assert.match(input,/Do not repeat the previous command/);
+  assert.match(input,/Decide what remains to be done and continue the task/);
   await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},
     {...options,continuationReview:{priorTurnId,reviewId:randomUUID()},readDelivery:()=>assert.fail('invalid review reached I/O')}),/INVALID_INPUT/);
 });

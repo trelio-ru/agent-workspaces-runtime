@@ -1609,12 +1609,12 @@ test(`pre-native recovery refuses ${changed} changing while native renew is in f
 
 // Exercise the real coordinator + persisted SQLite journal. Native/domain
 // adapters here are controlled witnesses, not claims about a live Windows run.
-for(const lostResume of [false,true])test(`owner-reviewed NEW turn preserves original delivery across SQLite restart (lost resume=${lostResume})`,async t=>{
+for(const legacyPending of [false,true])for(const lostResume of [false,true])test(`automatic NEW turn preserves original delivery across SQLite restart (legacy=${legacyPending}, lost resume=${lostResume})`,async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-terminal-continuation-'));
   const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
   const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
   const ordinaryOutcome=f.options.client.readBusinessOutcome,ordinaryRun=f.options.native.run;
-  let confirmed=false,ownerState='waiting_owner',reviewId=null,reviewCalls=0,resumes=0,health=0,newRuns=0,lose=lostResume;
+  let confirmed=false,ownerState='approved',reviewId=null,reviewCalls=0,resumes=0,health=0,newRuns=0,lose=lostResume,legacy=legacyPending;
   f.options.onBusinessConfirmed=()=>{health++;};
   f.options.client.readBusinessOutcome=async input=>{
     if(!confirmed)throw Object.assign(new Error('no business receipt'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
@@ -1632,14 +1632,15 @@ for(const lostResume of [false,true])test(`owner-reviewed NEW turn preserves ori
   };
   f.options.passHost.continuePass=async(input,expected)=>{
     assert.deepEqual(expected,f.activePass());const pass=f.passes.get(expected.deliveryId);
-    if(input.continuation==='review'){reviewCalls++;reviewId??=randomUUID();}
+    assert.equal(input.automatic,true,'technical recovery needs no new human decision');
+    if(input.continuation==='review'){reviewCalls++;reviewId??=randomUUID();legacy=false;}
     if(input.continuation==='resume'){
       resumes++;assert.equal(ownerState,'approved');assert.equal(pass.leaseRevision,input.expectedLeaseRevision);
       Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(Date.parse(pass.leaseExpiresAt)+3600000).toISOString()});
       ownerState='resumed';if(lose){lose=false;throw Object.assign(new Error('lost exact response'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
     }
-    return {schemaVersion:1,state:ownerState,reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
-      expectedLeaseRevision:input.expectedLeaseRevision,questionPath:'/owner-control',
+    return {schemaVersion:legacy?1:2,state:legacy?'waiting_owner':ownerState,reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
+      expectedLeaseRevision:input.expectedLeaseRevision,questionPath:legacy?'/owner-control':null,
       resumed:ownerState==='resumed'?{leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
   };
   const reopen=async()=>{await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});};
@@ -1649,10 +1650,14 @@ for(const lostResume of [false,true])test(`owner-reviewed NEW turn preserves ori
     const pass=[...f.passes.values()][0],original={...f.activePass()},oldHistory=JSON.stringify({passId:pass.passId,expectedLeaseRevision:0,clientRequestId:randomUUID()});
     database.prepare('UPDATE assistant_inbox_deliveries SET pass_recovery_json=? WHERE delivery_id=?').run(oldHistory,pass.deliveryId);
     f.advance(21*60_000);pass.state='review_required';
-    assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(reviewCalls,1);assert.equal(newRuns,0);
-    await reopen();assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(reviewCalls,1,'read existing question, no duplicate');
-    ownerState='clarification';assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(resumes,0,'Other/text never permits continuation');
-    ownerState='approved';
+    if(legacyPending){
+      reviewId=randomUUID();
+      const terminalTurnId=f.deliveries.get(pass.deliveryId).turnId;
+      database.prepare('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?')
+        .run(JSON.stringify([{passId:pass.passId,expectedLeaseRevision:pass.leaseRevision,clientRequestId:randomUUID(),terminalTurnId,
+          terminalMarkerId:pass.deliveryId,reviewId,resumeAttempted:false,resumed:false,started:false}]),pass.deliveryId);
+    }
+    await reopen();
     if(lostResume){await assert.rejects(coordinator.workOnce(),/TRANSPORT_UNAVAILABLE/);await reopen();}
     await coordinator.workOnce();
     assert.equal(newRuns,1);assert.equal(resumes,1);assert.equal(reviewCalls,1);assert.equal(f.counts().runs,2);
@@ -1663,7 +1668,7 @@ for(const lostResume of [false,true])test(`owner-reviewed NEW turn preserves ori
     assert.equal(database.prepare("SELECT count(*) n FROM assistant_inbox_deliveries WHERE kind='task'").get().n,1);
     assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,1);
     assert.equal(pass.passId,original.passId);assert.equal(pass.threadId,original.threadId);
-    await reopen();await coordinator.workOnce();assert.equal(newRuns,1,'restart cannot replay the reviewed invocation');
+    await reopen();await coordinator.workOnce();assert.equal(newRuns,1,'restart cannot replay the recovery invocation');
   }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
 });
 

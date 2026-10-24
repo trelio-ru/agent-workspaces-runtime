@@ -396,7 +396,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // and receives no task state or request to create a file.
       const scope = options.readinessProbe === true ? '' : `TRELIO_ASSISTANT_${workStateContext?.kind==='source_intake'?'INTAKE':'SCOPE'} ${JSON.stringify(workStateContext)}\n`;
       const recovery=options.continuationReview
-        ? `This is ONE owner-reviewed continuation after terminal turn ${options.continuationReview.priorTurnId}, under review ${options.continuationReview.reviewId}. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. This decision permits one new turn only, not sensitive actions or completion.\n`:'';
+        ? `This is ONE automatic recovery continuation after terminal turn ${options.continuationReview.priorTurnId}, with invocation marker ${options.continuationReview.reviewId}. The original task authorization remains in force. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Decide what remains to be done and continue the task. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. Technical recovery does not approve sensitive actions or prove completion.\n`:'';
       child.stdin.end(`${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${instruction}\n`);
     } catch { abort(); }
   });

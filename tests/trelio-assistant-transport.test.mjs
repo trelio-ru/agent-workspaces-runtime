@@ -3313,4 +3313,10 @@ test('device-only terminal continuation uses SAME renew route, exact owner recei
   await assert.rejects(client.continueTaskPass({...base,continuation:'review',reviewId}),/INVALID_INPUT/);
   await assert.rejects(client.continueTaskPass({...base,continuation:'read'}),/INVALID_INPUT/);
   assert.equal(calls.length,count);
+  corrupt=v=>({...v,schemaVersion:2,questionPath:null});
+  await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read'}),/INVALID_RESPONSE/);
+  const automatic=await client.continueTaskPass({...base,reviewId,continuation:'read',automatic:true});
+  assert.equal(automatic.schemaVersion,2);assert.equal(automatic.questionPath,null);
+  assert.equal(calls.at(-1).automatic,true);assert.equal(automatic.invocationId,reviewId);
+  await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:false}),/INVALID_INPUT/);
 });

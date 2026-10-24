@@ -893,15 +893,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(live.state==='closed'||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
       ||live.bindingRevision!==saved.bindingRevision||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     let intent=inbox.readPassContinuation(job.deliveryId);
-    // A completed continuation without business material requires another
-    // explicit decision, never an automatic retry/loop or a new delivery.
+    // A positively completed continuation without business material may inspect
+    // the task again under a NEW bounded marker, never replay the old turn.
     if(!intent||intent.started)intent=inbox.preparePassContinuation(job.deliveryId,{passId:saved.passId,
       expectedLeaseRevision:live.leaseRevision,terminalTurnId:result.turnId,terminalMarkerId});
     if(intent.passId!==saved.passId||intent.terminalTurnId!==result.turnId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const request={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,expectedLeaseRevision:intent.expectedLeaseRevision,
       clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId};
-    let review=await passHost.continuePass({...request,continuation:intent.reviewId?'read':'review',
+    let review=await passHost.continuePass({...request,automatic:true,continuation:intent.reviewId?'read':'review',
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
+    // A former runtime may have left a purely technical owner question. Ask
+    // the SAME native ledger to migrate only that pending intent; its UUID and
+    // original native-start fence survive. A genuine refusal remains stopped.
+    if(review.schemaVersion===1&&review.state==='waiting_owner'&&!intent.resumeAttempted){
+      review=await passHost.continuePass({...request,automatic:true,continuation:'review'},saved,signal);
+    }
     lease();await recheck();
     if(!intent.reviewId)intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId:review.reviewId});
     if(review.reviewId!==intent.reviewId||review.invocationId!==intent.reviewId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
@@ -909,7 +915,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Persist before HTTP. A lost response is resolved ONLY by the read
       // branch; it cannot repeat the renewal or native model invocation.
       intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumeAttempted:true});
-      review=await passHost.continuePass({...request,continuation:'resume',reviewId:intent.reviewId},saved,signal);
+      review=await passHost.continuePass({...request,automatic:true,continuation:'resume',reviewId:intent.reviewId},saved,signal);
       lease();await recheck();
     }
     if(review.state!=='resumed')return true;
