@@ -117,7 +117,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -152,7 +152,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
       +get(`SELECT count(*) AS n FROM assistant_owner_intakes WHERE settled=0
         AND (state='uncertain' OR native_started=1 AND state!='complete')`).n;
     if(Object.values(result).some(value=>!Number.isSafeInteger(value)||value<0||value>50_000))fail('ASSISTANT_INBOX_FULL');
-    const last=versions[0].version===11?get(`SELECT failure_code,failure_stage FROM assistant_inbox_deliveries
+    const last=versions[0].version>=11?get(`SELECT failure_code,failure_stage FROM assistant_inbox_deliveries
       WHERE state IN ('started','uncertain') AND failure_code IS NOT NULL ORDER BY rowid DESC LIMIT 1`):null;
     result.failure=last?assistantDeliveryFailure(last.failure_code,last.failure_stage):null;
     db.exec('COMMIT');return Object.freeze(result);
@@ -183,7 +183,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -324,8 +324,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       db.exec(`ALTER TABLE assistant_inbox_deliveries ADD COLUMN failure_code TEXT;
         ALTER TABLE assistant_inbox_deliveries ADD COLUMN failure_stage TEXT;`);
     }
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=11');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (11)');
+    if(!versions.length||versions[0].version<12){
+      // Structural retry intent in the SAME delivery, before any recovery HTTP.
+      // Existing start bits, events, cursors, receipts and schedules are intact.
+      db.exec('ALTER TABLE assistant_inbox_deliveries ADD COLUMN pass_recovery_json TEXT');
+    }
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=12');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (12)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -1122,6 +1127,30 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         assertExternalDeliverySnapshot(row);
         run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?", time()+LEASE_MS, id);
       });
+    },
+    preparePassRecovery(id, {passId,expectedLeaseRevision}) {
+      passId=uuid(passId);expectedLeaseRevision=integer(expectedLeaseRevision,0,2_147_483_646);
+      return transaction(()=>{
+        const row=delivery(id);
+        if(row.kind!=='task'||row.native_started||!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        if(row.pass_recovery_json){
+          const prior=JSON.parse(row.pass_recovery_json);
+          object(prior,['passId','expectedLeaseRevision','clientRequestId']);
+          if(prior.passId!==passId||prior.expectedLeaseRevision!==expectedLeaseRevision)fail('ASSISTANT_INBOX_CONFLICT');
+          uuid(prior.clientRequestId);return Object.freeze(prior);
+        }
+        const intent={passId,expectedLeaseRevision,clientRequestId:randomUUID()};
+        run('UPDATE assistant_inbox_deliveries SET pass_recovery_json=? WHERE delivery_id=?',JSON.stringify(intent),id);
+        return Object.freeze(intent);
+      });
+    },
+    readPassRecovery(id) {
+      const row=delivery(id);
+      if(!row.pass_recovery_json)return null;
+      const intent=JSON.parse(row.pass_recovery_json);
+      object(intent,['passId','expectedLeaseRevision','clientRequestId']);
+      return Object.freeze({passId:uuid(intent.passId),expectedLeaseRevision:integer(intent.expectedLeaseRevision,0,2_147_483_646),
+        clientRequestId:uuid(intent.clientRequestId)});
     },
     /** Renew only the exact still-authorized started attempt. An expired lease
      * is never revived: native read-back, rather than a second launch, resolves it. */

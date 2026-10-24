@@ -2514,8 +2514,10 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       return Object.freeze({receiptId:id(basis.receiptId),workspaceId:id(basis.workspaceId),workspaceHead:basis.workspaceHead});
     },
     async renewTaskPass(input,signal) {
+      if(input.preNativeRecovery!==undefined&&input.preNativeRecovery!==true)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('passRenew',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
-        expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId)},signal);
+        expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),
+        ...(input.preNativeRecovery===true?{preNativeRecovery:true}:{})},signal);
       if(value.passId!==input.passId || value.leaseRevision!==input.expectedLeaseRevision+1 || value.state!=='leased') fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
         execution:executionConfiguration(value.execution)};

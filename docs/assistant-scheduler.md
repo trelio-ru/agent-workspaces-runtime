@@ -14,6 +14,25 @@ DB lifecycle, source polling and backend projection are wired by the host-only
 business MCP admission and supported Windows readiness still gate unattended
 activation. No existing pilot or human-plugin session is silently migrated.
 
+### Pre-native reservation recovery
+
+An expired reservation remains review-only unless the SAME trusted coordinator
+holds its current private lease and the SAME delivery has durable
+`native_started=0`, an exact protected active pass and full negative native
+summary coverage. `uncertain` alone is never absence: missing pagination,
+duplicate/invalid markers, running/failed/completed history or read errors refuse.
+The SAME native account/model preflight runs once, then host-only
+`beforeInvocation` performs existing `renew` with explicit `preNativeRecovery`.
+A UUID/previous lease revision is committed first in the SAME v12 delivery row;
+lost response/restart repeats that exact intent, without another delivery/chat.
+Setup/identity and inbox leases, current native binding/model and the zero-start
+bit are rechecked around HTTP and before the irreversible start CAS. Watchdog
+renewal starts only after this receipt settles. Native registration history,
+outcomes or operations deny recovery independently; no closed pass, source ACK,
+event processing or health clear is manufactured. Real committed work remains
+required to clear a dispatch incident. Old parent processes can use this through
+the current signed tick worker without restarting the supervisor.
+
 ## Cycles
 
 Cadences: 30 minutes; 1, 3, 6, 12 hours; daily, weekly, fortnightly, monthly.

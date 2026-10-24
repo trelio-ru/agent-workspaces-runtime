@@ -947,6 +947,17 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       return proxy.callTool('get_assistant_status',{},signal);
     }));
     const passHost=Object.fromEntries(['readActivePass','activatePass','releasePass'].map(name=>[name,(...args)=>invoke((_client,host)=>host[name](...args))]));
+    passHost.recoverPass=(input,expectedPass,signal)=>invoke(async(live,host)=>{
+      // Pairing/rebind and recovery share the existing setup mutex. Never use
+      // a pre-lock host getter as proof of the current protected pass identity.
+      const current=await host.readActivePass();
+      const same=value=>value&&Object.keys(value).length===Object.keys(expectedPass).length&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key]);
+      if(!same(current))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      const result=await live.renewTaskPass({...input,preNativeRecovery:true},signal);
+      if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      return result;
+    },true);
+
     // Source calls re-enter the same protected private invocation and signed
     // account/provider reader. No long-lived credential/worker or provider code
     // is copied into this coordinator. The narrower private deadline propagates

@@ -328,3 +328,45 @@ test('external task context permits bounded structural refs only, without bodies
   for(const refs of [[],[ref,ref],Array.from({length:101},(_,index)=>({...ref,eventId:`message:123:${index+1}`}))])
     assert.throws(()=>assistantWorkStateContext({...taskContext,sourceReferences:refs}),/INVALID_INPUT/);
 });
+
+
+test('recovery marker evidence requires complete bounded summaries and rejects present/ambiguous history',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),marker=assistantDeliveryMarker(deliveryId);
+  for(const [data,nextCursor,evidence] of [
+    [[{id:turnId,items:[]}],null,'absent'],
+    [[{id:turnId,items:[]}],undefined,'ambiguous'],
+    [[{id:'invalid',items:[]}],null,'ambiguous'],
+    [[{id:turnId,items:[{type:'userMessage',content:[{type:'text',text:marker+'\nPRIVATE'}]}]}],null,'present'],
+  ]){
+    const result=await readAssistantCodexDelivery(threadId,deliveryId,{requireAbsentMarker:true,executable:process.execPath,environment:{},
+      spawnProcess:nativeRpc(request=>request.method==='thread/read'?{result:{thread:{id:threadId,cwd:process.cwd()}}}:{result:{data,nextCursor}})});
+    assert.deepEqual(result,{state:'uncertain',markerEvidence:evidence});assert.doesNotMatch(JSON.stringify(result),/PRIVATE/);
+  }
+});
+
+test('pre-native recovery callback runs once after SAME model preflight and before irreversible start',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID();let modelChecks=0,recovery=0,starts=0;
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{requireAbsentMarker:true,
+    executable:process.execPath,environment:{},readDelivery:async()=>({state:'uncertain',markerEvidence:'absent'}),
+    readMetadata:async()=>({threadId,cwd:process.cwd()}),readExecutionAvailability:async()=>{modelChecks++;return true;},
+    beforeInvocation:async()=>{assert.equal(modelChecks,1);recovery++;throw Object.assign(new Error('closed native CAS conflict'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});},
+    startInvocation:()=>{starts++;},spawnProcess:()=>assert.fail('failed recovery launched Codex')}),/closed native CAS conflict/);
+  assert.equal(modelChecks,1);assert.equal(recovery,1);assert.equal(starts,0);
+});
+
+
+test('successful pre-native recovery reads a real positive receipt after the one native start',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();let reads=0,models=0,recoveries=0,starts=0;
+  const result=await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{requireAbsentMarker:true,passTimeoutMs:1000,
+    executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),
+    readDelivery:async(_thread,_delivery,options)=>{
+      if(++reads===1){assert.equal(options.requireAbsentMarker,true);return {state:'uncertain',markerEvidence:'absent'};}
+      assert.equal(options.requireAbsentMarker,false);return {state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`};
+    },readExecutionAvailability:async()=>{models++;return true;},beforeInvocation:async()=>{assert.equal(models,1);recoveries++;},
+    startInvocation:()=>{assert.equal(recoveries,1);starts++;},spawnProcess:()=>{
+      const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{
+        child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);
+      }));return child;
+    }});
+  assert.equal(result.state,'completed');assert.equal(reads,2);assert.equal(models,1);assert.equal(recoveries,1);assert.equal(starts,1);
+});

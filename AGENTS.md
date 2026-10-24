@@ -810,3 +810,5 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   Exact-chat rows retain >=2.11.0 semantics; body/material/ACK/owner proof remain
   independent, and root/exact duplicates choose only one local triage queue.
   [Contract](docs/assistant-inbox.md#native-max-through-the-same-source-journal).
+
+Pre-native reservation recovery: SAME delivery v12/bit0/lease and native history, not a new invocation; see docs/assistant-scheduler.md.

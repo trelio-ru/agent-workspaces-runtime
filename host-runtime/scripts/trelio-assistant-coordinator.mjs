@@ -924,7 +924,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:job.kind!=='provision' && started,
           captureBinding:value=>{watchedBinding=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
         if(started && watchedBinding.state==='accepted') inbox.renewDelivery(job.deliveryId);
-        if(taskPass) {
+        if(taskPass && inbox.readDelivery(job.deliveryId).nativeStarted) {
           const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:taskPass.passId},combined);
           if(live.state==='closed') return;
           if(live.state!=='leased') fail('ASSISTANT_PASS_REVIEW_REQUIRED');
@@ -966,14 +966,56 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const authority=inbox.taskState(job.scope,job.taskId).authority;
         const admitted=await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
           bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId},combined);lease();
-        if(admitted.state!=='leased' || admitted.bindingId!==authority.bindingId || admitted.bindingRevision!==authority.revision
+        const recoveryIntent=inbox.readPassRecovery(job.deliveryId);
+        const recovering=admitted.state==='review_required'||recoveryIntent!==null;
+        if(!['leased','review_required'].includes(admitted.state) || admitted.bindingId!==authority.bindingId || admitted.bindingRevision!==authority.revision
           || admitted.deliveryId!==job.deliveryId || admitted.threadId!==plan.threadId
-          || !Number.isFinite(Date.parse(admitted.leaseExpiresAt)) || Date.parse(admitted.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-        taskPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
+          || !Number.isFinite(Date.parse(admitted.leaseExpiresAt)) || !recovering&&Date.parse(admitted.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        const expectedPass=validateAssistantActivePass({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:job.scope.companyId,taskId:job.taskId,
           passId:admitted.passId,deliveryId:job.deliveryId,threadId:plan.threadId,bindingId:authority.bindingId,bindingRevision:authority.revision},identity);
-        // Origin belongs to host identity, not the exact pass ABI.
-        await passHost.activatePass(taskPass);
         execution=assistantExecutionConfiguration(admitted.execution);
+        const samePass=value=>value&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key])
+          &&Object.keys(value).length===Object.keys(expectedPass).length;
+        if(recovering){
+          if(typeof passHost.recoverPass!=='function')fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          // Recovery cannot manufacture a missing protected host pass or adopt
+          // another task/chat. The irreversible persisted zero-start bit is the
+          // local authority; native marker absence is an independent denial.
+          const recheck=async()=>{
+            lease();const row=inbox.readDelivery(job.deliveryId);
+            if(row.nativeStarted||row.kind!=='task'||row.taskId!==job.taskId||row.scope.companyId!==job.scope.companyId
+              ||!['started','uncertain'].includes(row.state))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');lease();
+            let currentExecution;
+            if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{currentExecution=value;}}))
+              fail('ASSISTANT_COORDINATOR_TASK_STOPPED');lease();
+            if(JSON.stringify(assistantExecutionConfiguration(currentExecution))!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          };
+          await recheck();
+          const intent=inbox.preparePassRecovery(job.deliveryId,{passId:admitted.passId,
+            expectedLeaseRevision:recoveryIntent?.expectedLeaseRevision??admitted.leaseRevision});
+          options.requireAbsentMarker=true;
+          options.beforeInvocation=async()=>{
+            // Normal native.run performs account/model preflight once before
+            // entering this callback. Watchdog cannot overwrite its CAS receipt:
+            // taskPass becomes live only after recovery has settled.
+            await recheck();
+            const recovered=await passHost.recoverPass({companyId:job.scope.companyId,taskId:job.taskId,...intent},expectedPass,combined);
+            lease();await recheck();
+            const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:intent.passId},combined);
+            lease();await recheck();
+            if(recovered.passId!==intent.passId||recovered.leaseRevision!==intent.expectedLeaseRevision+1
+              ||live.state!=='leased'||live.leaseRevision!==recovered.leaseRevision||live.passId!==intent.passId
+              ||live.bindingId!==expectedPass.bindingId||live.bindingRevision!==expectedPass.bindingRevision
+              ||live.deliveryId!==expectedPass.deliveryId||live.threadId!==expectedPass.threadId
+              ||Date.parse(live.leaseExpiresAt)<=now()||JSON.stringify(live.execution)!==JSON.stringify(execution))
+              fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            taskPass=expectedPass;
+          };
+        }else{
+          // Origin belongs to host identity, not the exact pass ABI.
+          await passHost.activatePass(expectedPass);taskPass=expectedPass;
+        }
         failureStage='native_preflight';
         result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,

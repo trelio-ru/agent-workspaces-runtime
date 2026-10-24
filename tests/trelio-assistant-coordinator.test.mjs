@@ -1534,3 +1534,75 @@ test('another retained device delivery suppresses dispatch recovery even after t
   assert.equal((await next.dispatchStatus()).reasons.includes('delivery_uncertain'),true);
   await next.close();
 });
+
+
+test('expired pre-native pass recovery retains SAME SQLite intent across lost response/reopen and launches once',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-pre-native-recovery-'));
+  const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
+  const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
+  const originalRun=f.options.native.run;let attempts=0,nativePreflights=0;const requests=[];
+  f.options.native.run=async(input,options)=>{
+    nativePreflights++;
+    if(nativePreflights===1)throw Object.assign(new Error('closed fixture preflight'),{code:'ASSISTANT_CODEX_UNAVAILABLE'});
+    assert.equal(options.requireAbsentMarker,true);
+    await options.beforeInvocation();return originalRun(input,options);
+  };
+  let receipt=null;
+  f.options.passHost.recoverPass=async(input,expected)=>{
+    assert.deepEqual(expected,f.activePass());requests.push({...input});
+    if(!receipt){
+      const pass=f.passes.get(expected.deliveryId);assert.equal(pass.leaseRevision,input.expectedLeaseRevision);
+      Object.assign(pass,{state:'leased',leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:new Date(Date.parse(pass.leaseExpiresAt)+3600000).toISOString()});
+      receipt={...pass};throw Object.assign(new Error('closed lost response'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+    }
+    assert.deepEqual(input,requests[0]);return receipt;
+  };
+  try{
+    const original={id:randomUUID(),revision:'original',taskId:f.taskId,wake:true};f.events.push(original);
+    await coordinator.pollOnce();await coordinator.workOnce();
+    await assert.rejects(coordinator.workOnce(),/DELIVERY_UNCERTAIN/);
+    const pass=[...f.passes.values()][0],deliveryId=pass.deliveryId,passId=pass.passId,threadId=pass.threadId;
+    assert.equal(database.prepare(`SELECT native_started FROM assistant_inbox_deliveries WHERE kind='task'`).get().native_started,0);
+    f.advance(21*60_000);pass.state='review_required';
+    await assert.rejects(coordinator.workOnce(),/DELIVERY_UNCERTAIN/);
+    const stored=database.prepare(`SELECT pass_recovery_json,delivery_id FROM assistant_inbox_deliveries WHERE kind='task'`).get();
+    assert.deepEqual(JSON.parse(stored.pass_recovery_json),{passId,expectedLeaseRevision:0,clientRequestId:requests[0].clientRequestId});
+    assert.equal(f.counts().runs,0);assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+    await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});
+    await coordinator.workOnce();
+    assert.equal(requests.length,2);assert.deepEqual(requests[1],requests[0]);assert.equal(f.counts().runs,1);
+    assert.equal(f.passes.size,1);assert.equal(f.passes.get(deliveryId).passId,passId);assert.equal(f.passes.get(deliveryId).threadId,threadId);
+    assert.equal(database.prepare(`SELECT count(*) AS n FROM assistant_inbox_deliveries WHERE kind='task'`).get().n,1);
+    assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,1);
+    assert.equal(database.prepare(`SELECT native_started FROM assistant_inbox_deliveries WHERE kind='task'`).get().native_started,1);
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+for(const changed of ['native_started','coordinator_lease','protected_pass','model_revision'])
+test(`pre-native recovery refuses ${changed} changing while native renew is in flight`,async t=>{
+  const f=fixture(t),originalRun=f.options.native.run;let preflights=0,renewals=0;
+  f.options.native.run=async(input,options)=>{
+    if(++preflights===1)throw Object.assign(new Error('closed preflight fixture'),{code:'ASSISTANT_CODEX_UNAVAILABLE'});
+    await options.beforeInvocation();return originalRun(input,options);
+  };
+  f.options.passHost.recoverPass=async(input,expected)=>{
+    renewals++;const pass=f.passes.get(expected.deliveryId);
+    Object.assign(pass,{state:'leased',leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:'2026-01-01T10:00:00Z'});
+    if(changed==='native_started')createAssistantInbox({database:f.database,now:()=>Date.parse('2026-01-01T09:21:00Z')}).startDelivery(expected.deliveryId);
+    if(changed==='coordinator_lease')f.database.prepare('UPDATE assistant_coordinator_lease SET token=?,expires_at=?').run(randomUUID(),Date.parse('2026-01-01T10:00:00Z'));
+    if(changed==='protected_pass')f.options.passHost.readActivePass=async()=>({...expected,passId:randomUUID()});
+    if(changed==='model_revision')f.execution.configuration={...f.execution.configuration,revision:2};
+    return {...pass};
+  };
+  try{
+    f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();await assert.rejects(f.coordinator.workOnce(),/DELIVERY_UNCERTAIN/);
+    const pass=[...f.passes.values()][0];f.advance(21*60000);pass.state='review_required';
+    await assert.rejects(f.coordinator.workOnce(),/DELIVERY_UNCERTAIN/);
+    assert.equal(renewals,1);assert.equal(f.counts().runs,0,'stale worker cannot cross its native launch boundary');
+    assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+    const row=f.database.prepare("SELECT native_started,state,pass_recovery_json FROM assistant_inbox_deliveries WHERE kind='task'").get();
+    assert.equal(row.state,'uncertain');assert.equal(row.native_started,changed==='native_started'?1:0);assert.ok(row.pass_recovery_json);
+    assert.equal(f.passes.size,1);
+  }finally{await f.coordinator.close();}
+});

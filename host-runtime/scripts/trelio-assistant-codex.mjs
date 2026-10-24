@@ -213,10 +213,34 @@ export const readAssistantCodexExecutionAvailabilitySet = async (configurations,
 /** Exact marker search stays in memory. Missing history is uncertainty, never
  * proof of rejection/retry. Summary pages contain user messages without reading
  * arbitrary local rollout files or loading full tool output/transcript bodies. */
-export const readAssistantCodexDelivery = (threadId, deliveryId, options) => {
+export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
   return readNative(threadId, async (_thread, request) => {
+    if(options.requireAbsentMarker===true){
+      // A generic uncertain result conflates missing, duplicate and invalid
+      // markers. Only this host-only recovery read walks complete bounded
+      // summary coverage; it exposes no transcript and confers no authority.
+      let cursor=null;const seen=new Set();let matches=0;
+      for(let page=0;page<10;page++){
+        const response=await request('thread/turns/list',{threadId,limit:20,sortDirection:'desc',itemsView:'summary',...(cursor?{cursor}:{})});
+        if(!Array.isArray(response?.data)||response.data.length>20)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+        for(const turn of response.data){
+          if(!UUID.test(turn?.id??'')||!Array.isArray(turn.items))return {state:'uncertain',markerEvidence:'ambiguous'};
+          for(const item of turn.items){
+            if(item?.type!=='userMessage')continue;
+            if(!Array.isArray(item.content))return {state:'uncertain',markerEvidence:'ambiguous'};
+            if(item.content.some(input=>input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(`${marker}\n`)))matches++;
+          }
+        }
+        if(matches)return {state:'uncertain',markerEvidence:matches===1?'present':'ambiguous'};
+        if(response.nextCursor===null)return {state:'uncertain',markerEvidence:'absent'};
+        if(typeof response.nextCursor!=='string'||!response.nextCursor.length||response.nextCursor.length>1024||seen.has(response.nextCursor))
+          return {state:'uncertain',markerEvidence:'ambiguous'};
+        cursor=response.nextCursor;seen.add(cursor);
+      }
+      return {state:'uncertain',markerEvidence:'ambiguous'};
+    }
     const response = await request('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc', itemsView: 'summary' });
     if (!Array.isArray(response?.data) || response.data.length > 20) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
     const matches = response.data.filter(turn => Array.isArray(turn.items) && turn.items.some(item =>
@@ -248,6 +272,7 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   const readMetadata = options.readMetadata ?? readAssistantCodexMetadata;
   const readDelivery = options.readDelivery ?? readAssistantCodexDelivery;
   const previous = await readDelivery(threadId, deliveryId, options);
+  if(options.requireAbsentMarker===true&&previous.markerEvidence!=='absent')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
   if (previous.state === 'completed' || previous.state === 'failed') return previous;
   // A durable caller distinguishes a never-sent lease from an uncertain prior
   // invocation. This adapter is invoked once after that boundary; it never
@@ -258,7 +283,9 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
   try { [expected,actual] = await Promise.all([fs.realpath(cwd),fs.realpath(metadata.cwd)]); } catch { fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE'); }
   if (metadata.threadId !== threadId || actual !== expected) fail('ASSISTANT_CODEX_WORKSPACE_MISMATCH');
   await executeNativePass({ threadId, deliveryId, cwd: actual, workStateContext, execution }, options);
-  const result = await readDelivery(threadId, deliveryId, options);
+  // Absence is a PRE-start denial only. After the one launch, read the exact
+  // ordinary positive receipt; requiring absence here would mask real success.
+  const result = await readDelivery(threadId, deliveryId, options.requireAbsentMarker===true?{...options,requireAbsentMarker:false}:options);
   if (!['completed','failed'].includes(result.state)) fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
   if (result.state === 'completed') await confirmFreshAuthentication(options);
   return result;
@@ -297,6 +324,14 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
   if (!Number.isSafeInteger(passTimeoutMs) || passTimeoutMs < 100 || passTimeoutMs > 30*60_000) fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (await (options.readExecutionAvailability ?? readAssistantCodexExecutionAvailability)(execution, options) !== true) fail('ASSISTANT_CODEX_MODEL_UNAVAILABLE');
   const { executable, env, spawnProcess } = await context(options);
+  // Resolve executable/vendor metadata BEFORE the final recovery freshness
+  // boundary too. No asynchronous resolver may run after its exact pass/model
+  // recheck and before the synchronous irreversible start CAS below.
+  // This reuses the SAME fresh model RPC, not another capability check.
+  if(options.beforeInvocation!==undefined){
+    if(typeof options.beforeInvocation!=='function')fail('ASSISTANT_CODEX_INVALID_INPUT');
+    await options.beforeInvocation();
+  }
   // The durable inbox performs its one-use leased -> started CAS only once all
   // local preparation succeeds. Read-back/reconciliation never invokes it.
   try {
