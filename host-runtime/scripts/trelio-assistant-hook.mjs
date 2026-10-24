@@ -149,10 +149,49 @@ const validate=value=>{
   if(url.protocol!=='https:' || url.origin!==value.origin || url.username || url.password) fail('ASSISTANT_HOST_STATE_INVALID');
   return Object.freeze({schemaVersion:1,origin:value.origin,assistantId:value.assistantId,deviceId:value.deviceId});
 };
+const sameIdentity=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
+/** Native owner approval distinguishes enrolling an additional computer from
+ * replacing this exact old host. This validator is not an approval source: the
+ * setup engine accepts it only from its fixed authenticated native transport.
+ * Both old UUIDs are mandatory so a same-owner, different-assistant device can
+ * never be inferred from a display name or a stale local record. */
+export const validateAssistantActivationAuthorization=value=>{
+  if(!exactObject(value,['schemaVersion','mode','assistantUserId','replacesAssistantUserId','replacesDeviceId','authorizationId'])
+    ||value.schemaVersion!==1||!['initial','replace'].includes(value.mode)
+    ||!uuid.test(value.assistantUserId??'')||!uuid.test(value.authorizationId??'')
+    ||(value.mode==='initial'?(value.replacesAssistantUserId!==null||value.replacesDeviceId!==null)
+      :!uuid.test(value.replacesAssistantUserId??'')||!uuid.test(value.replacesDeviceId??'')))fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+  return Object.fromEntries(['schemaVersion','mode','assistantUserId','replacesAssistantUserId','replacesDeviceId','authorizationId']
+    .map(key=>[key,value[key]]));
+};
+const activationRecord=value=>{
+  if(!exactObject(value,['schemaVersion','enrollmentId','previous','next','authorization','stage'])
+    ||value.schemaVersion!==1||!uuid.test(value.enrollmentId??'')||!['pending_owner','released','quiescing','active'].includes(value.stage))
+    fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+  const previous=value.previous===null?null:validate(value.previous);
+  if(['pending_owner','released'].includes(value.stage)){
+    if(previous===null||value.next!==null||value.authorization!==null)fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+    return {schemaVersion:1,enrollmentId:value.enrollmentId,previous,next:null,authorization:null,stage:value.stage};
+  }
+  const next=validate(value.next);
+  const authorization=validateAssistantActivationAuthorization(value.authorization);
+  if(authorization.assistantUserId!==next.assistantId
+    ||previous===null&&authorization.mode!=='initial'
+    ||previous!==null&&(authorization.mode!=='replace'||previous.origin!==next.origin
+      ||authorization.replacesAssistantUserId!==previous.assistantId||authorization.replacesDeviceId!==previous.deviceId))
+    fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+  return {schemaVersion:1,enrollmentId:value.enrollmentId,previous,next,authorization,stage:value.stage};
+};
 export const createAssistantHostState=({directory,store,primitives={}})=>{
   if(!path.isAbsolute(directory??'') || !store) fail('ASSISTANT_HOST_STATE_INVALID');
   const ops={ensurePrivateDirectory,assertPrivatePathKind,readPrivateJsonFile,writePrivateJsonFile,...primitives};
   const file=path.join(directory,'identity.json');
+  const activationFile=path.join(directory,'activation.json');
+  const readActivation=async()=>{
+    await ops.ensurePrivateDirectory(directory);
+    try{await ops.assertPrivatePathKind(activationFile,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
+    return activationRecord(await ops.readPrivateJsonFile(activationFile,{maximumBytes:8192}));
+  };
   const readIdentity=async()=>{
     await ops.ensurePrivateDirectory(directory);
     try{await ops.assertPrivatePathKind(file,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -160,6 +199,72 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
   };
   return {
     readIdentity,
+    readActivation,
+    withSetupLock:action=>(ops.withSetupLock??(run=>withRuntimeStateLock(path.join(directory,'setup'),run)))(action),
+    async prepareSetupIntent(enrollmentId){
+      const current=await readIdentity(),old=await readActivation();
+      if(!current||!uuid.test(enrollmentId??''))fail('ASSISTANT_HOST_STATE_INVALID');
+      if(old&&['pending_owner','quiescing'].includes(old.stage)){
+        if(old.enrollmentId!==enrollmentId||!sameIdentity(current,old.previous))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+        return old;
+      }
+      const pending=await store.get({origin:current.origin,kind:'pass',id:current.deviceId});
+      if(pending!==null)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      const next=activationRecord({schemaVersion:1,enrollmentId,previous:current,next:null,authorization:null,stage:'pending_owner'});
+      await ops.writePrivateJsonFile(activationFile,next);
+      if(JSON.stringify(await readActivation())!==JSON.stringify(next))fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+      return next;
+    },
+    /** A rejected/expired native enrollment and the unchanged protected old
+     * identity may release ONLY this pending denial. Never release an activation
+     * authorization, a pass or an unknown exchange by local age/expiry alone. */
+    async releaseSetupIntent(enrollmentId){
+      const old=await readActivation(),current=await readIdentity();
+      if(old===null||old.enrollmentId!==enrollmentId||old.stage!=='pending_owner')return;
+      if(!sameIdentity(current,old.previous)||await store.get({origin:current.origin,kind:'pass',id:current.deviceId})!==null)
+        fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      await ops.writePrivateJsonFile(activationFile,{...old,stage:'released'});
+      if((await readActivation()).stage!=='released')fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+    },
+    /** Only setup calls this under the existing host mutex. The structural
+     * quiesce record is durable before any credential/identity replacement;
+     * current passes retain their original protected slots and must settle. */
+    async prepareActivation(input){
+      const next=activationRecord({...input,schemaVersion:1,stage:'quiescing'});
+      const old=await readActivation(),current=await readIdentity();
+      if(old?.enrollmentId===next.enrollmentId&&old.stage!=='pending_owner'&&old.stage!=='released'){
+        if(JSON.stringify({...old,stage:'quiescing'})!==JSON.stringify(next))fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+        return old;
+      }
+      if(old&&['pending_owner','quiescing'].includes(old.stage)
+        &&(old.enrollmentId!==next.enrollmentId||!sameIdentity(old.previous,next.previous)))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      if(JSON.stringify(current)!==JSON.stringify(next.previous))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      await ops.writePrivateJsonFile(activationFile,next);
+      if(JSON.stringify(await readActivation())!==JSON.stringify(next))fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+      return next;
+    },
+    async assertActivationQuiescent(input){
+      const expected=activationRecord(input),current=await readIdentity();
+      if(JSON.stringify(await readActivation())!==JSON.stringify(expected)
+        ||![JSON.stringify(expected.previous),JSON.stringify(expected.next)].includes(JSON.stringify(current)))
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      if(expected.previous!==null){
+        const pending=await store.get({origin:expected.previous.origin,kind:'pass',id:expected.previous.deviceId});
+        if(pending!==null)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      }
+    },
+    async commitActivation(input){
+      const expected=activationRecord(input);
+      if(expected.stage!=='quiescing')fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+      await this.assertActivationQuiescent(expected);
+      const current=await readIdentity();
+      if(JSON.stringify(current)!==JSON.stringify(expected.next))await ops.writePrivateJsonFile(file,expected.next);
+      if(JSON.stringify(await readIdentity())!==JSON.stringify(expected.next))fail('ASSISTANT_HOST_STATE_INVALID');
+      const complete={...expected,stage:'active'};
+      await ops.writePrivateJsonFile(activationFile,complete);
+      if(JSON.stringify(await readActivation())!==JSON.stringify(complete))fail('ASSISTANT_HOST_ACTIVATION_INVALID');
+      return complete;
+    },
     async saveIdentity(identity){
       const next=validate({schemaVersion:1,origin:identity.origin,assistantId:identity.assistantId,deviceId:identity.deviceId});
       const old=await readIdentity();

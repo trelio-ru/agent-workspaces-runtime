@@ -9,7 +9,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
@@ -73,7 +73,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
 ]);
 const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
 const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
-const safeError = error => assistantHealthFailure(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code)
+const safeError = error => assistantHealthFailure(error) || assistantSetupRecovery(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code)
   || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error?.code) || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
@@ -111,14 +111,20 @@ export const createProductionAssistantSetup = async ({expectedOrigin='https://tr
   if(!path.isAbsolute(config))fail('ASSISTANT_HOST_STATE_INVALID');
   const store = createAssistantPrivateStore({ directory: path.join(config, 'digital-assistants', 'credentials') });
   const hostState = createAssistantHostState({ directory: path.join(config, 'digital-assistants'), store });
-  const setup = createAssistantSetup({ origin, store, http: createAssistantHttp({ origin }) });
+  const replacement=async()=>{
+    const implementation=await import('./trelio-assistant-setup.mjs');
+    if(typeof implementation.createAssistantWindowsBackgroundReplacement!=='function')fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+    return implementation.createAssistantWindowsBackgroundReplacement({expectedOrigin:origin,readIdentity:hostState.readIdentity});
+  };
+  const setup = createAssistantSetup({ origin, store, host:hostState,http:createAssistantHttp({origin}),
+    withLock:hostState.withSetupLock,
+    backgroundReplacement:{inspect:async previous=>(await replacement()).inspect(previous),
+      remove:async(previous,snapshot)=>(await replacement()).remove(previous,snapshot)} });
   // As in the common bridge, share one native worker only inside this tool
   // invocation. A long-lived MCP must not retain its ACL results or pipes.
   return { ...Object.fromEntries(Object.entries(setup).map(([name, action]) => [name,
     (...args) => withPrivateProcessSession(async () => {
-      const result = await action(...args);
-      if (result.state === 'paired') await hostState.saveIdentity({ origin, assistantId: result.assistantId, deviceId: result.deviceId });
-      return result;
+      return action(...args);
     })])), background: async operation => (await createBackground())(operation) };
 };
 
@@ -425,7 +431,24 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
         catalogRevision=assistantCatalogRevision(tools);
         return respond({tools:[...ASSISTANT_SETUP_TOOLS,...tools]});
       }
-      catch (error) { return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: safeError(error) } }); }
+      catch (error) {
+        if (assistantSetupRecovery(error)) {
+          // Native clients load a server's initial catalogue during startup. A
+          // broken local tuple OR a confirmed native device-auth refusal must
+          // not make the six public repair tools unreachable. This is an
+          // explicit failure projection, not an empty
+          // privileged catalogue or a readiness claim. A later maintenance
+          // heartbeat cannot clear it; only a fresh, successful tools/list can.
+          const recovery=assistantSetupRecovery(error),native=recovery!=='local_device_credential_mismatch';
+          catalogRevision=assistantCatalogRevision(ASSISTANT_SETUP_TOOLS);
+          return respond({tools:[...ASSISTANT_SETUP_TOOLS],_meta:{'trelio/assistant-setup-recovery':{
+            schemaVersion:1,state:recovery==='assistant_mcp_catalog_rejected'?'business_catalog_unavailable'
+              :native?'device_authorization_required':'local_identity_conflict',code:error.code,
+            ...(native?{status:error.status}:{}),
+          }}});
+        }
+        return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: safeError(error) } });
+      }
     }
     if (message.method === 'tools/call') {
       try {
@@ -523,7 +546,9 @@ export const runAssistantEntry = async (args, options = {}) => {
     try {
       const request=JSON.parse(body);
       output.write(JSON.stringify({value:await (options.executeRequest ?? executeAssistantRuntimeRequest)(validateAssistantRuntimeRequest(request))})+'\n');
-    } catch(error) {output.write(JSON.stringify({failure:safeError(error)})+'\n');}
+    } catch(error) {output.write(JSON.stringify({failure:safeError(error),
+      ...(assistantSetupRecovery(error)?{setupRecovery:assistantSetupRecovery(error),
+        ...(assistantSetupRecovery(error)!=='local_device_credential_mismatch'?{status:error.status}:{})}:{})})+'\n');}
     return;
   }
   let bytes = 0, text = '';
@@ -671,8 +696,15 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
         if(code!==0)return abort();
         try {
           const value=JSON.parse(output+decoder.end());
-          if(value?.failure && /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(value.failure)) {
-            return finish(Object.assign(new Error(value.failure),{code:value.failure}));
+          if(value?.failure && (/^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(value.failure)
+            ||assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status}))) {
+            const allowed=Object.keys(value).sort().join(',') === 'failure'
+              || ['failure,setupRecovery','failure,setupRecovery,status'].includes(Object.keys(value).sort().join(','))
+                &&assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status})
+                &&(value.setupRecovery!=='local_device_credential_mismatch')===Object.hasOwn(value,'status');
+            if(!allowed)return abort();
+            return finish(Object.assign(new Error(value.failure),{code:value.failure,
+              ...(value.setupRecovery?{setupRecovery:value.setupRecovery}:{}) ,...(value.status?{status:value.status}:{})}));
           }
           if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return abort();
           finish(null,value.value);
@@ -705,6 +737,19 @@ const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','ackno
   'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
   'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
+/** Reuse the host setup mutex at the final NEW-work HTTP boundary. This is a
+ * denial/CAS check, never domain admission: native owner/device/task guards
+ * still authorize the callback. Existing pass outcome/recovery does not enter
+ * it and cannot lose its signing key because a replacement was requested. */
+export const withAssistantNewWorkAdmission = (host,identity,action) => {
+  const run=async()=>{
+    const current=await host.readIdentity();
+    if(!current||['origin','assistantId','deviceId'].some(key=>current[key]!==identity[key]))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    if(['pending_owner','quiescing'].includes((await host.readActivation())?.stage))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    return action();
+  };
+  return host.withSetupLock(run);
+};
 /** The actual dedicated backend must open the whole business profile. A local
  * executable, successful pairing, timer, or human MCP cannot turn this on.
  * This is product admission, not evidence of a working Windows desktop or
@@ -742,15 +787,20 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   try{if(typeof timeZone!=='string' || timeZone.length>128)throw new Error();
     new Intl.DateTimeFormat('en-US',{timeZone}).format(0);
   }catch{fail('ASSISTANT_COORDINATOR_INVALID_TIMEZONE');}
-  const invoke=async action=>{
+  const invoke=async (action,newWork=false)=>{
     const value=await context(async(client,host,store)=>{
       if(['origin','assistantId','deviceId'].some(key=>client.identity[key]!==stableIdentity[key])) fail('ASSISTANT_HOST_REBIND_REQUIRED');
-      return {value:await action(client,host,store)};
+      const execute=async()=>({value:await action(client,host,store)});
+      // The local pending-owner fence and a native NEW pass admission cannot
+      // cross between their check and HTTP. Existing pass completion/recovery
+      // never takes this denial path and retains its original key/outcome.
+      return newWork?withAssistantNewWorkAdmission(host,stableIdentity,execute):execute();
     });
     if(value===null) fail('ASSISTANT_HOST_NOT_CONFIGURED');
     return value.value;
   };
-  const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args))]))};
+  const client={identity:stableIdentity,...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),
+    ['claimTaskHost','beginTaskPass','beginSourceIntake'].includes(name))]))};
   const privateInvocation=action=>withPrivateProcessSession(action,AbortSignal.timeout(45_000));
   const configDirectory=dependencies.configurationDirectory??dependencies.directory??common.resolveWorkspaceBridgeConfigDirectory();
   const root=dependencies.directory??path.join(configDirectory,'digital-assistants','runtime');
@@ -903,16 +953,33 @@ export const reportAssistantMaintenanceFailure = async (error, client = null) =>
  * OS registration is a separate explicit onboarding step.
  */
 export const runAssistantBackground = async ({signal,request=requestCurrentAssistantRuntime,
+  readHost=()=>productionContext(async(client,host)=>({identity:client.identity,activation:await host.readActivation()})),
+  verifyRegistration=async()=>process.platform==='win32'?(await createProductionAssistantBackground())('status'):null,
   wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure}={}) => {
   const controller=new AbortController();
   const stop=()=>controller.abort();
   const effective=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
   process.on('SIGTERM',stop);process.on('SIGINT',stop);
   try {
+    const initial=await readHost();
+    if(!initial?.identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
+    const identity=JSON.stringify(initial.identity);
+    const fenced=value=>['pending_owner','quiescing'].includes(value?.activation?.stage);
+    if(fenced(initial))return {schemaVersion:1,state:'stopped',reason:'replacement_pending'};
+    // An old Task Scheduler registration must never start a fresh parent for
+    // the new identity at its next logon. The SAME native status validator
+    // checks the current marker/SID/action before any worker or maintenance.
+    await verifyRegistration();
     while(!effective.aborted) {
       try {
-        await request({operation:'health'},{signal:effective});
-        if(!effective.aborted)await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000});
+        const current=await readHost();
+        if(JSON.stringify(current?.identity)!==identity||fenced(current))break;
+        const health=await request({operation:'health'},{signal:effective});
+        if(health?.state==='quiescing')break;
+        if(!effective.aborted){
+          const cycle=await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000});
+          if(cycle?.state==='quiescing')break;
+        }
       } catch(error) {
         if(!effective.aborted)await reportFailure(error).catch(()=>undefined);
         // Retained SQLite/native-start/pass receipts own recovery. This is the
@@ -934,6 +1001,14 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   verifyMaxSource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantMaxSource(input),
   verifySource=async input=>(await import('./trelio-assistant-transport.mjs')).verifyAssistantEmailSource(input)}={}) => {
   validateAssistantRuntimeRequest(request);
+  if(['health','health_check','background_tick'].includes(request.operation)){
+    // Fresh workers fence legacy supervisors too: an old parent may ignore
+    // this structural response and remain running, but cannot start polling,
+    // updater work or another task while replacement is pending. It must be
+    // stopped manually only after the exact protected pass has settled.
+    const pending=await context(async(_client,host)=>['pending_owner','quiescing'].includes((await host.readActivation?.())?.stage));
+    if(pending===true)return {schemaVersion:1,state:'quiescing'};
+  }
   if(request.operation==='background_tick')return backgroundTick();
   if(request.operation==='health') {
     const canUpdate=await context(async (_client,host)=>!await host.readActivePass());

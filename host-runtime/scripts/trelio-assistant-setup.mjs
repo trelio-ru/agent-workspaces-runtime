@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { resolveHostRuntimeLoader } from './trelio-host-runtime-recovery.mjs';
 import { createAssistantPairingClient, createAssistantDeviceClient } from './trelio-assistant-transport.mjs';
+import { validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantSetupError extends Error {
@@ -12,46 +13,180 @@ export class AssistantSetupError extends Error {
 }
 const fail = code => { throw new AssistantSetupError(code); };
 const id = value => { if (typeof value !== 'string' || !UUID.test(value)) fail('ASSISTANT_SETUP_INVALID_INPUT'); return value.toLowerCase(); };
-export const createAssistantSetup = ({ origin, store, http, now = Date.now }) => {
+export const createAssistantSetup = ({ origin, store, http, host, withLock = action => action(),
+  backgroundReplacement, now = Date.now }) => {
+  if(!host?.readIdentity || !host?.prepareActivation || !host?.commitActivation) fail('ASSISTANT_SETUP_INVALID_INPUT');
   const pairing = createAssistantPairingClient({ origin, store, http, now });
   const key = enrollmentId => ({ origin, kind: 'pairing', id: id(enrollmentId) });
-  const paired = async record => {
-    if (record.origin !== origin) fail('ASSISTANT_SETUP_RECOVERY_REQUIRED');
-    const assistantId = id(record.assistantId), deviceId = id(record.deviceId);
-    const client = createAssistantDeviceClient({ origin, assistantId, deviceId, store, http });
-    // A completed pairing receipt is not an offline grant. It must still
-    // survive live expiry, revocation and owner checks before reporting contact.
-    await client.heartbeat();
-    return { state: 'paired', assistantId, deviceId, businessReady: false,
-      requiredCapabilities: ['task_pass_admission', 'background_service'] };
+  const identity = record => ({schemaVersion:1,origin,assistantId:id(record.assistantId),deviceId:id(record.deviceId)});
+  const same = (left,right) => JSON.stringify(left)===JSON.stringify(right);
+  const deviceSlot = assistantId => ({origin,kind:'device',id:assistantId});
+  const releasePending = async enrollmentId => {
+    // Releasing a pending-only denial grants no device/business authority.
+    // Definitive native rejection + exact unchanged protected host + no local
+    // pass suffice even when the OLD credential is already broken/revoked.
+    // Requiring its heartbeat would permanently trap this repair workflow.
+    await host.releaseSetupIntent(enrollmentId);
   };
-  const status = async enrollmentId => {
-    const record = await store.get(key(enrollmentId));
-    if (!record) return { state: 'not_started' };
-    if (record.phase === 'complete') return paired(record);
-    if (record.phase === 'exchanging') return { state: 'recovery_required' };
-    if (record.phase === 'prepared') return { state: 'prepared' };
-    if (record.phase !== 'pending' || !Number.isSafeInteger(record.expiresAt)
-      || !/^[A-F0-9]{8}$/u.test(record.verificationCode ?? '')) fail('ASSISTANT_SETUP_RECOVERY_REQUIRED');
-    return { state: record.expiresAt <= now() ? 'expired' : 'waiting_owner',
-      verificationCode: record.verificationCode, expiresAt: record.expiresAt };
+  const observePairing = async (enrollmentId,action) => {
+    try{
+      const result=await action();
+      if(result.state==='denied')await releasePending(enrollmentId);
+      return result;
+    }catch(error){
+      // Only a definitive native rejection releases a pending-only denial.
+      // 409, network failure, local expiry or missing/mismatched old credential
+      // cannot establish that the owner did not already approve replacement.
+      if(error.code==='ASSISTANT_PAIRING_EXPIRED'&&error.status===410)await releasePending(enrollmentId);
+      throw error;
+    }
+  };
+  const guardLocalPass = async enrollmentId => {
+    const current=await host.readIdentity();
+    if(current!==null){
+      if(await host.readActivePass()!==null)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      await host.prepareSetupIntent(enrollmentId);
+    }
+  };
+  const validSecret = value => value && UUID.test(value.assistantId??'') && UUID.test(value.deviceId??'')
+    && /^tda_[A-Za-z0-9_-]{43}$/u.test(value.credential??'') && Number.isSafeInteger(value.expiresAt) && value.expiresAt>0;
+  const candidateClient = record => {
+    if(!validSecret(record))fail('ASSISTANT_SETUP_RECOVERY_REQUIRED');
+    const secret=Object.fromEntries(['assistantId','deviceId','credential','expiresAt'].map(name=>[name,record[name]]));
+    // A candidate heartbeat uses its own protected staged value. It never
+    // publishes that value into the currently active assistant credential slot.
+    const candidateStore={get:async input=>same(input,deviceSlot(record.assistantId))?secret:store.get(input)};
+    return createAssistantDeviceClient({...identity(record),store:candidateStore,http});
+  };
+  const paired = async record => {
+    if(record.origin!==origin)fail('ASSISTANT_SETUP_RECOVERY_REQUIRED');
+    const next=identity(record),old=await host.readIdentity();
+    if(old!==null&&!same(old,next))return {state:'replacement_required',code:'ASSISTANT_HOST_REBIND_REQUIRED',businessReady:false};
+    await createAssistantDeviceClient({...next,store,http}).heartbeat();
+    if(old===null)await host.saveIdentity(next);
+    return {state:'paired',assistantId:next.assistantId,deviceId:next.deviceId,businessReady:false,
+      requiredCapabilities:['task_pass_admission','background_service']};
+  };
+  const waiting = (reason,manual=false,previous=null) => ({state:'replacement_waiting_background',reason,businessReady:false,
+    requiredAction:reason==='unresolved_pass'?'reconcile_original_pass':manual?'stop_exact_idle_supervisor_then_finish':'finish_assistant_setup',
+    ...(manual&&previous?{backgroundTaskName:'Trelio-DigitalAssistant-'+previous.assistantId,
+      instruction:'The old supervisor has been fenced from starting new work and no protected pass is active. If it cannot exit itself, stop only Windows Task Scheduler task Trelio-DigitalAssistant-'+previous.assistantId+'; do not delete identity, credentials, journals or accounts. Then finish the SAME enrollment again.'}:{})});
+  const activate = async (enrollmentId,record,mutate) => {
+    if(record.origin!==origin||!['candidate','activating'].includes(record.phase)||!validSecret(record))fail('ASSISTANT_SETUP_RECOVERY_REQUIRED');
+    const next=identity(record),authorization=validateAssistantActivationAuthorization(record.activation);
+    const previous=record.hostIdentity===null?null:{schemaVersion:1,origin,
+      assistantId:id(record.hostIdentity?.assistantUserId),deviceId:id(record.hostIdentity?.deviceId)};
+    const live=await candidateClient(record).heartbeat();
+    // Old generic pairing approval never becomes replacement authority. The
+    // live native candidate must still expose this exact NEW owner receipt.
+    if(authorization.mode==='replace'&&!same(live.activation,authorization))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    if(!mutate)return {state:'activation_pending',businessReady:false,requiredAction:'finish_assistant_setup'};
+    const activation=await host.prepareActivation({enrollmentId,previous,next,authorization});
+    if(activation.stage==='quiescing'){
+      try{await host.assertActivationQuiescent(activation);}
+      catch(error){if(error.code==='ASSISTANT_PASS_REVIEW_REQUIRED')return waiting('unresolved_pass');throw error;}
+      const identityAlreadyWritten=same(await host.readIdentity(),next);
+      if(identityAlreadyWritten&&record.backgroundSettled!==true)fail('ASSISTANT_SETUP_ACTIVATION_RECOVERY_REQUIRED');
+      if(previous!==null&&!identityAlreadyWritten){
+        if(!backgroundReplacement)fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+        const observed=await backgroundReplacement.inspect(previous);
+        if(observed.state==='running'||observed.state==='queued')return waiting('supervisor_not_idle',true,previous);
+        if(observed.state!=='not_installed'){
+          if(!record.backgroundSnapshot){
+            record={...record,backgroundSnapshot:observed.snapshot};await store.put(key(enrollmentId),record);
+          }
+          if(!same(record.backgroundSnapshot,observed.snapshot))fail('ASSISTANT_BACKGROUND_CONFLICT');
+          if(record.backgroundRemoval==='attempted')return waiting('removal_outcome_unknown');
+          record={...record,backgroundRemoval:'attempted'};await store.put(key(enrollmentId),record);
+          try{await backgroundReplacement.remove(previous,record.backgroundSnapshot);}
+          catch(error){
+            if(error.code!=='ASSISTANT_BACKGROUND_BUSY')throw error;
+            // The native helper proves this exact refusal precedes DeleteTask
+            // (for example logon raced the idle snapshot). Release only this
+            // known-no-delete attempt; a later explicit finish must still
+            // reread the SAME snapshot. Unknown/access failures stay fenced.
+            const {backgroundRemoval,...unattempted}=record;record=unattempted;
+            await store.put(key(enrollmentId),record);return waiting('supervisor_not_idle',true,previous);
+          }
+          if((await backgroundReplacement.inspect(previous)).state!=='not_installed')fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+        }
+      }
+      if(record.backgroundSettled!==true){record={...record,backgroundSettled:true};await store.put(key(enrollmentId),record);}
+      await host.assertActivationQuiescent(activation);
+      if(authorization.mode==='replace'&&!same((await candidateClient(record).heartbeat()).activation,authorization))
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      const active=await store.get(deviceSlot(next.assistantId));
+      const secret=Object.fromEntries(['assistantId','deviceId','credential','expiresAt'].map(name=>[name,record[name]]));
+      if(!same(active,secret)){
+        if(record.activeCredentialWrite==='attempted')fail('ASSISTANT_SETUP_ACTIVATION_RECOVERY_REQUIRED');
+        if(active!==null&&(!validSecret(active)||previous===null||active.assistantId!==previous.assistantId||active.deviceId!==previous.deviceId))
+          fail('ASSISTANT_HOST_REBIND_REQUIRED');
+        // Keep the old protected slot in the SAME enrollment journal until
+        // activation read-back. A failed/unknown writer never triggers exchange
+        // replay or a second credential write; the next call reads it back.
+        record={...record,phase:'activating',activeCredentialWrite:'attempted',previousCredential:active};
+        await store.put(key(enrollmentId),record);
+        await store.put(deviceSlot(next.assistantId),secret);
+      }
+      await host.commitActivation(activation);
+    }
+    const complete={phase:'complete',origin,assistantId:next.assistantId,deviceId:next.deviceId};
+    await store.put(key(enrollmentId),complete);
+    return paired(complete);
+  };
+  const statusUnlocked=async(enrollmentId,mutate=false)=>{
+    const record=await store.get(key(enrollmentId));
+    if(!record)return {state:'not_started'};
+    if(record.phase==='complete')return paired(record);
+    if(['candidate','activating'].includes(record.phase))return activate(enrollmentId,record,mutate);
+    if(record.phase==='exchanging')return {state:'recovery_required'};
+    if(['prepared','pending'].includes(record.phase)&&record.recovery&&UUID.test(record.pairingId??'')){
+      // A persisted explicit replacement survives the short code/enrollment
+      // TTL. Read the candidate's durable native receipt BEFORE refreshing the
+      // expirable pairing; this path never invokes a one-use exchange.
+      const recovered=await pairing.exchange(enrollmentId);
+      if(recovered.state==='candidate')return activate(enrollmentId,await store.get(key(enrollmentId)),mutate);
+    }
+    if(record.phase==='prepared'){
+      const result=await observePairing(enrollmentId,()=>pairing.refresh(enrollmentId));
+      return {state:result.state==='denied'?'denied':'waiting_owner',verificationCode:result.verificationCode,expiresAt:result.expiresAt};
+    }
+    if(record.phase!=='pending'||!Number.isSafeInteger(record.expiresAt)||!/^[A-F0-9]{8}$/u.test(record.verificationCode??''))
+      fail('ASSISTANT_SETUP_RECOVERY_REQUIRED');
+    const result=await observePairing(enrollmentId,()=>pairing.refresh(enrollmentId));
+    return {state:result.state==='denied'?'denied':'waiting_owner',verificationCode:result.verificationCode,expiresAt:result.expiresAt};
   };
   return {
-    status,
-    async begin(enrollmentId, deviceName) {
-      id(enrollmentId);
-      const record = await store.get(key(enrollmentId));
-      if (record?.phase === 'complete') return paired(record);
-      const result = await pairing.begin(enrollmentId, deviceName);
-      return { state: 'waiting_owner', verificationCode: result.verificationCode, expiresAt: result.expiresAt };
-    },
-    async finish(enrollmentId) {
-      const record = await store.get(key(enrollmentId));
-      if (record?.phase === 'complete') return paired(record);
-      const result = await pairing.exchange(enrollmentId);
-      if (result.state === 'pending') return { state: 'waiting_owner' };
-      return paired({ phase: 'complete', ...result });
-    },
+    status:enrollmentId=>withLock(()=>statusUnlocked(id(enrollmentId))),
+    begin:(enrollmentId,deviceName)=>withLock(async()=>{
+      enrollmentId=id(enrollmentId);
+      const record=await store.get(key(enrollmentId));
+      if(record?.phase==='complete'||['candidate','activating'].includes(record?.phase))return statusUnlocked(enrollmentId);
+      await guardLocalPass(enrollmentId);
+      const current=await host.readIdentity();
+      const hostIdentity=current===null?null:{assistantUserId:current.assistantId,deviceId:current.deviceId};
+      // The only legacy candidate we can locate without scanning private slots
+      // is a different device already saved at this host assistant's exact key.
+      // Its bearer remains inside the protected transport and authorizes no
+      // replacement until a NEW explicit owner decision is persisted natively.
+      const saved=current===null?null:await store.get(deviceSlot(current.assistantId));
+      const recoveryCandidate=validSecret(saved)&&saved.assistantId===current?.assistantId&&saved.deviceId!==current?.deviceId?saved:null;
+      const result=await observePairing(enrollmentId,()=>pairing.begin(enrollmentId,deviceName,{hostIdentity,recoveryCandidate}));
+      return {state:result.state==='denied'?'denied':'waiting_owner',verificationCode:result.verificationCode,expiresAt:result.expiresAt};
+    }),
+    finish:enrollmentId=>withLock(async()=>{
+      enrollmentId=id(enrollmentId);const record=await store.get(key(enrollmentId));
+      if(record?.phase==='complete'||['candidate','activating'].includes(record?.phase))return statusUnlocked(enrollmentId,true);
+      if(!record||!['prepared','pending'].includes(record.phase))fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+      await guardLocalPass(enrollmentId);
+      if(!record.recovery){
+        const observed=await observePairing(enrollmentId,()=>pairing.refresh(enrollmentId));
+        if(observed.state==='denied')return {state:'denied'};
+      }
+      const result=await pairing.exchange(enrollmentId);
+      if(result.state==='pending')return {state:'waiting_owner'};
+      return statusUnlocked(enrollmentId,true);
+    }),
   };
 };
 
@@ -162,6 +297,67 @@ try {
     foreach ($key in $failed) { [Console]::Error.WriteLine('TRELIO_TASK_CHECK ' + $key) }
     return $failed.Count -eq 0
   }
+  # Replacement is an internal, owner-approved pairing path, never a normal
+  # installer option. An older plugin path may no longer exist; inspect its
+  # PUBLIC definition without resolving, reading or executing that path. The
+  # exact old identity marker, current SID and ordinary least-privilege policy
+  # still have to match. The full XML digest fences every otherwise unprojected
+  # field across the later idle deletion.
+  $replacement = $p.operation -eq 'replacement_inspect' -or $p.operation -eq 'replacement_remove'
+  if ($replacement) {
+    function Test-DefinitionForReplacement($task) {
+      if ($task.Definition.Actions.Count -ne 1) { return $false }
+      $action = $task.Definition.Actions.Item(1)
+      $savedCommand = $p.command
+      $savedArguments = $p.arguments
+      $savedCwd = $p.workingDirectory
+      if ($action.Path -notmatch '^[a-zA-Z]:\\(?:[^\r\n\x00"]+\\)?node\.exe$' -or
+          $action.Arguments -cnotmatch '^"[a-zA-Z]:\\(?:[^\r\n\x00"]+\\)?trelio-host-runtime-loader\.mjs" bridge assistant background$' -or
+          $action.WorkingDirectory -cne [System.IO.Path]::GetDirectoryName($action.Path)) { return $false }
+      $p.command = $action.Path
+      $p.arguments = $action.Arguments
+      $p.workingDirectory = $action.WorkingDirectory
+      try { return (Test-Definition $task) }
+      finally {
+        $p.command = $savedCommand
+        $p.arguments = $savedArguments
+        $p.workingDirectory = $savedCwd
+      }
+    }
+    if ($existing -and !(Test-DefinitionForReplacement $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+    function Get-DefinitionHash($task) {
+      $hasher = [System.Security.Cryptography.SHA256]::Create()
+      try { return ([System.BitConverter]::ToString($hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($task.Xml)))).Replace('-', '').ToLowerInvariant() }
+      finally { $hasher.Dispose() }
+    }
+    if ($p.operation -eq 'replacement_remove') {
+      # A lost delete response can be reconciled as absent. An existing task
+      # must match the protected original snapshot, not just a familiar name.
+      if ($existing) {
+        if (!$p.snapshot -or $p.snapshot.principalSid -cne $sid -or $p.snapshot.definitionSha256 -cne (Get-DefinitionHash $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+        if ($existing.State -eq 4 -or $existing.State -eq 2) { throw 'ASSISTANT_BACKGROUND_BUSY' }
+        # Reopen immediately before the single mutation: a changed definition
+        # or queued/logon instance must never be removed using an old snapshot.
+        $existing = $folder.GetTask($name)
+        if (!(Test-DefinitionForReplacement $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+        if ($p.snapshot.definitionSha256 -cne (Get-DefinitionHash $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+        if ($existing.State -eq 4 -or $existing.State -eq 2) { throw 'ASSISTANT_BACKGROUND_BUSY' }
+        $folder.DeleteTask($name, 0)
+        try { $null = $folder.GetTask($name); throw 'ASSISTANT_BACKGROUND_READBACK_FAILED' } catch { if (!(Test-NotFound $_)) { throw } }
+        $existing = $null
+      }
+    }
+    $snapshot = $null
+    $state = 'not_installed'
+    if ($existing) {
+      $snapshot = @{schemaVersion=1;assistantId=$p.assistantId;deviceId=$p.deviceId;principalSid=$sid;definitionSha256=(Get-DefinitionHash $existing)}
+      $state = 'registered'
+      if ($existing.State -eq 4) { $state = 'running' }
+      if ($existing.State -eq 2) { $state = 'queued' }
+    }
+    [Console]::Out.WriteLine((@{schemaVersion=1;state=$state;snapshot=$snapshot} | ConvertTo-Json -Depth 3 -Compress))
+    return
+  }
   if ($existing -and !(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
   if ($p.operation -eq 'install' -and !$existing) {
     $d = $service.NewTask(0)
@@ -259,6 +455,73 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact,
     remaining();
     return projectAssistantBackgroundResult(result);
   };
+};
+
+/** A replacement owns only the old scheduled task, not its executable, source
+ * files or provider data. This snapshot is kept inside the existing protected
+ * pairing journal. It never appears in a model result or chooses a command.
+ */
+export const validateAssistantBackgroundReplacementSnapshot = (snapshot, previous) => {
+  if (snapshot === null) return null;
+  const keys = ['schemaVersion', 'assistantId', 'deviceId', 'principalSid', 'definitionSha256'];
+  if (!snapshot || Object.getPrototypeOf(snapshot) !== Object.prototype
+    || Object.keys(snapshot).sort().join(',') !== keys.sort().join(',') || snapshot.schemaVersion !== 1
+    || !UUID.test(previous?.assistantId ?? '') || !UUID.test(previous?.deviceId ?? '')
+    || snapshot.assistantId !== previous.assistantId.toLowerCase() || snapshot.deviceId !== previous.deviceId.toLowerCase()
+    || !/^S-1-(?:5-21|12-1)-[0-9-]{1,180}$/u.test(snapshot.principalSid ?? '')
+    || !/^[a-f0-9]{64}$/u.test(snapshot.definitionSha256 ?? '')) fail('ASSISTANT_BACKGROUND_CONFLICT');
+  return Object.freeze(Object.fromEntries(keys.map(key => [key, snapshot[key]])));
+};
+
+/** Trusted pairing composition only: the owner has separately authorized the
+ * exact old/new identities before remove is called. Inspect has no mutation;
+ * remove never stops a running/queued task, executes a captured path, imports
+ * its sessions, or upgrades the ordinary installer's no-overwrite policy.
+ * Each operation retains the original Windows 45s/40s budgets and single OS
+ * attempt. A lost delete response is reconciled as absent on the next inspect.
+ */
+export const createAssistantWindowsBackgroundReplacement = ({ readIdentity,
+  platform = process.platform, environment = process.env, runNative = runAssistantWindowsBackgroundNative,
+  signal, expectedOrigin = 'https://trelio.ru' } = {}) => {
+  if (typeof readIdentity !== 'function') fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+  const invoke = async (previous, operation, original = null) => {
+    const started = performance.now();
+    const remaining = () => {
+      const budget = 45_000 - (performance.now() - started);
+      if (signal?.aborted || budget < 10) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+      return Math.min(40_000, Math.floor(budget));
+    };
+    if (!previous || previous.origin !== expectedOrigin || !UUID.test(previous.assistantId ?? '') || !UUID.test(previous.deviceId ?? ''))
+      fail('ASSISTANT_HOST_NOT_CONFIGURED');
+    const selected = { origin: expectedOrigin, assistantId: previous.assistantId.toLowerCase(), deviceId: previous.deviceId.toLowerCase() };
+    const assertCurrent = async () => {
+      remaining();
+      const current = await readIdentity();
+      if (['origin', 'assistantId', 'deviceId'].some(key => current?.[key] !== selected[key])) fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      remaining();
+    };
+    await assertCurrent();
+    const snapshot = validateAssistantBackgroundReplacementSnapshot(original, selected);
+    // Windows is the only supported OS registration. Other platforms have no
+    // Trelio Task Scheduler registration to adopt, remove or translate.
+    if (platform !== 'win32') {
+      if (snapshot !== null) fail('ASSISTANT_BACKGROUND_CONFLICT');
+      return { schemaVersion: 1, state: 'not_installed', snapshot: null };
+    }
+    const result = await runNative({ schemaVersion: 1, operation,
+      assistantId: selected.assistantId, deviceId: selected.deviceId,
+      command: '', arguments: '', workingDirectory: '', snapshot }, { environment, signal, timeoutMs: remaining() });
+    await assertCurrent();
+    if (codes.has(result?.code)) fail(result.code);
+    if (!result || Object.getPrototypeOf(result) !== Object.prototype
+      || Object.keys(result).sort().join(',') !== 'schemaVersion,snapshot,state' || result.schemaVersion !== 1
+      || !['not_installed', 'registered', 'running', 'queued'].includes(result.state)
+      || (result.state === 'not_installed') !== (result.snapshot === null)
+      || operation === 'replacement_remove' && result.state !== 'not_installed') fail('ASSISTANT_BACKGROUND_READBACK_FAILED');
+    return { schemaVersion: 1, state: result.state, snapshot: validateAssistantBackgroundReplacementSnapshot(result.snapshot, selected) };
+  };
+  return { inspect: previous => invoke(previous, 'replacement_inspect'),
+    remove: (previous, snapshot) => invoke(previous, 'replacement_remove', snapshot) };
 };
 
 export const projectAssistantBackgroundResult = value => {

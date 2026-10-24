@@ -731,30 +731,47 @@ test('source config rejects scope/protocol/duplicate errors and never maps refus
   assert.ok(!ASSISTANT_MCP_TOOLS.includes('sourceAccounts'),'host-private discovery is not a model tool');
 });
 
-test('pairing persists verifier before I/O, handles pending and erases it after protected device save', async () => {
+test('pairing persists verifier before I/O, handles pending and stages candidate without overwriting active device', async () => {
   const origin='https://assistant.test',enrollmentId=randomUUID(),pairingId=randomUUID(),assistantUserId=randomUUID(),deviceId=randomUUID();
   const store=memoryStore(); let exchanges=0,seenVerifier;
   const client=createAssistantPairingClient({origin,store,now:()=>100,http:async(operation,input)=>{
     const saved=await store.get({origin,kind:'pairing',id:enrollmentId});
     if(operation==='pair') {
       assert.equal(saved.phase,'prepared'); assert.equal(saved.verifier.length,43);
-      return {pairingId,verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
+      return {pairingId,assistantUserId,state:'pending',recovery:null,verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
     }
     assert.equal(saved.phase,'exchanging'); assert.equal(input.verifier,saved.verifier); seenVerifier=input.verifier;
-    if(!exchanges++) throw new AssistantTransportError('ASSISTANT_STATE_CHANGED',409);
-    return {assistantUserId,deviceId,credential:`tda_${'b'.repeat(43)}`,expiresAt:new Date(30000).toISOString()};
+    if(!exchanges++) throw new AssistantTransportError('ASSISTANT_PAIRING_NOT_APPROVED',409);
+    return {assistantUserId,deviceId,credential:`tda_${'b'.repeat(43)}`,expiresAt:new Date(30000).toISOString(),
+      activation:{schemaVersion:1,mode:'initial',assistantUserId,replacesAssistantUserId:null,replacesDeviceId:null,authorizationId:pairingId}};
   }});
   const begin=await client.begin(enrollmentId,'Fixture'); assert.equal(begin.verificationCode,'ABCDEF12'); assert.doesNotMatch(JSON.stringify(begin),/verifier/);
   assert.deepEqual(await client.exchange(enrollmentId),{state:'pending'});
-  assert.deepEqual(await client.exchange(enrollmentId),{state:'ready',origin,assistantId:assistantUserId,deviceId});
+  assert.deepEqual(await client.exchange(enrollmentId),{state:'candidate',origin,assistantId:assistantUserId,deviceId});
   assert.ok(!(JSON.stringify(await store.get({origin,kind:'pairing',id:enrollmentId}))).includes(seenVerifier));
-  assert.match((await store.get({origin,kind:'device',id:assistantUserId})).credential,/^tda_/u);
+  assert.equal(await store.get({origin,kind:'device',id:assistantUserId}),null,'host activation owns the active write');
+  assert.match((await store.get({origin,kind:'pairing',id:enrollmentId})).credential,/^tda_/u);
+});
+
+test('only exact not-approved exchange is waiting-owner; other known rejections preserve their native reason',async()=>{
+  for(const code of ['ASSISTANT_PAIRING_NOT_APPROVED','ASSISTANT_HOST_PASS_REVIEW_REQUIRED','ASSISTANT_HOST_INTAKE_REVIEW_REQUIRED','ASSISTANT_STATE_CHANGED','ASSISTANT_UNKNOWN_CONFLICT']){
+    const origin='https://assistant.test',enrollmentId=randomUUID(),pairingId=randomUUID(),assistantUserId=randomUUID(),store=memoryStore();let exchanges=0;
+    const client=createAssistantPairingClient({origin,store,now:()=>100,http:async operation=>{
+      if(operation==='pair')return {pairingId,assistantUserId,state:'pending',recovery:null,verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
+      exchanges++;throw new AssistantTransportError(code,409);
+    }});
+    await client.begin(enrollmentId,'Fixture');
+    if(code==='ASSISTANT_PAIRING_NOT_APPROVED')assert.deepEqual(await client.exchange(enrollmentId),{state:'pending'});
+    else await assert.rejects(client.exchange(enrollmentId),{code:code==='ASSISTANT_UNKNOWN_CONFLICT'?'ASSISTANT_PAIRING_RECOVERY_REQUIRED':code});
+    const saved=await store.get({origin,kind:'pairing',id:enrollmentId});
+    assert.equal(saved.phase,code==='ASSISTANT_UNKNOWN_CONFLICT'?'exchanging':'pending');assert.equal(exchanges,1);
+  }
 });
 
 test('lost exchange response is fenced across restarts and is never blindly repeated', async () => {
-  const origin='https://assistant.test',enrollmentId=randomUUID(),store=memoryStore(); let exchanges=0;
+  const origin='https://assistant.test',enrollmentId=randomUUID(),assistantUserId=randomUUID(),store=memoryStore(); let exchanges=0;
   const http=async operation=>{
-    if(operation==='pair') return {pairingId:randomUUID(),verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
+    if(operation==='pair') return {pairingId:randomUUID(),assistantUserId,state:'pending',recovery:null,verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
     exchanges++; throw new Error('response lost after server commit');
   };
   const client=createAssistantPairingClient({origin,store,http,now:()=>100}); await client.begin(enrollmentId,'Fixture');

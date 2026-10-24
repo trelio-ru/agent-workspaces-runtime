@@ -8,7 +8,8 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
-  quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+  quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
+  validateAssistantBackgroundReplacementSnapshot } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const identity = { origin: 'https://trelio.ru', assistantId: randomUUID(), deviceId: randomUUID() };
@@ -116,12 +117,64 @@ test('abort, timeout and oversized native output terminate one attempt without r
   }
 });
 
+test('replacement captures only the exact old registration and removes it without selecting or replaying a command', async () => {
+  const snapshot = { schemaVersion: 1, assistantId: identity.assistantId, deviceId: identity.deviceId,
+    principalSid: 'S-1-5-21-1-2-3-1001', definitionSha256: 'a'.repeat(64) };
+  const seen = [];
+  let current = identity;
+  const background = createAssistantWindowsBackgroundReplacement({ platform: 'win32', readIdentity: async () => current,
+    runNative: async (plan, options) => {
+      seen.push(plan);
+      assert.ok(options.timeoutMs > 0 && options.timeoutMs <= 40_000);
+      assert.equal(plan.command, ''); assert.equal(plan.arguments, ''); assert.equal(plan.workingDirectory, '');
+      return { schemaVersion: 1, state: plan.operation === 'replacement_inspect' ? 'registered' : 'not_installed',
+        snapshot: plan.operation === 'replacement_inspect' ? snapshot : null };
+    } });
+  assert.deepEqual(await background.inspect(identity), { schemaVersion: 1, state: 'registered', snapshot });
+  assert.deepEqual(await background.remove(identity, snapshot), { schemaVersion: 1, state: 'not_installed', snapshot: null });
+  assert.deepEqual(seen.map(plan => plan.operation), ['replacement_inspect', 'replacement_remove']);
+  assert.deepEqual(seen[1].snapshot, snapshot);
+  for (const invalid of [{ ...snapshot, deviceId: randomUUID() }, { ...snapshot, command: 'PRIVATE' },
+    { ...snapshot, principalSid: 'SYSTEM' }, { ...snapshot, definitionSha256: 'bad' }]) {
+    assert.throws(() => validateAssistantBackgroundReplacementSnapshot(invalid, identity), { code: 'ASSISTANT_BACKGROUND_CONFLICT' });
+    await assert.rejects(background.remove(identity, invalid), { code: 'ASSISTANT_BACKGROUND_CONFLICT' });
+  }
+  current = { ...identity, deviceId: randomUUID() };
+  await assert.rejects(background.inspect(identity), { code: 'ASSISTANT_HOST_REBIND_REQUIRED' });
+  assert.equal(seen.length, 2, 'bad snapshot/changed identity must refuse before the native operation');
+});
+
+test('replacement keeps busy, changed, ambiguous and malformed registrations closed without an OS retry', async () => {
+  const snapshot = { schemaVersion: 1, assistantId: identity.assistantId, deviceId: identity.deviceId,
+    principalSid: 'S-1-5-21-1-2-3-1001', definitionSha256: 'a'.repeat(64) };
+  for (const failure of ['ASSISTANT_BACKGROUND_BUSY', 'ASSISTANT_BACKGROUND_CONFLICT', 'ASSISTANT_BACKGROUND_ACCESS_DENIED']) {
+    let calls = 0;
+    const background = createAssistantWindowsBackgroundReplacement({ platform: 'win32', readIdentity: async () => identity,
+      runNative: async () => { calls++; return { code: failure }; } });
+    await assert.rejects(background.remove(identity, snapshot), { code: failure });
+    assert.equal(calls, 1);
+  }
+  for (const result of [{ schemaVersion: 1, state: 'not_installed', snapshot },
+    { schemaVersion: 1, state: 'running', snapshot: null },
+    { schemaVersion: 1, state: 'not_installed', snapshot: null, path: 'PRIVATE' }]) {
+    const background = createAssistantWindowsBackgroundReplacement({ platform: 'win32', readIdentity: async () => identity,
+      runNative: async () => result });
+    await assert.rejects(background.inspect(identity), { code: 'ASSISTANT_BACKGROUND_READBACK_FAILED' });
+  }
+  let calls = 0;
+  const changed = createAssistantWindowsBackgroundReplacement({ platform: 'win32',
+    readIdentity: async () => ++calls === 1 ? identity : { ...identity, deviceId: randomUUID() },
+    runNative: async () => ({ schemaVersion: 1, state: 'not_installed', snapshot: null }) });
+  await assert.rejects(changed.inspect(identity), { code: 'ASSISTANT_HOST_REBIND_REQUIRED' });
+});
+
 test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and removes only its own fixture', { skip: process.platform !== 'win32' }, async t => {
   // Hosted Windows only; never an assistant/user VM or live service. A tiny
   // native Node action proves Task Scheduler invocation independently of Codex,
   // backend, credentials and the businessReady gate.
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'assistant background Юникод '));
-  const loader = path.join(directory, 'fixture loader.mjs'), marker = path.join(directory, 'receipt.json');
+  const loader = path.join(directory, 'old shell', 'scripts', 'trelio-host-runtime-loader.mjs'), marker = path.join(directory, 'receipt.json');
+  await fs.mkdir(path.dirname(loader), { recursive: true });
   const fixture = { ...identity, assistantId: randomUUID(), deviceId: randomUUID() };
   await fs.writeFile(loader, `import fs from 'node:fs';\nif(JSON.stringify(process.argv.slice(2))!==JSON.stringify(['bridge','assistant','background']))process.exit(9);\nfs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({ready:true}));\n`);
   const controller = createAssistantWindowsBackground({ readIdentity: async () => fixture, verifyContact: async () => {}, resolveLoader: async () => loader,
@@ -160,6 +213,15 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   assert.equal((await manage('status')).state, 'not_installed');
   assert.equal((await manage('install')).state, 'registered');
   assert.equal((await manage('install')).state, 'registered', 'idempotent install reads the exact definition instead of overwriting it');
+  const replacementController = createAssistantWindowsBackgroundReplacement({ readIdentity: async () => fixture });
+  const captured = await replacementController.inspect(fixture);
+  assert.equal(captured.state, 'registered');
+  assert.equal(captured.snapshot.assistantId, fixture.assistantId);
+  assert.match(captured.snapshot.definitionSha256, /^[0-9a-f]{64}$/u);
+  assert.equal(Object.keys(captured.snapshot).length, 5, 'paths and XML must not escape the native helper');
+  await assert.rejects(replacementController.remove(fixture, { ...captured.snapshot, definitionSha256: '0'.repeat(64) }),
+    { code: 'ASSISTANT_BACKGROUND_CONFLICT' });
+  assert.equal((await manage('status')).state, 'registered', 'a different full definition digest never deletes the registration');
   const replacement = { ...fixture, deviceId: randomUUID() };
   const otherDevice = createAssistantWindowsBackground({ readIdentity: async () => replacement,
     verifyContact: async () => {}, resolveLoader: async () => loader });
@@ -173,4 +235,13 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   }
   assert.equal(ready, true, 'the actual native task must execute, not merely register or return queue acceptance');
   assert.equal((await manage('status')).businessReady, false, 'a positive OS receipt cannot claim business delivery');
+  // The action has genuinely finished. Removal must reread the exact original
+  // native definition and preserve the registration if it is still running.
+  let removed = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try { assert.equal((await replacementController.remove(fixture, captured.snapshot)).state, 'not_installed'); removed = true; break; }
+    catch (error) { if (error.code !== 'ASSISTANT_BACKGROUND_BUSY') throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
+  }
+  assert.equal(removed, true);
+  assert.equal((await replacementController.inspect(fixture)).snapshot, null);
 });

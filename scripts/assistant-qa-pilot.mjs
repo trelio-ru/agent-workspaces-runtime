@@ -113,6 +113,8 @@ export const createAssistantQaPilot=async({configuration,configurationFile,confi
     requestRuntime:request,upgradeRuntime:async()=>{await loadAssistantQaRuntime(configuration);},
     backgroundTick:()=>entry.runAssistantBackgroundTick({createHost})});
   const runBackground=options=>entry.runAssistantBackground({...options,request,
+    readHost:()=>privateContext(async(client,host)=>({identity:client.identity,activation:await host.readActivation()})),
+    verifyRegistration:async()=>process.platform==='win32'?background()('status'):null,
     reportFailure:error=>privateContext(client=>entry.reportAssistantMaintenanceFailure(error,client))});
   return Object.freeze({origin,configurationDirectory:config,context:privateContext,withProfile,createMcp:nativeMcp,
     async run(args,options={}){

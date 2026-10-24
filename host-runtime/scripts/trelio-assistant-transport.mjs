@@ -1,6 +1,6 @@
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
-import { validateAssistantActivePass } from './trelio-assistant-hook.mjs';
+import { validateAssistantActivePass, validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
@@ -13,6 +13,22 @@ import { canonicalJson } from './trelio-company-encryption.mjs';
 export class AssistantTransportError extends Error {
   constructor(code, status = null) { super(code); this.code = code; this.status = status; }
 }
+/** Public setup remains available for two closed failures: an observed local
+ * slot mismatch, or confirmed 401/403 from the fixed native device transport.
+ * They are separately diagnosed, never an empty/healthy privileged catalogue.
+ * Malformed private bytes, ACL/DPAPI and network failures remain hard. No identity,
+ * path or credential is copied into the signed worker's error envelope. */
+export const assistantSetupRecovery = error => {
+  if(error?.code==='ASSISTANT_DEVICE_REQUIRED'&&error.status==null&&error.setupRecovery==='local_device_credential_mismatch')
+    return 'local_device_credential_mismatch';
+  const native=error?.code==='ASSISTANT_DEVICE_REQUIRED'&&error.status===401
+    ||error?.code==='ASSISTANT_ACCESS_DENIED'&&error.status===403;
+  if(error?.setupRecovery==='assistant_mcp_catalog_rejected'
+    &&(error.code==='REMOTE_MCP_AUTH_REJECTED'&&error.status===401
+      ||error.code==='REMOTE_MCP_INSUFFICIENT_SCOPE'&&error.status===403))return 'assistant_mcp_catalog_rejected';
+  return native&&(error instanceof AssistantTransportError||error.setupRecovery==='device_authorization_required')
+    ?'device_authorization_required':null;
+};
 const fail = (code, status) => { throw new AssistantTransportError(code, status); };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const HEAD = /^[0-9a-f]{40,64}$/u;
@@ -286,9 +302,15 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
   return async (operation, body, credential = null, signal = null) => {
     const route = routes.get(operation);
     if (!route || (credential !== null && !/^tda_[A-Za-z0-9_-]{43}$/u.test(credential))) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
-    // These two public routes use the enrollment's S256 verifier, never an
-    // owner bearer. All runtime operations require the separate device token.
-    if (['pair','exchange'].includes(operation) ? credential !== null : credential === null) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+    // A candidate device may authenticate ONLY the existing pair endpoint for
+    // explicit owner-reviewed recovery; it never borrows a human bearer. The
+    // one-use exchange remains S256-only and is never repeated for recovery.
+    if (operation==='exchange'&&credential!==null
+      ||!['pair','exchange'].includes(operation)&&credential===null
+      ||operation==='pair'&&credential!==null&&(!object(body?.hostIdentity)
+        ||Object.keys(body.hostIdentity).sort().join(',')!=='assistantUserId,deviceId'
+        ||!UUID.test(body.hostIdentity.assistantUserId??'')||!UUID.test(body.hostIdentity.deviceId??'')))
+      fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
     // This sole GET query has a closed structural schema. The caller cannot
     // choose an endpoint, append selectors or smuggle a request body to fetch.
     let query = '';
@@ -339,9 +361,14 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
 
 const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, store }) => {
   const secret = await store.get({ origin, kind: 'device', id: assistantId });
-  if (!secret || secret.assistantId !== assistantId || secret.deviceId !== deviceId
+  if (secret && (!UUID.test(secret.assistantId ?? '') || !UUID.test(secret.deviceId ?? '')
     || !/^tda_[A-Za-z0-9_-]{43}$/u.test(secret.credential ?? '') || !Number.isSafeInteger(secret.expiresAt)
-    || secret.expiresAt <= 0) fail('ASSISTANT_DEVICE_REQUIRED');
+    || secret.expiresAt <= 0)) fail('ASSISTANT_DEVICE_REQUIRED');
+  if (!secret || secret.assistantId !== assistantId || secret.deviceId !== deviceId) {
+    throw Object.assign(new AssistantTransportError('ASSISTANT_DEVICE_REQUIRED'), {
+      setupRecovery: 'local_device_credential_mismatch',
+    });
+  }
   // Pairing's stored expiry is historical metadata, not live authority: the
   // owner can renew this exact device in Trelio without changing its protected
   // credential. Every fixed endpoint rechecks current absolute/idle expiry,
@@ -2235,7 +2262,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async heartbeat(signal) {
       const value = await call('heartbeat', {}, signal);
       if (value.assistantUserId !== assistantId || value.deviceId !== deviceId) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-      return { assistantId, deviceId };
+      let activation;
+      if(value.activation!=null){
+        try{activation=validateAssistantActivationAuthorization(value.activation);}catch{fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');}
+        if(activation.assistantUserId!==assistantId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      }
+      return { assistantId, deviceId,...(activation?{activation}:{}) };
     },
     async companies(signal) {
       const value = await call('companies', undefined, signal);
@@ -2385,37 +2417,98 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
   origin = originOf(origin);
   if (!store || typeof http !== 'function') fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   return {
-    async begin(enrollmentId, deviceName) {
+    async begin(enrollmentId, deviceName, {hostIdentity=null,recoveryCandidate=null,refresh=false}={}) {
       enrollmentId = id(enrollmentId);
       if (typeof deviceName !== 'string' || !deviceName.trim() || deviceName.length > 120 || /[\x00-\x1f\x7f]/u.test(deviceName)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      if(hostIdentity!==null&&(!object(hostIdentity)||Object.keys(hostIdentity).sort().join(',')!=='assistantUserId,deviceId'
+        ||!UUID.test(hostIdentity.assistantUserId??'')||!UUID.test(hostIdentity.deviceId??'')))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const key = { origin, kind: 'pairing', id: enrollmentId };
       let current = await store.get(key);
       if (!current) {
-        current = { phase: 'prepared', verifier: randomBytes(32).toString('base64url'), deviceName };
+        current = { phase: 'prepared', verifier: randomBytes(32).toString('base64url'), deviceName,hostIdentity };
         await store.put(key, current);
       }
-      if (!['prepared','pending'].includes(current.phase) || current.deviceName !== deviceName || !/^[A-Za-z0-9_-]{43}$/u.test(current.verifier ?? '')) fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
-      if (current.phase === 'prepared') {
-        const result = await http('pair', { enrollmentId, deviceName,
-          challenge: createHash('sha256').update(current.verifier).digest('base64url') });
+      recoveryCandidate??=current.recovery??null;
+      if (!['prepared','pending'].includes(current.phase) || current.deviceName !== deviceName || !/^[A-Za-z0-9_-]{43}$/u.test(current.verifier ?? '')
+        ||JSON.stringify(current.hostIdentity??null)!==JSON.stringify(hostIdentity)) fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+      if (current.phase === 'prepared'||refresh) {
+        const body={enrollmentId,deviceName,challenge:createHash('sha256').update(current.verifier).digest('base64url'),hostIdentity};
+        if(recoveryCandidate&&!current.recovery){current={...current,recovery:recoveryCandidate};await store.put(key,current);}
+        let result = await http('pair',body,recoveryCandidate?.credential??null);
+        const target=id(result.assistantUserId);
+        if(!['pending','approved','denied','exchanged'].includes(result.state))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+        if(hostIdentity!==null&&!recoveryCandidate&&result.state==='pending'){
+          // The exact enrollment supplies this one structural target. Read its
+          // one protected device slot; never enumerate accounts/private cache
+          // to guess a surviving different-assistant candidate. Attaching it
+          // repeats only idempotent pair registration, never old exchange or
+          // an already-approved decision. Native CAS refuses that late upgrade.
+          const observed=await store.get({origin,kind:'device',id:target});
+          if(observed?.assistantId===target&&UUID.test(observed.deviceId??'')
+            &&/^tda_[A-Za-z0-9_-]{43}$/u.test(observed.credential??'')&&Number.isSafeInteger(observed.expiresAt)&&observed.expiresAt>0
+            &&(target!==hostIdentity.assistantUserId||observed.deviceId!==hostIdentity.deviceId)){
+            recoveryCandidate=observed;
+            // Save the newly discovered exact candidate BEFORE the second
+            // idempotent registration. If its response is lost, restart must
+            // retain the same bearer/target rather than returning with none.
+            current={...current,recovery:observed,pairingId:id(result.pairingId)};await store.put(key,current);
+            result=await http('pair',body,observed.credential);
+            if(result.assistantUserId!==target||result.state!=='pending')fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+          }
+        }
         if (!/^[A-F0-9]{8}$/u.test(result.verificationCode ?? '') || !Number.isFinite(Date.parse(result.expiresAt))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-        current = { ...current, phase: 'pending', pairingId: id(result.pairingId), verificationCode: result.verificationCode, expiresAt: Date.parse(result.expiresAt) };
+        if(current.pairingId&&result.pairingId!==current.pairingId)fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+        if(recoveryCandidate&&result.recovery==null)fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+        let recovery=null;
+        if(result.recovery!=null){
+          if(!object(result.recovery)||Object.keys(result.recovery).sort().join(',')!=='assistantUserId,deviceId'
+            ||!recoveryCandidate||result.recovery.assistantUserId!==recoveryCandidate.assistantId
+            ||result.recovery.deviceId!==recoveryCandidate.deviceId)fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+          recovery={assistantId:id(result.recovery.assistantUserId),deviceId:id(result.recovery.deviceId),
+            credential:recoveryCandidate.credential,expiresAt:recoveryCandidate.expiresAt};
+        }
+        current = { ...current, phase: 'pending', pairingId: id(result.pairingId), verificationCode: result.verificationCode,
+          expiresAt: Date.parse(result.expiresAt),pairingState:result.state,...(recovery?{recovery}:{}) };
         await store.put(key, current);
       }
       if (current.expiresAt <= now()) fail('ASSISTANT_PAIRING_EXPIRED');
-      return { pairingId: id(current.pairingId), verificationCode: current.verificationCode, expiresAt: current.expiresAt };
+      return { pairingId: id(current.pairingId), verificationCode: current.verificationCode, expiresAt: current.expiresAt,state:current.pairingState??'pending' };
+    },
+    async refresh(enrollmentId){
+      const current=await store.get({origin,kind:'pairing',id:id(enrollmentId)});
+      if(!current||!['prepared','pending'].includes(current.phase))fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+      return this.begin(enrollmentId,current.deviceName,{hostIdentity:current.hostIdentity??null,recoveryCandidate:current.recovery??null,refresh:true});
     },
     async exchange(enrollmentId) {
       const key = { origin, kind: 'pairing', id: id(enrollmentId) };
       const current = await store.get(key);
-      if (!current || current.phase !== 'pending') fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+      if (!current || current.phase !== 'pending'&&!(current.phase==='prepared'&&current.recovery&&UUID.test(current.pairingId??'')))
+        fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+      if(current.recovery){
+        // This is a NEW owner decision for a surviving old candidate, not a
+        // second exchange of either enrollment. Only authenticated heartbeat
+        // can produce its persisted explicit replacement authorization.
+        const value=await http('heartbeat',{},current.recovery.credential);
+        if(value.assistantUserId!==current.recovery.assistantId||value.deviceId!==current.recovery.deviceId)
+          fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+        if(value.activation==null)return {state:'pending'};
+        const activation=validateAssistantActivationAuthorization(value.activation);
+        if(activation.mode!=='replace'||activation.authorizationId!==current.pairingId
+          ||activation.assistantUserId!==current.recovery.assistantId)fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+        const candidate={phase:'candidate',origin,...current.recovery,activation,hostIdentity:current.hostIdentity};
+        await store.put(key,candidate);
+        return {state:'candidate',origin,assistantId:candidate.assistantId,deviceId:candidate.deviceId};
+      }
       if (current.expiresAt <= now()) fail('ASSISTANT_PAIRING_EXPIRED');
       await store.put(key, { ...current, phase: 'exchanging' });
       let result;
       try { result = await http('exchange', { pairingId: id(current.pairingId), verifier: current.verifier }); }
       catch (error) {
-        if (error instanceof AssistantTransportError && error.status === 409) {
-          await store.put(key, current); return { state: 'pending' };
+        if (error instanceof AssistantTransportError && error.status === 409
+          &&['ASSISTANT_PAIRING_NOT_APPROVED','ASSISTANT_HOST_PASS_REVIEW_REQUIRED','ASSISTANT_HOST_INTAKE_REVIEW_REQUIRED','ASSISTANT_STATE_CHANGED'].includes(error.code)) {
+          await store.put(key,current);
+          if(error.code==='ASSISTANT_PAIRING_NOT_APPROVED')return {state:'pending'};
+          throw error;
         }
         // Persisted `exchanging` is intentionally left terminal on uncertainty.
         // A restart cannot recreate the verifier and issue a second device.
@@ -2423,10 +2516,15 @@ export const createAssistantPairingClient = ({ origin, store, http, now = Date.n
       }
       if (!/^tda_[A-Za-z0-9_-]{43}$/u.test(result.credential ?? '') || !Number.isFinite(Date.parse(result.expiresAt))) fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
       const identity = { origin, assistantId: id(result.assistantUserId), deviceId: id(result.deviceId) };
-      await store.put({ origin, kind: 'device', id: identity.assistantId }, { assistantId: identity.assistantId,
-        deviceId: identity.deviceId, credential: result.credential, expiresAt: Date.parse(result.expiresAt) });
-      await store.put(key, { phase: 'complete', ...identity }); // Erase verifier.
-      return { state: 'ready', ...identity };
+      const activation=validateAssistantActivationAuthorization(result.activation);
+      if(activation.assistantUserId!==identity.assistantId||activation.authorizationId!==current.pairingId)
+        fail('ASSISTANT_PAIRING_RECOVERY_REQUIRED');
+      // The active assistant slot is intentionally untouched here. A durable
+      // encrypted candidate survives failures before host/background preflight;
+      // verifier erasure cannot turn a staged candidate into an active host.
+      await store.put(key,{phase:'candidate',...identity,credential:result.credential,
+        expiresAt:Date.parse(result.expiresAt),activation,hostIdentity:current.hostIdentity??null});
+      return { state: 'candidate', ...identity };
     },
   };
 };
@@ -2587,8 +2685,9 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   const perform = async (action, signal, operationTimeoutMs = timeoutMs) => {
     const deadline = AbortSignal.timeout(operationTimeoutMs);
     const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+    let protocol;
     try {
-      const protocol = await import("./trelio-remote-mcp.mjs");
+      protocol = await import("./trelio-remote-mcp.mjs");
       const request = httpRequest ?? protocol.remoteMcpHttpRequest;
       const credential = await loadAssistantDeviceCredential({ origin, assistantId, deviceId, store });
       if (boundedSignal.aborted) fail("ASSISTANT_MCP_UNAVAILABLE");
@@ -2605,6 +2704,16 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       finally { await protocol.closeRemoteSession(config, credential, session.sessionId, request, { signal: boundedSignal }); }
     } catch (error) {
       if (error instanceof AssistantTransportError) throw error;
+      if(protocol&&error instanceof protocol.RemoteMcpHostError
+        &&['REMOTE_MCP_AUTH_REJECTED','REMOTE_MCP_INSUFFICIENT_SCOPE'].includes(error.code)){
+        // The shared protocol drops raw HTTP details by design. Only HERE,
+        // beneath the fixed assistant-device endpoint, mark its two exact
+        // closed auth/scope refusals for the public setup catalogue. A human
+        // Remote MCP/provider failure never receives this provenance.
+        throw Object.assign(new AssistantTransportError(error.code,error.code==='REMOTE_MCP_AUTH_REJECTED'?401:403),{
+          setupRecovery:'assistant_mcp_catalog_rejected',
+        });
+      }
       if (/^REMOTE_MCP_[A-Z_]{1,100}$/u.test(error?.code ?? '')) fail(error.code);
       // Raw HTTP/JSON-RPC errors may contain paths or upstream detail. Preserve
       // the private credential and queue; never login or retry a tools/call.

@@ -6,23 +6,94 @@ import path from 'node:path';
 import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { runAssistantSetupMcp, runAssistantEntry, assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
+import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
+import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
+import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
   executeAssistantRuntimeRequest,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
+const memorySetupHost=(store,{afterWrite}={})=>{
+  const files=new Map();let queued=Promise.resolve();
+  const host=createAssistantHostState({directory:path.join(os.tmpdir(),'synthetic-setup-'+randomUUID()),store,primitives:{
+    ensurePrivateDirectory:async()=>{},assertPrivatePathKind:async file=>{if(!files.has(file))throw Object.assign(new Error(),{code:'ENOENT'});},
+    readPrivateJsonFile:async file=>structuredClone(files.get(file)),
+    writePrivateJsonFile:async(file,value)=>{files.set(file,structuredClone(value));await afterWrite?.(file,value);},
+    withSetupLock:action=>{const result=queued.then(action);queued=result.catch(()=>{});return result;},
+  }});
+  return {host,files};
+};
+
+const stagedSetupFixture=async({previous=null,target=previous?.assistantId??randomUUID(),legacy=false,afterWrite}={})=>{
+  const origin='https://owner-rebind.test',deviceId=randomUUID(),values=new Map(),reads=[],writes=[],pairs=new Map();
+  const oldSecret=previous?{assistantId:previous.assistantId,deviceId:previous.deviceId,credential:`tda_${'o'.repeat(43)}`,expiresAt:1}:null;
+  const secret={assistantId:target,deviceId,credential:`tda_${'n'.repeat(43)}`,expiresAt:90000};
+  let activeAuthorization=null,background='not_installed',removed=0,inspected=0,exchanged=0,failActiveWrite=false,expired=false,clock=100,pairRequests=0,loseAttach=false,removeError=null;
+  const slot=input=>JSON.stringify(input),deviceKey=assistantId=>({origin,kind:'device',id:assistantId});
+  const store={get:async input=>{reads.push(input);return structuredClone(values.get(slot(input))??null);},put:async(input,value)=>{
+    writes.push({input,value:structuredClone(value)});values.set(slot(input),structuredClone(value));
+    if(input.kind==='device'&&failActiveWrite){failActiveWrite=false;throw new Error('synthetic lost protected-write acknowledgement');}
+  }};
+  if(oldSecret)await store.put(deviceKey(previous.assistantId),oldSecret);
+  if(legacy)await store.put(deviceKey(target),secret);
+  const {host,files}=memorySetupHost(store,{afterWrite});
+  if(previous)await host.saveIdentity(previous);
+  const authorization=(row,replace=true)=>({schemaVersion:1,mode:previous&&replace?'replace':'initial',assistantUserId:target,
+    replacesAssistantUserId:previous&&replace?previous.assistantId:null,replacesDeviceId:previous&&replace?previous.deviceId:null,authorizationId:row.pairingId});
+  const http=async(operation,input,credential)=>{
+    if(operation==='pair'){
+      pairRequests++;
+      if(expired)throw new AssistantTransportError('ASSISTANT_PAIRING_EXPIRED',410);
+      let row=pairs.get(input.enrollmentId);
+      if(!row){row={pairingId:randomUUID(),state:'pending',recovery:null};pairs.set(input.enrollmentId,row);}
+      if(credential===secret.credential){
+        if(row.state!=='pending'&&!row.recovery)throw new AssistantTransportError('ASSISTANT_STATE_CHANGED',409);
+        row.recovery={assistantUserId:target,deviceId};
+        if(loseAttach){loseAttach=false;throw new Error('synthetic lost recovery attach response');}
+      }
+      return {pairingId:row.pairingId,assistantUserId:target,state:row.state,recovery:row.recovery,
+        verificationCode:'ABCDEF12',expiresAt:new Date(80000).toISOString()};
+    }
+    if(operation==='exchange'){
+      exchanged++;const row=[...pairs.values()].find(row=>row.pairingId===input.pairingId);
+      if(row.state!=='approved')throw new AssistantTransportError('ASSISTANT_PAIRING_NOT_APPROVED',409);
+      row.state='exchanged';activeAuthorization=authorization(row,row.replace);
+      return {...secret,assistantUserId:target,expiresAt:new Date(secret.expiresAt).toISOString(),activation:activeAuthorization};
+    }
+    assert.equal(operation,'heartbeat');
+    if(credential===secret.credential)return {assistantUserId:target,deviceId,activation:activeAuthorization};
+    if(oldSecret&&credential===oldSecret.credential&&!activeAuthorization)return {assistantUserId:previous.assistantId,deviceId:previous.deviceId};
+    throw new AssistantTransportError('ASSISTANT_ACCESS_DENIED',403);
+  };
+  const backgroundReplacement={inspect:async selected=>{
+    inspected++;assert.deepEqual(await host.readIdentity(),selected);
+    return {schemaVersion:1,state:background,snapshot:background==='not_installed'?null:{schemaVersion:1,
+      assistantId:selected.assistantId,deviceId:selected.deviceId,principalSid:'S-1-5-21-1-2-3-1001',definitionSha256:'a'.repeat(64)}};
+  },remove:async(selected,snapshot)=>{if(removeError){const code=removeError;removeError=null;throw Object.assign(new Error(code),{code});}removed++;assert.equal(snapshot.deviceId,selected.deviceId);assert.equal(background,'registered');background='not_installed';}};
+  const options={origin,store,http,host,backgroundReplacement,withLock:host.withSetupLock,now:()=>clock};
+  return {origin,store,host,files,reads,writes,secret,oldSecret,options,setup:createAssistantSetup(options),
+    approve:(enrollmentId,replace=true)=>{const row=pairs.get(enrollmentId);row.replace=replace;row.state=row.recovery?'exchanged':'approved';if(row.recovery)activeAuthorization=authorization(row,replace);},
+    deny:enrollmentId=>{pairs.get(enrollmentId).state='denied';},expire:()=>{expired=true;},unexpire:()=>{expired=false;},
+    setClock:value=>{clock=value;},pairRequests:()=>pairRequests,loseAttach:()=>{loseAttach=true;},rejectRemoval:code=>{removeError=code;},
+    setBackground:value=>{background=value;},loseActiveWrite:()=>{failActiveWrite=true;},
+    counts:()=>({exchanged,removed,inspected,activeWrites:writes.filter(write=>write.input.kind==='device'&&write.value.credential===secret.credential).length}),
+  };
+};
+
 test('setup projects only pairing code and live identities, with no repeated exchange', async () => {
-  const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID();
+  const origin='https://assistant.test', enrollmentId=randomUUID(), assistantUserId=randomUUID(), deviceId=randomUUID(),pairingId=randomUUID();
   const values = new Map(), key = input => JSON.stringify(input);
   const store = { get: async input => structuredClone(values.get(key(input)) ?? null),
     put: async (input,value) => values.set(key(input),structuredClone(value)) };
   let exchanges = 0, revoked = false;
   const http = async (operation) => {
-    if (operation === 'pair') return { pairingId: randomUUID(), verificationCode:'ABCDEF12', expiresAt:new Date(20000).toISOString() };
-    if (operation === 'exchange') { exchanges++; return { assistantUserId,deviceId,credential:`tda_${'b'.repeat(43)}`,expiresAt:new Date(30000).toISOString() }; }
+    if (operation === 'pair') return { pairingId,assistantUserId,state:'pending',recovery:null,verificationCode:'ABCDEF12', expiresAt:new Date(20000).toISOString() };
+    if (operation === 'exchange') { exchanges++; return { assistantUserId,deviceId,credential:`tda_${'b'.repeat(43)}`,expiresAt:new Date(30000).toISOString(),
+      activation:{schemaVersion:1,mode:'initial',assistantUserId,replacesAssistantUserId:null,replacesDeviceId:null,authorizationId:pairingId} }; }
     assert.equal(operation,'heartbeat');
     if(revoked) throw Object.assign(new Error('PRIVATE FAILURE'),{code:'ASSISTANT_ACCESS_DENIED'});
     return {assistantUserId,deviceId};
   };
-  const setup = createAssistantSetup({origin,store,http,now:()=>100});
+  const {host}=memorySetupHost(store);
+  const setup = createAssistantSetup({origin,store,http,host,withLock:host.withSetupLock,now:()=>100});
   assert.deepEqual(await setup.status(enrollmentId),{state:'not_started'});
   assert.deepEqual(await setup.begin(enrollmentId,'Fixture'),{state:'waiting_owner',verificationCode:'ABCDEF12',expiresAt:20000});
   assert.ok(!JSON.stringify(await setup.status(enrollmentId)).includes('verifier'));
@@ -38,12 +109,13 @@ test('setup projects only pairing code and live identities, with no repeated exc
 });
 
 test('uncertain exchange remains blocked after setup restart', async () => {
-  const values=new Map(),key=input=>JSON.stringify(input),enrollmentId=randomUUID();
+  const values=new Map(),key=input=>JSON.stringify(input),enrollmentId=randomUUID(),pairingId=randomUUID(),assistantUserId=randomUUID();
   const store={get:async input=>structuredClone(values.get(key(input))??null),
     put:async(input,value)=>values.set(key(input),structuredClone(value))};
   let exchanges=0;
-  const options={origin:'https://assistant.test',store,now:()=>100,http:async operation=>{
-    if(operation==='pair')return {pairingId:randomUUID(),verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
+  const {host}=memorySetupHost(store);
+  const options={origin:'https://assistant.test',store,host,withLock:host.withSetupLock,now:()=>100,http:async operation=>{
+    if(operation==='pair')return {pairingId,assistantUserId,state:'pending',recovery:null,verificationCode:'ABCDEF12',expiresAt:new Date(20000).toISOString()};
     exchanges++;throw new Error('committed response lost');
   }};
   const setup=createAssistantSetup(options);await setup.begin(enrollmentId,'Fixture');
@@ -51,6 +123,126 @@ test('uncertain exchange remains blocked after setup restart', async () => {
   const restarted=createAssistantSetup(options);
   assert.deepEqual(await restarted.status(enrollmentId),{state:'recovery_required'});
   await assert.rejects(restarted.finish(enrollmentId),/RECOVERY_REQUIRED/);assert.equal(exchanges,1);
+});
+
+test('replacement stages candidate before active writes, waits for exact idle background and reuses the same enrollment',async()=>{
+  const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const f=await stagedSetupFixture({previous}),enrollmentId=randomUUID();
+  f.setBackground('running');await f.setup.begin(enrollmentId,'Windows fixture');f.approve(enrollmentId);
+  const wait=await f.setup.finish(enrollmentId);
+  assert.equal(wait.state,'replacement_waiting_background');assert.equal(wait.backgroundTaskName,'Trelio-DigitalAssistant-'+previous.assistantId);
+  assert.deepEqual(await f.host.readIdentity(),previous);
+  assert.deepEqual(await f.store.get({origin:f.origin,kind:'device',id:previous.assistantId}),f.oldSecret,'old active credential is unchanged while background is busy');
+  assert.equal((await f.host.readActivation()).stage,'quiescing');
+  assert.equal((await f.setup.status(enrollmentId)).state,'activation_pending');
+  assert.equal(f.counts().removed,0);assert.equal(f.counts().activeWrites,0);
+  f.setBackground('registered');const done=await createAssistantSetup(f.options).finish(enrollmentId);
+  assert.equal(done.state,'paired');assert.equal(done.deviceId,f.secret.deviceId);
+  assert.deepEqual(f.counts(),{exchanged:1,removed:1,inspected:3,activeWrites:1});
+  const before=f.counts();assert.equal((await f.setup.begin(enrollmentId,'Windows fixture')).state,'paired');
+  assert.equal((await f.setup.finish(enrollmentId)).state,'paired');assert.deepEqual(f.counts(),before);
+});
+
+test('ordinary add-device approval never grants replacement or overwrites the old credential',async()=>{
+  const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const f=await stagedSetupFixture({previous}),enrollmentId=randomUUID();await f.setup.begin(enrollmentId,'Windows fixture');f.approve(enrollmentId,false);
+  await assert.rejects(f.setup.finish(enrollmentId),{code:'ASSISTANT_HOST_ACTIVATION_INVALID'});
+  assert.deepEqual(await f.host.readIdentity(),previous);assert.equal(f.counts().activeWrites,0);assert.equal(f.counts().removed,0);
+});
+
+test('a retained local pass blocks pair before HTTP even if native work might already be closed',async()=>{
+  const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const f=await stagedSetupFixture({previous}),enrollmentId=randomUUID();
+  // It is deliberately NOT inferred closed from native counts or age. The
+  // original pass recovery must verify/release it through its existing engine.
+  await f.store.put({origin:f.origin,kind:'pass',id:previous.deviceId},{retainedUnknownOutcome:true});
+  await assert.rejects(f.setup.begin(enrollmentId,'Windows fixture'));
+  assert.equal(await f.store.get({origin:f.origin,kind:'pairing',id:enrollmentId}),null);
+  assert.equal(await f.host.readActivation(),null);assert.equal(f.counts().exchanged,0);assert.equal(f.pairRequests(),0);
+  assert.deepEqual(await f.host.readIdentity(),previous);
+});
+
+test('definitively denied or expired pending enrollment can release its denial despite a broken old credential',async()=>{
+  for(const rejection of ['denied','expired']){
+    const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+    const f=await stagedSetupFixture({previous,legacy:true}),enrollmentId=randomUUID();
+    await f.setup.begin(enrollmentId,'Windows fixture');
+    if(rejection==='denied'){f.deny(enrollmentId);assert.equal((await f.setup.status(enrollmentId)).state,'denied');}
+    else{f.expire();await assert.rejects(f.setup.status(enrollmentId),{code:'ASSISTANT_PAIRING_EXPIRED'});f.unexpire();}
+    assert.equal((await f.host.readActivation()).stage,'released');assert.deepEqual(await f.host.readIdentity(),previous);
+    assert.equal((await f.setup.begin(randomUUID(),'Windows fixture')).state,'waiting_owner');
+    assert.equal(f.counts().exchanged,0);assert.equal(f.counts().removed,0);
+  }
+});
+
+test('legacy half-commit recovers same or different assistant by one exact native target, never another exchange',async()=>{
+  for(const differentAssistant of [false,true]){
+    const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+    const target=differentAssistant?randomUUID():previous.assistantId;
+    const f=await stagedSetupFixture({previous,target,legacy:true}),enrollmentId=randomUUID();
+    await f.setup.begin(enrollmentId,'Windows fixture');
+    assert.equal((await f.setup.finish(enrollmentId)).state,'waiting_owner','old generic pairing is not replacement approval');
+    f.approve(enrollmentId);assert.equal((await f.setup.finish(enrollmentId)).state,'paired');
+    assert.equal(f.counts().exchanged,0);assert.equal(f.counts().activeWrites,1,'only the pre-existing legacy write exists');
+    assert.ok(f.reads.filter(read=>read.kind==='device').every(read=>[previous.assistantId,target].includes(read.id)),'no private slot scan');
+  }
+});
+
+test('lost active-credential write reply resumes by exact read-back without repeating the writer or exchange',async()=>{
+  const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const f=await stagedSetupFixture({previous}),enrollmentId=randomUUID();await f.setup.begin(enrollmentId,'Windows fixture');f.approve(enrollmentId);
+  f.loseActiveWrite();await assert.rejects(f.setup.finish(enrollmentId));
+  assert.deepEqual(await f.host.readIdentity(),previous);assert.equal((await f.host.readActivation()).stage,'quiescing');
+  assert.equal((await createAssistantSetup(f.options).finish(enrollmentId)).state,'paired');
+  assert.equal(f.counts().activeWrites,1);assert.equal(f.counts().exchanged,1);
+});
+
+test('crash after identity write resumes the same activation without old background inspection or a second write',async()=>{
+  for(const replacement of [false,true]){
+    const previous=replacement?{schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()}:null;
+    let crash=false;
+    const f=await stagedSetupFixture({previous,afterWrite:async(file,value)=>{
+      if(crash&&file.endsWith('identity.json')){crash=false;throw new Error('synthetic crash after identity publication');}
+    }}),enrollmentId=randomUUID();
+    if(replacement)f.setBackground('registered');
+    await f.setup.begin(enrollmentId,'Windows fixture');f.approve(enrollmentId);crash=true;
+    await assert.rejects(f.setup.finish(enrollmentId));
+    assert.equal((await f.host.readIdentity()).deviceId,f.secret.deviceId);assert.equal((await f.host.readActivation()).stage,'quiescing');
+    const before=f.counts();assert.equal((await createAssistantSetup(f.options).finish(enrollmentId)).state,'paired');
+    assert.deepEqual(f.counts(),before,'only the interrupted structural activation commit is completed');
+  }
+});
+
+test('lost different-assistant candidate attach survives restart and short enrollment expiry through durable heartbeat only',async()=>{
+  const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const f=await stagedSetupFixture({previous,target:randomUUID(),legacy:true}),enrollmentId=randomUUID();f.loseAttach();
+  await assert.rejects(f.setup.begin(enrollmentId,'Windows fixture'));
+  const retained=await f.store.get({origin:f.origin,kind:'pairing',id:enrollmentId});
+  assert.equal(retained.recovery.deviceId,f.secret.deviceId,'exact candidate is durable BEFORE the native attach request');
+  f.approve(enrollmentId);f.setClock(100000);f.expire();const pairRequests=f.pairRequests();
+  const restarted=createAssistantSetup(f.options);
+  assert.equal((await restarted.status(enrollmentId)).state,'activation_pending');
+  assert.equal((await restarted.finish(enrollmentId)).state,'paired');
+  assert.equal(f.pairRequests(),pairRequests,'durable approval is read before expired enrollment refresh');
+  assert.equal(f.counts().exchanged,0,'legacy candidate never repeats its original one-use exchange');
+});
+
+test('only native known-no-delete busy releases the exact background attempt fence',async()=>{
+  for(const code of ['ASSISTANT_BACKGROUND_BUSY','ASSISTANT_BACKGROUND_ACCESS_DENIED']){
+    const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+    const f=await stagedSetupFixture({previous}),enrollmentId=randomUUID();f.setBackground('registered');
+    await f.setup.begin(enrollmentId,'Windows fixture');f.approve(enrollmentId);f.rejectRemoval(code);
+    if(code==='ASSISTANT_BACKGROUND_BUSY'){
+      assert.equal((await f.setup.finish(enrollmentId)).reason,'supervisor_not_idle');
+      assert.equal(f.counts().removed,0,'native busy is rejected before DeleteTask');
+      assert.equal((await createAssistantSetup(f.options).finish(enrollmentId)).state,'paired');
+      assert.equal(f.counts().removed,1);
+    }else{
+      await assert.rejects(f.setup.finish(enrollmentId),{code});
+      assert.equal((await createAssistantSetup(f.options).finish(enrollmentId)).reason,'removal_outcome_unknown');
+      assert.equal(f.counts().removed,0,'unknown/access result never repeats the OS deletion');
+    }
+  }
 });
 
 test('actual stdio frames discover setup without auth I/O and reject unknown fields/tools', async () => {
@@ -78,6 +270,106 @@ test('oversized frames and unsupported entry commands fail before setup or priva
     createSetup:async()=>{created++;}}),/FRAME_TOO_LARGE/);
   await assert.rejects(runAssistantEntry(['mcp','--human-oauth']),/COMMAND_UNSUPPORTED/);
   assert.equal(created,0);
+});
+
+test('startup retains all six setup tools for an observed local device conflict without admitting business work',async()=>{
+  const origin='https://rebind-fixture.test',assistantId=randomUUID(),deviceId=randomUUID();
+  for(const candidate of [null,{assistantId,deviceId:randomUUID(),credential:`tda_${'c'.repeat(43)}`,expiresAt:1}]){
+    let calls=0,setupCalls=0,raw='';const output=new PassThrough();output.on('data',part=>raw+=part);
+    const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>candidate},
+      http:async()=>{calls++;assert.fail('local tuple refusal must precede HTTP');}});
+    const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+      {jsonrpc:'2.0',id:2,method:'tools/list'},
+      {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'get_assistant_setup_status',arguments:{enrollmentId:randomUUID()}}},
+      {jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'get_task',arguments:{}}}];
+    await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+      createMcp:async()=>({listTools:async()=>{await client.heartbeat();return [];},callTool:()=>client.heartbeat()}),
+      createSetup:async()=>({status:async()=>{setupCalls++;return {state:'recovery_required'};}})});
+    const messages=raw.trim().split('\n').map(JSON.parse);
+    assert.ok(messages[0].result.capabilities.tools.listChanged);
+    assert.equal(messages[1].result.tools.length,6);
+    assert.deepEqual(messages[1].result._meta,{'trelio/assistant-setup-recovery':{
+      schemaVersion:1,state:'local_identity_conflict',code:'ASSISTANT_DEVICE_REQUIRED'}});
+    assert.deepEqual(messages[2].result.structuredContent,{state:'recovery_required'});
+    assert.equal(messages[3].result.structuredContent.code,'ASSISTANT_DEVICE_REQUIRED');
+    assert.equal(messages[3].result.isError,true);assert.equal(setupCalls,1);assert.equal(calls,0);
+    assert.doesNotMatch(raw,new RegExp([assistantId,deviceId,'tda_'].join('|')),'discovery diagnostic contains no private identity/value');
+  }
+});
+
+test('malformed slots, private I/O and untrusted failure flags are not setup-recovery evidence',async()=>{
+  const origin='https://rebind-fixture.test',assistantId=randomUUID(),deviceId=randomUUID();
+  const valid={assistantId,deviceId,credential:`tda_${'c'.repeat(43)}`,expiresAt:1};
+  const cases=[
+    {get:async()=>({...valid,deviceId:'malformed'}),code:'ASSISTANT_DEVICE_REQUIRED'},
+    {get:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_PRIVATE_UNAVAILABLE'});},code:'ASSISTANT_PRIVATE_UNAVAILABLE'},
+    {get:async()=>valid,http:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE',setupRecovery:'local_device_credential_mismatch'});},code:'ASSISTANT_TRANSPORT_UNAVAILABLE'},
+  ];
+  for(const input of cases){
+    const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:input.get},
+      http:input.http??(async()=>assert.fail('invalid private slot reached HTTP'))});
+    let raw='';const output=new PassThrough();output.on('data',part=>raw+=part);
+    await runAssistantSetupMcp({input:Readable.from([
+      JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize'})+'\n',
+      JSON.stringify({jsonrpc:'2.0',id:2,method:'tools/list'})+'\n']),output,
+      createMcp:async()=>({listTools:()=>client.heartbeat()})});
+    const result=JSON.parse(raw.trim().split('\n')[1]);
+    assert.equal(result.error.message,input.code);assert.equal(result.result,undefined);
+  }
+});
+
+test('fixed assistant MCP auth/scope rejection survives the signed child frame and leaves staged repair reachable',async()=>{
+  const {RemoteMcpHostError}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const {EventEmitter}=await import('node:events');
+  const decode=raw=>requestCurrentAssistantRuntime({operation:'list'},{resolveLoader:async()=>'/synthetic/verified-loader.mjs',spawnProcess:()=>{
+    const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};
+    child.stdin.on('finish',()=>queueMicrotask(()=>{child.stdout.write(raw);child.emit('close',0);}));return child;
+  }});
+  for(const [code,status]of [['REMOTE_MCP_AUTH_REJECTED',401],['REMOTE_MCP_INSUFFICIENT_SCOPE',403]]){
+    const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+    const f=await stagedSetupFixture({previous}),enrollmentId=randomUUID();f.setBackground('running');
+    await f.setup.begin(enrollmentId,'Windows fixture');f.approve(enrollmentId);await f.setup.finish(enrollmentId);
+    let requests=0;
+    const proxy=createAssistantMcpClient({...previous,store:f.store,httpRequest:async input=>{
+      requests++;assert.equal(input.config.endpoint,f.origin+'/mcp/assistant');assert.equal(input.config.authentication.type,'assistant_device');
+      assert.equal(input.payload.method,'initialize');throw new RemoteMcpHostError(code,'PRIVATE upstream detail');
+    }});
+    let workerRaw='';const workerOutput=new PassThrough();workerOutput.on('data',part=>workerRaw+=part);
+    await runAssistantEntry(['request'],{input:Readable.from([JSON.stringify({operation:'list'})]),output:workerOutput,
+      executeRequest:()=>proxy.listTools()});
+    assert.deepEqual(JSON.parse(workerRaw),{failure:code,setupRecovery:'assistant_mcp_catalog_rejected',status});
+    let raw='';const output=new PassThrough();output.on('data',part=>raw+=part);
+    const frames=[{jsonrpc:'2.0',id:1,method:'initialize'}, {jsonrpc:'2.0',id:2,method:'tools/list'},
+      {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'get_assistant_setup_status',arguments:{enrollmentId}}},
+      {jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'get_task',arguments:{}}}];
+    await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+      createMcp:async()=>({listTools:()=>decode(workerRaw),callTool:()=>decode(workerRaw)}),createSetup:async()=>f.setup});
+    const messages=raw.trim().split('\n').map(JSON.parse);
+    assert.equal(messages[1].result.tools.length,6);
+    assert.deepEqual(messages[1].result._meta,{'trelio/assistant-setup-recovery':{
+      schemaVersion:1,state:'business_catalog_unavailable',code,status}});
+    assert.equal(messages[2].result.structuredContent.state,'activation_pending');
+    assert.equal(messages[3].result.structuredContent.code,code);assert.equal(messages[3].result.isError,true);
+    assert.equal(requests,1);assert.ok(!raw.includes('PRIVATE'));assert.deepEqual(await f.host.readIdentity(),previous);
+  }
+  for(const frame of [{failure:'REMOTE_MCP_AUTH_REJECTED'},
+    {failure:'REMOTE_MCP_AUTH_REJECTED',setupRecovery:'local_device_credential_mismatch'},
+    {failure:'ASSISTANT_TRANSPORT_UNAVAILABLE',setupRecovery:'device_authorization_required',status:403}])
+    await assert.rejects(decode(JSON.stringify(frame)),{code:'ASSISTANT_RUNTIME_REQUEST_UNAVAILABLE'});
+});
+
+test('pending-owner fence serializes a concurrent new pass before its HTTP boundary and blocks fresh legacy workers',async()=>{
+  const previous={schemaVersion:1,origin:'https://owner-rebind.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const f=await stagedSetupFixture({previous});let issued=0,background=0,upgrades=0;
+  const begin=f.setup.begin(randomUUID(),'Windows fixture');
+  const admission=withAssistantNewWorkAdmission(f.host,previous,async()=>{issued++;});
+  await begin;await assert.rejects(admission,{code:'ASSISTANT_HOST_REBIND_REQUIRED'});assert.equal(issued,0);
+  for(const operation of ['health','health_check','background_tick']){
+    const result=await executeAssistantRuntimeRequest({operation},{context:async action=>action({identity:previous},f.host),
+      backgroundTick:async()=>{background++;},upgradeRuntime:async()=>{upgrades++;}});
+    assert.deepEqual(result,{schemaVersion:1,state:'quiescing'});
+  }
+  assert.equal(background,0);assert.equal(upgrades,0);
 });
 
 test('source setup stdio accepts exact owner-ref locators only and returns closed native catalogue failures',async()=>{
@@ -309,7 +601,7 @@ test('production host composes real SQLite, fresh private calls and the native a
   },run:async()=>assert.fail('no business pass in this fixture'),readDelivery:async()=>({state:'uncertain'})};
   const database=new DatabaseSync(':memory:');
   const host=await createAssistantRuntimeHost({context:async action=>{
-    contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null});
+    contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null,readIdentity:async()=>currentIdentity,readActivation:async()=>null,withSetupLock:action=>action()});
   },dependencies:{directory:taskConfig,
     readSourceMonitor:async(source,signal)=>{sourcePolls++;assert.ok(signal);assert.deepEqual(source,{companyId,projectId:null,
       skillId:'email-imap-smtp',sourceId,sourceRevision:0,accountId:sourceAccountId,cursor:sourcePolls===1?null:'email-history',initialUnread:true});
@@ -374,7 +666,7 @@ test('production native health reports survive the delivery fence; only fresh co
         return {};
       },
     };
-    const host=await createAssistantRuntimeHost({context:async action=>action({...client,identity:currentIdentity},{readActivePass:async()=>null}),
+    const host=await createAssistantRuntimeHost({context:async action=>action({...client,identity:currentIdentity},{readActivePass:async()=>null,readIdentity:async()=>currentIdentity,readActivation:async()=>null,withSetupLock:action=>action()}),
       dependencies:{directory:path.join(os.tmpdir(),'synthetic-auth-health-'+randomUUID()),ensureDirectory:async()=>{},
         openDatabase:async()=>({database,close:async()=>database.close()}),timeZone:'UTC',
         readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
@@ -429,7 +721,8 @@ test('one background worker keeps model-free polling alive during a single nativ
 
 test('background supervisor resolves a fresh worker only between cycles and preserves uncertain delivery recovery',async()=>{
   const controller=new AbortController(),operations=[];let waits=0,reports=0;
-  const result=await runAssistantBackground({signal:controller.signal,request:async(request,options)=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID()};
+  const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),verifyRegistration:async()=>{},request:async(request,options)=>{
     operations.push(request.operation);assert.equal(options.signal.aborted,false);
     if(request.operation==='background_tick'){
       assert.equal(options.timeoutMs,35*60_000);
@@ -441,6 +734,16 @@ test('background supervisor resolves a fresh worker only between cycles and pres
   assert.equal(reports,1);assert.deepEqual(result,{schemaVersion:1,state:'stopped'});
 });
 
+
+test('fresh supervisor exits before maintenance when replacement is pending or its OS marker is stale',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID()};let calls=0,checks=0;
+  const pending=await runAssistantBackground({readHost:async()=>({identity,activation:{stage:'pending_owner'}}),
+    verifyRegistration:async()=>{checks++;},request:async()=>{calls++;}});
+  assert.equal(pending.reason,'replacement_pending');assert.equal(checks,0);assert.equal(calls,0);
+  await assert.rejects(runAssistantBackground({readHost:async()=>({identity,activation:null}),
+    verifyRegistration:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_BACKGROUND_CONFLICT'});},request:async()=>{calls++;}}),{code:'ASSISTANT_BACKGROUND_CONFLICT'});
+  assert.equal(calls,0,'an old scheduled registration never drives a new identity');
+});
 
 test('background composition validates timezone before private DB I/O and closes the opened DB after an adapter failure',async()=>{
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};

@@ -728,6 +728,25 @@ uses the same implementation. Owner cleanup via `background-remove` requires
 that exact matching task to be idle; a busy/queued pass is never killed or
 unregistered, and an ambiguous OS operation is not retried automatically.
 
+Owner-approved host replacement uses an internal composition of this SAME native
+helper. It first inspects the old assistant/device marker, current Windows SID,
+least-privilege definition and a closed Node/signed-loader supervisor command.
+The old loader path is neither opened nor executed, so an updated plugin cache
+does not require adopting another installed plugin. Only the full definition's
+SHA-256, SID and old identity are retained in the protected pairing record; no
+Task Scheduler XML, command or path appears in setup output. A later removal
+reopens and compares that exact snapshot immediately before deleting an idle
+task. Changed, foreign, running or queued definitions refuse; no stop, force
+overwrite, task execution, password or automatic Codex restart is introduced.
+Ordinary install/start/remove retain their existing exact loaded-shell checks.
+
+The pairing coordinator owns the independent owner decision, active-pass fence,
+quiescing journal and identity CAS. A snapshot alone grants no replacement. An
+older already-running supervisor may not understand graceful shutdown; it must
+remain a concrete waiting condition rather than being terminated underneath
+unknown work. Native deletion can be reconciled as absent after a lost response;
+neither another definition nor a new running instance can be deleted as a retry.
+
 Status distinguishes not_installed/registered/queued/running from business
 readiness and always reports `businessReady:false`. OS running state is not
 proof of backend admission, source delivery, a native task outcome, working
@@ -751,7 +770,13 @@ register or start an OS task. Pairing composes the existing protected S256 journ
 and fixed HTTPS client, under one invocation-local Windows native worker. No
 human OAuth/client configuration, owner browser login or credential-valued MCP
 arguments exist. Unpaired discovery does not load private credentials. After pairing,
-the read proxy below obtains live backend schemas. Input frames are bounded
+the read proxy below obtains live backend schemas. A confirmed local missing or
+mismatched device slot, native device authorization rejection, or the fixed
+assistant MCP discovery's authentication/scope rejection keeps these SAME six
+setup tools available with a closed recovery `_meta` diagnostic. It never returns
+a false paired/ready result or grants a business schema; business calls retain
+the original denial. Malformed/private-store I/O, unsafe paths, unrelated
+provider/human MCP failures and network errors remain hard failures. Input frames are bounded
 at 128 KiB; unknown tools/fields and raw failures cannot expose the private journal.
 
 An already completed pairing is read back privately and checked by live heartbeat;
@@ -762,6 +787,44 @@ remain required; the local setup profile never claims business readiness from
 registration/contact. The assistant hook composes the ordinary observer, proof serializer, state lock
 and invocation-private deadline. Without a live exact pass it denies task calls
 with a closed reason and JSON-deny/exit-0, including malformed input on Windows shells.
+
+Replacement uses a NEW explicit owner decision bound to the old assistant/device
+and candidate. Ordinary add-device approval is insufficient. Before native pairing,
+the SAME protected host mutex records a pending-owner denial and rejects any
+retained pass, including a locally unresolved journal after native completion.
+New work/maintenance cannot start while pending or quiescing; existing receipt
+reconciliation remains independent. Definitive native denied/expired pairing may
+release only the pending denial with the unchanged old identity and no pass,
+even if the old credential is broken. Time alone, unknown exchange or an active
+candidate never releases a fence.
+
+The candidate is staged in the SAME OS-protected enrollment record, not the active
+device slot. A legacy half-commit is located only at the native-selected exact
+assistant slot, without a private cache scan or automatic account/session transfer.
+Persist the candidate before attaching it natively. A NEW explicit persisted owner
+replacement receipt can be read by candidate heartbeat beyond the short pairing
+code TTL; the old one-use exchange is never replayed. Unknown exchange remains a
+concrete recovery blocker. Known pass/intake/state conflicts retain their native
+reason instead of becoming a misleading waiting-owner loop.
+
+Activation requires the old background registration to be absent or exactly idle
+under the native snapshot/CAS checks above. New supervisors exit gracefully and
+fresh signed workers refuse new work before any action. An already running older
+supervisor may not understand this journal; only a positive busy read returns the
+exact `Trelio-DigitalAssistant-<old-assistant UUID>` task and asks its human owner
+to stop that task, then finish the SAME enrollment. No kill/force, journal deletion
+or active-pass cancellation is performed. Unknown OS removal is read-back only;
+only an exact native pre-delete BUSY refusal permits a later explicit attempt.
+The active credential and identity are published only after this protected
+preflight. Persisted stage/read-back completes a crash after credential or identity
+publication without repeating exchange, credential write or OS deletion.
+
+A facade already loaded from an older runtime cannot gain its new discovery catch
+from a child-worker hot update alone. After publication, a fresh native MCP spawn
+(for example one new chat when the client needs it) may be required; no automatic
+Codex restart or hook trust is performed. Healthy SAME-device reuse with a NEW
+enrollment is a separate known follow-up; it is not claimed by this replacement
+contract. Reusing the SAME completed enrollment remains idempotent.
 
 `trelio-assistant-setup.test.mjs` checks projection, restart fences, real stdio
 frames and denial; the actual generic-entry child test confirms that discovery

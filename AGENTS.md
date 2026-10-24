@@ -96,8 +96,13 @@ publication tooling также остаются вне этого публичн
   generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
-  Before pairing discovery не читает credential; paired ACL/I/O ошибки не пустой
-  catalog. [Контракт](docs/assistant-scheduler.md#assistant-read-mcp-proxy).
+  Before pairing discovery не читает credential. Confirmed local device mismatch
+  or fixed assistant native/MCP auth denial preserves exactly six public setup
+  tools plus a closed diagnostic, never business authority or false readiness;
+  private I/O/malformed/network failures remain hard. Staged replacement uses
+  SAME protected enrollment/host lock, explicit native owner receipt and exact
+  idle background CAS; no exchange/credential/unknown OS replay. Retained passes
+  block before pairing; only definitive denied/expired pending intent may unwind. [Контракт](docs/assistant-scheduler.md#assistant-read-mcp-proxy).
 
 - Личная очередь и server/model response contract – [контракт](docs/agent-workspace-runtime.md#unfiled-response-reminders).
   Пустая очередь не добавляет инструкции; fresh metadata не требует unlock.
@@ -590,6 +595,8 @@ publication tooling также остаются вне этого публичн
   InteractiveToken and exact native Task Scheduler read-back. No saved password,
   autologon, force overwrite, active-pass termination or readiness inference.
   Constant public-metadata PowerShell is separate from native ACL/DPAPI.
+  Owner rebind may inspect/hash and remove only the exact idle old registration;
+  protected snapshot/identity fences never permit stop, force, path execution or session migration.
   It loads only the fixed OS utility manifest with process-local autoload off;
   slow module discovery never permits extra time or OS mutation replay.
   [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
