@@ -632,7 +632,7 @@ export const startAssistantWindowsConsoleIcon = async ({platform=process.platfor
             &&keys==='foregroundUnchanged,schemaVersion,state,verified')
             return finish({state:'applied',verified:true,foregroundUnchanged:value.foregroundUnchanged});
           if(value.schemaVersion===1&&value.state==='skipped'&&keys==='reason,schemaVersion,state'
-            &&['no_console','not_visible_classic_console','shared_console','parent_identity_unavailable'].includes(value.reason))
+            &&['no_console','console_already_attached','console_attach_failed','not_visible_classic_console','shared_console','parent_identity_unavailable'].includes(value.reason))
             return finish({state:'skipped',reason:value.reason});
         }catch{}
         child.kill();finish({state:'unavailable'});

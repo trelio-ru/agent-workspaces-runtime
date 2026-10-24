@@ -189,7 +189,7 @@ test('the actual bounded native pipe selects the strict replacement receipt befo
 });
 
 test('console branding uses one fixed native mode with bounded closed output and retains icons only until supervisor close',async()=>{
-  for(const scenario of ['applied','shared','malformed','overflow','exit']){
+  for(const scenario of ['applied','shared','console_already_attached','console_attach_failed','malformed','overflow','exit']){
     let child,spawned=0,ended=0,killed=0;
     const icon=await startAssistantWindowsConsoleIcon({platform:'win32',environment:{SystemRoot:'C:\Windows',PRIVATE:'never-inherited'},
       selectWorker:async()=>({executable:'C:\signed\trelio-private-process.exe',args:[]}),
@@ -201,12 +201,12 @@ test('console branding uses one fixed native mode with bounded closed output and
         queueMicrotask(()=>{
           if(scenario==='exit'){child.emit('close',1);return;}
           const value=scenario==='applied'?{schemaVersion:1,state:'applied',verified:true,foregroundUnchanged:true}
-            :scenario==='shared'?{schemaVersion:1,state:'skipped',reason:'shared_console'}
+            :['shared','console_already_attached','console_attach_failed'].includes(scenario)?{schemaVersion:1,state:'skipped',reason:scenario==='shared'?'shared_console':scenario}
             :{schemaVersion:1,state:'applied',verified:true,rawWindow:'PRIVATE'};
           child.stdout.write(scenario==='overflow'?'PRIVATE'.repeat(100):JSON.stringify(value)+'\n');
         });return child;
       }});
-    assert.equal(spawned,1);assert.equal(icon.state,scenario==='applied'?'applied':scenario==='shared'?'skipped':'unavailable');
+    assert.equal(spawned,1);assert.equal(icon.state,scenario==='applied'?'applied':['shared','console_already_attached','console_attach_failed'].includes(scenario)?'skipped':'unavailable');
     if(scenario==='applied')assert.equal(ended,0,'HICON lifetime cannot end at successful startup');
     await icon.close();
     if(scenario==='applied')assert.equal(ended,1);
@@ -220,15 +220,24 @@ test('the signed worker brands only an isolated visible parent console and reads
   {skip:process.platform!=='win32'},async()=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-icon-classic-'));
     const fixture=path.join(directory,'fixture.mjs'),receipt=path.join(directory,'receipt.json');
+    const ready=path.join(directory,'ready'),release=path.join(directory,'release');
     const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
     try{
       for(const mode of ['visible','shared','hidden']){
+        await Promise.all([ready,release,receipt].map(file=>fs.rm(file,{force:true})));
         // libuv's detached:true means DETACHED_PROCESS, not CREATE_NEW_CONSOLE.
         // The test-only native launcher explicitly creates a classic console;
         // production branding itself never creates or shows a window.
         await fs.writeFile(fixture,`import fs from 'node:fs/promises';
           import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
           import {spawn} from 'node:child_process';
+          await fs.writeFile(${JSON.stringify(ready)},'ready');
+          let released=false;
+          for(let attempt=0;attempt<500;attempt++){
+            try{await fs.access(${JSON.stringify(release)});released=true;break;}catch{}
+            await new Promise(resolve=>setTimeout(resolve,20));
+          }
+          if(!released)process.exit(126);
           let sibling=null;
           if(${JSON.stringify(mode)}==='shared'){
             sibling=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:false,stdio:'ignore'});
@@ -238,14 +247,14 @@ test('the signed worker brands only an isolated visible parent console and reads
           await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify(Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'))));
           await icon.close();if(sibling)sibling.kill();`);
         const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
-        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.executable,[string]$p.arguments,[bool]$p.hidden)";
+        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release)";
         const code=await new Promise((resolve,reject)=>{
           const child=spawn(resolveWindowsPowerShellExecutable(process.env),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
             {shell:false,windowsHide:true,stdio:['pipe','ignore','ignore'],timeout:60000});
           child.once('error',reject);child.once('close',resolve);
-          child.stdin.end(JSON.stringify({executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden'}));
+          child.stdin.end(JSON.stringify({executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release}));
         });
-        assert.equal(code,0,'the synthetic native classic-console host must complete');
+        assert.equal(code,0,`the synthetic native classic-console host must complete (closed precondition stage ${code})`);
         const result=JSON.parse(await fs.readFile(receipt,'utf8'));
         if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true});
         else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
@@ -279,22 +288,45 @@ public static class AssistantIconPseudoConsoleFixture {
   [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateProcess(string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,int flags,IntPtr environment,string directory,ref Extended startup,out ProcessInfo process);
   [DllImport("kernel32.dll", EntryPoint="CreateProcessW",ExactSpelling=true,CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateClassicProcess(string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,int flags,IntPtr environment,string directory,ref Startup startup,out ProcessInfo process);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool AttachConsole(int processId);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern bool FreeConsole();
+  [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
+  [DllImport("kernel32.dll")] static extern bool SetStdHandle(int kind,IntPtr handle);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
   [DllImport("kernel32.dll")] static extern int WaitForSingleObject(IntPtr handle,int milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process,out int code);
   [DllImport("kernel32.dll")] static extern bool ReadFile(IntPtr handle,byte[] bytes,int length,out int count,IntPtr overlapped);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,int code);
   static void Check(bool value) { if(!value)throw new Exception("synthetic pseudoconsole API failed"); }
-  public static int RunClassic(string executable,string arguments,bool hidden) {
-    ProcessInfo process=new ProcessInfo();
+  public static int RunClassic(string executable,string arguments,bool hidden,string ready,string release) {
+    ProcessInfo process=new ProcessInfo();bool released=false,attached=false;
+    IntPtr input=GetStdHandle(-10),output=GetStdHandle(-11),error=GetStdHandle(-12);
     try {
-      // STARTF_USESHOWWINDOW + SW_SHOWNOACTIVATE keeps the synthetic positive
-      // window visible without selecting it. Hidden tests use SW_HIDE instead.
+      // Node waits at a test-only file gate after its console initialization.
+      // An independent API read proves the expected classic console before the
+      // gate opens; no helper-under-test is used to establish that precondition.
       Startup startup=new Startup {cb=Marshal.SizeOf(typeof(Startup)),flags=1,show=(short)(hidden?0:4)};
       Check(CreateClassicProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0x00000010,IntPtr.Zero,null,ref startup,out process));
+      for(int attempt=0;attempt<500&&!System.IO.File.Exists(ready);attempt++)System.Threading.Thread.Sleep(20);
+      if(!System.IO.File.Exists(ready))return 35;
+      if(!FreeConsole())return 30;
+      attached=AttachConsole(process.Id);if(!attached)return 31;
+      IntPtr window=GetConsoleWindow();if(window==IntPtr.Zero)return 32;
+      StringBuilder name=new StringBuilder(64);
+      if(GetClassName(window,name,64)<=0||name.ToString()!="ConsoleWindowClass")return 33;
+      if(IsWindowVisible(window)==hidden)return 34;
+      Check(FreeConsole());attached=false;
+      SetStdHandle(-10,input);SetStdHandle(-11,output);SetStdHandle(-12,error);
+      System.IO.File.WriteAllText(release,"release");released=true;
       if(WaitForSingleObject(process.Process,15000)!=0) { TerminateProcess(process.Process,124);throw new Exception("synthetic classic console timeout"); }
       int result;Check(GetExitCodeProcess(process.Process,out result));return result;
     } finally {
+      if(attached)FreeConsole();
+      SetStdHandle(-10,input);SetStdHandle(-11,output);SetStdHandle(-12,error);
+      if(!released&&process.Process!=IntPtr.Zero)TerminateProcess(process.Process,125);
       if(process.Thread!=IntPtr.Zero)CloseHandle(process.Thread);if(process.Process!=IntPtr.Zero)CloseHandle(process.Process);
     }
   }

@@ -605,7 +605,8 @@ publication tooling также остаются вне этого публичн
   direct parent's exclusive visible classic console may receive WM_SETICON;
   no hidden/shared/ConPTY host, foreground change, new window or Node.exe patch.
   Keep icon lifetime scoped to its supervisor pipe and the private worker mode
-  unchanged. See [contract](docs/assistant-scheduler.md#owned-windows-console-icon).
+  unchanged. Closed attach diagnostics expose no PID/HWND/path; native fixtures
+  must independently prove their classic-console precondition before testing icons. See [contract](docs/assistant-scheduler.md#owned-windows-console-icon).
 
 ## Граница plugin/runtime
 

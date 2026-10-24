@@ -660,7 +660,12 @@ pipe; cleanup restores only icons still owned by that attempt. The private
 request protocol, ACL/DPAPI startup, background task definition and work
 admission/deadlines stay unchanged. Branding failure is cosmetic and never
 blocks or grants business readiness. Native Windows/ARM fixtures verify actual
-WM_GETICON, unchanged foreground, and shared/hidden/ConPTY no-op behavior.
+WM_GETICON, unchanged foreground, and shared/hidden/ConPTY no-op behavior. A
+classic-console fixture first holds its own initialized Node child at a test-only
+file gate and proves its HWND/class/visibility through an independent AttachConsole
+read, then detaches before releasing the child. Production attach refusals use
+closed reasons only; they never expose a PID, HWND, path or raw OS error. No unavailable console becomes a
+successful branding receipt.
 
 ### Optional source-tree QA launcher
 
