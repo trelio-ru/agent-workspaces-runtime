@@ -139,9 +139,16 @@ const isoTimestamp = value => {
 const state = value => {
   if (!['accepted','waiting_owner','paused','done','revoked'].includes(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); return value;
 };
+// Legacy native services keep the ordinary material contract. Only an explicit
+// closed native value selects the restricted discussion prompt/timer display.
+const workMode = value => {
+  if (value === undefined) return {};
+  if (!['task','discussion'].includes(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {workMode:value};
+};
 const binding = value => {
   if (!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
-  return { id: id(value.id), taskId: id(value.taskId), state: state(value.state), revision: revision(value.revision) };
+  return { id: id(value.id), taskId: id(value.taskId), state: state(value.state), revision: revision(value.revision), ...workMode(value.workMode) };
 };
 const executionConfiguration = value => {
   if (!object(value)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -2298,6 +2305,7 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         if (typeof event.wake !== 'boolean' || event.ownerQuestionId !== undefined && !event.wake) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
         return { id: id(event.id), revision: text(event.revision,128), taskId: id(event.taskId), wake: event.wake,
           bindingId: id(event.bindingId), bindingRevision: revision(event.bindingRevision), taskState: state(event.taskState),
+          ...workMode(event.workMode),
           ...(event.ownerQuestionId === undefined ? {} : { ownerQuestionId: id(event.ownerQuestionId) }) };
       }), nextCursor: text(value.nextCursor), hasMore: value.hasMore };
     },
@@ -2321,14 +2329,14 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
         || value.bindingRevision!==input.bindingRevision || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },
     async readTaskPass(input,signal) {
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId)},signal);
       if(value.passId!==input.passId || !['leased','closed','review_required'].includes(value.state)) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {passId:id(value.passId),bindingId:id(value.bindingId),bindingRevision:revision(value.bindingRevision),
         deliveryId:id(value.deliveryId),threadId:id(value.threadId),leaseRevision:revision(value.leaseRevision),
-        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value)};
+        leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),state:value.state,execution:passExecution(value),...workMode(value.workMode)};
     },
     async readTaskMaterialBasis(input,signal){
       const value=await call('passRead',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),includeMaterialBasis:true},signal);
