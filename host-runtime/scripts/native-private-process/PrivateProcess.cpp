@@ -362,10 +362,19 @@ int assistantConsoleIcon() {
   // never AllocConsole, enumerate windows or select another process/window.
   if (GetConsoleWindow()) FreeConsole();
   const BOOL attached = AttachConsole(ATTACH_PARENT_PROCESS);
+  // Capture the API result before restoring std handles: that restoration may
+  // change last-error. Closed reasons distinguish a missing parent console from
+  // our already-associated console without exporting IDs, handles or raw errors.
+  const DWORD attachError = attached ? ERROR_SUCCESS : GetLastError();
   // AttachConsole may replace standard handles; keep the inherited private
   // control pipes. No CONIN$/CONOUT$ stream is opened or written.
   SetStdHandle(STD_INPUT_HANDLE, input); SetStdHandle(STD_OUTPUT_HANDLE, output);
-  if (!attached) { presentationSkipped("no_console"); return 0; }
+  if (!attached) {
+    presentationSkipped(attachError == ERROR_ACCESS_DENIED ? "console_already_attached"
+      : attachError == ERROR_INVALID_HANDLE ? "no_console"
+      : attachError == ERROR_INVALID_PARAMETER ? "parent_identity_unavailable" : "console_attach_failed");
+    return 0;
+  }
   const auto window = GetConsoleWindow();
   const HMODULE user32 = LoadLibraryExW(L"user32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   require(user32 != nullptr);
