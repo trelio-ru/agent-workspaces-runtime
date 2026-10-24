@@ -71,7 +71,11 @@ allows the existing start flow; another author's first connection still needs
 the SAME owner decision. Mention access never grants project/admin/Workspace
 rights. The native binding and immutable pass select `workMode:discussion` for
 comment-only access; ordinary editable task access keeps `workMode:task` and
-all existing material evidence. The host never infers mode from message text.
+all existing material evidence. The host never infers mode from message text. The fixed control-plane transport
+sends the SAME loader-selected `x-trelio-host-runtime-version` metadata; native
+discussion admission requires runtime >=3.18.3 before reserving a chat/pass. This
+narrow compatibility gate does not raise the human runtime/plugin minimum or
+grant task permission, and model body fields cannot replace the header.
 
 A discussion uses the SAME queue, observed proof, dedicated tools and permanent
 task chat. Its stdin locators omit `workStatePath` and reject external source

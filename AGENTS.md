@@ -617,7 +617,8 @@ publication tooling также остаются вне этого публичн
 - Mention-derived comment-only access uses native `workMode:discussion`, the SAME
   permanent chat/proof/comment/outcome engine, no Workspace or periodic timer.
   Completion requires the exact native reply receipt; full task material and
-  source ACK guards stay independent. See the scheduler discussion contract.
+  source ACK guards stay independent. Fixed control-plane version metadata comes
+  from the signed loader; native discussion >=3.18.3 rollout never broadens ACL. See the scheduler discussion contract.
 
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.
