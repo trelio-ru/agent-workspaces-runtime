@@ -663,7 +663,9 @@ blocks or grants business readiness. Native Windows/ARM fixtures verify actual
 WM_GETICON, unchanged foreground, and shared/hidden/ConPTY no-op behavior. A
 classic-console fixture first holds its own initialized Node child at a test-only
 file gate and proves its HWND/class/visibility through an independent AttachConsole
-read, then detaches before releasing the child. Production attach refusals use
+read, then detaches before releasing the child. The presentation helper detaches
+itself before attaching to its parent even when its previous headless association
+has no HWND; FreeConsole never detaches the parent. Production attach refusals use
 closed reasons only; they never expose a PID, HWND, path or raw OS error. No unavailable console becomes a
 successful branding receipt.
 
