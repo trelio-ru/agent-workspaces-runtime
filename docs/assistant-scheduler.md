@@ -232,7 +232,8 @@ returned. This observation is diagnostic, never model/pass/owner authority.
 
 The SAME private journal schema11 adds nullable `failure_code` and
 `failure_stage` on the existing delivery row. Marking it uncertain commits the
-closed original failure and phase atomically; the generic outward uncertain
+first observed closed failure and phase atomically; later claim/review failures
+cannot replace that cause. The generic outward uncertain
 error and native-start/replay fence are unchanged. Phases are
 `native_claim|native_preflight|native_started|readback`; only the actual
 one-use `startInvocation` boundary selects `native_started`. The last unfinished
@@ -1281,6 +1282,28 @@ exception, credential, local path, company/task context or model-generated
 instruction reaches the journal/outbox. Failed health delivery cannot replay
 business work. Only the correct successful boundary may clear a login/trust
 latch; unrelated metadata success is not recovery.
+
+Retained coordinator uncertainty reports `dispatch_review_required` through that
+SAME device-health CAS and owner inbox/outbox. A returned blocked reconciliation
+is reported as well as a thrown delivery uncertainty. The CURRENT immutable
+tick worker owns this report, so an older already-running supervisor needs no
+restart/new enum to notify the owner. Duplicate worker/parent observations preserve
+the existing latch rather than post again. A missing model or waiting
+owner does not become this device incident. The independent dispatch latch survives
+metadata-ready reports, a recovered login/hook and tool-free READY provisioning.
+Only a confirmed native/business completion, committed local schedule/inbox and
+released protected pass may clear it, and only when the SAME device-wide journal
+has zero retained uncertain deliveries/intakes. It never grants work or adds a
+new global business stop. A newer unrelated incident is retained; failed diagnostic
+CAS/network I/O cannot undo a receipt, reopen a pass or replay a business action.
+
+The fixed host header `x-trelio-assistant-health-protocol: 2` advertises only this
+closed diagnostic projection on the existing GET/POST health routes. It is no
+ACL/proof/version override. Older/missing/unknown protocol clients keep the prior
+closed reason/latch DTO: the dispatch reason is `not_checked` and its latch is
+hidden, with unchanged CAS revision/generation. Their ready reports cannot clear
+the stored incident. Owner web/SSE/messenger projections always retain the real
+closed cause. No endpoint, notification engine or global minimum is added.
 
 Backend account notifications deduplicate incidents, copy to linked messengers
 with ordinary FIFO/retry rules, and send one recovery notice. The server detects

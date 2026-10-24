@@ -1271,3 +1271,36 @@ test('trusted Workspace context retains attachment reader and isolates actual ac
     assert.doesNotMatch(accounts+inspection,/unselected-production-state/);
   },{context:async action=>action(client,host,{})});
 });
+
+
+test('supervisor reports retained unknown dispatch returned by recovery without misreporting policy/owner waiting',async()=>{
+  const controller=new AbortController();let cycles=0,waits=0;const reports=[];
+  const identity={assistantId:randomUUID(),deviceId:randomUUID()};
+  await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),
+    verifyRegistration:async()=>{},startConsoleIcon:async()=>null,request:async request=>{
+      if(request.operation!=='background_tick')return;
+      return {state:'blocked',dispatch:{reasons:[['delivery_uncertain'],['model_selection_required'],['waiting_owner']][cycles++]}};
+    },reportFailure:async error=>{reports.push(error);},wait:async()=>{if(++waits===3)controller.abort();}});
+  assert.equal(cycles,3);assert.deepEqual(reports,[{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'}]);
+});
+
+
+test('fresh tick worker reports retained/throwing uncertainty under an unchanged old supervisor without replay',async()=>{
+  for(const scenario of ['returned','thrown','report_failed','model_blocked']){
+    const reports=[];let work=0,closes=0;
+    const failure=Object.assign(new Error('PRIVATE original native read failure'),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
+    const dispatch={state:'blocked',reasons:[scenario==='model_blocked'?'model_selection_required':'delivery_uncertain']};
+    const tick=()=>runAssistantBackgroundTick({createHost:async()=>({coordinator:{pollOnce:async()=>{},
+      workOnce:async()=>{work++;if(['thrown','report_failed'].includes(scenario))throw failure;return null;},
+      dispatchStatus:async()=>dispatch},reportDispatchFailure:async error=>{
+        reports.push(error);if(scenario==='report_failed')throw new Error('PRIVATE diagnostic CAS/transport refusal');
+      },close:async()=>{closes++;}})});
+    // This caller deliberately has NO new supervisor failure mapping. Only the
+    // current immutable worker can deliver the owner report after hot update.
+    if(['thrown','report_failed'].includes(scenario))await assert.rejects(tick,error=>error===failure);
+    else assert.equal((await tick()).state,'blocked');
+    assert.equal(work,1);assert.equal(closes,1);
+    assert.deepEqual(reports,scenario==='model_blocked'?[]:[{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'}]);
+    assert.ok(!JSON.stringify(reports).includes('PRIVATE'));
+  }
+});

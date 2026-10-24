@@ -699,7 +699,7 @@ export const assistantCatalogRevision = tools => {
   if(Buffer.byteLength(text)>768*1024) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
   return createHash('sha256').update(text).digest('hex');
 };
-const reasons = new Set(['ready','not_checked','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','connection_lost']);
+const reasons = new Set(['ready','not_checked','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','dispatch_review_required','connection_lost']);
 const assistantHealthCodes = Object.freeze({
   AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:'plugin_update_required',
   TRELIO_PLUGIN_RESTART_REQUIRED:'plugin_restart_required',
@@ -709,6 +709,12 @@ const assistantHealthCodes = Object.freeze({
   ASSISTANT_MCP_RECONNECT_REQUIRED:'mcp_reconnect_required',
   ASSISTANT_CODEX_AUTH_REQUIRED:'codex_auth_required',
   ASSISTANT_HOOK_REVIEW_REQUIRED:'hook_review_required',
+  ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN:'dispatch_review_required',
+  ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED:'dispatch_review_required',
+  ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED:'dispatch_review_required',
+  ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED:'dispatch_review_required',
+  ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED:'dispatch_review_required',
+  ASSISTANT_INTAKE_REVIEW_REQUIRED:'dispatch_review_required',
 });
 export const assistantHealthFailure = error => Object.hasOwn(assistantHealthCodes,error?.code??'') ? assistantHealthCodes[error.code] : null;
 const version = value => typeof value === 'string' && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/u.test(value);
@@ -978,9 +984,16 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
         const directory=path.join(assistantTaskStorageDirectory(configDirectory,{...stableIdentity,companyId:scope.companyId,taskId:scope.taskId}),'chat');
         await ensureDirectory(directory);return directory;
       },timeZone,
+      // Only the coordinator's committed business/native completion boundary
+      // may clear dispatch review. A metadata check, READY provision, model
+      // catalogue or an empty queue is never evidence of repaired work.
+      onBusinessConfirmed:()=>invoke(live=>reportAssistantDispatchRecovery(live)),
       ...(dependencies.now?{now:dependencies.now}:{}),...(dependencies.notify?{notify:dependencies.notify}:{}),
     });
-    return {identity:stableIdentity,coordinator,async close(){
+    return {identity:stableIdentity,coordinator,
+      // Every immutable worker owns its diagnostic boundary. An already live
+      // supervisor may still run an older module and cannot know a new cause.
+      reportDispatchFailure:error=>invoke(live=>reportAssistantMaintenanceFailure(error,live)),async close(){
       if(closed)return;closed=true;
       try {await coordinator.close();} finally {await privateInvocation(()=>database.close());}
     }};
@@ -1004,6 +1017,14 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
   wait=waitForAssistantPoll}={}) => {
   if(signal?.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
   const host=await createHost();
+  const reportDispatch=async(dispatch,error=null)=>{
+    const failure=dispatch?.reasons?.includes('delivery_uncertain')
+      ?{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'}:error;
+    // The CURRENT signed worker reports even when its long-lived parent knows
+    // only an older health enum. Failed reporting never hides the original
+    // cause, advances a cursor, clears the fence or repeats native work.
+    if(failure&&host.reportDispatchFailure)try{await host.reportDispatchFailure(failure);}catch{}
+  };
   try {
     await host.coordinator.pollOnce(signal);
     let done=false,pollFailure=null;
@@ -1023,7 +1044,13 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
     const result=await work;if(result.error)throw result.error;
     if(pollFailure)throw pollFailure; // Preserve a source outage after settling the one native pass.
     const dispatch=await host.coordinator.dispatchStatus(signal);
+    await reportDispatch(dispatch);
     return {schemaVersion:1,state:['blocked','unknown','queued'].includes(dispatch.state)?dispatch.state:result.value===null?'idle':'checked',dispatch};
+  } catch(error) {
+    let dispatch=null;
+    try{dispatch=await host.coordinator.dispatchStatus?.(signal);}catch{}
+    await reportDispatch(dispatch,error);
+    throw error;
   } finally {await host.close();}
 };
 
@@ -1035,9 +1062,27 @@ export const reportAssistantMaintenanceFailure = async (error, client = null) =>
   if(!code)return;
   const report=async connection=>{
     const current=await connection.readHealth();
+    // A new worker and an older/newer parent can both observe this SAME fence.
+    // The second read must preserve the current incident rather than rewrite
+    // contact/CAS or cover a newer unrelated problem. Native generations still
+    // independently deduplicate every concurrent report at commit.
+    if(code==='dispatch_review_required'&&(current.code===code||current.latchedCodes?.includes(code)))return current;
     return connection.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code});
   };
   return client?report(client):productionContext(report);
+};
+
+/** Called only after the SAME coordinator has committed its exact native +
+ * business receipt and released the protected pass. No status read calls this
+ * function. Preserve a newer unrelated incident; CAS/network failures cannot
+ * roll back the committed work or replay the native/provider action. */
+export const reportAssistantDispatchRecovery = async client => {
+  try {
+    const current=await client.readHealth();
+    if(current.code!=='dispatch_review_required')return;
+    return await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),
+      code:'ready',clearedReason:'dispatch_review_required'});
+  } catch { /* A future genuine completion may safely retry this diagnostic boundary. */ }
 };
 
 /** Stable model-free supervisor of our own runtime workers, never Codex.
@@ -1079,6 +1124,11 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
         if(!effective.aborted){
           const cycle=await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000});
           if(cycle?.state==='quiescing')break;
+          // A retained unknown operation can be returned by reconciliation
+          // without throwing. Report only this closed, device-global fence;
+          // missing model and waiting-owner remain their independent policies.
+          if(cycle?.dispatch?.reasons?.includes('delivery_uncertain'))
+            await reportFailure({code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'}).catch(()=>undefined);
         }
       } catch(error) {
         if(!effective.aborted)await reportFailure(error).catch(()=>undefined);

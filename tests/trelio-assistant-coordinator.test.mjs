@@ -1489,3 +1489,48 @@ test('coexisting MAX account root and exact-chat sources select one triage queue
     assert.equal(inbox.ownerIntake(row.id).eventIds.length,1);
   }finally{await coordinator.close();database.close();}
 });
+
+
+test('dispatch recovery requires native/business receipt plus durable completion, released pass and no retained uncertainty',async t=>{
+  const f=fixture(t);let recoveries=0;
+  f.options.onBusinessConfirmed=async()=>{
+    recoveries++;assert.equal(f.activePass(),null);
+    assert.equal(f.database.prepare("select count(*) n from assistant_inbox_deliveries where state in ('started','uncertain')").get().n,0);
+    assert.equal(f.database.prepare('select count(*) n from assistant_inbox_events where processed=0').get().n,0);
+  };
+  await f.coordinator.close();let next=createAssistantCoordinator(f.options);
+  await next.pollOnce();await next.workOnce();assert.equal(recoveries,0,'tool-free READY provisioning never clears an incident');
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300001);await next.pollOnce();
+  f.failNative(true);await assert.rejects(next.workOnce(),/UNCERTAIN/);assert.equal(recoveries,0);
+  await next.close();next=createAssistantCoordinator(f.options);
+  // Restart reconciles the original positive native marker/business receipt.
+  // No fresh mention/turn is needed and a rejected health report is inert.
+  await next.workOnce();assert.equal(recoveries,1);assert.equal(f.counts().runs,1);
+  f.options.onBusinessConfirmed=async()=>{throw new Error('synthetic health CAS/network refusal');};
+  await next.close();next=createAssistantCoordinator(f.options);
+  f.failNative(false);f.events.push({id:randomUUID(),revision:'2',taskId:f.taskId,wake:true});f.advance(300001);
+  await next.pollOnce();await next.workOnce();assert.equal(f.counts().runs,2);
+  assert.equal(f.activePass(),null,'health failure cannot reopen/replay an already committed pass');
+  await next.close();
+});
+
+
+test('another retained device delivery suppresses dispatch recovery even after this task committed',async t=>{
+  const f=fixture(t);let recoveries=0;f.options.onBusinessConfirmed=async()=>{recoveries++;};
+  await f.coordinator.close();const next=createAssistantCoordinator(f.options);
+  await next.pollOnce();await next.workOnce();
+  const release=f.options.passHost.releasePass;
+  f.options.passHost.releasePass=async receipt=>{
+    await release(receipt);
+    // Model a second coordinator's already retained fence using the SAME inbox
+    // APIs, after the first delivery's local commit. It cannot earn recovery.
+    const inbox=createAssistantInbox({database:f.database});
+    const pending=await inbox.claimDelivery({authorize:async()=>true,
+      scheduledTask:{scope:next.status()[0].source,taskId:f.taskId}});
+    inbox.prepareTaskPass(pending.deliveryId);inbox.markDeliveryUncertain(pending.deliveryId);
+  };
+  f.events.push({id:randomUUID(),revision:'1',taskId:f.taskId,wake:true});f.advance(300001);
+  await next.pollOnce();await next.workOnce();assert.equal(f.counts().runs,1);assert.equal(recoveries,0);
+  assert.equal((await next.dispatchStatus()).reasons.includes('delivery_uncertain'),true);
+  await next.close();
+});

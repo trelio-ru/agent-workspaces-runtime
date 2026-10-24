@@ -589,6 +589,7 @@ publication tooling также остаются вне этого публичн
   Independent task creation uses the SAME proxy/native creator with a sealed
   owner decision and project ACL; no inherited pass/chat/route or sender proof.
 
+- Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
 - Assistant maintenance: fixed signed request worker, no business replay, closed owner health/CAS; MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
 - Native account preflight diagnoses login only from explicit missing auth, not
   prose or a cached catalogue. Only a fresh completed turn with exact read-back

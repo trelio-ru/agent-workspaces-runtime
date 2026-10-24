@@ -3263,3 +3263,25 @@ test('triage device transport preserves null-thread company decisions and refuse
    changed=patch;await assert.rejects(client.beginSourceIntake(input),/INVALID_RESPONSE/);
  }
 });
+
+
+test('health protocol v2 is fixed host metadata and independent dispatch/auth/hook latches stay closed',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  const credential=`tda_${'x'.repeat(43)}`;await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  let revision=3,calls=0,body;
+  const state=()=>({revision,code:'dispatch_review_required',generation:1,
+    latchedCodes:['codex_auth_required','hook_review_required','dispatch_review_required'],
+    compatibility:{minimumPluginVersion:'3.0.0',minimumRuntimeVersion:'3.8.11'}});
+  const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;assert.equal(options.headers['x-trelio-assistant-health-protocol'],'2');
+    assert.equal(options.headers.authorization,`Bearer ${credential}`);
+    if(options.method==='POST'){body=JSON.parse(options.body);revision++;}
+    return new Response(JSON.stringify(state()),{headers:{'content-type':'application/json'}});
+  }});
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
+  assert.equal((await client.readHealth()).code,'dispatch_review_required');
+  const input={expectedRevision:revision,clientRequestId:randomUUID(),code:'ready',clearedReason:'dispatch_review_required'};
+  assert.equal((await client.reportHealth(input)).latchedCodes.length,3);assert.deepEqual(body,input);
+  await assert.rejects(client.reportHealth({...input,healthProtocol:'2'}),/INVALID_INPUT/);
+  await assert.rejects(client.reportHealth({...input,clearedReason:'PRIVATE'}),/INVALID_INPUT/);assert.equal(calls,2);
+});

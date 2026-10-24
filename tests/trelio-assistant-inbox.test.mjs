@@ -1098,3 +1098,21 @@ test('MAX full native dialog hints use SAME atomic stream journal up to 1000, wh
   assert.throws(()=>inbox.commitPage(ordinary,{...inbox.claimPoll(ordinary),nextCursor:'bad',hasMore:false,events:[],streams:hints}),/INVALID_INPUT/);
   assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources WHERE scope_json LIKE ?').get('%'+ordinary.bindingId+'%').cursor,null,'MAX inventory bound never raises event or other-provider page bounds');
 });
+
+
+test('pre-native claim recovery preserves the first closed preflight cause through a later lease-review refusal',async t=>{
+  const f=memory(t),source=scope(),taskId=randomUUID();f.inbox.register(source);accept(f.inbox,source,taskId);
+  page(f.inbox,source,[{id:'original-mention',revision:'1',taskId,wake:true}]);
+  const job=await f.inbox.claimDelivery({authorize:async()=>true});f.inbox.prepareTaskPass(job.deliveryId);
+  const original=assistantDeliveryFailure('ASSISTANT_CODEX_UNAVAILABLE','native_preflight');
+  f.inbox.markDeliveryUncertain(job.deliveryId,original);
+  // SAME durable ID may retry only the native claim because its launch bit is
+  // still zero. The ensuing expired server lease is a later symptom, not the
+  // original reason the usable native turn never started.
+  f.inbox.prepareTaskPass(job.deliveryId);
+  f.inbox.markDeliveryUncertain(job.deliveryId,assistantDeliveryFailure('ASSISTANT_PASS_REVIEW_REQUIRED','native_claim'));
+  const row=f.database.prepare('SELECT state,native_started,failure_code,failure_stage FROM assistant_inbox_deliveries').get();
+  assert.deepEqual({...row},{state:'uncertain',native_started:0,failure_code:original.code,failure_stage:original.stage});
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,1);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+});

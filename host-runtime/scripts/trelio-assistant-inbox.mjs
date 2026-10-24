@@ -1145,7 +1145,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       return transaction(() => {
         const row = delivery(id);
         if (!['started','uncertain'].includes(row.state)) fail('ASSISTANT_INBOX_STALE_DELIVERY');
-        run("UPDATE assistant_inbox_deliveries SET state='uncertain',failure_code=coalesce(?,failure_code),failure_stage=coalesce(?,failure_stage) WHERE delivery_id=?",
+        // Retain the FIRST observed closed cause. A later safe pre-native
+        // claim retry may fail only because its original pass lease expired;
+        // replacing the cause would erase the actual preflight failure. This
+        // never reconstructs a legacy cause or changes any replay/lease bit.
+        run("UPDATE assistant_inbox_deliveries SET state='uncertain',failure_code=coalesce(failure_code,?),failure_stage=coalesce(failure_stage,?) WHERE delivery_id=?",
           failure?.code??null,failure?.stage??null,id);
       });
     },

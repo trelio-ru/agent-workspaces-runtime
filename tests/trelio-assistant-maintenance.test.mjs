@@ -2,19 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
-import { assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
 const snapshot=()=>({revision:0,generation:0,code:'ready',latchedCodes:[],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:'4.9.0'}});
 const fixture=()=>{
   let state=snapshot();const reports=[];
-  return {reports,get state(){return state;},set state(value){state={...value,latchedCodes:[...new Set([...(value.latchedCodes??[]),...(['codex_auth_required','hook_review_required'].includes(value.code)?[value.code]:[])])]};},
+  return {reports,get state(){return state;},set state(value){state={...value,latchedCodes:[...new Set([...(value.latchedCodes??[]),...(['codex_auth_required','hook_review_required','dispatch_review_required'].includes(value.code)?[value.code]:[])])]};},
     client:{readHealth:async()=>structuredClone(state),reportHealth:async input=>{
       assert.equal(input.expectedRevision,state.revision);assert.match(input.clientRequestId,/^[a-f0-9-]{36}$/u);
-      const latched=new Set(state.latchedCodes);if(['codex_auth_required','hook_review_required'].includes(input.code))latched.add(input.code);
+      const latched=new Set(state.latchedCodes);if(['codex_auth_required','hook_review_required','dispatch_review_required'].includes(input.code))latched.add(input.code);
       if(input.clearedReason)latched.delete(input.clearedReason);
-      const code=input.code==='ready'?(latched.has('codex_auth_required')?'codex_auth_required':latched.has('hook_review_required')?'hook_review_required':'ready'):input.code;
+      const code=input.code==='ready'?(latched.has('codex_auth_required')?'codex_auth_required':latched.has('hook_review_required')?'hook_review_required':latched.has('dispatch_review_required')?'dispatch_review_required':'ready'):input.code;
       reports.push(input);state={...state,revision:state.revision+1,code,latchedCodes:[...latched]};return state;
     }},
   };
@@ -131,4 +131,33 @@ test('only a successful protected read clears hook review; metadata cannot clear
   assert.deepEqual(assistantHealthyBoundary(current,{operation:'call',name:'configure_assistant_email_source'}),{code:'ready'});
   assert.deepEqual(assistantHealthyBoundary(current,{operation:'call',name:'verify_assistant_email_source'}),{code:'ready'});
   assert.deepEqual(assistantHealthyBoundary(current,{operation:'call',name:'get_task'}),{code:'ready',clearedReason:'hook_review_required'});
+});
+
+
+test('retained dispatch failures report one closed reason and only the committed recovery boundary may clear it',async()=>{
+  const f=fixture();
+  for(const code of ['ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN','ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED',
+    'ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED','ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED',
+    'ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED','ASSISTANT_INTAKE_REVIEW_REQUIRED'])
+    assert.equal(assistantHealthFailure({code,message:'PRIVATE'}),'dispatch_review_required');
+  assert.equal(assistantHealthFailure({code:'ASSISTANT_INTAKE_CHANGED'}),null);
+  assert.equal(assistantHealthFailure({code:'ASSISTANT_COORDINATOR_SETUP_REQUIRED'}),null);
+  await reportAssistantMaintenanceFailure({code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN',message:'PRIVATE'},f.client);
+  assert.equal(f.reports.at(-1).code,'dispatch_review_required');
+  const reported=f.reports.length;
+  await reportAssistantMaintenanceFailure({code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'},f.client);
+  assert.equal(f.reports.length,reported,'worker/parent observation of the same fence does not post twice');
+  await maintainAssistantHost({client:f.client,versions,update:async()=>{},probe:async()=>{}});
+  assert.equal(f.state.code,'dispatch_review_required','signed metadata/catalogue success never clears retained dispatch review');
+  assert.deepEqual(assistantHealthyBoundary(f.state,{operation:'list'}),{code:'ready'});
+  assert.deepEqual(assistantHealthyBoundary(f.state,{operation:'call',name:'get_task'}),{code:'ready'});
+  await reportAssistantDispatchRecovery(f.client);
+  assert.equal(f.reports.at(-1).clearedReason,'dispatch_review_required');
+  f.state={...f.state,code:'plugin_update_required',latchedCodes:['dispatch_review_required']};
+  const count=f.reports.length;await reportAssistantDispatchRecovery(f.client);
+  assert.equal(f.reports.length,count,'a business receipt does not clear a newer unrelated outage');
+  await reportAssistantDispatchRecovery({readHealth:async()=>{throw new Error('PRIVATE');}});
+  await reportAssistantDispatchRecovery({readHealth:async()=>({code:'dispatch_review_required',revision:1}),
+    reportHealth:async()=>{throw new Error('PRIVATE');}});
+  assert.ok(!JSON.stringify(f.reports).includes('PRIVATE'));
 });

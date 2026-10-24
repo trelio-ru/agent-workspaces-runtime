@@ -262,10 +262,10 @@ export const validateAssistantPassOutcome = (value, expected) => {
 // These latches describe diagnostic obligations only, never task authority.
 // An unrelated plugin/network recovery must not forget login or hook review.
 const healthState = value => {
-  const codes=['not_checked','ready','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','connection_lost'];
-  if(!object(value) || !codes.includes(value.code) || !Array.isArray(value.latchedCodes) || value.latchedCodes.length>2
+  const codes=['not_checked','ready','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','dispatch_review_required','connection_lost'];
+  if(!object(value) || !codes.includes(value.code) || !Array.isArray(value.latchedCodes) || value.latchedCodes.length>3
     || new Set(value.latchedCodes).size!==value.latchedCodes.length
-    || value.latchedCodes.some(code=>!['codex_auth_required','hook_review_required'].includes(code))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    || value.latchedCodes.some(code=>!['codex_auth_required','hook_review_required','dispatch_review_required'].includes(code))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {revision:revision(value.revision),code:value.code,generation:revision(value.generation),latchedCodes:[...value.latchedCodes]};
 };
 const sourceHealthCodes=Object.freeze(['ready','setup_required','authentication_required','scope_changed','history_gap','read_failed']);
@@ -342,6 +342,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
         // Native discussion rollout gates it before reserving a chat/pass; it
         // never substitutes device authorization, task ACL or observed proof.
         headers: { accept: 'application/json', 'x-trelio-host-runtime-version':getHostRuntimeVersion(),
+          ...(['healthRead','healthReport'].includes(operation)?{'x-trelio-assistant-health-protocol':'2'}:{}),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           ...(credential ? { authorization: `Bearer ${credential}` } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -2424,8 +2425,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async reportHealth(input,signal) {
       const keys=Object.keys(input??{}).filter(key=>key!=='clearedReason').sort().join(',');
       if(!object(input) || keys!=='clientRequestId,code,expectedRevision'
-        || !['ready','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required'].includes(input.code)
-        || input.clearedReason!==undefined && (input.code!=='ready' || !['codex_auth_required','hook_review_required'].includes(input.clearedReason))) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+        || !['ready','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','dispatch_review_required'].includes(input.code)
+        || input.clearedReason!==undefined && (input.code!=='ready' || !['codex_auth_required','hook_review_required','dispatch_review_required'].includes(input.clearedReason))) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const value=await call('healthReport',{clientRequestId:id(input.clientRequestId),expectedRevision:revision(input.expectedRevision),code:input.code,
         ...(input.clearedReason?{clearedReason:input.clearedReason}:{})},signal);
       if(value.revision!==input.expectedRevision+1) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');

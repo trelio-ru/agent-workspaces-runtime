@@ -64,10 +64,11 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 };
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+  if(onBusinessConfirmed!==null&&typeof onBusinessConfirmed!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(sourceHealth!==null&&(!sourceHealth||typeof sourceHealth.read!=='function'||typeof sourceHealth.report!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(readSourceMonitor!==null && (typeof readSourceMonitor!=='function' || typeof client.sourceAccounts!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(acknowledgeSource!==null && (typeof acknowledgeSource!=='function'||typeof client.sourceAccounts!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
@@ -612,6 +613,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     return {receipt:`assistant:${outcome.receiptId}:${nativeReceipt}`,outcome};
   };
+  const businessConfirmed = async () => {
+    // Same fixed journal reader counts ALL retained device uncertainty,
+    // including removed companies and taskless intakes. Health must not claim
+    // recovery just because this task, company or fresh inventory is empty.
+    // This runs after durable completion, outside its transaction; diagnostic
+    // I/O failure never changes a business receipt or authorizes a second turn.
+    if(!onBusinessConfirmed)return;
+    try {
+      const summary=readAssistantInboxDispatchSummary({database,identity,companies:[]});
+      if(summary.uncertainDeliveries===0)await onBusinessConfirmed();
+    } catch { /* Keep the independent server incident until a later real completion. */ }
+  };
   const commitCompletion = async (job,threadId,nativeReceipt,signal) => {
     const result=await completedReceipt(job,threadId,nativeReceipt,signal);
     let binding;
@@ -623,7 +636,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     inbox.completeDelivery(job.deliveryId,result.receipt,result.outcome?{
       continuation:result.outcome.continuation,bindingState:binding.state,
       ...(result.outcome.processedSourceReferences?{processedSourceReferences:result.outcome.processedSourceReferences}:{})}:null);
-    if(result.outcome) await passHost.releasePass(result.outcome);
+    if(result.outcome) {await passHost.releasePass(result.outcome);await businessConfirmed();}
   };
   const intakeSource=async(row,signal)=>{
     const selected=(await client.sourceAccounts(row.scope.companyId,signal)).find(source=>source.id===row.scope.bindingId);lease();
@@ -876,6 +889,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const result=await completedReceipt(row,pass.threadId,nativeResult.receipt,signal);
         if(row.receipt!==result.receipt) fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
         await passHost.releasePass(result.outcome);
+        await businessConfirmed();
       }
     }
     const [job]=inbox.incompleteDeliveries(); if(!job) return false;
