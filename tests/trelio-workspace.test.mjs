@@ -5339,14 +5339,19 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
   // Codex resolves relative MCP paths against the plugin root and owns the
   // env allowlist/timeouts. Keep this byte-for-byte host contract independent
   // from Claude, which resolves plain relative paths against the project cwd.
+  // Since shell 3.2.4 both Codex servers also publish schemas directly: hiding
+  // them behind deferred/Code Mode calls would bypass client PreToolUse. This
+  // is a shell contract, independent of this signed runtime's release version.
   assert.deepEqual(codexManifest.mcpServers.trelio, {
     url: "https://trelio.ru/mcp",
+    omit_tools_from: ["deferred", "code_mode"],
     oauth: {
       clientId: "trelio_agent_workspaces_v1",
     },
   });
   assert.deepEqual(codexManifest.mcpServers["trelio-remote-skills"], {
     command: "./scripts/launch-trelio-node",
+    omit_tools_from: ["deferred", "code_mode"],
     args: ["./scripts/trelio-host-runtime-loader.mjs", "mcp"],
     cwd: ".",
     env_vars: [
