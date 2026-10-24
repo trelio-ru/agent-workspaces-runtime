@@ -3234,11 +3234,20 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
     try {
       await fs.rename(temporaryPath, entry.installedPath);
     } catch (error) {
-      if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
-      const concurrent = await inspectImmutableCodexPluginTree(
-        entry.installedPath,
-        entry.version,
-      );
+      // Windows can report an existing non-empty destination as EPERM.
+      // Accept only a fully verified identical concurrent publication; a real
+      // permission failure, absent destination or different tree still fails.
+      if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) throw error;
+      let concurrent;
+      try {
+        concurrent = await inspectImmutableCodexPluginTree(entry.installedPath, entry.version);
+      } catch (verificationError) {
+        // In particular, an absent target does not turn a real EPERM into a
+        // retryable ENOENT. Preserve the rename refusal unless its exact
+        // independently verified postcondition was actually achieved.
+        if (error.code === "EPERM") throw error;
+        throw verificationError;
+      }
       if (concurrent.treeSha256 !== entry.treeSha256) throw error;
     }
   } finally {
@@ -3338,7 +3347,21 @@ export const retainLoadedCodexPluginInstallation = async ({
     try {
       await fs.rename(temporaryDirectory, entryDirectory);
     } catch (error) {
-      if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+      if (!["EEXIST", "ENOTEMPTY", "EPERM"].includes(error.code)) throw error;
+      if (error.code === "EPERM") {
+        // Two live MCPs can snapshot the same content id. Windows reports the
+        // losing directory rename as EPERM rather than EEXIST. Prove the exact
+        // private winner and its complete bytes before accepting that result;
+        // never retry rename, change ACLs or swallow an ordinary access denial.
+        try {
+          await assertPrivatePathKind(entryDirectory, "directory");
+          await assertRetainedCodexPluginEntry({
+            pluginDirectory, version: source.version, treeSha256: source.treeSha256,
+          });
+        } catch {
+          throw error;
+        }
+      }
     }
   } finally {
     await fs.rm(temporaryDirectory, { recursive: true, force: true });

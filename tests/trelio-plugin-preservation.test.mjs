@@ -7,7 +7,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
-import { startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { retainLoadedCodexPluginInstallation, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const execute = promisify(execFile);
 const waitUntil = async (predicate) => {
@@ -167,4 +167,64 @@ test("source and non-Codex shell roots never create a retention store", async ()
     }
     await assert.rejects(fs.stat(f.retentionDirectory), { code: "ENOENT" });
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+// Exercise Windows' EPERM collision result on every OS as well as through the
+// native concurrent-start scenario above. Only an independently verified exact
+// destination can turn a failed rename into an already-completed publication.
+test("EPERM publication accepts only an existing verified snapshot, never an access denial", async () => {
+  for (const publishFirst of [false, true]) {
+    const f = await fixture();
+    const rename = fs.rename;
+    try {
+      fs.rename = async (source, destination) => {
+        if (destination.startsWith(f.retentionDirectory + path.sep)) {
+          if (publishFirst) await rename(source, destination);
+          throw Object.assign(new Error("synthetic directory rename result"), { code: "EPERM" });
+        }
+        return rename(source, destination);
+      };
+      const result = retainLoadedCodexPluginInstallation({
+        loadedPluginDirectory: f.plugin, loadedPluginVersion: "3.2.3", retentionDirectory: f.retentionDirectory,
+      });
+      if (publishFirst) assert.equal((await result).version, "3.2.3");
+      else await assert.rejects(result, { code: "EPERM" });
+    } finally {
+      fs.rename = rename;
+      await fs.rm(f.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("EPERM cache restoration needs identical published bytes and preserves real access failures", async () => {
+  for (const publishFirst of [false, true]) {
+    const f = await fixture();
+    const errors = [];
+    const preservation = startLoadedCodexPluginPreservation({ ...f, checkIntervalMs: 20, onError: error => errors.push(error) });
+    const rename = fs.rename;
+    try {
+      await preservation.ready;
+      fs.rename = async (source, destination) => {
+        if (destination === f.plugin) {
+          if (publishFirst) await rename(source, destination);
+          throw Object.assign(new Error("synthetic cache rename result"), { code: "EPERM" });
+        }
+        return rename(source, destination);
+      };
+      await fs.rm(f.plugin, { recursive: true });
+      if (publishFirst) {
+        await waitUntil(async () => fs.stat(f.plugin).then(() => true, () => false));
+        await preservation.close();
+        assert.deepEqual(errors, []);
+      } else {
+        await waitUntil(() => errors.length > 0);
+        assert.equal(errors[0].code, "EPERM", "do not hide a permission failure behind missing destination");
+        await assert.rejects(fs.stat(f.plugin), { code: "ENOENT" });
+      }
+    } finally {
+      await preservation.close();
+      fs.rename = rename;
+      await fs.rm(f.root, { recursive: true, force: true });
+    }
+  }
 });
