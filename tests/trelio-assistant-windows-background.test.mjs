@@ -243,9 +243,19 @@ test('the signed worker brands only an isolated visible parent console and reads
             sibling=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:false,stdio:'ignore'});
             await new Promise((resolve,reject)=>{sibling.once('spawn',resolve);sibling.once('error',reject);});
           }
-          const icon=await startAssistantWindowsConsoleIcon();
-          await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify(Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'))));
-          await icon.close();if(sibling)sibling.kill();`);
+          let presentationChild;
+          const icon=await startAssistantWindowsConsoleIcon({spawnProcess:(...args)=>{presentationChild=spawn(...args);return presentationChild;}});
+          const result=Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'));
+          if(icon.state==='applied'){
+            // The actual native receipt has crossed the restored stdout pipe.
+            // Keep stdin open and prove the keeper does not exit until EOF.
+            await new Promise(resolve=>setTimeout(resolve,100));
+            result.keeperAliveBeforeClose=presentationChild.exitCode===null;
+          }
+          await icon.close();
+          if(icon.state==='applied')result.closedAtEof=presentationChild.exitCode===0&&!presentationChild.killed;
+          await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify(result));
+          if(sibling)sibling.kill();`);
         const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
         const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release)";
         const code=await new Promise((resolve,reject)=>{
@@ -256,7 +266,7 @@ test('the signed worker brands only an isolated visible parent console and reads
         });
         assert.equal(code,0,`the synthetic native classic-console host must complete (closed precondition stage ${code})`);
         const result=JSON.parse(await fs.readFile(receipt,'utf8'));
-        if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true});
+        if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true,keeperAliveBeforeClose:true,closedAtEof:true});
         else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
         else{assert.equal(result.state,'skipped');assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));}
       }

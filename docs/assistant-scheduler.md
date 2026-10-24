@@ -666,8 +666,10 @@ file gate and proves its HWND/class/visibility through an independent AttachCons
 read, then detaches before releasing the child. The presentation helper detaches
 itself before attaching to its parent even when its previous headless association
 has no HWND; FreeConsole never detaches the parent. Production attach refusals use
-closed reasons only; they never expose a PID, HWND, path or raw OS error. No unavailable console becomes a
-successful branding receipt.
+closed reasons only; they never expose a PID, HWND, path or raw OS error. The
+positive native fixture also keeps the restored stdin pipe open after receipt,
+requires the keeper to remain alive, then verifies clean exit at EOF without a
+kill. No unavailable console becomes a successful branding receipt.
 
 ### Optional source-tree QA launcher
 
