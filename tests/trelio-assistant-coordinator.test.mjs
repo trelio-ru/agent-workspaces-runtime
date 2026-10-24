@@ -1609,7 +1609,7 @@ test(`pre-native recovery refuses ${changed} changing while native renew is in f
 
 // Exercise the real coordinator + persisted SQLite journal. Native/domain
 // adapters here are controlled witnesses, not claims about a live Windows run.
-for(const legacyPending of [false,true])for(const lostResume of [false,true])test(`automatic NEW turn preserves original delivery across SQLite restart (legacy=${legacyPending}, lost resume=${lostResume})`,async t=>{
+for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResume of [false,true])test(`automatic NEW turn preserves original delivery across SQLite restart (legacy=${legacyPending}, lost resume=${lostResume})`,async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-terminal-continuation-'));
   const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
   const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
@@ -1639,7 +1639,7 @@ for(const legacyPending of [false,true])for(const lostResume of [false,true])tes
       Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(Date.parse(pass.leaseExpiresAt)+3600000).toISOString()});
       ownerState='resumed';if(lose){lose=false;throw Object.assign(new Error('lost exact response'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
     }
-    return {schemaVersion:legacy?1:2,state:legacy?'waiting_owner':ownerState,reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
+    return {schemaVersion:legacy?1:2,state:legacy?legacyPending:ownerState,reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
       expectedLeaseRevision:input.expectedLeaseRevision,questionPath:legacy?'/owner-control':null,
       resumed:ownerState==='resumed'?{leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
   };

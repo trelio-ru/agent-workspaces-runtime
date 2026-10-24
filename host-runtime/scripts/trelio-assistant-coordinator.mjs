@@ -904,8 +904,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
     // A former runtime may have left a purely technical owner question. Ask
     // the SAME native ledger to migrate only that pending intent; its UUID and
-    // original native-start fence survive. A genuine refusal remains stopped.
-    if(review.schemaVersion===1&&review.state==='waiting_owner'&&!intent.resumeAttempted){
+    // original native-start fence survive, including an expired pending prompt.
+    // Native migration still refuses an explicit decline/Other decision.
+    if(review.schemaVersion===1&&['waiting_owner','expired','approved'].includes(review.state)&&!intent.resumeAttempted){
       review=await passHost.continuePass({...request,automatic:true,continuation:'review'},saved,signal);
     }
     lease();await recheck();
