@@ -29,7 +29,8 @@ const fixture = t => {
     reportSchedule:async input=>({sequence:input.sequence}),
     beginTaskPass:async input=>{
       if(!passes.has(input.deliveryId)) passes.set(input.deliveryId,{...input,passId:randomUUID(),leaseRevision:0,
-        leaseExpiresAt:new Date(clock+1200000).toISOString(),state:'leased',execution:execution.configuration});
+        leaseExpiresAt:new Date(clock+1200000).toISOString(),state:'leased',execution:execution.configuration,
+        ...(authority.workMode?{workMode:authority.workMode}:{})});
       return passes.get(input.deliveryId);
     },
     readTaskPass:async input=>[...passes.values()].find(pass=>pass.passId===input.passId),
@@ -57,7 +58,8 @@ const fixture = t => {
     },
     run:async({threadId,deliveryId,taskContext,execution:choice},options)=>{
       assert.deepEqual(choice,execution.configuration);
-      const {ownerQuestionIds,...task}=taskContext; assert.deepEqual(task,{assistantId,companyId,taskId});
+      const {ownerQuestionIds,...task}=taskContext; assert.deepEqual(task,{assistantId,companyId,taskId,
+        ...(authority.workMode==='discussion'?{workMode:'discussion'}:{})});
       if(ownerQuestionIds) assert.ok(ownerQuestionIds.every(id=>/^[0-9a-f-]{36}$/u.test(id)));
       runs++;options.startInvocation();starts++;
       const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};deliveries.set(deliveryId,result);
@@ -87,6 +89,33 @@ test('real SQLite coordinator provisions one chat and wakes only on a mention or
   f.advance(30*60000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
   assert.ok(f.coordinator.status()[0].lastCycleAt);assert.equal(f.counts().provisions,1);assert.equal(f.counts().runs,2);
   assert.equal(await f.coordinator.workOnce(),null);
+});
+
+test('a mention-only discussion uses the permanent chat without enabling a timer, including across restart',async t=>{
+  const f=fixture(t),reports=[],observed=[];
+  f.authority.workMode='discussion';f.continuation.goalState='completed';
+  f.options.client.reportSchedule=async input=>{reports.push(input);return {sequence:input.sequence};};
+  const run=f.options.native.run;
+  f.options.native.run=async(input,options)=>{observed.push(input);return run(input,options);};
+  f.events.push({id:randomUUID(),revision:'mention-1',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();assert.equal((await f.coordinator.workOnce()).kind,'provision');
+  const initial=f.coordinator.status()[0],threadId=initial.threadId;
+  assert.equal(initial.state,'paused');assert.equal(initial.nextRunAt,null);
+  assert.equal((await f.coordinator.workOnce()).state,'completed','first queued mention runs despite the paused timer');
+  assert.equal(observed[0].taskContext.workMode,'discussion');assert.equal(f.activePass(),null);
+  assert.equal(f.coordinator.status()[0].state,'done');assert.equal(f.coordinator.status()[0].nextRunAt,null);
+  await f.coordinator.close();const restarted=createAssistantCoordinator(f.options);
+  f.advance(24*60*60000);
+  await restarted.pollOnce();assert.equal(await restarted.workOnce(),null,'restart and elapsed time cannot invent discussion work');
+  f.events.push({id:randomUUID(),revision:'ordinary-comment',taskId:f.taskId,wake:false});f.advance(300000);
+  await restarted.pollOnce();assert.equal(await restarted.workOnce(),null);
+  f.events.push({id:randomUUID(),revision:'mention-2',taskId:f.taskId,wake:true});f.advance(300000);
+  await restarted.pollOnce();assert.equal((await restarted.workOnce()).state,'completed');
+  assert.equal(restarted.status()[0].threadId,threadId);assert.equal(restarted.status()[0].nextRunAt,null);
+  assert.deepEqual(f.counts(),{starts:3,provisions:1,runs:2,acks:3});
+  assert.ok(reports.length>0);assert.ok(reports.every(report=>report.state!=='active'&&report.nextRunAt===null),
+    'no transient active schedule is reported before or after the first reply');
+  await restarted.close();
 });
 
 test('the next wake uses the company owner choice in the same permanent chat', async t=>{

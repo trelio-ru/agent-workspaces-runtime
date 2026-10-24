@@ -36,6 +36,39 @@ function fakeChild() {
   const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough();
   child.killed = false; child.kill = () => { child.killed = true; return true; }; return child;
 }
+
+test('native discussion prompt uses only task/comment locators and never a material work-state path',async t=>{
+  const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-discussion-test-'));
+  t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();let reads=0,starts=0,input='';
+  const context={...taskContext,workMode:'discussion',ownerQuestionIds:[randomUUID()]};
+  const state=assistantWorkStateContext(context);
+  assert.equal(state.workMode,'discussion');assert.equal(Object.hasOwn(state,'workStatePath'),false);
+  assert.deepEqual(assistantWorkStateContext({...taskContext,workMode:'task'}),assistantWorkStateContext(taskContext),
+    'an explicit ordinary mode retains the legacy material contract');
+  for(const workMode of [null,'admin','DISCUSSION',{},false])assert.throws(()=>assistantWorkStateContext({...taskContext,workMode}),/INVALID_INPUT/);
+  const source={provider:'telegram',eventOrdinal:0,sourceId:randomUUID(),sourceRevision:1,routeId:randomUUID(),accountId:randomUUID(),
+    eventRevision:'a'.repeat(64),eventId:'message:123:4',conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
+  assert.equal(assistantWorkStateContext({...taskContext,sourceReferences:[source]}).sourceReferences.length,1);
+  assert.throws(()=>assistantWorkStateContext({...context,sourceReferences:[source]}),/INVALID_INPUT/);
+  const result=await runAssistantCodexPass({threadId,deliveryId,cwd,taskContext:context,execution},{
+    readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+    readMetadata:async()=>({threadId,cwd}),startInvocation:()=>{starts++;},
+    readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
+    spawnProcess:(_executable,args)=>{
+      assert.equal(args.includes('-'),true);assert.equal(args.some(arg=>arg.includes('discussion')),false);
+      const child=fakeChild();child.stdin.on('data',chunk=>{input+=chunk.toString();});
+      child.stdin.on('end',()=>queueMicrotask(()=>{child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);}));
+      return child;
+    },
+  });
+  assert.equal(result.state,'completed');assert.equal(starts,1);
+  const line=input.split('\n').find(value=>value.startsWith('TRELIO_ASSISTANT_SCOPE '));
+  assert.deepEqual(JSON.parse(line.slice('TRELIO_ASSISTANT_SCOPE '.length)),state);
+  assert.match(input,/restricted native discussion pass/u);assert.match(input,/replyCommentId/u);
+  assert.match(input,/Do not create\/read a Workspace or WORK\.md/u);
+  assert.doesNotMatch(input,/Use the assistant-task-worker skill|workStatePath|Save confirmed progress/u);
+});
 const nativeRpc = handler => (_executable, args, options) => {
   assert.deepEqual(args,['app-server','--listen','stdio://']); assert.equal(options.shell,false);
   assert.deepEqual(options.stdio,['pipe','pipe','ignore']);

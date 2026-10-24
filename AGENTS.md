@@ -614,6 +614,10 @@ publication tooling также остаются вне этого публичн
   нового плагина и [контракт](docs/assistant-scheduler.md#durable-human-goal).
   Markdown не хранится в SQLite, не становится authority и не закрывает цель
   по одному native completed turn. READY не создаёт task files.
+- Mention-derived comment-only access uses native `workMode:discussion`, the SAME
+  permanent chat/proof/comment/outcome engine, no Workspace or periodic timer.
+  Completion requires the exact native reply receipt; full task material and
+  source ACK guards stay independent. See the scheduler discussion contract.
 
 - Plugin shell и host runtime имеют независимые release histories и versions.
   Изменение runtime само по себе не требует plugin release.

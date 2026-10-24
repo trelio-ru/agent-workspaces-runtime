@@ -1393,6 +1393,18 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
  * noChange/retraction and final grant/head/envelope/CAS validation. */
 export const withAssistantEncryptedMaterial = async ({args,signal},send,
   {withProfile=withProductionAssistantWorkspace,loadCommon=()=>import('./trelio-workspace.mjs')}={})=>{
+  if(Object.hasOwn(args,'replyCommentId')) {
+    // A discussion pass completes from its own exact published-comment receipt,
+    // never from a fabricated Workspace/WORK.md. No company key/material read
+    // is needed, including in encrypted firms. The ordinary observed proof and
+    // native handler still reject task-mode passes, stale/foreign comments and
+    // missing native mutation receipts. Mixed evidence fails before private I/O.
+    if(!new RegExp(UUID,'u').test(args.replyCommentId??'') || args.goalState!=='completed' || args.noChange!==false
+      || ['workspaceId','workspaceHead','acceptedRunId','encryptedMaterialWitness','sourceProcessingProof'].some(key=>Object.hasOwn(args,key))
+      || args.processedSourceReferences!==undefined && (!Array.isArray(args.processedSourceReferences)||args.processedSourceReferences.length))
+      fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+    return send(args);
+  }
   if(Object.hasOwn(args,'encryptedMaterialWitness') || !new RegExp(UUID,'u').test(args.workspaceId??'')
     || !/^[0-9a-f]{40,64}$/u.test(args.workspaceHead??'') || typeof args.noChange!=='boolean')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
   return withProfile(async({identity,host,client,store,prepareWorkspaceMaterial})=>{

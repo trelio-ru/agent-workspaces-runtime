@@ -829,6 +829,53 @@ test('task-pass and observed-runtime transport retain exact bindings and project
   assert.deepEqual(operations,['passBegin','passRead','passRenew','registerRuntime','registerRuntime','endRuntime']);
 });
 
+test('native discussion mode survives task inventory, exact reads, event and pass projection; unknown modes fail closed',async()=>{
+  const origin='https://discussion.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1});
+  const companyId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID(),passId=randomUUID(),deliveryId=randomUUID(),threadId=randomUUID();
+  let mode='discussion';
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async operation=>{
+    const binding={id:bindingId,taskId,state:'accepted',revision:2,...(mode===undefined?{}:{workMode:mode})};
+    if(operation==='tasks')return {bindings:[binding],nextCursor:null};
+    if(operation==='task')return {binding,hostState:'this_device',execution:{state:'unconfigured',configuration:null,policyRevisionId:null}};
+    if(operation==='poll')return {events:[{id:randomUUID(),revision:'1',taskId,wake:true,bindingId,bindingRevision:2,taskState:'accepted',
+      ...(mode===undefined?{}:{workMode:mode})}],nextCursor:'1',hasMore:false};
+    assert.ok(['passBegin','passRead'].includes(operation));
+    return {passId,bindingId,bindingRevision:2,deliveryId,threadId,state:'leased',leaseRevision:0,
+      leaseExpiresAt:new Date(Date.now()+60000).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},
+      ...(mode===undefined?{}:{workMode:mode})};
+  }});
+  const reads=[async()=>(await client.tasks(companyId)).bindings[0],()=>client.task(companyId,taskId),
+    async()=>(await client.poll(companyId)).events[0],()=>client.beginTaskPass({companyId,taskId,bindingId,bindingRevision:2,deliveryId,threadId}),
+    ()=>client.readTaskPass({companyId,taskId,passId})];
+  for(const read of reads)assert.equal((await read()).workMode,'discussion');
+  mode=undefined;for(const read of reads)assert.equal(Object.hasOwn(await read(),'workMode'),false,'legacy server keeps its existing projection');
+  for(mode of [null,'admin','DISCUSSION',{},false])for(const read of reads)await assert.rejects(read(),/INVALID_RESPONSE/);
+});
+
+test('discussion completion forwards its exact native reply without opening any material or company key',async()=>{
+  const {withAssistantEncryptedMaterial}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()};
+  const args={taskPass,clientRequestId:randomUUID(),replyCommentId:randomUUID(),goalState:'completed',noChange:false};
+  let sends=0;
+  const isolated={withProfile:()=>assert.fail('discussion cannot inspect a Workspace or private managed profile'),
+    loadCommon:()=>assert.fail('discussion cannot open a material inspector')};
+  const send=async wire=>{sends++;assert.equal(wire,args);return {state:'confirmed',receiptId:randomUUID()};};
+  assert.equal((await withAssistantEncryptedMaterial({args},send,isolated)).state,'confirmed');assert.equal(sends,1);
+  for(const invalid of [{replyCommentId:'invalid'},{goalState:'active'},{noChange:true},
+    {workspaceId:randomUUID()},{workspaceHead:'a'.repeat(40)},{acceptedRunId:randomUUID()},
+    {encryptedMaterialWitness:{}},{sourceProcessingProof:{}},{processedSourceReferences:[{eventOrdinal:0}]},
+    {processedSourceReferences:{}}]){
+    await assert.rejects(withAssistantEncryptedMaterial({args:{...args,...invalid}},send,isolated),/PLAN_INVALID/);
+  }
+  assert.equal(sends,1,'mixed/fabricated material evidence never reaches native completion');
+  const denial=Object.assign(new Error('native task-mode denial'),{code:'ASSISTANT_DISCUSSION_REQUIRED'});
+  await assert.rejects(withAssistantEncryptedMaterial({args},async()=>{sends++;throw denial;},isolated),error=>error===denial);
+  assert.equal(sends,2,'native rejection is preserved without a retry or material fallback');
+  const ordinary={...args};delete ordinary.replyCommentId;
+  await assert.rejects(withAssistantEncryptedMaterial({args:ordinary},send,isolated),/PLAN_INVALID/);
+});
+
 test('fresh company execution state is projected without accepting local defaults or private metadata',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),taskId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'v'.repeat(43)}`,expiresAt:1});

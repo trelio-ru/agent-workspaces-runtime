@@ -63,6 +63,36 @@ assistant's part or the entire task. Shared task files retain normal ACL and E2E
 no private credential belongs in them. The backend-confirmed outcome below owns
 goal-stop; native prompt/path tests alone do not prove activation readiness.
 
+### Mention-derived discussion
+
+Native assignment discovery also accepts current canonical mentions without
+adding the assistant to the participant list. The assistant owner's mention
+allows the existing start flow; another author's first connection still needs
+the SAME owner decision. Mention access never grants project/admin/Workspace
+rights. The native binding and immutable pass select `workMode:discussion` for
+comment-only access; ordinary editable task access keeps `workMode:task` and
+all existing material evidence. The host never infers mode from message text.
+
+A discussion uses the SAME queue, observed proof, dedicated tools and permanent
+task chat. Its stdin locators omit `workStatePath` and reject external source
+references. The prompt asks for the permitted task/rules/discussion read and an
+ordinary native task reply. Completion supplies exact `replyCommentId`,
+`goalState:completed`, `noChange:false`, without Workspace/material or source
+processing fields. The native handler independently requires this pass's own
+published comment effect and exact unchanged revision/current access. A model
+ID, successful turn or unrelated comment cannot replace that receipt. Encrypted
+comments use the SAME content adapter; completion does not read company keys,
+Workspace containers or create a WORK.md. Restricted skills/Secrets/task edits
+and external ACK remain denied by the server, not merely the prompt.
+
+Initial discussion chat registration immediately pauses its timer, before any
+native schedule report. Its accepted inbox and original queued mention remain
+runnable without a second mention. Confirmed reply completion stops the timer;
+restart/elapsed time/ordinary comments cannot create work. A fresh real mention
+or permitted owner answer can resume the SAME chat. A later native full task
+assignment uses ordinary material/goal/cycle semantics. The mode is closed
+structural presentation metadata, not another journal or an authorization flag.
+
 ### Native invocation
 
 The official [CLI reference](https://learn.chatgpt.com/docs/developer-commands)

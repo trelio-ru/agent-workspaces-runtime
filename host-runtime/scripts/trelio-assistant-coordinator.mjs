@@ -72,7 +72,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     try { return schedule.get(scopeFor(source,taskId)); }
     catch(error) { if (error.code==='ASSISTANT_SCHEDULE_TASK_REQUIRED') return null; throw error; }
   };
+  // Presentation only, refreshed from native task/binding responses before
+  // admission. The protected pass ABI and native domain permissions stay exact;
+  // this bounded metadata never grants access or becomes a second task journal.
+  const taskWorkModes=new Map();
+  const modeKey=(source,taskId)=>`${source.companyId}:${taskId}`;
   const apply = (source,binding) => {
+    const mode=binding.workMode??'task';
+    if(!['task','discussion'].includes(mode))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    if(taskWorkModes.size>=10_000&&!taskWorkModes.has(modeKey(source,binding.taskId)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    taskWorkModes.set(modeKey(source,binding.taskId),mode);
     const old=inbox.taskState(source,binding.taskId);
     inbox.applyTaskState(source,{ taskId:binding.taskId,state:binding.state,expectedRevision:old?.revision??0,
       authority:{bindingId:binding.id,revision:binding.revision} });
@@ -83,7 +92,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // A completed personal goal is sticky during ordinary source polls. A new
     // explicit mention may still run in the same chat and commit a new goal;
     // rediscovering an accepted task alone must not resurrect its cycle.
-    const state=binding.state==='accepted'?(plan.state==='done'?'done':'active'):binding.state==='done'?'done':binding.state==='revoked'?'revoked':'paused';
+    const state=binding.state==='accepted'?(plan.state==='done'?'done':mode==='discussion'?'paused':'active'):binding.state==='done'?'done':binding.state==='revoked'?'revoked':'paused';
     if (plan.state!==state) schedule.setState(scopeFor(source,binding.taskId),{state,expectedRevision:plan.revision});
   };
   const authorize = async ({scope,taskId},signal,{captureExecution=null,captureBinding=null,requireModel=true,allowTaskDone=false,job=null}={}) => {
@@ -533,7 +542,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(existing.threadId!==threadId) fail('ASSISTANT_COORDINATOR_THREAD_CONFLICT');
       return existing;
     }
-    return schedule.register({scope:scopeFor(job.scope,job.taskId),source:job.scope,threadId,cadence:'every_30_minutes',timeZone});
+    const plan=schedule.register({scope:scopeFor(job.scope,job.taskId),source:job.scope,threadId,cadence:'every_30_minutes',timeZone});
+    // A mention-only discussion has a permanent chat but no periodic work.
+    // Pause just the timer immediately, before any native schedule report.
+    // The accepted inbox binding and its first queued mention remain runnable.
+    return taskWorkModes.get(modeKey(job.scope,job.taskId))==='discussion'
+      ?schedule.setState(scopeFor(job.scope,job.taskId),{state:'paused',expectedRevision:plan.revision}):plan;
   };
   const completedReceipt = async (job,threadId,nativeReceipt,signal) => {
     if(job.kind==='provision') return {receipt:nativeReceipt,outcome:null};
@@ -907,6 +921,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         execution=assistantExecutionConfiguration(admitted.execution);
         result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
+            ...(admitted.workMode==='discussion'?{workMode:'discussion'}:{}),
             ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
               const source=JSON.parse(event.event_scope_json);
               return {sourceId:source.bindingId,sourceRevision:event.route_source_revision,routeId:event.route_id,eventOrdinal:event.event_ordinal,provider:source.provider,

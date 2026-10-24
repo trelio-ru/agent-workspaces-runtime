@@ -88,6 +88,15 @@ invent a mention. A real cyclic scheduler may pass an explicit `scheduledTask`;
 that permits a normal pass with context-only or no new events and is not evidence
 that an automation exists.
 
+Native mention-derived bindings need not add task participants. Current
+comment-only access selects a restricted discussion pass: the SAME permanent
+chat and original queued mention run while the timer stays paused. An exact
+native published-reply outcome completes that delivery without Workspace/source
+evidence; ordinary material passes retain their existing requirements. A restart
+does not fabricate a cycle, and another actual mention reuses the same chat.
+Owner-start decisions and native per-tool ACL remain independent; see the
+scheduler's mention-derived discussion contract.
+
 `claimDelivery` invokes a mandatory fresh authorization callback outside the DB
 transaction, then rechecks source/task revisions. The callback must use the
 current backend/provider ACL, managed lifecycle and task-start approval. Local
