@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
-  validateAssistantBackgroundReplacementSnapshot } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+  validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const identity = { origin: 'https://trelio.ru', assistantId: randomUUID(), deviceId: randomUUID() };
@@ -186,6 +186,142 @@ test('the actual bounded native pipe selects the strict replacement receipt befo
   for (const invalid of [registered(), { ...captured, rawXml: 'PRIVATE' }, { ...absent, state: 'running' }])
     await assert.rejects(wire(invalid), { code: 'ASSISTANT_BACKGROUND_READBACK_FAILED' });
   await assert.rejects(wire(captured, 'replacement_remove'), { code: 'ASSISTANT_BACKGROUND_READBACK_FAILED' });
+});
+
+test('console branding uses one fixed native mode with bounded closed output and retains icons only until supervisor close',async()=>{
+  for(const scenario of ['applied','shared','malformed','overflow','exit']){
+    let child,spawned=0,ended=0,killed=0;
+    const icon=await startAssistantWindowsConsoleIcon({platform:'win32',environment:{SystemRoot:'C:\Windows',PRIVATE:'never-inherited'},
+      selectWorker:async()=>({executable:'C:\signed\trelio-private-process.exe',args:[]}),
+      spawnProcess:(executable,args,options)=>{
+        spawned++;assert.equal(executable,'C:\signed\trelio-private-process.exe');assert.deepEqual(args,['--assistant-console-icon']);
+        assert.deepEqual(options.env,{SystemRoot:'C:\Windows',PATH:''});assert.equal(options.shell,false);assert.equal(options.windowsHide,true);
+        child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{killed++;child.emit('close',1);};
+        child.stdin.on('finish',()=>{ended++;child.emit('close',0);});
+        queueMicrotask(()=>{
+          if(scenario==='exit'){child.emit('close',1);return;}
+          const value=scenario==='applied'?{schemaVersion:1,state:'applied',verified:true,foregroundUnchanged:true}
+            :scenario==='shared'?{schemaVersion:1,state:'skipped',reason:'shared_console'}
+            :{schemaVersion:1,state:'applied',verified:true,rawWindow:'PRIVATE'};
+          child.stdout.write(scenario==='overflow'?'PRIVATE'.repeat(100):JSON.stringify(value)+'\n');
+        });return child;
+      }});
+    assert.equal(spawned,1);assert.equal(icon.state,scenario==='applied'?'applied':scenario==='shared'?'skipped':'unavailable');
+    if(scenario==='applied')assert.equal(ended,0,'HICON lifetime cannot end at successful startup');
+    await icon.close();
+    if(scenario==='applied')assert.equal(ended,1);
+    assert.ok(killed<=1,'cosmetic process is never retried');assert.ok(!JSON.stringify(icon).includes('PRIVATE'));
+  }
+  const skipped=await startAssistantWindowsConsoleIcon({platform:'linux',selectWorker:async()=>assert.fail('non-Windows never resolves worker')});
+  assert.equal(skipped.reason,'unsupported_platform');
+});
+
+test('the signed worker brands only an isolated visible parent console and reads actual WM_GETICON without changing focus',
+  {skip:process.platform!=='win32'},async()=>{
+    const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
+    for(const mode of ['visible','shared','hidden']){
+      // detached Windows children own their fixture console. These are synthetic
+      // hosted windows, never the test runner's shell or an assistant desktop.
+      const body=`import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
+        import {spawn} from 'node:child_process';
+        let sibling=null;
+        if(${JSON.stringify(mode)}==='shared'){
+          sibling=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:false,stdio:'ignore'});
+          await new Promise((resolve,reject)=>{sibling.once('spawn',resolve);sibling.once('error',reject);});
+        }
+        const icon=await startAssistantWindowsConsoleIcon();
+        console.log(JSON.stringify(Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'))));
+        await icon.close();if(sibling)sibling.kill();`;
+      const result=await new Promise((resolve,reject)=>{
+        const child=spawn(process.execPath,['--input-type=module','-e',body],{detached:true,windowsHide:mode==='hidden',
+          shell:false,stdio:['ignore','pipe','pipe'],timeout:15000});let output='';
+        child.stdout.on('data',chunk=>{output+=chunk;});child.once('error',reject);
+        child.once('close',code=>{try{assert.equal(code,0);resolve(JSON.parse(output));}catch(error){reject(error);}});
+      });
+      if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true});
+      else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
+      else{assert.equal(result.state,'skipped');assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));}
+    }
+});
+
+// Native ConPTY fixture only. It owns every process/pipe below; production
+// branding never creates a console or terminal and never compiles native code.
+const PSEUDOCONSOLE_FIXTURE = String.raw`
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading.Tasks;
+public static class AssistantIconPseudoConsoleFixture {
+  [StructLayout(LayoutKind.Sequential)] struct Coord { public short X, Y; }
+  [StructLayout(LayoutKind.Sequential)] struct Security { public int Length; public IntPtr Descriptor; [MarshalAs(UnmanagedType.Bool)] public bool Inherit; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
+    public int cb; public string reserved, desktop, title;
+    public int x,y,xSize,ySize,xCount,yCount,fill,flags; public short show,reservedSize;
+    public IntPtr reservedBytes,input,output,error;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct Extended { public Startup Info; public IntPtr Attributes; }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr Process,Thread; public int Id,ThreadId; }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CreatePipe(out IntPtr read,out IntPtr write,ref Security attributes,int size);
+  [DllImport("kernel32.dll")] static extern int CreatePseudoConsole(Coord size,IntPtr input,IntPtr output,int flags,out IntPtr console);
+  [DllImport("kernel32.dll")] static extern void ClosePseudoConsole(IntPtr console);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,int flags,ref IntPtr size);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list,int flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr returned);
+  [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateProcess(string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,int flags,IntPtr environment,string directory,ref Extended startup,out ProcessInfo process);
+  [DllImport("kernel32.dll")] static extern int WaitForSingleObject(IntPtr handle,int milliseconds);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process,out int code);
+  [DllImport("kernel32.dll")] static extern bool ReadFile(IntPtr handle,byte[] bytes,int length,out int count,IntPtr overlapped);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,int code);
+  static void Check(bool value) { if(!value)throw new Exception("synthetic pseudoconsole API failed"); }
+  public static int Run(string executable,string arguments) {
+    IntPtr inputRead=IntPtr.Zero,inputWrite=IntPtr.Zero,outputRead=IntPtr.Zero,outputWrite=IntPtr.Zero,console=IntPtr.Zero,attributes=IntPtr.Zero;
+    ProcessInfo process=new ProcessInfo();Task drain=null;bool initialized=false;
+    try {
+      Security security=new Security {Length=Marshal.SizeOf(typeof(Security)),Inherit=false};
+      Check(CreatePipe(out inputRead,out inputWrite,ref security,0));Check(CreatePipe(out outputRead,out outputWrite,ref security,0));
+      Check(CreatePseudoConsole(new Coord {X=80,Y=25},inputRead,outputWrite,0,out console)==0);
+      // Drain the synthetic terminal independently before ClosePseudoConsole:
+      // its output is deliberately discarded, never an MCP/content fixture.
+      drain=Task.Run(()=>{byte[] bytes=new byte[4096];int count;while(ReadFile(outputRead,bytes,bytes.Length,out count,IntPtr.Zero)&&count>0){};});
+      IntPtr size=IntPtr.Zero;InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
+      attributes=Marshal.AllocHGlobal(size);Check(InitializeProcThreadAttributeList(attributes,1,0,ref size));initialized=true;
+      Check(UpdateProcThreadAttribute(attributes,0,new IntPtr(0x00020016),console,new IntPtr(IntPtr.Size),IntPtr.Zero,IntPtr.Zero));
+      Extended startup=new Extended {Info=new Startup {cb=Marshal.SizeOf(typeof(Extended))},Attributes=attributes};
+      Check(CreateProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0x00080000,IntPtr.Zero,null,ref startup,out process));
+      if(WaitForSingleObject(process.Process,15000)!=0) { TerminateProcess(process.Process,124);throw new Exception("synthetic pseudoconsole timeout"); }
+      int result;Check(GetExitCodeProcess(process.Process,out result));return result;
+    } finally {
+      if(process.Thread!=IntPtr.Zero)CloseHandle(process.Thread);if(process.Process!=IntPtr.Zero)CloseHandle(process.Process);
+      if(initialized)DeleteProcThreadAttributeList(attributes);if(attributes!=IntPtr.Zero)Marshal.FreeHGlobal(attributes);
+      if(console!=IntPtr.Zero)ClosePseudoConsole(console);
+      foreach(IntPtr handle in new[]{inputRead,inputWrite,outputWrite})if(handle!=IntPtr.Zero)CloseHandle(handle);
+      if(drain!=null)drain.Wait(2000);if(outputRead!=IntPtr.Zero)CloseHandle(outputRead);
+    }
+  }
+}
+`;
+
+test('a real Windows pseudoconsole stays unbranded without opening or selecting its terminal host',
+  {skip:process.platform!=='win32'},async()=>{
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-icon-conpty-'));
+    const fixture=path.join(directory,'fixture.mjs'),receipt=path.join(directory,'receipt.json');
+    const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
+    try{
+      await fs.writeFile(fixture,`import fs from 'node:fs/promises';import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
+        const icon=await startAssistantWindowsConsoleIcon();await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify({state:icon.state,reason:icon.reason}));await icon.close();`);
+      const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+      const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::Run([string]$p.executable,[string]$p.arguments)";
+      const code=await new Promise((resolve,reject)=>{
+        const child=spawn(resolveWindowsPowerShellExecutable(process.env),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
+          {shell:false,windowsHide:true,stdio:['pipe','ignore','ignore'],timeout:60000});
+        child.once('error',reject);child.once('close',resolve);
+        child.stdin.end(JSON.stringify({executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture)}));
+      });
+      assert.equal(code,0,'the synthetic native ConPTY host must complete');
+      const result=JSON.parse(await fs.readFile(receipt,'utf8'));assert.equal(result.state,'skipped');
+      assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));
+    }finally{await fs.rm(directory,{recursive:true,force:true});}
 });
 
 test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and removes only its own fixture', { skip: process.platform !== 'win32' }, async t => {
