@@ -358,9 +358,12 @@ int assistantConsoleIcon() {
   if (!basename || _wcsicmp(basename + 1, L"node.exe") != 0) {
     presentationSkipped("parent_identity_unavailable"); return 0;
   }
-  // A hidden child may have no console. Attach ONLY to its own direct parent;
-  // never AllocConsole, enumerate windows or select another process/window.
-  if (GetConsoleWindow()) FreeConsole();
+  // CREATE_NO_WINDOW can associate this helper with a headless console while
+  // GetConsoleWindow() is NULL. HWND absence is not a detach precondition:
+  // FreeConsole succeeds even when unattached and affects ONLY this helper.
+  // Then attach ONLY to its own direct parent; never allocate/show a console,
+  // enumerate windows or select another process/window.
+  require(FreeConsole() != FALSE);
   const BOOL attached = AttachConsole(ATTACH_PARENT_PROCESS);
   // Capture the API result before restoring std handles: that restoration may
   // change last-error. Closed reasons distinguish a missing parent console from
