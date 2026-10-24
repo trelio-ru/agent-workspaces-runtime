@@ -218,33 +218,43 @@ test('console branding uses one fixed native mode with bounded closed output and
 
 test('the signed worker brands only an isolated visible parent console and reads actual WM_GETICON without changing focus',
   {skip:process.platform!=='win32'},async()=>{
+    const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-icon-classic-'));
+    const fixture=path.join(directory,'fixture.mjs'),receipt=path.join(directory,'receipt.json');
     const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
-    for(const mode of ['visible','shared','hidden']){
-      // detached Windows children own their fixture console. These are synthetic
-      // hosted windows, never the test runner's shell or an assistant desktop.
-      const body=`import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
-        import {spawn} from 'node:child_process';
-        let sibling=null;
-        if(${JSON.stringify(mode)}==='shared'){
-          sibling=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:false,stdio:'ignore'});
-          await new Promise((resolve,reject)=>{sibling.once('spawn',resolve);sibling.once('error',reject);});
-        }
-        const icon=await startAssistantWindowsConsoleIcon();
-        console.log(JSON.stringify(Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'))));
-        await icon.close();if(sibling)sibling.kill();`;
-      const result=await new Promise((resolve,reject)=>{
-        const child=spawn(process.execPath,['--input-type=module','-e',body],{detached:true,windowsHide:mode==='hidden',
-          shell:false,stdio:['ignore','pipe','pipe'],timeout:15000});let output='';
-        child.stdout.on('data',chunk=>{output+=chunk;});child.once('error',reject);
-        child.once('close',code=>{try{assert.equal(code,0);resolve(JSON.parse(output));}catch(error){reject(error);}});
-      });
-      if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true});
-      else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
-      else{assert.equal(result.state,'skipped');assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));}
-    }
+    try{
+      for(const mode of ['visible','shared','hidden']){
+        // libuv's detached:true means DETACHED_PROCESS, not CREATE_NEW_CONSOLE.
+        // The test-only native launcher explicitly creates a classic console;
+        // production branding itself never creates or shows a window.
+        await fs.writeFile(fixture,`import fs from 'node:fs/promises';
+          import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
+          import {spawn} from 'node:child_process';
+          let sibling=null;
+          if(${JSON.stringify(mode)}==='shared'){
+            sibling=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{windowsHide:false,stdio:'ignore'});
+            await new Promise((resolve,reject)=>{sibling.once('spawn',resolve);sibling.once('error',reject);});
+          }
+          const icon=await startAssistantWindowsConsoleIcon();
+          await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify(Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'))));
+          await icon.close();if(sibling)sibling.kill();`);
+        const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.executable,[string]$p.arguments,[bool]$p.hidden)";
+        const code=await new Promise((resolve,reject)=>{
+          const child=spawn(resolveWindowsPowerShellExecutable(process.env),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
+            {shell:false,windowsHide:true,stdio:['pipe','ignore','ignore'],timeout:60000});
+          child.once('error',reject);child.once('close',resolve);
+          child.stdin.end(JSON.stringify({executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden'}));
+        });
+        assert.equal(code,0,'the synthetic native classic-console host must complete');
+        const result=JSON.parse(await fs.readFile(receipt,'utf8'));
+        if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true});
+        else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
+        else{assert.equal(result.state,'skipped');assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));}
+      }
+    }finally{await fs.rm(directory,{recursive:true,force:true});}
 });
 
-// Native ConPTY fixture only. It owns every process/pipe below; production
+// Native console fixtures only. They own every process/pipe below; production
 // branding never creates a console or terminal and never compiles native code.
 const PSEUDOCONSOLE_FIXTURE = String.raw`
 using System;
@@ -268,12 +278,26 @@ public static class AssistantIconPseudoConsoleFixture {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list,int flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr returned);
   [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateProcess(string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,int flags,IntPtr environment,string directory,ref Extended startup,out ProcessInfo process);
+  [DllImport("kernel32.dll", EntryPoint="CreateProcessW",ExactSpelling=true,CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateClassicProcess(string application,StringBuilder command,IntPtr processAttributes,IntPtr threadAttributes,bool inherit,int flags,IntPtr environment,string directory,ref Startup startup,out ProcessInfo process);
   [DllImport("kernel32.dll")] static extern int WaitForSingleObject(IntPtr handle,int milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process,out int code);
   [DllImport("kernel32.dll")] static extern bool ReadFile(IntPtr handle,byte[] bytes,int length,out int count,IntPtr overlapped);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,int code);
   static void Check(bool value) { if(!value)throw new Exception("synthetic pseudoconsole API failed"); }
+  public static int RunClassic(string executable,string arguments,bool hidden) {
+    ProcessInfo process=new ProcessInfo();
+    try {
+      // STARTF_USESHOWWINDOW + SW_SHOWNOACTIVATE keeps the synthetic positive
+      // window visible without selecting it. Hidden tests use SW_HIDE instead.
+      Startup startup=new Startup {cb=Marshal.SizeOf(typeof(Startup)),flags=1,show=(short)(hidden?0:4)};
+      Check(CreateClassicProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0x00000010,IntPtr.Zero,null,ref startup,out process));
+      if(WaitForSingleObject(process.Process,15000)!=0) { TerminateProcess(process.Process,124);throw new Exception("synthetic classic console timeout"); }
+      int result;Check(GetExitCodeProcess(process.Process,out result));return result;
+    } finally {
+      if(process.Thread!=IntPtr.Zero)CloseHandle(process.Thread);if(process.Process!=IntPtr.Zero)CloseHandle(process.Process);
+    }
+  }
   public static int Run(string executable,string arguments) {
     IntPtr inputRead=IntPtr.Zero,inputWrite=IntPtr.Zero,outputRead=IntPtr.Zero,outputWrite=IntPtr.Zero,console=IntPtr.Zero,attributes=IntPtr.Zero;
     ProcessInfo process=new ProcessInfo();Task drain=null;bool initialized=false;
