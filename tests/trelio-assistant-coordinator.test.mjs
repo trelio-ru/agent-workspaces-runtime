@@ -118,6 +118,21 @@ test('a mention-only discussion uses the permanent chat without enabling a timer
   await restarted.close();
 });
 
+test('an ordinary native poll cannot turn an existing paused discussion into a recurring timer',async t=>{
+  const f=fixture(t),reports=[];f.authority.workMode='discussion';
+  f.options.client.reportSchedule=async report=>{reports.push(report);return {sequence:report.sequence};};
+  try{
+    await f.coordinator.pollOnce();assert.equal((await f.coordinator.workOnce()).kind,'provision');
+    assert.equal(f.coordinator.status()[0].state,'paused');
+    f.events.push({id:randomUUID(),revision:'ordinary-before-reply',taskId:f.taskId,wake:false,workMode:'discussion'});
+    f.advance(300000);await f.coordinator.pollOnce();
+    assert.equal(f.coordinator.status()[0].state,'paused');assert.equal(f.coordinator.status()[0].nextRunAt,null);
+    assert.equal(await f.coordinator.workOnce(),null,'ordinary discussion notifications cannot invent periodic work');
+    assert.ok(reports.every(report=>report.state!=='active'&&report.nextRunAt===null));
+    assert.equal(f.counts().runs,0);
+  }finally{await f.coordinator.close();}
+});
+
 test('the next wake uses the company owner choice in the same permanent chat', async t=>{
   const f=fixture(t);await f.coordinator.pollOnce();await f.coordinator.workOnce();
   const threadId=f.coordinator.status()[0].threadId;

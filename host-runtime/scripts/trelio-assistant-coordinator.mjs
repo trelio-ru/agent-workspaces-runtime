@@ -138,7 +138,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         inbox.abandonPoll(source,{token:poll.token,retryAfterMs:300_000}); throw error;
       }
       lease();
-      for(const event of result.events) apply(source,{id:event.bindingId,taskId:event.taskId,state:event.taskState,revision:event.bindingRevision});
+      for(const event of result.events) apply(source,{id:event.bindingId,taskId:event.taskId,state:event.taskState,revision:event.bindingRevision,
+        ...(event.workMode===undefined?{}:{workMode:event.workMode})});
       inbox.commitPage(source,{...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
         events:result.events.map(({id,revision,taskId,wake,ownerQuestionId})=>({id,revision,taskId,wake,
           ...(ownerQuestionId === undefined ? {} : {ownerQuestionId})}))});
