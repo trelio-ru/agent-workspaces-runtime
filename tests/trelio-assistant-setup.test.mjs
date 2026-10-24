@@ -720,9 +720,9 @@ test('one background worker keeps model-free polling alive during a single nativ
 });
 
 test('background supervisor resolves a fresh worker only between cycles and preserves uncertain delivery recovery',async()=>{
-  const controller=new AbortController(),operations=[];let waits=0,reports=0;
+  const controller=new AbortController(),operations=[];let waits=0,reports=0,icons=0,iconsClosed=0;
   const identity={assistantId:randomUUID(),deviceId:randomUUID()};
-  const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),verifyRegistration:async()=>{},request:async(request,options)=>{
+  const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),verifyRegistration:async()=>{},startConsoleIcon:async()=>{icons++;return {close:async()=>{iconsClosed++;}};},request:async(request,options)=>{
     operations.push(request.operation);assert.equal(options.signal.aborted,false);
     if(request.operation==='background_tick'){
       assert.equal(options.timeoutMs,35*60_000);
@@ -731,7 +731,7 @@ test('background supervisor resolves a fresh worker only between cycles and pres
   },reportFailure:async error=>{assert.equal(error.code,'ASSISTANT_CODEX_DELIVERY_UNCERTAIN');reports++;},
   wait:async(milliseconds)=>{assert.equal(milliseconds,300_000);if(++waits===2)controller.abort();}});
   assert.deepEqual(operations,['health','background_tick','health','background_tick']);
-  assert.equal(reports,1);assert.deepEqual(result,{schemaVersion:1,state:'stopped'});
+  assert.equal(reports,1);assert.equal(icons,1);assert.equal(iconsClosed,1);assert.deepEqual(result,{schemaVersion:1,state:'stopped'});
 });
 
 

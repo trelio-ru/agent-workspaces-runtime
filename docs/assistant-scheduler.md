@@ -626,6 +626,38 @@ onboarding require independent live evidence after deployment. Pairing alone
 never installs or starts the service, and no user configuration changes on import. Automatic restart of Codex
 remains backlog-only.
 
+### Owned Windows console icon
+
+An explicitly running Windows supervisor may have a visible **classic console**.
+After protected identity and the exact OS registration are checked, the SAME
+packaged native worker has one fixed, presentation-only `--assistant-console-icon`
+mode. It attaches only to its direct Node parent, verifies the current user and
+parent lifetime, and requires that console to contain exactly that parent and
+its helper. No PID, HWND, path, image or command can be selected by a model.
+
+The worker sets `ICON_SMALL` and `ICON_BIG` with
+[WM_SETICON](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-seticon),
+then verifies the actual window handles through WM_GETICON. This changes the
+owned window's caption/Alt+Tab icons, rather than merely a shortcut. Its icon
+uses the exact three bars/cursor geometry from the dedicated plugin's
+`assets/trelio-assistant-logo.svg` (SVG SHA-256
+`fbf526b22fb2324623e64aaa89fa5474d8d4cd6b4bb64c3255d22cdd1263131e`).
+The fixed 64px raster is embedded in the existing reviewed C++ source/binary;
+there is no extra package file or Node.exe modification.
+
+No console is allocated, shown, activated or brought forward. A shared or hidden
+console is unchanged. In
+[a pseudoconsole](https://learn.microsoft.com/en-us/windows/console/getconsolewindow),
+the returned handle is not the terminal's displayed window: Windows Terminal and
+other terminal hosts are deliberately left alone. This is not a promise to
+replace every host's taskbar/pinned icon or the executable icon in Task Manager.
+Icon handles remain alive in the same helper until the supervisor closes its
+pipe; cleanup restores only icons still owned by that attempt. The private
+request protocol, ACL/DPAPI startup, background task definition and work
+admission/deadlines stay unchanged. Branding failure is cosmetic and never
+blocks or grants business readiness. Native Windows/ARM fixtures verify actual
+WM_GETICON, unchanged foreground, and shared/hidden/ConPTY no-op behavior.
+
 ### Optional source-tree QA launcher
 
 This is isolated development tooling, not a prerequisite for the normal

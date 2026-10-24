@@ -955,11 +955,13 @@ export const reportAssistantMaintenanceFailure = async (error, client = null) =>
 export const runAssistantBackground = async ({signal,request=requestCurrentAssistantRuntime,
   readHost=()=>productionContext(async(client,host)=>({identity:client.identity,activation:await host.readActivation()})),
   verifyRegistration=async()=>process.platform==='win32'?(await createProductionAssistantBackground())('status'):null,
+  startConsoleIcon=async()=>(await import('./trelio-assistant-setup.mjs')).startAssistantWindowsConsoleIcon(),
   wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure}={}) => {
   const controller=new AbortController();
   const stop=()=>controller.abort();
   const effective=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
   process.on('SIGTERM',stop);process.on('SIGINT',stop);
+  let consoleIcon=null;
   try {
     const initial=await readHost();
     if(!initial?.identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
@@ -970,6 +972,10 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
     // the new identity at its next logon. The SAME native status validator
     // checks the current marker/SID/action before any worker or maintenance.
     await verifyRegistration();
+    // Cosmetic only, after the exact identity/OS registration checks. The
+    // helper refuses shared/hidden/terminal-host windows; a failed icon never
+    // changes admission, native work, its deadline or a running window's focus.
+    try{consoleIcon=await startConsoleIcon();}catch{}
     while(!effective.aborted) {
       try {
         const current=await readHost();
@@ -988,7 +994,10 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
       if(!effective.aborted)await wait(300_000,effective);
     }
     return {schemaVersion:1,state:'stopped'};
-  } finally {process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);}
+  } finally {
+    try{await consoleIcon?.close?.();}catch{} // Cosmetic cleanup cannot hide a work/transport outcome.
+    process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);
+  }
 };
 
 export const executeAssistantRuntimeRequest = async (request,{context=productionContext,proxyFor=createProductionAssistantMcp,

@@ -587,3 +587,56 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
     child.stdin.end(JSON.stringify(plan));
   } catch { finish('ASSISTANT_BACKGROUND_UNAVAILABLE'); }
 });
+
+/** Optional presentation for the supervisor's OWN visible classic console.
+ * The fixed signed helper derives its direct parent/window internally. Nothing
+ * here accepts a HWND, PID, icon, executable, title or model-visible argument.
+ * A missing/shared/hidden/ConPTY console remains unchanged. This never installs
+ * or starts a service, obtains private state, or gates business readiness. */
+export const startAssistantWindowsConsoleIcon = async ({platform=process.platform,environment=process.env,
+  spawnProcess=spawn,selectWorker,timeoutMs=2000}={}) => {
+  const noop=state=>Object.freeze({...state,close:async()=>{}});
+  if(platform!=='win32')return noop({state:'skipped',reason:'unsupported_platform'});
+  if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>2000)return noop({state:'unavailable'});
+  const selected=await (selectWorker??(async()=>{
+    const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
+  }))();
+  return new Promise(resolve=>{
+    let child,settled=false,closed=false,buffer='';
+    let resolveClosed;const ended=new Promise(done=>{resolveClosed=done;});
+    const stop=()=>{if(!closed){child?.stdin?.end();}};
+    const close=async()=>{
+      stop();let timer;
+      await Promise.race([ended,new Promise(done=>{timer=setTimeout(()=>{if(!closed)child?.kill();done();},1000);})]);
+      clearTimeout(timer);
+    };
+    const finish=value=>{
+      if(settled)return;settled=true;clearTimeout(timer);
+      if(value.state!=='applied')stop();
+      resolve(Object.freeze({...value,close}));
+    };
+    const timer=setTimeout(()=>{child?.kill();finish({state:'unavailable'});},timeoutMs);
+    try{
+      child=spawnProcess(selected.executable,['--assistant-console-icon'],{shell:false,windowsHide:true,
+        stdio:['pipe','pipe','ignore'],env:{SystemRoot:environment.SystemRoot??environment.SYSTEMROOT??'C:\\Windows',PATH:''}});
+      child.stdin.on('error',()=>{});
+      child.once('error',()=>{closed=true;resolveClosed();finish({state:'unavailable'});});
+      child.once('close',()=>{closed=true;resolveClosed();finish({state:'unavailable'});});
+      child.stdout.on('data',chunk=>{
+        buffer+=chunk.toString('utf8');
+        if(Buffer.byteLength(buffer)>512){child.kill();finish({state:'unavailable'});return;}
+        if(!buffer.endsWith('\n'))return;
+        try{
+          const value=JSON.parse(buffer),keys=Object.keys(value).sort().join(',');
+          if(value.schemaVersion===1&&value.state==='applied'&&value.verified===true&&typeof value.foregroundUnchanged==='boolean'
+            &&keys==='foregroundUnchanged,schemaVersion,state,verified')
+            return finish({state:'applied',verified:true,foregroundUnchanged:value.foregroundUnchanged});
+          if(value.schemaVersion===1&&value.state==='skipped'&&keys==='reason,schemaVersion,state'
+            &&['no_console','not_visible_classic_console','shared_console','parent_identity_unavailable'].includes(value.reason))
+            return finish({state:'skipped',reason:value.reason});
+        }catch{}
+        child.kill();finish({state:'unavailable'});
+      });
+    }catch{closed=true;resolveClosed();finish({state:'unavailable'});}
+  });
+};

@@ -600,6 +600,12 @@ publication tooling также остаются вне этого публичн
   It loads only the fixed OS utility manifest with process-local autoload off;
   slow module discovery never permits extra time or OS mutation replay.
   [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
+- Optional Windows console branding uses the SAME signed native binary and a
+  fixed no-input presentation mode after host/registration checks. Only the
+  direct parent's exclusive visible classic console may receive WM_SETICON;
+  no hidden/shared/ConPTY host, foreground change, new window or Node.exe patch.
+  Keep icon lifetime scoped to its supervisor pipe and the private worker mode
+  unchanged. See [contract](docs/assistant-scheduler.md#owned-windows-console-icon).
 
 ## Граница plugin/runtime
 
