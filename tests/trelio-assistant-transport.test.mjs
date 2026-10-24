@@ -3285,3 +3285,32 @@ test('health protocol v2 is fixed host metadata and independent dispatch/auth/ho
   await assert.rejects(client.reportHealth({...input,healthProtocol:'2'}),/INVALID_INPUT/);
   await assert.rejects(client.reportHealth({...input,clearedReason:'PRIVATE'}),/INVALID_INPUT/);assert.equal(calls,2);
 });
+
+test('device-only terminal continuation uses SAME renew route, exact owner receipt and closed structural projection',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1});
+  const companyId=randomUUID(),taskId=randomUUID(),passId=randomUUID(),bindingId=randomUUID(),deliveryId=randomUUID(),threadId=randomUUID(),reviewId=randomUUID();
+  const base={companyId,taskId,passId,expectedLeaseRevision:3,terminalTurnId:randomUUID(),clientRequestId:randomUUID()};
+  let state='waiting_owner',corrupt=null;const calls=[];
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:async(operation,input)=>{
+    calls.push({...input});assert.equal(operation,'passRenew');
+    const value={schemaVersion:1,state,reviewId,invocationId:reviewId,terminalTurnId:base.terminalTurnId,expectedLeaseRevision:3,
+      questionPath:'/test/agent-work/',resumed:state==='resumed'?{leaseRevision:4,leaseExpiresAt:new Date(Date.now()+1200000).toISOString()}:null,
+      pass:{passId,bindingId,bindingRevision:2,deliveryId,threadId,state:state==='resumed'?'leased':'review_required',leaseRevision:state==='resumed'?4:3,
+        leaseExpiresAt:new Date(Date.now()+(state==='resumed'?1200000:-1)).toISOString(),execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1}}};
+    return corrupt?corrupt(value):value;
+  }});
+  assert.equal((await client.continueTaskPass({...base,continuation:'review'})).state,'waiting_owner');
+  assert.equal(calls[0].reviewId,undefined);
+  state='approved';assert.equal((await client.continueTaskPass({...base,reviewId,continuation:'read'})).state,'approved');
+  state='resumed';const receipt=await client.continueTaskPass({...base,reviewId,continuation:'resume'});assert.equal(receipt.pass.deliveryId,deliveryId);
+  assert.equal(receipt.pass.threadId,threadId);assert.equal(receipt.pass.leaseRevision,4);
+  for(const change of [v=>({...v,invocationId:randomUUID()}),v=>({...v,terminalTurnId:randomUUID()}),
+    v=>({...v,resumed:{...v.resumed,leaseRevision:5}}),v=>({...v,untrusted:'PRIVATE_CANARY'}),v=>({...v,pass:{...v.pass,passId:randomUUID()}})]){
+    corrupt=change;await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read'}),/INVALID_RESPONSE/);
+  }
+  const count=calls.length;
+  await assert.rejects(client.continueTaskPass({...base,continuation:'review',reviewId}),/INVALID_INPUT/);
+  await assert.rejects(client.continueTaskPass({...base,continuation:'read'}),/INVALID_INPUT/);
+  assert.equal(calls.length,count);
+});

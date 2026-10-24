@@ -121,7 +121,7 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   db.exec('DROP TABLE assistant_source_intake_events; DROP TABLE assistant_owner_intakes');
   db.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256');
   db.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN configuration_revision');
-  db.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json');
+  db.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json');
   for(const name of ['conversation_key','provider_wake','dispatch_source_key','route_id','route_source_revision','route_checked_at','dispatched','read_delivery_id'])
     db.exec(`ALTER TABLE assistant_inbox_events DROP COLUMN ${name}`);
   for(const name of ['conversation_key','route_id','route_source_revision','event_ordinal'])db.exec(`ALTER TABLE assistant_inbox_delivery_events DROP COLUMN ${name}`);
@@ -129,7 +129,7 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   inbox = createAssistantInbox({ database: db });
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.taskState(source, taskId).state, 'paused');
-  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 12);
+  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 13);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('assistant_owner_intakes','assistant_source_intake_events')").get().count, 2);
   assert.ok(db.prepare('PRAGMA table_info(assistant_owner_intakes)').all().some(row => row.name === 'kind'));
 });

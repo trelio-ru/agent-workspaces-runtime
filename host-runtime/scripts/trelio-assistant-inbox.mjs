@@ -31,6 +31,15 @@ const integer = (value, min, max) => {
   return value;
 };
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const continuationIntent = value => {
+  const fields=['passId','expectedLeaseRevision','clientRequestId','terminalTurnId','terminalMarkerId','reviewId','resumeAttempted','resumed','started'];
+  object(value,fields);
+  if(Object.keys(value).length!==fields.length||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
+    ||value.resumed&&!value.resumeAttempted||value.started&&!value.resumed||value.resumeAttempted&&value.reviewId===null)inputError();
+  return {...Object.fromEntries(['passId','clientRequestId','terminalTurnId','terminalMarkerId'].map(key=>[key,uuid(value[key])])),
+    expectedLeaseRevision:integer(value.expectedLeaseRevision,0,2_147_483_646),reviewId:value.reviewId===null?null:uuid(value.reviewId),
+    resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started};
+};
 /** Provider-owned opaque routing hints, never sender or task authority. Email
  * uses a scoped hash of untrusted threading headers; Telegram uses its native
  * account HMAC; MAX uses its verified native/account-scope key. These remain
@@ -117,7 +126,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -183,7 +192,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -329,8 +338,14 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // Existing start bits, events, cursors, receipts and schedules are intact.
       db.exec('ALTER TABLE assistant_inbox_deliveries ADD COLUMN pass_recovery_json TEXT');
     }
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=12');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (12)');
+    if(!versions.length||versions[0].version<13){
+      // Separate additive intent: never rewrite the original native-start bit
+      // or the older bit-zero recovery receipt. Each owner-reviewed NEW turn
+      // has its own monotonic start fence in the SAME delivery journal.
+      db.exec('ALTER TABLE assistant_inbox_deliveries ADD COLUMN pass_continuation_json TEXT');
+    }
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=13');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (13)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -1151,6 +1166,59 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       object(intent,['passId','expectedLeaseRevision','clientRequestId']);
       return Object.freeze({passId:uuid(intent.passId),expectedLeaseRevision:integer(intent.expectedLeaseRevision,0,2_147_483_646),
         clientRequestId:uuid(intent.clientRequestId)});
+    },
+    readPassContinuation(id) {
+      const raw=delivery(uuid(id)).pass_continuation_json;if(!raw)return null;
+      const history=JSON.parse(raw);
+      if(!Array.isArray(history)||!history.length||history.length>20)inputError();
+      return Object.freeze(continuationIntent(history.at(-1)));
+    },
+    /** Only structural history is appended. An owner decision permits a NEW
+     * marker, never resetting the original native-start or replaying a turn.
+     * The coordinator supplies positive terminal read-back before this call. */
+    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId}) {
+      return transaction(()=>{
+        const row=delivery(uuid(id));
+        if(row.kind!=='task'||!row.native_started||!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        const history=row.pass_continuation_json?JSON.parse(row.pass_continuation_json):[];
+        if(!Array.isArray(history)||history.length>20)inputError();history.forEach(continuationIntent);
+        const last=history.at(-1);
+        if(last&&last.terminalTurnId===terminalTurnId){
+          if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId)fail('ASSISTANT_INBOX_CONFLICT');
+          return Object.freeze(continuationIntent(last));
+        }
+        if(last&&!last.started||history.length>=20)fail('ASSISTANT_INBOX_CONFLICT');
+        if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
+        const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
+          resumeAttempted:false,resumed:false,started:false});history.push(intent);
+        run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);
+        return Object.freeze(intent);
+      });
+    },
+    updatePassContinuation(id,clientRequestId,change) {
+      object(change,['reviewId','resumeAttempted','resumed','started']);
+      return transaction(()=>{
+        const row=delivery(uuid(id)),history=JSON.parse(row.pass_continuation_json??'null');
+        if(!Array.isArray(history)||!history.length||history.length>20)inputError();history.forEach(continuationIntent);
+        const last=history.at(-1);
+        if(row.kind!=='task'||!row.native_started||!['started','uncertain'].includes(row.state)
+          ||last.clientRequestId!==uuid(clientRequestId))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        const next=continuationIntent({...last,...change});
+        if(last.reviewId!==null&&next.reviewId!==last.reviewId
+          ||['resumeAttempted','resumed','started'].some(key=>last[key]&&!next[key])||last.started&&change.started===true)
+          fail('ASSISTANT_INBOX_CONFLICT');
+        if(change.started===true){
+          const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
+          activeSource(scope);
+          const task=get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',row.source_key,row.task_id);
+          if(task?.state!=='accepted'||task.revision!==row.task_revision)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+          assertExternalDeliverySnapshot(row);
+          run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?",time()+LEASE_MS,id);
+        }
+        history[history.length-1]=next;
+        run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);
+        return Object.freeze(next);
+      });
     },
     /** Renew only the exact still-authorized started attempt. An expired lease
      * is never revived: native read-back, rather than a second launch, resolves it. */

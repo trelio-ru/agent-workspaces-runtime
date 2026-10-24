@@ -875,6 +875,53 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       throw error;
     }finally{clearInterval(watch);controller.abort();}
   };
+  const continueTerminalPass = async (job,result,signal,terminalMarkerId) => {
+    if(job.kind!=='task'||result.state!=='completed'||!uuid.test(result.turnId??'')||!passHost?.continuePass)
+      fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
+    const saved=validateAssistantActivePass(await passHost.readActivePass(),identity);
+    const same=value=>value&&Object.keys(value).length===Object.keys(saved).length&&Object.keys(saved).every(key=>value[key]===saved[key]);
+    const recheck=async()=>{
+      lease();
+      if(saved.deliveryId!==job.deliveryId||saved.taskId!==job.taskId||saved.companyId!==job.scope.companyId
+        ||!same(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      let execution;
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{job,captureExecution:value=>{execution=value;}}))
+        fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      return assistantExecutionConfiguration(execution);
+    };
+    const execution=await recheck(),live=await client.readTaskPass({companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId},signal);
+    if(live.state==='closed'||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
+      ||live.bindingRevision!==saved.bindingRevision||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    let intent=inbox.readPassContinuation(job.deliveryId);
+    // A completed continuation without business material requires another
+    // explicit decision, never an automatic retry/loop or a new delivery.
+    if(!intent||intent.started)intent=inbox.preparePassContinuation(job.deliveryId,{passId:saved.passId,
+      expectedLeaseRevision:live.leaseRevision,terminalTurnId:result.turnId,terminalMarkerId});
+    if(intent.passId!==saved.passId||intent.terminalTurnId!==result.turnId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    const request={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,expectedLeaseRevision:intent.expectedLeaseRevision,
+      clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId};
+    let review=await passHost.continuePass({...request,continuation:intent.reviewId?'read':'review',
+      ...(intent.reviewId?{reviewId:intent.reviewId}:{})},saved,signal);
+    lease();await recheck();
+    if(!intent.reviewId)intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId:review.reviewId});
+    if(review.reviewId!==intent.reviewId||review.invocationId!==intent.reviewId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    if(review.state==='approved'&&!intent.resumeAttempted){
+      // Persist before HTTP. A lost response is resolved ONLY by the read
+      // branch; it cannot repeat the renewal or native model invocation.
+      intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumeAttempted:true});
+      review=await passHost.continuePass({...request,continuation:'resume',reviewId:intent.reviewId},saved,signal);
+      lease();await recheck();
+    }
+    if(review.state!=='resumed')return true;
+    if(!intent.resumeAttempted||review.pass.state!=='leased'||Date.parse(review.pass.leaseExpiresAt)<=now()
+      ||review.pass.leaseRevision<review.resumed.leaseRevision||review.resumed.leaseRevision!==intent.expectedLeaseRevision+1
+      ||review.pass.passId!==saved.passId||review.pass.deliveryId!==saved.deliveryId||review.pass.threadId!==saved.threadId
+      ||review.pass.bindingId!==saved.bindingId||review.pass.bindingRevision!==saved.bindingRevision
+      ||JSON.stringify(review.pass.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    if(!intent.resumed)intent=inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{resumed:true});
+    if(await native.ready(identity,signal)!==true)fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    await perform(job,signal,intent);return false;
+  };
   const reconcile = async signal => {
     const saved=passHost?await passHost.readActivePass():null;
     if(saved) {
@@ -884,7 +931,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(row.taskId!==pass.taskId || row.scope.companyId!==pass.companyId || row.scope.assistantId!==identity.assistantId
         || row.kind!=='task') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
       if(row.state==='complete') {
-        const nativeResult=await native.readDelivery(pass.threadId,pass.deliveryId,{signal});lease();
+        const continued=inbox.readPassContinuation(pass.deliveryId);
+        const nativeResult=await native.readDelivery(pass.threadId,continued?(continued.started?continued.reviewId:continued.terminalMarkerId):pass.deliveryId,{signal});lease();
         if(nativeResult.state!=='completed') fail('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
         const result=await completedReceipt(row,pass.threadId,nativeResult.receipt,signal);
         if(row.receipt!==result.receipt) fail('ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED');
@@ -903,17 +951,23 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     const threadId=job.kind==='provision'?job.threadId:findSchedule(job.scope,job.taskId)?.threadId;
     if(!threadId) { emit('ASSISTANT_COORDINATOR_PROVISION_REVIEW_REQUIRED'); return true; }
-    const result=await native.readDelivery(threadId,job.deliveryId,{signal}); lease();
+    const continued=job.kind==='task'?inbox.readPassContinuation(job.deliveryId):null;
+    const marker=continued?(continued.started?continued.reviewId:continued.terminalMarkerId):job.deliveryId;
+    const result=await native.readDelivery(threadId,marker,{signal}); lease();
     if(result.state==='completed') {
       if(job.kind==='provision') registerChat(job,threadId);
-      await commitCompletion(job,threadId,result.receipt,signal);
+      try{await commitCompletion(job,threadId,result.receipt,signal);}
+      catch(error){
+        if(error?.code!=='ASSISTANT_COORDINATOR_BUSINESS_OUTCOME_REQUIRED')throw error;
+        return continueTerminalPass(job,result,signal,marker);
+      }
       notices.clear();
       return false;
     }
     if(result.state==='failed') emit('ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED');
     return true;
   };
-  const perform = async (job,signal) => {
+  const perform = async (job,signal,continuation=null) => {
     const controller=new AbortController();
     const combined=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
     let checking=false,started=false,taskPass=null,failureStage='native_claim';
@@ -938,7 +992,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
       if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
-      const options={signal:combined,startInvocation:()=>{lease();inbox.startDelivery(job.deliveryId);started=true;failureStage='native_started';}};
+      const options={signal:combined,startInvocation:()=>{lease();
+        if(continuation)inbox.updatePassContinuation(job.deliveryId,continuation.clientRequestId,{started:true});
+        else inbox.startDelivery(job.deliveryId);
+        started=true;failureStage='native_started';}};
       let result;
       if(job.kind==='provision') {
         inbox.prepareProvision(job.deliveryId);started=true;
@@ -962,11 +1019,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(!passHost || ['beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome'].some(key=>typeof client[key]!=='function')) fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
         const plan=findSchedule(job.scope,job.taskId);
         if(!plan) fail('ASSISTANT_COORDINATOR_THREAD_REQUIRED');
-        inbox.prepareTaskPass(job.deliveryId);started=true;
+        if(!continuation){inbox.prepareTaskPass(job.deliveryId);started=true;}
         const authority=inbox.taskState(job.scope,job.taskId).authority;
-        const admitted=await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
-          bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId},combined);lease();
-        const recoveryIntent=inbox.readPassRecovery(job.deliveryId);
+        const admitted=continuation?await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},combined)
+          :await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
+            bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId},combined);lease();
+        const recoveryIntent=continuation?null:inbox.readPassRecovery(job.deliveryId);
         const recovering=admitted.state==='review_required'||recoveryIntent!==null;
         if(!['leased','review_required'].includes(admitted.state) || admitted.bindingId!==authority.bindingId || admitted.bindingRevision!==authority.revision
           || admitted.deliveryId!==job.deliveryId || admitted.threadId!==plan.threadId
@@ -976,7 +1034,32 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         execution=assistantExecutionConfiguration(admitted.execution);
         const samePass=value=>value&&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key])
           &&Object.keys(value).length===Object.keys(expectedPass).length;
-        if(recovering){
+        if(continuation){
+          options.requireAbsentMarker=true;
+          options.continuationReview={priorTurnId:continuation.terminalTurnId,reviewId:continuation.reviewId};
+          options.beforeInvocation=async()=>{
+            lease();
+            if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            const prior=inbox.readPassContinuation(job.deliveryId);
+            if(JSON.stringify(prior)!==JSON.stringify(continuation)||prior.started)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            const previous=inbox.readPassContinuation(job.deliveryId);
+            // The previously completed marker is already frozen in this intent.
+            // Re-read the native turn by its parent marker immediately before
+            // launching the reviewed child; no claimed turn ID alone suffices.
+            const marker=continuation.terminalMarkerId;
+            const terminal=await native.readDelivery(plan.threadId,marker,{signal:combined});lease();
+            if(terminal.state!=='completed'||terminal.turnId!==previous.terminalTurnId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:expectedPass.passId},combined);
+            if(live.state!=='leased'||live.leaseRevision<continuation.expectedLeaseRevision+1||Date.parse(live.leaseExpiresAt)<=now()
+              ||live.bindingId!==expectedPass.bindingId||live.bindingRevision!==expectedPass.bindingRevision
+              ||live.threadId!==expectedPass.threadId||live.deliveryId!==expectedPass.deliveryId
+              ||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{
+              if(JSON.stringify(assistantExecutionConfiguration(value))!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+            }}))fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+            if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');lease();taskPass=expectedPass;
+          };
+        }else if(recovering){
           if(typeof passHost.recoverPass!=='function')fail('ASSISTANT_PASS_REVIEW_REQUIRED');
           // Recovery cannot manufacture a missing protected host pass or adopt
           // another task/chat. The irreversible persisted zero-start bit is the
@@ -1017,7 +1100,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           await passHost.activatePass(expectedPass);taskPass=expectedPass;
         }
         failureStage='native_preflight';
-        result=await native.run({threadId:plan.threadId,deliveryId:job.deliveryId,cwd,execution,
+        result=await native.run({threadId:plan.threadId,deliveryId:continuation?.reviewId??job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
             ...(admitted.workMode==='discussion'?{workMode:'discussion'}:{}),
             ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
@@ -1037,7 +1120,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       await commitCompletion(job,threadId,result.receipt,combined);
       return {state:'completed',kind:job.kind};
     } catch(error) {
-      if(started) {
+      if(started||continuation) {
         if(inbox.readDelivery(job.deliveryId).state!=='complete') inbox.markDeliveryUncertain(job.deliveryId,assistantDeliveryFailure(error?.code,failureStage));
       } else inbox.abandonUnstartedDelivery(job.deliveryId);
       const code=started?'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN':errorCode(error);

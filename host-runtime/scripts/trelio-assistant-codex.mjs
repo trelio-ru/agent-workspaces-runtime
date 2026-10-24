@@ -265,6 +265,11 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
 export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskContext, intakeContext, execution }, options = {}) => {
   threadId = id(threadId); deliveryId = id(deliveryId);
   if((taskContext!==undefined)===(intakeContext!==undefined))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  if(options.continuationReview!==undefined){
+    const value=options.continuationReview;
+    if(intakeContext!==undefined||!value||Object.keys(value).sort().join(',')!=='priorTurnId,reviewId'
+      ||id(value.reviewId)!==deliveryId||!UUID.test(value.priorTurnId??''))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  }
   const workStateContext = intakeContext===undefined?assistantWorkStateContext(taskContext):assistantIntakeContext(intakeContext);
   execution = assistantExecutionConfiguration(execution);
   if (typeof options.startInvocation !== 'function') fail('ASSISTANT_CODEX_INVALID_INPUT');
@@ -390,7 +395,9 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
       // UUID/path locators enter the native stdin prompt. READY stays tool-free
       // and receives no task state or request to create a file.
       const scope = options.readinessProbe === true ? '' : `TRELIO_ASSISTANT_${workStateContext?.kind==='source_intake'?'INTAKE':'SCOPE'} ${JSON.stringify(workStateContext)}\n`;
-      child.stdin.end(`${assistantDeliveryMarker(deliveryId)}\n${scope}${instruction}\n`);
+      const recovery=options.continuationReview
+        ? `This is ONE owner-reviewed continuation after terminal turn ${options.continuationReview.priorTurnId}, under review ${options.continuationReview.reviewId}. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. This decision permits one new turn only, not sensitive actions or completion.\n`:'';
+      child.stdin.end(`${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${instruction}\n`);
     } catch { abort(); }
   });
   return threadId;

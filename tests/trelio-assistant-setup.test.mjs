@@ -771,7 +771,7 @@ test('paired background dispatch status is SELECT-only, preserves the journal an
   result=await readProductionAssistantDispatchStatus(options);
   assert.equal(result.state,'unknown');assert.equal(result.pendingEvents,null,'unsupported schema cannot be interpreted as an empty queue');
   assert.deepEqual(await fs.readFile(path.join(directory,'inbox.sqlite')),unsupportedBytes,'diagnostics never migrate or repair unsupported state');
-  const restored=await openAssistantDatabase(directory);restored.database.exec('UPDATE assistant_inbox_meta SET version=12');await restored.close();
+  const restored=await openAssistantDatabase(directory);restored.database.exec('UPDATE assistant_inbox_meta SET version=13');await restored.close();
   const beforeDenied=opens;client.companies=async()=>{throw Object.assign(new Error('PRIVATE DETAIL'),{code:'ASSISTANT_ACCESS_DENIED'});};
   result=await readProductionAssistantDispatchStatus(options);assert.equal(result.state,'unknown');assert.equal(result.pendingEvents,null);
   assert.equal(opens,beforeDenied,'native denial must precede any journal read');

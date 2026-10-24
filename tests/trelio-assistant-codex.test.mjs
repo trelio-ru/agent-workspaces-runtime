@@ -374,3 +374,19 @@ test('successful pre-native recovery reads a real positive receipt after the one
     }});
   assert.equal(result.state,'completed');assert.equal(reads,2);assert.equal(models,1);assert.equal(recoveries,1);assert.equal(starts,1);
 });
+
+test('reviewed continuation uses a NEW stdin marker in the same chat, with receipt inspection before any action',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),priorTurnId=randomUUID(),turnId=randomUUID();let input='',reads=0,starts=0,checked=false;
+  const options={continuationReview:{priorTurnId,reviewId:deliveryId},requireAbsentMarker:true,
+    executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),readExecutionAvailability:async()=>true,
+    beforeInvocation:async()=>{checked=true;},startInvocation:()=>{assert.equal(checked,true);starts++;},
+    readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
+    spawnProcess:(_exe,args)=>{assert.equal(args[2],threadId);const child=fakeChild();
+      child.stdin.on('data',chunk=>{input+=chunk.toString();});child.stdin.on('end',()=>queueMicrotask(()=>{
+        child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);}));return child;}};
+  assert.equal((await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},options)).state,'completed');
+  assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
+  assert.match(input,/ONE owner-reviewed continuation/);assert.ok(input.includes(priorTurnId));assert.match(input,/Do not repeat the previous command/);
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},
+    {...options,continuationReview:{priorTurnId,reviewId:randomUUID()},readDelivery:()=>assert.fail('invalid review reached I/O')}),/INVALID_INPUT/);
+});

@@ -2522,6 +2522,28 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       return {passId:id(value.passId),leaseRevision:revision(value.leaseRevision),leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
         execution:executionConfiguration(value.execution)};
     },
+    async continueTaskPass(input,signal) {
+      if(!object(input)||!['review','read','resume'].includes(input.continuation)
+        ||Object.keys(input).some(key=>!['companyId','taskId','passId','continuation','expectedLeaseRevision','clientRequestId','terminalTurnId','reviewId'].includes(key))
+        ||(input.continuation==='review')!==(input.reviewId===undefined))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),continuation:input.continuation,
+        expectedLeaseRevision:revision(input.expectedLeaseRevision),clientRequestId:id(input.clientRequestId),terminalTurnId:id(input.terminalTurnId),
+        ...(input.reviewId?{reviewId:id(input.reviewId)}:{})};
+      const value=await call('passRenew',body,signal),pass=value?.pass;
+      if(!object(value)||Object.keys(value).sort().join(',')!=='expectedLeaseRevision,invocationId,pass,questionPath,resumed,reviewId,schemaVersion,state,terminalTurnId'
+        ||value.schemaVersion!==1||!['waiting_owner','approved','declined','clarification','expired','stale','resumed'].includes(value.state)
+        ||value.terminalTurnId!==body.terminalTurnId||value.expectedLeaseRevision!==body.expectedLeaseRevision
+        ||value.invocationId!==value.reviewId||body.reviewId&&body.reviewId!==value.reviewId
+        ||!object(pass)||pass.passId!==body.passId||!['leased','closed','review_required'].includes(pass.state))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const resumed=value.resumed===null?null:{leaseRevision:revision(value.resumed?.leaseRevision),leaseExpiresAt:isoTimestamp(value.resumed?.leaseExpiresAt)};
+      if(resumed&&(Object.keys(value.resumed).sort().join(',')!=='leaseExpiresAt,leaseRevision'||resumed.leaseRevision!==body.expectedLeaseRevision+1)
+        ||(value.state==='resumed')!==(resumed!==null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {schemaVersion:1,state:value.state,reviewId:id(value.reviewId),invocationId:id(value.invocationId),terminalTurnId:body.terminalTurnId,
+        expectedLeaseRevision:body.expectedLeaseRevision,questionPath:text(value.questionPath,2048),resumed,
+        pass:{passId:id(pass.passId),bindingId:id(pass.bindingId),bindingRevision:revision(pass.bindingRevision),deliveryId:id(pass.deliveryId),
+          threadId:id(pass.threadId),leaseRevision:revision(pass.leaseRevision),leaseExpiresAt:isoTimestamp(pass.leaseExpiresAt),
+          state:pass.state,execution:passExecution(pass),...workMode(pass.workMode)}};
+    },
     async readBusinessOutcome(input,signal) {
       const fields=['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'];
       if(!object(input) || Object.keys(input).sort().join(',')!==fields.sort().join(',')

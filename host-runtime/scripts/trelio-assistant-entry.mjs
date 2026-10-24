@@ -957,6 +957,17 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       return result;
     },true);
+    passHost.continuePass=(input,expectedPass,signal)=>invoke(async(live,host)=>{
+      // The control request stays device-only and under the existing setup
+      // mutex. A replacement identity, task or pass cannot inherit the owner's
+      // single-turn decision. It is never exposed as a model MCP alias.
+      const same=value=>value&&Object.keys(value).length===Object.keys(expectedPass).length
+        &&Object.keys(expectedPass).every(key=>value[key]===expectedPass[key]);
+      if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      const result=await live.continueTaskPass(input,signal);
+      if(!same(await host.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      return result;
+    },true);
 
     // Source calls re-enter the same protected private invocation and signed
     // account/provider reader. No long-lived credential/worker or provider code

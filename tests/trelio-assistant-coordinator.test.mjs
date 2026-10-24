@@ -1606,3 +1606,75 @@ test(`pre-native recovery refuses ${changed} changing while native renew is in f
     assert.equal(f.passes.size,1);
   }finally{await f.coordinator.close();}
 });
+
+// Exercise the real coordinator + persisted SQLite journal. Native/domain
+// adapters here are controlled witnesses, not claims about a live Windows run.
+for(const lostResume of [false,true])test(`owner-reviewed NEW turn preserves original delivery across SQLite restart (lost resume=${lostResume})`,async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-terminal-continuation-'));
+  const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
+  const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
+  const ordinaryOutcome=f.options.client.readBusinessOutcome,ordinaryRun=f.options.native.run;
+  let confirmed=false,ownerState='waiting_owner',reviewId=null,reviewCalls=0,resumes=0,health=0,newRuns=0,lose=lostResume;
+  f.options.onBusinessConfirmed=()=>{health++;};
+  f.options.client.readBusinessOutcome=async input=>{
+    if(!confirmed)throw Object.assign(new Error('no business receipt'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    return ordinaryOutcome(input);
+  };
+  f.options.native.readDelivery=async(_thread,id,options)=>f.deliveries.get(id)
+    ??{state:'uncertain',...(options?.requireAbsentMarker?{markerEvidence:'absent'}:{})};
+  f.options.native.run=async(input,options)=>{
+    if(options.continuationReview){
+      newRuns++;assert.equal(options.requireAbsentMarker,true);assert.equal(input.threadId,f.activePass().threadId);
+      assert.equal(input.deliveryId,reviewId);assert.notEqual(input.deliveryId,f.activePass().deliveryId);
+      await options.beforeInvocation();confirmed=true;
+    }
+    const result=await ordinaryRun(input,options);result.turnId=result.receipt.split(':')[2];return result;
+  };
+  f.options.passHost.continuePass=async(input,expected)=>{
+    assert.deepEqual(expected,f.activePass());const pass=f.passes.get(expected.deliveryId);
+    if(input.continuation==='review'){reviewCalls++;reviewId??=randomUUID();}
+    if(input.continuation==='resume'){
+      resumes++;assert.equal(ownerState,'approved');assert.equal(pass.leaseRevision,input.expectedLeaseRevision);
+      Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(Date.parse(pass.leaseExpiresAt)+3600000).toISOString()});
+      ownerState='resumed';if(lose){lose=false;throw Object.assign(new Error('lost exact response'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
+    }
+    return {schemaVersion:1,state:ownerState,reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
+      expectedLeaseRevision:input.expectedLeaseRevision,questionPath:'/owner-control',
+      resumed:ownerState==='resumed'?{leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+  };
+  const reopen=async()=>{await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});};
+  try{
+    f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
+    await coordinator.pollOnce();await coordinator.workOnce();await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    const pass=[...f.passes.values()][0],original={...f.activePass()},oldHistory=JSON.stringify({passId:pass.passId,expectedLeaseRevision:0,clientRequestId:randomUUID()});
+    database.prepare('UPDATE assistant_inbox_deliveries SET pass_recovery_json=? WHERE delivery_id=?').run(oldHistory,pass.deliveryId);
+    f.advance(21*60_000);pass.state='review_required';
+    assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(reviewCalls,1);assert.equal(newRuns,0);
+    await reopen();assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(reviewCalls,1,'read existing question, no duplicate');
+    ownerState='clarification';assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(resumes,0,'Other/text never permits continuation');
+    ownerState='approved';
+    if(lostResume){await assert.rejects(coordinator.workOnce(),/TRANSPORT_UNAVAILABLE/);await reopen();}
+    await coordinator.workOnce();
+    assert.equal(newRuns,1);assert.equal(resumes,1);assert.equal(reviewCalls,1);assert.equal(f.counts().runs,2);
+    assert.equal(f.activePass(),null);assert.equal(health,1);
+    const row=database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(pass.deliveryId);
+    assert.equal(row.state,'complete');assert.equal(row.native_started,1);assert.equal(row.pass_recovery_json,oldHistory);
+    assert.equal(JSON.parse(row.pass_continuation_json).length,1);assert.equal(JSON.parse(row.pass_continuation_json)[0].started,true);
+    assert.equal(database.prepare("SELECT count(*) n FROM assistant_inbox_deliveries WHERE kind='task'").get().n,1);
+    assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,1);
+    assert.equal(pass.passId,original.passId);assert.equal(pass.threadId,original.threadId);
+    await reopen();await coordinator.workOnce();assert.equal(newRuns,1,'restart cannot replay the reviewed invocation');
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+for(const nativeState of ['uncertain','running','failed'])test(`terminal review cannot be created from ${nativeState} native evidence`,async t=>{
+  const f=fixture(t);let reviews=0;
+  f.options.client.readBusinessOutcome=async()=>{throw new Error('no outcome');};
+  f.options.passHost.continuePass=async()=>{reviews++;throw new Error('must not request');};
+  await f.coordinator.pollOnce();await f.coordinator.workOnce();
+  f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});f.advance(300001);await f.coordinator.pollOnce();
+  await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+  f.options.native.readDelivery=async()=>({state:nativeState,turnId:randomUUID()});
+  assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(reviews,0);assert.equal(f.counts().runs,1);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);await f.coordinator.close();
+});

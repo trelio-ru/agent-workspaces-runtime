@@ -28,13 +28,13 @@ test('schema11 adds nullable closed failure metadata without inventing legacy ca
   const job=await f.inbox.claimDelivery({authorize:async()=>true});f.inbox.startDelivery(job.deliveryId);
   f.inbox.markDeliveryUncertain(job.deliveryId);
   createAssistantScheduler({database:f.database});
-  f.database.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=10');
+  f.database.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=10');
   const before={...f.database.prepare('SELECT delivery_id,state,native_started,expires_at FROM assistant_inbox_deliveries').get()};
   const identity={origin:source.origin,assistantId:source.assistantId,deviceId:source.bindingId},companies=[{companyId:source.companyId,memberId:source.accountId}];
   assert.equal(readAssistantInboxDispatchSummary({database:f.database,identity,companies}).failure,null,'v10 readonly status does not infer a cause');
   assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,10,'readonly status cannot migrate');
   const migrated=createAssistantInbox({database:f.database,now:()=>1000000});
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
   assert.deepEqual({...f.database.prepare('SELECT delivery_id,state,native_started,expires_at FROM assistant_inbox_deliveries').get()},before);
   assert.equal(readAssistantInboxDispatchSummary({database:f.database,identity,companies}).failure,null);
   const failure=assistantDeliveryFailure('ASSISTANT_CODEX_MODEL_UNAVAILABLE','native_preflight');
@@ -293,9 +293,9 @@ test('v2 SQLite upgrade preserves question-free events, leases and cursors; ques
   // Real previous schema on the same connection, not a mock version flag on a
   // new table: the upgrade must add the column without resetting pending work.
   removeRoutingColumns(database);
-  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=2');
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN owner_question_id; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=2');
   const inbox = createAssistantInbox({ database, now: () => 1_000_000 });
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 12);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version, 13);
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.incompleteDeliveries()[0].deliveryId, first.deliveryId);
   assert.equal(inbox.incompleteDeliveries()[0].events[0].owner_question_id, null);
@@ -414,9 +414,9 @@ test('v4 ACK upgrade preserves cursors, streams and legacy uncertainty without c
   const positions=database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all();
   const streamCount=database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n;
   removeRoutingColumns(database);
-  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=4');
+  database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=4');
   const upgraded=createAssistantInbox({database,now:()=>3_000_000});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
   assert.deepEqual(database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
   assert.equal(database.prepare('SELECT count(*) AS n FROM assistant_inbox_streams').get().n,streamCount);
   const recovered=upgraded.claimAcknowledgements(external);assert.equal(recovered.reconcileOnly,true);
@@ -511,9 +511,9 @@ test('v3 to v4 stream upgrade preserves source cursors and started delivery ambi
   page(inbox,source,[event(task)],'existing-cursor');const work=await inbox.claimDelivery({authorize:authorized});inbox.startDelivery(work.deliveryId);
   const before=database.prepare('SELECT * FROM assistant_inbox_deliveries').get();
   removeRoutingColumns(database);
-  database.exec('DROP TABLE assistant_inbox_streams; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=3');
+  database.exec('DROP TABLE assistant_inbox_streams; ALTER TABLE assistant_inbox_events DROP COLUMN ack_started; ALTER TABLE assistant_inbox_events DROP COLUMN ack_attempt_token; ALTER TABLE assistant_inbox_events DROP COLUMN ack_retry_at; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=3');
   const upgraded=createAssistantInbox({database});
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
   assert.deepEqual(database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.equal(database.prepare('SELECT cursor FROM assistant_inbox_sources').get().cursor,'existing-cursor');
   assert.equal(await upgraded.claimDelivery({authorize:authorized}),null);
@@ -579,13 +579,13 @@ test('email exact original bytes survive read/processing/restart; one UID ACK ca
 
 test('actual v7 upgrade retains unknown ACK/source positions and never manufactures original-byte read evidence',t=>{
   const f=routedFixture(t);
-  f.database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=7');
+  f.database.exec('ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=7');
   const before=f.database.prepare('SELECT * FROM assistant_inbox_events').get(),sources=f.database.prepare('SELECT * FROM assistant_inbox_sources').all();
   createAssistantInbox({database:f.database});
   const after=f.database.prepare('SELECT * FROM assistant_inbox_events').get();
   assert.equal(after.read_original_sha256,null);delete after.read_original_sha256;assert.deepEqual(after,before);
   assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_sources').all(),sources);
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
 });
 
 test('two committed email UIDs in one conversation get separate fresh attempts and independent uncertain recovery',async t=>{
@@ -665,9 +665,9 @@ test('true v5 upgrade retains cursors and uncertain delivery/ACK fences without 
   f.inbox.markDeliveryUncertain(work.deliveryId);
   const before=f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get();
   const positions=f.database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all();
-  removeRoutingColumns(f.database);f.database.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=5');
+  removeRoutingColumns(f.database);f.database.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=5');
   const upgraded=createAssistantInbox({database:f.database,now:()=>1_000_000});
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
   assert.deepEqual(f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get(),before);
   assert.deepEqual(f.database.prepare('SELECT source_key,cursor,cursor_revision FROM assistant_inbox_sources ORDER BY source_key').all(),positions);
   assert.deepEqual(upgraded.pendingExternalRoutes(f.external),[]);
@@ -869,11 +869,11 @@ for(const started of [false,true])test(`resumed source reconciles an original ${
 test('actual v6 upgrade preserves all source/event/cursor/delivery state without inventing verification', t=>{
   const f=routedFixture(t);
   const tables=['sources','events','tasks','deliveries','delivery_events','streams'];
-  f.database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=6');
+  f.database.exec('ALTER TABLE assistant_inbox_sources DROP COLUMN ack_verified_revision; ALTER TABLE assistant_inbox_events DROP COLUMN ack_verify_only; ALTER TABLE assistant_inbox_events DROP COLUMN read_original_sha256; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=6');
   const snapshot=()=>Object.fromEntries(tables.map(name=>[name,f.database.prepare(`SELECT * FROM assistant_inbox_${name}`).all()
     .map(row=>Object.fromEntries(Object.entries(row).filter(([key])=>!['ack_verified_revision','ack_verify_only','read_original_sha256'].includes(key))))]));
   const before=snapshot();createAssistantInbox({database:f.database,now:()=>1_000_000});
-  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(f.database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
   assert.deepEqual(snapshot(),before);
   assert.ok(f.database.prepare('SELECT ack_verified_revision FROM assistant_inbox_sources').all().every(row=>row.ack_verified_revision===null));
 });
@@ -1034,9 +1034,9 @@ test('actual v9 owner-intake migration retains original identities, unknown nati
     ALTER TABLE assistant_owner_intakes DROP COLUMN conversation_key;
     ALTER TABLE assistant_owner_intakes DROP COLUMN redirect_from_intake_id;
     ALTER TABLE assistant_owner_intakes DROP COLUMN frozen;
-    ALTER TABLE assistant_owner_intakes DROP COLUMN kind; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=9;`);
+    ALTER TABLE assistant_owner_intakes DROP COLUMN kind; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_recovery_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_code; ALTER TABLE assistant_inbox_deliveries DROP COLUMN failure_stage; UPDATE assistant_inbox_meta SET version=9;`);
   const restored=createAssistantInbox({database,now:()=>1_000_000}).ownerIntake(old.id);
-  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,12);
+  assert.equal(database.prepare('SELECT version FROM assistant_inbox_meta').get().version,13);
   for(const field of ['id','original_event_id','event_key','account_key','native_event_id','native_revision','owner_identity_id','source_key','source_revision','provision_id','delivery_id'])
     assert.equal(restored[field],old[field]);
   assert.equal(restored.state,'provisioning');assert.equal(restored.native_started,1);
@@ -1115,4 +1115,27 @@ test('pre-native claim recovery preserves the first closed preflight cause throu
   assert.deepEqual({...row},{state:'uncertain',native_started:0,failure_code:original.code,failure_stage:original.stage});
   assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,1);
   assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+});
+
+test('schema13 preserves true v12 native-start/recovery history; reviewed start is a separate monotonic CAS',async t=>{
+  const f=memory(t),source=scope(),taskId=randomUUID();f.inbox.register(source);accept(f.inbox,source,taskId);
+  page(f.inbox,source,[{id:'original',revision:'1',taskId,wake:true}]);
+  const job=await f.inbox.claimDelivery({authorize:async()=>true});f.inbox.prepareTaskPass(job.deliveryId);
+  const recovery=f.inbox.preparePassRecovery(job.deliveryId,{passId:randomUUID(),expectedLeaseRevision:0});
+  f.inbox.startDelivery(job.deliveryId);f.inbox.markDeliveryUncertain(job.deliveryId);
+  f.database.exec('ALTER TABLE assistant_inbox_deliveries DROP COLUMN pass_continuation_json; UPDATE assistant_inbox_meta SET version=12');
+  const before={...f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get()};
+  const inbox=createAssistantInbox({database:f.database,now:()=>1000000});
+  const {pass_continuation_json,...after}=f.database.prepare('SELECT * FROM assistant_inbox_deliveries').get();
+  assert.equal(pass_continuation_json,null);assert.deepEqual(after,before);assert.deepEqual(inbox.readPassRecovery(job.deliveryId),recovery);
+  const intent=inbox.preparePassContinuation(job.deliveryId,{passId:recovery.passId,expectedLeaseRevision:1,terminalTurnId:randomUUID(),terminalMarkerId:job.deliveryId});
+  assert.equal(intent.started,false);const reviewId=randomUUID();
+  inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId,resumeAttempted:true,resumed:true});
+  inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{started:true});
+  assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{started:true}),/CONFLICT/);
+  assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{started:false}),/CONFLICT/);
+  assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId:randomUUID()}),/CONFLICT/);
+  assert.equal(f.database.prepare('SELECT native_started FROM assistant_inbox_deliveries').get().native_started,1);
+  assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
+  assert.deepEqual(inbox.readPassRecovery(job.deliveryId),recovery);
 });

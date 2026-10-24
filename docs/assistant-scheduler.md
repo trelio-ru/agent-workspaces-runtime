@@ -33,6 +33,35 @@ event processing or health clear is manufactured. Real committed work remains
 required to clear a dispatch incident. Old parent processes can use this through
 the current signed tick worker without restarting the supervisor.
 
+### Owner-reviewed terminal continuation
+
+A positive native completed turn without a business receipt is retained. It is
+not a bit-zero reservation and cannot use pre-native recovery. The SAME trusted
+coordinator may request a fixed native owner question through the existing
+`task-pass/renew` control route. It freezes the original terminal turn, exact
+protected pass, binding, model pair and SQLite coordinator lease. Only the
+owner's explicit first option permits ONE new turn; Other/text and decline never
+do. The ordinary question UI/notifications/ACL/encrypted answer engine are reused.
+
+The SAME native operation ledger returns the question UUID as the NEW invocation
+marker. The original pass/delivery/chat and all prior operation history survive.
+Resume renews that exact pass once by CAS; after an uncertain resume response the
+host uses read only. SQLite schema13 adds structural continuation history to the
+same delivery, preserving schema12 recovery JSON and the original native-start
+bit. Each new marker has an independent monotonic start flag committed before
+spawn. No transcript, prompt, reply or business-result claim is journaled.
+Before launch the host repeats native positive terminal read-back, protected
+identity/pass, fresh ACL/model/lease and exact new-marker absence. Unknown,
+running, failed, missing or ambiguous native history never authorizes review or
+replay. A lost native start remains read-only; a completed new turn without a
+business receipt needs another explicit review (bounded to20 retained intents).
+The same executor resumes the permanent chat with an instruction to inspect
+prior receipts and avoid repeating the old command or uncertain external effects.
+Sensitive-action approval stays independent. Only the ordinary exact business
+outcome/native receipt can complete original events, advance the schedule or clear
+health. There is no new model tool, shell ABI, executor, vault, queue or pass-close
+shortcut. Old supervisors use the current signed worker between ticks.
+
 ## Cycles
 
 Cadences: 30 minutes; 1, 3, 6, 12 hours; daily, weekly, fortnightly, monthly.
