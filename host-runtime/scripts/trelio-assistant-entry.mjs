@@ -1915,6 +1915,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         withGenerationKey:withSecretGenerationKey});
       return {schemaVersion:1,operation:'secret_generate',stdout:JSON.stringify(result),stderr:''};
     }
+    let recovery=null;
     const action={...plan.localAction,parameters:{...plan.localAction.parameters,
       ...(plan.localAction.operation==='open'?{directory:root}:{}),
       // The shared writer accepts an outcome only for a final handoff. A draft
@@ -1923,7 +1924,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       ...(plan.localAction.operation==='finish' || plan.localAction.operation==='checkpoint'
         && plan.localAction.parameters.type==='handoff'?{taskOutcome:'no_status_change'}:{}),
     }};
-    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,recovery=null;
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{
       resolveRunRootDirectory:async()=>root,
