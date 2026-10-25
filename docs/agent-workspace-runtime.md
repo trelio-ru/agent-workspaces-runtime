@@ -2454,7 +2454,7 @@ Refresh уже существующей exact managed-привязки допу�
 
 ## Native DeepSeek Harness preview
 
-`trelio-deepseek-harness.mjs` — Cordis plugin для exact Harness 0.2.1-rc.2,
+`trelio-remote-mcp.mjs.deepseekHarnessPlugin` — Cordis plugin для exact Harness 0.2.1-rc.2,
 без Codex/Claude compatibility hooks. `Session.requestHeader().config` даёт
 actual provider/model/effort, `session.header.id` — native session, с префиксом
 `dsh:` в общем private signing state. `deepseek_native/local_observed` проходит
@@ -2470,7 +2470,8 @@ stable shell `selectHostRuntime` и shell version по постоянному pl
 подпись/full inventory проверяются до import native module. Изменённый bundle
 не заменяется. Официальный shell нельзя держать во временной папке. Установка
 в профиль — только `dsh plugin --profile <actual-profile> add <bundleDirectory>`,
-затем reload. Public plugin ABI/manifests/hooks не меняются. Загруженный native
+затем reload. Installer остаётся в bridge, native adapter — в local MCP module: package
+сохраняет frozen 100-file limit без изменения verifier. Public plugin ABI/manifests/hooks не меняются. Загруженный native
 module обновляется при reload; signed runtime selection остаётся общей.
 
 `trelio_connect` использует общий DCR/S256/loopback OAuth с resource Trelio,
@@ -2482,7 +2483,7 @@ args/results/env/files; Keychain/DPAPI/Secret Service отказ не даёт f
 с pagination/лимитом и без App-only tools; после pairing/access changes explicit
 connect обновляет его без повторного OAuth действующего grant.
 
-Remote и local tools исполняют общий transport/dispatcher. Native text содержит
+Remote и local tools исполняют общий transport/dispatcher. Native prefix сохраняет remote и local MCP инструкции; text содержит
 полный structured authority/routes, PTC получает тот же public envelope;
 `_meta` и rich binary не сериализуются. Local continuation использует общий
 receipt/scope/seed/Run validator и per-Agent WeakMap: до 16 записей, 2 MiB,

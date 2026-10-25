@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { installDeepseekBundle } from "../host-runtime/scripts/trelio-deepseek-install.mjs";
+import { installDeepseekBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
 
 test("native bundle is immutable, uses signed selection and never edits a Harness profile", async t => {
@@ -19,6 +19,8 @@ test("native bundle is immutable, uses signed selection and never edits a Harnes
   const entry = await fs.readFile(path.join(installed.bundleDirectory, "index.mjs"), "utf8");
   assert.match(entry, /await selectHostRuntime\(\)/);
   assert.match(entry, /selected.runtimeVersion/);
+  assert.match(entry, /trelio-remote-mcp\.mjs/);
+  assert.match(entry, /module.deepseekHarnessPlugin/);
   assert.doesNotMatch(entry, /runtimeSessionProof|accessToken|CODEX_THREAD_ID/);
   await fs.appendFile(path.join(installed.bundleDirectory, "index.mjs"), "// user edit\n");
   await assert.rejects(installDeepseekBundle(options), /TRELIO_HARNESS_BUNDLE_CHANGED/);

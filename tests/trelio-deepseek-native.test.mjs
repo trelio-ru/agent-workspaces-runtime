@@ -7,7 +7,7 @@ import test from "node:test";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuations,
-  harnessToolName, observeHarnessRuntime, projectHarnessMcpResult } from "../host-runtime/scripts/trelio-deepseek-harness.mjs";
+  harnessToolName, observeHarnessRuntime, projectHarnessMcpResult, AGENT_SKILL_ROUTING_INSTRUCTIONS } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
 const require = createRequire(new URL("./fixtures/deepseek-native/package.json", import.meta.url));
 const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)).href);
@@ -33,11 +33,15 @@ test("real native pipeline preserves structured authority and hides dispatch-onl
   t.after(() => ctx.fiber.dispose());
   const observed = [], calls = [];
   await applyHarnessAdapter(ctx, {
-    connection: { listTools: async () => [tool("get_task"), tool("hidden", { _meta: { ui: { visibility: ["app"] } } })],
+    connection: { listTools: async () => [tool("get_task"), tool("prepare_agent_secret_browser_fill"), tool("hidden", { _meta: { ui: { visibility: ["app"] } } })],
       instructions: () => "server instructions", call: async (method, args) => { calls.push({ method, args }); return result; } },
     localMessage: async () => ({ result: { tools: [] } }),
     prepare: async input => { observed.push(input); return { ...input.input, runtimeSessionProof: { test: "private-dispatch" } }; },
   });
+  const assembly = await ctx.systemPrompt.assemble({});
+  const prefix = assembly.sections.map(section => section.text).join("\n");
+  assert.ok(prefix.includes("server instructions"));
+  assert.ok(prefix.includes(AGENT_SKILL_ROUTING_INSTRUCTIONS));
   const a = agent(), name = harnessToolName("trelio", "get_task");
   assert.equal(ctx.tools.get(harnessToolName("trelio", "hidden")), undefined);
   assert.equal(ctx.tools.get(name).parameters.properties.runtimeSessionProof, undefined);
@@ -52,6 +56,12 @@ test("real native pipeline preserves structured authority and hides dispatch-onl
   assert.equal(calls.length, 1); assert.equal(calls[0].args.runtimeSessionProof.test, "private-dispatch");
   assert.equal(observed[0].observation.modelId, "deepseek/v4");
   assert.equal(Object.hasOwn(args, "runtimeSessionProof"), false);
+  const unsupported = await ctx.tools.execute({ name: harnessToolName("trelio", "prepare_agent_secret_browser_fill"),
+    callId: "browser-1", arguments: {}, agent: a, signal: signal() });
+  assert.equal(unsupported.isError, true);
+  assert.ok(JSON.stringify(unsupported.content).includes("TRELIO_HARNESS_UNSUPPORTED_OPERATION"));
+  assert.equal(calls.length, 1, "Unsupported browser fill must stop before granting or dispatching");
+
   // Real request-header replacement supplies the new model/effort. No old
   // high effort may be borrowed after the user disables reasoning.
   a.session.append("request/header", { reason: "change", header: { config: { provider: "custom", model: "next", reasoningEffort: "off" } } });

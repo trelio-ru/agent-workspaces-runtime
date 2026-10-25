@@ -120,6 +120,20 @@ test("signed package reaches the real hook through the complete configured shell
         path.join(pluginDirectory, "scripts/trelio-host-runtime-loader.mjs"), "__update",
       ], environment);
       assert.equal(installed.code, 0, installed.stderr);
+      // Qualify the native bootstrap against the actual signed package too.
+      // Source-only imports would miss a renamed/omitted entry or the frozen
+      // package inventory ceiling. Loading exports must not request OAuth.
+      const nativeInstall = await runProcess(process.execPath, [
+        path.join(pluginDirectory, "scripts/trelio-host-runtime-loader.mjs"), "bridge", "deepseek", "install",
+      ], environment);
+      assert.equal(nativeInstall.code, 0, nativeInstall.stderr);
+      const nativeDirectory = JSON.parse(nativeInstall.stdout).bundleDirectory;
+      const nativeLoad = await runProcess(process.execPath, ["--input-type=module", "-e",
+        "import assert from 'node:assert/strict'; import {pathToFileURL} from 'node:url'; const m=await import(pathToFileURL(process.argv[1]).href); assert.equal(m.name,'trelio-deepseek-harness'); assert.equal(typeof m.apply,'function'); process.stdout.write('native-loaded');",
+        path.join(nativeDirectory, "index.mjs"),
+      ], environment);
+      assert.equal(nativeLoad.code, 0, nativeLoad.stderr);
+      assert.equal(nativeLoad.stdout, "native-loaded");
       const config = resolveWorkspaceBridgeConfigDirectory({ environment, homeDirectory: home });
       const pointerPath = path.join(config, "host-runtimes/current.json");
       const pointerBefore = await fs.readFile(pointerPath, "utf8");
