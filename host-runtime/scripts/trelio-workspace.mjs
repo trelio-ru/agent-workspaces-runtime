@@ -18449,6 +18449,7 @@ const printHelp = () => {
   );
   process.stdout.write("Команды:\n");
   process.stdout.write("  trelio-workspace doctor [--json] [--origin URL]\n");
+  process.stdout.write("  trelio-workspace deepseek install\n");
   process.stdout.write("  trelio-workspace login [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace encryption setup --company SLUG [--json] [--origin https://trelio.ru]\n");
   process.stdout.write("  trelio-workspace inspect --workspace UUID [--origin https://trelio.ru]\n");
@@ -18783,7 +18784,13 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2)) 
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
-  if (command === "doctor") {
+  if (command === "deepseek") {
+    if (positional.length !== 1 || positional[0] !== "install" || Object.keys(options).length) {
+      throw new Error("Команда deepseek поддерживает только install без параметров.");
+    }
+    const { installDeepseekBundle } = await import("./trelio-deepseek-install.mjs");
+    process.stdout.write(`${JSON.stringify(await installDeepseekBundle(), null, 2)}\n`);
+  } else if (command === "doctor") {
     await doctor(options);
   } else if (command === "login") {
     await pairBridge(origin);

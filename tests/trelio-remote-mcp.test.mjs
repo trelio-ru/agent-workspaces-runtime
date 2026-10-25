@@ -2807,7 +2807,7 @@ test("local MCP exposes bounded provider routes plus skill-management and execut
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.clientKind.enum,
-    ["codex", "claude-code", "cursor", "antigravity"],
+    ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"],
   );
   assert.deepEqual(
     installationDiagnosticTool.inputSchema.properties.intent.enum,
@@ -3089,7 +3089,7 @@ test("diagnostics prepare an exact native read despite an independent folder blo
 });
 
 test("diagnostic next read selects an existing scope or company discovery without executing a proxy", async () => {
-  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"]) {
     const scope = { companySlug: "company", projectSlug: "project" };
     for (const workingFolder of [{ status: "ready", scope }, { status: "not_checked" }]) {
       const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
@@ -5716,4 +5716,20 @@ test('shared Remote MCP engine consumes native write fence only after both live 
   assert.equal(events.filter(event=>event==='tools/call').length,1);
   assert.ok(events.indexOf('consume')>events.lastIndexOf('tools/list'));
   assert.ok(events.indexOf('consume')<events.indexOf('tools/call'));
+});
+
+
+test("Harness diagnostics preserve native identity and never inspect foreign Hooks", async () => {
+  const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
+    clientKind: "deepseek-harness", intent: "diagnostics",
+  }, {
+    localPrerequisiteDiagnosis: async options => { assert.equal(options.includeHookStartup, false); return readyLocalInstallationDiagnosis; },
+    codexRoutingPlan: async () => assert.fail("native Harness must not read Codex config"),
+    codexHookSettingsRead: async () => assert.fail("native Harness must not read Codex hooks"),
+    publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }),
+  });
+  const payload = JSON.parse(result.content[0].text);
+  assert.equal(payload.clientInspection.nativeAdapter.qualifiedVersion, "0.2.1-rc.2");
+  assert.equal(payload.liveVerification.hook.state, "not_applicable");
+  assert.equal(payload.clientInspection.nativeAdapter.state, "not_checked");
 });

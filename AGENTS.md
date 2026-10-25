@@ -854,3 +854,8 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   [Contract](docs/assistant-inbox.md#native-max-through-the-same-source-journal).
 
 Pre-native reservation recovery: SAME delivery v12/bit0/lease and native history, not a new invocation; see docs/assistant-scheduler.md.
+
+
+Native DeepSeek Harness preview принадлежит host runtime; его bootstrap,
+qualification и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-preview).
+Public plugin shell для этого клиента не меняется.

@@ -3923,7 +3923,7 @@ const LOCAL_TOOLS = [
       properties: {
         clientKind: {
           type: "string",
-          enum: ["codex", "claude-code", "cursor", "antigravity"],
+          enum: ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"],
           description: "Точный текущий клиент; не выводите его только из CLAUDE_PLUGIN_ROOT.",
         },
         intent: {
@@ -5844,7 +5844,7 @@ export const handleToolCall = async (
       || typeof rawArguments !== "object"
       || Array.isArray(rawArguments)
       || Object.keys(rawArguments).some((key) => !["clientKind", "intent", "folderOnboarding", "readTarget"].includes(key))
-      || !["codex", "claude-code", "cursor", "antigravity"].includes(rawArguments.clientKind)
+      || !["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"].includes(rawArguments.clientKind)
       || !["diagnostics", "onboarding", "folder_onboarding"].includes(rawArguments.intent)
       || (folderOnboardingIntent && !rawArguments.folderOnboarding)
       || (rawArguments.intent === "onboarding" && rawArguments.folderOnboarding !== undefined)
@@ -5862,7 +5862,7 @@ export const handleToolCall = async (
       const prepared = await folderOnboardingPrepare({
         ...rawArguments.folderOnboarding,
         // Select native clients' file format without changing legacy plans.
-        ...(["cursor", "antigravity"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
+        ...(["cursor", "antigravity", "deepseek-harness"].includes(rawArguments.clientKind) ? { clientKind: rawArguments.clientKind } : {}),
       });
       return buildTextResult(prepared);
     }
@@ -5870,7 +5870,7 @@ export const handleToolCall = async (
       origin,
       clientKind: rawArguments.clientKind,
       includeHookStartup: rawArguments.intent === "diagnostics"
-        && !["cursor", "antigravity"].includes(rawArguments.clientKind),
+        && !["cursor", "antigravity", "deepseek-harness"].includes(rawArguments.clientKind),
       signal,
     });
     let codexRouting = null;

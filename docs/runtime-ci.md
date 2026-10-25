@@ -94,3 +94,10 @@ Targeted planner/verifier regressions:
 ```sh
 node scripts/runtime-ci-plan.test.mjs
 ```
+
+
+Full gate также выполняет `trelio-deepseek-native.test.mjs` с exact npm-ci
+fixture core 0.2.1-rc.2 (Tools/Session) на Linux/macOS и Windows, без account/model
+или network provider. `trelio-deepseek-install.test.mjs` проверяет immutable
+bundle и реальный shared proof engine. Fixture lockfile не входит в artifact.
+Эти тесты не квалифицируют другую версию Harness и не доказывают live OAuth/save.
