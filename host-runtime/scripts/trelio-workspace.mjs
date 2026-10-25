@@ -3435,19 +3435,33 @@ export const startLoadedCodexPluginPreservation = ({
   onError = () => process.stderr.write("Trelio: exact plugin preservation failed; automatic repair stopped.\n"),
 } = {}) => {
   const loadedPluginDirectory = environment.TRELIO_PLUGIN_ROOT;
-  const loadedPluginVersion = environment.TRELIO_PLUGIN_VERSION;
+  const shellComponentVersion = environment.TRELIO_PLUGIN_VERSION;
   // Exact cache layout establishes one of the two installed shells. Neither
   // CLAUDE_PLUGIN_ROOT nor a similar directory name may choose a profile/store.
   // Source checkouts and other clients remain outside this code-only lifecycle.
   let profile;
+  let loadedPluginVersion;
   try {
-    if (!loadedPluginDirectory) throw new Error("No loader-selected shell.");
+    if (!loadedPluginDirectory || !parseStableVersion(shellComponentVersion)) {
+      throw new Error("No loader-selected shell.");
+    }
     const cacheRoot = path.resolve(environment.CODEX_HOME || path.join(os.homedir(), ".codex"), "plugins", "cache");
     profile = Object.keys(codexRetentionProfiles).find(key => {
       const item = codexRetentionProfiles[key];
-      return sameLocalPath(loadedPluginDirectory, path.join(cacheRoot, item.marketplace, item.name, loadedPluginVersion));
+      // The dedicated plugin embeds the pinned HUMAN loader unchanged. Its
+      // TRELIO_PLUGIN_VERSION is that common component's version (e.g. 3.2.3),
+      // not the assistant distribution version (e.g. 0.1.3). Select only the
+      // basename of this exact loader-selected directory, never a sibling or
+      // a "latest" version. The immutable-tree inspector below independently
+      // requires the assistant's native manifest to match that exact version.
+      // Keep the human profile's existing environment/version equality intact.
+      const version = key === "assistant"
+        ? path.basename(path.resolve(loadedPluginDirectory)) : shellComponentVersion;
+      return sameLocalPath(loadedPluginDirectory, path.join(cacheRoot, item.marketplace, item.name, version));
     });
     if (!profile) throw new Error("Not the exact Codex cache.");
+    loadedPluginVersion = profile === "assistant"
+      ? path.basename(path.resolve(loadedPluginDirectory)) : shellComponentVersion;
     assertCodexPluginVersionPath(loadedPluginDirectory, loadedPluginVersion, profile);
     retentionDirectory ??= codexRetentionProfile(profile).directory;
   } catch {

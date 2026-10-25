@@ -131,6 +131,10 @@ OAuth, pairing, hooks/trust и модель открытого чата не м�
 namespace отделён от human retention. Metadata/version/path/hash, regular-file,
 size, private-storage и concurrent-publication guards остаются теми же; новый
 credential store или способ выбрать другой установленный plugin не добавляется.
+Dedicated distribution и её pinned common loader имеют независимые версии:
+`TRELIO_PLUGIN_VERSION` остаётся версией общего компонента. Retention assistant
+берёт distribution version только из basename exact loader-selected cache path
+и проверяет её по native manifest; human environment/version equality прежняя.
 Assistant MCP запускает lifecycle после записи initialize, а supervisor – после
 проверки exact OS registration и до первого worker; каждый закрывает только свой
 watcher при EOF/shutdown. Это сохраняет уже используемую shell, но не исправляет

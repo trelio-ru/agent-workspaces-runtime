@@ -663,6 +663,8 @@ publication tooling также остаются вне этого публичн
   a closed assistant profile and separate code-copy namespace. Supervisor waits
   for its snapshot after exact OS registration, before starting workers; no
   human plugin store, version discovery, trust/config change or task replay.
+  Dedicated cache/native-manifest version is independent of the pinned common
+  loader's TRELIO_PLUGIN_VERSION; exercise the actual differing versions.
   Lifecycle работает и для signed runtime: независимый runtime не делает
   hook/skill paths независимыми от plugin cache. Нужен production MCP regression
   внешнего обновления, cleanup после EOF и сохранение trust; см.

@@ -31,7 +31,9 @@ const fixture = async (profile = "human") => {
   await fs.writeFile(path.join(plugin, "skills/example/SKILL.md"), "exact old instructions\n");
   await fs.writeFile(path.join(plugin, "scripts/hook.mjs"), 'process.stdout.write("exact-old-hook");\n', { mode: 0o755 });
   return { root, plugin, retentionDirectory: path.join(root, "private", "retention"), environment: {
-    CODEX_HOME: path.join(root, "codex"), TRELIO_PLUGIN_ROOT: plugin, TRELIO_PLUGIN_VERSION: version,
+    // Actual dedicated distribution 0.1.3 embeds the unchanged common loader
+    // component 3.2.3. Its environment must not pretend these versions coincide.
+    CODEX_HOME: path.join(root, "codex"), TRELIO_PLUGIN_ROOT: plugin, TRELIO_PLUGIN_VERSION: "3.2.3",
     TRELIO_HOST_RUNTIME_VERSION: "3.18.0",
   } };
 };
@@ -51,6 +53,7 @@ test("dedicated assistant MCP preserves only its exact loaded shell and stops af
     input.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
     await waitUntil(()=>preservation!==undefined);const entry=await preservation.ready;
     assert.equal(entry.profile,"assistant");
+    assert.equal(entry.version,"0.1.3");
     const before=await fs.readFile(path.join(f.plugin,"hooks/hooks.json"));
     await fs.rm(path.dirname(f.plugin),{recursive:true});
     const newer=path.join(path.dirname(f.plugin),"0.1.4");await fs.mkdir(newer,{recursive:true});
@@ -97,6 +100,11 @@ test("assistant cache paths cannot adopt a human manifest or foreign CODEX_HOME"
   try{
     const wrong=startLoadedCodexPluginPreservation({...f,environment:{...f.environment,CODEX_HOME:path.join(f.root,"foreign")}});
     assert.equal(await wrong.ready,null);await wrong.close();
+    const missing=startLoadedCodexPluginPreservation({...f,environment:{...f.environment,TRELIO_PLUGIN_VERSION:""}});
+    assert.equal(await missing.ready,null);await missing.close();
+    await fs.writeFile(path.join(f.plugin,".codex-plugin/plugin.json"),JSON.stringify({name:"trelio-digital-assistant",version:"0.1.4"}));
+    const mismatch=startLoadedCodexPluginPreservation({...f,onError:()=>{}});
+    await assert.rejects(mismatch.ready,/manifest/);await mismatch.close();
     await fs.writeFile(path.join(f.plugin,".codex-plugin/plugin.json"),JSON.stringify({name:"trelio-agent-workspaces",version:"0.1.3"}));
     const errors=[],preservation=startLoadedCodexPluginPreservation({...f,onError:error=>errors.push(error)});
     await assert.rejects(preservation.ready,/manifest/);await preservation.close();
