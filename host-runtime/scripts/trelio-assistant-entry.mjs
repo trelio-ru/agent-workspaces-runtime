@@ -1888,7 +1888,11 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     }
     const action={...plan.localAction,parameters:{...plan.localAction.parameters,
       ...(plan.localAction.operation==='open'?{directory:root}:{}),
-      ...(['checkpoint','finish','pause'].includes(plan.localAction.operation)?{taskOutcome:'no_status_change'}:{}),
+      // The shared writer accepts an outcome only for a final handoff. A draft
+      // or blocker is continuity, not a task decision; injecting even the safe
+      // no_status_change there rejects before its durable upload.
+      ...(plan.localAction.operation==='finish' || plan.localAction.operation==='checkpoint'
+        && plan.localAction.parameters.type==='handoff'?{taskOutcome:'no_status_change'}:{}),
     }};
     let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
     try {return await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{

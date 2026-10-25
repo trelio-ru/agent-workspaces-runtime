@@ -1625,6 +1625,10 @@ Run UUID and fencing token; full device/task/Workspace identity is inside the
 ciphertext. Native validation uses the SAME writer/envelope/signature boundary.
 Only an exact opaque echo in the original scope is opened, process-only, before
 the SAME local command. Refusals/lost responses are not replayed.
+Draft checkpoints and blocker pauses pass no task outcome to that shared writer:
+continuity is not a task decision. Only a handoff checkpoint or finish supplies
+`no_status_change`; the common handoff validator remains authoritative. This
+keeps partial files durably saveable without changing the task status.
 Echo equality uses the SAME crypto canonical JSON: native schema property
 reordering is harmless, but extra fields, array order, types, AAD, signatures
 and ciphertext bytes remain exact. No re-encryption or mutation replay follows.

@@ -1016,6 +1016,50 @@ test('assistant Workspace preflight binds own protected pass and server Run befo
 });
 
 
+test('assistant draft and pause reach the shared writer without a handoff-only outcome',async t=>{
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const {validateHandoffTaskOutcome}=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const config=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-checkpoint-outcome-'));
+  t.after(()=>fs.rm(config,{recursive:true,force:true}));
+  const plan=workspacePlan(),scope=plan.scope,p=plan.localAction.parameters;
+  const identity={origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId};
+  const runIdentity={workspaceId:p.workspaceId,runId:p.runId};
+  const root=path.join(assistantTaskStorageDirectory(config,{...identity,companyId:scope.companyId,taskId:scope.taskId}),
+    'workspaces',p.workspaceId),directory=path.join(root,'workspace');
+  await fs.mkdir(directory,{recursive:true,mode:0o700});
+  await fs.writeFile(path.join(root,'.trelio-run.json'),JSON.stringify({schemaVersion:3,origin:identity.origin,
+    workspaceId:p.workspaceId,runId:p.runId,workspaceDirectory:directory}),{mode:0o600});
+  const active={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+    companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  let calls=0;
+  const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),
+    request:async()=>({run:{id:p.runId,workspaceId:p.workspaceId}}),
+    readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async()=>{},
+    formatBridgeCommandError:error=>String(error.code??'UNKNOWN'),runWorkspaceCommand:async args=>{
+      calls++;
+      const option=name=>{const i=args.indexOf('--'+name);return i<0?'':args[i+1];};
+      const checkpointType=args[0]==='finish'?'handoff':args[0]==='pause'?'blocker':option('type');
+      // Exercise the production shared writer's validator, not another copy of
+      // its outcome policy. The old adapter rejects draft/pause at this point.
+      validateHandoffTaskOutcome({scopeType:'task',checkpointType,taskOutcome:option('task-outcome'),openQuestions:[]});
+      assert.equal(option('task-outcome'),checkpointType==='handoff'?'no_status_change':'');
+      process.stdout.write('shared lifecycle validation passed');
+    }};
+  const withProfile=async action=>action({identity,host:{readActivePass:async()=>active},prepareWorkspaceRun:async()=>null});
+  for(const [operation,parameters] of [
+    ['checkpoint',{type:'draft',summary:'Synthetic durable draft'}],
+    ['pause',{summary:'Synthetic blocker draft',questions:['Synthetic decision'],nextAction:'Review synthetic decision'}],
+    ['checkpoint',{type:'handoff',summary:'Synthetic completed material',evidence:['Synthetic check'],filePaths:['WORK.md'],nextAction:'Read result'}],
+    ['finish',{summary:'Synthetic completed material',evidence:['Synthetic check'],filePaths:['WORK.md'],nextAction:'Read result',taskOutcome:'no_status_change'}],
+  ]){
+    const result=await executeAssistantWorkspacePlan({...plan,localAction:{schemaVersion:1,operation,runIdentity,parameters}},
+      {withProfile,loadCommon:async()=>common});
+    assert.equal(result.stdout,'shared lifecycle validation passed');
+  }
+  assert.equal(calls,4);
+});
+
 test('accepted inspection uses no Run identity, local writable root, renewal or finish registry',async()=>{
   const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan,createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const plan=workspacePlan(),workspaceId=plan.localAction.parameters.workspaceId;

@@ -520,6 +520,8 @@ publication tooling также остаются вне этого публичн
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+  Draft/blocker continuity has no task outcome; only handoff/finish supplies
+  no_status_change to the SAME handoff validator. Test the real shared command boundary.
   Preserve validated encrypted inspection/lifecycle descriptors across the real
   isolated stdin boundary. Keep closed local recovery codes through MCP without
   copying raw exceptions or authorizing replay; parent validation is not delivery.
