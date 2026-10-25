@@ -1625,6 +1625,9 @@ Run UUID and fencing token; full device/task/Workspace identity is inside the
 ciphertext. Native validation uses the SAME writer/envelope/signature boundary.
 Only an exact opaque echo in the original scope is opened, process-only, before
 the SAME local command. Refusals/lost responses are not replayed.
+Echo equality uses the SAME crypto canonical JSON: native schema property
+reordering is harmless, but extra fields, array order, types, AAD, signatures
+and ciphertext bytes remain exact. No re-encryption or mutation replay follows.
 Closed local Workspace/Run/lease/hook failure codes survive the MCP wrapper
 even when the shared adapter throws ordinary Error+code. Raw messages, stacks,
 payloads and unrelated errors remain redacted; projection grants no retry.

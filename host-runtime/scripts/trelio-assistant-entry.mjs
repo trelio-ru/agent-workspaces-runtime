@@ -1426,8 +1426,16 @@ export const withAssistantEncryptedWorkspaceArguments = async ({name,args,signal
     const sealed=await transport.sealAssistantWorkspaceArguments({binding,parameters:args.parameters,companyEncryption:encryption});
     const result=await send({...args,parameters:{encryptedArguments:sealed}});
     if(result?.isError)return result;
+    // The native strict schema rebuilds its objects in schema order. The SAME
+    // ciphertext/signature/AAD may therefore have a different property order
+    // on echo. Compare exact JSON values with the existing crypto canonicalizer,
+    // not insertion order. Arrays, extra fields, types and every ciphertext
+    // byte remain significant; an invalid/absent echo still refuses closed.
+    const {canonicalJson}=await import('./trelio-company-encryption.mjs');
+    let exactEcho=false;
+    try{exactEcho=canonicalJson(result?.structuredContent?.localAction?.parameters)===canonicalJson({encryptedArguments:sealed});}catch{}
     if(!result?.structuredContent?.encryptedLifecycle
-      || JSON.stringify(result.structuredContent.localAction?.parameters)!==JSON.stringify({encryptedArguments:sealed})
+      || !exactEcho
       || Object.keys(result.structuredContent.scope??{}).sort().join(',')!==Object.keys(scope).sort().join(',')
       || Object.entries(scope).some(([key,value])=>result.structuredContent.scope[key]!==value))fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
     const opened=await transport.openAssistantWorkspaceArguments({binding,sealed,companyEncryption:encryption});

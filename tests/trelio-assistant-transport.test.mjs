@@ -2302,6 +2302,7 @@ test('encrypted local Workspace arguments reuse the SAME payload signature and H
 
 test('ordinary continuation protects prose before MCP and restores it only inside the SAME managed pass',async()=>{
   const {withAssistantEncryptedWorkspaceArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {canonicalJson}=await import('../host-runtime/scripts/trelio-company-encryption.mjs');
   const f=await workspaceProfileFixture({workspaceRun:true});
   const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
   const pair=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
@@ -2330,8 +2331,13 @@ test('ordinary continuation protects prose before MCP and restores it only insid
   const options={withProfile:action=>withWorkspaceExecutionProfile(f.profile,()=>action({...f,prepareWorkspaceRun:f.profile.prepareWorkspaceRun}))};
   const send=async wire=>{
     remoteCalls++;assert.equal(JSON.stringify(wire).includes(args.parameters.summary),false);
-    const parameters=structuredClone(wire.parameters);
+    // Native schema parsing/JSON serialization may rebuild every object in a
+    // different key order. Exercise that real boundary instead of echoing the
+    // same in-memory fixture DTO and hiding an insertion-order comparison bug.
+    const parameters=JSON.parse(canonicalJson(wire.parameters));
+    assert.notEqual(JSON.stringify(parameters),JSON.stringify(wire.parameters));
     if(mode==='tamper')parameters.encryptedArguments.payload.signature='invalid';
+    if(mode==='extra')parameters.extra='SYNTHETIC_UNEXPECTED_FIELD';
     return {content:[{type:'text',text:'opaque native plan'}],structuredContent:{prepared:true,scope,
       encryptedLifecycle:{schemaVersion:1,companyId:company.id,companySlug:company.slug,requestOrigin:'https://e2ee.trelio.ru',workspaceId:f.runIdentity.workspaceId},
       localAction:{schemaVersion:1,operation:wire.operation,runIdentity:wire.runIdentity,parameters}}};
@@ -2341,8 +2347,10 @@ test('ordinary continuation protects prose before MCP and restores it only insid
     assert.deepEqual(result.structuredContent.localAction.parameters,args.parameters);
     mode='tamper';await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options));
     assert.equal(remoteCalls,2,'one remote call per explicit request, no mutation retry');
+    mode='extra';await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options));
+    assert.equal(remoteCalls,3,'ignoring object order never admits additional fields');
     f.close();await assert.rejects(withAssistantEncryptedWorkspaceArguments({name:'continue_assistant_workspace_action',args},send,options));
-    assert.equal(remoteCalls,2,'a closed pass refuses before remote company content I/O');
+    assert.equal(remoteCalls,3,'a closed pass refuses before remote company content I/O');
   }finally{globalThis.fetch=previous;}
 });
 

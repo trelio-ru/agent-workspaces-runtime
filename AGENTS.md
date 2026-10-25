@@ -525,6 +525,8 @@ publication tooling также остаются вне этого публичн
   copying raw exceptions or authorizing replay; parent validation is not delivery.
   Exercise facade -> coordinator -> real child and automatic heartbeat together;
   both parent boundaries reuse one closed plan projection.
+  Native opaque echo equality uses existing canonical JSON, not object insertion
+  order; reordered schema objects pass, added/tampered fields still refuse.
   Exact encrypted task reads reuse the SAME schema-v3/MVCC reader and hydrator,
   with native-selected ciphertext bundles only; no general payload resolver or
   human key fallback. Other encrypted adapters retain their independent gates.
