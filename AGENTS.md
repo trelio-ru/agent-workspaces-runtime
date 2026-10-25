@@ -736,7 +736,10 @@ publication tooling также остаются вне этого публичн
   отчётов, сборок и тестов.
 - Завершённая правка получает commit на русском. Сначала опубликуй только task
   branch, открой PR и дождись SUCCESS exact head во всех обязательных hosted
-  Windows/ARM64/visual/macOS/Linux jobs. Только затем `npm run git:push-main`:
+  jobs выбранного по полному diff [CI-профиля](docs/runtime-ci.md). Unknown,
+  shared/native/crypto/hook/transport/CI изменения требуют full с четырьмя visual
+  OS jobs; narrow никогда не пропускает Windows/ARM64, proof/signature/package.
+  Только затем `npm run git:push-main`:
   это transport интеграции, он не создаёт PR и сам не запускает/не проверяет CI.
   Push workflow на `main` не заменяет PR gate. Raw push в `main` запрещён.
 - После интеграции выполни из canonical checkout
@@ -747,8 +750,13 @@ publication tooling также остаются вне этого публичн
 
 ## Проверки
 
-- Сначала запускай узкие изменённые tests, затем весь список direct Node tests из
-  `.github/workflows/runtime-tests.yml`.
+- Сначала запускай узкие изменённые tests, затем required direct tests выбранного
+  CI-профиля; full сохраняет весь список из `.github/workflows/runtime-tests.yml`.
+  Versioned planner/tag verifier используют exact base/head и полный Git diff,
+  не labels/path filters. Narrow допускает только closed assistant orchestration;
+  imports/rename/delete/mode/неоднозначный entry block возвращают full. Maintainer
+  docs не расширяют code allowlist; docs-only остаётся full. Tag заново проверяет
+  diff, run/attempt и все required conclusions; старый/неполный receipt не waiver.
 - Перед локальным gate `npm run check:dependencies` должен подтвердить exact
   dependency tree; `node_modules` разных worktree не объединяются.
 - Package builder проверяй двумя сборками одной версии и byte comparison.
