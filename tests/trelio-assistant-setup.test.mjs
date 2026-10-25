@@ -1060,6 +1060,103 @@ test('assistant draft and pause reach the shared writer without a handoff-only o
   assert.equal(calls,4);
 });
 
+test('assistant reuses the shared local recovery and keeps heartbeat/status on its registered root after restart',async t=>{
+  const {executeAssistantWorkspacePlan,createAssistantWorkspaceExecutor,validateAssistantWorkspacePlan,
+    resolveAssistantWorkspaceRoot}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const native=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {WorkspaceLocalRecoveryRequiredError}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const config=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-local-recovery-'));
+  t.after(()=>fs.rm(config,{recursive:true,force:true}));
+  const raw=workspacePlan(),plan=await validateAssistantWorkspacePlan(raw),p=raw.localAction.parameters,scope=plan.scope;
+  const identity={origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId};
+  const base=path.join(assistantTaskStorageDirectory(config,{...identity,companyId:scope.companyId,taskId:scope.taskId}),'workspaces',p.workspaceId);
+  const recovered=`${base}-recovery-${p.runId.slice(0,8)}`,oldRun=randomUUID(),oldFile=path.join(base,'workspace','WORK.md');
+  const metadata=async(root,runId)=>{
+    await native.ensurePrivateDirectory(path.join(root,'workspace'));
+    await native.writePrivateJsonFile(path.join(root,'.trelio-run.json'),{schemaVersion:3,...identity,
+      origin:identity.origin,workspaceId:p.workspaceId,runId,workspaceDirectory:path.join(root,'workspace')});
+  };
+  await metadata(base,oldRun);await fs.writeFile(oldFile,'synthetic unsaved original\n',{mode:0o600});
+  await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[base]});
+  const active={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+    companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
+  let openCalls=0,allowed=true;const actions=[];
+  const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),
+    request:async()=>{if(!allowed)throw Object.assign(new Error('synthetic revoked'),{code:'ASSISTANT_ACCESS_DENIED'});
+      return {run:{id:p.runId,workspaceId:p.workspaceId}};},
+    readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),
+    ensurePrivateDirectory:native.ensurePrivateDirectory,formatBridgeCommandError:native.formatBridgeCommandError,
+    runWorkspaceCommand:async args=>{
+      actions.push({args,cwd:process.cwd()});
+      if(args[0]==='open'){
+        openCalls++;assert.equal(args[args.indexOf('--run')+1],p.runId);
+        assert.equal(args[args.indexOf('--runtime-session')+1],p.runtimeSessionId);
+        if(openCalls===1)throw new WorkspaceLocalRecoveryRequiredError({workspaceId:p.workspaceId,sourceRunId:oldRun,
+          targetRunId:p.runId,sourceRunStatus:'cancelled',sourceDirectory:base,sourceWorkspaceDirectory:path.join(base,'workspace'),
+          suggestedDirectory:recovered,lastSavedDraftHead:null,changes:['?? WORK.md']});
+        assert.equal(args[args.indexOf('--dir')+1],recovered);
+        await metadata(recovered,p.runId);
+        await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[base,recovered]});
+      }else assert.equal(process.cwd(),await fs.realpath(path.join(recovered,'workspace')));
+      process.stdout.write('synthetic common writer result');
+    }};
+  const withProfile=async action=>action({identity,prepareWorkspaceRun:async()=>null,
+    host:{readActivePass:async()=>active},store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}});
+  const runPlan=raw=>executeAssistantWorkspacePlan(raw,{withProfile,loadCommon:async()=>common});
+  let scheduled;
+  const options={configDirectory:config,runPlan,
+    heartbeatOptions:{scheduleTimer:callback=>(scheduled=callback),cancelTimer:()=>{}}};
+  const executor=await createAssistantWorkspaceExecutor(options);
+  try{
+    const result=await executor.execute(raw),evidence=JSON.parse(result.stdout.trim().split('\n').at(-1)).assistantLocalRecovery;
+    assert.equal(evidence.code,'TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED');
+    assert.equal(evidence.sourceFilesMustRemainUntouched,true);assert.equal(evidence.sourceDirectory,base);
+    assert.equal(openCalls,2);assert.equal(await fs.readFile(oldFile,'utf8'),'synthetic unsaved original\n');
+    assert.deepEqual(await fs.readdir(path.join(recovered,'workspace')),[],'opening is not automatic copying or accepted material');
+    await scheduled();assert.equal(actions.at(-1).args[0],'heartbeat');
+    assert.equal(await resolveAssistantWorkspaceRoot(config,plan),recovered);
+  }finally{executor.stop();}
+  const restarted=await createAssistantWorkspaceExecutor(options);
+  const status={...raw,localAction:{schemaVersion:1,operation:'status',parameters:{},runIdentity:plan.runIdentity}};
+  try{
+    await restarted.execute(status);assert.equal(actions.at(-1).args[0],'status');
+    allowed=false;const before=actions.length;
+    await assert.rejects(restarted.execute(status),error=>error.code==='ASSISTANT_ACCESS_DENIED');
+    assert.equal(actions.length,before,'a registered path cannot bypass fresh native permission');
+  }finally{restarted.stop();}
+  // Registry entries from another identity are not inspected or adopted. A
+  // second exact copy in this identity remains ambiguous, never newest-wins.
+  const duplicate=`${recovered}-recovery-${p.runId.slice(0,8)}`;
+  await metadata(duplicate,p.runId);
+  await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[recovered,duplicate,'/synthetic/foreign/workspace']});
+  await assert.rejects(resolveAssistantWorkspaceRoot(config,plan));
+  assert.equal(await fs.readFile(oldFile,'utf8'),'synthetic unsaved original\n');
+});
+
+test('assistant recovery rejects an out-of-scope suggested directory without another open',async t=>{
+  const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const native=await import('../host-runtime/scripts/trelio-workspace.mjs');
+  const {WorkspaceLocalRecoveryRequiredError}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+  const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const config=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-refused-recovery-'));t.after(()=>fs.rm(config,{recursive:true,force:true}));
+  const plan=workspacePlan(),p=plan.localAction.parameters,s=plan.scope;
+  const identity={origin:'https://trelio.ru',assistantId:s.assistantUserId,deviceId:s.deviceId};
+  const base=path.join(assistantTaskStorageDirectory(config,{...identity,companyId:s.companyId,taskId:s.taskId}),'workspaces',p.workspaceId);
+  let calls=0;
+  const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),request:async()=>({run:{id:p.runId,workspaceId:p.workspaceId}}),
+    readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:native.ensurePrivateDirectory,
+    formatBridgeCommandError:native.formatBridgeCommandError,runWorkspaceCommand:async()=>{calls++;
+      throw new WorkspaceLocalRecoveryRequiredError({workspaceId:p.workspaceId,sourceRunId:randomUUID(),targetRunId:p.runId,
+        sourceRunStatus:'cancelled',sourceDirectory:base,sourceWorkspaceDirectory:path.join(base,'workspace'),
+        suggestedDirectory:path.join(config,'foreign'),lastSavedDraftHead:null,changes:['?? WORK.md']});}};
+  await assert.rejects(executeAssistantWorkspacePlan(plan,{loadCommon:async()=>common,withProfile:async action=>action({identity,
+    prepareWorkspaceRun:async()=>null,host:{readActivePass:async()=>({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+      companyId:s.companyId,taskId:s.taskId,passId:s.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0})},
+    store:{get:async()=>({state:{runtimeSessionId:p.runtimeSessionId}})}})}),error=>error.code==='ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  assert.equal(calls,1);await assert.rejects(fs.stat(path.join(config,'foreign')),error=>error.code==='ENOENT');
+});
+
 test('accepted inspection uses no Run identity, local writable root, renewal or finish registry',async()=>{
   const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan,createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const plan=workspacePlan(),workspaceId=plan.localAction.parameters.workspaceId;

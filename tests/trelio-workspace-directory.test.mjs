@@ -300,6 +300,51 @@ test("local change recovery preserves bounded source evidence and an exact safe 
   assert.equal(calls, 1, "recovery must not move files or retry open automatically");
 });
 
+test("trusted local recovery reopens only the common suggested root once with the original binding", async () => {
+  const sourceDirectory = path.resolve(os.tmpdir(), "synthetic owned source");
+  const suggestedDirectory = `${sourceDirectory}-recovery-${newRun.slice(0, 8)}`;
+  const errors = [
+    new WorkspaceLocalRecoveryRequiredError({workspaceId, sourceRunId:firstRun,
+      targetRunId:newRun, sourceRunStatus:"cancelled", sourceDirectory,
+      sourceWorkspaceDirectory:path.join(sourceDirectory,"workspace"), suggestedDirectory,
+      lastSavedDraftHead:null, changes:["?? WORK.md"]}),
+    new WorkspaceDraftRecoveryRequiredError({workspaceId, runId:newRun,
+      reasonCode:"DIVERGED_HISTORY", sourceDirectory,
+      sourceWorkspaceDirectory:path.join(sourceDirectory,"workspace"), suggestedDirectory,
+      baseHead:"a".repeat(40), localHead:"b".repeat(40), serverDraftHead:"c".repeat(40), changes:["M WORK.md"]}),
+  ];
+  for (const recovery of errors) {
+    const calls = [], signal = new AbortController().signal;
+    const input = {schemaVersion:1, operation:"open", parameters:{workspaceId,runId:newRun,
+      runtimeSessionId:firstRun, directory:sourceDirectory}};
+    let selected=0;
+    const result = await handleTrelioWorkspaceActionOperation(origin,input,{
+      signal,selectOpenRecovery:async actual=>{selected++;assert.deepEqual(actual.toJSON(),recovery.toJSON());return true;},
+      runBridge:async (_origin,args,options)=>{
+        calls.push(args);assert.equal(options.signal,signal);
+        assert.equal(args[args.indexOf("--run")+1],newRun);
+        assert.equal(args[args.indexOf("--runtime-session")+1],firstRun);
+        if(calls.length===1)throw Object.assign(new Error("synthetic refusal"),{stderr:'Ошибка: '+formatBridgeCommandError(recovery,"open")});
+        assert.equal(args[args.indexOf("--dir")+1],suggestedDirectory);
+        return {stdout:"synthetic opened",stderr:""};
+      },
+    });
+    assert.equal(result.stdout,"synthetic opened");assert.equal(calls.length,2);assert.equal(selected,1);
+    let repeated=0;
+    await assert.rejects(handleTrelioWorkspaceActionOperation(origin,input,{
+      selectOpenRecovery:async()=>true,runBridge:async()=>{repeated++;throw Object.assign(new Error("same refusal"),{
+        stderr:'Ошибка: '+formatBridgeCommandError(recovery,"open")});},
+    }),error=>error.code===recovery.code);
+    assert.equal(repeated,2,"a second recovery refusal cannot recursively reopen");
+  }
+  let launches=0,callbacks=0;
+  await assert.rejects(handleTrelioWorkspaceActionOperation(origin,{schemaVersion:1,operation:"open",
+    parameters:{workspaceId,runId:newRun,directory:sourceDirectory}}, {
+    selectOpenRecovery:async()=>{callbacks++;return true;},runBridge:async()=>{launches++;throw new Error("network outcome unknown");},
+  }));
+  assert.equal(launches,1);assert.equal(callbacks,0,"unknown outcomes never enter recovery selection");
+});
+
 test("Windows recovery accepts a source Workspace path with different letter case", {
   skip: process.platform !== "win32",
 }, () => {

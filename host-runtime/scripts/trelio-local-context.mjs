@@ -10493,6 +10493,7 @@ const executeTrelioWorkspaceActionOperation = async (
     onProgress,
     folderOnboardingApply = applyTrelioFolderOnboarding,
     resolveRunRootDirectory = resolveRegisteredWorkspaceRootDirectory,
+    selectOpenRecovery,
   } = {},
 ) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput);
@@ -10692,6 +10693,17 @@ const executeTrelioWorkspaceActionOperation = async (
         )
       : null;
     if (openRecovery) {
+      // A trusted host may opt into the SAME exact local recovery route. This
+      // callback is not a model field and receives only the already parsed
+      // common envelope. It cannot select another path. Re-enter open ONCE
+      // with the original signal/Run/runtimeSession, after a positive recovery
+      // refusal; network/lease/unknown effects never enter this branch. The
+      // default human route still returns the envelope without doing anything.
+      if(typeof selectOpenRecovery==='function'&&await selectOpenRecovery(openRecovery)===true){
+        return executeTrelioWorkspaceActionOperation(origin,{...rawInput,
+          parameters:{...rawInput.parameters,directory:openRecovery.details.suggestedDirectory}},
+        {signal,runBridge,runHeartbeatManager,onProgress,folderOnboardingApply,resolveRunRootDirectory});
+      }
       // Не повторяем open и не выбираем первый root за вызывающего агента.
       // Structured recovery сохраняет exact пути без второй копии stderr. Для
       // dirty terminal Run или same-Run draft divergence открываются отдельным

@@ -11035,9 +11035,13 @@ const readLocalSettings = async () => {
   };
 };
 
-export const readRunRegistry = async () => {
+export const readRunRegistry = async ({configurationDirectory=CONFIG_DIRECTORY}={}) => {
+  // Trusted host composition may select its already isolated configuration
+  // root (including a synthetic QA/test root). Keep ONE registry codec; this
+  // is not a model path parameter, a credential store or workspace authority.
+  if(!path.isAbsolute(configurationDirectory))throw new Error('Workspace registry configuration root must be absolute.');
   try {
-    const payload = JSON.parse(await fs.readFile(RUN_REGISTRY_FILE, "utf8"));
+    const payload = JSON.parse(await fs.readFile(path.join(configurationDirectory,'runs.json'), "utf8"));
     return Array.isArray(payload?.roots)
       ? payload.roots.filter((item) => typeof item === "string" && path.isAbsolute(item))
       : [];

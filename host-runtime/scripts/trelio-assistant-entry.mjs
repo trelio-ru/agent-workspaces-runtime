@@ -12,7 +12,7 @@ import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
-import { isDirectModuleInvocation } from './trelio-local-path.mjs';
+import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation } from './trelio-workspace.mjs';
 
@@ -1699,6 +1699,26 @@ const assistantPlanTaskScope=(plan,expectedOrigin='https://trelio.ru')=>({origin
   companyId:plan.scope.companyId,taskId:plan.scope.taskId});
 const assistantWorkspaceRoot=(config,plan,expectedOrigin)=>path.join(assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin)),
   'workspaces',plan.runIdentity.workspaceId.toLowerCase());
+const isAssistantWorkspaceRoot=(candidate,base)=>{
+  if(typeof candidate!=='string'||!path.isAbsolute(candidate)||candidate.includes('\0')
+    ||!sameLocalPath(path.dirname(candidate),path.dirname(base)))return false;
+  const suffix=path.basename(candidate).slice(path.basename(base).length);
+  // Common recovery uses these bounded sibling names, not arbitrary custom
+  // directories. The registry is discovery only; exact private metadata and
+  // the child native pass/Run/recipient checks remain independent authority.
+  return /^(?:-recovery-[0-9a-f]{8}){0,8}$/u.test(suffix)&&sameLocalPath(candidate,base+suffix);
+};
+export const resolveAssistantWorkspaceRoot=async(config,plan,expectedOrigin='https://trelio.ru')=>{
+  const common=await import('./trelio-workspace.mjs'),context=await import('./trelio-local-context.mjs');
+  const base=assistantWorkspaceRoot(config,plan,expectedOrigin);
+  const root=await common.resolveRegisteredWorkspaceRootDirectory({workspaceId:plan.runIdentity.workspaceId,
+    runId:plan.runIdentity.runId,origin:expectedOrigin,startDirectory:base},{readRegistry:async()=>
+    (await common.readRunRegistry({configurationDirectory:config})).filter(candidate=>isAssistantWorkspaceRoot(candidate,base))});
+  if(!root)return base;
+  if(!isAssistantWorkspaceRoot(root,base))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+  const identity=await context.readOpenedWorkspaceRunIdentity(path.join(root,'workspace'),expectedOrigin);
+  return identity.workspaceId===plan.runIdentity.workspaceId&&identity.runId===plan.runIdentity.runId?root:base;
+};
 /** No silent move/reset of prototype writable folders or permanent chat cwd.
  * Presence requires explicit outcome recovery. This exact lstat reads no files;
  * access errors are not mistaken for absence. Inspection caches are rebuildable. */
@@ -1742,13 +1762,14 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     // Accepted inspection has no Run, renewal, progress registry or writable
     // task directory. The common reader selects its isolated cache in the child.
     if(['inspect','skill_run'].includes(plan.localAction.operation))return runPlan(assistantWorkspaceExecutionPlan(plan),{signal});
-    const root=assistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
+    const root=await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
     const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
     const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
-    const previous=plans.get(directory);
-    if(previous && (previous.scope.passId!==plan.scope.passId || previous.runIdentity.runId!==plan.runIdentity.runId)) {
-      if(finishes.active(key))fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
-      heartbeat.stop(directory);
+    for(const [oldDirectory,previous] of plans){
+      if(previous.key===key&&(previous.scope.passId!==plan.scope.passId||previous.runIdentity.runId!==plan.runIdentity.runId)){
+        if(finishes.active(key))fail('ASSISTANT_WORKSPACE_FINISH_IN_PROGRESS');
+        heartbeat.stop(oldDirectory);plans.delete(oldDirectory);
+      }
     }
     if(!plans.has(directory) && plans.size>=64) {
       for(const [oldDirectory,oldPlan] of plans) {
@@ -1764,7 +1785,13 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
       const entry=await heartbeat.beginAction(directory,plan.localAction.operation);
       try {
         const result=await runPlan(assistantWorkspaceExecutionPlan(plan),{signal:actionSignal,onProgress});
-        if(plan.localAction.operation==='open')heartbeat.start({origin:expectedOrigin,...plan.runIdentity,workspaceDirectory:directory});
+        if(plan.localAction.operation==='open'){
+          const opened=path.join(await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin),'workspace');
+          if(!sameLocalPath(opened,directory)){
+            heartbeat.stop(directory);plans.set(opened,plans.get(directory));plans.delete(directory);
+          }
+          heartbeat.start({origin:expectedOrigin,...plan.runIdentity,workspaceDirectory:opened});
+        }
         else heartbeat.markActionSuccess(entry,plan.localAction.operation,plan.localAction.parameters);
         return result;
       } finally {heartbeat.endAction(entry);}
@@ -1861,7 +1888,9 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
     if(!inspecting)await rejectLegacyAssistantTaskStorage(config,assistantPlanTaskScope(plan,expectedOrigin));
     // Signed skill commands use the same task-local cwd, but need no invented
     // Workspace/Run. Their native resolver repeats task admission before launch.
-    const root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin)):assistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
+    let root=skill?assistantTaskStorageDirectory(config,assistantPlanTaskScope(plan,expectedOrigin))
+      :inspecting?assistantWorkspaceRoot(config,plan,expectedOrigin):await resolveAssistantWorkspaceRoot(config,plan,expectedOrigin);
+    let directory=path.join(root,'workspace');
     // The common opener claims a new root itself. Precreating that final
     // --dir makes it look like an unrelated existing directory and correctly
     // trips its ownership guard. Prepare ONLY its private parent for open;
@@ -1894,9 +1923,25 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       ...(plan.localAction.operation==='finish' || plan.localAction.operation==='checkpoint'
         && plan.localAction.parameters.type==='handoff'?{taskOutcome:'no_status_change'}:{}),
     }};
-    let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
-    try {return await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{
+    let nativeReason,nativeHealthCause,nativeCommandPolicyCause,recovery=null;
+    try {
+      const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{
       resolveRunRootDirectory:async()=>root,
+      selectOpenRecovery:opening?async error=>{
+        const d=error.details,base=assistantWorkspaceRoot(config,plan,expectedOrigin);
+        if(!['TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED','TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED'].includes(error.code))return false;
+        // Only a positive common LOCAL/DRAFT preflight can choose a new sibling.
+        // No model path, foreign registry root, lease failure or missing source
+        // metadata can enter this branch. Opening never copies/clears old work.
+        if(d?.workspaceId!==plan.runIdentity.workspaceId
+          ||(error.code==='TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED'?d.targetRunId:d.runId)!==plan.runIdentity.runId
+          ||d.sourceFilesMustRemainUntouched!==true||!sameLocalPath(d.sourceDirectory,root)
+          ||!sameLocalPath(d.sourceWorkspaceDirectory,directory)
+          ||!sameLocalPath(d.suggestedDirectory,`${root}-recovery-${plan.runIdentity.runId.slice(0,8)}`)
+          ||!isAssistantWorkspaceRoot(d.suggestedDirectory,base))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        recovery={code:error.code,...d};root=d.suggestedDirectory;directory=path.join(root,'workspace');
+        return true;
+      }:undefined,
       runBridge:async(_origin,args,options)=>{
         if(options.cwd && path.resolve(options.cwd)!==directory)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
         let stdout='',bytes=0;const write=process.stdout.write;
@@ -1929,7 +1974,12 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         }
         finally {process.stdout.write=write;process.chdir(previousDirectory);}
       },
-    });} catch(error) {
+    });
+      // Preserve the common bounded evidence for semantic reconciliation in
+      // this SAME chat. It stays local, not in HTTP/SQLite or a second journal.
+      // A fresh open is not saved material and never completes the task.
+      return recovery?{...result,stdout:result.stdout+'\n'+JSON.stringify({assistantLocalRecovery:recovery})+'\n'}:result;
+    } catch(error) {
       const diagnostic=error?.details?.http?.failureCode;
       if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;
       if(nativeHealthCause)error.code=nativeHealthCause;

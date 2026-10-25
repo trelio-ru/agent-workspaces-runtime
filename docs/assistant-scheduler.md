@@ -1573,6 +1573,34 @@ or provider business E2E evidence.
 
 ## Shared Workspace HTTP profile
 
+### Local unsaved-file and draft recovery
+
+The assistant uses the SAME shared bridge preflight and typed
+`TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED` / `TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED`
+envelopes. A trusted process-only callback may reopen exactly once at the
+common `suggestedDirectory`, retaining the original signal, Run and runtime
+session. The default human bridge still returns the envelope. Unknown transport,
+lease failures and a second recovery refusal never trigger another open.
+
+The managed callback accepts only the exact current Workspace/target Run, the
+original owned source directory and the common sibling suffix
+`-recovery-<first-eight-Run-UUID-characters>` (at most eight nested suffixes).
+No model path is admitted. Source files remain untouched; the new root is opened
+through ordinary native pass/recipient/ACL/lease/Git checks. Its bounded common
+reconciliation evidence is returned locally to the SAME task chat, never to
+HTTP, SQLite or a second journal. The agent compares the old delta against the
+accepted context, transfers only useful selected changes and saves through a
+normal checkpoint/pause/finish. Opening alone is not material or goal completion.
+Technical reopening needs no additional owner approval; an actual unresolved
+business conflict retains the ordinary question/decision boundaries.
+
+Later actions and automatic heartbeat discover the actual root through the SAME
+Run registry codec and private metadata reader, restricted to this assistant,
+device, company, task and Workspace namespace. The exact Run wins over a retained
+older source; ambiguous copies remain blocked. Restart reuses that same registry,
+not a model directory, newest-file heuristic or new recovery database. Discovery
+never substitutes for fresh native authority in the isolated worker.
+
 ### Exact encrypted task reads
 
 The authenticated native refusal `ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED` carries
