@@ -345,6 +345,9 @@ publication tooling также остаются вне этого публичн
   Owner-publication failures also retain an allowlisted filesystem syscall;
   authentication fixtures retain only closed reasons and synthetic effect counts.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
+  Native manual-close regression shares the auth fixture's owned HTTP abort
+  helper: close listener/sockets before awaiting browser cleanup, retain the
+  original assertion, and emit only fixed phase/completion/state/reason counts.
   Detached owner descriptor I/O/cleanup share the SAME PID/nonce private mutex
   as mirror readers; no age-based eviction of a live/paused holder. Its empty root
   stays outside the claim. Recheck complete original ownership/lease after

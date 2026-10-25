@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { ExtensionVisualBrowser } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
+import { ownFixtureHttpServer } from './fixtures/visual-owned-http.mjs';
 
 test('outgoing chooser uploads original image, document, archive and arbitrary files without a native dialog or replay', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-browser-')));
@@ -204,7 +205,8 @@ test('ordinary Chromium extension clicks, types, scrolls and restores auth witho
   }
 });
 
-test('manual window close and ready save once before unlocking images; crash preserves the previous snapshot', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async () => {
+test('manual window close and ready save once before unlocking images; crash preserves the previous snapshot', { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
+  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-extension-manual-')));
   let snapshot, writes = 0, window, restored = false, logout = false, logoutObserved = false;
   const server = http.createServer((request, response) => {
@@ -216,48 +218,66 @@ test('manual window close and ready save once before unlocking images; crash pre
     if (request.url === '/restore' && request.headers.cookie?.includes('manual_fixture=SYNTHETIC')) restored = true;
     response.setHeader('Content-Type', 'text/html'); response.end('<!doctype html><body style="background:#def;height:1400px">Synthetic manual fixture<script>setInterval(()=>fetch("/keep"),100)</script></body>');
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const ownedServer=ownFixtureHttpServer(server,t.signal);await ownedServer.listen();
   const origin = `http://127.0.0.1:${server.address().port}`;
-  const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const store = { directory, async read() { return snapshot; }, async prepare() {}, async write(value) { snapshot = structuredClone(value); writes++; }, close() {} };
   const diagnostics = [];
   const create = () => new ExtensionVisualBrowser({ dependencies, store, policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150_000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1', testWindowController: value => { window = value; }, testDiagnostics: value => diagnostics.push(value) });
-  let browser = create();
+  let browser = create(),phase='start',completion='none',primaryFailure=null,lastState='none',lastReason='none';
+  const abortOwned=()=>browser.abort();t.signal.addEventListener('abort',abortOwned,{once:true});
+  const call=async(operation,args)=>{
+    phase=operation;const result=await browser.call(operation,args);
+    lastState=['ready','error','manual_input_required','saved_unverified'].includes(result?.state)?result.state:'other';
+    lastReason=['none','bootstrap_failed','manual_control_active','operation_failed','lease_expired','storage_unavailable','browser_process_lost'].includes(result?.reason)?result.reason:'other';
+    return result;
+  };
+  const diagnose=()=>console.log(JSON.stringify({fixture:'visual-manual-failure',phase,completion,lastState,lastReason,writes,
+    failure:primaryFailure?.code==='ERR_ASSERTION'?'assertion':t.signal.aborted?'timeout':'operation'}));
+  t.signal.addEventListener('abort',diagnose,{once:true});
   try {
-    for (const completion of ['window_close', 'ready', 'logout_window_close']) {
+    for (completion of ['window_close', 'ready', 'logout_window_close']) {
       diagnostics.push({ stage: completion });
-      assert.equal((await browser.call('setup', { url: `${origin}/login` })).state, 'manual_input_required', JSON.stringify(diagnostics));
-      assert.equal((await browser.call('show-login')).image, undefined);
-      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
-      assert.equal((await browser.call('type-text', { frameId: 'invalid', text: 'blocked' })).reason, 'manual_control_active');
+      assert.equal((await call('setup', { url: `${origin}/login` })).state, 'manual_input_required', JSON.stringify(diagnostics));
+      assert.equal((await call('show-login')).image, undefined);
+      assert.equal((await call('screenshot')).reason, 'manual_control_active');
+      assert.equal((await call('type-text', { frameId: 'invalid', text: 'blocked' })).reason, 'manual_control_active');
       const before = writes;
       if (completion === 'logout_window_close') {
         logout = true;
         for (let i = 0; i < 50 && !logoutObserved; i++) await new Promise(resolve => setTimeout(resolve, 100));
         assert.equal(logoutObserved, true, 'the fixture browser completed explicit logout before the user closed its window');
       }
-      if (completion === 'ready') assert.equal((await browser.call('ready')).state, 'saved_unverified');
-      else await window.close().then(value => diagnostics.push({ stage: 'fixture_close_reply', state: value.state, reason: value.reason })).catch(() => diagnostics.push({ stage: 'fixture_close_disconnected' })); // UI close can race its socket's graceful shutdown.
-      for (let i = 0; i < 200 && (await browser.call('status')).state !== 'saved_unverified'; i++) await new Promise(resolve => setTimeout(resolve, 100));
-      assert.equal((await browser.call('status')).state, 'saved_unverified');
+      if (completion === 'ready') assert.equal((await call('ready')).state, 'saved_unverified');
+      else {phase='user_window_close';await window.close().then(value => diagnostics.push({ stage: 'fixture_close_reply', state: value.state, reason: value.reason })).catch(() => diagnostics.push({ stage: 'fixture_close_disconnected' })); } // UI close can race its socket's graceful shutdown.
+      for (let i = 0; i < 200 && (await call('status')).state !== 'saved_unverified'; i++) await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal((await call('status')).state, 'saved_unverified');
       assert.equal(writes, before + 1, 'the final manual snapshot is saved once');
       restored = false;
-      assert.equal((await browser.call('navigate', { url: `${origin}/restore` })).state, 'ready');
+      assert.equal((await call('navigate', { url: `${origin}/restore` })).state, 'ready');
       assert.equal(restored, completion !== 'logout_window_close', 'window-close retains login but never resurrects an explicit logout');
-      await browser.close(); browser = create();
+      phase='cycle_close';await browser.close(); browser = create();
     }
-    assert.equal((await browser.call('navigate', { url: `${origin}/restore` })).state, 'ready');
+    assert.equal((await call('navigate', { url: `${origin}/restore` })).state, 'ready');
     const before = writes, previous = structuredClone(snapshot);
-    window.crash();
-    for (let i = 0; i < 100 && (await browser.call('status')).reason !== 'browser_process_lost'; i++) await new Promise(resolve => setTimeout(resolve, 100));
-    assert.equal((await browser.call('status')).reason, 'browser_process_lost');
-    await browser.close(); assert.equal(writes, before); assert.deepEqual(snapshot, previous);
-  } finally {
-    await browser.close().catch(() => browser.abort());
-    console.log(JSON.stringify({ fixture: 'visual-manual', diagnostics }));
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
-    await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    phase='crash';window.crash();
+    for (let i = 0; i < 100 && (await call('status')).reason !== 'browser_process_lost'; i++) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal((await call('status')).reason, 'browser_process_lost');
+    phase='crash_close';await browser.close(); assert.equal(writes, before); assert.deepEqual(snapshot, previous);
+  } catch(error){primaryFailure=error;diagnose();throw error;} finally {
+    // SAME fixture-owned abort/HTTP cleanup as the native authentication test.
+    // A failure cannot wait behind the browser queue or leave a live listener;
+    // stop accepting before closing sockets and preserve the primary assertion.
+    let cleanupFailed=false;
+    try{await ownedServer.stop();}catch{cleanupFailed=true;}
+    try{
+      if(primaryFailure||t.signal.aborted)browser.abort();
+      else await browser.close().catch(()=>browser.abort());
+      await fs.rm(directory,{recursive:true,force:true,maxRetries:10,retryDelay:200});
+    }catch{cleanupFailed=true;}finally{
+      t.signal.removeEventListener('abort',abortOwned);t.signal.removeEventListener('abort',diagnose);
+      console.log(JSON.stringify({fixture:'visual-manual',diagnostics}));
+    }
+    if(cleanupFailed&&!primaryFailure)throw new Error('visual_manual_fixture_cleanup_failed');
   }
 });
 

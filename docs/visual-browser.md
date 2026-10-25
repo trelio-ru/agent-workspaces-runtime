@@ -589,6 +589,14 @@ request, pre-aborted и pending-bind cleanup. Диагностика допол�
 только фиксированные variant/action/state/reason. Это исправляет утечку fixture,
 а не доказывает устранение исходной native ошибки; 180 секунд и все assertions
 сохранены.
+Manual window-close/ready/logout/crash regression использует тот же общий
+fixture-owned HTTP helper, что authentication regression. Ошибка тела выводит
+только фиксированные phase/completion/state/reason и счётчик сохранений; listener
+и его sockets закрываются до ожидания browser queue. Abort отдельно останавливает
+только owned test browser. Это сохраняет исходный assertion вместо зависшего
+finally; лимит 180 секунд, login/logout/snapshot/crash assertions и production
+browser lifecycle остаются прежними. Такой cleanup сам по себе не доказывает
+устранение исходного native отказа.
 Ранний startup отказ дополнительно сохраняет только закрытый этап control/listen/
 owner publish/dependency/browser и разрешённые common process category/operation/
 timeout/errno. Используется общий diagnostic parser; Error message/stack и owner
