@@ -310,7 +310,7 @@ export const applyHarnessAdapter = async (ctx, {
       } catch (error) { throw nativeError(error); }
     },
   });
-  const refresh = async signal => {
+  const refresh = signal => withPrivateProcessSession(async () => {
     const remote = await connection.listTools(signal);
     const local = await localMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, { origin: ORIGIN, signal });
     if (!Array.isArray(local?.result?.tools)) throw fail("TRELIO_HARNESS_CATALOG_INVALID", "Локальный каталог Trelio недоступен.");
@@ -329,7 +329,7 @@ export const applyHarnessAdapter = async (ctx, {
     disposers = [];
     try { for (const tool of definitions) disposers.push(ctx.tools.register(tool)); }
     catch (error) { for (const dispose of disposers) dispose(); disposers = []; throw error; }
-  };
+  }, signal);
   ctx.tools.register({ name: "trelio_connect",
     description: "Connect or explicitly reconnect Trelio in the system browser. Never supply tokens or authorization codes in chat. Also refreshes the live tool catalogue; it does not retry a previous business action.",
     parameters: { type: "object", properties: { reauthorize: { type: "boolean", description: "Explicitly replace a revoked or insufficient OAuth grant in the browser." } }, additionalProperties: false },
