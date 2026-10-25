@@ -75,7 +75,7 @@ publication tooling также остаются вне этого публичн
   Test task discovery → existing list change → exact
   owner decision → advertised setup → task view; never add a hidden-call alias.
 - Модель ассистента: один owner choice/company, fresh execution state перед
-  create/resume; native model/list и explicit flags, без fallback. Policy block
+  create/queue; native model/list и exact Desktop pair, без fallback. Policy block
   пропускается без ack/roll-forward, не останавливает другие компании и не
   снимает unknown-outcome fence. [Контракт](docs/assistant-scheduler.md#company-model-selection).
   Existing background status keeps OS state and appends a content-free native
@@ -610,6 +610,7 @@ publication tooling также остаются вне этого публичн
 - Terminal continuation: SAME pass/ledger, native trusted-hook preflight, indexed schema14 history;20 attempts per actual hook/signed-worker fingerprint, no old-history reset. Automatic new marker/monotonic start; sensitive approvals intact, unknown never replay. See scheduler contract.
 - Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
 - Assistant maintenance: fixed signed worker, no replay/health shortcut; terminal retained-pass updates require the SAME coordinator lease/native evidence. MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
+- Visible task chats reuse SAME native App Server + system URI opener. Empty bootstrap persists the explicit pair; ONLY the second GUI-queued READY earns provision. No exec/resume/hidden fallback, queue replay or model-mediated reconfiguration of old private history. See scheduler native invocation.
 - Native account preflight diagnoses login only from explicit missing auth, not
   prose or a cached catalogue. Only a fresh completed turn with exact read-back
   clears its current login latch; unrelated health incidents and delivery fences

@@ -9,7 +9,6 @@ import path from 'node:path';
 import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
-const modelArgs = ['--model',execution.modelId,'--config','model_reasoning_effort="high"'];
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
 
 test('work-state locators use immutable assistant identity and refuse paths or source text', async()=>{
@@ -55,12 +54,7 @@ test('native discussion prompt uses only task/comment locators and never a mater
     readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
     readMetadata:async()=>({threadId,cwd}),startInvocation:()=>{starts++;},
     readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
-    spawnProcess:(_executable,args)=>{
-      assert.equal(args.includes('-'),true);assert.equal(args.some(arg=>arg.includes('discussion')),false);
-      const child=fakeChild();child.stdin.on('data',chunk=>{input+=chunk.toString();});
-      child.stdin.on('end',()=>queueMicrotask(()=>{child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);}));
-      return child;
-    },
+    openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,cwd:await fs.realpath(cwd),onInput:text=>{input=text;}}),
   });
   assert.equal(result.state,'completed');assert.equal(starts,1);
   const line=input.split('\n').find(value=>value.startsWith('TRELIO_ASSISTANT_SCOPE '));
@@ -78,11 +72,43 @@ const nativeRpc = handler => (_executable, args, options) => {
     while ((boundary=input.indexOf('\n'))!==-1) {
       const request=JSON.parse(input.slice(0,boundary)); input=input.slice(boundary+1);
       if (!request.id) continue;
-      queueMicrotask(() => child.stdout.write(`${JSON.stringify({ id:request.id,
-        ...(request.method==='initialize' ? { result:{} } : handler(request)) })}\n`));
+      queueMicrotask(() => {
+        try {
+          const {notifications=[],...response}=request.method==='initialize'?{result:{}}:handler(request);
+          child.stdout.write(`${JSON.stringify({id:request.id,...response})}\n`);
+          for(const notification of notifications)child.stdout.write(`${JSON.stringify(notification)}\n`);
+        }
+        catch(error){child.emit('error',error);}
+      });
     }
   });
   return child;
+};
+
+// Real-shaped public App Server fixture: a bootstrap owns only its empty
+// READY; business messages are accepted solely by the already opened GUI queue.
+const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onQueue=()=>{},
+  onRequest=()=>{},pair=execution,queued=[],terminal=true,children=[]}={}) => {
+  let input='',turnId=randomUUID();
+  const rpc=nativeRpc(request=>{
+    onRequest(request);
+    if(request.method==='thread/start'){onCreate(request);return {result:{thread:{id:threadId}}};}
+    if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,model:pair.modelId,reasoningEffort:pair.effortLevel}}};
+    if(request.method==='turn/start'){
+      assert.equal(request.params.model,execution.modelId);assert.equal(request.params.effort,execution.effortLevel);
+      assert.equal(request.params.collaborationMode.settings.reasoning_effort,execution.effortLevel);
+      input=request.params.input[0].text;onInput(input,'bootstrap');return {result:{turn:{id:turnId}},
+        notifications:[{method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}}]};
+    }
+    if(request.method==='thread/queue/list')return {result:{data:queued,nextCursor:null}};
+    if(request.method==='thread/queue/add'){
+      onQueue(request);input=request.params.input[0].text;onInput(input,'desktop');turnId=randomUUID();
+      return {result:{queuedSubmission:{id:randomUUID(),clientUserMessageId:request.params.clientUserMessageId,input:request.params.input}}};
+    }
+    assert.equal(request.method,'thread/turns/list');
+    return {result:{data:terminal?[{id:turnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:input}]}]}]:[],nextCursor:null}};
+  });
+  return (...args)=>{const child=rpc(...args);children.push(child);return child;};
 };
 
 test('actual native hook inventory gates trusted definitions, never installation or another plugin',async()=>{
@@ -256,14 +282,10 @@ test('initial native chat persists its ID synchronously and consumes no business
     onAuthenticationConfirmed:async()=>{confirmed++;},
     startInvocation:()=>{started=true;},onThreadStarted:value=>{assert.equal(started,true);saved=value;},
     readDelivery:async value=>{assert.equal(saved,threadId);assert.equal(value,threadId);return{state:'completed',receipt:'fixture:ready'};},
-    spawnProcess:(_executable,args)=>{
-      assert.deepEqual(args,['exec',...modelArgs,'--json','--skip-git-repo-check','-']);
-      const child=fakeChild();child.stdin.on('data',chunk=>{input+=chunk.toString();});
-      child.stdin.on('end',()=>queueMicrotask(()=>{
-        child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);
-        child.emit('close',0);
-      }));return child;
-    },
+    openDesktop:async url=>{assert.equal(url,`codex://threads/${threadId}`);},
+    spawnProcess:desktopRpc({threadId,cwd:await fs.realpath(cwd),onCreate:()=>assert.equal(started,true),
+      onRequest:request=>{if(request.method==='turn/start')assert.equal(saved,threadId);},
+      onInput:text=>{input=text;}}),
   };
   const result=await provisionAssistantCodexChat({deliveryId,cwd,execution},options);
   assert.equal(confirmed,1);
@@ -290,20 +312,14 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
     startInvocation:() => { if (starts++) throw new Error('private state error'); },
     readMetadata:async () => ({ threadId,cwd }), readDelivery:async () => ++reads===1 ? { state:'uncertain' }
       : { state:'completed',turnId,receipt:`codex:${threadId}:${turnId}` },
+    openDesktop:async url=>assert.equal(url,`codex://threads/${threadId}`),
     spawnProcess:(_executable,args,spawnOptions) => {
-      launches++; assert.deepEqual(args,['exec','resume',threadId,...modelArgs,'--json','--skip-git-repo-check','-']);
-      assert.equal(spawnOptions.shell,false); assert.equal(spawnOptions.cwd,expectedCwd);
-      assert.equal(spawnOptions.env.SHOULD_NOT_PASS,undefined);
-      assert.equal(spawnOptions.env.OPENAI_API_KEY,undefined);
-      assert.equal(spawnOptions.env.ComSpec,process.platform==='win32'?'C:\\Windows\\System32\\cmd.exe':undefined);
+      launches++;assert.deepEqual(args,['app-server','--listen','stdio://']);
+      assert.equal(spawnOptions.shell,false);assert.equal(spawnOptions.cwd,expectedCwd);
+      assert.equal(spawnOptions.env.SHOULD_NOT_PASS,undefined);assert.equal(spawnOptions.env.OPENAI_API_KEY,undefined);
+      assert.equal(spawnOptions.env.ComSpec,process.platform==='win32'?'C:\Windows\System32\cmd.exe':undefined);
       assert.equal(spawnOptions.env.PATHEXT,process.platform==='win32'?'.COM;.EXE;.BAT;.CMD':undefined);
-      assert.ok(!args.some(arg => /bypass|ignore-rules|ignore-user-config|approval|sandbox/u.test(arg)));
-      assert.ok(!args.some(arg=>/message:|uid:|conversation\/v1/u.test(arg)),'source refs stay in stdin, never native argv');
-      const child=fakeChild(); child.stdin.on('data',chunk=>{ input+=chunk.toString(); });
-      child.stdin.on('end',()=>queueMicrotask(()=>{
-        child.stdout.write(`${JSON.stringify({ type:'thread.started',thread_id:threadId })}\n${JSON.stringify({ type:'turn.completed' })}\n`);
-        child.emit('close',0);
-      })); return child;
+      return desktopRpc({threadId,cwd:expectedCwd,onInput:text=>{input=text;}})(_executable,args,spawnOptions);
     },
   };
   const result=await runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext:repliedTaskContext,execution },options);
@@ -323,23 +339,20 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   // A lost/empty history lookup cannot bypass the durable first-attempt fence.
   reads=0;
   await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },options), /DELIVERY_NOT_STARTED/);
-  assert.equal(launches,1);
+  assert.equal(launches,2);
 });
 
-test('a successful CLI exit/queue claim without exact completed-turn read-back remains uncertain', async t => {
-  const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-codex-test-'));
-  t.after(()=>fs.rm(cwd,{ recursive:true,force:true }));
-  const threadId=randomUUID(),deliveryId=randomUUID();
-  await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },{
-    onAuthenticationConfirmed:()=>assert.fail('an uncertain result is not login recovery'),
-    readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
-    readDelivery:async()=>({ state:'uncertain' }),spawnProcess:()=>{
-      const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{
-        child.stdout.write(`${JSON.stringify({ type:'thread.started',thread_id:threadId })}\n${JSON.stringify({ type:'turn.completed' })}\n`);
-        child.emit('close',0);
-      }));return child;
-    },
+test('queue acceptance without an exact completed GUI turn stays uncertain and is never replayed', async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID();let starts=0,queues=0;const children=[];
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{
+    passTimeoutMs:100,executable:process.execPath,environment:{},openDesktop:async()=>{},
+    onAuthenticationConfirmed:()=>assert.fail('accepted queue is not login recovery'),
+    readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),readExecutionAvailability:async()=>true,
+    startInvocation:()=>{starts++;},readMetadata:async()=>({threadId,cwd:process.cwd()}),
+    readDelivery:async()=>({state:'uncertain'}),
+    spawnProcess:desktopRpc({threadId,terminal:false,onQueue:()=>{queues++;},children}),
   }),/DELIVERY_UNCERTAIN/);
+  assert.equal(starts,1);assert.equal(queues,1);assert.ok(children.every(child=>child.killed));
 });
 
 test('external task context permits bounded structural refs only, without bodies/owner assertions/argv options',()=>{
@@ -383,7 +396,7 @@ test('pre-native recovery callback runs once after SAME model preflight and befo
     executable:process.execPath,environment:{},readDelivery:async()=>({state:'uncertain',markerEvidence:'absent'}),
     readMetadata:async()=>({threadId,cwd:process.cwd()}),readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>{modelChecks++;return true;},
     beforeInvocation:async()=>{assert.equal(modelChecks,1);recovery++;throw Object.assign(new Error('closed native CAS conflict'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});},
-    startInvocation:()=>{starts++;},spawnProcess:()=>assert.fail('failed recovery launched Codex')}),/closed native CAS conflict/);
+    openDesktop:async()=>{},startInvocation:()=>{starts++;},spawnProcess:desktopRpc({threadId,onQueue:()=>assert.fail('failed recovery queued work')})}),/closed native CAS conflict/);
   assert.equal(modelChecks,1);assert.equal(recovery,1);assert.equal(starts,0);
 });
 
@@ -396,11 +409,8 @@ test('successful pre-native recovery reads a real positive receipt after the one
       if(++reads===1){assert.equal(options.requireAbsentMarker,true);return {state:'uncertain',markerEvidence:'absent'};}
       assert.equal(options.requireAbsentMarker,false);return {state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`};
     },readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>{models++;return true;},beforeInvocation:async()=>{assert.equal(models,1);recoveries++;},
-    startInvocation:()=>{assert.equal(recoveries,1);starts++;},spawnProcess:()=>{
-      const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{
-        child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);
-      }));return child;
-    }});
+    startInvocation:()=>{assert.equal(recoveries,1);starts++;},openDesktop:async()=>{},
+    spawnProcess:desktopRpc({threadId})});
   assert.equal(result.state,'completed');assert.equal(reads,2);assert.equal(models,1);assert.equal(recoveries,1);assert.equal(starts,1);
 });
 
@@ -410,13 +420,74 @@ test('reviewed continuation uses a NEW stdin marker in the same chat, with recei
     executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,
     beforeInvocation:async()=>{checked=true;},startInvocation:()=>{assert.equal(checked,true);starts++;},
     readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
-    spawnProcess:(_exe,args)=>{assert.equal(args[2],threadId);const child=fakeChild();
-      child.stdin.on('data',chunk=>{input+=chunk.toString();});child.stdin.on('end',()=>queueMicrotask(()=>{
-        child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);}));return child;}};
+    openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,onInput:text=>{input=text;}})};
   assert.equal((await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},options)).state,'completed');
   assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   assert.match(input,/ONE automatic recovery continuation/);assert.ok(input.includes(priorTurnId));assert.match(input,/Do not repeat the previous command/);
   assert.match(input,/Decide what remains to be done and continue the task/);
   await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},
     {...options,continuationReview:{priorTurnId,reviewId:randomUUID()},readDelivery:()=>assert.fail('invalid review reached I/O')}),/INVALID_INPUT/);
+});
+
+
+test('Desktop handoff failure and mismatched native settings never submit task content or consume its bit',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID();let starts=0,queues=0;
+  const options={executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),
+    readDelivery:async()=>({state:'uncertain'}),readExecutionAvailability:async()=>true,readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    startInvocation:()=>{starts++;},openDesktop:async()=>{throw Error('PRIVATE OS ERROR');},
+    spawnProcess:desktopRpc({threadId,onQueue:()=>{queues++;}})};
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},options),
+    error=>error.code==='ASSISTANT_CODEX_DELIVERY_UNCERTAIN'&&!error.message.includes('PRIVATE'));
+  for(const pair of [{...execution,effortLevel:'ultra'},{...execution,modelId:'other'},{}]){
+    await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},
+      {...options,openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,pair,onQueue:()=>{queues++;}})}),/MODEL_UNAVAILABLE/);
+  }
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},
+    {...options,openDesktop:async()=>{},spawnProcess:desktopRpc({threadId,queued:[{id:randomUUID()}],onQueue:()=>{queues++;}})}),/DELIVERY_UNCERTAIN/);
+  assert.equal(starts,0);assert.equal(queues,0);
+});
+
+test('empty bootstrap is closed before GUI opens and only the second Desktop READY earns provision',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),children=[];let starts=0,saved=false,opened=false,queues=0,bootstraps=0;
+  const options={executable:process.execPath,environment:{},readExecutionAvailability:async()=>true,
+    readHookReadiness:()=>assert.fail('empty READY never earns or needs business hook authority'),
+    startInvocation:()=>{starts++;},onThreadStarted:value=>{assert.equal(value,threadId);saved=true;},
+    openDesktop:async uri=>{assert.equal(uri,`codex://threads/${threadId}`);assert.ok(saved);assert.ok(children.every(c=>c.killed));opened=true;},
+    readDelivery:async()=>{assert.equal(queues,1);return {state:'completed',turnId:randomUUID(),receipt:'exact:desktop:ready'};},
+    spawnProcess:desktopRpc({threadId,children,onCreate:request=>{
+      assert.deepEqual(request.params,{cwd:process.cwd(),model:execution.modelId,ephemeral:false,allowProviderModelFallback:false});
+    },onInput:(text,phase)=>{
+      assert.ok(saved);assert.doesNotMatch(text,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
+      if(phase==='bootstrap'){bootstraps++;assert.ok(!opened);assert.ok(text.startsWith(`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}\n`));
+        assert.ok(!text.includes(assistantDeliveryMarker(deliveryId)));}
+      else{assert.ok(opened);assert.ok(text.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));}
+    },onQueue:()=>{queues++;assert.ok(opened);}}),
+  };
+  assert.equal((await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},options)).threadId,threadId);
+  assert.equal(starts,1);assert.equal(bootstraps,1);assert.equal(queues,1);assert.equal(children.length,2);
+  assert.ok(children.every(c=>c.killed));
+  // The same API bootstrap receipt cannot masquerade as a GUI receipt if the
+  // owner has closed Desktop or its URI handler is unavailable.
+  let readbacks=0;
+  await assert.rejects(provisionAssistantCodexChat({deliveryId:randomUUID(),cwd:process.cwd(),execution},
+    {...options,spawnProcess:desktopRpc({threadId}),openDesktop:async()=>{throw Error('NO_DESKTOP');},
+      readDelivery:async()=>{readbacks++;return {state:'completed'};}}),/DELIVERY_UNCERTAIN/);
+  assert.equal(readbacks,0);
+});
+
+test('lost queue response retains uncertainty, closes its own reader and never retries or interrupts GUI',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),children=[];let queues=0,starts=0;
+  const spawnProcess=nativeRpc(request=>{
+    if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd:process.cwd(),model:execution.modelId,reasoningEffort:execution.effortLevel}}};
+    if(request.method==='thread/queue/list')return {result:{data:[],nextCursor:null}};
+    assert.equal(request.method,'thread/queue/add');queues++;
+    return {error:{code:-32000,message:'PRIVATE LOST RESPONSE'}};
+  });
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{
+    executable:process.execPath,environment:{},openDesktop:async()=>{},
+    readMetadata:async()=>({threadId,cwd:process.cwd()}),readDelivery:async()=>({state:'uncertain'}),
+    readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),readExecutionAvailability:async()=>true,startInvocation:()=>{starts++;},
+    spawnProcess:(...args)=>{const child=spawnProcess(...args);children.push(child);return child;},
+  }),error=>error.code==='ASSISTANT_CODEX_DELIVERY_UNCERTAIN'&&!error.message.includes('PRIVATE'));
+  assert.equal(queues,1);assert.equal(starts,1);assert.equal(children.length,1);assert.ok(children[0].killed);
 });

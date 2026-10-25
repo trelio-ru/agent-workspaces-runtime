@@ -173,22 +173,46 @@ structural presentation metadata, not another journal or an authorization flag.
 
 ### Native invocation
 
-The official [CLI reference](https://learn.chatgpt.com/docs/developer-commands)
-documents `codex queue` and `codex exec resume`; the
-[App Server](https://learn.chatgpt.com/docs/app-server) documents exact thread
-metadata and paginated turn reads. An isolated local macOS probe confirmed that
-queue acceptance alone did not start the sleeping fixture. `exec resume` on that
-same permanent ID did start and complete a native turn. The actual adapter then
-passed a marker-based positive read-back on that host. This does not establish
-Windows readiness, GUI availability, provider access or a running cyclic daemon.
+The permanent task UUID is a **visible Desktop chat**. The runtime uses the
+public [App Server](https://learn.chatgpt.com/docs/app-server) methods and the
+registered `codex://threads/<UUID>` handler; it never executes business work
+through `codex exec`, resumes/steals the GUI writer or creates a hidden fallback.
+A tool-free native bootstrap first persists the new UUID and executes an empty
+READY with explicit company model/effort. Zero-turn settings alone do not suffice:
+Desktop restores the last executed pair. This initial turn has a distinct
+`TRELIO_ASSISTANT_DESKTOP_PREPARE` marker and earns no provisioning receipt.
 
-`trelio-assistant-codex.mjs` resumes the exact UUID/cwd, using existing local Codex
-authentication. The owner-selected company model/effort is passed explicitly
-for both create and resume. It never copies human OAuth, overrides sandbox/
-approval/rules, automates hook trust or selects another thread.
-Only the structural delivery marker and platform instruction go through stdin;
-no prompt/content/credential is placed in argv. Stderr and raw JSON diagnostics
-are suppressed; native content is parsed in bounded memory, never cached/logged.
+After closing ONLY that owned bootstrap child, the SAME common system URI opener
+hands this exact UUID to Desktop. The public `thread/queue/add` (experimental
+capability) submits the second READY to its existing GUI writer. Exact native
+terminal read-back of the ordinary provision marker proves that the GUI queue
+actually ran. Closed/missing Desktop, a successful opener or an accepted queue
+alone cannot make a provision complete. The original one-use provision bit covers
+this entire chain; a lost create/start/queue response never creates another chat.
+
+Every subsequent business/continuation uses that same exact UUID/cwd and GUI
+queue. Fresh native thread model/effort must match the server-selected pair;
+unknown/mismatched settings refuse before the task's irreversible start bit.
+A changed company choice never silently uses the old GUI model or a configuration
+model turn on old private history. Native hook observation remains independent.
+The queue API has no model-setting parameter: autonomous reconfiguration of an
+already GUI-owned chat must use a separately verified native Desktop capability,
+not an invented URI option, foreign resume, hidden helper chat or prompt command.
+
+Only structural locators and the platform instruction cross private stdin; no
+prompt/content/credential is placed in argv or an extra transcript cache. The
+adapter never changes sandbox, approval, trust, saved rules or authentication.
+An owned reader polls bounded native turn summaries with backoff under the same
+absolute deadline. Timeout/cancellation closes only that reader, not the GUI
+turn/queue. Queue UUIDs correlate requests; they are not an idempotency guarantee,
+and an uncertain submission is never automatically requeued.
+
+Windows live probes with the official 0.164 client confirmed both High and Ultra
+bootstrap → exact URI → GUI queue → actual turn_context/read-back, independent
+of the preceding GUI default. The SAME common signed URI opener also handed off
+in the existing InteractiveToken Windows user session. These are tool-free
+Desktop transport checks, not a business outcome, provider login or actual
+cyclic-wake acceptance.
 
 The SAME common Codex environment projector keeps only its public OS/profile
 allowlist. On Windows that includes `ComSpec` and `PATHEXT`, with one canonical
@@ -205,7 +229,7 @@ makes no model turn or tool call and is not a real assistant business outcome.
 
 The host passes a one-use synchronous `startInvocation` callback that performs the
 inbox's leased -> started CAS. Missing history cannot authorize a second attempt.
-After CLI exit, the adapter must find exactly one matching native user-message
+After queue dispatch, the adapter must find exactly one matching native user-message
 marker with a completed/failed turn. Quoted/tool/assistant text is not acceptance.
 Missing/oversized/unavailable history is uncertainty, not proof of rejection.
 Provisioning consumes no business events and needs only the exact READY receipt.
@@ -279,8 +303,9 @@ model preferences in SQLite or mistake the selection for actual attestation.
 Backend task-pass admission pins an immutable launch snapshot and the shared
 hook still proves the observed model/effort against the company's live policy.
 
-Both new READY provisioning and exact `exec resume` receive explicit `--model`
-and TOML-quoted `model_reasoning_effort` flags. No sandbox, approval, trust,
+New empty bootstrap receives explicit native `model`, `effort` and the same
+collaboration settings. The existing visible task chat must retain that exact
+pair in fresh native metadata before each queue write. No sandbox, approval, trust,
 account or rule override is added. Before crossing the durable native-start
 fence, a bounded read-only App Server `model/list` checks the signed-in account's
 actual model/effort availability. Pagination shares one deadline; missing,
@@ -431,7 +456,7 @@ admission check, workspace resolver and notification transport.
 
 The native provision uses the same global delivery fence but no task events.
 Its only initial instruction is READY without tools. The exact thread ID is
-journaled on `thread.started`, then verified by native completed-turn read-back.
+journaled before the empty bootstrap turn, then verified by the GUI-queued READY read-back.
 Only subsequent task passes may consume the event queue. A lost native ID blocks
 another chat; an ambiguous *server host claim* is different: the durable
 `native_started=0` bit permits retrying that same provision ID before the one-use
