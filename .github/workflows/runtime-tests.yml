@@ -17,10 +17,38 @@ env:
   TRELIO_AGENT_SKILLS_ROOT: ${{ github.workspace }}/_contracts/agent-skills
 
 jobs:
-  visual-browser:
+  ci-plan:
     if: github.event_name == 'pull_request'
+    name: Runtime CI plan
+    runs-on: ubuntu-latest
+    outputs:
+      profile: ${{ steps.plan.outputs.profile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Classify the complete pinned PR diff
+        id: plan
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: node scripts/runtime-ci-plan.mjs create --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --output "$RUNNER_TEMP/ci-plan.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-ci-plan
+          path: ${{ runner.temp }}/ci-plan.json
+          if-no-files-found: error
+          overwrite: true
+
+  visual-browser:
+    if: github.event_name == 'pull_request' && needs.ci-plan.outputs.profile == 'full'
     name: Native visual browser (${{ matrix.os }})
-    needs: windows-private-build
+    needs: [ci-plan, windows-private-build]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -34,6 +62,8 @@ jobs:
       TRELIO_TEXT_HEADED: '1'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Read actual search pacing contract sources
         uses: actions/checkout@v4
         with:
@@ -129,9 +159,12 @@ jobs:
   windows-private-build:
     if: github.event_name == 'pull_request'
     name: Build native Windows private worker
+    needs: ci-plan
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
@@ -151,10 +184,12 @@ jobs:
   windows-native-arm:
     if: github.event_name == 'pull_request'
     name: Native Windows private worker (arm64)
-    needs: windows-private-build
+    needs: [ci-plan, windows-private-build]
     runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: windows-private-worker
@@ -173,11 +208,14 @@ jobs:
   git-main-guard:
     if: github.event_name == 'pull_request'
     name: Canonical main Git guard
+    needs: ci-plan
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out runtime repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Run canonical main guard regressions
         run: npm run test:worktree-bootstrap && npm run test:git-guard
@@ -185,7 +223,7 @@ jobs:
   node-tests:
     if: github.event_name == 'pull_request'
     name: Runtime tests (${{ matrix.os }})
-    needs: windows-private-build
+    needs: [ci-plan, windows-private-build]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -197,6 +235,8 @@ jobs:
     steps:
       - name: Check out runtime repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Cross-repository tests consume the real stable shell. The checkout is
       # read-only test input and is never copied into a runtime package.
@@ -231,7 +271,9 @@ jobs:
       # Execute files directly: a parent node:test process has intermittently
       # corrupted serialized child IPC under load on hosted runners.
       - name: Run host runtime tests
+        if: needs.ci-plan.outputs.profile == 'full'
         run: |
+          node scripts/runtime-ci-plan.test.mjs
           node tests/context-budget.test.mjs
           node tests/trelio-browser-open.test.mjs
           node tests/trelio-browser-session.test.mjs
@@ -310,6 +352,10 @@ jobs:
           node tests/trelio-workspace-files.test.mjs
           node tests/trelio-workspace.test.mjs
 
+      - name: Run selected assistant and shared-boundary tests
+        if: needs.ci-plan.outputs.profile == 'assistant-orchestration'
+        run: node scripts/runtime-ci-plan.mjs assistant-tests
+
       - name: Build deterministic runtime packages
         shell: bash
         run: |
@@ -320,12 +366,14 @@ jobs:
   windows-acl:
     if: github.event_name == 'pull_request'
     name: Windows runtime and private ACL
-    needs: windows-private-build
+    needs: [ci-plan, windows-private-build]
     runs-on: windows-latest
 
     steps:
       - name: Check out runtime repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -346,6 +394,7 @@ jobs:
       # The Python regression relocates a real interpreter into the default
       # per-user layout. PATH alone cannot prove this installation is accepted.
       - name: Set up Python fixture
+        if: needs.ci-plan.outputs.profile == 'full'
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -353,6 +402,7 @@ jobs:
       # Pin the real public Telegram importer; it is test input only and never
       # enters the generic host package or receives private provider credentials.
       - name: Check out public account-import contract
+        if: needs.ci-plan.outputs.profile == 'full'
         uses: actions/checkout@v4
         with:
           repository: trelio-ru/agent-skills
@@ -360,30 +410,39 @@ jobs:
           path: _contracts/agent-skills
 
       - name: Run Windows encrypted mirror retention regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-mirror-retention.test.mjs
 
       - name: Run Windows Python discovery and isolation regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-python.test.mjs
 
       - name: Run admission cache boundary regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-skill-admission.test.mjs
 
       - name: Run signed setup boundary regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-skill-secret-setup.test.mjs
 
       - name: Run Windows runtime recovery regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-host-runtime-recovery.test.mjs
 
       - name: Run Windows diagnostic regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-agent-diagnostics.test.mjs
 
       - name: Run Windows Antigravity native shell diagnostics
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-antigravity.test.mjs
 
       - name: Run Windows folder diagnostic and instruction refresh regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-folder-onboarding.test.mjs
 
       - name: Run Windows personal account catalogue regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         # setup-python installs into the Actions toolcache, deliberately outside
         # production fixed-root discovery. Supply a real per-user installation
         # for this fixture instead of depending on incidental runner software or
@@ -406,30 +465,43 @@ jobs:
           node tests/trelio-assistant-hook.test.mjs
           node tests/trelio-assistant-coordinator.test.mjs
 
+      - name: Run selected assistant Workspace and proof boundaries
+        if: needs.ci-plan.outputs.profile == 'assistant-orchestration'
+        run: |
+          node tests/trelio-local-context.test.mjs
+          node tests/trelio-runtime-policy.test.mjs
+
       - name: Run Windows ACL regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: >-
           node --test
           --test-name-pattern="Windows ACL command|Windows bridge applies|Windows DPAPI|Windows Node resolver|Windows Remote MCP launcher|bridge pairs once|connection-free skill runtime"
           tests/trelio-workspace.test.mjs
 
       - name: Run Windows browser HTTP evidence regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-browser-http.test.mjs
 
       - name: Run Windows browser bootstrap and npm discovery regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-browser-session.test.mjs
 
       # Реальный зарегистрированный URI handler принимает synthetic query целиком.
       # Это проверяет ShellExecute, а не только mock argv или успешный spawn.
       - name: Run Windows browser URL handoff regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-browser-open.test.mjs
 
       - name: Run Windows Git prerequisite regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node --test tests/trelio-git.test.mjs
 
       - name: Run Windows proposal local file regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-proposal-local-files.test.mjs
 
       - name: Run Windows private attachment delivery regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-local-attachments.test.mjs
 
       - name: Run Windows encrypted Workspace file delivery regressions
@@ -442,6 +514,7 @@ jobs:
         run: node tests/trelio-workspace-finish-progress.test.mjs
 
       - name: Run Windows Workspace saving and rate-limit regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: >-
           node --test
           --test-name-pattern="bridge draft and finish survive|bridge finish recovers saved handoff|plain mutation retry|429 respects|HTTP retry"
@@ -454,9 +527,11 @@ jobs:
         run: node tests/trelio-local-path.test.mjs
 
       - name: Run Windows embedded browser transport regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-secret-browser-native.test.mjs
 
       - name: Run Windows hook launcher regression
+        if: needs.ci-plan.outputs.profile == 'full'
         run: >-
           node --test
           --test-name-pattern="configured platform hook launcher|event session identity|pairing recovery|resume and compact|bounded cleanup|malformed Trelio action|SessionStart pins|discovery strips|chat binding"
@@ -466,6 +541,7 @@ jobs:
         run: node tests/trelio-hook-tool-identity.test.mjs
 
       - name: Run Windows company-scoped unfiled contract regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-unfiled-context.test.mjs
 
       - name: Run Windows proof preparation regressions
@@ -488,6 +564,7 @@ jobs:
           node tests/trelio-local-continuation.test.mjs
 
       - name: Run Windows persisted hook settings diagnostics
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node --test --test-name-pattern="persisted hook" tests/trelio-codex-routing.test.mjs
 
       - name: Run native Windows private process regressions
@@ -497,15 +574,18 @@ jobs:
         run: node tests/trelio-hook-private-session.test.mjs
 
       - name: Run read-only Windows worker startup diagnostic regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-windows-startup-diagnostic.test.mjs
 
       - name: Run Windows hook timeout regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-runtime-session-timeout.test.mjs
 
       - name: Preserve open Codex sessions during external plugin updates
         run: node tests/trelio-plugin-preservation.test.mjs
 
       - name: Run Windows Remote MCP handshake regression
+        if: needs.ci-plan.outputs.profile == 'full'
         run: >-
           node --test
           --test-name-pattern="stdio initialize is not blocked by Codex plugin retention|stdio startup trace"
@@ -515,6 +595,7 @@ jobs:
         run: node tests/trelio-host-runtime-entry.test.mjs
 
       - name: Run Windows Remote MCP OAuth storage regressions
+        if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-remote-mcp-oauth.test.mjs
 
       - name: Set up current Node.js for private worker compatibility
@@ -531,6 +612,7 @@ jobs:
       # Desktop clients may carry Node 24 independently of the supported backend
       # Node 22. Exercise the reported Python/execFile boundary on that host too.
       - name: Run Windows account import on Node.js 24
+        if: needs.ci-plan.outputs.profile == 'full'
         shell: pwsh
         run: |
           node tests/trelio-python.test.mjs
@@ -548,6 +630,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.23.2
@@ -574,15 +658,36 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - name: Require complete successful PR gate for this exact SHA
-        id: gate
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.2
+      - name: Select an exact successful PR run
+        id: source
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=pull_request&status=success" > "$RUNNER_TEMP/runs.json"
-          node -e 'const fs=require("fs");const runs=JSON.parse(fs.readFileSync(process.argv[1])).workflow_runs.filter(r=>r.head_sha===process.env.GITHUB_SHA&&r.event==="pull_request"&&r.conclusion==="success");if(!runs.length)throw Error("Exact successful PR gate is required");fs.writeFileSync(process.argv[2],String(runs[0].id))' "$RUNNER_TEMP/runs.json" "$RUNNER_TEMP/run-id"
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$(cat "$RUNNER_TEMP/run-id")/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
-          node -e 'const fs=require("fs");const jobs=JSON.parse(fs.readFileSync(process.argv[1])).jobs;for(const name of ["Canonical main Git guard","Runtime tests (ubuntu-latest)","Runtime tests (macos-latest)","Windows runtime and private ACL","Build native Windows private worker","Native Windows private worker (arm64)","Native visual browser (macos-latest)","Native visual browser (windows-latest)","Native visual browser (windows-11-arm)","Native visual browser (ubuntu-latest)"])if(!jobs.some(j=>j.name===name&&j.conclusion==="success"))throw Error("Incomplete exact OS gate: "+name)' "$RUNNER_TEMP/jobs.json"
-
-          echo "run-id=$(cat "$RUNNER_TEMP/run-id")" >> "$GITHUB_OUTPUT"
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/runtime-tests.yml/runs?head_sha=$GITHUB_SHA&event=pull_request&status=success&per_page=100" > "$RUNNER_TEMP/runs.json"
+          node scripts/runtime-ci-plan.mjs select-run --runs "$RUNNER_TEMP/runs.json" --head "$GITHUB_SHA" --output "$RUNNER_TEMP/selection.json"
+      - name: Read the exact run's pinned CI plan
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-ci-plan
+          path: ${{ runner.temp }}/source-ci-plan
+          run-id: ${{ steps.source.outputs.run-id }}
+          github-token: ${{ github.token }}
+      - name: Recompute complete diff and require every selected native job
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_RUN_ID: ${{ steps.source.outputs.run-id }}
+          PR_RUN_ATTEMPT: ${{ steps.source.outputs.run-attempt }}
+        shell: bash
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$PR_RUN_ID/attempts/$PR_RUN_ATTEMPT/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
+          node scripts/runtime-ci-plan.mjs verify --plan "$RUNNER_TEMP/source-ci-plan/ci-plan.json" --selection "$RUNNER_TEMP/selection.json" --jobs "$RUNNER_TEMP/jobs.json" --head "$GITHUB_SHA"
+          echo "run-id=$PR_RUN_ID" >> "$GITHUB_OUTPUT"

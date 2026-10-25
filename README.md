@@ -166,8 +166,11 @@ Local company search и Workspace-file search возвращают один ко
 [Контракт](docs/agent-workspace-runtime.md#finish-progress).
 
 Tagged artifact собирается на GitHub только после проверки successful PR gate
-того же exact SHA на Linux/macOS/Windows. Main/tag не повторяют уже зелёный
-полный test set; новый source SHA сначала проходит новый PR gate.
+того же exact SHA на Linux/macOS/Windows и ARM64. [CI-профиль](docs/runtime-ci.md)
+выбирается по полному pinned base/head diff: только closed assistant orchestration
+сохраняет узкий набор, остальные изменения – full. Tag заново проверяет Git diff,
+receipt и exact run/attempt jobs перед загрузкой native artifact. Main/tag не
+повторяют уже зелёные проверки; новый source SHA сначала проходит новый PR gate.
 
 ### Поиск Python для Agent Skills
 

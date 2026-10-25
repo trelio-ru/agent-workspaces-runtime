@@ -570,8 +570,11 @@ Extension E2E использует synthetic localhost: clicks, русский i
 scroll, same-tab target-blank routing, cookies/localStorage restore, window-close,
 ready, explicit logout без восстановления входа и crash сохранение предыдущего snapshot. Headed Mac test независимо
 сравнивает OS foreground до/после каждого действия, без activate/restore tricks.
-Native OS vault и detached worker проходят отдельно. CI обязателен на macOS,
-Windows x64/ARM64 и desktop Linux; local VM не заменяет hosted gate.
+Native OS vault и detached worker проходят отдельно. При browser/shared/native/
+crypto/security/CI изменениях full CI обязателен на macOS, Windows x64/ARM64 и
+desktop Linux; local VM не заменяет hosted gate. Только independently closed
+assistant orchestration diff по [CI-контракту](runtime-ci.md) может не запускать
+неизменённые browser GUI suites; он сохраняет native/proof/package проверки.
 Linux CI заменяет только Azure HTTP entry в mirror list hosted runner на
 официальный HTTPS archive. Оба APT installer, включая Playwright, используют
 20-секундный network timeout и один retry; ошибка index refresh и общий
