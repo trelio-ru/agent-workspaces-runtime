@@ -217,11 +217,45 @@ test("two open sessions survive repeated external pruning without replacing diff
   const options = { ...f, checkIntervalMs: 20, onError: error => errors.push(error) };
   const first = startLoadedCodexPluginPreservation(options);
   const second = startLoadedCodexPluginPreservation(options);
+  const rename = fs.rename;
+  const remove = fs.rm;
+  let releasePublications = () => {};
+  let publicationBarrier;
+  let publications = 0;
+  let cleanups = 0;
   try {
     await Promise.all([first.ready, second.ready]);
+    // Make both real observers reach publication before either rename runs.
+    // A restored file becoming visible does NOT mean the losing observer has
+    // finished checking the winner. Pruning again at that point can erase the
+    // only evidence that distinguishes Windows' EPERM collision from a genuine
+    // permission failure. Keep those refusals terminal: the separate deletion-
+    // during-verification regression covers a positively observed second prune.
+    fs.rename = async (source, destination) => {
+      if (destination === f.plugin) {
+        publications++;
+        if (publications === 2) releasePublications();
+        await publicationBarrier;
+      }
+      return rename(source, destination);
+    };
+    fs.rm = async (target, ...args) => {
+      const result = await remove(target, ...args);
+      if (path.dirname(target) === path.dirname(f.plugin)
+        && path.basename(target).startsWith(".3.2.3.trelio-retain-")) cleanups++;
+      return result;
+    };
     for (let i = 0; i < 3; i++) {
+      publications = 0;
+      cleanups = 0;
+      publicationBarrier = new Promise(resolve => { releasePublications = resolve; });
       await fs.rm(f.plugin, { recursive: true });
-      await waitUntil(async () => fs.readFile(path.join(f.plugin, "scripts/hook.mjs"), "utf8").then(text => text.includes("exact-old-hook"), () => false));
+      // Each finally removes only its own staging tree AFTER verification.
+      // Observe both completions, without sleeps, fake rename results or an
+      // observer restart between rounds; all filesystem/security checks run.
+      await waitUntil(() => cleanups === 2);
+      assert.equal(publications, 2);
+      assert.match(await fs.readFile(path.join(f.plugin, "scripts/hook.mjs"), "utf8"), /exact-old-hook/u);
     }
     assert.deepEqual(errors, []);
     // A present replacement is never overwritten by a background timer.
@@ -229,7 +263,10 @@ test("two open sessions survive repeated external pruning without replacing diff
     await new Promise(resolve => setTimeout(resolve, 80));
     assert.equal(await fs.readFile(path.join(f.plugin, "skills/example/SKILL.md"), "utf8"), "operator-edited bytes");
   } finally {
+    releasePublications();
     await Promise.all([first.close(), second.close()]);
+    fs.rename = rename;
+    fs.rm = remove;
     await fs.rm(f.root, { recursive: true, force: true });
   }
 });

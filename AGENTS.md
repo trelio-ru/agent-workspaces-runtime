@@ -767,6 +767,7 @@ publication tooling также остаются вне этого публичн
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
 
 - Windows retention claim: bounded pre-claim sharing retries only; private validation and operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
+- Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
 - Assistant Remote MCP reuses the SAME resolver/forms/vault/doctor/call with a managed namespace, native-selected encrypted config and one-use owner attempt fence. Presentation views never grant authority; see [contract](docs/assistant-scheduler.md#managed-remote-mcp-profile).
 - Assistant owner actions: live sealed intent and persisted decision; never text-as-approval. Signup is one attempt, never site success. See [contract](docs/assistant-scheduler.md#exact-owner-action-client).
 - Assistant pass completion: exact backend receipt + native read-back; schedule/inbox commit together, protected journal released afterwards. No replay on expiry. [Contract](docs/assistant-scheduler.md#durable-pass-completion-and-recovery).
