@@ -124,7 +124,19 @@ OAuth, pairing, hooks/trust и модель открытого чата не м�
 уже используемого кода, а не установка или публикация другой версии. Проверка
 не повторяет исходные business actions и не создаёт runtime proof.
 
-Source checkout, Claude и отдельный assistant shell не удовлетворяют точному
+Два закрытых host profile используют этот же engine: обычный plugin и
+`trelio-digital-assistant@trelio-digital-assistants`. Profile определяется только
+по exact loader-selected path внутри текущего `CODEX_HOME/plugins/cache` и
+проверяется по native manifest; модель не выбирает его. Assistant code-copy
+namespace отделён от human retention. Metadata/version/path/hash, regular-file,
+size, private-storage и concurrent-publication guards остаются теми же; новый
+credential store или способ выбрать другой установленный plugin не добавляется.
+Assistant MCP запускает lifecycle после записи initialize, а supervisor – после
+проверки exact OS registration и до первого worker; каждый закрывает только свой
+watcher при EOF/shutdown. Это сохраняет уже используемую shell, но не исправляет
+задним числом старую регистрацию, чьи files были удалены до создания snapshot.
+
+Source checkout, Claude и foreign Codex roots не удовлетворяют точному
 Codex layout и не создают retention store. Integrity/type/permission failure
 останавливает восстановление с отдельным stderr-сигналом; другая версия или
 непроверенные bytes не подставляются. После EOF MCP прекращает наблюдение и
@@ -138,6 +150,9 @@ production `runStdioHost`, удаляет старую shell внешним де
 проверяет старые skill bytes и исполняет прежний hook на том же соединении.
 Отдельно проверяются медленный snapshot вне handshake, повреждённая копия,
 не-Codex root и прекращение восстановления после закрытия транспорта.
+Та же regression запускает dedicated assistant MCP и supervisor, удаляет их
+exact старую shell внешним действием и исполняет прежний восстановленный hook;
+новая версия, human profile и trust/config остаются независимыми.
 Конкурентный directory rename на Windows может дать `EPERM` вместо `EEXIST`:
 такой результат принимается только после независимой проверки exact уже
 опубликованной копии. При отсутствующем/другом destination исходный permission

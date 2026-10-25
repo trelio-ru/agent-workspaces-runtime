@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/scripts/trelio-assistant-entry.mjs";
 import { retainLoadedCodexPluginInstallation, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const execute = promisify(execFile);
@@ -17,21 +18,91 @@ const waitUntil = async (predicate) => {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 };
-const fixture = async () => {
+const fixture = async (profile = "human") => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-plugin-preservation-"));
-  const plugin = path.join(root, "codex", "plugins", "cache", "trelio-plugins", "trelio-agent-workspaces", "3.2.3");
+  const assistant=profile==="assistant",name=assistant?"trelio-digital-assistant":"trelio-agent-workspaces";
+  const version=assistant?"0.1.3":"3.2.3",marketplace=assistant?"trelio-digital-assistants":"trelio-plugins";
+  const plugin = path.join(root, "codex", "plugins", "cache", marketplace, name, version);
   for (const directory of [".codex-plugin", "hooks", "scripts", "skills/example"]) {
     await fs.mkdir(path.join(plugin, directory), { recursive: true });
   }
-  await fs.writeFile(path.join(plugin, ".codex-plugin/plugin.json"), JSON.stringify({ name: "trelio-agent-workspaces", version: "3.2.3" }));
+  await fs.writeFile(path.join(plugin, ".codex-plugin/plugin.json"), JSON.stringify({ name, version }));
   await fs.writeFile(path.join(plugin, "hooks/hooks.json"), '{"hooks":{"PreToolUse":[]}}');
   await fs.writeFile(path.join(plugin, "skills/example/SKILL.md"), "exact old instructions\n");
   await fs.writeFile(path.join(plugin, "scripts/hook.mjs"), 'process.stdout.write("exact-old-hook");\n', { mode: 0o755 });
   return { root, plugin, retentionDirectory: path.join(root, "private", "retention"), environment: {
-    CODEX_HOME: path.join(root, "codex"), TRELIO_PLUGIN_ROOT: plugin, TRELIO_PLUGIN_VERSION: "3.2.3",
+    CODEX_HOME: path.join(root, "codex"), TRELIO_PLUGIN_ROOT: plugin, TRELIO_PLUGIN_VERSION: version,
     TRELIO_HOST_RUNTIME_VERSION: "3.18.0",
   } };
 };
+
+test("dedicated assistant MCP preserves only its exact loaded shell and stops after EOF",async()=>{
+  const f=await fixture("assistant"),input=new PassThrough(),output=new PassThrough();
+  let data="",preservation,starts=0;
+  output.on("data",chunk=>{data+=chunk;});
+  const host=runAssistantSetupMcp({input,output,environment:f.environment,createMcp:async()=>assert.fail("initialize never needs a device credential"),
+    preservePlugin:options=>{
+      starts++;assert.ok(data.includes('"id":1'),"snapshot cannot delay initialize");
+      preservation=startLoadedCodexPluginPreservation({...options,retentionDirectory:f.retentionDirectory,checkIntervalMs:20,
+        onError:error=>assert.fail(error)});
+      return preservation;
+    }});
+  try{
+    input.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
+    await waitUntil(()=>preservation!==undefined);const entry=await preservation.ready;
+    assert.equal(entry.profile,"assistant");
+    const before=await fs.readFile(path.join(f.plugin,"hooks/hooks.json"));
+    await fs.rm(path.dirname(f.plugin),{recursive:true});
+    const newer=path.join(path.dirname(f.plugin),"0.1.4");await fs.mkdir(newer,{recursive:true});
+    await fs.writeFile(path.join(newer,"sentinel"),"independent new installation");
+    await waitUntil(()=>fs.readFile(path.join(f.plugin,"scripts/hook.mjs"),"utf8").then(v=>v.includes("exact-old-hook"),()=>false));
+    assert.deepEqual(await fs.readFile(path.join(f.plugin,"hooks/hooks.json")),before);
+    assert.equal((await execute(process.execPath,[path.join(f.plugin,"scripts/hook.mjs")])).stdout,"exact-old-hook");
+    assert.equal(await fs.readFile(path.join(newer,"sentinel"),"utf8"),"independent new installation");
+    input.write('{"jsonrpc":"2.0","id":2,"method":"ping"}\n');await waitUntil(()=>data.includes('"id":2'));
+    assert.equal(starts,1);input.end();await host;
+    await fs.rm(f.plugin,{recursive:true});await new Promise(resolve=>setTimeout(resolve,80));
+    await assert.rejects(fs.stat(f.plugin),{code:"ENOENT"});
+  }finally{input.end();await host;await fs.rm(f.root,{recursive:true,force:true});}
+});
+
+test("assistant supervisor keeps the same shell for later workers independently of any MCP",async()=>{
+  const f=await fixture("assistant"),order=[],identity={origin:"https://assistant.test",assistantId:"synthetic",deviceId:"synthetic"};
+  let preservation;
+  try{
+    const result=await runAssistantBackground({environment:f.environment,
+      readHost:async()=>({identity,activation:null}),verifyRegistration:async()=>{order.push("registration");},
+      startConsoleIcon:async()=>null,
+      preservePlugin:options=>{
+        order.push("preservation");preservation=startLoadedCodexPluginPreservation({...options,retentionDirectory:f.retentionDirectory,
+          checkIntervalMs:20,onError:error=>assert.fail(error)});return preservation;
+      },
+      request:async request=>{
+        if(request.operation==="health"){
+          order.push("worker");assert.ok(await preservation.ready);
+          await fs.rm(f.plugin,{recursive:true});
+          await waitUntil(()=>fs.readFile(path.join(f.plugin,"scripts/hook.mjs"),"utf8").then(v=>v.includes("exact-old-hook"),()=>false));
+          return {};
+        }
+        assert.equal(request.operation,"background_tick");return {state:"quiescing"};
+      }});
+    assert.equal(result.state,"stopped");assert.deepEqual(order,["registration","preservation","worker"]);
+    await fs.rm(f.plugin,{recursive:true});await new Promise(resolve=>setTimeout(resolve,80));
+    await assert.rejects(fs.stat(f.plugin),{code:"ENOENT"},"stopped supervisor does not retain an eternal watcher");
+  }finally{await preservation?.close();await fs.rm(f.root,{recursive:true,force:true});}
+});
+
+test("assistant cache paths cannot adopt a human manifest or foreign CODEX_HOME",async()=>{
+  const f=await fixture("assistant");
+  try{
+    const wrong=startLoadedCodexPluginPreservation({...f,environment:{...f.environment,CODEX_HOME:path.join(f.root,"foreign")}});
+    assert.equal(await wrong.ready,null);await wrong.close();
+    await fs.writeFile(path.join(f.plugin,".codex-plugin/plugin.json"),JSON.stringify({name:"trelio-agent-workspaces",version:"0.1.3"}));
+    const errors=[],preservation=startLoadedCodexPluginPreservation({...f,onError:error=>errors.push(error)});
+    await assert.rejects(preservation.ready,/manifest/);await preservation.close();
+    await assert.rejects(fs.stat(f.retentionDirectory),{code:"ENOENT"});
+  }finally{await fs.rm(f.root,{recursive:true,force:true});}
+});
 
 // This regression uses the production MCP composition, not only the retention
 // helper. A signed-runtime refactor must not silently disconnect this lifecycle

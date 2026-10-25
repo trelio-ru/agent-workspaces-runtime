@@ -656,6 +656,10 @@ publication tooling также остаются вне этого публичн
   variables, headers и typed upgrade errors.
 - Открытый Codex MCP сохраняет точную loader-selected shell после записи initialize
   и восстанавливает только её проверенные bytes при внешней очистке cache.
+  Dedicated assistant MCP and supervisor reuse that SAME retention engine with
+  a closed assistant profile and separate code-copy namespace. Supervisor waits
+  for its snapshot after exact OS registration, before starting workers; no
+  human plugin store, version discovery, trust/config change or task replay.
   Lifecycle работает и для signed runtime: независимый runtime не делает
   hook/skill paths независимыми от plugin cache. Нужен production MCP regression
   внешнего обновления, cleanup после EOF и сохранение trust; см.

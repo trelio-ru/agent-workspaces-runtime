@@ -2985,7 +2985,24 @@ export const isStableVersionAtLeast = (rawVersion, rawMinimumVersion) => {
   return true;
 };
 
-const assertCodexPluginVersionPath = (pluginDirectory, version) => {
+// Both installed shells use ONE immutable-code retention engine. Profiles are
+// closed host constants, never tool input or discovery of another cache version.
+// Separate code-copy namespaces preserve the human store's legacy metadata and
+// keep an assistant lifecycle from restoring the human plugin (or vice versa).
+const codexRetentionProfiles = Object.freeze({
+  human: Object.freeze({ name: "trelio-agent-workspaces", marketplace: CODEX_MARKETPLACE_NAME,
+    pluginId: CODEX_PLUGIN_ID, directory: CODEX_PLUGIN_RETENTION_DIRECTORY }),
+  assistant: Object.freeze({ name: "trelio-digital-assistant", marketplace: "trelio-digital-assistants",
+    pluginId: "trelio-digital-assistant@trelio-digital-assistants",
+    directory: path.join(CONFIG_DIRECTORY, "codex-assistant-plugin-retention") }),
+});
+const codexRetentionProfile = profile => {
+  if (!Object.hasOwn(codexRetentionProfiles, profile)) throw new Error("Unknown plugin retention profile.");
+  return codexRetentionProfiles[profile];
+};
+
+const assertCodexPluginVersionPath = (pluginDirectory, version, profile = "human") => {
+  const selected = codexRetentionProfile(profile);
   const absoluteDirectory = path.resolve(pluginDirectory);
   const pluginRoot = path.dirname(absoluteDirectory);
   const marketplaceRoot = path.dirname(pluginRoot);
@@ -2997,8 +3014,8 @@ const assertCodexPluginVersionPath = (pluginDirectory, version) => {
   if (
     !parseStableVersion(version)
     || path.basename(absoluteDirectory) !== version
-    || path.basename(pluginRoot) !== "trelio-agent-workspaces"
-    || path.basename(marketplaceRoot) !== CODEX_MARKETPLACE_NAME
+    || path.basename(pluginRoot) !== selected.name
+    || path.basename(marketplaceRoot) !== selected.marketplace
   ) {
     throw new Error(
       "Codex вернул неподдерживаемый versioned path Trelio plugin.",
@@ -3011,10 +3028,10 @@ const assertCodexPluginVersionPath = (pluginDirectory, version) => {
 const inspectImmutableCodexPluginTree = async (
   pluginDirectory,
   expectedVersion,
-  { requireCodexVersionPath = true, onRootValidated } = {},
+  { requireCodexVersionPath = true, onRootValidated, profile = "human" } = {},
 ) => {
   const absoluteDirectory = requireCodexVersionPath
-    ? assertCodexPluginVersionPath(pluginDirectory, expectedVersion)
+    ? assertCodexPluginVersionPath(pluginDirectory, expectedVersion, profile)
     : path.resolve(pluginDirectory);
   const rootMetadata = await fs.lstat(absoluteDirectory);
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
@@ -3079,7 +3096,7 @@ const inspectImmutableCodexPluginTree = async (
   );
   const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
   if (
-    manifest?.name !== "trelio-agent-workspaces"
+    manifest?.name !== codexRetentionProfile(profile).name
     || manifest?.version !== expectedVersion
   ) {
     throw new Error("Retention получил несовместимый manifest Trelio plugin.");
@@ -3103,7 +3120,8 @@ const buildCodexPluginRetentionEntryId = ({
   treeSha256,
 })).digest("hex");
 
-const readRetainedCodexPluginEntries = async (retentionDirectory) => {
+const readRetainedCodexPluginEntries = async (retentionDirectory, profile = "human") => {
+  const selected = codexRetentionProfile(profile);
   await ensurePrivateDirectory(retentionDirectory);
   const directoryEntries = await fs.readdir(retentionDirectory, {
     withFileTypes: true,
@@ -3128,13 +3146,13 @@ const readRetainedCodexPluginEntries = async (retentionDirectory) => {
       "metadata.json",
     ));
     const installedPath = typeof metadata?.installedPath === "string"
-      ? assertCodexPluginVersionPath(metadata.installedPath, metadata.version)
+      ? assertCodexPluginVersionPath(metadata.installedPath, metadata.version, profile)
       : null;
 
     if (
       metadata?.schemaVersion !== 1
-      || metadata?.pluginId !== CODEX_PLUGIN_ID
-      || metadata?.marketplaceName !== CODEX_MARKETPLACE_NAME
+      || metadata?.pluginId !== selected.pluginId
+      || metadata?.marketplaceName !== selected.marketplace
       || !installedPath
       || !/^[0-9a-f]{64}$/u.test(String(metadata?.treeSha256 || ""))
       || buildCodexPluginRetentionEntryId({
@@ -3147,7 +3165,7 @@ const readRetainedCodexPluginEntries = async (retentionDirectory) => {
     }
 
     retainedEntries.push({
-      entryDirectory,
+      profile, entryDirectory,
       pluginDirectory: path.join(entryDirectory, "plugin"),
       installedPath,
       version: metadata.version,
@@ -3164,7 +3182,7 @@ const assertRetainedCodexPluginEntry = async (entry) => {
   const inspection = await inspectImmutableCodexPluginTree(
     entry.pluginDirectory,
     entry.version,
-    { requireCodexVersionPath: false },
+    { requireCodexVersionPath: false, profile: entry.profile },
   );
   if (inspection.treeSha256 !== entry.treeSha256) {
     throw new Error(
@@ -3181,6 +3199,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
     const existing = await inspectImmutableCodexPluginTree(
       entry.installedPath,
       entry.version,
+      { profile: entry.profile },
     );
     if (existing.treeSha256 !== entry.treeSha256) {
       throw new Error(
@@ -3203,7 +3222,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
     if (
       !marketplaceMetadata.isDirectory()
       || marketplaceMetadata.isSymbolicLink()
-      || path.basename(marketplaceDirectory) !== CODEX_MARKETPLACE_NAME
+      || path.basename(marketplaceDirectory) !== codexRetentionProfile(entry.profile).marketplace
     ) {
       throw new Error("Каталог Codex marketplace для retention небезопасен.");
     }
@@ -3232,7 +3251,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
     const copied = await inspectImmutableCodexPluginTree(
       temporaryPath,
       entry.version,
-      { requireCodexVersionPath: false },
+      { requireCodexVersionPath: false, profile: entry.profile },
     );
     if (copied.treeSha256 !== entry.treeSha256) {
       throw new Error(
@@ -3251,7 +3270,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
       let concurrentRootValidated = false;
       try {
         concurrent = await inspectImmutableCodexPluginTree(entry.installedPath, entry.version, {
-          onRootValidated: () => { concurrentRootValidated = true; },
+          profile: entry.profile, onRootValidated: () => { concurrentRootValidated = true; },
         });
       } catch (verificationError) {
         // A second external prune can start after a competing MCP published
@@ -3279,9 +3298,10 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
 };
 
 export const restoreRetainedCodexPluginInstallations = async ({
-  retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+  retentionDirectory, profile = "human",
 } = {}) => {
-  const entries = await readRetainedCodexPluginEntries(retentionDirectory);
+  retentionDirectory ??= codexRetentionProfile(profile).directory;
+  const entries = await readRetainedCodexPluginEntries(retentionDirectory, profile);
   for (const entry of entries) {
     await restoreOneRetainedCodexPlugin(entry);
   }
@@ -3291,17 +3311,20 @@ export const restoreRetainedCodexPluginInstallations = async ({
 export const retainLoadedCodexPluginInstallation = async ({
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = PLUGIN_VERSION,
-  retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+  retentionDirectory, profile = "human",
 } = {}) => {
+  const selected = codexRetentionProfile(profile);
+  retentionDirectory ??= selected.directory;
   const source = await inspectImmutableCodexPluginTree(
     loadedPluginDirectory,
     loadedPluginVersion,
+    { profile },
   );
   // Restore earlier exact releases only after proving that this process itself
   // was loaded from the expected Codex cache layout. The same bridge module is
   // also imported from a source checkout and by Claude, where touching Codex
   // retention would be outside the active client lifecycle.
-  await restoreRetainedCodexPluginInstallations({ retentionDirectory });
+  await restoreRetainedCodexPluginInstallations({ retentionDirectory, profile });
   const entryId = buildCodexPluginRetentionEntryId({
     installedPath: source.installedPath,
     version: source.version,
@@ -3316,7 +3339,7 @@ export const retainLoadedCodexPluginInstallation = async ({
       throw new Error("Небезопасный каталог сохранённой версии Trelio plugin.");
     }
     const [existingEntry] = (await readRetainedCodexPluginEntries(
-      retentionDirectory,
+      retentionDirectory, profile,
     )).filter((entry) => entry.entryDirectory === entryDirectory);
     if (!existingEntry) {
       throw new Error("Retention entry не соответствует своему content id.");
@@ -3350,15 +3373,15 @@ export const retainLoadedCodexPluginInstallation = async ({
     const copied = await inspectImmutableCodexPluginTree(
       path.join(temporaryDirectory, "plugin"),
       source.version,
-      { requireCodexVersionPath: false },
+      { requireCodexVersionPath: false, profile },
     );
     if (copied.treeSha256 !== source.treeSha256) {
       throw new Error("Trelio plugin изменился при создании retention-копии.");
     }
     await writePrivateJsonFile(path.join(temporaryDirectory, "metadata.json"), {
       schemaVersion: 1,
-      pluginId: CODEX_PLUGIN_ID,
-      marketplaceName: CODEX_MARKETPLACE_NAME,
+      pluginId: selected.pluginId,
+      marketplaceName: selected.marketplace,
       installedPath: source.installedPath,
       version: source.version,
       treeSha256: source.treeSha256,
@@ -3377,7 +3400,7 @@ export const retainLoadedCodexPluginInstallation = async ({
         try {
           await assertPrivatePathKind(entryDirectory, "directory");
           await assertRetainedCodexPluginEntry({
-            pluginDirectory, version: source.version, treeSha256: source.treeSha256,
+            profile, pluginDirectory, version: source.version, treeSha256: source.treeSha256,
           });
         } catch {
           throw error;
@@ -3388,7 +3411,7 @@ export const retainLoadedCodexPluginInstallation = async ({
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
   }
 
-  const entries = await readRetainedCodexPluginEntries(retentionDirectory);
+  const entries = await readRetainedCodexPluginEntries(retentionDirectory, profile);
   const retained = entries.find((entry) => entry.entryDirectory === entryDirectory);
   if (!retained) {
     throw new Error("Codex plugin retention не сохранил проверенную версию.");
@@ -3407,21 +3430,26 @@ export const retainLoadedCodexPluginInstallation = async ({
  */
 export const startLoadedCodexPluginPreservation = ({
   environment = process.env,
-  retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+  retentionDirectory,
   checkIntervalMs = 1_000,
   onError = () => process.stderr.write("Trelio: exact plugin preservation failed; automatic repair stopped.\n"),
 } = {}) => {
   const loadedPluginDirectory = environment.TRELIO_PLUGIN_ROOT;
   const loadedPluginVersion = environment.TRELIO_PLUGIN_VERSION;
-  // Exact cache layout, not inherited CODEX_* variables, establishes the
-  // client. Claude, source checkouts and dedicated assistant shells must not
-  // copy themselves into the human Codex plugin cache or touch its store.
+  // Exact cache layout establishes one of the two installed shells. Neither
+  // CLAUDE_PLUGIN_ROOT nor a similar directory name may choose a profile/store.
+  // Source checkouts and other clients remain outside this code-only lifecycle.
+  let profile;
   try {
     if (!loadedPluginDirectory) throw new Error("No loader-selected shell.");
-    assertCodexPluginVersionPath(loadedPluginDirectory, loadedPluginVersion);
     const cacheRoot = path.resolve(environment.CODEX_HOME || path.join(os.homedir(), ".codex"), "plugins", "cache");
-    const expectedRoot = path.join(cacheRoot, CODEX_MARKETPLACE_NAME, "trelio-agent-workspaces", loadedPluginVersion);
-    if (!sameLocalPath(loadedPluginDirectory, expectedRoot)) throw new Error("Not the exact Codex cache.");
+    profile = Object.keys(codexRetentionProfiles).find(key => {
+      const item = codexRetentionProfiles[key];
+      return sameLocalPath(loadedPluginDirectory, path.join(cacheRoot, item.marketplace, item.name, loadedPluginVersion));
+    });
+    if (!profile) throw new Error("Not the exact Codex cache.");
+    assertCodexPluginVersionPath(loadedPluginDirectory, loadedPluginVersion, profile);
+    retentionDirectory ??= codexRetentionProfile(profile).directory;
   } catch {
     return { ready: Promise.resolve(null), close: async () => {} };
   }
@@ -3441,7 +3469,7 @@ export const startLoadedCodexPluginPreservation = ({
     onError(error);
   };
   const ready = retainLoadedCodexPluginInstallation({
-    loadedPluginDirectory, loadedPluginVersion, retentionDirectory,
+    loadedPluginDirectory, loadedPluginVersion, retentionDirectory, profile,
   }).then((entry) => {
     if (stopped) return entry;
     const check = () => {

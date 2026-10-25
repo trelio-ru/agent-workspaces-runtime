@@ -14,6 +14,7 @@ import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEX
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
+import { startLoadedCodexPluginPreservation } from './trelio-workspace.mjs';
 
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
 const enrollment = { type: 'string', pattern: UUID };
@@ -469,7 +470,9 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
  * exchanges from this client cannot race its one-use private journal. */
 export const runAssistantSetupMcp = async ({ input = process.stdin, output = process.stdout,
   createSetup = createProductionAssistantSetup, createMcp = createForwardingAssistantMcp,
-  maintenanceRequest = requestCurrentAssistantRuntime, scheduleMaintenance = setInterval } = {}) => {
+  maintenanceRequest = requestCurrentAssistantRuntime, scheduleMaintenance = setInterval,
+  environment=process.env, preservePlugin=startLoadedCodexPluginPreservation } = {}) => {
+  let pluginPreservation=null;
   let setup, initialized = false, busy = false, maintenance = null, maintenanceController = null, catalogRevision = null, presentationProfile = 'task';
   const controller=new AbortController();
   const tick=()=>{
@@ -511,9 +514,14 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     const respond = result => reply({ jsonrpc: '2.0', id: requestId, result });
     if (message.method === 'initialize' && !initialized) {
       initialized = true;
-      return respond({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true } },
+      const response=respond({ protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true } },
         serverInfo: { name: 'trelio-assistant', version: '1.0.0' },
         instructions: 'This computer uses assistant device pairing, not human OAuth. Setup/contact alone does not authorize task work.' });
+      // SAME immutable-shell preservation as the human MCP, after writing
+      // initialize and outside the request queue. A marketplace update must not
+      // delete the exact already trusted hook/loader paths of this live client.
+      pluginPreservation=preservePlugin({environment});
+      return response;
     }
     if (message.method === 'ping') return respond({});
     if (!initialized) return reply({ jsonrpc: '2.0', id: requestId, error: { code: -32000, message: 'Initialize first' } });
@@ -615,6 +623,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     if (pending.trim()) await consume('\n');
   } finally {
     if(timer)clearInterval(timer);controller.abort();await maintenance;
+    await pluginPreservation?.close?.();
   }
 };
 
@@ -1120,12 +1129,13 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
   readHost=()=>productionContext(async(client,host)=>({identity:client.identity,activation:await host.readActivation()})),
   verifyRegistration=async()=>process.platform==='win32'?(await createProductionAssistantBackground())('status'):null,
   startConsoleIcon=async()=>(await import('./trelio-assistant-setup.mjs')).startAssistantWindowsConsoleIcon(),
-  wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure}={}) => {
+  wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure,
+  environment=process.env,preservePlugin=startLoadedCodexPluginPreservation}={}) => {
   const controller=new AbortController();
   const stop=()=>controller.abort();
   const effective=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
   process.on('SIGTERM',stop);process.on('SIGINT',stop);
-  let consoleIcon=null;
+  let consoleIcon=null,pluginPreservation=null;
   try {
     const initial=await readHost();
     if(!initial?.identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
@@ -1136,6 +1146,11 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
     // the new identity at its next logon. The SAME native status validator
     // checks the current marker/SID/action before any worker or maintenance.
     await verifyRegistration();
+    // A supervisor outlives individual MCP clients. Preserve its exact loaded
+    // shell BEFORE starting workers, using the common verifier/watch lifecycle;
+    // this never chooses another installed plugin or changes hook trust.
+    pluginPreservation=preservePlugin({environment});
+    await pluginPreservation.ready;
     // Cosmetic only, after the exact identity/OS registration checks. The
     // helper refuses shared/hidden/terminal-host windows; a failed icon never
     // changes admission, native work, its deadline or a running window's focus.
@@ -1165,6 +1180,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
     return {schemaVersion:1,state:'stopped'};
   } finally {
     try{await consoleIcon?.close?.();}catch{} // Cosmetic cleanup cannot hide a work/transport outcome.
+    await pluginPreservation?.close?.();
     process.removeListener('SIGTERM',stop);process.removeListener('SIGINT',stop);
   }
 };

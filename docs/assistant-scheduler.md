@@ -775,6 +775,18 @@ its position and cannot manufacture a successful empty page.
 
 ## Protected background host composition
 
+The dedicated MCP and background supervisor reuse the SAME immutable Codex
+plugin-preservation engine. A closed assistant profile validates the exact
+loaded cache path/native manifest and uses its own code-copy namespace; it
+cannot restore/adopt the human shell or choose a newer installed version. MCP
+snapshots after writing initialize; the supervisor verifies its exact native
+registration, then awaits its snapshot before any worker. Watchers stop at
+their original lifecycle boundary. Cache cleanup may restore only previously
+verified bytes; it never changes trust/config, device identity, a pass or an
+operation receipt. A registration already pointing to files lost before this
+snapshot still needs ordinary idle registration recovery; no missing old code
+is fabricated or copied from a different release.
+
 `createAssistantRuntimeHost` composes the real private SQLite opener, fixed device
 client, protected pass journal and existing native Codex adapter. Its database directory
 is separated by assistant/device; task working folders use a domain-separated
