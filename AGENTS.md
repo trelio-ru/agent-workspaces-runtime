@@ -520,6 +520,9 @@ publication tooling также остаются вне этого публичн
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+  Preserve validated encrypted inspection/lifecycle descriptors across the real
+  isolated stdin boundary. Keep closed local recovery codes through MCP without
+  copying raw exceptions or authorizing replay; parent validation is not delivery.
   Exact encrypted task reads reuse the SAME schema-v3/MVCC reader and hydrator,
   with native-selected ciphertext bundles only; no general payload resolver or
   human key fallback. Other encrypted adapters retain their independent gates.

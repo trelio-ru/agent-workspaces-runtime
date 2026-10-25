@@ -1774,7 +1774,14 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
 export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolveLoader=resolveHostRuntimeLoader,
   runProcess,environment=process.env,expectedOrigin='https://trelio.ru'}={}) => {
   const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
-  const input=JSON.stringify({prepared:true,scope:plan.scope,localAction:plan.localAction});
+  // The native encryption descriptors are part of the validated plan, not
+  // optional presentation metadata. Dropping them here made the isolated
+  // inspector attempt the canonical/plain snapshot route, despite the parent
+  // having admitted an encrypted inspection. Forward only these two validated
+  // fields; the child repeats their scope/origin checks before any private I/O.
+  const input=JSON.stringify({prepared:true,scope:plan.scope,localAction:plan.localAction,
+    ...(plan.encryptedInspection?{encryptedInspection:plan.encryptedInspection}:{}),
+    ...(plan.encryptedLifecycle?{encryptedLifecycle:plan.encryptedLifecycle}:{})});
   const loader=await resolveLoader({environment});
   const {runWorkspaceFinishProcess}=await import('./trelio-workspace-finish-progress.mjs');
   let result;

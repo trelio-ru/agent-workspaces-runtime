@@ -869,6 +869,47 @@ test('assistant Workspace continuation uses fixed signed child and stdin; unknow
   }}),error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
 });
 
+test('encrypted Workspace descriptors survive the actual isolated worker stdin boundary',async t=>{
+  const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {spawnSync}=await import('node:child_process');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-plan-pipe-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const moduleUrl=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+  // Real parent serialization -> real child stdin/worker parser -> strict plan
+  // validator. The child stops before any HTTP/private authority or execution;
+  // this is a pipe regression, not evidence of a provider/business E2E.
+  const code=`import {runAssistantWorkspaceWorker,validateAssistantWorkspacePlan} from ${JSON.stringify(moduleUrl)};
+    await runAssistantWorkspaceWorker({executePlan:async raw=>{
+      const plan=await validateAssistantWorkspacePlan(raw);
+      return {schemaVersion:1,operation:plan.localAction.operation,
+        stdout:JSON.stringify({descriptor:raw.encryptedInspection??raw.encryptedLifecycle,sentinel:'validated-real-child'})};
+    }});`;
+  let launches=0;
+  const runProcess=async(_executable,_args,options)=>{
+    launches++;
+    const env={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};
+    delete env.NODE_TEST_CONTEXT;
+    const child=spawnSync(process.execPath,['--input-type=module','-e',code],{
+      input:options.input,encoding:'utf8',env,timeout:10_000,maxBuffer:1024*1024});
+    assert.equal(child.status,0,child.stderr);return {stdout:child.stdout,stderr:child.stderr};
+  };
+  for(const operation of ['inspect','checkpoint']){
+    const plan=workspacePlan(),identity={workspaceId:plan.localAction.parameters.workspaceId,runId:plan.localAction.parameters.runId};
+    const descriptor={schemaVersion:1,companyId:plan.scope.companyId,companySlug:'synthetic',
+      workspaceId:identity.workspaceId,requestOrigin:'https://e2ee.trelio.ru'};
+    plan.localAction=operation==='inspect'?{schemaVersion:1,operation,parameters:{workspaceId:identity.workspaceId}}
+      :{schemaVersion:1,operation,runIdentity:identity,parameters:{type:'draft',summary:'Synthetic fixture'}};
+    plan[operation==='inspect'?'encryptedInspection':'encryptedLifecycle']=descriptor;
+    const result=await runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess});
+    assert.deepEqual(JSON.parse(result.stdout),{descriptor,sentinel:'validated-real-child'});
+    const before=launches;
+    await assert.rejects(runAssistantWorkspaceProcess({...plan,[operation==='inspect'?'encryptedInspection':'encryptedLifecycle']:
+      {...descriptor,companyId:randomUUID()}},{resolveLoader:async()=>'/verified/loader.mjs',runProcess}));
+    assert.equal(launches,before,'foreign descriptor refuses before the child');
+  }
+  assert.equal(launches,2);
+});
+
 test('only a native skill result can cross the existing visual projection boundary',async()=>{
   const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const plan=workspacePlan();

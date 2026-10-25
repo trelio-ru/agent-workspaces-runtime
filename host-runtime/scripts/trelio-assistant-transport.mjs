@@ -3021,8 +3021,25 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           }},{signal});
           return protocol.assertJsonRpcResult(response,"tools/call");
         };
-        const value=typeof withWorkspaceArguments==='function'
-          ? await withWorkspaceArguments({name,args:argumentsSnapshot,signal},send) : await send(argumentsSnapshot);
+        let value;
+        try{
+          value=typeof withWorkspaceArguments==='function'
+            ? await withWorkspaceArguments({name,args:argumentsSnapshot,signal},send) : await send(argumentsSnapshot);
+        }catch(error){
+          // The trusted local Workspace adapter also uses the shared entry's
+          // ordinary Error+code contract. It is not necessarily an instance of
+          // this module's AssistantTransportError. Preserve only its closed
+          // recovery code, never message/stack/payload or an upstream JSON-RPC
+          // error: otherwise a stale Run/lease falsely becomes a network outage
+          // and the worker cannot choose the existing exact recovery path.
+          if(!(error instanceof AssistantTransportError)
+            && /^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code??'')){
+            throw Object.assign(new AssistantTransportError(error.code),
+              error.code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid','expired','replayed'].includes(error.reason)
+                ?{reason:error.reason}:{});
+          }
+          throw error;
+        }
 
         if (!object(value) || !Array.isArray(value.content) || value.content.length > 20
           || value.content.some(item => !object(item) || item.type !== "text" || typeof item.text !== "string")

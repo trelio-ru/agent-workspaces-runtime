@@ -1005,6 +1005,29 @@ test('fresh native input shape is checked before managed preparation and never r
   assert.equal(business,3,'lost mutation result is never replayed');assert.equal(catalogs,8);
 });
 
+test('trusted local Workspace recovery errors keep their closed code across the real MCP wrapper',async()=>{
+  const origin='https://local-recovery.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'r'.repeat(43)}`,expiresAt:1});
+  let code='ASSISTANT_WORKSPACE_BINDING_CHANGED',business=0,preparations=0;
+  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,
+    withWorkspaceArguments:async()=>{preparations++;throw Object.assign(new Error('PRIVATE EXCEPTION AND PATH'),{code,reason:'expired',payload:{secret:'PRIVATE'}});},
+    httpRequest:async input=>{
+      const reply=result=>({sessionId:'local-recovery',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'get_task',description:'Synthetic native schema',inputSchema:{type:'object',properties:{},additionalProperties:false}}]});
+      business++;assert.fail('local refusal cannot send or repeat a business call');
+    }});
+  for(code of ['ASSISTANT_WORKSPACE_BINDING_CHANGED','RUN_NOT_ACTIVE','TRELIO_RUNTIME_HOOK_REQUIRED']){
+    await assert.rejects(client.callTool('get_task',{}),error=>error instanceof AssistantTransportError
+      &&error.code===code&&error.message===code&&!JSON.stringify(error).includes('PRIVATE')
+      &&(code!=='TRELIO_RUNTIME_HOOK_REQUIRED'||error.reason==='expired'));
+  }
+  code='PRIVATE_UNREVIEWED_CODE';
+  await assert.rejects(client.callTool('get_task',{}),{code:'ASSISTANT_MCP_UNAVAILABLE'});
+  assert.equal(preparations,4);assert.equal(business,0);
+});
+
 test('generic owner action fields reuse their current native operation inventory before staging',async()=>{
   const origin='https://action-shape.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'q'.repeat(43)}`,expiresAt:1});

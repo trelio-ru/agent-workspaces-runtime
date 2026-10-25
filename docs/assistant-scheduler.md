@@ -1581,6 +1581,9 @@ Only native `prepare_assistant_workspace_read` / continuation `inspect` may
 carry `encryptedInspection`: exact company/Workspace UUID, slug and selected
 data-plane origin, checked against the original protected pass. No model
 permission flag, write scope, Run/lease, human credential or key is added.
+The parent-to-isolated-worker stdin boundary retains the validated
+`encryptedInspection` / `encryptedLifecycle` descriptor unchanged; validation
+in the parent never permits silently reverting the child to a plain read.
 The SAME common inspector prepares its own managed company envelope, reads the
 native authority snapshot and downloads the pinned immutable encrypted bundle.
 Only its two exact GET/HEAD paths may use the alternate origin; managed key
@@ -1618,6 +1621,9 @@ Run UUID and fencing token; full device/task/Workspace identity is inside the
 ciphertext. Native validation uses the SAME writer/envelope/signature boundary.
 Only an exact opaque echo in the original scope is opened, process-only, before
 the SAME local command. Refusals/lost responses are not replayed.
+Closed local Workspace/Run/lease/hook failure codes survive the MCP wrapper
+even when the shared adapter throws ordinary Error+code. Raw messages, stacks,
+payloads and unrelated errors remain redacted; projection grants no retry.
 
 Encrypted `complete_assistant_pass` reads a fresh authenticated accepted snapshot
 through the SAME inspector/cache and full/delta chain validator. Its own computed
