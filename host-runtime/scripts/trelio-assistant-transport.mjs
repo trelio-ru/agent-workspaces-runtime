@@ -398,13 +398,20 @@ const loadAssistantDeviceCredential = async ({ origin, assistantId, deviceId, st
  * This grants no mutation/owner authority and consumes no business proof.
  */
 export const readAssistantCompanyContentMode=async({identity,host,client,signal})=>{
+  // The authenticated device client deliberately exposes only routing IDs;
+  // the protected host journal additionally carries its storage schema. They
+  // describe the SAME identity, but serializing the two raw DTOs always differs
+  // in production. Compare against the exact versioned journal shape instead.
+  // This does not adopt another identity or relax the independent live pass,
+  // company inventory and final pre-send checks below.
+  const expectedIdentity={schemaVersion:1,origin:identity.origin,assistantId:identity.assistantId,deviceId:identity.deviceId};
   const pass=validateAssistantActivePass(await host.readActivePass(),identity);
   const intake=pass.kind==='source_intake',locator=intake
     ?{companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}
     :{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
   const assertCurrent=async()=>{
     signal?.throwIfAborted();
-    if(JSON.stringify(await host.readIdentity())!==JSON.stringify(identity)
+    if(JSON.stringify(await host.readIdentity())!==JSON.stringify(expectedIdentity)
       || JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))
       fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
     const live=intake?await client.readSourceIntake(locator,signal):await client.readTaskPass(locator,signal);

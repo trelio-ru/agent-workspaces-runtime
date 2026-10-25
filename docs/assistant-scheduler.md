@@ -1788,6 +1788,15 @@ checkpoint; human default paths and the shared integrity/cache guards are unchan
 
 ## Private owner dialogue
 
+The fresh company-content preflight compares the authenticated device client's
+routing identity with the SAME versioned host-journal identity. The journal's
+`schemaVersion:1` is storage metadata absent from `deviceClient.identity`; the
+comparison must construct the exact journal shape, never compare the two raw
+DTO serializations. Current origin/assistant/device, original pass, lease and
+company inventory are still rechecked before staging or sending content. Tests
+compose the real device client identity with the production encrypted comment
+protector, plus taskless and late-identity/pass refusal paths.
+
 The dedicated live catalog may expose `ask_assistant_owner` and
 `get_assistant_owner_question`. The common proxy forwards their current backend
 schemas with the same observed task pass/proof, without a human OAuth alias,

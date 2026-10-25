@@ -548,6 +548,9 @@ publication tooling также остаются вне этого публичн
 
 - Typed custom fields use native type/revision discovery and the SAME value protector; no model type hint or structural prose over HTTP.
 - Owner dialogue keeps only structural question IDs in SQLite/stdin; live pass reads supply answers, never action approval. See [contract](docs/assistant-scheduler.md#private-owner-dialogue).
+  Content preflight compares the real three-field device-client identity with
+  the exact versioned host journal; test their production composition, not two
+  identical fixture DTOs. Storage schema metadata grants no extra authority.
   Managed encrypted content/whole skill argv reuse the SAME protector/payload collision/hydrator;
   Comments reuse SAME human mention canonicalizer and signed native member/group selection.
   reject model markers before signing. Native exact target/proof/ACL/CAS and

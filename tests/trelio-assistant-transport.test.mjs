@@ -215,7 +215,13 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         {code:'ASSISTANT_ENCRYPTED_CONTENT_INVALID'});
     }
     assert.equal(preparations,readsBefore,'content-dependent choice refinements run before encryption/private I/O');
-    const comment=await withAssistantManagedContentArguments({...input,name:'create_comment',args:{clientRequestId:randomUUID(),
+    // Exercise the actual production composition, not just the crypto helper:
+    // deviceClient.identity has no storage schemaVersion, host.readIdentity does.
+    const {withProductionAssistantManagedContent}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    host.configurationDirectory=root;
+    const deviceIdentity=createAssistantDeviceClient({...identity,store,http:async()=>assert.fail('fixture native methods are selected below')}).identity;
+    assert.equal(Object.hasOwn(deviceIdentity,'schemaVersion'),false);
+    const comment=await withProductionAssistantManagedContent({name:'create_comment',args:{clientRequestId:randomUUID(),
       expectedTaskUpdatedAt:new Date().toISOString(),bodyText:'RICH_BODY_CANARY @fixture_owner'}},async wire=>{
       assert.equal(Object.hasOwn(wire,'bodyText'),false,'normalization cannot leave plaintext source aliases in final wire');
       assert.ok(wire.bodyJson.$trelioE2ee);
@@ -225,7 +231,7 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         companyId,target:{kind:'task',pass:{companyId,taskId:pass.taskId,passId:pass.passId}},nativeTool:'create_comment',arguments:business,
         commentMentions:encryptedContent.commentMentions},encryptedContent.signature),true);
       return {content:[],structuredContent:{recorded:true}};
-    });
+    },{context:action=>action({...client,identity:deviceIdentity},host,store)});
     assert.equal(comment.structuredContent.recorded,true);
     const richPayload=[...staged.values()].find(payload=>payload.entityId!==[...staged.keys()][0]);
     const richOpened=await decryptCompanyPayload({encryptedPayload:richPayload,scopePrivateKey:keyPair.privateKey,scopePrivateJwk:scopePrivateEncryptionJwk});
@@ -431,7 +437,6 @@ test('managed key readiness opens a real recipient envelope and verifies the com
     const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
     const privateSkillPreparation={parameters:{...privateArgs.parameters,encryptionFingerprint:registered.fingerprint},privateRuntime:true,recipe:command};
     let privateCalls=0;
-    const {withProductionAssistantManagedContent}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
     let inspections=0;host.configurationDirectory=root;
     const protectedPrivate=await withProductionAssistantManagedContent({name:'continue_assistant_workspace_action',args:privateArgs},async wire=>{
       privateCalls++;assert.doesNotMatch(JSON.stringify(wire),/PRIVATE_RECIPE_ARGV_CANARY/);
@@ -1553,11 +1558,50 @@ test('content mode never falls back to plain on missing inventory, transition, s
   assert.equal(sent,0,'no failed or late authority check exposes prose to send');
 });
 
+test('content mode composes the real device client identity with the versioned host journal and retains late fences',async()=>{
+  const {readAssistantCompanyContentMode}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const stored={schemaVersion:1,origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
+  const store=memoryStore(),credential=`tda_${'i'.repeat(43)}`,companyId=randomUUID();
+  await store.put({origin:stored.origin,kind:'device',id:stored.assistantId},{assistantId:stored.assistantId,deviceId:stored.deviceId,credential,expiresAt:1});
+  const pass={schemaVersion:1,assistantId:stored.assistantId,deviceId:stored.deviceId,companyId,taskId:randomUUID(),
+    passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:2};
+  let current=stored,active=pass,mode='plain',state='leased',afterInventory=()=>{},reads=0,inventories=0;
+  const host={readIdentity:async()=>current,readActivePass:async()=>active};
+  const client=createAssistantDeviceClient({...stored,store,http:async(operation,input,token)=>{
+    assert.equal(token,credential);
+    if(operation==='companies'){
+      inventories++;afterInventory();
+      return {assistantUserId:stored.assistantId,bindingId:stored.deviceId,
+        companies:[{id:companyId,memberId:randomUUID(),slug:'synthetic',encryptionState:mode}]};
+    }
+    assert.equal(operation,'passRead');reads++;
+    assert.deepEqual(input,{companyId,taskId:pass.taskId,passId:pass.passId});
+    return {...pass,state,leaseRevision:1,leaseExpiresAt:new Date(Date.now()+600000).toISOString(),
+      execution:{modelId:'gpt-6.1-sol',effortLevel:'xhigh',revision:1}};
+  }});
+  assert.deepEqual(Object.keys(client.identity),['origin','assistantId','deviceId']);
+  for(mode of ['plain','encrypted',null])
+    assert.equal((await readAssistantCompanyContentMode({identity:client.identity,host,client})).encryptionState,mode??'plain');
+  assert.equal(reads,6);assert.equal(inventories,3,'each real inventory is bracketed by independent native pass reads');
+  for(const change of [{origin:'https://foreign.test'},{assistantId:randomUUID()},{deviceId:randomUUID()},{schemaVersion:2}]){
+    current={...stored,...change};
+    await assert.rejects(readAssistantCompanyContentMode({identity:client.identity,host,client}),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  }
+  current=stored;mode='encrypted';
+  afterInventory=()=>{current={...stored,deviceId:randomUUID()};};
+  await assert.rejects(readAssistantCompanyContentMode({identity:client.identity,host,client}),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  current=stored;afterInventory=()=>{active={...pass,bindingRevision:3};};
+  await assert.rejects(readAssistantCompanyContentMode({identity:client.identity,host,client}),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  active=pass;afterInventory=()=>{state='closed';};
+  await assert.rejects(readAssistantCompanyContentMode({identity:client.identity,host,client}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+});
+
 test('the SAME content mode preflight uses an intake lease without inventing a task pass',async()=>{
   const {readAssistantCompanyContentMode}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const identity={schemaVersion:1,origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,
     companyId:randomUUID(),sourceId:randomUUID(),sourceRevision:3,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
+  const deviceIdentity=createAssistantDeviceClient({...identity,store:memoryStore(),http:async()=>assert.fail('taskless native methods are selected below')}).identity;
   const host={readIdentity:async()=>identity,readActivePass:async()=>pass};
   let reads=0,closed=false;
   const client={readTaskPass:async()=>assert.fail('taskless intake never borrows a task'),
@@ -1566,10 +1610,10 @@ test('the SAME content mode preflight uses an intake lease without inventing a t
       return {state:closed?'closed':'leased',threadId:pass.threadId,eventId:pass.eventId,sourceRevision:pass.sourceRevision,
         leaseExpiresAt:new Date(Date.now()+600000).toISOString()};
     },companies:async()=>[{companyId:pass.companyId,encryptionState:'encrypted'}]};
-  assert.equal((await readAssistantCompanyContentMode({identity,host,client})).encryptionState,'encrypted');
+  assert.equal((await readAssistantCompanyContentMode({identity:deviceIdentity,host,client})).encryptionState,'encrypted');
   assert.equal(reads,2);
   client.companies=async()=>{closed=true;return [{companyId:pass.companyId,encryptionState:'plain'}];};
-  await assert.rejects(readAssistantCompanyContentMode({identity,host,client}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  await assert.rejects(readAssistantCompanyContentMode({identity:deviceIdentity,host,client}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
   assert.equal(reads,4,'a late source stop cannot release prose through a cached plain mode');
 });
 
