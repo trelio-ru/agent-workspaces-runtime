@@ -128,3 +128,14 @@ test("explicit recovery survives a revoked grant without silently replacing it",
   await applyHarnessAdapter(ctx, { connection: { listTools: async () => { throw Object.assign(new Error("revoked"), { code: "REMOTE_MCP_AUTH_REJECTED" }); } } });
   assert.ok(ctx.tools.get("trelio_connect"));
 });
+
+
+test("native text compatibility preserves the shared complete skill-response budget", () => {
+  const source = { content: [{ type: "text", text: "summary" }],
+    structuredContent: { instructionsMarkdown: "private-overflow-marker" + "x".repeat(41000) } };
+  const projected = projectHarnessMcpResult(source, "get_agent_skill");
+  assert.equal(projected.isError, true);
+  assert.ok(JSON.stringify(projected).includes("AGENT_SKILL_RESPONSE_TOO_LARGE"));
+  assert.ok(!JSON.stringify(projected).includes("private-overflow-marker"));
+  assert.ok(source.structuredContent.instructionsMarkdown.includes("private-overflow-marker"));
+});

@@ -3915,7 +3915,7 @@ const LOCAL_TOOLS = [
   {
     name: TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME,
     title: "Проверить установку или подготовить настройку папки Trelio",
-    description: "Read-only: компоненты и folderOnboarding.folderPath, план live reads/refresh. Все клиенты: folder_onboarding – CAS-план AGENTS.md; Cursor/Antigravity без foreign Hooks. Windows: worker/HTTPS. Не применяет, не устанавливает, не авторизует.",
+    description: "Read-only: компоненты, folderOnboarding.folderPath, live read/refresh. folder_onboarding – CAS-план AGENTS.md; native клиенты без foreign Hooks. Windows: worker/HTTPS. Не применяет, не устанавливает, не авторизует.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

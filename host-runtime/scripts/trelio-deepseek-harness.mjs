@@ -82,17 +82,17 @@ export const harnessToolName = (server, method) => {
  * App grants. PTC receives the same public envelope. Rich binary blocks stay
  * outside model text; original files use Trelio's existing local-file route.
  */
-export const projectHarnessMcpResult = result => {
+export const projectHarnessMcpResult = (result, nativeTool) => {
   if (!record(result) || !Array.isArray(result.content)) {
     throw fail("TRELIO_HARNESS_RESULT_INVALID", "Trelio вернул несовместимый MCP-ответ.");
   }
-  const projected = deliverLocalMcpResult(result, true);
+  const projected = deliverLocalMcpResult(result, true, nativeTool);
   return {
     content: projected.content.map(block => block.type === "text" ? { type: "text", text: block.text }
       : block.type === "resource_link" ? { type: "text", text: `Resource: ${block.name} (${block.uri})` }
         : { type: "text", text: `[MCP ${block.type} is unavailable in this adapter; use original local-file delivery]` }),
     ...(projected.structuredContent === undefined ? {} : { structuredContent: projected.structuredContent }),
-    ...(result.isError === true ? { isError: true } : {}),
+    ...(projected.isError === true ? { isError: true } : {}),
   };
 };
 
@@ -304,7 +304,7 @@ export const applyHarnessAdapter = async (ctx, {
         }
         const result = await withPrivateProcessSession(() => call(input, execution.signal), execution.signal);
         if (server === "trelio") continuations.remember(execution.agent, tool.name, raw, result);
-        const value = projectHarnessMcpResult(result);
+        const value = projectHarnessMcpResult(result, server === "trelio" ? tool.name : input.parameters?.nativeTool);
         if (value.isError) throw fail("TRELIO_MCP_ERROR", value.content.map(block => block.text).join("\n"));
         return value;
       } catch (error) { throw nativeError(error); }
