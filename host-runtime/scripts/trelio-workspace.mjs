@@ -13395,11 +13395,15 @@ export const withEncryptedAcceptedWorkspaceFiles = async (input, consume) => {
   }
 };
 
-/** Stream the immutable blob, not checkout bytes affected by .gitattributes. */
-export const readAcceptedWorkspaceBlob = async ({ workspaceDirectory, workspaceHead, filePath, signal }, consume) => {
+/** Stream the immutable blob, not checkout bytes affected by .gitattributes.
+ * Only its opaque object id enters Git argv; decrypted filenames stay inside
+ * this process, including original-file delivery from an encrypted snapshot.
+ */
+export const readAcceptedWorkspaceBlob = async ({ workspaceDirectory, blobId, signal }, consume) => {
+  if (!GIT_OBJECT_PATTERN.test(String(blobId))) throw new Error("WORKSPACE_FILE_INVALID_LOCATOR");
   const resolvedGit = await requireGitRuntime();
   const child = spawn(resolvedGit.gitPath, ["-c", `core.hooksPath=${GIT_DISABLED_HOOKS_PATH}`,
-    "-c", "init.templateDir=", "-c", "core.longpaths=true", "show", `${workspaceHead}:${filePath}`], {
+    "-c", "init.templateDir=", "-c", "core.longpaths=true", "cat-file", "blob", blobId], {
     cwd: workspaceDirectory, stdio: ["ignore", "pipe", "pipe"], signal,
     env: { ...process.env, GIT_CONFIG_GLOBAL: GIT_DISABLED_GLOBAL_CONFIG_PATH,
       GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" },
@@ -13444,7 +13448,7 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
           contentType: file.contentType, text: "", chunks: [],
           searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } };
         if (file.contentType.startsWith("text/plain")) {
-          await readAcceptedWorkspaceBlob({ ...requestInput, workspaceDirectory, filePath: file.path }, async stream => {
+          await readAcceptedWorkspaceBlob({ ...requestInput, workspaceDirectory, blobId: file.id }, async stream => {
             try {
               for await (const chunk of chunkWorkspaceText(stream.iterator({ destroyOnReturn: false }))) document.chunks.push(chunk);
               document.searchCoverage = { status: "complete", indexedBytes: file.sizeBytes, totalBytes: file.sizeBytes };

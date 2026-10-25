@@ -85,8 +85,10 @@ test("unified search reads cutover bundles without browser projections and keeps
     assert.equal(result.guidance.status, "searched");
     assert.equal(result.guidance.items[0].read.arguments.skillId, skill.id);
     assert.ok(result.results.length > 0);
-    await withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory }) => {
-      const bytes = await readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, filePath: "large.md" }, async stream => {
+    await assert.rejects(readAcceptedWorkspaceBlob({ workspaceDirectory: repository, blobId: "HEAD:large.md" },
+      () => assert.fail("A decrypted filename must never be accepted as the Git selector")), /WORKSPACE_FILE_INVALID_LOCATOR/u);
+    await withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory, files }) => {
+      const bytes = await readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, blobId: files.find(file => file.path === "large.md").id }, async stream => {
         const parts = []; for await (const part of stream) parts.push(part); return Buffer.concat(parts);
       });
       assert.equal(createHash("sha256").update(bytes).digest("hex"), createHash("sha256").update(text).digest("hex"));
@@ -98,9 +100,9 @@ test("unified search reads cutover bundles without browser projections and keeps
     mode = "ready";
     await assert.rejects(withEncryptedAcceptedWorkspaceFiles(input, () => { throw new Error("consumer-cancelled"); }), /consumer-cancelled/u);
     assert.deepEqual(await readdir(staging), before);
-    await assert.rejects(withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory }) => {
+    await assert.rejects(withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory, files }) => {
       const controller = new AbortController();
-      return readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, filePath: "large.md", signal: controller.signal }, async stream => {
+      return readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, blobId: files.find(file => file.path === "large.md").id, signal: controller.signal }, async stream => {
         for await (const _chunk of stream) { controller.abort(); controller.signal.throwIfAborted(); }
       });
     }), { name: "AbortError" });

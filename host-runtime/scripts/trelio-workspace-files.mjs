@@ -250,7 +250,7 @@ export const downloadAcceptedWorkspaceFile = async (origin, rawLocator, { signal
           if (!file) fail("WORKSPACE_FILE_NOT_FOUND");
           if (file.sizeBytes > LOCAL_ATTACHMENT_MAX_BYTES) fail("WORKSPACE_FILE_TOO_LARGE");
           contentType = file.contentType;
-          bytes = await readAcceptedWorkspaceBlob({ ...input, workspaceDirectory }, stream => readBoundedBytes({ body: stream }, LOCAL_ATTACHMENT_MAX_BYTES, signal));
+          bytes = await readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, blobId: file.id }, stream => readBoundedBytes({ body: stream }, LOCAL_ATTACHMENT_MAX_BYTES, signal));
           if (bytes.length !== file.sizeBytes) fail("WORKSPACE_FILE_SIZE_MISMATCH");
         });
       }
