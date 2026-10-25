@@ -468,6 +468,9 @@ publication tooling также остаются вне этого публичн
   pure module. Проверяй native/local parity, большие файлы, границы UTF-8/слов,
   crypto binding и очистку staging по [контракту](docs/agent-workspace-runtime.md).
   Chunk/batch bounds не являются лимитом полного индексируемого текста.
+  Отсутствующая обязательная browser projection допускает только проверенный
+  encrypted accepted bundle с ephemeral private Git по тому же контракту;
+  unknown/ACL/crypto/stale ошибки не разрешают fallback или пропуск Workspace.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
   opt-in startup trace пишет только закрытые этапы и process clocks в stderr,

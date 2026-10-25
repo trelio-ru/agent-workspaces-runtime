@@ -13340,17 +13340,128 @@ const materializeWorkspaceInspection = async ({
 };
 
 /**
- * Open one accepted encrypted Workspace only long enough to build the local
- * search generation.  The returned text stays in process memory; the private
- * temporary Git tree and decrypted bundle are removed before this function
- * resolves.  Persistent mirror generations are encrypted separately by the
- * caller, while unchanged heads can reuse their previous encrypted records.
+ * Company cutover creates a complete encrypted Git snapshot, but cannot sign a
+ * browser file projection on behalf of a device. Read that existing snapshot
+ * through the same authenticated bundle engine as accepted inspection. This is
+ * read-only: no Run, projection upload or repair mutation is created. Unlike an
+ * inspection, its private plaintext tree is removed before returning anything.
  */
+export const withEncryptedAcceptedWorkspaceFiles = async (input, consume) => {
+  const { validateWorkspaceFileLocator } = await import("./trelio-workspace-files.mjs");
+  validateWorkspaceFileLocator({ ...input, filePath: "WORKSPACE_CONTEXT.md" });
+  const stagingRoot = path.join(resolveCompanyContextMirrorDirectory(), "search-staging");
+  await ensurePrivateDirectory(stagingRoot);
+  const directory = await fs.mkdtemp(path.join(stagingRoot, "accepted-"));
+  const bundlePath = path.join(directory, "accepted.bundle");
+  const workspaceDirectory = path.join(directory, "workspace");
+  try {
+    await ensurePrivateDirectory(directory);
+    input.signal?.throwIfAborted();
+    await requestAndDecryptCompanyWorkspaceBundle({
+      origin: input.origin, token: input.token, companyEncryption: input.companyEncryption,
+      expectedWorkspaceId: input.workspaceId, expectedWorkspaceHead: input.workspaceHead,
+      pathname: `/api/agent-workspaces/workspaces/${input.workspaceId}/encrypted-bundle?${new URLSearchParams({ head: input.workspaceHead })}`,
+      destination: bundlePath, signal: input.signal,
+      inspectResponse: response => {
+        if (response.headers.get("x-trelio-accepted-head") !== input.workspaceHead) {
+          const error = new Error("WORKSPACE_OUTDATED"); error.code = "WORKSPACE_OUTDATED"; throw error;
+        }
+      },
+    });
+    input.signal?.throwIfAborted();
+    await materializeBundle({ bundlePath, directory: workspaceDirectory, head: input.workspaceHead, branch: "trelio-search" });
+    await assertMaterializedWorkspaceFileTypes(workspaceDirectory);
+    const tree = await runGit(["ls-tree", "-r", "-l", "-z", input.workspaceHead], { cwd: workspaceDirectory });
+    const files = tree.stdout.split("\0").filter(Boolean).map(entry => {
+      const match = /^(100644|100755) blob ([0-9a-f]{40,64})\s+(\d+)\t([\s\S]+)$/u.exec(entry);
+      if (!match || !Number.isSafeInteger(Number(match[3]))) throw new Error("WORKSPACE_FILE_MANIFEST_INVALID");
+      const filePath = match[4];
+      validateWorkspaceFileLocator({ ...input, filePath });
+      return serializeEncryptedWorkspaceBrowserFile({ fileId: match[2], filePath, sizeBytes: Number(match[3]) });
+    }).filter(file => isHumanFacingEncryptedWorkspacePath(file.path));
+    // Cutover snapshots inline external objects before encryption. Refuse an
+    // older pointer-bearing snapshot rather than indexing the pointer itself
+    // or returning its bytes as the user's original file.
+    for (const file of files) {
+      if (file.sizeBytes <= 2048 && parseWorkspaceObjectPointer(await fs.readFile(path.join(workspaceDirectory, file.path)))) {
+        throw new Error("WORKSPACE_FILE_EXTERNAL_OBJECT_UNAVAILABLE");
+      }
+    }
+    return await consume({ workspaceDirectory, files });
+  } finally {
+    // Private staging is never a reusable plaintext mirror. In particular a
+    // failed decrypt, cancelled consumer or invalid Git tree cannot leave it.
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+};
+
+/** Stream the immutable blob, not checkout bytes affected by .gitattributes. */
+export const readAcceptedWorkspaceBlob = async ({ workspaceDirectory, workspaceHead, filePath, signal }, consume) => {
+  const resolvedGit = await requireGitRuntime();
+  const child = spawn(resolvedGit.gitPath, ["-c", `core.hooksPath=${GIT_DISABLED_HOOKS_PATH}`,
+    "-c", "init.templateDir=", "-c", "core.longpaths=true", "show", `${workspaceHead}:${filePath}`], {
+    cwd: workspaceDirectory, stdio: ["ignore", "pipe", "pipe"], signal,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: GIT_DISABLED_GLOBAL_CONFIG_PATH,
+      GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" },
+  });
+  const completion = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", code => code === 0 ? resolve() : reject(new Error("WORKSPACE_FILE_GIT_READ_FAILED")));
+  });
+  const closed = new Promise(resolve => child.once("close", resolve));
+  completion.catch(() => undefined);
+  child.stderr.resume();
+  try {
+    const result = await consume(child.stdout);
+    await completion;
+    signal?.throwIfAborted();
+    return result;
+  } finally {
+    child.kill();
+    await closed;
+  }
+};
+
+/** Index the complete accepted head; only verified projection absence uses Git. */
 export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks } =
     await import("./trelio-workspace-files.mjs");
   const requestInput = { ...input, workspaceHead: input.acceptedHead };
-  const files = await readEncryptedWorkspaceFileManifest(requestInput);
+  let files;
+  try { files = await readEncryptedWorkspaceFileManifest(requestInput); }
+  catch (error) {
+    // Do not turn ACL, transport, crypto, stale-head or malformed manifests
+    // into an alternate read. Only a proven missing derived projection has a
+    // complete canonical encrypted snapshot that can replace it.
+    if (error?.code !== "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" || error.encryptedBundleReadable !== true) throw error;
+    const { chunkWorkspaceText } = await import("./trelio-workspace-text-chunks.mjs");
+    return withEncryptedAcceptedWorkspaceFiles(requestInput, async ({ workspaceDirectory, files }) => {
+      const documents = [];
+      for (const file of files) {
+        input.signal?.throwIfAborted();
+        const document = { kind: "workspace_file", workspaceId: input.workspaceId, workspaceHead: input.acceptedHead,
+          path: file.path, name: file.path.split("/").at(-1), sizeBytes: file.sizeBytes,
+          contentType: file.contentType, text: "", chunks: [],
+          searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } };
+        if (file.contentType.startsWith("text/plain")) {
+          await readAcceptedWorkspaceBlob({ ...requestInput, workspaceDirectory, filePath: file.path }, async stream => {
+            try {
+              for await (const chunk of chunkWorkspaceText(stream.iterator({ destroyOnReturn: false }))) document.chunks.push(chunk);
+              document.searchCoverage = { status: "complete", indexedBytes: file.sizeBytes, totalBytes: file.sizeBytes };
+            } catch (error) {
+              if (error?.code !== "ERR_ENCODING_INVALID_ENCODED_DATA" && error?.message !== "WORKSPACE_TEXT_INVALID") throw error;
+              document.chunks = [];
+              // Complete the verified Git read even for binary mislabeled as
+              // text; a failed stream must not become a successful empty hit.
+              for await (const _chunk of stream) { /* drain */ }
+            }
+          });
+        }
+        documents.push(document);
+      }
+      return documents;
+    });
+  }
   const documents = files.filter((file) => isHumanFacingEncryptedWorkspacePath(file.path))
     .sort((left, right) => left.sizeBytes - right.sizeBytes || (left.path < right.path ? -1 : 1))
     .map((file) => ({ kind: "workspace_file", workspaceId: input.workspaceId, workspaceHead: input.acceptedHead,

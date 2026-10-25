@@ -1949,9 +1949,26 @@ owner-private staging, plaintext на диск не записывается. П
 AAD binding, размера и digest staging удаляется, включая ошибку/отмену. Полное
 поколение содержит `searchCoverage` каждого файла и chunks; бинарные/NUL/невалидные
 UTF-8 файлы имеют `unsupported` и остаются доступны по имени без binary download.
-Термины в разных частях дают один file hit; искусственные границы слова исключены. Отсутствующая
-browser projection блокирует поиск до обновления runtime; прежний encrypted
-bundle не используется ни при какой категории ошибки.
+Термины в разных частях дают один file hit; искусственные границы слова исключены.
+Если свежий ACL-filtered overview явно сообщает `browserProjectionRequired=true`,
+подтверждает exact accepted head, но не содержит проекции, search и выдача одного
+оригинала читают canonical encrypted bundle через общий accepted-inspection
+движок. Это покрывает полный снимок после включения шифрования: backend не может
+подписать browser projection от имени устройства. Неизвестное/отсутствующее поле,
+ошибка ACL, transport, crypto, manifest либо stale head не разрешают этот маршрут.
+`browserProjectionRequired=false` сохраняет прежнее initial-empty поведение.
+
+Bundle проходит прежние scope/AAD/digest/head проверки. Только для этого пути
+расшифрованный bundle и Git tree временно материализуются в owner-private
+`search-staging` текущего human/managed namespace и обязательно удаляются до
+возврата, включая ошибку и отмену. Нового persistent plaintext cache нет.
+Проверяются regular-file types и допустимые пути; snapshot с неразрешёнными
+external-object pointers отклоняется. Текст читается потоково из immutable Git
+blobs, поэтому `.gitattributes`/CRLF checkout не меняет результат; прежние chunk,
+UTF-8/NUL и download bounds сохраняются. Workspace не пропускается и не выдаётся
+за пустой; готовая generation публикуется только после полной проверки файлов.
+Нет Run, upload проекции или mutation восстановления. Современная browser
+projection остаётся основным путём с отдельной загрузкой выбранного ciphertext.
 
 Первичная синхронизация сохраняет каждый успешно проверенный текстовый файл
 в отдельном зашифрованном scratchpad `search-files-v1` внутри schema-root mirror.

@@ -1,15 +1,116 @@
 import assert from "node:assert/strict";
 import { createHash, webcrypto } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator } from "../host-runtime/scripts/trelio-workspace-files.mjs";
 import { matchWorkspaceTextChunks } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
-import { createEncryptedSearchFileCache } from "../host-runtime/scripts/trelio-local-context.mjs";
-import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { createEncryptedSearchFileCache, handleNativeLocalContextRead } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory, resolveCompanyContextMirrorDirectory,
+  runGit, withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob } from "../host-runtime/scripts/trelio-workspace.mjs";
+
+test("unified search reads cutover bundles without browser projections and keeps assigned guidance", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-cutover-search-"));
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const companyId = "22222222-2222-4222-8222-222222222222";
+  const scopeId = "33333333-3333-4333-8333-333333333333";
+  const deviceId = "44444444-4444-4444-8444-444444444444";
+  const repository = path.join(root, "repository");
+  await mkdir(repository);
+  for (const args of [["init", "--initial-branch=main"], ["config", "user.name", "Fixture"], ["config", "user.email", "fixture@example.invalid"]]) {
+    await runGit(args, { cwd: repository });
+  }
+  const text = "начало " + "x ".repeat(9 * 1024 * 1024) + " договор согласован";
+  await writeFile(path.join(repository, "large.md"), text);
+  await writeFile(path.join(repository, "original.jpg"), Buffer.from([255, 216, 0, 1, 255, 217]));
+  await writeFile(path.join(repository, "invalid.md"), Buffer.from([255, 0]));
+  // Checkout conversion must not alter the exact Git bytes used for search
+  // or original delivery (notably in native Windows CI).
+  await writeFile(path.join(repository, ".gitattributes"), "*.md text eol=crlf\n");
+  await writeFile(path.join(repository, "AGENTS.md"), "protected control text");
+  await runGit(["add", "--all"], { cwd: repository });
+  await runGit(["commit", "-m", "Synthetic cutover"], { cwd: repository });
+  const head = (await runGit(["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
+  await runGit(["bundle", "create", path.join(root, "workspace.bundle"), "main"], { cwd: repository });
+  const scope = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const device = await createAgentEncryptionDevice();
+  const publicJwk = await webcrypto.subtle.exportKey("jwk", scope.publicKey);
+  const companyEncryption = { runtime: { company: { id: companyId, slug: "synthetic" }, scope: { id: scopeId, epoch: 1 } },
+    scopePrivateEncryptionKey: { privateKey: scope.privateKey, privateJwk: await webcrypto.subtle.exportKey("jwk", scope.privateKey) } };
+  const encryptedPath = path.join(root, "bundle.trelioe1");
+  await encryptFileToCompanyContainer({ sourcePath: path.join(root, "workspace.bundle"), destinationPath: encryptedPath,
+    scopePublicEncryptionJwk: publicJwk, aad: { companyId, scopeId, scopeEpoch: 1, entityType: "agent_workspace_revision", entityId: workspaceId, entityRevision: 1 },
+    originalName: "workspace.bundle", mimeType: "application/vnd.git.bundle", writerDeviceId: deviceId, signingPrivateKey: device.privateKeys.signingPrivateKey });
+  const ciphertext = await readFile(encryptedPath);
+  const requests = [];
+  let mode = "ready";
+  const server = createServer((request, response) => {
+    requests.push(request.url);
+    response.setHeader("content-type", "application/json");
+    if (request.url === `/api/agent-workspaces/workspaces/${workspaceId}`) {
+      response.end(JSON.stringify({ company: { id: companyId }, workspace: { acceptedHead: head }, encryption: { browserProjectionRequired: true } }));
+    } else if (request.url === `/api/agent-workspaces/workspaces/${workspaceId}/encrypted-bundle?head=${head}`) {
+      if (mode === "denied") { response.statusCode = 403; response.end(JSON.stringify({ code: "ACCESS_DENIED" })); return; }
+      response.setHeader("x-trelio-e2ee", "v1");
+      response.setHeader("x-trelio-workspace-id", workspaceId);
+      response.setHeader("x-trelio-accepted-head", mode === "stale" ? "b".repeat(40) : head);
+      response.setHeader("x-trelio-scope-id", scopeId);
+      response.setHeader("x-trelio-scope-epoch", "1");
+      response.setHeader("x-trelio-ciphertext-sha256", createHash("sha256").update(ciphertext).digest("hex"));
+      response.end(mode === "corrupt" ? Buffer.alloc(ciphertext.length) : ciphertext);
+    } else { response.statusCode = 404; response.end(); }
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const input = { origin: `http://127.0.0.1:${server.address().port}`, token: "synthetic-token", companyEncryption, workspaceId, workspaceHead: head, acceptedHead: head };
+  const staging = path.join(resolveCompanyContextMirrorDirectory(), "search-staging");
+  await mkdir(staging, { recursive: true, mode: 0o700 });
+  const before = await readdir(staging);
+  try {
+    const documents = await readEncryptedWorkspaceSearchDocuments(input);
+    const large = documents.find(file => file.path === "large.md");
+    assert.equal(large.searchCoverage.indexedBytes, Buffer.byteLength(text));
+    assert.match(matchWorkspaceTextChunks(large.path, large.chunks, "начало договор").previewText, /договор/u);
+    assert.equal(documents.some(file => file.path === "AGENTS.md"), false);
+    assert.equal(documents.find(file => file.path === "invalid.md").searchCoverage.status, "unsupported");
+    const skill = { id: "synthetic-integration", catalogSlug: "synthetic-integration", title: "Календарь", description: "Согласование отпуска", searchTerms: ["отпуск"], version: "1.0.0", sources: ["project"] };
+    const result = handleNativeLocalContextRead({ company: { id: companyId, slug: "synthetic", name: "Synthetic" },
+      projects: [{ id: scopeId, slug: "project", name: "Project" }], tasks: [], contextDocuments: [],
+      agentSkills: { company: [], projects: [{ projectId: scopeId, skills: [skill] }] },
+      workspaces: [{ id: workspaceId, acceptedHead: head, documents }] }, "search", {
+      companySlugs: ["synthetic"], projectSlug: "project", intent: "согласование отпуска", queries: ["договор"],
+    });
+    assert.equal(result.guidance.status, "searched");
+    assert.equal(result.guidance.items[0].read.arguments.skillId, skill.id);
+    assert.ok(result.results.length > 0);
+    await withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory }) => {
+      const bytes = await readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, filePath: "large.md" }, async stream => {
+        const parts = []; for await (const part of stream) parts.push(part); return Buffer.concat(parts);
+      });
+      assert.equal(createHash("sha256").update(bytes).digest("hex"), createHash("sha256").update(text).digest("hex"));
+    });
+    for (mode of ["denied", "stale", "corrupt"]) {
+      await assert.rejects(readEncryptedWorkspaceSearchDocuments(input), error => mode === "corrupt" || error.code === (mode === "stale" ? "WORKSPACE_OUTDATED" : "ACCESS_DENIED"));
+      assert.deepEqual(await readdir(staging), before);
+    }
+    mode = "ready";
+    await assert.rejects(withEncryptedAcceptedWorkspaceFiles(input, () => { throw new Error("consumer-cancelled"); }), /consumer-cancelled/u);
+    assert.deepEqual(await readdir(staging), before);
+    await assert.rejects(withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory }) => {
+      const controller = new AbortController();
+      return readAcceptedWorkspaceBlob({ ...input, workspaceDirectory, filePath: "large.md", signal: controller.signal }, async stream => {
+        for await (const _chunk of stream) { controller.abort(); controller.signal.throwIfAborted(); }
+      });
+    }), { name: "AbortError" });
+    assert.deepEqual(await readdir(staging), before, "An aborted Git reader must close before private staging cleanup");
+    assert.ok(requests.every(url => !url.includes("large.md") && !url.includes("query") && !url.includes("/bundle?")));
+  } finally {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("encrypted discovery reads names and bounded text; delivery decrypts only the selected original", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trelio-file-delivery-test-"));
@@ -167,7 +268,6 @@ test("encrypted discovery treats only a server-confirmed initial revision as an 
       readEncryptedWorkspaceFileManifest(input),
       { code: "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" },
     );
-
     // An older or malformed server response must not be mistaken for the
     // explicitly authenticated initial-empty state.
     browserProjectionRequired = undefined;
@@ -175,6 +275,8 @@ test("encrypted discovery treats only a server-confirmed initial revision as an 
       readEncryptedWorkspaceFileManifest(input),
       { code: "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" },
     );
+    await assert.rejects(readEncryptedWorkspaceSearchDocuments({ ...input, acceptedHead: head }),
+      { code: "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" });
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));

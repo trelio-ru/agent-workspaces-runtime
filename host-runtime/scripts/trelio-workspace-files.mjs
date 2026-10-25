@@ -9,6 +9,7 @@ import {
   readJsonResponse, currentWorkspaceExecutionProfile, resolveCompanyContextMirrorDirectory,
   resolveBridgeDataPlaneRouting, hydrateAgentCompanyEncryptedJson,
   ensurePrivateDirectory, hardenWindowsPrivatePath, resolveWorkspaceBridgeConfigDirectory,
+  withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob,
 } from "./trelio-workspace.mjs";
 import { decryptFileFromCompanyContainer, decryptFileFromCompanyContainerBytes } from "./trelio-company-encryption.mjs";
 import { materializeLocalAttachment, LOCAL_ATTACHMENT_MAX_BYTES } from "./trelio-local-attachments.mjs";
@@ -90,7 +91,14 @@ export const readEncryptedWorkspaceFileManifest = async (input) => {
     // false value: missing or true must remain fail-closed so a protocol drift
     // cannot silently hide accepted Workspace content from local search.
     if (overview?.encryption?.browserProjectionRequired === false) return [];
-    fail("WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE");
+    const error = new Error("WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE");
+    error.code = "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE";
+    // Only an authenticated, explicit requirement permits the caller to read
+    // the accepted encrypted bundle instead. A missing/unknown server field
+    // remains a protocol failure, never evidence of an empty Workspace.
+    error.encryptedBundleReadable = overview?.encryption?.browserProjectionRequired === true
+      && overview?.workspace?.acceptedHead === input.workspaceHead;
+    throw error;
   }
   if (projection.workspaceHead !== input.workspaceHead) fail("WORKSPACE_OUTDATED");
   if (!UUID.test(String(projection.id)) || !UUID.test(String(projection.manifestFileId))) fail("WORKSPACE_FILE_MANIFEST_INVALID");
@@ -226,11 +234,26 @@ export const downloadAcceptedWorkspaceFile = async (origin, rawLocator, { signal
   let contentType;
   try {
     if (companyEncryption) {
-      const files = await readEncryptedWorkspaceFileManifest(input);
-      const file = files.find((candidate) => candidate.path === locator.filePath);
-      if (!file) fail("WORKSPACE_FILE_NOT_FOUND");
-      contentType = file.contentType;
-      bytes = await readEncryptedWorkspaceSelectedFile(input, file);
+      try {
+        const files = await readEncryptedWorkspaceFileManifest(input);
+        const file = files.find((candidate) => candidate.path === locator.filePath);
+        if (!file) fail("WORKSPACE_FILE_NOT_FOUND");
+        contentType = file.contentType;
+        bytes = await readEncryptedWorkspaceSelectedFile(input, file);
+      } catch (error) {
+        if (error?.code !== "WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE" || error.encryptedBundleReadable !== true) throw error;
+        // A search hit from a cutover bundle must remain downloadable. Repeat
+        // the same fresh ACL/head/crypto checks; never use mirror plaintext or
+        // send a decrypted path to the server. Delivery still has its own cap.
+        await withEncryptedAcceptedWorkspaceFiles(input, async ({ workspaceDirectory, files }) => {
+          const file = files.find(candidate => candidate.path === locator.filePath);
+          if (!file) fail("WORKSPACE_FILE_NOT_FOUND");
+          if (file.sizeBytes > LOCAL_ATTACHMENT_MAX_BYTES) fail("WORKSPACE_FILE_TOO_LARGE");
+          contentType = file.contentType;
+          bytes = await readAcceptedWorkspaceBlob({ ...input, workspaceDirectory }, stream => readBoundedBytes({ body: stream }, LOCAL_ATTACHMENT_MAX_BYTES, signal));
+          if (bytes.length !== file.sizeBytes) fail("WORKSPACE_FILE_SIZE_MISMATCH");
+        });
+      }
     } else {
       const query = new URLSearchParams({ path: locator.filePath, head: locator.workspaceHead, download: "1" });
       const response = await request(requestOrigin, token,
