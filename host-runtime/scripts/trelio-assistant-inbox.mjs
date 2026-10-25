@@ -80,7 +80,7 @@ const DELIVERY_FAILURE_CODES=new Set(['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT
   'ASSISTANT_CODEX_DELIVERY_UNCERTAIN','ASSISTANT_CODEX_INVALID_EXECUTION','ASSISTANT_CODEX_INVALID_INPUT',
   'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_UNAVAILABLE',
   'ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE','ASSISTANT_ACCESS_DENIED',
-  'ASSISTANT_TASK_ACCESS_DENIED','ASSISTANT_COMPANY_ACCESS_DENIED','ASSISTANT_HOST_REBIND_REQUIRED',
+  'ASSISTANT_TASK_ACCESS_DENIED','ASSISTANT_COMPANY_ACCESS_DENIED','ASSISTANT_HOST_REBIND_REQUIRED','ASSISTANT_HOOK_REVIEW_REQUIRED',
   'ASSISTANT_MODEL_SELECTION_REQUIRED','ASSISTANT_MODEL_POLICY_BLOCKED','ASSISTANT_SCOPE_REQUIRED',
   'ASSISTANT_PASS_REVIEW_REQUIRED','ASSISTANT_PASS_REQUIRED','TRELIO_RUNTIME_HOOK_REQUIRED',
   'ASSISTANT_TRANSPORT_UNAVAILABLE','ASSISTANT_TRANSPORT_INVALID_RESPONSE','ASSISTANT_COORDINATOR_AUTHORITY_REQUIRED',
@@ -126,7 +126,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -192,7 +192,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if(versions[0]?.version===14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
+      fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
         source_key TEXT PRIMARY KEY, scope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active'
@@ -344,8 +346,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // has its own monotonic start fence in the SAME delivery journal.
       db.exec('ALTER TABLE assistant_inbox_deliveries ADD COLUMN pass_continuation_json TEXT');
     }
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=13');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (13)');
+    // Keep the entire original v13 JSON byte-for-byte. New definition-scoped
+    // budgets append to this SAME SQLite journal, not a replacement delivery,
+    // history truncation or reset. Indexed latest/count reads remain bounded
+    // even for a long-running human goal with many legitimate continuations.
+    db.exec(`CREATE TABLE IF NOT EXISTS assistant_pass_continuations(
+      delivery_id TEXT NOT NULL REFERENCES assistant_inbox_deliveries(delivery_id),
+      ordinal INTEGER NOT NULL CHECK(ordinal>=1), prerequisite_key TEXT NOT NULL,
+      intent_json TEXT NOT NULL, PRIMARY KEY(delivery_id,ordinal));
+      CREATE INDEX IF NOT EXISTS assistant_continuation_budget ON assistant_pass_continuations(delivery_id,prerequisite_key);`);
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=14');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (14)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -1168,39 +1179,55 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         clientRequestId:uuid(intent.clientRequestId)});
     },
     readPassContinuation(id) {
-      const raw=delivery(uuid(id)).pass_continuation_json;if(!raw)return null;
+      const row=delivery(uuid(id));
+      const latest=get('SELECT intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
+      if(latest)return Object.freeze(continuationIntent(JSON.parse(latest.intent_json)));
+      const raw=row.pass_continuation_json;if(!raw)return null;
       const history=JSON.parse(raw);
       if(!Array.isArray(history)||!history.length||history.length>20)inputError();
       return Object.freeze(continuationIntent(history.at(-1)));
     },
-    /** Only structural history is appended. An owner decision permits a NEW
+    /** Only structural history is appended. A native continuation permits a NEW
      * marker, never resetting the original native-start or replaying a turn.
      * The coordinator supplies positive terminal read-back before this call. */
-    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId}) {
+    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null}) {
+      if(prerequisiteKey!==null&&(typeof prerequisiteKey!=='string'||!/^[0-9a-f]{64}$/u.test(prerequisiteKey)))inputError();
       return transaction(()=>{
         const row=delivery(uuid(id));
         if(row.kind!=='task'||!row.native_started||!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_STALE_DELIVERY');
         const history=row.pass_continuation_json?JSON.parse(row.pass_continuation_json):[];
         if(!Array.isArray(history)||history.length>20)inputError();history.forEach(continuationIntent);
-        const last=history.at(-1);
+        const latest=get('SELECT ordinal,intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
+        const last=latest?continuationIntent(JSON.parse(latest.intent_json)):history.at(-1);
         if(last&&last.terminalTurnId===terminalTurnId){
           if(last.passId!==passId||last.expectedLeaseRevision!==expectedLeaseRevision||last.terminalMarkerId!==terminalMarkerId)fail('ASSISTANT_INBOX_CONFLICT');
           return Object.freeze(continuationIntent(last));
         }
-        if(last&&!last.started||history.length>=20)fail('ASSISTANT_INBOX_CONFLICT');
+        // Twenty remains the unchanged retry bound for one actual trusted hook
+        // definition. Returning to an earlier definition does not reset its
+        // count. Legacy callers keep their original bound and cannot bypass a
+        // newer journal. A ready inventory is never permission to replay the
+        // original turn, release a pass, process an event or clear health.
+        if(last&&!last.started||prerequisiteKey===null&&(latest||history.length>=20)
+          ||prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
+          fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
         const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
-          resumeAttempted:false,resumed:false,started:false});history.push(intent);
-        run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);
+          resumeAttempted:false,resumed:false,started:false});
+        if(prerequisiteKey!==null){
+          const ordinal=integer((latest?.ordinal??0)+1,1,2_147_483_647);
+          run('INSERT INTO assistant_pass_continuations(delivery_id,ordinal,prerequisite_key,intent_json) VALUES(?,?,?,?)',id,ordinal,prerequisiteKey,JSON.stringify(intent));
+        }else{history.push(intent);run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);}
         return Object.freeze(intent);
       });
     },
     updatePassContinuation(id,clientRequestId,change) {
       object(change,['reviewId','resumeAttempted','resumed','started']);
       return transaction(()=>{
-        const row=delivery(uuid(id)),history=JSON.parse(row.pass_continuation_json??'null');
-        if(!Array.isArray(history)||!history.length||history.length>20)inputError();history.forEach(continuationIntent);
-        const last=history.at(-1);
+        const row=delivery(uuid(id)),latest=get('SELECT ordinal,intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
+        const history=JSON.parse(row.pass_continuation_json??'[]');
+        if(!Array.isArray(history)||!latest&&!history.length||history.length>20)inputError();history.forEach(continuationIntent);
+        const last=latest?continuationIntent(JSON.parse(latest.intent_json)):history.at(-1);
         if(row.kind!=='task'||!row.native_started||!['started','uncertain'].includes(row.state)
           ||last.clientRequestId!==uuid(clientRequestId))fail('ASSISTANT_INBOX_STALE_DELIVERY');
         const next=continuationIntent({...last,...change});
@@ -1215,8 +1242,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           assertExternalDeliverySnapshot(row);
           run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?",time()+LEASE_MS,id);
         }
-        history[history.length-1]=next;
-        run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);
+        if(latest)run('UPDATE assistant_pass_continuations SET intent_json=? WHERE delivery_id=? AND ordinal=?',JSON.stringify(next),id,latest.ordinal);
+        else{history[history.length-1]=next;run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);}
         return Object.freeze(next);
       });
     },

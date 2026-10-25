@@ -129,7 +129,7 @@ test('forward SQLite migration preserves v1 cursors and task state', t => {
   inbox = createAssistantInbox({ database: db });
   assert.equal(inbox.status(source).cursorRevision, 1);
   assert.equal(inbox.taskState(source, taskId).state, 'paused');
-  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 13);
+  assert.equal(db.prepare('SELECT version FROM assistant_inbox_meta').get().version, 14);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('assistant_owner_intakes','assistant_source_intake_events')").get().count, 2);
   assert.ok(db.prepare('PRAGMA table_info(assistant_owner_intakes)').all().some(row => row.name === 'kind'));
 });

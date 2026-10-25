@@ -589,7 +589,7 @@ publication tooling также остаются вне этого публичн
   Independent task creation uses the SAME proxy/native creator with a sealed
   owner decision and project ACL; no inherited pass/chat/route or sender proof.
 
-- Terminal continuation: SAME pass/ledger, automatic new marker/monotonic start; original history and sensitive approvals intact; unknown never replay. See scheduler contract.
+- Terminal continuation: SAME pass/ledger, native trusted-hook preflight, indexed schema14 history;20 attempts per actual hook/signed-worker fingerprint, no old-history reset. Automatic new marker/monotonic start; sensitive approvals intact, unknown never replay. See scheduler contract.
 - Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
 - Assistant maintenance: fixed signed worker, no replay/health shortcut; terminal retained-pass updates require the SAME coordinator lease/native evidence. MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
 - Native account preflight diagnoses login only from explicit missing auth, not

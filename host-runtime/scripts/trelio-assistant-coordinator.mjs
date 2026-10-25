@@ -892,11 +892,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const execution=await recheck(),live=await client.readTaskPass({companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId},signal);
     if(live.state==='closed'||live.deliveryId!==saved.deliveryId||live.threadId!==saved.threadId||live.bindingId!==saved.bindingId
       ||live.bindingRevision!==saved.bindingRevision||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+    // Do not consume another continuation intent/lease while the actual native
+    // client has no usable hooks. Production reads its current task folder;
+    // this is a budget/preflight witness only, not backend or observed proof.
+    const prerequisites=typeof native.readPrerequisites==='function'
+      ?await native.readPrerequisites(await workspaceForTask({origin:job.scope.origin,assistantId:identity.assistantId,
+        companyId:job.scope.companyId,taskId:job.taskId}),{signal}):null;
+    if(typeof native.readPrerequisites==='function'&&(!prerequisites||typeof prerequisites.fingerprint!=='string'
+      ||!/^[0-9a-f]{64}$/u.test(prerequisites.fingerprint)))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
+    lease();await recheck();
     let intent=inbox.readPassContinuation(job.deliveryId);
     // A positively completed continuation without business material may inspect
     // the task again under a NEW bounded marker, never replay the old turn.
     if(!intent||intent.started)intent=inbox.preparePassContinuation(job.deliveryId,{passId:saved.passId,
-      expectedLeaseRevision:live.leaseRevision,terminalTurnId:result.turnId,terminalMarkerId});
+      expectedLeaseRevision:live.leaseRevision,terminalTurnId:result.turnId,terminalMarkerId,
+      ...(prerequisites?{prerequisiteKey:prerequisites.fingerprint}:{})});
     if(intent.passId!==saved.passId||intent.terminalTurnId!==result.turnId)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const request={companyId:saved.companyId,taskId:saved.taskId,passId:saved.passId,expectedLeaseRevision:intent.expectedLeaseRevision,
       clientRequestId:intent.clientRequestId,terminalTurnId:intent.terminalTurnId};

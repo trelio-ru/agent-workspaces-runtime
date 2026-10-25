@@ -50,7 +50,25 @@ start flag committed before spawn. No transcript, prompt, reply or claimed
 business result is journaled. Before launch the host repeats positive terminal
 read-back, protected identity/pass, fresh ACL/model/lease and full negative new
 marker coverage. Unknown/running/failed/ambiguous history and unknown new starts
-never authorize replay. History is bounded to20 retained intents.
+never authorize replay. Schema14 preserves the whole legacy JSON unchanged and
+appends new structural intents to an indexed table in the SAME SQLite journal.
+Latest-intent and per-prerequisite count reads are bounded, without deleting
+old starts or adding another pass/chat. Twenty remains the attempt limit for
+one actual prerequisite fingerprint: the native trusted hook definition hashes
+and the exact immutable signed worker version selected by the existing loader.
+Switching back to a spent fingerprint does not reset its count. A newly repaired
+definition/runtime may therefore continue the retained pass automatically; a
+new model-supplied epoch, history reset or cap increase is not accepted.
+
+Before creating/renewing a terminal-continuation intent the production host reads
+native `hooks/list` for the exact task folder. It requires the three enabled,
+trusted dedicated-plugin hooks, no inventory errors/warnings and valid native
+definition hashes. Each real task/intake execution checks again before its
+irreversible start bit. Missing/untrusted hooks report the existing closed
+hook-review incident without launching another model turn; tool-free READY
+provision is not this check. Inventory/fingerprint never replaces actual hook
+dispatch, live native pass/ACL/lease or observed one-use proof. No config/trust
+mutation, automatic Codex restart or human-plugin fallback is performed.
 
 A retained v1 pending technical owner question is migrated through the same ledger,
 keeping its UUID/history and closing only its answer surface. An explicit refusal

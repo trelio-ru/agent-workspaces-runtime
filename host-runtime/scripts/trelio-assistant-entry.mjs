@@ -938,6 +938,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
         onAuthenticationConfirmed:()=>reportAuthentication('ready',options.signal)});}
       catch(error){
         if(error?.code==='ASSISTANT_CODEX_AUTH_REQUIRED')await reportAuthentication('codex_auth_required',options.signal);
+        if(error?.code==='ASSISTANT_HOOK_REVIEW_REQUIRED')await reportAuthentication('hook_review_required',options.signal);
         throw error;
       }
     }]))};
@@ -990,7 +991,9 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,acknowledgeSource,
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
         report:(row,observation,signal)=>invoke(live=>live.reportSourceHealth({companyId:row.companyId,sourceId:row.id,...observation},signal))},
-      native:{...observedNative,ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
+      native:{...observedNative,
+        readPrerequisites:dependencies.readHookReadiness??nativeRuntime.readAssistantCodexHookReadiness,
+        ready:async(_identity,signal)=>assistantCoordinatorReadiness(await readStatus(signal),stableIdentity)},
       workspaceForIntake:async scope=>{
         if(!scope||Object.keys(scope).sort().join(',')!=='companyId,sourceId'
           ||![scope.companyId,scope.sourceId].every(value=>new RegExp(UUID,'u').test(value??'')))fail('ASSISTANT_HOST_STATE_INVALID');

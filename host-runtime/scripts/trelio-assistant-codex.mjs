@@ -1,5 +1,6 @@
 /** Native Codex adapter: exact IDs, stdio-only prompts, no transcript cache. */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
@@ -150,10 +151,10 @@ const readNative = async (threadId, project, options = {}) => {
         const value = await project(thread, request);
         if (!done) finish(null, value);
       })().catch(error => {
-        // Only our own structural account check can establish missing login.
+        // Only our own structural account/hook checks establish these closed prerequisites.
         // RPC errors, provider prose and unavailable history remain unknown;
         // none may become a request to sign in or expose native diagnostics.
-        finish(error instanceof AssistantCodexError && error.code === 'ASSISTANT_CODEX_AUTH_REQUIRED'
+        finish(error instanceof AssistantCodexError && ['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_HOOK_REVIEW_REQUIRED'].includes(error.code)
           ? error.code : 'ASSISTANT_CODEX_READ_UNAVAILABLE');
       });
     } catch { abort(); }
@@ -161,6 +162,39 @@ const readNative = async (threadId, project, options = {}) => {
 };
 
 export const readAssistantCodexMetadata = (threadId, options) => readNative(id(threadId), thread => ({ threadId: thread.id, cwd: thread.cwd }), options);
+
+/** Native inventory is a precondition, never hook execution/proof authority.
+ * In particular an installed MCP/skill is not evidence that Codex loaded its
+ * hooks. Read the actual task folder's effective native definitions without
+ * changing enabled/trust state or returning commands, paths or trust hashes.
+ * The digest partitions a bounded recovery budget after a real definition
+ * change; native pass/lease, marker and observed proof still authorize work. */
+export const readAssistantCodexHookReadiness = (cwd, options = {}) => {
+  if(typeof cwd!=='string'||!path.isAbsolute(cwd))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  // The stable verified loader supplies this exact immutable worker version,
+  // not a model argument or a caller-selected retry generation. A runtime fix
+  // can legitimately repair a prerequisite without changing stable hook bytes.
+  const runtimeVersion=(options.environment??process.env).TRELIO_HOST_RUNTIME_VERSION??null;
+  if(runtimeVersion!==null&&(typeof runtimeVersion!=='string'||!/^\d+\.\d+\.\d+$/u.test(runtimeVersion)))fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+  return readNative(null,async(_thread,request)=>{
+    const result=await request('hooks/list',{cwds:[cwd]});
+    if(!Array.isArray(result?.data)||result.data.length!==1)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+    const row=result.data[0];
+    if(!Array.isArray(row?.hooks)||row.hooks.length>1024||!Array.isArray(row.errors)||row.errors.length
+      ||!Array.isArray(row.warnings)||row.warnings.length)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+    const hooks=row.hooks.filter(h=>h?.pluginId==='trelio-digital-assistant@trelio-digital-assistants');
+    const events=['preToolUse','sessionEnd','sessionStart'];
+    if(hooks.length!==3||hooks.some(h=>h.source!=='plugin'||h.enabled!==true||h.trustStatus!=='trusted'
+      // Codex hashes are opaque versioned strings, not necessarily hex SHA256
+      // (the real Windows 0.164 client returns143 characters). Bound/hash the
+      // native value without inventing a digest grammar or exposing it.
+      ||h.handlerType!=='command'||typeof h.currentHash!=='string'||!h.currentHash.length
+      ||h.currentHash.length>1024||h.currentHash.includes('\0'))
+      ||hooks.map(h=>h.eventName).sort().join(',')!==events.join(','))fail('ASSISTANT_HOOK_REVIEW_REQUIRED');
+    return Object.freeze({fingerprint:createHash('sha256').update(JSON.stringify({runtimeVersion,hooks:hooks
+      .map(h=>[h.eventName,h.currentHash]).sort((a,b)=>a[0].localeCompare(b[0]))})).digest('hex')});
+  },options);
+};
 
 /** Account-visible native capabilities are authoritative for availability.
  * Read account state and model/list under the original RPC deadline.
@@ -328,6 +362,10 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
   const passTimeoutMs = options.passTimeoutMs ?? 15*60_000;
   if (!Number.isSafeInteger(passTimeoutMs) || passTimeoutMs < 100 || passTimeoutMs > 30*60_000) fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (await (options.readExecutionAvailability ?? readAssistantCodexExecutionAvailability)(execution, options) !== true) fail('ASSISTANT_CODEX_MODEL_UNAVAILABLE');
+  // READY provision is deliberately tool-free and cannot earn business
+  // readiness. Every real task/intake turn checks hooks BEFORE its irreversible
+  // start bit, even if an earlier continuation inventory was already ready.
+  if(options.readinessProbe!==true)await (options.readHookReadiness??readAssistantCodexHookReadiness)(cwd,options);
   const { executable, env, spawnProcess } = await context(options);
   // Resolve executable/vendor metadata BEFORE the final recovery freshness
   // boundary too. No asynchronous resolver may run after its exact pass/model

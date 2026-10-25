@@ -1684,6 +1684,65 @@ for(const nativeState of ['uncertain','running','failed'])test(`terminal review 
   assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);await f.coordinator.close();
 });
 
+for(const lostResume of [false,true])test(`fixed native hooks recover all twenty retained legacy starts without reset (lost resume=${lostResume})`,async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-hook-budget-')),file=path.join(directory,'inbox.sqlite');
+  let database=new DatabaseSync(file),coordinator;const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
+  const ordinaryRun=f.options.native.run,ordinaryOutcome=f.options.client.readBusinessOutcome;
+  let trusted=false,confirmed=false,reviews=0,resumes=0,newRuns=0,lose=lostResume,reviewId,reviewState='approved';
+  f.options.native.readPrerequisites=async()=>{
+    if(!trusted)throw Object.assign(new Error('closed hook failure'),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
+    return {fingerprint:'a'.repeat(64)};
+  };
+  f.options.client.readBusinessOutcome=async input=>{
+    if(!confirmed)throw Object.assign(new Error('no business outcome'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    return ordinaryOutcome(input);
+  };
+  f.options.native.readDelivery=async(_thread,marker,options)=>f.deliveries.get(marker)
+    ??{state:'uncertain',...(options?.requireAbsentMarker?{markerEvidence:'absent'}:{})};
+  f.options.native.run=async(input,options)=>{
+    if(options.continuationReview){newRuns++;assert.equal(input.deliveryId,reviewId);await options.beforeInvocation();confirmed=true;}
+    const result=await ordinaryRun(input,options);result.turnId=result.receipt.split(':')[2];return result;
+  };
+  f.options.passHost.continuePass=async(input,expected)=>{
+    assert.deepEqual(expected,f.activePass());const pass=f.passes.get(expected.deliveryId);
+    if(input.continuation==='review'){reviews++;reviewId??=randomUUID();}
+    if(input.continuation==='resume'){
+      resumes++;assert.equal(pass.leaseRevision,input.expectedLeaseRevision);reviewState='resumed';
+      Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,leaseExpiresAt:new Date(Date.now()+3600000).toISOString()});
+      if(lose){lose=false;throw Object.assign(new Error('lost exact response'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
+    }
+    return {schemaVersion:2,state:reviewState,reviewId,invocationId:reviewId,terminalTurnId:input.terminalTurnId,
+      expectedLeaseRevision:input.expectedLeaseRevision,questionPath:null,
+      resumed:reviewState==='resumed'?{leaseRevision:input.expectedLeaseRevision+1,leaseExpiresAt:pass.leaseExpiresAt}:null,pass:{...pass}};
+  };
+  const reopen=async()=>{await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});};
+  try{
+    f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
+    await coordinator.pollOnce();await coordinator.workOnce();await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    const pass=f.activePass(),nativePass=[...f.passes.values()][0],history=[];let marker=pass.deliveryId;
+    for(let i=0;i<20;i++){
+      const intent={passId:pass.passId,expectedLeaseRevision:i,clientRequestId:randomUUID(),terminalTurnId:randomUUID(),
+        terminalMarkerId:marker,reviewId:randomUUID(),resumeAttempted:true,resumed:true,started:true};history.push(intent);marker=intent.reviewId;
+    }
+    const legacy=JSON.stringify(history),terminalTurnId=randomUUID();
+    f.deliveries.set(marker,{state:'completed',turnId:terminalTurnId,receipt:`codex:${pass.threadId}:${terminalTurnId}`});
+    database.prepare('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?').run(legacy,pass.deliveryId);
+    database.exec('DROP TABLE assistant_pass_continuations; UPDATE assistant_inbox_meta SET version=13');
+    f.advance(21*60000);Object.assign(nativePass,{state:'review_required',leaseRevision:21});await reopen();
+    await assert.rejects(coordinator.workOnce(),/HOOK_REVIEW_REQUIRED/);
+    assert.equal(reviews,0);assert.equal(resumes,0);assert.equal(newRuns,0);
+    assert.equal(database.prepare('SELECT count(*) n FROM assistant_pass_continuations').get().n,0);
+    trusted=true;
+    if(lostResume){await assert.rejects(coordinator.workOnce(),/TRANSPORT_UNAVAILABLE/);await reopen();}
+    await coordinator.workOnce();assert.equal(newRuns,1);assert.equal(reviews,1);assert.equal(resumes,1);assert.equal(f.activePass(),null);
+    const row=database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(pass.deliveryId);
+    assert.equal(row.pass_continuation_json,legacy);assert.equal(row.native_started,1);assert.equal(row.state,'complete');
+    assert.equal(database.prepare('SELECT count(*) n FROM assistant_pass_continuations').get().n,1);
+    assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,1);
+    await reopen();await coordinator.workOnce();assert.equal(newRuns,1,'no new marker or replay after committed completion');
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 for(const state of ['completed','running','uncertain','failed','missing_turn','read_error'])test(`signed update retained-pass boundary: ${state}`,async t=>{
   const f=fixture(t);let updates=0;
   const ordinaryRun=f.options.native.run;

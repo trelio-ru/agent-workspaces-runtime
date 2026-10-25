@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const modelArgs = ['--model',execution.modelId,'--config','model_reasoning_effort="high"'];
@@ -52,7 +52,7 @@ test('native discussion prompt uses only task/comment locators and never a mater
   assert.equal(assistantWorkStateContext({...taskContext,sourceReferences:[source]}).sourceReferences.length,1);
   assert.throws(()=>assistantWorkStateContext({...context,sourceReferences:[source]}),/INVALID_INPUT/);
   const result=await runAssistantCodexPass({threadId,deliveryId,cwd,taskContext:context,execution},{
-    readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+    readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
     readMetadata:async()=>({threadId,cwd}),startInvocation:()=>{starts++;},
     readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
     spawnProcess:(_executable,args)=>{
@@ -84,6 +84,35 @@ const nativeRpc = handler => (_executable, args, options) => {
   });
   return child;
 };
+
+test('actual native hook inventory gates trusted definitions, never installation or another plugin',async()=>{
+  const cwd=process.cwd();let reads=0;
+  const hooks=['sessionStart','preToolUse','sessionEnd'].map((eventName,i)=>({eventName,handlerType:'command',
+    source:'plugin',pluginId:'trelio-digital-assistant@trelio-digital-assistants',enabled:true,
+    currentHash:`native-v2:${String(i+1).repeat(64)}:${'a'.repeat(69)}`,trustStatus:'trusted',command:'PRIVATE command',sourcePath:'PRIVATE path'}));
+  const read=rows=>readAssistantCodexHookReadiness(cwd,{executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+    assert.equal(request.method,'hooks/list');assert.deepEqual(request.params,{cwds:[cwd]});reads++;
+    return {result:{data:[{hooks:rows,errors:[],warnings:[]}]}};
+  })});
+  const first=await read(hooks),reordered=await read([...hooks].reverse());
+  assert.deepEqual(first,reordered);assert.match(first.fingerprint,/^[0-9a-f]{64}$/u);assert.doesNotMatch(JSON.stringify(first),/PRIVATE/);
+  assert.notDeepEqual(await read(hooks.map((h,i)=>i? h:{...h,currentHash:'f'.repeat(64)})),first);
+  for(const rows of [[],hooks.slice(1),[...hooks,hooks[0]],hooks.map(h=>({...h,trustStatus:'untrusted'})),
+    hooks.map(h=>({...h,enabled:false})),hooks.map(h=>({...h,pluginId:'human@other'})),
+    hooks.map(h=>({...h,currentHash:null}))])await assert.rejects(read(rows),/HOOK_REVIEW_REQUIRED/);
+  assert.equal(reads,10);
+});
+
+test('untrusted hooks stop a real task before renewal/start/spawn without fabricating completion',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID();let hooks=0;
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{
+    readMetadata:async()=>({threadId,cwd:process.cwd()}),readDelivery:async()=>({state:'uncertain'}),
+    readExecutionAvailability:async()=>true,readHookReadiness:async()=>{hooks++;throw Object.assign(new Error('closed'),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});},
+    executable:process.execPath,environment:{},beforeInvocation:()=>assert.fail('untrusted hook renewed native lease'),
+    startInvocation:()=>assert.fail('untrusted hook changed start bit'),spawnProcess:()=>assert.fail('untrusted hook launched model'),
+  }),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
+  assert.equal(hooks,1);
+});
 
 test('company execution is an immutable closed pair; missing/argv-like choices never reach native I/O', async()=>{
   const original={...execution};
@@ -181,7 +210,7 @@ test('an unavailable native model never crosses the durable invocation fence', a
   let starts=0,spawns=0;
   await assert.rejects(runAssistantCodexPass({threadId:randomUUID(),deliveryId:randomUUID(),cwd:process.cwd(),taskContext,execution}, {
     readDelivery:async()=>({state:'uncertain'}),readMetadata:async threadId=>({threadId,cwd:process.cwd()}),
-    readExecutionAvailability:async choice=>{assert.deepEqual(choice,execution);return false;},
+    readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async choice=>{assert.deepEqual(choice,execution);return false;},
     startInvocation:()=>{starts++;},spawnProcess:()=>{spawns++;assert.fail('unavailable model launched native work');},
   }),/MODEL_UNAVAILABLE/);
   assert.equal(starts,0);assert.equal(spawns,0);
@@ -190,7 +219,7 @@ test('an unavailable native model never crosses the durable invocation fence', a
 test('exact native marker read-back exposes receipt only; quoted/tool text is not acceptance', async () => {
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
   const text=assistantDeliveryMarker(deliveryId)+'\nprivate instruction';
-  const options = { readExecutionAvailability:async()=>true,executable:process.execPath, environment:{}, spawnProcess:nativeRpc(request => {
+  const options = { readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath, environment:{}, spawnProcess:nativeRpc(request => {
     if (request.method==='thread/read') return { result:{ thread:{ id:threadId,cwd:process.cwd(),name:'PRIVATE TITLE' } } };
     assert.equal(request.method,'thread/turns/list'); assert.equal(request.params.itemsView,'summary');
     return { result:{ data:[{ id:turnId,status:'completed',items:[
@@ -208,13 +237,13 @@ test('exact native marker read-back exposes receipt only; quoted/tool text is no
 
 test('native read failure stays closed and never copies diagnostic content into the error', async () => {
   const threadId=randomUUID(),deliveryId=randomUUID();
-  await assert.rejects(readAssistantCodexDelivery(threadId,deliveryId,{ readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+  await assert.rejects(readAssistantCodexDelivery(threadId,deliveryId,{ readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
     spawnProcess:nativeRpc(() => ({ error:{ code:-32600,message:'PRIVATE SECRET DIAGNOSTIC' } })) }),
     error => error.code==='ASSISTANT_CODEX_READ_UNAVAILABLE' && !/PRIVATE/.test(error.message));
 });
 
 test('malformed native JSON frames fail closed instead of crashing the coordinator process', async()=>{
-  const options={readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},spawnProcess:()=>{
+  const options={readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},spawnProcess:()=>{
     const child=fakeChild();queueMicrotask(()=>child.stdout.write('null\n'));return child;
   }};
   await assert.rejects(readAssistantCodexDelivery(randomUUID(),randomUUID(),options),/READ_UNAVAILABLE/);
@@ -223,7 +252,7 @@ test('malformed native JSON frames fail closed instead of crashing the coordinat
 test('initial native chat persists its ID synchronously and consumes no business instruction', async t=>{
   const cwd=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-provision-test-'));t.after(()=>fs.rm(cwd,{recursive:true,force:true}));
   const threadId=randomUUID(),deliveryId=randomUUID();let started=false,saved=null,input='',confirmed=0;
-  const options={readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
+  const options={readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},
     onAuthenticationConfirmed:async()=>{confirmed++;},
     startInvocation:()=>{started=true;},onThreadStarted:value=>{assert.equal(started,true);saved=value;},
     readDelivery:async value=>{assert.equal(saved,threadId);assert.equal(value,threadId);return{state:'completed',receipt:'fixture:ready'};},
@@ -255,7 +284,7 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
     eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`}));
   const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()],sourceReferences};
   let starts=0,reads=0,launches=0,confirmed=0,input='';
-  const options = { readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,
+  const options = { readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,
     ComSpec:'C:\\Windows\\System32\\cmd.exe',PATHEXT:'.COM;.EXE;.BAT;.CMD',OPENAI_API_KEY:'private',SHOULD_NOT_PASS:'private' },
     onAuthenticationConfirmed:async()=>{confirmed++;throw new Error('PRIVATE health report failed');},
     startInvocation:() => { if (starts++) throw new Error('private state error'); },
@@ -303,7 +332,7 @@ test('a successful CLI exit/queue claim without exact completed-turn read-back r
   const threadId=randomUUID(),deliveryId=randomUUID();
   await assert.rejects(runAssistantCodexPass({ threadId,deliveryId,cwd,taskContext,execution },{
     onAuthenticationConfirmed:()=>assert.fail('an uncertain result is not login recovery'),
-    readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
+    readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{},startInvocation:()=>{},readMetadata:async()=>({ threadId,cwd }),
     readDelivery:async()=>({ state:'uncertain' }),spawnProcess:()=>{
       const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{
         child.stdout.write(`${JSON.stringify({ type:'thread.started',thread_id:threadId })}\n${JSON.stringify({ type:'turn.completed' })}\n`);
@@ -352,7 +381,7 @@ test('pre-native recovery callback runs once after SAME model preflight and befo
   const threadId=randomUUID(),deliveryId=randomUUID();let modelChecks=0,recovery=0,starts=0;
   await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{requireAbsentMarker:true,
     executable:process.execPath,environment:{},readDelivery:async()=>({state:'uncertain',markerEvidence:'absent'}),
-    readMetadata:async()=>({threadId,cwd:process.cwd()}),readExecutionAvailability:async()=>{modelChecks++;return true;},
+    readMetadata:async()=>({threadId,cwd:process.cwd()}),readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>{modelChecks++;return true;},
     beforeInvocation:async()=>{assert.equal(modelChecks,1);recovery++;throw Object.assign(new Error('closed native CAS conflict'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});},
     startInvocation:()=>{starts++;},spawnProcess:()=>assert.fail('failed recovery launched Codex')}),/closed native CAS conflict/);
   assert.equal(modelChecks,1);assert.equal(recovery,1);assert.equal(starts,0);
@@ -366,7 +395,7 @@ test('successful pre-native recovery reads a real positive receipt after the one
     readDelivery:async(_thread,_delivery,options)=>{
       if(++reads===1){assert.equal(options.requireAbsentMarker,true);return {state:'uncertain',markerEvidence:'absent'};}
       assert.equal(options.requireAbsentMarker,false);return {state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`};
-    },readExecutionAvailability:async()=>{models++;return true;},beforeInvocation:async()=>{assert.equal(models,1);recoveries++;},
+    },readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>{models++;return true;},beforeInvocation:async()=>{assert.equal(models,1);recoveries++;},
     startInvocation:()=>{assert.equal(recoveries,1);starts++;},spawnProcess:()=>{
       const child=fakeChild();child.stdin.resume();child.stdin.on('end',()=>queueMicrotask(()=>{
         child.stdout.write(`${JSON.stringify({type:'thread.started',thread_id:threadId})}\n${JSON.stringify({type:'turn.completed'})}\n`);child.emit('close',0);
@@ -378,7 +407,7 @@ test('successful pre-native recovery reads a real positive receipt after the one
 test('reviewed continuation uses a NEW stdin marker in the same chat, with receipt inspection before any action',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),priorTurnId=randomUUID(),turnId=randomUUID();let input='',reads=0,starts=0,checked=false;
   const options={continuationReview:{priorTurnId,reviewId:deliveryId},requireAbsentMarker:true,
-    executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),readExecutionAvailability:async()=>true,
+    executable:process.execPath,environment:{},readMetadata:async()=>({threadId,cwd:process.cwd()}),readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,
     beforeInvocation:async()=>{checked=true;},startInvocation:()=>{assert.equal(checked,true);starts++;},
     readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
     spawnProcess:(_exe,args)=>{assert.equal(args[2],threadId);const child=fakeChild();
