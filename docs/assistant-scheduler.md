@@ -1584,6 +1584,10 @@ permission flag, write scope, Run/lease, human credential or key is added.
 The parent-to-isolated-worker stdin boundary retains the validated
 `encryptedInspection` / `encryptedLifecycle` descriptor unchanged; validation
 in the parent never permits silently reverting the child to a plain read.
+The facade coordinator and process launcher use the SAME closed projection;
+automatic heartbeat keeps only that structural native lifecycle descriptor.
+The regression traverses the actual facade, coordinator and child pipe together,
+including renewal; testing a direct launcher alone does not prove delivery.
 The SAME common inspector prepares its own managed company envelope, reads the
 native authority snapshot and downloads the pinned immutable encrypted bundle.
 Only its two exact GET/HEAD paths may use the alternate origin; managed key

@@ -1705,6 +1705,13 @@ const rejectLegacyAssistantTaskStorage=async(config,scope)=>{
  * private storage, native ACL checks, transport and Git execute in a fresh
  * signed child. It cannot keep an expired async auth profile or a human token.
  * Finishing survives cancellation of a short MCP wait, as in the human host. */
+// Both parent handoffs use ONE closed projection of an already validated
+// native plan. Derived invocation fields stay local; encrypted routing must
+// survive facade -> coordinator -> process -> child, not only the last pipe.
+const assistantWorkspaceExecutionPlan = plan => ({prepared:true,scope:plan.scope,localAction:plan.localAction,
+  ...(plan.encryptedInspection?{encryptedInspection:plan.encryptedInspection}:{}),
+  ...(plan.encryptedLifecycle?{encryptedLifecycle:plan.encryptedLifecycle}:{})});
+
 export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWorkspaceProcess,configDirectory,
   finishOptions={},heartbeatOptions={},expectedOrigin='https://trelio.ru'}={}) => {
   const common=await import('./trelio-workspace.mjs');
@@ -1718,15 +1725,15 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     runBridge:async (_origin,args,options)=>{
       const plan=plans.get(path.resolve(options.cwd??''));
       if(!plan || args.length!==1 || args[0]!=='heartbeat')fail('ASSISTANT_WORKSPACE_REVIEW_REQUIRED');
-      const value=await runPlan({prepared:true,scope:plan.scope,localAction:{schemaVersion:1,operation:'heartbeat',
-        parameters:{},runIdentity:plan.runIdentity}},options);
+      const value=await runPlan(assistantWorkspaceExecutionPlan({...plan,localAction:{schemaVersion:1,operation:'heartbeat',
+        parameters:{},runIdentity:plan.runIdentity}}),options);
       return {stdout:value.stdout??'',stderr:value.stderr??''};
     }});
   return {async execute(raw,{signal}={}) {
     const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
     // Accepted inspection has no Run, renewal, progress registry or writable
     // task directory. The common reader selects its isolated cache in the child.
-    if(['inspect','skill_run'].includes(plan.localAction.operation))return runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal});
+    if(['inspect','skill_run'].includes(plan.localAction.operation))return runPlan(assistantWorkspaceExecutionPlan(plan),{signal});
     const root=assistantWorkspaceRoot(config,plan,expectedOrigin),directory=path.join(root,'workspace');
     const key=`${plan.scope.assistantUserId}:${plan.scope.deviceId}:${plan.scope.companyId}:${plan.scope.taskId}:${plan.runIdentity.workspaceId}`;
     const scope=`${plan.scope.passId}:${plan.runIdentity.runId}`;
@@ -1743,11 +1750,12 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     }
     // Keep only structural renewal locators. Handoff text stays in the common
     // bounded finish registry for its ordinary retention, not a second cache.
-    plans.set(directory,{scope:plan.scope,runIdentity:plan.runIdentity,key});
+    plans.set(directory,{scope:plan.scope,runIdentity:plan.runIdentity,key,
+      ...(plan.encryptedLifecycle?{encryptedLifecycle:plan.encryptedLifecycle}:{})});
     const execute=async(onProgress,actionSignal)=>{
       const entry=await heartbeat.beginAction(directory,plan.localAction.operation);
       try {
-        const result=await runPlan({prepared:true,scope:plan.scope,localAction:plan.localAction},{signal:actionSignal,onProgress});
+        const result=await runPlan(assistantWorkspaceExecutionPlan(plan),{signal:actionSignal,onProgress});
         if(plan.localAction.operation==='open')heartbeat.start({origin:expectedOrigin,...plan.runIdentity,workspaceDirectory:directory});
         else heartbeat.markActionSuccess(entry,plan.localAction.operation,plan.localAction.parameters);
         return result;
@@ -1779,9 +1787,7 @@ export const runAssistantWorkspaceProcess = async (raw,{signal,onProgress,resolv
   // inspector attempt the canonical/plain snapshot route, despite the parent
   // having admitted an encrypted inspection. Forward only these two validated
   // fields; the child repeats their scope/origin checks before any private I/O.
-  const input=JSON.stringify({prepared:true,scope:plan.scope,localAction:plan.localAction,
-    ...(plan.encryptedInspection?{encryptedInspection:plan.encryptedInspection}:{}),
-    ...(plan.encryptedLifecycle?{encryptedLifecycle:plan.encryptedLifecycle}:{})});
+  const input=JSON.stringify(assistantWorkspaceExecutionPlan(plan));
   const loader=await resolveLoader({environment});
   const {runWorkspaceFinishProcess}=await import('./trelio-workspace-finish-progress.mjs');
   let result;

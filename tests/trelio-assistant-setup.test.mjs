@@ -869,8 +869,8 @@ test('assistant Workspace continuation uses fixed signed child and stdin; unknow
   }}),error=>error.code==='TRELIO_RUNTIME_HOOK_REQUIRED' && error.reason==='expired');
 });
 
-test('encrypted Workspace descriptors survive the actual isolated worker stdin boundary',async t=>{
-  const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+test('encrypted Workspace descriptors survive facade, coordinator, real child pipe and automatic heartbeat',async t=>{
+  const {runAssistantWorkspaceProcess,createAssistantWorkspaceExecutor,createForwardingAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {spawnSync}=await import('node:child_process');
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-plan-pipe-'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
@@ -884,9 +884,9 @@ test('encrypted Workspace descriptors survive the actual isolated worker stdin b
       return {schemaVersion:1,operation:plan.localAction.operation,
         stdout:JSON.stringify({descriptor:raw.encryptedInspection??raw.encryptedLifecycle,sentinel:'validated-real-child'})};
     }});`;
-  let launches=0;
+  let launches=0;const observed=[];
   const runProcess=async(_executable,_args,options)=>{
-    launches++;
+    launches++;observed.push(JSON.parse(options.input));
     const env={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};
     delete env.NODE_TEST_CONTEXT;
     const child=spawnSync(process.execPath,['--input-type=module','-e',code],{
@@ -900,14 +900,35 @@ test('encrypted Workspace descriptors survive the actual isolated worker stdin b
     plan.localAction=operation==='inspect'?{schemaVersion:1,operation,parameters:{workspaceId:identity.workspaceId}}
       :{schemaVersion:1,operation,runIdentity:identity,parameters:{type:'draft',summary:'Synthetic fixture'}};
     plan[operation==='inspect'?'encryptedInspection':'encryptedLifecycle']=descriptor;
-    const result=await runAssistantWorkspaceProcess(plan,{resolveLoader:async()=>'/verified/loader.mjs',runProcess});
-    assert.deepEqual(JSON.parse(result.stdout),{descriptor,sentinel:'validated-real-child'});
+    let scheduled;
+    const executor=await createAssistantWorkspaceExecutor({configDirectory:root,
+      heartbeatOptions:{scheduleTimer:callback=>(scheduled=callback),cancelTimer:()=>{}},
+      runPlan:(raw,options)=>runAssistantWorkspaceProcess(raw,{...options,resolveLoader:async()=>'/verified/loader.mjs',runProcess})});
+    await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+    await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+    let selected=plan;
+    const facade=await createForwardingAssistantMcp({configurationDirectory:root,createWorkspace:async()=>executor,
+      request:async()=>({content:[],structuredContent:selected})});
+    try{
+      if(operation==='checkpoint'){
+        selected={...plan,localAction:{...workspacePlan().localAction,parameters:{...identity,runtimeSessionId:randomUUID()}}};
+        await facade.callTool('continue_assistant_workspace_action',{operation:'open'});
+        selected=plan;
+      }
+      const result=await facade.callTool('continue_assistant_workspace_action',{operation});
+      assert.deepEqual(JSON.parse(result.structuredContent.stdout),{descriptor,sentinel:'validated-real-child'});
+      if(operation==='checkpoint'){
+        await scheduled();
+        assert.equal(observed.at(-1).localAction.operation,'heartbeat');
+        assert.deepEqual(observed.at(-1).encryptedLifecycle,descriptor,'automatic renewal retains the native routing too');
+      }
+    }finally{executor.stop();}
     const before=launches;
     await assert.rejects(runAssistantWorkspaceProcess({...plan,[operation==='inspect'?'encryptedInspection':'encryptedLifecycle']:
       {...descriptor,companyId:randomUUID()}},{resolveLoader:async()=>'/verified/loader.mjs',runProcess}));
     assert.equal(launches,before,'foreign descriptor refuses before the child');
   }
-  assert.equal(launches,2);
+  assert.equal(launches,4);
 });
 
 test('only a native skill result can cross the existing visual projection boundary',async()=>{
