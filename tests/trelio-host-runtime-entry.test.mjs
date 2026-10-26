@@ -86,6 +86,37 @@ test("assistant hook retains the hook clock and never consumes a human Run cwd h
   assert.deepEqual(observed.args.slice(1), ["hook"]);
 });
 
+test("assistant installer policy crosses the signed runtime entry and the managed setup boundary", async () => {
+  const { runAssistantEntry } = await import("../host-runtime/scripts/trelio-assistant-entry.mjs");
+  for (const enabled of [true, false]) {
+    let received, setup, output = "";
+    await runHostRuntime({ rawArguments: ["bridge", "assistant", "background-install", `--auto-update-plugin=${enabled ? "on" : "off"}`],
+      environment: { TRELIO_PLUGIN_VERSION: "3.2.4", TRELIO_HOST_RUNTIME_VERSION: "3.21.1" },
+      spawnProcess: (_command, args) => {
+        received = args;
+        const child = new EventEmitter(); queueMicrotask(() => child.emit("exit", 0)); return child;
+      },
+    });
+    assert.equal(path.basename(received[0]), "trelio-assistant-entry.mjs");
+    await runAssistantEntry(received.slice(1), {
+      createBackground: async () => async (operation, options) => { setup = { operation, options }; return { installed: true }; },
+      output: { write: text => { output += text; } },
+    });
+    assert.deepEqual(setup, { operation: "install", options: { autoUpdatePlugin: enabled } });
+    assert.deepEqual(JSON.parse(output), { installed: true });
+  }
+  for (const args of [
+    ["background-start", "--auto-update-plugin=on"], ["background-install", "--auto-update-plugin=true"],
+    ["background-install", "--auto-update-plugin=on", "extra"], ["background-install", "--auto-update-plugin=off", "--auto-update-plugin=on"],
+  ]) {
+    let spawned = false;
+    await assert.rejects(runHostRuntime({ rawArguments: ["bridge", "assistant", ...args],
+      spawnProcess: () => { spawned = true; throw Error("must not spawn"); },
+    }), /ASSISTANT_COMMAND_UNSUPPORTED/);
+    assert.equal(spawned, false);
+  }
+});
+
 test("actual runtime assistant MCP discovers setup and broken hooks deny without human auth", async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-assistant-entry-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

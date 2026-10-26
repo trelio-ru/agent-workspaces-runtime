@@ -42,7 +42,13 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
   // explicit bridge subprofile; neither an unknown assistant command nor a
   // missing capability may fall through to human bridge/MCP authentication.
   if (mode === "bridge" && argumentsAfterMode[0] === "assistant") {
-    if (argumentsAfterMode.length !== 2 || !["mcp", "hook", "request", "background", "workspace",
+    // The optional setup policy is closed at BOTH entry boundaries. Forward
+    // only the exact installer flag; other commands, values or extra arguments
+    // must still refuse before importing/spawning the assistant implementation.
+    const pluginPolicy = argumentsAfterMode.length === 3
+      && argumentsAfterMode[1] === "background-install"
+      && ["--auto-update-plugin=on", "--auto-update-plugin=off"].includes(argumentsAfterMode[2]);
+    if ((!pluginPolicy && argumentsAfterMode.length !== 2) || !["mcp", "hook", "request", "background", "workspace",
       "background-install", "background-status", "background-start", "background-remove"].includes(argumentsAfterMode[1])) {
       throw new Error("ASSISTANT_COMMAND_UNSUPPORTED");
     }

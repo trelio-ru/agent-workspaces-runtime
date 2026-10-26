@@ -1508,6 +1508,8 @@ opts into the following maintenance policy. Hook review and login remain human.
 The human may opt this paired machine into plugin maintenance once through
 `install_assistant_background({autoUpdatePlugin:true})`, or the host-only
 `bridge assistant background-install --auto-update-plugin=on` command. The same
+signed runtime entry forwards only this exact `on|off` installer option;
+other commands/values/extra arguments refuse before the assistant spawn. The
 installation path writes a bounded identity-bound private policy only after
 native registration/read-back. Omitting the option preserves existing policy;
 `false`/`--auto-update-plugin=off` disables it. No flag is a business/owner grant,
