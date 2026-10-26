@@ -68,6 +68,11 @@ registration runs first in that group. Synthetic filesystem expectations use
 canonical Windows paths and bounded short fixture homes, not production path
 exceptions. Classic-console readiness shares its original startup deadline;
 cleanup of an owned terminated helper preserves the original assertion.
+The positive classic-console fixture explicitly launches inbox `conhost.exe`
+for its synthetic client, independently verifies its HWND/class and waits for
+that client's own exit code. This per-launch selection follows the
+[Microsoft default-terminal specification](https://github.com/microsoft/terminal/blob/main/doc/specs/%23492%20-%20Default%20Terminal/spec.md);
+it never changes the user's registry/default terminal or production launcher.
 
 Both Linux/macOS jobs retain exact dependency checks and two byte-identical
 unsigned package builds. The same deterministic Windows x64/ia32/arm64 artifact

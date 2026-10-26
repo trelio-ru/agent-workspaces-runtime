@@ -269,7 +269,7 @@ test('the signed worker brands only an isolated visible parent console and reads
         await fs.writeFile(fixture,`import fs from 'node:fs/promises';
           import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
           import {spawn} from 'node:child_process';
-          await fs.writeFile(${JSON.stringify(ready)},'ready');
+          await fs.writeFile(${JSON.stringify(ready)},String(process.pid));
           let released=false;
           for(let attempt=0;attempt<500;attempt++){
             try{await fs.access(${JSON.stringify(release)});released=true;break;}catch{}
@@ -295,12 +295,12 @@ test('the signed worker brands only an isolated visible parent console and reads
           await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify(result));
           if(sibling)sibling.kill();`);
         const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
-        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release)";
+        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.consoleHost,[string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release)";
         const code=await new Promise((resolve,reject)=>{
           const child=spawn(resolveWindowsPowerShellExecutable(process.env),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
             {shell:false,windowsHide:true,stdio:['pipe','ignore','ignore'],timeout:60000});
           child.once('error',reject);child.once('close',resolve);
-          child.stdin.end(JSON.stringify({executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release}));
+          child.stdin.end(JSON.stringify({consoleHost:path.join(process.env.SystemRoot,'System32','conhost.exe'),executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release}));
         });
         assert.equal(code,0,`the synthetic native classic-console host must complete (closed precondition stage ${code})`);
         const result=JSON.parse(await fs.readFile(receipt,'utf8'));
@@ -345,27 +345,28 @@ public static class AssistantIconPseudoConsoleFixture {
   [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
   [DllImport("kernel32.dll")] static extern int WaitForSingleObject(IntPtr handle,int milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process,out int code);
+  [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(int access,bool inherit,int processId);
   [DllImport("kernel32.dll")] static extern bool ReadFile(IntPtr handle,byte[] bytes,int length,out int count,IntPtr overlapped);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,int code);
   static void Check(bool value) { if(!value)throw new Exception("synthetic pseudoconsole API failed"); }
-  public static int RunClassic(string executable,string arguments,bool hidden,string ready,string release) {
-    ProcessInfo process=new ProcessInfo();bool released=false,attached=false;
+  public static int RunClassic(string consoleHost,string executable,string arguments,bool hidden,string ready,string release) {
+    ProcessInfo process=new ProcessInfo();bool released=false,attached=false;IntPtr client=IntPtr.Zero;
     IntPtr input=GetStdHandle(-10),output=GetStdHandle(-11),error=GetStdHandle(-12);
     try {
-      // Node waits at a test-only file gate after its console initialization.
-      // An independent API read proves the expected classic console before the
-      // gate opens; no helper-under-test is used to establish that precondition.
+      // Explicit inbox conhost selects a classic host for this one synthetic
+      // launch even when Windows Terminal is the user's default. This is the
+      // Microsoft per-launch route, never a registry/default-terminal change.
+      // Node publishes its own PID; conhost's exit code is not the client's.
       Startup startup=new Startup {cb=Marshal.SizeOf(typeof(Startup)),flags=1,show=(short)(hidden?0:4)};
-      Check(CreateClassicProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0x00000010,IntPtr.Zero,null,ref startup,out process));
+      Check(CreateClassicProcess(consoleHost,new StringBuilder("\""+consoleHost+"\" \""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0,IntPtr.Zero,null,ref startup,out process));
       DateTime deadline=DateTime.UtcNow.AddSeconds(10);
       while(DateTime.UtcNow<deadline&&!System.IO.File.Exists(ready))System.Threading.Thread.Sleep(20);
       if(!System.IO.File.Exists(ready))return 35;
+      int clientId;Check(int.TryParse(System.IO.File.ReadAllText(ready),out clientId)&&clientId>0);
+      client=OpenProcess(0x00101000,false,clientId);Check(client!=IntPtr.Zero);
       if(!FreeConsole())return 30;
-      attached=AttachConsole(process.Id);if(!attached)return 31;
-      // Node readiness does not prove conhost has published its final HWND.
-      // Observe the SAME process under the original ten-second startup budget;
-      // never accept a pseudoconsole or grant a fresh deadline.
+      attached=AttachConsole(clientId);if(!attached)return 31;
       IntPtr window=IntPtr.Zero;StringBuilder name=new StringBuilder(64);
       while(DateTime.UtcNow<deadline) {
         window=GetConsoleWindow();name.Clear();
@@ -378,12 +379,16 @@ public static class AssistantIconPseudoConsoleFixture {
       Check(FreeConsole());attached=false;
       SetStdHandle(-10,input);SetStdHandle(-11,output);SetStdHandle(-12,error);
       System.IO.File.WriteAllText(release,"release");released=true;
-      if(WaitForSingleObject(process.Process,15000)!=0) { TerminateProcess(process.Process,124);throw new Exception("synthetic classic console timeout"); }
-      int result;Check(GetExitCodeProcess(process.Process,out result));return result;
+      if(WaitForSingleObject(client,15000)!=0) { TerminateProcess(client,124);throw new Exception("synthetic classic console timeout"); }
+      int result;Check(GetExitCodeProcess(client,out result));return result;
     } finally {
       if(attached)FreeConsole();
       SetStdHandle(-10,input);SetStdHandle(-11,output);SetStdHandle(-12,error);
-      if(!released&&process.Process!=IntPtr.Zero)TerminateProcess(process.Process,125);
+      if(!released&&client!=IntPtr.Zero)TerminateProcess(client,125);
+      if(client!=IntPtr.Zero)CloseHandle(client);
+      // Only the explicitly created synthetic launcher is cleaned up. It is
+      // never confused with the node client or any pre-existing terminal host.
+      if(process.Process!=IntPtr.Zero&&WaitForSingleObject(process.Process,1000)!=0)TerminateProcess(process.Process,125);
       if(process.Thread!=IntPtr.Zero)CloseHandle(process.Thread);if(process.Process!=IntPtr.Zero)CloseHandle(process.Process);
     }
   }
