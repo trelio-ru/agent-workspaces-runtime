@@ -1493,6 +1493,15 @@ server heads, bounded changed paths и exact `suggestedDirectory`. Агент в
 только при смысловом конфликте; технический recovery не завершает ход сам по
 себе и не создаёт новый Run.
 
+Recovery directory – сосед с постоянной длиной имени `r-<SHA256-base64url>`.
+Полный digest связывает исходный путь, Workspace и target Run; повторное
+восстановление не удлиняет имя. Это необходимо и при `core.longpaths=true`:
+некоторые Git for Windows metadata probes всё ещё ограничены MAX_PATH.
+После успешного native open общий registry заменяет только точный same-Run
+source locator, доказанный этим digest и большей новой fencingToken в metadata.
+Исходные файлы и metadata сохраняются. Посторонние duplicate roots остаются
+неоднозначными; ни возраст файла, ни максимальный fence не выбирают путь.
+
 Этот recovery code, его model-facing action contract и local MCP description
 принадлежат independently signed runtime/server contour. Ради их изменения
 public stable plugin и его bundled references не меняются.

@@ -15,6 +15,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation } from './trelio-workspace.mjs';
+import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
 const enrollment = { type: 'string', pattern: UUID };
@@ -1729,6 +1730,10 @@ const assistantWorkspaceRoot=(config,plan,expectedOrigin)=>path.join(assistantTa
 const isAssistantWorkspaceRoot=(candidate,base)=>{
   if(typeof candidate!=='string'||!path.isAbsolute(candidate)||candidate.includes('\0')
     ||!sameLocalPath(path.dirname(candidate),path.dirname(base)))return false;
+  // Only registered siblings in this exact task namespace are considered.
+  // The common private metadata reader still matches full Workspace/Run IDs;
+  // a compact locator alone grants no identity or execution authority.
+  if(/^r-[A-Za-z0-9_-]{43}$/u.test(path.basename(candidate)))return true;
   const suffix=path.basename(candidate).slice(path.basename(base).length);
   // Common recovery uses these bounded sibling names, not arbitrary custom
   // directories. The registry is discovery only; exact private metadata and
@@ -1965,7 +1970,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
           ||(error.code==='TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED'?d.targetRunId:d.runId)!==plan.runIdentity.runId
           ||d.sourceFilesMustRemainUntouched!==true||!sameLocalPath(d.sourceDirectory,root)
           ||!sameLocalPath(d.sourceWorkspaceDirectory,directory)
-          ||!sameLocalPath(d.suggestedDirectory,`${root}-recovery-${plan.runIdentity.runId.slice(0,8)}`)
+          ||!sameLocalPath(d.suggestedDirectory,workspaceRecoveryDirectory(root,plan.runIdentity.workspaceId,plan.runIdentity.runId))
           ||!isAssistantWorkspaceRoot(d.suggestedDirectory,base))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
         recovery={code:error.code,...d};root=d.suggestedDirectory;directory=path.join(root,'workspace');
         return true;

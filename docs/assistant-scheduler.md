@@ -1595,8 +1595,14 @@ session. The default human bridge still returns the envelope. Unknown transport,
 lease failures and a second recovery refusal never trigger another open.
 
 The managed callback accepts only the exact current Workspace/target Run, the
-original owned source directory and the common sibling suffix
-`-recovery-<first-eight-Run-UUID-characters>` (at most eight nested suffixes).
+original owned source directory and the common deterministic `r-<full-SHA256-base64url>`
+sibling computed from source/Workspace/Run. Its basename stays 45 characters on
+repeated recovery: Git for Windows still has MAX_PATH-limited internal probes
+even with `core.longpaths=true`. Existing legacy roots remain discoverable.
+After successful native open, the SAME registry replaces only the exact known
+same-Run source locator when the new metadata has a greater native fence. All
+source bytes remain intact. Unrelated duplicate roots remain ambiguous; neither
+file age nor the largest fence chooses a directory.
 No model path is admitted. Source files remain untouched; the new root is opened
 through ordinary native pass/recipient/ACL/lease/Git checks. Its bounded common
 reconciliation evidence is returned locally to the SAME task chat, never to

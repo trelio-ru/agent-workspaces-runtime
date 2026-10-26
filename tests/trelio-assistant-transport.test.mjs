@@ -2110,7 +2110,7 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     const writerProfile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
       workspaceRun:runIdentity,lockDirectory:path.join(os.tmpdir(),'synthetic-writer-locks'),lock:(_file,action)=>action()});
     const readFetch=globalThis.fetch,uploads=new Map(),storedPayloads=[payload];
-    let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null;
+    let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null;
     globalThis.fetch=async(url,options)=>{
       const parsed=new URL(url),base='/api/digital-assistants/runtime/workspace';
       const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
@@ -2120,7 +2120,7 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
       if(parsed.pathname===`${base}/workspaces/${descriptor.workspaceId}/runs/${runId}`)return scoped({run:nativeRun,latestCheckpoint});
       if(parsed.pathname===`${base}/runs/${runId}/claim`){
         const input=JSON.parse(options.body);assert.equal(input.expectedFencingToken,nativeRun.fencingToken);
-        nativeRun={...nativeRun,fencingToken:nativeRun.fencingToken+1,leaseId:randomUUID()};return scoped(nativeRun);
+        nativeRun={...nativeRun,status:'running',fencingToken:nativeRun.fencingToken+1,leaseId:randomUUID()};return scoped(nativeRun);
       }
       if(parsed.pathname===`${base}/encryption/payloads`){
         const body=JSON.parse(options.body);assert.equal(body.writerDeviceId,cryptoDeviceId);
@@ -2176,7 +2176,7 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
         return json({run:nativeRun});
       }
       if(parsed.pathname===`${base}/runs/${runId}/encrypted-bundle`)
-        return new Response(bytes,{headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':descriptor.workspaceId,
+        return draftTransport?new Response(draftTransport.bytes,{headers:draftTransport.headers}):new Response(bytes,{headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':descriptor.workspaceId,
           'x-trelio-accepted-head':head,'x-trelio-materialized-head':head,'x-trelio-materialized-source':'base',
           'x-trelio-encrypted-revision-id':revisionId,'x-trelio-scope-id':scopeId,'x-trelio-scope-epoch':'1',
           'x-trelio-ciphertext-sha256':digest(bytes)}});
@@ -2186,13 +2186,58 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
       parameters:{...runIdentity,runtimeSessionId:f.runtime.state.runtimeSessionId}}};
     const opened=await common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
-    const writable=path.join(assistantTaskStorageDirectory(common.resolveWorkspaceBridgeConfigDirectory(),{
+    let writable=path.join(assistantTaskStorageDirectory(common.resolveWorkspaceBridgeConfigDirectory(),{
       origin:f.identity.origin,assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
       companyId:f.pass.companyId,taskId:f.pass.taskId}),'workspaces',descriptor.workspaceId,'workspace');
     assert.equal(await fs.readFile(path.join(writable,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');
     assert.equal(await fs.readFile(path.join(path.dirname(writable),'context','agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
     assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
     assert.equal(opened.operation,'open');
+
+    // A saved encrypted draft and a later local committed delta are both real
+    // material. Reopening an expired own Run must preserve that checkout and
+    // materialize the native draft through the SAME common recovery callback.
+    // A fresh open from the accepted base alone never exercises this boundary.
+    await fs.writeFile(path.join(root,'server-draft.md'),'SYNTHETIC_NATIVE_DRAFT');
+    await git(['add','server-draft.md']);await git(['commit','-m','Native portable draft']);
+    const draftHead=(await git(['rev-parse','HEAD'])).stdout.trim(),draftId=randomUUID();
+    const draftBundle=path.join(os.homedir(),'portable-draft.bundle'),draftCipher=path.join(os.homedir(),'portable-draft.trelioe1');
+    await git(['bundle','create',draftBundle,'refs/heads/main','^'+head]);
+    await encryptFileToCompanyContainer({sourcePath:draftBundle,destinationPath:draftCipher,scopePublicEncryptionJwk:publicJwk,
+      originalName:'workspace.bundle',mimeType:'application/vnd.git.bundle',aad:{companyId:company.id,scopeId,scopeEpoch:1,
+        entityType:'agent_workspace_revision',entityId:runId,entityRevision:nativeRun.fencingToken,schemaVersion:1}});
+    const draftBytes=await fs.readFile(draftCipher),draftChainHeader=Buffer.from(canonicalJson({schemaVersion:1,companyId:company.id,
+      workspaceId:descriptor.workspaceId,revisions:[{id:revisionId,workspaceHead:head,baseHead:null,bundleFormat:'full',parentRevisionId:null,
+        scopeId,scopeEpoch:1,ciphertextSha256:digest(bytes),ciphertextSizeBytes:bytes.length},
+      {id:draftId,workspaceHead:draftHead,baseHead:head,bundleFormat:'delta',parentRevisionId:revisionId,
+        scopeId,scopeEpoch:1,ciphertextSha256:digest(draftBytes),ciphertextSizeBytes:draftBytes.length}]}));
+    const chainSize=Buffer.alloc(4);chainSize.writeUInt32BE(draftChainHeader.length);
+    const chainBytes=Buffer.concat([Buffer.from('TRELIOH1'),chainSize,draftChainHeader,bytes,draftBytes]);
+    draftTransport={bytes:chainBytes,headers:{'x-trelio-e2ee':'v1','x-trelio-workspace-id':descriptor.workspaceId,
+      'x-trelio-materialized-source':'draft','x-trelio-materialized-head':draftHead,'x-trelio-accepted-head':head,
+      'x-trelio-encrypted-revision-id':draftId,'x-trelio-scope-id':scopeId,'x-trelio-scope-epoch':'1',
+      'x-trelio-ciphertext-sha256':digest(draftBytes),'x-trelio-encrypted-bundle-format':'chain-v1',
+      'x-trelio-writer-device-id':cryptoDeviceId,'x-trelio-bundle-format':'delta','x-trelio-parent-revision-id':revisionId,
+      'x-trelio-revision-ciphertext-size':String(draftBytes.length)}};
+    await fs.writeFile(path.join(writable,'local-only.md'),'SYNTHETIC_LOCAL_COMMITTED_DELTA');
+    await common.runGit(['add','local-only.md'],{cwd:writable});await common.runGit(['commit','-m','Retained local delta'],{cwd:writable});
+    const sourceDirectory=writable,sourceHead=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
+    nativeRun={...nativeRun,status:'expired',draftHead};
+    const reopened=await common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
+      withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
+    const recovery=JSON.parse(reopened.stdout.trim().split('\n').at(-1)).assistantLocalRecovery;
+    assert.equal(recovery.reasonCode,'DIVERGED_HISTORY');
+    assert.equal(recovery.sourceFilesMustRemainUntouched,true);
+    writable=path.join(recovery.suggestedDirectory,'workspace');
+    const registered=await common.readRunRegistry();
+    assert.equal(registered.includes(path.dirname(sourceDirectory)),false,'only the proven same-Run source locator is superseded');
+    assert.equal(registered.includes(path.dirname(writable)),true);
+    assert.equal(await fs.readFile(path.join(writable,'server-draft.md'),'utf8'),'SYNTHETIC_NATIVE_DRAFT');
+    assert.equal((await common.runGit(['rev-parse','HEAD'],{cwd:sourceDirectory})).stdout.trim(),sourceHead);
+    assert.equal(await fs.readFile(path.join(sourceDirectory,'local-only.md'),'utf8'),'SYNTHETIC_LOCAL_COMMITTED_DELTA');
+    assert.equal(JSON.parse(await fs.readFile(path.join(path.dirname(writable),'.trelio-run.json'),'utf8')).fencingToken,nativeRun.fencingToken);
+    // The agent, rather than open, chooses the compatible material to carry.
+    await fs.copyFile(path.join(sourceDirectory,'local-only.md'),path.join(writable,'local-only.md'));
     await fs.mkdir(path.join(writable,'assistants',f.identity.assistantId),{recursive:true});
     await fs.writeFile(path.join(writable,'assistants',f.identity.assistantId,'WORK.md'),'# Goal\nVerified material result\n');
     await fs.writeFile(path.join(writable,'new-result.md'),'SYNTHETIC_ENCRYPTED_DELIVERABLE');

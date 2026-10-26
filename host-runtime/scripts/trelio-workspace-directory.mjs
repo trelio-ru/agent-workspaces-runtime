@@ -1,5 +1,26 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { sameLocalPath } from "./trelio-local-path.mjs";
+
+/** A recovery is a sibling, not another suffix appended to an already long
+ * checkout. Git for Windows still probes objects/info/alternates through a
+ * MAX_PATH-limited API even with core.longpaths=true. The full digest binds
+ * source + Workspace + exact target Run without growing on a second recovery.
+ * This is only a locator: ordinary ownership, native lease and Git checks still
+ * decide whether the selected path can be opened. No existing folder is adopted.
+ */
+export const workspaceRecoveryDirectory = (sourceDirectory, workspaceId, runId) => {
+  if (typeof sourceDirectory !== "string" || !path.isAbsolute(sourceDirectory)
+    || sourceDirectory.includes("\0") || !UUID_PATTERN.test(String(workspaceId || ""))
+    || (runId !== null && !UUID_PATTERN.test(String(runId || "")))) {
+    throw new Error("Invalid Workspace recovery identity.");
+  }
+  const source = path.resolve(sourceDirectory);
+  const identity = JSON.stringify(["trelio-workspace-recovery-v1",
+    process.platform === "win32" ? source.toLowerCase() : source,
+    workspaceId.toLowerCase(), runId?.toLowerCase() ?? null]);
+  return path.join(path.dirname(source), "r-" + createHash("sha256").update(identity).digest("base64url"));
+};
 
 export const WORKSPACE_DIRECTORY_REQUIRED = "TRELIO_WORKSPACE_DIRECTORY_REQUIRED";
 export const WORKSPACE_LOCAL_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED";

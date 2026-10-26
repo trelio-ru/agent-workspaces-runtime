@@ -524,6 +524,7 @@ publication tooling также остаются вне этого публичн
   retain original files and return reconciliation evidence in the same chat.
   SAME registry/metadata resolve later actions and heartbeat after restart;
   no model directory, blind retry, automatic transfer or material-outcome shortcut.
+  Recovery uses a constant-length shared sibling locator and a verified same-Run registry handoff; source files remain intact, unrelated copies remain ambiguous.
   The stdio host owns one lazy finish/heartbeat coordinator across fresh native
   proxies; every poll reauthorises before registry access. EOF stops its timers,
   not a writer or private state. Exercise real serial MCP frames, not one proxy.

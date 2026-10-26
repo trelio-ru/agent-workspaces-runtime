@@ -1146,7 +1146,8 @@ test('assistant reuses the shared local recovery and keeps heartbeat/status on i
   const raw=workspacePlan(),plan=await validateAssistantWorkspacePlan(raw),p=raw.localAction.parameters,scope=plan.scope;
   const identity={origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId};
   const base=path.join(assistantTaskStorageDirectory(config,{...identity,companyId:scope.companyId,taskId:scope.taskId}),'workspaces',p.workspaceId);
-  const recovered=`${base}-recovery-${p.runId.slice(0,8)}`,oldRun=randomUUID(),oldFile=path.join(base,'workspace','WORK.md');
+  const {workspaceRecoveryDirectory}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
+  const recovered=workspaceRecoveryDirectory(base,p.workspaceId,p.runId),oldRun=randomUUID(),oldFile=path.join(base,'workspace','WORK.md');
   const metadata=async(root,runId)=>{
     await native.ensurePrivateDirectory(path.join(root,'workspace'));
     await native.writePrivateJsonFile(path.join(root,'.trelio-run.json'),{schemaVersion:3,...identity,
@@ -1202,7 +1203,7 @@ test('assistant reuses the shared local recovery and keeps heartbeat/status on i
   }finally{restarted.stop();}
   // Registry entries from another identity are not inspected or adopted. A
   // second exact copy in this identity remains ambiguous, never newest-wins.
-  const duplicate=`${recovered}-recovery-${p.runId.slice(0,8)}`;
+  const duplicate=workspaceRecoveryDirectory(recovered,p.workspaceId,p.runId);
   await metadata(duplicate,p.runId);
   await native.writePrivateJsonFile(path.join(config,'runs.json'),{roots:[recovered,duplicate,'/synthetic/foreign/workspace']});
   await assert.rejects(resolveAssistantWorkspaceRoot(config,plan));

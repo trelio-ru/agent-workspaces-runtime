@@ -38,6 +38,7 @@ import {
   WorkspaceLayoutMigrationBlockedError,
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
+  workspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
 import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
@@ -11162,7 +11163,35 @@ const writeRunRegistry = async (roots) => {
 const registerRunRoot = async (rootDirectory) => {
   await withRunRegistryLock(async () => {
     const roots = await readRunRegistry();
-    await writeRunRegistry([...roots, path.resolve(rootDirectory)]);
+    const target = path.resolve(rootDirectory);
+    let retained = roots;
+    if (/^r-[A-Za-z0-9_-]{43}$/u.test(path.basename(target))) {
+      const current = await readOptionalRunMetadata(target);
+      if (!current) throw new Error("Recovery registration requires completed Run metadata.");
+      await assertValidMaterializedRoot(target, current, current.workspaceId, normalizeOrigin(current.origin));
+      retained = [];
+      for (const source of roots) {
+        // Inspect no unrelated metadata. Only the exact deterministic sibling
+        // from a successful ordinary open may supersede its original locator.
+        // Its files/metadata remain untouched and are still named in the local
+        // reconciliation evidence. Other copies stay ambiguous, never newest-wins.
+        const sameParent = sameLocalPath(path.dirname(source), path.dirname(target));
+        if (!sameParent || sameLocalPath(source, target)
+          || !sameLocalPath(workspaceRecoveryDirectory(source, current.workspaceId, current.runId), target)) {
+          retained.push(source); continue;
+        }
+        const previous = await readOptionalRunMetadata(source);
+        if (previous?.workspaceId !== current.workspaceId || previous?.runId !== current.runId) {
+          retained.push(source); continue;
+        }
+        await assertValidMaterializedRoot(source, previous, current.workspaceId, normalizeOrigin(current.origin));
+        if (!Number.isSafeInteger(current.fencingToken) || !Number.isSafeInteger(previous.fencingToken)
+          || current.fencingToken <= previous.fencingToken) {
+          throw new Error("Recovery registration has no newer native Run fence.");
+        }
+      }
+    }
+    await writeRunRegistry([...retained, target]);
   });
 };
 
@@ -12177,7 +12206,7 @@ const preflightWorkspaceDirectory = async ({
           sourceRunStatus: localRunState.status,
           sourceDirectory: rootDirectory,
           sourceWorkspaceDirectory: existingMetadata.workspaceDirectory,
-          suggestedDirectory: `${rootDirectory}-recovery-${String(requestedRunId || "new-run").slice(0, 8)}`,
+          suggestedDirectory: workspaceRecoveryDirectory(rootDirectory, workspaceId, requestedRunId),
           lastSavedDraftHead: existingMetadata.draftHead || null,
           changes: localStatus.split("\n"),
         });
@@ -12331,7 +12360,7 @@ const preflightWorkspaceDirectory = async ({
           sourceRunStatus: materializedRunState.status,
           sourceDirectory: legacyRoot,
           sourceWorkspaceDirectory: legacyMetadata.workspaceDirectory,
-          suggestedDirectory: `${rootDirectory}-recovery-${String(requestedRunId || "new-run").slice(0, 8)}`,
+          suggestedDirectory: workspaceRecoveryDirectory(rootDirectory, workspaceId, requestedRunId),
           lastSavedDraftHead: legacyMetadata.draftHead || null,
           changes: localChanges,
         });
@@ -12818,7 +12847,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
             runId,
             sourceDirectory: rootDirectory,
             sourceWorkspaceDirectory: workspaceDirectory,
-            suggestedDirectory: `${rootDirectory}-recovery-${runId.slice(0, 8)}`,
+            suggestedDirectory: workspaceRecoveryDirectory(rootDirectory, workspaceId, runId),
             baseHead: String(agentRun.baseHead),
           } : null,
         });

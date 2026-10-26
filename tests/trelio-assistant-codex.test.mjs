@@ -464,6 +464,9 @@ test('reviewed continuation uses a NEW stdin marker in the same chat, with recei
   assert.equal((await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},options)).state,'completed');
   assert.equal(starts,1);assert.ok(input.startsWith(assistantDeliveryMarker(deliveryId)+'\n'));
   assert.match(input,/ONE automatic recovery continuation/);assert.ok(input.includes(priorTurnId));assert.match(input,/Do not repeat the previous command/);
+  assert.match(input,/earlier error is not a current result/);
+  assert.match(input,/ordinary status without that handle and an exact native Run read/);
+  assert.match(input,/technical reopening needs no new owner approval/);
   assert.match(input,/Decide what remains to be done and continue the task/);
   await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},
     {...options,continuationReview:{priorTurnId,reviewId:randomUUID()},readDelivery:()=>assert.fail('invalid review reached I/O')}),/INVALID_INPUT/);

@@ -12,6 +12,7 @@ import {
   formatBridgeCommandError,
   resolveRegisteredWorkspaceRootDirectory,
   resolveWorkspaceBridgeConfigDirectory,
+  runGit as runBridgeGit,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import {
   WorkspaceActiveRunRequiredError,
@@ -32,6 +33,7 @@ import {
   parseWorkspaceLayoutMigrationBlockedError,
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
+  workspaceRecoveryDirectory,
 } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   TRELIO_WORKSPACE_ACTION_TOOL,
@@ -40,6 +42,45 @@ import {
 } from "../host-runtime/scripts/trelio-local-context.mjs";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
+
+test("repeated recovery keeps a full identity digest and does not accumulate Windows path suffixes", () => {
+  const runId = "22222222-2222-4222-8222-222222222222";
+  const parent = path.resolve(os.tmpdir(), "owned-task", "workspaces");
+  const legacy = path.join(parent, workspaceId + "-recovery-22222222-recovery-22222222");
+  const first = workspaceRecoveryDirectory(legacy, workspaceId, runId);
+  const second = workspaceRecoveryDirectory(first, workspaceId, runId);
+  assert.equal(path.dirname(first), parent);
+  assert.equal(path.dirname(second), parent);
+  assert.equal(path.basename(first).length, 45);
+  assert.equal(path.basename(second).length, 45);
+  assert.notEqual(first, second, "a source already opened for recovery is a different immutable source");
+  assert.equal(workspaceRecoveryDirectory(legacy, workspaceId, runId), first);
+  assert.notEqual(workspaceRecoveryDirectory(legacy, runId, runId), first);
+  assert.notEqual(workspaceRecoveryDirectory(legacy, workspaceId, workspaceId), first);
+  assert.throws(() => workspaceRecoveryDirectory("relative", workspaceId, runId));
+  assert.throws(() => workspaceRecoveryDirectory(legacy, "unknown", runId));
+});
+
+test("compact recovery permits real Git metadata reads beside a long retained source", async t => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-recovery-path-"));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  // The old nested Windows checkout was 236 characters before .git's own
+  // metadata suffix. Do not depend on that Git version emitting a warning:
+  // prove the replacement actually works while retaining the original bytes.
+  const source = path.join(parent, "s".repeat(Math.max(1, 226 - parent.length - 1)));
+  await fs.mkdir(source);await fs.writeFile(path.join(source, "retained.md"), "retained synthetic source\n");
+  const recovery = workspaceRecoveryDirectory(source, workspaceId, "22222222-2222-4222-8222-222222222222");
+  const checkout = path.join(recovery, "workspace");await fs.mkdir(checkout, { recursive: true });
+  await runBridgeGit(["init", "--initial-branch=main"], { cwd: checkout });
+  await runBridgeGit(["config", "user.name", "Synthetic"], { cwd: checkout });
+  await runBridgeGit(["config", "user.email", "test@trelio.invalid"], { cwd: checkout });
+  await fs.writeFile(path.join(checkout, "result.md"), "synthetic replacement\n");
+  await runBridgeGit(["add", "result.md"], { cwd: checkout });
+  await runBridgeGit(["-c", "commit.gpgsign=false", "commit", "-m", "Synthetic recovery"], { cwd: checkout });
+  const head = (await runBridgeGit(["rev-parse", "HEAD"], { cwd: checkout })).stdout.trim();
+  assert.equal((await runBridgeGit(["cat-file", "-e", head + "^{commit}"], { cwd: checkout })).stderr, "");
+  assert.equal(await fs.readFile(path.join(source, "retained.md"), "utf8"), "retained synthetic source\n");
+});
 const firstRun = "22222222-2222-4222-8222-222222222222";
 const secondRun = "33333333-3333-4333-8333-333333333333";
 const newRun = "44444444-4444-4444-8444-444444444444";
