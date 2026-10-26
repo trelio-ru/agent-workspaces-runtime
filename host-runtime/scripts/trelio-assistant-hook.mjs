@@ -239,6 +239,9 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const current=await readIdentity();
       if(typeof enabled!=='boolean'||!current||['origin','assistantId','deviceId'].some(k=>current[k]!==expectedIdentity[k]))
         fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      // A business task cannot grant itself this machine-wide setup policy.
+      // Disabling remains safe immediately; granting waits for the idle host.
+      if(enabled&&await this.readActivePass()!==null)fail('ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');
       await ops.writePrivateJsonFile(pluginPolicyFile,{schemaVersion:1,assistantId:current.assistantId,deviceId:current.deviceId,autoUpdatePlugin:enabled});
       if(await this.readPluginUpdatesEnabled()!==enabled)fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
     },

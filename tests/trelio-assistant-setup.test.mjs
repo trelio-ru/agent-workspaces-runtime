@@ -1876,6 +1876,9 @@ test('old devices remain opted out and an explicit policy remains bound to the c
   await host.setPluginUpdatesEnabled(true,identity);assert.equal(await host.readPluginUpdatesEnabled(),true);
   await assert.rejects(host.setPluginUpdatesEnabled(true,{...identity,deviceId:randomUUID()}),/REBIND_REQUIRED/);
   await host.setPluginUpdatesEnabled(false,identity);assert.equal(await host.readPluginUpdatesEnabled(),false);
+  host.readActivePass=async()=>({kind:'task'});
+  await assert.rejects(host.setPluginUpdatesEnabled(true,identity),{code:'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'});
+  assert.equal(await host.readPluginUpdatesEnabled(),false);
 });
 
 
