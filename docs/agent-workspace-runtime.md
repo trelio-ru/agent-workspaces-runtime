@@ -609,6 +609,20 @@ id-only top-document grants сохраняют прежний ABI. Без `frame
 `nested_document_unbound` и направляет к новому exact плану до запроса секрета.
 Обычный bounded readiness grace основной формы и закрытые причины отказов сохранены.
 
+macOS discovery обходит native shell до границ HTTP(S) WebArea и не читает их
+потомков до выбора exact target. Non-HTTP Electron shell остаётся проходимым
+для вложенной browser view. Application/main/focused roots обходятся вместе:
+CF object identity устраняет повторные aliases/циклы, но разные документы с
+одним URL сохраняют ambiguity. Один прежний бюджет 12 000 уникальных узлов /
+12 секунд по monotonic clock включает обход и проверку metadata, без reset на
+каждом alias. Controls и explicit frame hops сохраняют отдельный bounded обход.
+При исчерпании helper возвращает прежний `reasonCode=timeout` и optional closed
+`diagnostic={stage,limit}`: stage только `document_discovery|frame_discovery|
+field_resolution|activation_resolution`, limit только `node_count|deadline`.
+JS повторно проверяет обе enum и exact shape; raw native text, app/DOM identity,
+URLs и values не входят в диагностику, backend audit ABI не меняется.
+Такой timeout не разрешает fallback, consume, увеличение лимита или повтор fill.
+
 Только план с этим явным password locator расширяет discovery native клиента
 на работающий Google Chrome: macOS проверяет bundle `com.google.Chrome` и
 Apple team `EQHXZ8M8AV`, Windows – Authenticode `Google LLC` и product

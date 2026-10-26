@@ -263,6 +263,8 @@ publication tooling также остаются вне этого публичн
   Вложенная форма требует explicit same-origin URL/hash path; native имена
   полей допустимы только с unique/object binding, без AX/UIA value reads.
   Старый host отказывается до checkout; такой план не меняет native surface.
+  Discovery останавливается на HTTP(S) WebArea; общие native roots разделяют
+  прежний bounded budget. Закрытые stage/limit не разрешают fill retry.
   Native UIA fixture reports fixed startup stages only; its window timeout is
   not permission to relax production admission, deadlines or Windows assertions.
 - Hook/bridge/MCP используют общий recovery exact stable loader по

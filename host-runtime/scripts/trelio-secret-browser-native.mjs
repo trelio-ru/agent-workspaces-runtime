@@ -27,6 +27,22 @@ const NATIVE_UNAVAILABLE = new Set([
 const NATIVE_PREFLIGHT_CHROME_RETRY = new Set(["target_url_changed", "field_not_found"]);
 const NATIVE_PREFLIGHT_ATTEMPTS = 3;
 
+const NATIVE_TRAVERSAL_STAGES = new Set(["document_discovery", "frame_discovery", "field_resolution", "activation_resolution"]);
+const NATIVE_TRAVERSAL_LIMITS = new Set(["node_count", "deadline"]);
+// Native diagnostics are an optional closed pair, never exception text, an AX
+// attribute, a URL or an app identifier. Keep the backend outcome ABI as timeout
+// and reject malformed detail before it can become a model-visible message.
+const nativeTraversalDiagnostic = (reply) => {
+  if (reply?.diagnostic === undefined) return null;
+  const diagnostic = reply.diagnostic;
+  if (reply.status !== "failed" || reply.reasonCode !== "timeout" || !diagnostic || Array.isArray(diagnostic)
+    || typeof diagnostic !== "object" || Object.keys(diagnostic).sort().join(",") !== "limit,stage"
+    || !NATIVE_TRAVERSAL_STAGES.has(diagnostic.stage) || !NATIVE_TRAVERSAL_LIMITS.has(diagnostic.limit)) {
+    throw new SecretBrowserFillError("Некорректная закрытая диагностика native обхода.");
+  }
+  return diagnostic;
+};
+
 export class EmbeddedBrowserUnavailable extends SecretBrowserFillError {
   constructor(nativeReason, { canRetrySameTab = false } = {}) {
     const reason = NATIVE_UNAVAILABLE.has(nativeReason) ? nativeReason : "helper_unavailable";
@@ -314,8 +330,10 @@ export const openNativeSecretBrowserChannel = ({ executable, platform = process.
     if (!pending || buffer.length) return fail();
     let reply;
     try { reply = JSON.parse(line); } catch { return fail(); }
-    // The child must only emit a fixed status/reason, never DOM, URL or values.
-    if (!reply || Object.keys(reply).some((key) => !["status", "reasonCode"].includes(key))) return fail();
+    // Only fixed status/reason and an optional closed traversal diagnostic.
+    // No arbitrary child detail is reflected into a tool error or audit event.
+    if (!reply || Object.keys(reply).some((key) => !["status", "reasonCode", "diagnostic"].includes(key))) return fail();
+    try { nativeTraversalDiagnostic(reply); } catch { return fail(); }
     const { resolve, timer } = pending;
     pending = null;
     clearTimeout(timer);
@@ -439,6 +457,7 @@ export const prepareSecretBrowserSession = async ({
       channel = null;
       await new Promise((resolve) => setTimeout(resolve, (treeUnavailable ? 500 : 200) * (attempt + 1)));
     }
+    const traversalDiagnostic = nativeTraversalDiagnostic(ready);
     if (ready.status === "unavailable" && NATIVE_UNAVAILABLE.has(ready.reasonCode)) {
       throw new EmbeddedBrowserUnavailable(ready.reasonCode, {
         canRetrySameTab: !steps.some((step) => step.activationId),
@@ -479,7 +498,9 @@ export const prepareSecretBrowserSession = async ({
       // silently move the credential to a different Chrome profile.
       const message = ready.reasonCode === "submit_press_unavailable"
         ? "Кнопка submit не поддерживает AXPress. Для финального шага подготовьте новый field-only grant без submitSelector и после успешной подстановки нажмите ранее определённую кнопку в той же embedded-вкладке без чтения заполненных полей."
-        : "Проверка встроенной вкладки отклонена.";
+        : traversalDiagnostic
+          ? `Native обход остановлен: stage=${traversalDiagnostic.stage}; limit=${traversalDiagnostic.limit}. Секрет не запрошен этой попыткой для подстановки. Увеличение лимитов и повтор выдачи значения не разрешены этим отказом.`
+          : "Проверка встроенной вкладки отклонена.";
       throw new SecretBrowserFillError(message, ready.reasonCode);
     }
     let used = false;

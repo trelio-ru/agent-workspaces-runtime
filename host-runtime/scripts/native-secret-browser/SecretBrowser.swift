@@ -33,7 +33,13 @@ final class NativeLease {
 enum Stop: Error {
     case failed(String)
     case unavailable(String)
+    case bounded(WalkDiagnostic)
 }
+// Only these closed structural dimensions may leave the native process. They
+// contain no app/page identity, DOM attributes, URLs, paths or field values.
+enum WalkStage: String { case documentDiscovery = "document_discovery", frameDiscovery = "frame_discovery", fieldResolution = "field_resolution", activationResolution = "activation_resolution" }
+enum WalkLimit: String { case nodeCount = "node_count", deadline }
+struct WalkDiagnostic { let stage: WalkStage; let limit: WalkLimit }
 struct Field: Decodable { let fieldKey: String; let id: String?; let passwordInput: Bool?; var accessibleName: String? = nil }
 struct FrameTarget: Decodable { let targetOrigin: String; let targetUrlSha256: String }
 struct Step: Decodable {
@@ -50,9 +56,12 @@ struct Request: Decodable {
     let steps: [Step]?
     let values: [String: String]?
 }
-func reply(_ status: String, _ reason: String? = nil) {
-    var object = ["status": status]
+func reply(_ status: String, _ reason: String? = nil, _ diagnostic: WalkDiagnostic? = nil) {
+    var object: [String: Any] = ["status": status]
     if let reason = reason { object["reasonCode"] = reason }
+    if let diagnostic = diagnostic {
+        object["diagnostic"] = ["stage": diagnostic.stage.rawValue, "limit": diagnostic.limit.rawValue]
+    }
     if let data = try? JSONSerialization.data(withJSONObject: object) {
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data([10]))
@@ -138,21 +147,59 @@ func matchesField(_ element: AXUIElement, _ field: Field) -> Bool {
     return field.id != nil && text(element, "AXDOMIdentifier") == field.id
 }
 
-// Bounded traversal ignores nested WebAreas when resolving fields. An iframe
-// may expose an identical DOM id but is never part of the grant's top document.
-func walk(_ root: AXUIElement, stopAtWebArea: Bool = false) throws -> [AXUIElement] {
-    var queue = [root]
+// Keep the original 12,000 unique-node / 12-second allowance. Monotonic time
+// also bounds metadata filtering after the walk; wall-clock changes and another
+// root alias must not restart a discovery budget. This internal type has no
+// Request/JSON representation and provides no caller-controlled budget override.
+struct WalkBudget {
+    let stage: WalkStage
+    let deadline: TimeInterval
+    init(stage: WalkStage, deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + 12) {
+        self.stage = stage; self.deadline = deadline
+    }
+    func check(_ queued: Int) throws {
+        if queued > 12000 { throw Stop.bounded(WalkDiagnostic(stage: stage, limit: .nodeCount)) }
+        if ProcessInfo.processInfo.systemUptime > deadline { throw Stop.bounded(WalkDiagnostic(stage: stage, limit: .deadline)) }
+    }
+}
+func walk(_ root: AXUIElement, stopAtWebArea: Bool = false, stage: WalkStage = .fieldResolution) throws -> [AXUIElement] {
+    return try walkRoots([root], stopAtWebArea: stopAtWebArea, budget: WalkBudget(stage: stage))
+}
+func walkRoots(_ roots: [AXUIElement], stopAtWebArea: Bool = false, budget: WalkBudget) throws -> [AXUIElement] {
+    var queue: [AXUIElement] = []
     var result: [AXUIElement] = []
     var index = 0
-    let deadline = Date().addingTimeInterval(12)
+    var callbacks = kCFTypeSetCallBacks
+    guard let seen = CFSetCreateMutable(kCFAllocatorDefault, 0, &callbacks) else { throw Stop.failed("adapter_error") }
+    func enqueue(_ element: AXUIElement) throws {
+        let pointer = Unmanaged.passUnretained(element).toOpaque()
+        if CFSetContainsValue(seen, pointer) { return }
+        try budget.check(queue.count + 1)
+        CFSetAddValue(seen, pointer)
+        queue.append(element)
+    }
+    for root in roots { try enqueue(root) }
     while index < queue.count {
-        if queue.count > 12000 || Date() > deadline { throw Stop.failed("timeout") }
+        try budget.check(queue.count)
         let current = queue[index]
         index += 1
-        result.append(current)
-        if stopAtWebArea && !CFEqual(root, current) && text(current, kAXRoleAttribute) == "AXWebArea" { continue }
-        queue.append(contentsOf: children(current))
+        if budget.stage == .documentDiscovery {
+            // A web document is a discovery result, never a subtree to search
+            // for another tab. In particular, unrelated Chrome/Codex content
+            // must not exhaust the allowance before the target URL is chosen.
+            // Keep traversing non-HTTP shell WebAreas: an embedded browser can
+            // live beneath a native/custom-URL Electron shell.
+            if let url = documentURL(current) {
+                result.append(current)
+                if url.hasPrefix("https://") || url.hasPrefix("http://") { continue }
+            }
+        } else {
+            result.append(current)
+            if stopAtWebArea && !CFEqual(roots[0], current) && text(current, kAXRoleAttribute) == "AXWebArea" { continue }
+        }
+        for child in children(current) { try enqueue(child) }
     }
+    try budget.check(queue.count)
     return result
 }
 
@@ -177,20 +224,27 @@ final class Session {
         return SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code) == errSecSuccess
             && code != nil && SecCodeCheckValidity(code!, SecCSFlags(), requirement) == errSecSuccess
     }
-    static func documents(_ root: AXUIElement) throws -> [AXUIElement] {
-        return try walk(root).filter { candidate in
+    static func documents(_ root: AXUIElement) throws -> [AXUIElement] { return try documentCandidates([root]) }
+    static func documentCandidates(_ roots: [AXUIElement]) throws -> [AXUIElement] {
+        let budget = WalkBudget(stage: .documentDiscovery)
+        let nodes = try walkRoots(roots, budget: budget)
+        let found = try nodes.filter { candidate in
+            try budget.check(nodes.count)
             guard documentURL(candidate) != nil, rectangle(candidate) != nil,
                   (attribute(candidate, "AXHidden") as? Bool) != true else { return false }
             // A top-level embedded view can be nested under the Electron shell,
             // but a web document nested in another HTTPS document is an iframe.
             var cursor = elementAttribute(candidate, kAXParentAttribute)
             for _ in 0..<128 {
+                try budget.check(nodes.count)
                 guard let parent = cursor else { return true }
                 if let url = documentURL(parent), url.hasPrefix("https://") || url.hasPrefix("http://") { return false }
                 cursor = elementAttribute(parent, kAXParentAttribute)
             }
             return false
         }
+        try budget.check(nodes.count)
+        return found
     }
     static func applicationDocuments(_ application: AXUIElement) throws -> [AXUIElement] {
         // An inactive Electron client may leave its application-level
@@ -206,13 +260,10 @@ final class Session {
                 roots.append(window)
             }
         }
-        var found: [AXUIElement] = []
-        for root in roots {
-            for document in try documents(root) where !found.contains(where: { CFEqual($0, document) }) {
-                found.append(document)
-            }
-        }
-        return found
+        // Application/main/focused roots commonly overlap. Traverse them once
+        // under one budget and deduplicate by native identity, never by URL:
+        // two independent tabs at the same URL must remain ambiguous.
+        return try documentCandidates(roots)
     }
     static func boundDocument(_ root: AXUIElement, _ step: Step) throws -> (AXUIElement, [AXUIElement]) {
         var current = root
@@ -223,7 +274,7 @@ final class Session {
             // walk stops at immediate WebArea boundaries. Do not search another
             // frame for a matching field or treat a same-origin URL as consent
             // to a different path. Every explicitly requested hop is unique.
-            let candidates = try walk(current, stopAtWebArea: true).filter {
+            let candidates = try walk(current, stopAtWebArea: true, stage: .frameDiscovery).filter {
                 !CFEqual($0, current) && text($0, kAXRoleAttribute) == "AXWebArea"
             }
             let exact = candidates.filter { matches(documentURL($0), target) }
@@ -307,7 +358,7 @@ final class Session {
         while Date() < deadline {
             do {
                 if !activated, let activationId = step.activationId {
-                    let nodes = try walk(document, stopAtWebArea: true)
+                    let nodes = try walk(document, stopAtWebArea: true, stage: .activationResolution)
                     let matches = nodes.filter {
                         text($0, "AXDOMIdentifier") == activationId && belongs($0, to: document)
                     }
@@ -500,6 +551,7 @@ while let line = readLine(strippingNewline: true) {
             break
         } else { throw Stop.failed("adapter_error") }
     } catch Stop.unavailable(let reason) { reply("unavailable", reason); break }
+      catch Stop.bounded(let diagnostic) { reply("failed", "timeout", diagnostic); break }
       catch Stop.failed(let reason) { reply("failed", reason); break }
       catch { reply("failed", "adapter_error"); break }
 }
