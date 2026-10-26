@@ -840,12 +840,15 @@ test('stdio retains the same finish registry across fresh per-call native proxie
   await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
   await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
   const plan=workspacePlan(),runIdentity={workspaceId:plan.localAction.parameters.workspaceId,runId:plan.localAction.parameters.runId};
-  let settle,launches=0,factories=0,proxies=0,requests=0,stops=0,deny=false;
+  let settle,launches=0,statusReads=0,factories=0,proxies=0,requests=0,stops=0,deny=false;
   const finished=new Promise(resolve=>{settle=resolve;});
   const createWorkspace=async()=>{
     factories++;
     const executor=await createAssistantWorkspaceExecutor({configDirectory:root,finishOptions:{waitMs:2},
-      runPlan:async raw=>{assert.equal(raw.localAction.operation,'finish');launches++;await finished;
+      runPlan:async raw=>{if(raw.localAction.operation==='status'){
+          statusReads++;assert.deepEqual(raw.localAction.parameters,{});
+          return {schemaVersion:1,operation:'status',stdout:'synthetic exact local status'};
+        }assert.equal(raw.localAction.operation,'finish');launches++;await finished;
         return {schemaVersion:1,operation:'finish',stdout:'synthetic accepted receipt'};}});
     const stop=executor.stop;executor.stop=()=>{stops++;stop();};return executor;
   };
@@ -882,6 +885,25 @@ test('stdio retains the same finish registry across fresh per-call native proxie
   assert.equal(requests,3,'poll repeats the native authorisation boundary');
   assert.equal(proxies,3,'the private/native proxy is not retained');
   assert.equal(factories,1,'the host-lifetime finish registry is retained');
+  const unknown=await send(5,'tools/call',{name:'continue_assistant_workspace_action',arguments:{
+    schemaVersion:1,operation:'status',runIdentity,parameters:{finishOperationId:randomUUID()}}});
+  assert.equal(unknown.result.isError,true);
+  const recovery=unknown.result.structuredContent.recovery;
+  assert.equal(unknown.result.structuredContent.code,'TRELIO_WORKSPACE_FINISH_UNKNOWN');
+  assert.equal(recovery.readOnly,true);assert.equal(statusReads,0,'unknown handle only prepares a fresh read');
+  assert.deepEqual(recovery.nextCall,{tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,
+    operation:'status',parameters:{},runIdentity}});
+  assert.match(unknown.result.content[0].text,/Do not poll it again/);
+  assert.doesNotMatch(JSON.stringify(recovery),/passId|runtimeSessionProof|finishOperationId|workingDirectory/);
+  deny=true;
+  const deniedRecovery=await send(6,'tools/call',{name:recovery.nextCall.tool,arguments:recovery.nextCall.arguments});
+  assert.equal(deniedRecovery.result.structuredContent.code,'ASSISTANT_ACCESS_DENIED');
+  assert.equal(deniedRecovery.result.structuredContent.recovery,undefined);assert.equal(statusReads,0);
+  deny=false;
+  const observed=await send(7,'tools/call',{name:recovery.nextCall.tool,arguments:recovery.nextCall.arguments});
+  assert.equal(observed.result.structuredContent.operation,'status');assert.equal(statusReads,1);
+  assert.equal(launches,1,'neither the hint nor the actual read repeats finish');
+  assert.equal(requests,6,'the suggested read has its own fresh native authorisation');
   input.end();await done;assert.equal(stops,1,'EOF stops only this host heartbeat manager');
 });
 

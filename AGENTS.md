@@ -529,6 +529,8 @@ publication tooling также остаются вне этого публичн
   not a writer or private state. Exercise real serial MCP frames, not one proxy.
   Native pre-handler 429/REQUEST_RATE_LIMITED has a closed distinct transport
   result; it never authorises request replay, pass release or auth replacement.
+  Lost finish handles return only a fresh native-authorised read nextCall, never
+  a finish retry, cached receipt, owner approval or implicit claim.
   Draft/blocker continuity has no task outcome; only handoff/finish supplies
   no_status_change to the SAME handoff validator. Test the real shared command boundary.
   Preserve validated encrypted inspection/lifecycle descriptors across the real

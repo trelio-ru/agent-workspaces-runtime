@@ -1863,6 +1863,12 @@ pause stop renewal. The poll route names the dedicated continuation tool.
 A facade restart loses its in-memory operation handle, so native exact status,
 accepted-head/clean-tree and shared recovery guards must establish the outcome
 before a new finish. Files/accepted receipts are not replaced with process exit.
+An authorised unknown-handle poll returns a bounded ordinary read-only status
+nextCall without the old handle. It starts no reader/writer itself; executing
+that nextCall repeats native admission. The closed error guidance requires the
+exact server Run read and, for own expiry, exact prepare/open before writes.
+It never requests a technical owner approval, infers a live writer/acceptance,
+returns another pass's receipt or authorises replaying an uncertain effect.
 
 Protected local AGENTS keeps common security/dirty-state/pinned-rule invariants
 and specializes human-only proposal/bootstrap clauses for the trusted assistant

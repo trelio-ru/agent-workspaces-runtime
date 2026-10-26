@@ -456,7 +456,24 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
       if(['secret_list','secret_browser_prepare','secret_create','skill_consent','skill_account_setup','external_account_admit'].includes(args?.operation))return result;
       let executed;
       try {executed=await workspace.execute(result.structuredContent,{signal});}
-      catch(error) {await reportAssistantMaintenanceFailure(error).catch(()=>undefined);throw error;}
+      catch(error) {
+        await reportAssistantMaintenanceFailure(error).catch(()=>undefined);
+        if(error?.code==='TRELIO_WORKSPACE_FINISH_UNKNOWN'){
+          // The native request has already authorised this exact status plan.
+          // A facade restart loses only its in-memory handle: polling it again
+          // can never recover the writer's outcome. Return the existing READ
+          // action without that handle, not a finish/claim, cached receipt or
+          // permission to replay. The next call obtains a fresh native proof.
+          const plan=await validateAssistantWorkspacePlan(result.structuredContent);
+          if(plan.localAction.operation==='status' && plan.localAction.parameters.finishOperationId){
+            const nextCall={tool:'continue_assistant_workspace_action',arguments:{schemaVersion:1,
+              operation:'status',parameters:{},runIdentity:plan.runIdentity}};
+            return {isError:true,content:[{type:'text',text:'The local finish handle is no longer retained. Do not poll it again or infer acceptance/a running writer. Execute the returned ordinary read-only status, then read the exact server Run. For an expired own Run, prepare that runId and execute its returned open before further writes. Preserve files; never resubmit an accepted Run or blindly repeat finish. Technical inspection/recovery does not need a new owner decision or approve sensitive actions.'}],
+              structuredContent:{code:'TRELIO_WORKSPACE_FINISH_UNKNOWN',recovery:{readOnly:true,nextCall}}};
+          }
+        }
+        throw error;
+      }
       if(executed?.operation==='skill_run' && executed.visual){
         const {visualMcpResult}=await import('./trelio-visual-result.mjs');
         return visualMcpResult(executed.visual);
