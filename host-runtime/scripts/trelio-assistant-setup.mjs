@@ -745,7 +745,7 @@ export const runAssistantWindowsDesktop = async (operation, generation=null, {en
 export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,
   guard=async()=>{}}) => {
   let state=await readState();
-  let startedThisTick=false;
+  let startedThisTick=false,optionalDiscovery=false;
   const save=async patch=>{await guard();const next={...state,...patch};await writeState(state,next);state=next;};
   const recover=async()=>{
     await guard();
@@ -770,15 +770,18 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     if(state.stage==='ready' && current.version!==state.targetVersion)
       await save({previousVersion:state.targetVersion,previousTreeSha256:state.targetTreeSha256,
         targetVersion:current.version,targetTreeSha256:current.treeSha256,stage:'installed',desktopGeneration:null,restarts:0,failures:0});
-    if(['ready','hook_review'].includes(state.stage)){
-      const awaitingHooks=state.stage==='hook_review';
+    if(['ready','hook_review','failed'].includes(state.stage)){
+      const awaitingActivation=state.stage!=='ready';
       if(current.treeSha256!==state.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      optionalDiscovery=state.stage==='ready';
       const result=await upgrade(state.failedVersion??current.version,async targetVersion=>{
-        await guard();await save({previousVersion:awaitingHooks?state.previousVersion:current.version,
-          previousTreeSha256:awaitingHooks?state.previousTreeSha256:current.treeSha256,
+        optionalDiscovery=false;
+        await guard();await save({previousVersion:awaitingActivation?state.previousVersion:current.version,
+          previousTreeSha256:awaitingActivation?state.previousTreeSha256:current.treeSha256,
           targetVersion,targetTreeSha256:null,stage:'installing',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
       });
-      if(result.unchanged&&!awaitingHooks)return {state:'current',version:current.version,...(state.failedVersion?{failedVersion:state.failedVersion}:{})};
+      optionalDiscovery=false;
+      if(result.unchanged&&!awaitingActivation)return {state:'current',version:current.version,...(state.failedVersion?{failedVersion:state.failedVersion}:{})};
       if(!result.unchanged)current=await inventory();
     }
     if(state.stage==='installing'){
@@ -842,12 +845,16 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     // A changed identity/pass or an aborted lease cannot authorize repair of
     // another device. Native permission/unknown I/O is never an idle snapshot.
     await guard();
-    if(state.stage==='hook_review')throw error;
+    // Before the durable install intent, only marketplace discovery happened.
+    // The exact verified current plugin remains usable during a Git/network
+    // outage. Checking for a compatible optional update must not stop work.
+    if(state.stage==='ready'&&optionalDiscovery)return {state:'current',version:current.version,updateDeferred:true};
+    if(['hook_review','failed'].includes(state.stage))throw error;
     if(state.failures<2){await save({failures:state.failures+1});return {state:'retrying',blockBusiness:true};}
     if(typeof rollback==='function' && state.previousVersion!==state.targetVersion){
       await save({stage:'rolling_back',failedVersion:state.targetVersion,failures:3});
       await recover();return {state:'retrying',blockBusiness:true};
     }
-    await save({stage:'failed',failures:3});throw error;
+    await save({stage:'failed',failures:3,failedVersion:state.failedVersion??state.targetVersion});throw error;
   }
 };

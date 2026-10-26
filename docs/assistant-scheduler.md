@@ -1516,6 +1516,11 @@ An absent/disabled plugin is not installed/enabled. There is no experimental
 `plugin/install` RPC, cache-version scan, copied executor, raw config edit or
 alternate credential route. The release channel/source cannot come from a task.
 
+An optional marketplace discovery outage before any install intent retains the
+verified current plugin and does not block business work. A failed activation
+stays blocked for that exact version; a newer release can replace it while
+preserving the last verified rollback basis.
+
 A separate private structural journal records the previous verified tree,
 exact intended version and install/close/start/verify phases before side
 effects. Lost install replies reconcile the exact native inventory rather than

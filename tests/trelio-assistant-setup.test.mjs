@@ -1711,6 +1711,38 @@ test('asynchronous Windows activation is observed on a later tick without a seco
   assert.equal(launches,1);assert.equal(f.counts().installs,1);
 });
 
+test('an optional marketplace outage leaves the verified current plugin usable before any install intent',async()=>{
+  const f=pluginUpdateFixture();f.options.upgrade=async()=>{throw Error('synthetic network outage before install');};
+  for(let i=0;i<4;i++)assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'current',version:'0.1.3',updateDeferred:true});
+  assert.equal(f.state().stage,'ready');assert.equal(f.state().failures,0);assert.equal(f.counts().installs,0);
+  assert.deepEqual(f.effects,[]);
+});
+
+test('a failed activation stays blocked for the same version but a newer release can recover without replacing the rollback basis',async()=>{
+  const f=pluginUpdateFixture(),desktop=f.options.desktop;
+  f.options.desktop=async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE'});};
+  // No rollback implementation: retain the failed original candidate. Nothing
+  // silently treats that failed native installation as a verified ready one.
+  for(let i=0;i<2;i++)assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');
+  await assert.rejects(maintainAssistantPlugin(f.options),{code:'ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE'});
+  assert.equal(f.state().stage,'failed');assert.equal(f.state().failedVersion,'0.1.4');
+  f.options.desktop=desktop;
+  await assert.rejects(maintainAssistantPlugin(f.options),{code:'ASSISTANT_PLUGIN_UPDATE_FAILED'});
+  assert.equal(f.counts().installs,1);
+  Object.assign(f.current(),{desiredVersion:'0.1.5'});
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.5'});
+  assert.equal(f.state().previousVersion,'0.1.3');assert.equal(f.state().previousTreeSha256,'a'.repeat(64));
+  assert.equal(f.counts().installs,2);
+});
+
+test('an installed-tree mismatch is never treated as an optional marketplace outage',async()=>{
+  const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'current');
+  Object.assign(f.current(),{treeSha256:'b'.repeat(64)});
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'retrying',blockBusiness:true});
+  assert.equal(f.counts().installs,0);assert.deepEqual(f.effects,[]);
+});
+
 test('lost install reply reconciles the exact installed version after restart, with zero native installation replay',async()=>{
   const f=pluginUpdateFixture(),upgrade=f.options.upgrade;
   f.options.upgrade=async(...args)=>{await upgrade(...args);throw Error('synthetic lost install acknowledgement');};
