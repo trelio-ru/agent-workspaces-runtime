@@ -265,6 +265,10 @@ jobs:
       - name: Install pinned report dependencies
         run: npm run worktree:bootstrap
 
+      - name: Install pinned native Harness qualification fixture
+        if: needs.ci-plan.outputs.profile == 'full'
+        run: npm ci --prefix tests/fixtures/deepseek-native --ignore-scripts --no-audit --no-fund
+
       - name: Verify local dependency tree
         run: npm run check:dependencies
 
@@ -326,6 +330,7 @@ jobs:
           node tests/trelio-python.test.mjs
           node tests/trelio-mcp-results.test.mjs
           node tests/trelio-remote-mcp-oauth.test.mjs
+          node tests/trelio-deepseek-native.test.mjs
           node tests/trelio-agent-diagnostics.test.mjs
           node tests/trelio-antigravity.test.mjs
           node tests/trelio-plugin-preservation.test.mjs
@@ -341,6 +346,7 @@ jobs:
           node tests/trelio-runtime-proof-preparation.test.mjs
           node tests/trelio-instruction-reuse.test.mjs
           node tests/trelio-local-continuation.test.mjs
+          node tests/trelio-deepseek-install.test.mjs
           node tests/trelio-secret-browser-native.test.mjs
           node tests/trelio-secret-chat.test.mjs
           node tests/trelio-secret-generate.test.mjs
@@ -593,6 +599,13 @@ jobs:
 
       - name: Run Windows MCP entrypoint trace regressions
         run: node tests/trelio-host-runtime-entry.test.mjs
+
+      - name: Qualify native Harness on Windows
+        if: needs.ci-plan.outputs.profile == 'full'
+        run: |
+          npm ci --prefix tests/fixtures/deepseek-native --ignore-scripts --no-audit --no-fund
+          node tests/trelio-deepseek-native.test.mjs
+          node tests/trelio-deepseek-install.test.mjs
 
       - name: Run Windows Remote MCP OAuth storage regressions
         if: needs.ci-plan.outputs.profile == 'full'

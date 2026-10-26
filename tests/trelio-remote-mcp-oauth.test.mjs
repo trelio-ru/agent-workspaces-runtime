@@ -294,3 +294,39 @@ test('same OAuth vault isolates human and managed devices even for identical pro
   assert.equal((await human.read('https://trelio.ru',declaration)).clientId,session.clientId);
   assert.equal(items.size,1);
 });
+
+
+test("native OAuth uses the same S256 loopback with resource binding and explicit token lifetime", async () => {
+  let authorization;
+  const session = await connectRemoteMcpOAuth(callbackConfig, {
+    clientName: "Trelio native synthetic", resource: "https://trelio.ru/mcp", maximumLifetimeSeconds: 365 * 86400,
+    httpJson: createOAuthTransport(request => {
+      const body = new URLSearchParams(request.body);
+      assert.equal(body.get("resource"), "https://trelio.ru/mcp");
+      assert.equal(createHash("sha256").update(body.get("code_verifier")).digest("base64url"), authorization.searchParams.get("code_challenge"));
+      return { statusCode: 200, body: { token_type: "Bearer", access_token: "synthetic-native", expires_in: 365 * 86400 } };
+    }),
+    openBrowserFn: async url => {
+      authorization = new URL(url); assert.equal(authorization.searchParams.get("resource"), "https://trelio.ru/mcp");
+      const callback = new URL(authorization.searchParams.get("redirect_uri"));
+      callback.searchParams.set("state", authorization.searchParams.get("state")); callback.searchParams.set("code", "synthetic-code");
+      callback.searchParams.set("iss", issuer); assert.equal(await requestCallback(callback), 200);
+    },
+  });
+  assert.ok(session.expiresAt > Date.now() + 300 * 86400000);
+});
+
+test("native OAuth vault cannot borrow an external skill or another namespace", async () => {
+  const items = new Map(), keychain = {
+    read: async (service, account) => items.get(service + account) ?? null,
+    write: async (service, account, value) => { items.set(service + account, value); },
+    remove: async (service, account) => { items.delete(service + account); },
+  };
+  const native = createRemoteMcpOAuthVault({ platform: "darwin", credentialFile: "/unused/native.json", keychain,
+    nativeClient: "deepseek-harness", namespace: "native-trelio-deepseek-harness-v1" });
+  const external = createRemoteMcpOAuthVault({ platform: "darwin", credentialFile: "/unused/external.json", keychain });
+  const id = resolved("a".repeat(64));
+  await native.write("https://trelio.ru", id, { issuer, clientId: "synthetic", accessToken: "synthetic-native", expiresAt: Date.now() + 10000 });
+  assert.equal(await external.read("https://trelio.ru", id), null);
+  assert.equal((await native.read("https://trelio.ru", { remoteMcp: id.remoteMcp })).accessToken, "synthetic-native");
+});

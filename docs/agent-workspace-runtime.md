@@ -2450,3 +2450,53 @@ read-only repeatable-read транзакции; host гидратирует ciph
 Refresh уже существующей exact managed-привязки допускает соседние материалы
 в root: меняется только managed block с прежним scope, safe-file/CAS/read-back
 и Git isolation. Для папки без привязки dedicated-folder gate сохраняется.
+
+
+## Native DeepSeek Harness preview
+
+`trelio-remote-mcp.mjs.deepseekHarnessPlugin` — Cordis plugin для exact Harness 0.2.1-rc.2,
+без Codex/Claude compatibility hooks. `Session.requestHeader().config` даёт
+actual provider/model/effort, `session.header.id` — native session, с префиксом
+`dsh:` в общем private signing state. `deepseek_native/local_observed` проходит
+тот же registration/refresh/nonce/proof engine. Off/unknown effort не наследует
+прежний high; отсутствующий model/header блокирует protected dispatch. Proof и
+instruction hints удаляются из authored args/schema и добавляются только внутри
+execute. Runtime observation не является MCP/CLI аргументом. Company enforce
+требует отдельный `deepseekHarnessAction=allow`, default deny; допуск all-model.
+
+Native wrapper строится `bridge deepseek install`: immutable private bundle,
+engines.dsh exact, без изменения Harness profile. Wrapper импортирует existing
+stable shell `selectHostRuntime` и shell version по постоянному plugin root;
+подпись/full inventory проверяются до import native module. Изменённый bundle
+не заменяется. Официальный shell нельзя держать во временной папке. Установка
+в профиль — только `dsh plugin --profile <actual-profile> add <bundleDirectory>`,
+затем reload. Installer остаётся в bridge, native adapter — в local MCP module: package
+сохраняет frozen 100-file limit без изменения verifier. Public plugin ABI/manifests/hooks не меняются. Загруженный native
+module обновляется при reload; signed runtime selection остаётся общей.
+
+`trelio_connect` использует общий DCR/S256/loopback OAuth с resource Trelio,
+read-back OS vault и отдельной native ячейкой. Grant fingerprint содержит
+endpoint/protocol/scopes, не текущую версию runtime. Bearer не входит в model
+args/results/env/files; Keychain/DPAPI/Secret Service отказ не даёт fallback.
+Явный reauthorize заменяет revoked/insufficient grant, ordinary вызовы не
+запускают login и не повторяются при ambiguous transport. Каталог реальный,
+с pagination/лимитом и без App-only tools; после pairing/access changes explicit
+connect обновляет его без повторного OAuth действующего grant.
+
+Remote и local tools исполняют общий transport/dispatcher. Native prefix сохраняет remote и local MCP инструкции; text содержит
+полный structured authority/routes, PTC получает тот же public envelope;
+`_meta` и rich binary не сериализуются. Local continuation использует общий
+receipt/scope/seed/Run validator и per-Agent WeakMap: до 16 записей, 2 MiB,
+15 минут. Content generation mismatch после compaction закрывает recovery.
+Credentials/key/grant не являются correlation state. Explicit полные args
+сохраняют обычную completeness/schema validation; другой Agent не заимствует
+сохранённый input. App-only publication и browser-fill недоступны; обычные
+proposal approval/ACL/CAS остаются отдельными человеческими решениями.
+
+`diagnose_trelio_installation(clientKind=deepseek-harness)` не проверяет foreign
+hooks; общий folder planner пишет AGENTS.md. Неизвестные компоненты остаются
+not_checked. Actual native core fixture + shared proof/installer/OAuth tests
+запускаются в full hosted gate на Linux/macOS/Windows. Живой OAuth/E2EE save
+проверяется отдельно после signed artifact и backend rollout; offline gate не
+является live readiness. Fixture зависимости не входят в runtime artifact.
+Upstream rc.2 pins Zod 4.6.5 с [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5); bundle не исправляет Harness.

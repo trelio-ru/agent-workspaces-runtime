@@ -9,6 +9,7 @@
  * tool output, MCP arguments, Workspace or backend storage.
  */
 import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { saveRuntimeChatBinding, runtimeChatBindingPath } from "./trelio-runtime-chat-binding.mjs";
 import { saveRuntimeProofBinding, runtimeProofBindingPath } from "./trelio-runtime-proof-preparation.mjs";
 import { buildDiagnosticObservation, observationCode } from "./trelio-diagnostic-observation.mjs";
@@ -73,7 +74,7 @@ import {
 } from "./trelio-instruction-reuse.mjs";
 
 import {
-  assertRuntimeHookBudget, runtimeHookSignal, withRuntimeHookPrivateSession, withRuntimeHookStage,
+  assertRuntimeHookBudget, runtimeHookSignal, withRuntimeHookPrivateSession, withRuntimeHookStage, withPrivateProcessSession,
 } from "./trelio-hook-private-session.mjs";
 
 const DISCOVERY_TOOLS = new Set([
@@ -445,8 +446,14 @@ const retryIdempotentRequest = async (operation) => {
 // One flag per invocation even when initial admission and refresh both read
 // the observation. The diagnostic is flushed after the private scope closes.
 const unavailableEffortEvents = new WeakSet();
+// A native client adapter supplies evidence through an invocation-local closure,
+// never through hook JSON, environment, tool arguments or global mutable state.
+// AsyncLocalStorage keeps concurrent Harness agents from borrowing each other's
+// model/session while reusing the exact existing key/refresh/nonce engine.
+const nativeRuntimeObservation = new AsyncLocalStorage();
+let nativeCleanupAfter = 0;
 const observeRuntimeForHook = async (hookInput) => {
-  const observation = await withRuntimeHookStage("runtime_attestation", () => detectAgentRuntimeAttestation({ hookInput }));
+  const observation = await withRuntimeHookStage("runtime_attestation", () => nativeRuntimeObservation.getStore() ?? detectAgentRuntimeAttestation({ hookInput }));
   if (observation.modelId && observation.effortLevel === null) unavailableEffortEvents.add(hookInput);
   return observation;
 };
@@ -471,7 +478,7 @@ const createRuntimeState = async ({
     ? currentObservation
     : initialObservation ? { ...initialObservation, observedAt: currentObservation.observedAt } : currentObservation;
   if (
-    (observation.clientFamily === "codex" || observation.clientFamily === "claude-code")
+    (["codex", "claude-code", "deepseek-harness"].includes(observation.clientFamily))
     && (!observation.modelId || observation.evidenceLevel !== "local_observed")
   ) {
     throw new Error(
@@ -622,7 +629,7 @@ const refreshRuntimeState = async ({ hookInput, state, filePath, origin, clientS
     // backend still evaluates this pinned snapshot against company policy:
     // a previously insufficient effort does not become an admission here.
     // Never lend another model's effort, or invent one for a first unknown.
-    if (observation.modelId === current.observation?.modelId
+    if (observation.source !== "deepseek_native" && observation.modelId === current.observation?.modelId
       && observation.effortLevel === null && current.observation.effortLevel !== null) return current;
     if (sameRuntimeConfiguration(current.observation, observation)) {
       if (current.pendingRefresh) {
@@ -668,8 +675,10 @@ export const buildRuntimeSessionProof = ({ state, toolName, now = new Date(), lo
   return proof;
 };
 
-const writeUpdatedInput = (toolInput, proof) => {
-  process.stdout.write(`${JSON.stringify({
+const emitHookOutput = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
+
+const writeUpdatedInput = (toolInput, proof, emit = emitHookOutput) => {
+  emit({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "allow",
@@ -678,17 +687,17 @@ const writeUpdatedInput = (toolInput, proof) => {
         runtimeSessionProof: proof,
       },
     },
-  })}\n`);
+  });
 };
 
-const writeDeniedLocalProposalRenderer = () => {
-  process.stdout.write(`${JSON.stringify({
+const writeDeniedLocalProposalRenderer = (emit = emitHookOutput) => {
+  emit({
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
       permissionDecisionReason: "Bridge уже выбрал local proposal provider для этой цели. Native renderer остановлен до запуска, чтобы хост не смонтировал лишнюю App-карточку. Используй уже полученный continue_trelio_local_action с route=proposal_context или вызови его для exact цели, затем следуй его nextCall к trelio-remote-skills.render_trelio_local_proposal с целью внутри payload.target.",
     },
-  })}\n`);
+  });
 };
 
 const shouldDenyNativeProposalRenderer = async ({ origin, toolName, toolInput }) => {
@@ -718,12 +727,13 @@ const shouldDenyNativeProposalRenderer = async ({ origin, toolName, toolInput })
   return false;
 };
 
-const runPreToolUse = async (hookInput) => {
+const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
   const identity = resolveTrelioHookToolIdentity(hookInput);
   if (identity.status === "invalid") throw new TrelioHookToolIdentityError(identity.reason);
   if (identity.status === "unrelated") return;
   const toolName = identity.toolName;
-  const origin = process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
+  const origin = nativeRuntimeObservation.getStore() ? "https://trelio.ru"
+    : process.env.TRELIO_WORKSPACE_ORIGIN || "https://trelio.ru";
   let toolInput = resolveToolInput(hookInput);
   if (identity.status === "local") {
     toolInput = await recoverLocalContinuationArguments({ hookInput, input: toolInput });
@@ -732,7 +742,7 @@ const runPreToolUse = async (hookInput) => {
   if (!isProtectedTrelioToolName(toolName)) {
     if (!hasManagedInstructionKeys(identity, toolInput)) {
       if (JSON.stringify(toolInput) !== JSON.stringify(resolveToolInput(hookInput))) {
-        process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: toolInput } }) + "\n");
+        emit({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput: toolInput } });
       }
       return;
     }
@@ -750,12 +760,12 @@ const runPreToolUse = async (hookInput) => {
     } catch { /* Optional delivery evidence is unavailable. */ }
     const updatedInput = await manageInstructionKeys({ hookInput, identity, input: toolInput, boundary });
     if (JSON.stringify(updatedInput) !== JSON.stringify(resolveToolInput(hookInput))) {
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } }) + "\n");
+      emit({ hookSpecificOutput: { hookEventName: "PreToolUse", updatedInput } });
     }
     return;
   }
   if (await shouldDenyNativeProposalRenderer({ origin, toolName, toolInput })) {
-    writeDeniedLocalProposalRenderer();
+    writeDeniedLocalProposalRenderer(emit);
     return;
   }
   const clientSessionId = resolveRuntimeClientSessionId(hookInput);
@@ -823,7 +833,45 @@ const runPreToolUse = async (hookInput) => {
     }
   }
   assertRuntimeHookBudget();
-  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }));
+  writeUpdatedInput(updatedInput, buildRuntimeSessionProof({ state, toolName, localFiles, localFilePayload }), emit);
+};
+
+/**
+ * Native Harness dispatch boundary. The adapter has already frozen the actual
+ * request header; this library entry is not an MCP method or CLI argument.
+ * Reuse the SAME hook engine, including private paths, refresh, pairing,
+ * proposal route guard and proof-preparation binding. Proofs never enter the
+ * Harness-authored tool arguments or recorded tool input.
+ */
+export const prepareNativeRuntimeToolArguments = async ({ sessionId, observation, toolName, input, signal }) => {
+  if (observation?.clientFamily !== "deepseek-harness" || observation.source !== "deepseek_native"
+      || observation.evidenceLevel !== "local_observed" || typeof observation.modelId !== "string"
+      || !/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,254}$/u.test(observation.modelId)
+      || (observation.effortLevel !== null && !["low", "medium", "high", "xhigh", "max", "ultra"].includes(observation.effortLevel))
+      || typeof sessionId !== "string" || !sessionId || sessionId.length > 256) {
+    throw Object.assign(new Error("Harness не подтвердил текущую модель и сессию."), { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
+  }
+  const hookInput = { hook_event_name: "PreToolUse", session_id: `dsh:${sessionId}`,
+    tool_name: toolName, tool_input: Object.fromEntries(Object.entries(structuredClone(input)).filter(([key]) =>
+      !["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"].includes(key))) };
+  let updated = hookInput.tool_input;
+  const emit = ({ hookSpecificOutput: decision }) => {
+    if (decision?.permissionDecision === "deny") throw Object.assign(new Error(decision.permissionDecisionReason),
+      { code: "TRELIO_LOCAL_PROPOSAL_ROUTE_REQUIRED" });
+    if (decision?.updatedInput) updated = decision.updatedInput;
+  };
+  const deadline = AbortSignal.any([AbortSignal.timeout(22_000), ...(signal ? [signal] : [])]);
+  await withPrivateProcessSession(() => nativeRuntimeObservation.run(Object.freeze({ ...observation }),
+    async () => {
+      // Native profiles are long-lived and have no command SessionStart hook.
+      // Reuse the bounded expired-state sweep without a background interval.
+      if (Date.now() >= nativeCleanupAfter) {
+        nativeCleanupAfter = Date.now() + 30 * 60_000;
+        await cleanupStaleRuntimeSessions().catch(() => undefined);
+      }
+      return runPreToolUse(hookInput, emit);
+    }), deadline);
+  return updated;
 };
 
 const runSessionStart = async (hookInput) => {

@@ -24,7 +24,7 @@ export const buildTrelioConnectionRecovery = (publicService, requiredActions = [
   instructions: "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema действительно отсутствует в текущем ходе, перейди к client recovery для фактического клиента: это наблюдение о выдаче tools, не доказательство failed startup. Не заканчивай повтором doctor или общим отказом без следующего шага. Не объявляй старый 5xx текущей ошибкой. Без наблюдаемого client blocker или exact requiredAction не советуй restart; login, pairing и переустановка требуют своих отдельных оснований. Не придумывай команды или API reconnect.",
 });
 
-const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity"]);
+const CLIENT_KINDS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"]);
 const INTENTS = new Set(["diagnostics", "onboarding"]);
 
 export class TrelioInstallationDiagnosticError extends Error {
@@ -176,7 +176,11 @@ const buildClientInspection = (clientKind, intent, requiredActions) => (
           doesNotProve: ["oauth_bearer_usable", "hook_approved", "runtime_proof", "current_chat_model_tool_exposure"],
         },
       }
-    : ["cursor", "antigravity"].includes(clientKind) ? {
+    : clientKind === "deepseek-harness" ? {
+        nativeAdapter: { state: "not_checked", qualifiedVersion: "0.2.1-rc.2",
+          checks: ["native_bundle_loaded", "current_request_provider_model", "safe_protected_read"],
+          instructions: "Проверь native bundle в фактическом профиле Harness и текущие tools. OAuth выполняется trelio_connect, reauthorize=true только для замены отозванного/недостаточного grant. Не устанавливай Codex/Claude hooks. Успех CLI не доказывает protected read или сохранение. MCP Apps и browser-fill не поддержаны." },
+      } : ["cursor", "antigravity"].includes(clientKind) ? {
         mcpInventory: {
           surface: clientKind === "antigravity" ? "Antigravity Customizations" : "Cursor Plugins and MCP settings",
           proves: ["remote_mcp_registration", "local_mcp_registration"],
@@ -319,7 +323,7 @@ const buildLocalSummary = (local, clientKind) => ({
       ...(clientKind === "cursor" ? { cursorVersion: local.plugin?.manifests?.cursorVersion ?? null } : {}),
       ...(clientKind === "antigravity" ? { antigravityVersion: local.plugin?.manifests?.antigravityVersion ?? null } : {}),
     },
-    hooks: ["cursor", "antigravity"].includes(clientKind) ? { status: "not_applicable" } : {
+    hooks: ["cursor", "antigravity", "deepseek-harness"].includes(clientKind) ? { status: "not_applicable" } : {
       status: local.plugin?.hooks?.status ?? "unknown",
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
       toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
@@ -558,7 +562,7 @@ export const buildTrelioInstallationDiagnostic = ({
         nextTool: "list_companies",
         successProves: "oauth_bearer_usable_for_current_client_process",
       },
-      hook: ["cursor", "antigravity"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
+      hook: ["cursor", "antigravity", "deepseek-harness"].includes(clientKind) ? { state: "not_applicable", nextTools: [] } : {
         state: startupBlocked ? "blocked_by_local_startup" : "client_managed_unknown",
         nextTools: startupBlocked ? [] : ["get_agent_instructions", "get_task"],
         successProves: "approved_hook_added_valid_one_use_runtime_proof",

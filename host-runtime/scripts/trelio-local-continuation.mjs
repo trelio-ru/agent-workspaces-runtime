@@ -14,6 +14,43 @@ const missing = (input) => Array.isArray(input.parameters?.nativeArgumentKeys)
 // Unknown clients keep explicit input rather than heuristic journal parsing.
 const SUPPORTED_CODEX = new Set(["0.160.0", "0.162.0-alpha.17.2"]);
 
+/** Shared receipt validation for transcript and native in-process adapters.
+ * Correlation storage is client-owned, but route/seed/scope invariants are one
+ * contract. A ref never authorizes choosing a different source or Workspace.
+ */
+export const recoverSelectedContinuation = ({ method, original, result, input }) => {
+  const selection = result?.providerSelection ?? result?.structuredContent?.providerSelection;
+  const envelope = selection?.arguments;
+  const code = result?.code ?? result?.structuredContent?.code;
+  const checkpoint = code === "MCP_LOCAL_BRIDGE_REQUIRED" && input.route === "workspace" && input.parameters?.operation === "checkpoint_native"
+    && method === "checkpoint_agent_workspace_run" && selection?.provider === "local_agent_workspace_bridge";
+  if (!(checkpoint || code === "MCP_LOCAL_CONTEXT_REQUIRED" && selection?.provider === "local_company_context") || selection?.automatic !== true
+    || selection.server !== "trelio-remote-skills" || selection.tool !== "continue_trelio_local_action"
+    || selection.nativeTool !== method || input.parameters?.nativeTool !== method
+    || selection.companySlug !== input.parameters?.companySlug || envelope?.schemaVersion !== 1
+    || input.schemaVersion !== 1 || envelope.route !== input.route || !record(envelope.parameters)) return null;
+  const { arguments: seed, ...route } = envelope.parameters;
+  const { arguments: supplied, ...requested } = input.parameters;
+  if (!record(seed) || !record(supplied) || canonical(route) !== canonical(requested)) return null;
+  const authored = clean(original);
+  if (authored.companySlug !== undefined && (typeof authored.companySlug !== "string"
+    || authored.companySlug.trim() !== selection.companySlug)) return null;
+  if (Array.isArray(authored.companySlugs) && (authored.companySlugs.length !== 1
+    || authored.companySlugs[0] !== selection.companySlug)) return null;
+  if (!Array.isArray(route.nativeArgumentKeys)
+    || Object.keys(authored).some(key => !route.nativeArgumentKeys.includes(key))) return null;
+  const recovered = { ...authored, ...seed };
+  if (checkpoint && recovered.runId !== route.runIdentity?.runId) return null;
+  for (const [key, value] of Object.entries(seed)) {
+    if (Object.hasOwn(authored, key) && canonical(value) !== canonical(
+      typeof authored[key] === "string" ? authored[key].trim() : authored[key])) return null;
+  }
+  for (const [key, value] of Object.entries(supplied)) {
+    if (canonical(value) !== canonical(recovered[key])) return null;
+  }
+  return recovered;
+};
+
 /** A ref is only correlation, never execution authority or a request cache. */
 export const collectLocalContinuationArguments = ({ header, rows, hookInput, input, now = Date.now() }) => {
   if (!SUPPORTED_CODEX.has(header?.cli_version) || header.id !== hookInput.session_id || hookInput.agent_id
@@ -61,33 +98,9 @@ export const collectLocalContinuationArguments = ({ header, rows, hookInput, inp
         || selection.companySlug !== input.parameters.companySlug || envelope?.schemaVersion !== 1
         || envelope.route !== input.route || !Number.isFinite(age) || age < 0 || age > 15 * 60 * 1000
         || envelope.parameters?.nativeCallRef !== input.parameters.nativeCallRef) continue;
-      // Require the complete server-selected routing fields and unchanged
-      // structural seed. A lookalike ref, changed target/operation, or duplicate
-      // receipt cannot choose a convenient source for a mutation.
-      const { arguments: seed, ...route } = envelope.parameters;
-      const { arguments: supplied, ...requested } = input.parameters;
-      if (!record(seed) || !record(supplied) || canonical(route) !== canonical(requested)) return null;
-      const authored = clean(original);
-      if (authored.companySlug !== undefined && (typeof authored.companySlug !== "string"
-        || authored.companySlug.trim() !== selection.companySlug)) return null;
-      if (Array.isArray(authored.companySlugs) && (authored.companySlugs.length !== 1
-        || authored.companySlugs[0] !== selection.companySlug)) return null;
-      if (!Array.isArray(route.nativeArgumentKeys)
-        || Object.keys(authored).some((key) => !route.nativeArgumentKeys.includes(key))) return null;
-      // SDK schemas may insert defaults or trim structural locators before the
-      // server builds its seed. Keep those reviewed values, while recovering
-      // the original optional content and letting native validation reapply
-      // any remaining defaults. Never invent missing protected content.
-      const recovered = { ...authored, ...seed };
-      if (checkpointRoute && recovered.runId !== route.runIdentity?.runId) return null;
-      for (const [key, value] of Object.entries(seed)) {
-        if (!Object.hasOwn(authored, key)) continue;
-        const sourceValue = typeof authored[key] === "string" ? authored[key].trim() : authored[key];
-        if (canonical(value) !== canonical(sourceValue)) return null;
-      }
-      for (const [key, value] of Object.entries(supplied)) {
-        if (canonical(value) !== canonical(recovered[key])) return null;
-      }
+      const recovered = recoverSelectedContinuation({ method: input.parameters.nativeTool,
+        original, result, input });
+      if (!recovered) return null;
       if (candidate) duplicates = true;
       candidate = recovered;
     }

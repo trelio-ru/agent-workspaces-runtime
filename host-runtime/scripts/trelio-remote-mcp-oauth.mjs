@@ -196,7 +196,7 @@ export const discoverRemoteMcpOAuth = async (config, options) => {
   };
 };
 
-const tokenFromResponse = (body, previousRefreshToken = null) => {
+const tokenFromResponse = (body, previousRefreshToken = null, maximumLifetimeSeconds = 86_400) => {
   if (
     typeof body?.token_type !== "string"
     || body.token_type.toLowerCase() !== "bearer"
@@ -206,7 +206,7 @@ const tokenFromResponse = (body, previousRefreshToken = null) => {
     || /[\r\n\0]/u.test(body.access_token)
     || !Number.isFinite(body.expires_in)
     || body.expires_in <= 0
-    || body.expires_in > 86_400
+    || body.expires_in > maximumLifetimeSeconds
   ) {
     throw fail("REMOTE_MCP_OAUTH_TOKEN_INVALID", "OAuth token response не прошёл проверку.");
   }
@@ -314,7 +314,10 @@ const waitForOAuthCallback = async ({ issuer, openBrowserFn, buildAuthorizeUrl, 
 
 export const connectRemoteMcpOAuth = async (
   config,
-  { resolveEndpoint, openBrowserFn = openBrowser, httpJson = oauthHttpJson, signal } = {},
+  { resolveEndpoint, openBrowserFn = openBrowser, httpJson = oauthHttpJson, signal,
+    // Host-only options: the native Trelio client shares this SAME S256/state/
+    // origin-bound callback engine. External skill declarations cannot set them.
+    clientName = "Trelio Remote MCP host", resource = null, maximumLifetimeSeconds = 86_400 } = {},
 ) => {
   const metadata = await discoverRemoteMcpOAuth(config, { resolveEndpoint, httpJson, signal });
   const verifier = crypto.randomBytes(32).toString("base64url");
@@ -330,7 +333,7 @@ export const connectRemoteMcpOAuth = async (
         method: "POST",
         contentType: "application/json",
         body: JSON.stringify({
-          client_name: "Trelio Remote MCP host",
+          client_name: clientName,
           application_type: "native",
           redirect_uris: [callbackUrl],
           grant_types: ["authorization_code", "refresh_token"],
@@ -359,6 +362,7 @@ export const connectRemoteMcpOAuth = async (
       url.searchParams.set("code_challenge_method", "S256");
       url.searchParams.set("state", state);
       url.searchParams.set("scope", scopes);
+      if (resource !== null) url.searchParams.set("resource", resource);
       return url.toString();
     },
   });
@@ -371,6 +375,7 @@ export const connectRemoteMcpOAuth = async (
       client_id: clientId,
       redirect_uri: redirectUri,
       code_verifier: verifier,
+      ...(resource === null ? {} : { resource }),
     }).toString(),
     signal,
   }, { resolveEndpoint });
@@ -383,7 +388,7 @@ export const connectRemoteMcpOAuth = async (
   return {
     issuer: metadata.issuer,
     clientId,
-    ...tokenFromResponse(tokenResponse.body),
+    ...tokenFromResponse(tokenResponse.body, null, maximumLifetimeSeconds),
   };
 };
 
