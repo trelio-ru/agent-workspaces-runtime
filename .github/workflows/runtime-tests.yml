@@ -415,6 +415,9 @@ jobs:
           ref: 620044d67eb3a74fafdc11a00bb023240c3e2259
           path: _contracts/agent-skills
 
+      - name: Run Windows assistant transport and accepted inspection regressions
+        run: node tests/trelio-assistant-transport.test.mjs
+
       - name: Run Windows encrypted mirror retention regressions
         if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-mirror-retention.test.mjs
@@ -468,8 +471,6 @@ jobs:
           node tests/trelio-assistant-codex.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-private.test.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node tests/trelio-assistant-transport.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-source-reader.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

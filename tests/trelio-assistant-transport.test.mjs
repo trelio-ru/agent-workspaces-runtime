@@ -2010,7 +2010,8 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     // NODE_TEST_CONTEXT belongs to the outer runner. Inheriting it makes a
     // nested --test process suppress its runner, so exit 0 alone is no proof
     // that the isolated composition executed. Require an end-of-flow sentinel.
-    const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'l'),
+    const gitTrace=path.join(root,'synthetic-git-trace.jsonl');
+    const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'l'),GIT_TRACE2_EVENT:gitTrace,
       TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_INSPECTION_FIXTURE:'1'};
     delete childEnv.NODE_TEST_CONTEXT;
     try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted Workspace inspect open finish',fileURLToPath(import.meta.url)],{
@@ -2020,7 +2021,24 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
       // Keep synthetic-child failure evidence bounded to its error/stack, not
       // arbitrary assertion objects, headers or the managed private fixture.
       const lines=String(error.stdout??'').split('\n').filter(line=>/^\s*(?:error: [^|]|code: |at |stack:|TestContext\.|async )/u.test(line));
-      throw new Error(lines.slice(0,12).join('\n')||'Encrypted Workspace child failed');
+      // Only synthetic local Git runs enter this disposable trace. Preserve the
+      // guard failure and expose closed categories, never paths/argv/raw stderr.
+      const categories=new Set();
+      try{if((await fs.stat(gitTrace)).size<=1024*1024){
+        for(const line of (await fs.readFile(gitTrace,'utf8')).split('\n')){
+          let event;try{event=JSON.parse(line);}catch{continue;}
+          if(event.event!=='error'||typeof event.msg!=='string')continue;
+          const message=event.msg;
+          categories.add(/crlf|line endings|LF will/iu.test(message)?'line_endings'
+            :/too long|longpath/iu.test(message)?'long_path'
+            :/dubious|ownership/iu.test(message)?'ownership'
+            :/attributes/iu.test(message)?'attributes'
+            :/permission|denied|could not open|cannot open|unable to access/iu.test(message)?'inaccessible_path':'other');
+        }
+      }}catch{}
+      throw new Error((lines.slice(0,12).join('\n')||'Encrypted Workspace child failed')
+        +'\nSynthetic Git diagnostic categories: '+([...categories].sort().join(',')||'none'));
+
     }finally{
       const writable=async directory=>{await fs.chmod(directory,0o700);for(const entry of await fs.readdir(directory,{withFileTypes:true})){
         const item=path.join(directory,entry.name);if(entry.isDirectory())await writable(item);else if(!entry.isSymbolicLink())await fs.chmod(item,0o600);}};

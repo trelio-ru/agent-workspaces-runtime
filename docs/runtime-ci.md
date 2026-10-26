@@ -64,7 +64,8 @@ assertion, security admission or native fixture is relaxed.
 
 Windows multi-command assistant groups explicitly stop at each nonzero Node
 exit; a later passing suite cannot hide an earlier failure. Native background
-registration runs first in that group. Synthetic filesystem expectations use
+registration runs first in that group; transport/accepted inspection runs once
+before the slower unrelated groups. Synthetic filesystem expectations use
 canonical Windows paths and bounded short fixture homes, not production path
 exceptions. Classic-console readiness shares its original startup deadline;
 cleanup of an owned terminated helper preserves the original assertion.
@@ -73,6 +74,10 @@ for its synthetic client, independently verifies its HWND/class and waits for
 that client's own exit code. This per-launch selection follows the
 [Microsoft default-terminal specification](https://github.com/microsoft/terminal/blob/main/doc/specs/%23492%20-%20Default%20Terminal/spec.md);
 it never changes the user's registry/default terminal or production launcher.
+The isolated inspection fixture may capture disposable synthetic Git trace2
+events locally and project only closed warning categories on failure. Its
+ordinary Git diagnostics guard remains strict; raw trace/paths/argv are never
+printed and the fixture removes that trace with its private temporary root.
 
 Both Linux/macOS jobs retain exact dependency checks and two byte-identical
 unsigned package builds. The same deterministic Windows x64/ia32/arm64 artifact
