@@ -553,7 +553,7 @@ for (const mode of ["auto", "embedded"]) {
       assert.equal(error.reasonCode, "field_not_found");
       assert.match(error.message, /iframe.*пока не поддерживается/u);
       assert.match(error.message, /Секрет не запрошен этой попыткой/u);
-      assert.match(error.message, /Проверка пароля не выполнялась/u);
+      assert.match(error.message, /ошибка не означает, что сохранённый пароль неверный/u);
       assert.match(error.message, /вручную в исходной вкладке/u);
       return true;
     });
