@@ -1072,6 +1072,19 @@ uses the same implementation. Owner cleanup via `background-remove` requires
 that exact matching task to be idle; a busy/queued pass is never killed or
 unregistered, and an ambiguous OS operation is not retried automatically.
 
+Explicit plugin maintenance adds one closed exception: the SAME native helper
+may retarget only the current assistant/device/SID definition to its newly
+verified loader, with exact previous arguments from the protected journal.
+`TASK_UPDATE` preserves its running instance and logon trigger. One optional
+`TrelioPluginUpdate` time trigger starts in one minute, expires five minutes
+later and retains IgnoreNew. A positive new definition is not rewritten while
+that trigger is still future; an old parent after a lost reply may rearm only
+an observed expired activation. No process is killed, detached or elevated.
+Normal setup tools/CLI expose no retarget operation. Status and owner cleanup
+validate that exact optional trigger too, never an arbitrary extra schedule.
+The new confirmed parent removes the temporary time trigger through the same
+exact helper; steady state retains the original single-logon definition.
+
 Owner-approved host replacement uses an internal composition of this SAME native
 helper. It first inspects the old assistant/device marker, current Windows SID,
 least-privilege definition and a closed Node/signed-loader supervisor command.
@@ -1497,8 +1510,10 @@ native registration/read-back. Omitting the option preserves existing policy;
 a hook approval, a password, autologin or permission to update ChatGPT Desktop.
 A legacy setup with an explicit no-restart contract remains opted out.
 
-Each existing supervisor tick selects the current signed implementation, so the
-old independent parent can acquire this feature without restarting itself.
+Each existing supervisor tick selects the current signed implementation. An
+opted-in legacy parent receives one registered graceful handoff to acquire this
+implementation; no manual parent restart is needed. Later runtime changes use
+the same idle handoff, without restarting Desktop for runtime-only updates.
 Only that background path maintains plugins; ordinary MCP idle health never
 closes a human's setup chat. Windows first uses the SAME SQLite coordinator
 lease, refuses every retained pass/incomplete delivery (including uncertainty),
@@ -1535,6 +1550,24 @@ A known same generation permits at most one further graceful-close attempt;
 a lost successful close/start is observed, never replayed on another process.
 An asynchronously starting GUI is observed on the next tick; an immediate
 stopped read never causes a second activation in the same tick.
+
+After GUI verification, `retargeting` persists before the SAME native helper
+updates the registered action. The old parent returns its already-supported
+`quiescing` result and releases its lease/snapshot normally; the bounded native
+trigger starts the new registered action later. Native IgnoreNew prevents a
+second instance if the old process is slow. The next parent rechecks GUI/hooks/
+MCP before business resumes. Rollback also restores the registered loader;
+it cannot leave the bad version armed for the next Windows sign-in.
+
+A content-free `supervisor.json` in the SAME identity-bound maintenance directory
+records only the actual parent's signed runtime version and random generation.
+That generation is passed to its own request children, never used as hook/task
+proof or an owner grant. Missing/stale generations require the idle registered
+handoff before the worker can migrate to a newer parent implementation.
+The already-loaded signed parent retains technical maintenance if a newer shell
+floor prevents a fresh worker from loading. That path uses only global live
+device metadata, the SAME idle lease and verified native plugin code; it cannot
+run old business code, a model, a company read or a task/provider mutation.
 
 After a new process generation, a fresh native App Server probes the effective
 trusted three-hook definition and the configured assistant MCP/setup tools.

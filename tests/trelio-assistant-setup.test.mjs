@@ -1718,6 +1718,59 @@ test('an optional marketplace outage leaves the verified current plugin usable b
   assert.deepEqual(f.effects,[]);
 });
 
+test('plugin activation durably hands off the registered supervisor before business resumes, without replacing its task chat',async()=>{
+  const f=pluginUpdateFixture();let freshParent=false,activations=0;
+  f.options.activateHost=async installed=>{
+    assert.equal(f.state().stage,'retargeting');assert.equal(installed.version,'0.1.4');activations++;
+    return {state:freshParent?'current':'handoff'};
+  };
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
+  assert.equal(f.state().stage,'retargeting');assert.equal(activations,1);
+  freshParent=true;
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.4'});
+  assert.equal(f.state().stage,'ready');assert.equal(f.counts().installs,1);
+  assert.equal(f.effects.filter(value=>value==='close').length,1);
+  assert.equal(f.effects.filter(value=>value==='start').length,1);assert.equal(activations,2);
+});
+
+test('a registered host handoff tells the existing parent to quiesce before polling or starting business work',async()=>{
+  let closed=0;
+  const result=await runAssistantBackgroundTick({createHost:async()=>({close:async()=>{closed++;},coordinator:{
+    pollOnce:()=>assert.fail('handoff cannot poll'),workOnce:()=>assert.fail('handoff cannot start work')
+  }}),pluginMaintenance:async()=>({state:'host_handoff',blockBusiness:true})});
+  assert.deepEqual(result,{schemaVersion:1,state:'quiescing'});assert.equal(closed,1);
+});
+
+test('a legacy parent bootstraps the current registered implementation without a marketplace network check',async()=>{
+  const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});f.options.bootstrapHost=true;
+  f.options.upgrade=()=>assert.fail('bootstrap must remain reachable while optional Git discovery is offline');
+  f.options.activateHost=async()=>({state:'handoff'});
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
+  assert.equal(f.state().targetVersion,'0.1.3');assert.equal(f.state().stage,'retargeting');assert.deepEqual(f.effects,[]);
+});
+
+test('supervisor generations use the protected identity namespace without granting hook or task authority',async()=>{
+  const {host,files}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  await host.saveIdentity(identity);assert.equal(await host.readPluginSupervisor(),null);
+  const generation=randomUUID();await host.recordPluginSupervisor('3.21.0',generation,identity);
+  assert.equal((await host.readPluginSupervisor()).generation,generation);assert.equal(await host.readPluginUpdatesEnabled(),false);
+  await assert.rejects(host.recordPluginSupervisor('3.21.0',generation,{...identity,deviceId:randomUUID()}),/REBIND_REQUIRED/);
+  const identityPath=[...files.keys()].find(name=>path.basename(name)==='identity.json');
+  files.set(identityPath,{schemaVersion:1,...identity,deviceId:randomUUID()});assert.equal(await host.readPluginSupervisor(),null);
+});
+
+test('the live parent can recover an unavailable fresh worker through maintenance without replaying the request',async()=>{
+  const controller=new AbortController();let requests=0,repairs=0,recorded=null;
+  const identity={assistantId:randomUUID(),deviceId:randomUUID()};
+  const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),
+    verifyRegistration:async()=>{},startConsoleIcon:async()=>null,recordSupervisor:async(value,generation)=>{assert.deepEqual(value,identity);recorded=generation;},
+    request:async(_request,options)=>{requests++;assert.equal(options.environment.TRELIO_ASSISTANT_SUPERVISOR_GENERATION,recorded);
+      throw Object.assign(new Error(),{code:'ASSISTANT_RUNTIME_REQUEST_UNAVAILABLE'});},reportFailure:async()=>{},
+    maintainUnavailableWorker:async({environment})=>{repairs++;assert.equal(environment.TRELIO_ASSISTANT_SUPERVISOR_GENERATION,recorded);return {state:'host_handoff'};},
+    wait:()=>assert.fail('a positively registered handoff exits this parent immediately')});
+  assert.equal(result.state,'stopped');assert.equal(requests,1);assert.equal(repairs,1);
+});
+
 test('a failed activation stays blocked for the same version but a newer release can recover without replacing the rollback basis',async()=>{
   const f=pluginUpdateFixture(),desktop=f.options.desktop;
   f.options.desktop=async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE'});};

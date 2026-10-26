@@ -190,7 +190,7 @@ const pluginUpdateRecord = value => {
   if (!value || Object.getPrototypeOf(value)!==Object.prototype
     || Object.keys(value).sort().join(',')!=='assistantId,desktopGeneration,deviceId,failedVersion,failures,previousTreeSha256,previousVersion,restarts,schemaVersion,stage,targetTreeSha256,targetVersion'
     || value.schemaVersion!==1 || !uuid.test(value.assistantId??'') || !uuid.test(value.deviceId??'')
-    || !['ready','installing','installed','closing','starting','verifying','hook_review','rolling_back','failed'].includes(value.stage)
+    || !['ready','installing','installed','closing','starting','verifying','hook_review','retargeting','rolling_back','failed'].includes(value.stage)
     || ![value.previousVersion,value.targetVersion].every(v=>typeof v==='string'&&/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(v))
     || !/^[0-9a-f]{64}$/u.test(value.previousTreeSha256??'')
     || value.failedVersion!==null&&!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(value.failedVersion??'')
@@ -258,6 +258,24 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       await ops.writePrivateJsonFile(pluginUpdateFile,next);
       if(JSON.stringify(await this.readPluginUpdate())!==JSON.stringify(next))fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
       return next;
+    },
+    async readPluginSupervisor(){
+      const target=await maintenanceFile('supervisor');
+      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
+      const value=await ops.readPrivateJsonFile(target,{maximumBytes:4096}),current=await readIdentity();
+      if(!value||Object.keys(value).sort().join(',')!=='assistantId,deviceId,generation,runtimeVersion,schemaVersion'
+        ||value.schemaVersion!==1||!current||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId
+        ||!uuid.test(value.generation??'')||!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(value.runtimeVersion??''))
+        fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      return value;
+    },
+    async recordPluginSupervisor(runtimeVersion,generation,expectedIdentity){
+      const current=await readIdentity();
+      if(!current||['origin','assistantId','deviceId'].some(key=>current[key]!==expectedIdentity[key])
+        ||!uuid.test(generation??'')||!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(runtimeVersion??''))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      const value={schemaVersion:1,assistantId:current.assistantId,deviceId:current.deviceId,runtimeVersion,generation};
+      await ops.writePrivateJsonFile(await maintenanceFile('supervisor'),value);
+      if(JSON.stringify(await this.readPluginSupervisor())!==JSON.stringify(value))fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
     },
     withSetupLock:action=>(ops.withSetupLock??(run=>withRuntimeStateLock(path.join(directory,'setup'),run)))(action),
     async prepareSetupIntent(enrollmentId){

@@ -51,6 +51,19 @@ test('unpaired, wrong origin, revoked, unsupported OS and rebind failures preced
   assert.equal(calls, 0);
 });
 
+test('only internal plugin handoff can retarget the exact paired scheduled action after live contact',async()=>{
+  let contact=0,plan;
+  const options={platform:'win32',executable:'C:\\node.exe',readIdentity:async()=>identity,
+    verifyContact:async()=>{contact++;},resolveLoader:async()=>'C:\\plugins\\0.1.4\\scripts\\trelio-host-runtime-loader.mjs',
+    previousLoaders:['C:\\plugins\\0.1.3\\scripts\\trelio-host-runtime-loader.mjs'],restartRequested:true,
+    runNative:async value=>{plan=value;return registered();}};
+  await createAssistantWindowsBackground(options)('retarget');assert.equal(contact,1);
+  assert.deepEqual(plan.previousArguments,['"C:\\plugins\\0.1.3\\scripts\\trelio-host-runtime-loader.mjs" bridge assistant background']);
+  assert.equal(plan.restartRequested,true);assert.equal(plan.operation,'retarget');
+  await assert.rejects(createAssistantWindowsBackground({...options,previousLoaders:null})('retarget'),/INVALID_INPUT/);
+  await assert.rejects(runAssistantEntry(['background-retarget']),/COMMAND_UNSUPPORTED/);
+});
+
 test('the existing OS status keeps its running state and appends dispatch only after native registration and identity checks',async()=>{
   let diagnosticReads=0,current=identity;
   const running={...registered(),state:'running'};
@@ -482,6 +495,59 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   assert.equal((await replacementController.inspect(fixture)).snapshot, null);
 });
 
+
+test('native plugin handoff retargets only the exact scheduled action and preserves its running old process', {skip:process.platform!=='win32'},async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-native-handoff-'));
+  const oldLoader=path.join(directory,'old','scripts','trelio-host-runtime-loader.mjs');
+  const nextLoader=path.join(directory,'new','scripts','trelio-host-runtime-loader.mjs');
+  const heartbeat=path.join(directory,'old-heartbeat.json'),release=path.join(directory,'release'),receipt=path.join(directory,'new.json');
+  const fixture={...identity,assistantId:randomUUID(),deviceId:randomUUID()};
+  await fs.mkdir(path.dirname(oldLoader),{recursive:true});await fs.mkdir(path.dirname(nextLoader),{recursive:true});
+  await fs.writeFile(oldLoader,`import fs from 'node:fs';const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(timer);return;}fs.writeFileSync(${JSON.stringify(heartbeat)},String(Date.now()));},100);`);
+  await fs.writeFile(nextLoader,`import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(receipt)},JSON.stringify({ready:true}));`);
+  const options={readIdentity:async()=>fixture,verifyContact:async()=>{}};
+  const old=createAssistantWindowsBackground({...options,resolveLoader:async()=>oldLoader});
+  const next=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[oldLoader],restartRequested:true});
+  const steady=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[oldLoader],restartRequested:false});
+  const triggerCount=()=>runAssistantWindowsBackgroundNative({assistantId:fixture.assistantId},{script:String.raw`
+$PSModuleAutoLoadingPreference='None'
+Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($PSHOME,'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
+$p=ConvertFrom-Json ([Console]::In.ReadToEnd())
+$s=[Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service'));$s.Connect()
+$count=$s.GetFolder('\').GetTask('Trelio-DigitalAssistant-'+$p.assistantId).Definition.Triggers.Count
+[Console]::Out.Write((ConvertTo-Json -Compress @{count=$count}))
+`,project:value=>{assert.ok([1,2].includes(value.count));return value.count;}});
+  t.after(async()=>{
+    await fs.writeFile(release,'');
+    for(let attempt=0;attempt<20;attempt++){
+      for(const manage of [next,old]){
+        try{await manage('remove');await fs.rm(directory,{recursive:true,force:true});return;}
+        catch(error){if(!['ASSISTANT_BACKGROUND_BUSY','ASSISTANT_BACKGROUND_CONFLICT'].includes(error.code))throw error;}
+      }
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    assert.fail('native handoff fixture did not become idle; no process was killed');
+  });
+  await old('install');await old('start');
+  const read=async file=>{try{return await fs.readFile(file,'utf8');}catch(error){if(error.code==='ENOENT')return null;throw error;}};
+  const until=async predicate=>{for(let i=0;i<80;i++){if(await predicate())return true;await new Promise(resolve=>setTimeout(resolve,250));}return false;};
+  assert.equal(await until(async()=>await read(heartbeat)!==null),true);
+  const wrong=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[nextLoader],restartRequested:true});
+  await assert.rejects(wrong('retarget'),{code:'ASSISTANT_BACKGROUND_CONFLICT'});
+  assert.equal((await next('retarget')).installed,true);
+  assert.equal(await triggerCount(),2,'a bounded native time trigger arms the registered handoff');
+  assert.equal((await next('status')).state,'running');
+  const before=await read(heartbeat);
+  assert.equal(await until(async()=>await read(heartbeat)!==before),true,'updating the definition must not terminate its live old process');
+  await next('retarget'); // A positive read-back does not rearm an unexpired trigger.
+  await assert.rejects(old('status'),{code:'ASSISTANT_BACKGROUND_CONFLICT'});
+  await fs.writeFile(release,'');
+  assert.equal(await until(async()=>(await next('status')).state==='registered'),true);
+  await next('start');
+  assert.equal(await until(async()=>await read(receipt)!==null),true,'the next native invocation uses the new loader');
+  assert.deepEqual(JSON.parse(await read(receipt)),{ready:true});
+  await steady('retarget');assert.equal(await triggerCount(),1,'the confirmed parent restores the original steady-state logon definition');
+});
 
 test('native Desktop inspection selects the GUI App from the real two-application manifest shape', {skip:process.platform!=='win32'},async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-desktop-manifest-'));

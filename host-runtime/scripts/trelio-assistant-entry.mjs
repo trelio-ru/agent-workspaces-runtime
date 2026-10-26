@@ -678,7 +678,8 @@ export const runAssistantEntry = async (args, options = {}) => {
   }
   if (args[0] === 'workspace') return runAssistantWorkspaceWorker(options);
   if (args[0] === 'mcp') return runAssistantSetupMcp(options);
-  if (args[0] === 'background') return (options.runBackground ?? runAssistantBackground)(options);
+  if (args[0] === 'background') return options.runBackground?options.runBackground(options):runAssistantBackground({...options,
+    recordSupervisor:recordProductionAssistantSupervisor,maintainUnavailableWorker:maintainAssistantUnavailableWorker});
   if (args[0] === 'request') {
     let bytes=0;const chunks=[];
     for await (const chunk of options.input ?? process.stdin) {
@@ -1120,6 +1121,9 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
   const deadline=AbortSignal.timeout(150_000);
   signal=signal?AbortSignal.any([signal,deadline]):deadline;
   return runtime.coordinator.maintainPluginAtIdleBoundary(coordinatorGuard=>context(async (lockedClient,lockedHost)=>lockedHost.withSetupLock(async()=>{
+    // This control plane deliberately remains reachable under a business
+    // version floor, but revoked/expired/paused devices cannot maintain code.
+    await lockedClient.readHealth(signal);
     const common=await import('./trelio-workspace.mjs');
     const {resolveCodexExecutable,buildCodexEnvironment}=await import('./trelio-codex-conversation.mjs');
     const {maintainAssistantPlugin,runAssistantWindowsDesktop}=await import('./trelio-assistant-setup.mjs');
@@ -1142,7 +1146,10 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
     const inventory=()=>common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env});
     const loadedPluginDirectory=environment.TRELIO_PLUGIN_ROOT;
     if(!loadedPluginDirectory||!path.isAbsolute(loadedPluginDirectory))fail('TRELIO_PLUGIN_RESTART_REQUIRED');
-    return maintainAssistantPlugin({identity:runtime.identity,guard,inventory,
+    const parent=await lockedHost.readPluginSupervisor();
+    const bootstrapHost=parent?.generation!==environment.TRELIO_ASSISTANT_SUPERVISOR_GENERATION
+      ||parent?.runtimeVersion!==requireTrelioComponentVersions().hostRuntimeVersion;
+    return maintainAssistantPlugin({identity:runtime.identity,guard,inventory,bootstrapHost,
       readState:()=>lockedHost.readPluginUpdate(),
       writeState:(expected,next)=>lockedHost.writePluginUpdate(expected,next),
       upgrade:(current,beforeInstall)=>common.updateCodexPluginMarketplace({profile:'assistant',onlyIfNewerThan:current,beforeInstall,
@@ -1150,6 +1157,26 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
       rollback:(version,treeSha256)=>common.restoreAssistantCodexPluginVersion({version,treeSha256,execFileCommand,environment:env,
         loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
       desktop:(operation,generation)=>runAssistantWindowsDesktop(operation,generation,{environment,signal,guard}),
+      activateHost:async installed=>{
+        await guard();
+        const restartRequested=bootstrapHost||path.resolve(installed.installedPath)!==path.resolve(loadedPluginDirectory);
+        const nextLoader=await resolveHostRuntimeLoader({environment:{...environment,TRELIO_PLUGIN_ROOT:installed.installedPath}});
+        const previousLoader=await resolveHostRuntimeLoader({environment});
+        const journal=await lockedHost.readPluginUpdate();
+        // These are only exact previously observed versions in the protected
+        // journal. Old arguments are compared, never executed or adopted. This
+        // also repairs the registration when rolling back an uncertain update.
+        const previousLoaders=[...new Set([previousLoader,...[journal.previousVersion,journal.failedVersion]
+          .filter(Boolean).map(version=>path.join(path.dirname(installed.installedPath),version,'scripts','trelio-host-runtime-loader.mjs'))])];
+        const retarget=createAssistantWindowsBackground({environment,signal,previousLoaders,restartRequested,
+          resolveLoader:async()=>nextLoader,readIdentity:()=>lockedHost.readIdentity(),
+          verifyContact:async()=>{await guard();await lockedClient.heartbeat(signal);await guard();}});
+        await retarget('retarget');await guard();
+        // The existing parent already understands quiescing. Its clean exit
+        // releases the same lease/snapshot; the native one-shot trigger starts
+        // the retargeted task later, without killing or detaching a process.
+        return {state:restartRequested?'handoff':'current'};
+      },
       probe:async installed=>{
         await readAssistantCodexPluginReadiness(process.cwd(),{environment,signal});
         // Native global status may be null even with a cached catalogue. Prove
@@ -1190,6 +1217,7 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
     // enabling maintenance needs no extra plugin ABI or manual parent restart.
     const update=await pluginMaintenance(host,{signal});
     if(update?.blockBusiness){
+      if(update.state==='host_handoff')return {schemaVersion:1,state:'quiescing'};
       if(update.state==='hook_review')await reportDispatch(null,{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
       return {schemaVersion:1,state:'blocked',reason:update.state};
     }
@@ -1253,10 +1281,32 @@ export const reportAssistantDispatchRecovery = async client => {
   } catch { /* A future genuine completion may safely retry this diagnostic boundary. */ }
 };
 
-/** Stable model-free supervisor of our own runtime workers, never Codex.
+/** A non-authorizing generation stamp identifies this actual immutable parent,
+ * not a fresh request worker. It is separate from hook/pass/owner authority.
+ * The private store and setup mutex remain the only state engine. */
+export const recordProductionAssistantSupervisor = async (identity,generation) => {
+  if(process.platform!=='win32')return;
+  return productionContext((_client,host)=>host.withSetupLock(()=>host.recordPluginSupervisor(
+    requireTrelioComponentVersions().hostRuntimeVersion,generation,identity)));
+};
+
+/** Technical recovery also remains reachable in an already-loaded signed
+ * parent when a new plugin/runtime floor prevents a fresh worker from loading.
+ * Only global device metadata, verified native plugin code and the SAME idle
+ * lease are used. No old business code, model turn or company content runs. */
+export const maintainAssistantUnavailableWorker = async ({environment,signal}={}) => {
+  if(process.platform!=='win32'||await productionContext((_client,host)=>host.readPluginUpdatesEnabled())!==true)
+    return {state:'disabled'};
+  const runtime=await createAssistantRuntimeHost();
+  try{return await runProductionAssistantPluginMaintenance(runtime,{environment,signal});}
+  finally{await runtime.close();}
+};
+
+/** Stable model-free supervisor of our own runtime workers.
  * A fresh verified loader selects the immutable implementation for every
  * cycle. Updates wait for the active pass; no in-process import replacement,
- * guessed plugin cache, business retry or automatic Codex restart is involved.
+ * guessed plugin cache or business retry is involved. Explicitly opted-in
+ * plugin maintenance owns its separate idle Desktop/registered-parent handoff.
  * OS registration is a separate explicit onboarding step.
  */
 export const runAssistantBackground = async ({signal,request=requestCurrentAssistantRuntime,
@@ -1264,7 +1314,8 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
   verifyRegistration=async()=>process.platform==='win32'?(await createProductionAssistantBackground())('status'):null,
   startConsoleIcon=async()=>(await import('./trelio-assistant-setup.mjs')).startAssistantWindowsConsoleIcon(),
   wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure,
-  environment=process.env,preservePlugin=startLoadedCodexPluginPreservation}={}) => {
+  environment=process.env,preservePlugin=startLoadedCodexPluginPreservation,
+  recordSupervisor=async()=>{},maintainUnavailableWorker=async()=>({state:'disabled'})}={}) => {
   const controller=new AbortController();
   const stop=()=>controller.abort();
   const effective=signal?AbortSignal.any([signal,controller.signal]):controller.signal;
@@ -1285,6 +1336,9 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
     // this never chooses another installed plugin or changes hook trust.
     pluginPreservation=preservePlugin({environment});
     await pluginPreservation.ready;
+    const generation=randomUUID();
+    await recordSupervisor(initial.identity,generation);
+    const workerEnvironment={...environment,TRELIO_ASSISTANT_SUPERVISOR_GENERATION:generation};
     // Cosmetic only, after the exact identity/OS registration checks. The
     // helper refuses shared/hidden/terminal-host windows; a failed icon never
     // changes admission, native work, its deadline or a running window's focus.
@@ -1293,10 +1347,10 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
       try {
         const current=await readHost();
         if(JSON.stringify(current?.identity)!==identity||fenced(current))break;
-        const health=await request({operation:'health'},{signal:effective});
+        const health=await request({operation:'health'},{signal:effective,environment:workerEnvironment});
         if(health?.state==='quiescing')break;
         if(!effective.aborted){
-          const cycle=await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000});
+          const cycle=await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000,environment:workerEnvironment});
           if(cycle?.state==='quiescing')break;
           // A retained unknown operation can be returned by reconciliation
           // without throwing. Report only this closed, device-global fence;
@@ -1306,6 +1360,10 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
         }
       } catch(error) {
         if(!effective.aborted)await reportFailure(error).catch(()=>undefined);
+        if(!effective.aborted)try{
+          const maintenance=await maintainUnavailableWorker({environment:workerEnvironment,signal:effective});
+          if(maintenance?.state==='host_handoff')break;
+        }catch(maintenanceError){await reportFailure(maintenanceError).catch(()=>undefined);}
         // Retained SQLite/native-start/pass receipts own recovery. This is the
         // next polling cycle, never a second invocation of a business tool.
       }

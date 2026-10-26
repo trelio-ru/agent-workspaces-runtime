@@ -196,7 +196,7 @@ export const createAssistantSetup = ({ origin, store, http, host, withLock = act
  * Codex authentication; a different principal must never inherit them.
  */
 
-const operations = new Set(['install', 'status', 'start', 'remove']);
+const operations = new Set(['install', 'status', 'start', 'remove', 'retarget']);
 const codes = new Set(['ASSISTANT_BACKGROUND_UNAVAILABLE', 'ASSISTANT_BACKGROUND_CONFLICT',
   'ASSISTANT_BACKGROUND_BUSY', 'ASSISTANT_BACKGROUND_NOT_INSTALLED', 'ASSISTANT_BACKGROUND_READBACK_FAILED', 'ASSISTANT_BACKGROUND_ACCESS_DENIED']);
 const windowsPath = value => typeof value === 'string' && value.length <= 4096
@@ -267,6 +267,16 @@ try {
   }
   function Test-Definition($task) {
     $d = $task.Definition
+    $handoff = $true
+    if ($d.Triggers.Count -eq 2) {
+      $t = $d.Triggers.Item(2)
+      try {
+        $startTime = [DateTime]::ParseExact([string]$t.StartBoundary, 's', [Globalization.CultureInfo]::InvariantCulture)
+        $endTime = [DateTime]::ParseExact([string]$t.EndBoundary, 's', [Globalization.CultureInfo]::InvariantCulture)
+        $handoff = $t.Type -eq 1 -and $t.Id -ceq 'TrelioPluginUpdate' -and [bool]$t.Enabled -and
+          ($endTime - $startTime).TotalMinutes -eq 5 -and [string]$t.Repetition.Interval -ceq ''
+      } catch { $handoff = $false }
+    }
     $checks = @{
       marker = $d.RegistrationInfo.Description -ceq $marker
       principal = (Resolve-PrincipalSid $d.Principal.UserId) -ceq $sid
@@ -276,7 +286,8 @@ try {
       action_path = $d.Actions.Item(1).Path -ceq $p.command
       action_arguments = $d.Actions.Item(1).Arguments -ceq $p.arguments
       action_cwd = $d.Actions.Item(1).WorkingDirectory -ceq $p.workingDirectory
-      trigger_count = $d.Triggers.Count -eq 1
+      trigger_count = $d.Triggers.Count -in @(1,2)
+      handoff_trigger = $handoff
       trigger_type = $d.Triggers.Item(1).Type -eq 9
       trigger_user = (Resolve-PrincipalSid $d.Triggers.Item(1).UserId) -ceq $sid
       trigger_enabled = [bool]$d.Triggers.Item(1).Enabled
@@ -358,6 +369,39 @@ try {
     [Console]::Out.WriteLine((@{schemaVersion=1;state=$state;snapshot=$snapshot} | ConvertTo-Json -Depth 3 -Compress))
     return
   }
+  if ($p.operation -eq 'retarget') {
+    if (!$existing) { throw 'ASSISTANT_BACKGROUND_NOT_INSTALLED' }
+    # Update only our exact prior definition, never create-or-update or stop a
+    # process. A lost positive reply rereads the new action without moving its
+    # activation time. The original logon trigger is kept for later reboots.
+    $alreadyCurrent = Test-Definition $existing
+    $needsTimer = [bool]$p.restartRequested -and ($existing.Definition.Triggers.Count -eq 1 -or
+      [DateTime]::ParseExact([string]$existing.Definition.Triggers.Item(2).StartBoundary, 's', [Globalization.CultureInfo]::InvariantCulture) -le [DateTime]::Now)
+    $clearTimer = ![bool]$p.restartRequested -and $existing.Definition.Triggers.Count -eq 2
+    if (!$alreadyCurrent -or $needsTimer -or $clearTimer) {
+      $newArguments = $p.arguments
+      if (!$alreadyCurrent -and @($p.previousArguments) -cnotcontains $existing.Definition.Actions.Item(1).Arguments) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
+      $p.arguments = $existing.Definition.Actions.Item(1).Arguments
+      try { if (!(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' } }
+      finally { $p.arguments = $newArguments }
+      $d = $existing.Definition
+      $d.Actions.Item(1).Arguments = $p.arguments
+      if ($d.Triggers.Count -eq 2) { $d.Triggers.Remove(2) }
+      if ([bool]$p.restartRequested) {
+        $trigger = $d.Triggers.Create(1)
+        $trigger.Id = 'TrelioPluginUpdate'
+        $handoffStart = [DateTime]::Now.AddMinutes(1)
+        $trigger.StartBoundary = $handoffStart.ToString('s', [Globalization.CultureInfo]::InvariantCulture)
+        $trigger.EndBoundary = $handoffStart.AddMinutes(5).ToString('s', [Globalization.CultureInfo]::InvariantCulture)
+        $trigger.Enabled = $true
+      }
+      # TASK_UPDATE only. IgnoreNew protects a slow old process: this trigger
+      # cannot interrupt it or start a second instance while it is still live.
+      $null = $folder.RegisterTaskDefinition($name, $d, 4, $sid, $null, 3, $null)
+      $existing = $folder.GetTask($name)
+      if (!(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_READBACK_FAILED' }
+    }
+  }
   if ($existing -and !(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_CONFLICT' }
   if ($p.operation -eq 'install' -and !$existing) {
     $d = $service.NewTask(0)
@@ -425,7 +469,7 @@ try {
  */
 export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,readMaintenanceStatus=null,setPluginUpdates=null,
   platform = process.platform, environment = process.env, executable = process.execPath,
-  resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[] } = {}) => {
+  resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[], previousLoaders=null,restartRequested=false } = {}) => {
   if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function' || readDispatchStatus!==null&&typeof readDispatchStatus!=='function'
     || !Array.isArray(loaderArguments) || loaderArguments.length>4 || loaderArguments.some(value=>typeof value!=='string'||value.length>4096||/[\x00-\x1f\x7f]/u.test(value))) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
   return async (operation,options={}) => {
@@ -446,10 +490,16 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
       || !UUID.test(identity.deviceId ?? '')) fail('ASSISTANT_HOST_NOT_CONFIGURED');
     const loader = await resolveLoader({ environment });
     if (!windowsPath(executable) || !windowsPath(loader)) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
+    if(operation==='retarget'&&(!Array.isArray(previousLoaders)||!previousLoaders.length||previousLoaders.length>3
+      ||previousLoaders.some(loader=>!windowsPath(loader))||typeof restartRequested!=='boolean'||loaderArguments.length))fail('ASSISTANT_BACKGROUND_INVALID_INPUT');
     const plan = { schemaVersion: 1, operation, assistantId: identity.assistantId.toLowerCase(), deviceId: identity.deviceId.toLowerCase(),
       command: executable, arguments: `${[loader,...loaderArguments].map(quoteAssistantWindowsArgument).join(' ')} bridge assistant background`,
       workingDirectory: path.win32.dirname(executable) };
-    if (operation === 'install' || operation === 'start') await verifyContact();
+    if(operation==='retarget'){
+      plan.previousArguments=previousLoaders.map(loader=>`${quoteAssistantWindowsArgument(loader)} bridge assistant background`);
+      plan.restartRequested=restartRequested;
+    }
+    if (operation === 'install' || operation === 'start' || operation === 'retarget') await verifyContact();
     // Recheck after the potentially slow network operation. Pairing another
     // device midway cannot install an old identity's scheduled task.
     const current = await readIdentity();
@@ -742,10 +792,10 @@ export const runAssistantWindowsDesktop = async (operation, generation=null, {en
  * unfinished installation is reconciled from native inventory, and a new GUI
  * process is observed rather than closed again. Business receipts and chats
  * are never touched. A native hook-review result waits for the human unchanged. */
-export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,
+export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,activateHost=null,bootstrapHost=false,
   guard=async()=>{}}) => {
   let state=await readState();
-  let startedThisTick=false,optionalDiscovery=false;
+  let startedThisTick=false,optionalDiscovery=false,hostCurrent=false;
   const save=async patch=>{await guard();const next={...state,...patch};await writeState(state,next);state=next;};
   const recover=async()=>{
     await guard();
@@ -770,6 +820,13 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     if(state.stage==='ready' && current.version!==state.targetVersion)
       await save({previousVersion:state.targetVersion,previousTreeSha256:state.targetTreeSha256,
         targetVersion:current.version,targetTreeSha256:current.treeSha256,stage:'installed',desktopGeneration:null,restarts:0,failures:0});
+    if(bootstrapHost&&state.stage==='ready'){
+      if(current.treeSha256!==state.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      if(typeof activateHost!=='function')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      // Acquire the current parent implementation even when GitHub is offline;
+      // future shell-floor recovery must not depend on a legacy old parent.
+      await save({stage:'retargeting'});
+    }
     if(['ready','hook_review','failed'].includes(state.stage)){
       const awaitingActivation=state.stage!=='ready';
       if(current.treeSha256!==state.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
@@ -796,6 +853,15 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     if(current.version!==state.targetVersion || current.treeSha256!==state.targetTreeSha256)
       fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
     if(state.stage==='failed')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+    if(state.stage==='retargeting'){
+      if(typeof activateHost!=='function')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      const activation=await activateHost(current);
+      if(activation?.state==='handoff')return {state:'host_handoff',blockBusiness:true};
+      if(activation?.state!=='current')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      // The next registered supervisor now uses the new loader. Recheck the
+      // GUI/hooks/MCP after that boundary; it may have crossed a Windows reboot.
+      hostCurrent=true;await save({stage:'verifying',desktopGeneration:null,restarts:0});
+    }
     if(state.stage==='installed'){
       const before=await desktop('inspect');
       await save({stage:before.state==='running'?'closing':'starting',desktopGeneration:before.generation,restarts:1});
@@ -836,6 +902,12 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
           await save({stage:'hook_review',failures:0});return {state:'hook_review',blockBusiness:true};
         }
         throw error;
+      }
+      if(typeof activateHost==='function'&&!hostCurrent){
+        await save({stage:'retargeting',desktopGeneration:observed.generation,failures:0});
+        const activation=await activateHost(current);
+        if(activation?.state==='handoff')return {state:'host_handoff',blockBusiness:true};
+        if(activation?.state!=='current')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
       }
       await save({stage:'ready',desktopGeneration:observed.generation,failures:0});
       return {state:state.failedVersion?'rolled_back':'updated',version:current.version};
