@@ -427,7 +427,13 @@ try {
     $action.Arguments = $p.arguments
     $action.WorkingDirectory = $p.workingDirectory
     # TASK_CREATE only: a concurrent creator is never replaced.
-    $null = $folder.RegisterTaskDefinition($name, $d, 2, $sid, $null, 3, $null)
+    # An elevated installer can otherwise make Administrators the owner and
+    # grant this principal read-only access. Its least-privilege supervisor
+    # would then be unable to retarget its OWN registration. Give only the
+    # current task principal control, retaining native SYSTEM/admin access;
+    # this does not elevate the task or grant access to any other task/user.
+    $taskSddl = 'D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+    $null = $folder.RegisterTaskDefinition($name, $d, 2, $sid, $null, 3, $taskSddl)
     $existing = $folder.GetTask($name)
     if (!(Test-Definition $existing)) { throw 'ASSISTANT_BACKGROUND_READBACK_FAILED' }
   }

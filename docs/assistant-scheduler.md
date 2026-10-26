@@ -1057,8 +1057,14 @@ limit. The original JSON stdin, one native invocation and deadlines are unchange
 no temporary script, model code or credential-bearing argument is introduced.
 
 The deterministic task belongs to the current Windows SID with least privilege
-and `InteractiveToken`. A single logon trigger waits 15 seconds; unlimited task
-duration, IgnoreNew, battery continuation and three one-minute crash restarts
+and `InteractiveToken`. A single logon trigger waits 15 seconds.
+Creation grants only that SID,
+SYSTEM and Administrators control of this one task, so an elevated installer
+cannot leave the non-elevated supervisor with read-only registration access.
+Legacy administrator-owned registrations with only a read ACE require an
+authorised machine-operator ACL repair; runtime never elevates or changes their
+custom ACL on a retry. Unlimited task duration, IgnoreNew, battery continuation
+and three one-minute crash restarts
 are read back from the actual native definition. No saved password, automatic
 sign-in, privilege escalation or Codex restart is configured. After reboot the
 user must sign into Windows; a disconnected RDP session and a user logoff are

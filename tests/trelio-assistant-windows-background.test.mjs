@@ -547,9 +547,12 @@ $PSModuleAutoLoadingPreference='None'
 Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($PSHOME,'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
 $p=ConvertFrom-Json ([Console]::In.ReadToEnd())
 $s=[Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service'));$s.Connect()
-$count=$s.GetFolder('\').GetTask('Trelio-DigitalAssistant-'+$p.assistantId).Definition.Triggers.Count
-[Console]::Out.Write((ConvertTo-Json -Compress @{count=$count}))
-`,project:value=>{assert.ok([1,2].includes(value.count));return value.count;}});
+$task=$s.GetFolder('\').GetTask('Trelio-DigitalAssistant-'+$p.assistantId)
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$sd=[Security.AccessControl.RawSecurityDescriptor]::new($task.GetSecurityDescriptor(7))
+$ownWrite=@($sd.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -eq $sid.Value -and $_.AceQualifier -eq 'AccessAllowed' -and (($_.AccessMask -band 2) -eq 2 -or ($_.AccessMask -band 268435456) -eq 268435456)}).Count -gt 0
+[Console]::Out.Write((ConvertTo-Json -Compress @{count=$task.Definition.Triggers.Count;ownWrite=$ownWrite}))
+`,project:value=>{assert.ok([1,2].includes(value.count));assert.equal(value.ownWrite,true,'the task principal can maintain its own registration without an elevated token');return value.count;}});
   t.after(async()=>{
     await fs.writeFile(release,'');
     for(let attempt=0;attempt<20;attempt++){
@@ -561,7 +564,7 @@ $count=$s.GetFolder('\').GetTask('Trelio-DigitalAssistant-'+$p.assistantId).Defi
     }
     assert.fail('native handoff fixture did not become idle; no process was killed');
   });
-  await old('install');await old('start');
+  await old('install');assert.equal(await triggerCount(),1);await old('start');
   const read=async file=>{try{return await fs.readFile(file,'utf8');}catch(error){if(error.code==='ENOENT')return null;throw error;}};
   const until=async predicate=>{for(let i=0;i<80;i++){if(await predicate())return true;await new Promise(resolve=>setTimeout(resolve,250));}return false;};
   assert.equal(await until(async()=>await read(heartbeat)!==null),true);
