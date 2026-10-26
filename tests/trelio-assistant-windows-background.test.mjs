@@ -358,13 +358,22 @@ public static class AssistantIconPseudoConsoleFixture {
       // gate opens; no helper-under-test is used to establish that precondition.
       Startup startup=new Startup {cb=Marshal.SizeOf(typeof(Startup)),flags=1,show=(short)(hidden?0:4)};
       Check(CreateClassicProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,false,0x00000010,IntPtr.Zero,null,ref startup,out process));
-      for(int attempt=0;attempt<500&&!System.IO.File.Exists(ready);attempt++)System.Threading.Thread.Sleep(20);
+      DateTime deadline=DateTime.UtcNow.AddSeconds(10);
+      while(DateTime.UtcNow<deadline&&!System.IO.File.Exists(ready))System.Threading.Thread.Sleep(20);
       if(!System.IO.File.Exists(ready))return 35;
       if(!FreeConsole())return 30;
       attached=AttachConsole(process.Id);if(!attached)return 31;
-      IntPtr window=GetConsoleWindow();if(window==IntPtr.Zero)return 32;
-      StringBuilder name=new StringBuilder(64);
-      if(GetClassName(window,name,64)<=0||name.ToString()!="ConsoleWindowClass")return 33;
+      // Node readiness does not prove conhost has published its final HWND.
+      // Observe the SAME process under the original ten-second startup budget;
+      // never accept a pseudoconsole or grant a fresh deadline.
+      IntPtr window=IntPtr.Zero;StringBuilder name=new StringBuilder(64);
+      while(DateTime.UtcNow<deadline) {
+        window=GetConsoleWindow();name.Clear();
+        if(window!=IntPtr.Zero&&GetClassName(window,name,64)>0&&name.ToString()=="ConsoleWindowClass"&&IsWindowVisible(window)!=hidden)break;
+        System.Threading.Thread.Sleep(20);
+      }
+      if(window==IntPtr.Zero)return 32;
+      if(name.ToString()!="ConsoleWindowClass")return name.ToString()=="PseudoConsoleWindow"?36:33;
       if(IsWindowVisible(window)==hidden)return 34;
       Check(FreeConsole());attached=false;
       SetStdHandle(-10,input);SetStdHandle(-11,output);SetStdHandle(-12,error);

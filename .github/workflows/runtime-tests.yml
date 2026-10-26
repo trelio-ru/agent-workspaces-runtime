@@ -459,23 +459,36 @@ jobs:
 
       - name: Run Windows assistant runtime and private storage regressions
         run: |
-          node tests/trelio-assistant-inbox.test.mjs
-          node tests/trelio-assistant-scheduler.test.mjs
-          node tests/trelio-assistant-codex.test.mjs
-          node tests/trelio-assistant-private.test.mjs
-          node tests/trelio-assistant-transport.test.mjs
-          node tests/trelio-assistant-source-reader.test.mjs
-          node tests/trelio-assistant-setup.test.mjs
           node tests/trelio-assistant-windows-background.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-inbox.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-scheduler.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-codex.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-private.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-transport.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-source-reader.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/trelio-assistant-setup.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-maintenance.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-hook.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-assistant-coordinator.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run selected assistant Workspace and proof boundaries
         if: needs.ci-plan.outputs.profile == 'assistant-orchestration'
         run: |
           node tests/trelio-local-context.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/trelio-runtime-policy.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run Windows ACL regressions
         if: needs.ci-plan.outputs.profile == 'full'

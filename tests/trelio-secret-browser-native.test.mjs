@@ -759,7 +759,7 @@ test("native helper compiles locally, caches exact bytes and rejects an unprepar
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     if (process.platform !== "win32") await fs.chmod(directory, 0o700);
   };
-  let channel;
+  let channel,originalFailure;
   try {
     const executable = await buildNativeSecretBrowserHelper({ directory, ensurePrivateDirectory });
     assert.equal(await buildNativeSecretBrowserHelper({ directory, ensurePrivateDirectory }), executable);
@@ -779,10 +779,14 @@ test("native helper compiles locally, caches exact bytes and rejects an unprepar
     }
     await fs.appendFile(executable, "modified");
     await assert.rejects(buildNativeSecretBrowserHelper({ directory, ensurePrivateDirectory }), /изменён/);
-  } finally {
+  } catch(error) {originalFailure=error;} finally {
     await channel?.close();
-    await fs.rm(directory, { recursive: true, force: true });
+    // Only this disposable fixture is removed after its owned channel closes.
+    // Preserve the original assertion/timeout instead of masking it with EBUSY.
+    try{await fs.rm(directory, { recursive: true, force: true, maxRetries:5, retryDelay:100 });}
+    catch(error){if(!originalFailure)throw error;}
   }
+  if(originalFailure)throw originalFailure;
 });
 
 test("Windows UIA core fills a real synthetic document without keyboard focus and rejects stale bindings", {

@@ -62,6 +62,13 @@ diagnostics/onboarding/accounts/Python, unrelated browser/OAuth/Remote MCP and
 slow shared cache/timeout groups run only in full. No production deadline,
 assertion, security admission or native fixture is relaxed.
 
+Windows multi-command assistant groups explicitly stop at each nonzero Node
+exit; a later passing suite cannot hide an earlier failure. Native background
+registration runs first in that group. Synthetic filesystem expectations use
+canonical Windows paths and bounded short fixture homes, not production path
+exceptions. Classic-console readiness shares its original startup deadline;
+cleanup of an owned terminated helper preserves the original assertion.
+
 Both Linux/macOS jobs retain exact dependency checks and two byte-identical
 unsigned package builds. The same deterministic Windows x64/ia32/arm64 artifact
 is built for every PR and consumed by the signed-chain/package fixtures. Test

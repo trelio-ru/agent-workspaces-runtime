@@ -2003,12 +2003,14 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
   // private config root at import time. Never write synthetic authority/cache
   // into the developer's real HOME or share a human remembered-key profile.
   if(process.env.TRELIO_ASSISTANT_INSPECTION_FIXTURE!=='1'){
-    const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-inspect-process-'));
+    // Short synthetic HOME avoids adding an artificial Windows MAX_PATH limit
+    // to the fixed common cache layout. Production path guards stay unchanged.
+    const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'ai-')));
     const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{fileURLToPath}=await import('node:url');
     // NODE_TEST_CONTEXT belongs to the outer runner. Inheriting it makes a
     // nested --test process suppress its runner, so exit 0 alone is no proof
     // that the isolated composition executed. Require an end-of-flow sentinel.
-    const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'AppData','Local'),
+    const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'l'),
       TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_INSPECTION_FIXTURE:'1'};
     delete childEnv.NODE_TEST_CONTEXT;
     try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted Workspace inspect open finish',fileURLToPath(import.meta.url)],{

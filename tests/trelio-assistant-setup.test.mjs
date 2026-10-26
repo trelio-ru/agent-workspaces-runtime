@@ -1141,7 +1141,8 @@ test('assistant reuses the shared local recovery and keeps heartbeat/status on i
   const native=await import('../host-runtime/scripts/trelio-workspace.mjs');
   const {WorkspaceLocalRecoveryRequiredError}=await import('../host-runtime/scripts/trelio-workspace-directory.mjs');
   const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
-  const config=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-local-recovery-'));
+  // TEMP may contain RUNNER~1 while the shared writer canonicalises that path.
+  const config=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'assistant-local-recovery-')));
   t.after(()=>fs.rm(config,{recursive:true,force:true}));
   const raw=workspacePlan(),plan=await validateAssistantWorkspacePlan(raw),p=raw.localAction.parameters,scope=plan.scope;
   const identity={origin:'https://trelio.ru',assistantId:scope.assistantUserId,deviceId:scope.deviceId};

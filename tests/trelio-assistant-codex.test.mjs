@@ -318,7 +318,7 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
       launches++;assert.deepEqual(args,['app-server','--listen','stdio://']);
       assert.equal(spawnOptions.shell,false);assert.equal(spawnOptions.cwd,expectedCwd);
       assert.equal(spawnOptions.env.SHOULD_NOT_PASS,undefined);assert.equal(spawnOptions.env.OPENAI_API_KEY,undefined);
-      assert.equal(spawnOptions.env.ComSpec,process.platform==='win32'?'C:\Windows\System32\cmd.exe':undefined);
+      assert.equal(spawnOptions.env.ComSpec,process.platform==='win32'?String.raw`C:\Windows\System32\cmd.exe`:undefined);
       assert.equal(spawnOptions.env.PATHEXT,process.platform==='win32'?'.COM;.EXE;.BAT;.CMD':undefined);
       return desktopRpc({threadId,cwd:expectedCwd,onInput:text=>{input=text;}})(_executable,args,spawnOptions);
     },
