@@ -204,10 +204,11 @@ final class Session {
         // the child URL, identifiers or values, and is NOT authority to enter
         // that document. A page can also have an unrelated iframe: report the
         // observed limitation, not a claim that the requested fields are there.
-        let missingReason = missingControlReason(document, nodes)
         func find(_ field: Field, button: Bool) throws -> AXUIElement {
             let found = nodes.filter { matchesField($0, field) && belongs($0, to: document) }
-            guard !found.isEmpty else { throw Stop.failed(missingReason) }
+            // Inspect boundary visibility only on a miss, so a ready form's
+            // repeated pre-setter checks perform no extra native AX requests.
+            guard !found.isEmpty else { throw Stop.failed(missingControlReason(document, nodes)) }
             guard found.count == 1 else { throw Stop.failed("field_ambiguous") }
             let target = found[0]
             guard (attribute(target, kAXEnabledAttribute) as? Bool) == true, visible(target, in: document) else {
