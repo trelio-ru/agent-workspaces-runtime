@@ -1546,11 +1546,15 @@ test('encrypted private browser signs normalized native targets and keeps full U
   const target={targetOrigin:'https://example.invalid',targetUrlSha256:createHash('sha256').update(targetUrl).digest('hex')};
   const runIdentity={workspaceId:randomUUID(),runId:randomUUID()},secretId=randomUUID(),grantId=randomUUID();let calls=0,tamper=false;
   const args={schemaVersion:1,operation:'secret_browser_prepare',parameters:{secretId,runId:runIdentity.runId,
-    steps:[{targetUrl,fields:[{fieldKey:'password',selector:'#password'}],submitSelector:'#submit'}]}};
+    steps:[{targetUrl,frames:[{targetUrl:targetUrl+'#/frame'}],fields:[{fieldKey:'password',accessibleName:'Clave de acceso'}],submitSelector:'#submit'}]}};
   const withProfile=action=>action({readCompanyContentMode:f.profile.readCompanyContentMode,
     preparePrivateBrowserArguments:f.profile.preparePrivateBrowserArguments,preparePrivateSkillArguments:f.profile.preparePrivateSkillArguments});
   const invoke=input=>withAssistantCompanyContentArguments({name:'continue_assistant_workspace_action',args:input},async wire=>{
     calls++;assert.doesNotMatch(JSON.stringify(wire),new RegExp(canary));
+    if(wire.operation==='secret_browser_prepare'){
+      assert.equal(wire.parameters.steps[0].frames[0].targetUrlSha256,createHash('sha256').update(targetUrl+'#/frame').digest('hex'));
+      assert.equal(wire.parameters.steps[0].fields[0].accessibleName,'Clave de acceso');
+    }
     const {encryptedPlan,...parameters}=wire.parameters,record={schemaVersion:1,operation:wire.operation,
       ...(wire.runIdentity?{runIdentity:wire.runIdentity}:{}),parameters};
     assert.equal(encryptedPlan.fingerprint,managed.fingerprint);
@@ -1567,6 +1571,7 @@ test('encrypted private browser signs normalized native targets and keeps full U
   assert.deepEqual((await invoke(fill)).structuredContent.localAction.parameters,{grantId,targetUrl});assert.equal(calls,2);
   for(const invalid of [{...args,reason:canary},{...args,parameters:{...args.parameters,extra:canary}},
     {...args,parameters:{...args.parameters,steps:[{...args.parameters.steps[0],value:canary}]}},
+    {...args,parameters:{...args.parameters,steps:[{...args.parameters.steps[0],frames:[{targetUrl:'https://other.invalid/form'}]}]}},
     {...fill,runIdentity:{...runIdentity,extra:canary}}])await assert.rejects(invoke(invalid));
   assert.equal(calls,2,'unknown protected fields never reach native HTTP');
   tamper=true;await assert.rejects(invoke(args),/PLAN_INVALID/);assert.equal(calls,3,'native target mismatch is not replayed');

@@ -34,13 +34,15 @@ enum Stop: Error {
     case failed(String)
     case unavailable(String)
 }
-struct Field: Decodable { let fieldKey: String; let id: String?; let passwordInput: Bool? }
+struct Field: Decodable { let fieldKey: String; let id: String?; let passwordInput: Bool?; var accessibleName: String? = nil }
+struct FrameTarget: Decodable { let targetOrigin: String; let targetUrlSha256: String }
 struct Step: Decodable {
     let targetOrigin: String
     let targetUrlSha256: String
     let fields: [Field]
     let activationId: String?
     let submitId: String?
+    var frames: [FrameTarget]? = nil
 }
 struct Request: Decodable {
     let command: String
@@ -88,14 +90,17 @@ func documentURL(_ element: AXUIElement) -> String? {
     if let url = attribute(element, "AXURL") as? URL { return url.absoluteString }
     return text(element, "AXURL")
 }
-func matches(_ raw: String?, _ step: Step) -> Bool {
+func matchesTarget(_ raw: String?, _ targetOrigin: String, _ targetUrlSha256: String) -> Bool {
     guard let raw = raw, let url = URL(string: raw), url.scheme == "https",
           url.user == nil, url.password == nil, let host = url.host else { return false }
     let port = url.port.map { $0 == 443 ? "" : ":" + String($0) } ?? ""
     let origin = "https://" + (host.contains(":") && !host.hasPrefix("[") ? "[" + host + "]" : host) + port
     let digest = SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
-    return origin == step.targetOrigin && digest == step.targetUrlSha256
+    return origin == targetOrigin && digest == targetUrlSha256
 }
+func matches(_ raw: String?, _ step: Step) -> Bool { return matchesTarget(raw, step.targetOrigin, step.targetUrlSha256) }
+func matches(_ raw: String?, _ frame: FrameTarget) -> Bool { return matchesTarget(raw, frame.targetOrigin, frame.targetUrlSha256) }
+
 func belongs(_ child: AXUIElement, to ancestor: AXUIElement) -> Bool {
     var cursor: AXUIElement? = child
     for _ in 0..<128 {
@@ -113,6 +118,16 @@ func visible(_ element: AXUIElement, in document: AXUIElement) -> Bool {
 }
 
 func matchesField(_ element: AXUIElement, _ field: Field) -> Bool {
+    if let name = field.accessibleName {
+        // Shadow-root inputs may have no AXDOMIdentifier. Match only the exact
+        // native field name observed on the empty page, never surrounding text,
+        // label order or AXValue. Native identity is still pinned before input.
+        guard field.id == nil, field.passwordInput != true,
+              ["AXTextField", "AXTextArea"].contains(text(element, kAXRoleAttribute) ?? "") else { return false }
+        let title = text(element, kAXTitleAttribute).flatMap { $0.isEmpty ? nil : $0 }
+        let actual = title ?? text(element, kAXDescriptionAttribute)
+        return actual?.precomposedStringWithCanonicalMapping == name
+    }
     // AXSecureTextField is Chromium's native representation of a password
     // input, not its accessible label or its (unread) current value. Reject
     // malformed mixed locators rather than weakening id-bound grants.
@@ -148,6 +163,8 @@ final class Session {
     let steps: [Step]
     let window: AXUIElement
     let container: AXUIElement
+    var rootDocument: AXUIElement
+    var frameDocuments: [AXUIElement]
     var document: AXUIElement
     var targets: [AXUIElement]
     var button: AXUIElement?
@@ -197,6 +214,47 @@ final class Session {
         }
         return found
     }
+    static func boundDocument(_ root: AXUIElement, _ step: Step) throws -> (AXUIElement, [AXUIElement]) {
+        var current = root
+        var path = [root]
+        guard (step.frames?.count ?? 0) <= 4 else { throw Stop.failed("adapter_error") }
+        for target in step.frames ?? [] {
+            guard target.targetOrigin == step.targetOrigin else { throw Stop.failed("target_origin_changed") }
+            // walk stops at immediate WebArea boundaries. Do not search another
+            // frame for a matching field or treat a same-origin URL as consent
+            // to a different path. Every explicitly requested hop is unique.
+            let candidates = try walk(current, stopAtWebArea: true).filter {
+                !CFEqual($0, current) && text($0, kAXRoleAttribute) == "AXWebArea"
+            }
+            let exact = candidates.filter { matches(documentURL($0), target) }
+            guard exact.count <= 1 else { throw Stop.failed("field_ambiguous") }
+            guard let next = exact.first else {
+                if candidates.isEmpty || candidates.allSatisfy({ documentURL($0) == nil || documentURL($0) == "about:blank" }) {
+                    throw Stop.failed("field_not_found")
+                }
+                throw Stop.failed("target_url_changed")
+            }
+            guard visible(next, in: current), belongs(next, to: current),
+                  !path.contains(where: { CFEqual($0, next) }) else { throw Stop.failed("target_url_changed") }
+            path.append(next)
+            current = next
+        }
+        return (current, path)
+    }
+    static func checkBoundDocument(_ root: AXUIElement, _ leaf: AXUIElement, _ pinned: [AXUIElement], _ step: Step) throws {
+        guard matches(documentURL(root), step) else { throw Stop.failed("target_url_changed") }
+        let (current, path) = try boundDocument(root, step)
+        guard CFEqual(current, leaf), path.count == pinned.count,
+              zip(path, pinned).allSatisfy({ CFEqual($0.0, $0.1) }) else { throw Stop.failed("target_url_changed") }
+    }
+    static func preparedDocument(_ root: AXUIElement, _ step: Step) throws -> (AXUIElement, [AXUIElement]) {
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            do { return try boundDocument(root, step) }
+            catch Stop.failed("field_not_found") { Thread.sleep(forTimeInterval: 0.1) }
+        }
+        throw Stop.failed("field_not_found")
+    }
     static func controls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
         let nodes = try walk(document, stopAtWebArea: true)
         // The traversal includes each iframe's WebArea boundary, but never its
@@ -240,7 +298,7 @@ final class Session {
         return nodes.contains {
             !CFEqual($0, document) && text($0, kAXRoleAttribute) == "AXWebArea"
                 && visible($0, in: document)
-        } ? "nested_document_unsupported" : "field_not_found"
+        } ? "nested_document_unbound" : "field_not_found"
     }
     static func preparedControls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
         let deadline = Date().addingTimeInterval(20)
@@ -273,7 +331,7 @@ final class Session {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
                 return try controls(document, step)
-            } catch Stop.failed(let reason) where reason == "field_not_found" || reason == "nested_document_unsupported" {
+            } catch Stop.failed(let reason) where reason == "field_not_found" || reason == "nested_document_unbound" {
                 // Preserve the ordinary readiness grace: an unrelated iframe
                 // must not make a still-loading top-level form fail early.
                 // Only the last observed miss explains the final refusal.
@@ -331,20 +389,23 @@ final class Session {
             throw Stop.failed("target_url_changed")
         }
         guard candidates.count == 1 else { throw Stop.failed("field_ambiguous") }
-        (application, appElement, document, requirement) = candidates[0]
-        guard let window = elementAttribute(document, kAXWindowAttribute) else { throw Stop.failed("adapter_error") }
+        (application, appElement, rootDocument, requirement) = candidates[0]
+        guard let window = elementAttribute(rootDocument, kAXWindowAttribute) else { throw Stop.failed("adapter_error") }
         self.window = window
         // Pin the native view containing this single document, not the entire
         // app window. A later step must not jump to a different browser tab.
-        guard let container = elementAttribute(document, kAXParentAttribute),
+        guard let container = elementAttribute(rootDocument, kAXParentAttribute),
               try Session.documents(container).count == 1 else { throw Stop.unavailable("accessibility_unavailable") }
         self.container = container
+        (document, frameDocuments) = try Session.preparedDocument(rootDocument, steps[0])
         (targets, button) = try Session.preparedControls(document, steps[0])
+        try checkDocument(steps[0])
     }
     func checkDocument(_ step: Step) throws {
         guard !application.isTerminated, Session.trust(application, requirement),
-              belongs(container, to: window), belongs(document, to: container),
-              matches(documentURL(document), step) else { throw Stop.failed("target_url_changed") }
+              belongs(container, to: window), belongs(rootDocument, to: container),
+              matches(documentURL(rootDocument), step) else { throw Stop.failed("target_url_changed") }
+        try Session.checkBoundDocument(rootDocument, document, frameDocuments, step)
     }
     func fill(_ values: [String: String]) throws {
         guard !used else { throw Stop.failed("adapter_error") }
@@ -364,9 +425,12 @@ final class Session {
                         }
                         if matches(documentURL(next), step) {
                             do {
-                                let prepared = try Session.preparedControls(next, step)
+                                let (leaf, path) = try Session.preparedDocument(next, step)
+                                let prepared = try Session.preparedControls(leaf, step)
                                 found = next
-                                document = next
+                                rootDocument = next
+                                document = leaf
+                                frameDocuments = path
                                 targets = prepared.0
                                 button = prepared.1
                                 break
@@ -379,7 +443,7 @@ final class Session {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
                 guard let next = found else { throw Stop.failed("timeout") }
-                document = next
+                rootDocument = next
             }
             try checkDocument(step)
             let (current, currentButton) = try Session.controls(document, step)

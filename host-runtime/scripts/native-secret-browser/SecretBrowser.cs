@@ -40,6 +40,11 @@ public sealed class Field {
     public string fieldKey { get; set; }
     public string id { get; set; }
     public bool passwordInput { get; set; }
+    public string accessibleName { get; set; }
+}
+public sealed class FrameTarget {
+    public string targetOrigin { get; set; }
+    public string targetUrlSha256 { get; set; }
 }
 public sealed class Step {
     public string targetOrigin { get; set; }
@@ -47,6 +52,7 @@ public sealed class Step {
     public Field[] fields { get; set; }
     public string activationId { get; set; }
     public string submitId { get; set; }
+    public FrameTarget[] frames { get; set; }
 }
 public sealed class Request {
     public string command { get; set; }
@@ -124,6 +130,8 @@ internal sealed class Session {
     private readonly AutomationElement window;
     private readonly AutomationElement container;
     private readonly Step[] steps;
+    private AutomationElement rootDocument;
+    private AutomationElement[] frameDocuments;
     private AutomationElement document;
     private AutomationElement[] targets;
     private AutomationElement button;
@@ -144,14 +152,15 @@ internal sealed class Session {
         return IsDocument(element) && element.TryGetCurrentPattern(ValuePattern.Pattern, out pattern)
             ? ((ValuePattern)pattern).Current.Value : null;
     }
-    internal static bool Matches(string value, Step step) {
+    internal static bool Matches(string value, Step step) { return MatchesTarget(value, step.targetOrigin, step.targetUrlSha256); }
+    private static bool MatchesTarget(string value, string targetOrigin, string targetUrlSha256) {
         Uri uri;
         if (value == null || !Uri.TryCreate(value, UriKind.Absolute, out uri)
             || uri.Scheme != "https" || uri.UserInfo.Length != 0
-            || uri.GetLeftPart(UriPartial.Authority) != step.targetOrigin) return false;
+            || uri.GetLeftPart(UriPartial.Authority) != targetOrigin) return false;
         using (var hash = SHA256.Create()) {
             return BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(value))).Replace("-", "").ToLowerInvariant()
-                == step.targetUrlSha256;
+                == targetUrlSha256;
         }
     }
     private static List<AutomationElement> Walk(AutomationElement root, bool stopAtDocuments) {
@@ -190,14 +199,20 @@ internal sealed class Session {
         }).ToList();
     }
     private static bool MatchesField(AutomationElement element, Field field) {
+        if (field.accessibleName != null) {
+            // UIA Name is metadata of this exact edit control. Never inspect
+            // ValuePattern.Value, nearby labels or field order to find it.
+            return field.id == null && !field.passwordInput && element.Current.ControlType == ControlType.Edit
+                && element.Current.Name.Normalize(NormalizationForm.FormC) == field.accessibleName;
+        }
         // IsPassword is provider metadata, never ValuePattern.Current.Value.
         // A role locator must not be silently treated as a missing/empty id.
         return field.passwordInput
             ? field.id == null && element.Current.ControlType == ControlType.Edit && element.Current.IsPassword
             : field.id != null && element.Current.AutomationId == field.id;
     }
-    private static AutomationElement Find(List<AutomationElement> nodes, AutomationElement doc, string id, bool isButton, bool passwordInput = false) {
-        var field = new Field { id = id, passwordInput = passwordInput };
+    private static AutomationElement Find(List<AutomationElement> nodes, AutomationElement doc, string id, bool isButton, bool passwordInput = false, string accessibleName = null) {
+        var field = new Field { id = id, passwordInput = passwordInput, accessibleName = accessibleName };
         var candidates = nodes.Where(element => MatchesField(element, field) && Belongs(element, doc)).ToArray();
         if (candidates.Length == 0) throw new Stop("field_not_found");
         if (candidates.Length != 1) throw new Stop("field_ambiguous");
@@ -216,9 +231,48 @@ internal sealed class Session {
         }
         return target;
     }
+    private static AutomationElement BoundDocument(AutomationElement root, Step step, out AutomationElement[] path) {
+        var frames = step.frames ?? new FrameTarget[0];
+        if (frames.Length > 4) throw new Stop("adapter_error");
+        var visited = new List<AutomationElement> { root };
+        var current = root;
+        foreach (var target in frames) {
+            if (target.targetOrigin != step.targetOrigin) throw new Stop("target_origin_changed");
+            // Resolve one explicitly bound immediate child at a time. A frame
+            // with a matching field but a different URL never participates.
+            var children = Walk(current, true).Where(node => !Equal(node, current) && IsDocument(node)).ToArray();
+            var exact = children.Where(node => MatchesTarget(DocumentUrl(node), target.targetOrigin, target.targetUrlSha256)).ToArray();
+            if (exact.Length > 1) throw new Stop("field_ambiguous");
+            if (exact.Length == 0) {
+                if (children.Length == 0 || children.All(node => DocumentUrl(node) == null || DocumentUrl(node) == "about:blank"))
+                    throw new Stop("field_not_found");
+                throw new Stop("target_url_changed");
+            }
+            var next = exact[0];
+            if (next.Current.IsOffscreen || next.Current.BoundingRectangle.IsEmpty || !Belongs(next, current)
+                || visited.Any(previous => Equal(previous, next))) throw new Stop("target_url_changed");
+            visited.Add(next); current = next;
+        }
+        path = visited.ToArray(); return current;
+    }
+    private static void CheckBoundDocument(AutomationElement root, AutomationElement leaf, AutomationElement[] pinned, Step step) {
+        if (!Matches(DocumentUrl(root), step)) throw new Stop("target_url_changed");
+        AutomationElement[] path;
+        var current = BoundDocument(root, step, out path);
+        if (!Equal(current, leaf) || path.Length != pinned.Length || !path.Zip(pinned, Equal).All(equal => equal))
+            throw new Stop("target_url_changed");
+    }
+    private static AutomationElement PreparedDocument(AutomationElement root, Step step, out AutomationElement[] path) {
+        var clock = Stopwatch.StartNew();
+        while (clock.Elapsed.TotalSeconds < 20) {
+            try { return BoundDocument(root, step, out path); }
+            catch (Stop error) { if (error.Reason != "field_not_found") throw; Thread.Sleep(100); }
+        }
+        throw new Stop("field_not_found");
+    }
     private static AutomationElement[] Controls(AutomationElement doc, Step step, out AutomationElement button) {
         var nodes = Walk(doc, true);
-        var result = step.fields.Select(field => Find(nodes, doc, field.id, false, field.passwordInput)).ToArray();
+        var result = step.fields.Select(field => Find(nodes, doc, field.id, false, field.passwordInput, field.accessibleName)).ToArray();
         if (result.Where((target, index) => result.Take(index).Any(previous => Equal(target, previous))).Any())
             throw new Stop("field_ambiguous");
         button = step.submitId == null ? null : Find(nodes, doc, step.submitId, true);
@@ -300,14 +354,17 @@ internal sealed class Session {
         process = candidates[0].Item1;
         startedAt = process.StartTime;
         window = candidates[0].Item2;
-        document = candidates[0].Item3;
-        container = TreeWalker.RawViewWalker.GetParent(document);
+        rootDocument = candidates[0].Item3;
+        container = TreeWalker.RawViewWalker.GetParent(rootDocument);
         if (container == null || Documents(container).Count != 1) throw new Stop("accessibility_unavailable", true);
+        document = PreparedDocument(rootDocument, steps[0], out frameDocuments);
         targets = PreparedControls(document, steps[0], out button);
+        CheckDocument(steps[0]);
     }
     private void CheckDocument(Step step) {
-        if (process.HasExited || process.StartTime != startedAt || !Belongs(container, window) || !Belongs(document, container)
-            || !Matches(DocumentUrl(document), step)) throw new Stop("target_url_changed");
+        if (process.HasExited || process.StartTime != startedAt || !Belongs(container, window) || !Belongs(rootDocument, container)
+            || !Matches(DocumentUrl(rootDocument), step)) throw new Stop("target_url_changed");
+        CheckBoundDocument(rootDocument, document, frameDocuments, step);
     }
     internal void Fill(Dictionary<string, string> values) {
         if (used) throw new Stop("adapter_error");
@@ -329,7 +386,10 @@ internal sealed class Session {
                             throw new Stop("target_url_changed");
                         if (Matches(DocumentUrl(candidate), step)) {
                             try {
-                                targets = PreparedControls(candidate, step, out button);
+                                AutomationElement[] path;
+                                var leaf = PreparedDocument(candidate, step, out path);
+                                targets = PreparedControls(leaf, step, out button);
+                                document = leaf; frameDocuments = path;
                                 next = candidate;
                                 break;
                             } catch (Stop error) { if (error.Reason != "field_not_found") throw; }
@@ -338,7 +398,7 @@ internal sealed class Session {
                     Thread.Sleep(100);
                 }
                 if (next == null) throw new Stop("timeout");
-                document = next;
+                rootDocument = next;
             }
             CheckDocument(step);
             AutomationElement currentButton;

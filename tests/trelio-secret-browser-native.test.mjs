@@ -546,15 +546,16 @@ test("macOS native preflight distinguishes an unwritable field from an unpressab
 });
 for (const mode of ["auto", "embedded"]) {
   test("nested-document refusal explains the limit before checkout without retry/fallback: " + mode, async () => {
-    const f = fixture({ status: "failed", reasonCode: "nested_document_unsupported" });
+    const f = fixture({ status: "failed", reasonCode: "nested_document_unbound" });
     await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode }), (error) => {
       // The private helper's capability detail must not expand the server's
       // outcome schema or turn into the generic field-miss Chrome fallback.
       assert.equal(error.reasonCode, "field_not_found");
-      assert.match(error.message, /iframe.*пока не поддерживается/u);
+      assert.match(error.message, /iframe.*не задана привязка/u);
+      assert.match(error.message, /frames.*accessibleName/u);
       assert.match(error.message, /Секрет не запрошен этой попыткой/u);
       assert.match(error.message, /ошибка не означает, что сохранённый пароль неверный/u);
-      assert.match(error.message, /вручную в исходной вкладке/u);
+      assert.match(error.message, /остаётся в исходной вкладке/u);
       return true;
     });
     assert.equal(f.requests.length, 1);
@@ -566,7 +567,7 @@ for (const mode of ["auto", "embedded"]) {
   });
 }
 
-test("macOS production resolver diagnoses excluded nested documents without traversing their controls", {
+test("macOS production resolver binds explicit nested documents and rejects stale native objects", {
   skip: process.platform !== "darwin", timeout: 90_000,
 }, async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-native-ax-tree-test-"));
@@ -586,9 +587,10 @@ test("macOS production resolver diagnoses excluded nested documents without trav
     const fixtureSource = await fs.readFile(new URL("./fixtures/native-secret-browser-macos.swift", import.meta.url), "utf8");
     const code = fixtureSource.replace("// PRODUCTION_CORE", [
       section("enum Stop: Error", "struct Request: Decodable"),
+      section("func matchesTarget(", "func belongs("),
       section("func matchesField(", "final class Session {"),
       "final class Session {",
-      section("    static func controls(", "    init(_ request: Request) throws {"),
+      section("    static func boundDocument(", "    init(_ request: Request) throws {"),
       "}",
     ].join("\n"));
     assert.notEqual(code, fixtureSource);
@@ -1144,3 +1146,29 @@ test("native preparation carries an exact activation id without credential value
   assert.doesNotMatch(JSON.stringify(f.requests[0]), /CANARY/u);
   await session.close();
 });
+
+
+for (const platform of ["darwin", "win32"]) {
+  test("explicit frame/name plan pins the same native surface: " + platform, async () => {
+    const f = fixture();
+    f.args.context.browserSteps[0].frames = [{ targetOrigin: context.targetOrigin, targetUrlSha256: "a".repeat(64) }];
+    f.args.context.browserSteps[0].fields[0] = { fieldKey: "username", accessibleName: "Código de empresa" };
+    delete f.args.context.browserSteps[0].submitSelector;
+    const session = await prepareSecretBrowserSession({ ...f.args, platform });
+    assert.equal(session.surface, "embedded");
+    assert.deepEqual(f.requests[0].steps[0].frames, f.args.context.browserSteps[0].frames);
+    assert.deepEqual(f.requests[0].steps[0].fields[0], { fieldKey: "username", accessibleName: "Código de empresa" });
+    const changed = structuredClone(f.args.context); changed.browserSteps[0].frames[0].targetUrlSha256 = "b".repeat(64);
+    assert.throws(() => assertBrowserFillBindingUnchanged(f.args.context, changed));
+    await session.fill({ secretValues: values });
+    await assert.rejects(session.fill({ secretValues: values }));
+    assert.equal(f.requests.length, 2); assert.equal(f.chromePreflights, 0);
+    await session.close();
+    for (const reason of ["field_not_found", "target_url_changed", "accessibility_unavailable"]) {
+      const missing = fixture({ status: reason === "accessibility_unavailable" ? "unavailable" : "failed", reasonCode: reason });
+      missing.args.context = structuredClone(f.args.context);
+      await assert.rejects(prepareSecretBrowserSession({ ...missing.args, platform }));
+      assert.equal(missing.chromePreflights, 0, "a bound iframe plan must never select a new profile");
+    }
+  });
+}

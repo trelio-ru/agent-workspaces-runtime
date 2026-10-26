@@ -114,19 +114,35 @@ export const browserFillBinding = (context) => {
       || !Array.isArray(step.fields) || !step.fields.length) {
       throw new SecretBrowserFillError("Некорректный browser step.");
     }
-    const fields = step.fields.map(({ fieldKey, selector }) => {
+    const fields = step.fields.map(({ fieldKey, selector, accessibleName }) => {
       if (!context.fieldKeys.includes(fieldKey) || seen.has(fieldKey)) {
         throw new SecretBrowserFillError("Browser step не совпадает с полями grant.");
       }
       seen.add(fieldKey);
+      if ((selector === undefined) === (accessibleName === undefined)) throw new SecretBrowserFillError("Browser field requires exactly one locator.");
+      if (accessibleName !== undefined) {
+        if (typeof accessibleName !== "string" || !accessibleName || accessibleName.length > 120
+          || accessibleName !== accessibleName.trim().normalize("NFC") || /[\0-\x1f\x7f]/u.test(accessibleName))
+          throw new SecretBrowserFillError("Invalid native accessible name.", "field_selector_invalid");
+        return { fieldKey, accessibleName };
+      }
       return { fieldKey, selector: normalizeSecretBrowserFieldSelector(selector) };
     });
-    if (new Set(fields.map((field) => field.selector)).size !== fields.length) {
+    if (new Set(fields.map((field) => field.selector !== undefined ? "selector:" + field.selector : "name:" + field.accessibleName)).size !== fields.length) {
       throw new SecretBrowserFillError("Несколько secret fields назначены одному browser field.", "field_ambiguous");
     }
+    if (step.frames !== undefined && (!Array.isArray(step.frames) || !step.frames.length || step.frames.length > 4))
+      throw new SecretBrowserFillError("Invalid bound frame path.");
+    const frames = step.frames?.map(frame => {
+      const origin = new URL(frame.targetOrigin);
+      if (origin.protocol !== "https:" || origin.origin !== frame.targetOrigin || origin.origin !== step.targetOrigin || !/^[0-9a-f]{64}$/u.test(frame.targetUrlSha256 || ""))
+        throw new SecretBrowserFillError("Invalid bound frame target.", "target_origin_changed");
+      return { targetOrigin: frame.targetOrigin, targetUrlSha256: frame.targetUrlSha256 };
+    });
     return {
       targetOrigin: step.targetOrigin,
       targetUrlSha256: step.targetUrlSha256,
+      ...(frames ? { frames } : {}),
       fields,
       ...(step.activationSelector
         ? { activationSelector: normalizeSecretBrowserFieldSelector(step.activationSelector) }
@@ -325,7 +341,11 @@ export const prepareSecretBrowserSession = async ({
 }) => {
   mode = normalizeSecretBrowserMode(mode);
   let channel = null;
+  // New grants never change surface. In particular, missing native metadata is
+  // not permission to put a frame-bound credential in a fresh Chrome profile.
+  const boundPlan = context?.browserSteps?.some(step => step.frames?.length || step.fields?.some(field => field.accessibleName !== undefined));
   const chrome = async (fallbackReason) => {
+    if (boundPlan) throw new SecretBrowserFillError("Bound frames and accessible names require the original native tab.", "browser_unavailable");
     // Current servers provide a complete value-free binding. Resolve the
     // dedicated profile and its exact fields before the one-use grant is
     // consumed; an ordinary Chrome tab prepared by the agent is unrelated.
@@ -382,12 +402,14 @@ export const prepareSecretBrowserSession = async ({
           "field_selector_invalid",
         );
       }
-      const fields = step.fields.map(({ fieldKey, selector }) => ({ fieldKey, ...nativeFieldFromSecretSelector(selector) }));
-      if (new Set(fields.map(({ id, passwordInput }) => passwordInput ? "password-input" : "id:" + id)).size !== fields.length) {
+      const fields = step.fields.map(({ fieldKey, selector, accessibleName }) => ({ fieldKey,
+        ...(accessibleName !== undefined ? { accessibleName } : nativeFieldFromSecretSelector(selector)) }));
+      if (new Set(fields.map(({ id, passwordInput, accessibleName }) => accessibleName !== undefined ? "name:" + accessibleName : passwordInput ? "password-input" : "id:" + id)).size !== fields.length) {
         throw new SecretBrowserFillError("Browser selectors разрешаются в одно поле.", "field_ambiguous");
       }
       return {
         targetOrigin: step.targetOrigin, targetUrlSha256: step.targetUrlSha256,
+        ...(step.frames ? { frames: step.frames } : {}),
         fields,
         ...(step.activationSelector
           ? { activationId: nativeIdFromSecretSelector(step.activationSelector) }
@@ -427,7 +449,7 @@ export const prepareSecretBrowserSession = async ({
       // These two value-free misses may select a new isolated Chrome surface:
       // Chrome still has to verify its own exact URL and all fields before
       // the one-use grant is consumed. Ambiguity/write errors stay terminal.
-      if (mode === "auto" && ready.status === "failed"
+      if (!boundPlan && mode === "auto" && ready.status === "failed"
         && NATIVE_PREFLIGHT_CHROME_RETRY.has(ready.reasonCode)) {
         await channel.close();
         channel = null;
@@ -438,13 +460,14 @@ export const prepareSecretBrowserSession = async ({
       // a new profile cannot safely resolve an unbound iframe/shadow-root form.
       // Keep the existing backend outcome ABI; the specific explanation belongs
       // to this preparation error, never to a post-consume retry or audit text.
-      if (ready.status === "failed" && ready.reasonCode === "nested_document_unsupported") {
+      if (ready.status === "failed" && ready.reasonCode === "nested_document_unbound") {
         throw new SecretBrowserFillError(
           "В основном документе не найдены заданные поля или элемент входа. "
-            + "На странице есть вложенный web-документ (iframe); защищённое заполнение внутри него пока не поддерживается. "
+            + "На странице есть вложенная форма (iframe), для которой не задана привязка. "
+            + "После проверки пустой формы подготовьте новый план: frames с точными HTTPS URL каждого вложенного документа того же origin, "
+            + "а для полей без стабильного id – точный accessibleName. Подстановка остаётся в исходной вкладке. "
             + "Секрет не запрошен этой попыткой для подстановки. Эта ошибка не означает, что сохранённый пароль неверный. "
-            + "Выполните вход вручную в исходной вкладке и пройдите штатные подтверждения сайта. "
-            + "Не передавайте реквизиты в чат и не повторяйте выдачу в другой вкладке или через другой transport.",
+            + "Не считывайте заполненные поля и не обходите штатные подтверждения сайта.",
           "field_not_found",
         );
       }
@@ -476,7 +499,7 @@ export const prepareSecretBrowserSession = async ({
     };
   } catch (error) {
     await channel?.close();
-    if (mode === "auto" && error instanceof EmbeddedBrowserUnavailable) return chrome(error.nativeReason);
+    if (!boundPlan && mode === "auto" && error instanceof EmbeddedBrowserUnavailable) return chrome(error.nativeReason);
     throw error;
   }
 };

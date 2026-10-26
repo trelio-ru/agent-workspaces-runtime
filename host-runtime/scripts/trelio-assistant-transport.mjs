@@ -1354,16 +1354,27 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           ||!Array.isArray(parameters.steps)||parameters.steps.length<1||parameters.steps.length>10)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
         const seen=new Set();
         const steps=parameters.steps.map((step,index)=>{
-          if(!object(step)||Object.keys(step).some(key=>!['targetUrl','fields','activationSelector','submitSelector'].includes(key))
+          if(!object(step)||Object.keys(step).some(key=>!['targetUrl','frames','fields','activationSelector','submitSelector'].includes(key))
             ||!Array.isArray(step.fields)||!step.fields.length||step.fields.length>50
             ||index<parameters.steps.length-1&&step.submitSelector===undefined)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
           const {targetUrl,...target}=normalizeSecretBrowserGrantTarget(step.targetUrl);first??=targetUrl;
           const fields=step.fields.map(field=>{
-            if(!object(field)||Object.keys(field).sort().join(',')!=='fieldKey,selector'
+            if(!object(field)||!['accessibleName,fieldKey','fieldKey,selector'].includes(Object.keys(field).sort().join(','))
               ||!/^[a-z][a-z0-9_]{0,63}$/u.test(field.fieldKey??'')||seen.has(field.fieldKey))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
-            seen.add(field.fieldKey);return {fieldKey:field.fieldKey,selector:normalizeSecretBrowserFieldSelector(field.selector)};
+            seen.add(field.fieldKey);
+            if(field.accessibleName!==undefined){
+              if(typeof field.accessibleName!=='string'||!field.accessibleName.trim()||field.accessibleName.length>120||/[\0-\x1f\x7f]/u.test(field.accessibleName))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+              return {fieldKey:field.fieldKey,accessibleName:field.accessibleName.trim().normalize('NFC')};
+            }
+            return {fieldKey:field.fieldKey,selector:normalizeSecretBrowserFieldSelector(field.selector)};
           });
-          return {...target,fields,...(step.activationSelector!==undefined?{activationSelector:normalizeSecretBrowserFieldSelector(step.activationSelector)}:{}),
+          if(step.frames!==undefined&&(!Array.isArray(step.frames)||!step.frames.length||step.frames.length>4))fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+          const frames=step.frames?.map(frame=>{
+            if(!object(frame)||Object.keys(frame).join(',')!=='targetUrl')fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');
+            const {targetUrl:_,...binding}=normalizeSecretBrowserGrantTarget(frame.targetUrl);
+            if(binding.targetOrigin!==target.targetOrigin)fail('ASSISTANT_ENCRYPTED_CONTENT_REQUIRED');return binding;
+          });
+          return {...target,fields,...(frames?{frames}:{}),...(step.activationSelector!==undefined?{activationSelector:normalizeSecretBrowserFieldSelector(step.activationSelector)}:{}),
             ...(step.submitSelector!==undefined?{submitSelector:normalizeSecretBrowserFieldSelector(step.submitSelector)}:{})};
         });
         selected={schemaVersion:1,operation:args.operation,parameters:{secretId:parameters.secretId,runId:parameters.runId,steps}};

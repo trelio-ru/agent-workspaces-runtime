@@ -260,8 +260,9 @@ publication tooling также остаются вне этого публичн
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
   Формы без id и signed native browser – [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
-  macOS nested-document miss сохраняет границу WebArea и объясняет ограничение
-  до checkout; это terminal refusal без Chrome fallback, не поддержка iframe.
+  Вложенная форма требует explicit same-origin URL/hash path; native имена
+  полей допустимы только с unique/object binding, без AX/UIA value reads.
+  Старый host отказывается до checkout; такой план не меняет native surface.
   Native UIA fixture reports fixed startup stages only; its window timeout is
   not permission to relax production admission, deadlines or Windows assertions.
 - Hook/bridge/MCP используют общий recovery exact stable loader по

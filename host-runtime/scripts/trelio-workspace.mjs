@@ -1403,6 +1403,8 @@ export const buildBridgeRequestHeaders = (token, initialHeaders = {}) => {
   // Advertising it on every bridge request lets the backend reject an old
   // executable before either reading protected stdin or consuming a grant.
   headers.set(AGENT_SECRET_COMPANY_E2EE_HEADER, "v1");
+  // Old runtimes must not silently drop frame/name bindings before consume.
+  headers.set("x-trelio-agent-secret-bound-browser-fill", "v1");
   // The bridge is a crypto-aware client for the entire encrypted data plane.
   // This shared protocol header keeps Agent Secret mutations inside the same
   // fail-closed plaintext guard used by the browser.

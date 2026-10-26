@@ -100,14 +100,18 @@ internal static class Harness {
     }
     static object Prepared() {
         var instance = FormatterServices.GetUninitializedObject(sessionType);
-        var args = new object[] { document, step, null };
+        var bound = new object[] { document, step, null };
+        var leaf = sessionType.GetMethod("BoundDocument", Static).Invoke(null, bound);
+        var args = new object[] { leaf, step, null };
         var targets = sessionType.GetMethod("Controls", Static).Invoke(null, args);
         var process = Process.GetCurrentProcess();
         Set(instance, "process", process);
         Set(instance, "startedAt", process.StartTime);
         Set(instance, "window", root);
         Set(instance, "container", TreeWalker.RawViewWalker.GetParent(document));
-        Set(instance, "document", document);
+        Set(instance, "rootDocument", document);
+        Set(instance, "frameDocuments", bound[2]);
+        Set(instance, "document", leaf);
         Set(instance, "steps", new[] { step });
         Set(instance, "targets", targets);
         Set(instance, "button", args[2]);
@@ -260,6 +264,47 @@ internal static class Harness {
             try { Fill(replacedSecure); throw new Exception("replacement password was accepted"); }
             catch (Exception error) { Check(Reason(error) == "field_write_failed", "secure object identity must stay pinned"); }
             window.Dispatcher.Invoke(new Action(() => Check(secure.Text == "", "replacement received a secret")));
+            // Real UIA nested Document + named edits model shadow-root inputs:
+            // outer controls with identical names may never receive a value.
+            FixturePage inner = null;
+            StackPanel innerPanel = null;
+            TextBox innerUser = null, innerPassword = null;
+            const string frameUrl = "https://login.example.test/form";
+            window.Dispatcher.Invoke(new Action(() => {
+                username.Text = ""; secure.Text = "";
+                AutomationProperties.SetName(username, "Usuario"); AutomationProperties.SetName(secure, "Clave de acceso");
+                inner = new FixturePage { Url = frameUrl, Height = 110 };
+                innerPanel = new StackPanel(); innerUser = Input(""); innerPassword = Input("");
+                AutomationProperties.SetName(innerUser, "Usuario"); AutomationProperties.SetName(innerPassword, "Clave de acceso");
+                innerPanel.Children.Add(innerUser); innerPanel.Children.Add(innerPassword);
+                inner.Child = innerPanel; panel.Children.Add(inner); window.UpdateLayout();
+            }));
+            string frameHash;
+            using (var sha = SHA256.Create()) frameHash = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(frameUrl))).Replace("-", "").ToLowerInvariant();
+            step = new Step { targetOrigin = "https://login.example.test", targetUrlSha256 = hash,
+                frames = new[] { new FrameTarget { targetOrigin = "https://login.example.test", targetUrlSha256 = frameHash } },
+                fields = new[] { new Field { fieldKey = "username", accessibleName = "Usuario" }, new Field { fieldKey = "password", accessibleName = "Clave de acceso" } } };
+            var framed = Prepared(); Fill(framed);
+            window.Dispatcher.Invoke(new Action(() => {
+                Check(innerUser.Text == "synthetic-native-user" && innerPassword.Text == "synthetic-native-password", "bound frame setters failed");
+                Check(username.Text == "" && secure.Text == "", "a top-document alias received a secret");
+                innerUser.Text = ""; innerPassword.Text = "";
+            }));
+            var foreignFrame = Prepared();
+            window.Dispatcher.Invoke(new Action(() => inner.Url = "https://other.example.test/form"));
+            try { Fill(foreignFrame); throw new Exception("foreign iframe accepted"); }
+            catch (Exception error) { Check(Reason(error) == "target_url_changed", "frame URL must remain pinned"); }
+            window.Dispatcher.Invoke(new Action(() => {
+                Check(innerUser.Text == "" && innerPassword.Text == "", "foreign frame received a secret"); inner.Url = frameUrl;
+            }));
+            var changedFrame = Prepared();
+            window.Dispatcher.Invoke(new Action(() => {
+                panel.Children.Remove(inner);
+                var newFrame = new FixturePage { Url = frameUrl, Height = 110 };
+                newFrame.Child = new StackPanel(); panel.Children.Add(newFrame); window.UpdateLayout();
+            }));
+            try { Fill(changedFrame); throw new Exception("replacement iframe accepted"); }
+            catch (Exception error) { Check(Reason(error) == "target_url_changed", "frame object must remain pinned"); }
             using (Lease()) Check(ProbeLease().Contains("browser_unavailable"), "parallel helper acquired an owned lease");
             using (var holder = Process.Start(new ProcessStartInfo {
                 FileName = Assembly.GetExecutingAssembly().Location, Arguments = "--hold-native-lease",

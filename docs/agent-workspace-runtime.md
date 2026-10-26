@@ -581,19 +581,33 @@ Native id locators сохраняют прежний ABI. Явный `input[type
 смена URL/объекта либо перекрывающиеся id/role mappings дают отказ.
 Native object identity и роль перепроверяются до каждого setter.
 
-macOS AX lookup по-прежнему не входит во вложенные WebArea. Если после
-обычного bounded ожидания заданный control отсутствует в основном документе,
-а уже прочитанный обход содержит видимую границу вложенного документа,
-helper возвращает private diagnostic `nested_document_unsupported`.
-Bridge сообщает, что поля не найдены в основном документе и iframe пока не
-поддерживается; это не утверждение о расположении полей внутри iframe или о
-неверном пароле. URL, содержимое и controls вложенного документа не читаются.
-Отказ терминален до checkout, без нового native retry или Chrome fallback;
-серверный outcome ABI сохраняет `field_not_found`. Этот diagnostic не
-разрешает рекурсивный поиск, вход в shadow roots либо обход подтверждений банка.
-Top-level форма с посторонним iframe сохраняет прежний readiness grace,
-уникальность и object binding. Hidden/disabled, ambiguity и write failures
-сохраняют свои причины. После consume прежний запрет повтора сохраняется.
+Explicit `steps[].frames` задаёт до четырёх ordered immediate-child документов
+по exact HTTPS URL того же origin, что основная страница. Backend сохраняет
+только origin/full-URL SHA-256 каждого hop. Native AX/UIA обходит родителя до
+границ WebArea/Document, выбирает единственный exact child и закрепляет всю
+цепочку объектов. Поля ищутся только в конечном документе, без рекурсивного
+поиска подходящих inputs в других iframe. Дубликат frame URL (даже hidden),
+чужой origin, URL/path/query change, замена root/frame/field и потеря writable
+state останавливают выдачу/следующий setter. До consume выполняется весь preflight;
+после него никакого повторного заполнения или смены transport нет.
+
+В `fields[]` допустим либо legacy `selector`, либо exact `accessibleName`
+наблюдённого native text field (до 120 символов, NFC, без control characters).
+Это AXTitle/AXDescription либо UIA Name конкретного edit, без AXValue/ValuePattern
+read, поиска соседнего текста или угадывания порядка. Так поддерживаются
+shadow-root inputs, доступные через native accessibility, без dynamic DOM id.
+Неоднозначные имена и пересечение name/id locators отклоняются до setter.
+Последний step может оставаться field-only для заранее определённого browser
+click в той же вкладке; MFA/SMS/push не обходятся, успешный fill не доказывает login.
+
+Планы с frames/accessibility names всегда используют исходный native browser,
+без Chrome fallback. Header `x-trelio-agent-secret-bound-browser-fill: v1`
+проверяется backend на context и consume (включая managed assistant): старый
+host не может проигнорировать неизвестные bindings и получить value. Existing
+id-only top-document grants сохраняют прежний ABI. Без `frames` вложенные
+документы по-прежнему исключены; macOS miss с видимой границей WebArea возвращает
+`nested_document_unbound` и направляет к новому exact плану до запроса секрета.
+Обычный bounded readiness grace основной формы и закрытые причины отказов сохранены.
 
 Только план с этим явным password locator расширяет discovery native клиента
 на работающий Google Chrome: macOS проверяет bundle `com.google.Chrome` и
