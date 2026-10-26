@@ -658,6 +658,8 @@ publication tooling также остаются вне этого публичн
   autologon, force overwrite, active-pass termination or readiness inference.
   New tasks grant that principal control of its own registration; legacy ACLs
   are not silently rewritten or elevated during a maintenance retry.
+  Explicit maintenance setup verifies native task write access and may resume
+  only an untouched failed bootstrap; polling never resets candidate/trust latches.
   Constant public-metadata PowerShell is separate from native ACL/DPAPI.
   Owner rebind may inspect/hash and remove only the exact idle old registration;
   protected snapshot/identity fences never permit stop, force, path execution or session migration.

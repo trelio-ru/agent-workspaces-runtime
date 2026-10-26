@@ -1095,6 +1095,15 @@ validate that exact optional trigger too, never an arbitrary extra schedule.
 The new confirmed parent removes the temporary time trigger through the same
 exact helper; steady state retains the original single-logon definition.
 
+Explicit maintenance opt-in checks that principal's own task write ACE before
+writing the policy; an administrator token alone is insufficient. After an
+authorised operator repairs a legacy read-only registration, repeating the
+same installer opt-in may resume only a failed initial host handoff: identical
+previous/target version and tree, no GUI generation or restart, and no distinct
+failed candidate. The SAME setup lock/active-pass fence and journal CAS apply.
+Polling never clears that latch; plugin/rollback failures and hook review stay
+independent. Recovery resumes `retargeting`, never installation or task replay.
+
 Owner-approved host replacement uses an internal composition of this SAME native
 helper. It first inspects the old assistant/device marker, current Windows SID,
 least-privilege definition and a closed Node/signed-loader supervisor command.

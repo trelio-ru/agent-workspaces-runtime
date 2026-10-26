@@ -538,7 +538,10 @@ test('native plugin handoff retargets only the exact scheduled action and preser
   await fs.mkdir(path.dirname(oldLoader),{recursive:true});await fs.mkdir(path.dirname(nextLoader),{recursive:true});
   await fs.writeFile(oldLoader,`import fs from 'node:fs';const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(timer);return;}fs.writeFileSync(${JSON.stringify(heartbeat)},String(Date.now()));},100);`);
   await fs.writeFile(nextLoader,`import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(receipt)},JSON.stringify({ready:true}));`);
-  const options={readIdentity:async()=>fixture,verifyContact:async()=>{}};
+  let writableOptIns=0;
+  const options={readIdentity:async()=>fixture,verifyContact:async()=>{},setPluginUpdates:async(enabled,current,proof)=>{
+    assert.equal(enabled,true);assert.deepEqual(current,fixture);assert.deepEqual(proof,{ownTaskWriteVerified:true});writableOptIns++;
+  }};
   const old=createAssistantWindowsBackground({...options,resolveLoader:async()=>oldLoader});
   const next=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[oldLoader],restartRequested:true});
   const steady=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[oldLoader],restartRequested:false});
@@ -564,7 +567,7 @@ $ownWrite=@($sd.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -eq $s
     }
     assert.fail('native handoff fixture did not become idle; no process was killed');
   });
-  await old('install');assert.equal(await triggerCount(),1);await old('start');
+  await old('install',{autoUpdatePlugin:true});assert.equal(writableOptIns,1);assert.equal(await triggerCount(),1);await old('start');
   const read=async file=>{try{return await fs.readFile(file,'utf8');}catch(error){if(error.code==='ENOENT')return null;throw error;}};
   const until=async predicate=>{for(let i=0;i<80;i++){if(await predicate())return true;await new Promise(resolve=>setTimeout(resolve,250));}return false;};
   assert.equal(await until(async()=>await read(heartbeat)!==null),true);
@@ -601,8 +604,8 @@ test('native Desktop inspection selects the GUI App from the real two-applicatio
 test('plugin maintenance is a one-time explicit setup policy, recorded only after exact native registration',async()=>{
   let writes=0,installed=0;const flags=[];
   const manage=createAssistantWindowsBackground({platform:'win32',executable:'C:\\node.exe',readIdentity:async()=>identity,
-    verifyContact:async()=>{},resolveLoader:async()=>'C:\\plugin\\loader.mjs',runNative:async()=>{installed++;return registered();},
-    setPluginUpdates:async(enabled,current)=>{assert.deepEqual(current,identity);flags.push(enabled);writes++;}});
+    verifyContact:async()=>{},resolveLoader:async()=>'C:\\plugin\\loader.mjs',runNative:async plan=>{installed++;assert.equal(plan.requireOwnTaskWrite,installed===2?true:undefined);return registered();},
+    setPluginUpdates:async(enabled,current,proof)=>{assert.deepEqual(current,identity);assert.deepEqual(proof,{ownTaskWriteVerified:enabled});flags.push(enabled);writes++;}});
   await manage('install');assert.equal(writes,0,'legacy installation cannot silently authorize Desktop restart');
   await manage('install',{autoUpdatePlugin:true});await manage('install',{autoUpdatePlugin:false});
   assert.deepEqual(flags,[true,false]);assert.equal(installed,3);
@@ -610,4 +613,9 @@ test('plugin maintenance is a one-time explicit setup policy, recorded only afte
   const output=new PassThrough();let supplied;
   await runAssistantEntry(['background-install','--auto-update-plugin=on'],{output,createBackground:async()=>async(op,options)=>{supplied={op,options};return registered();}});
   assert.deepEqual(supplied,{op:'install',options:{autoUpdatePlugin:true}});
+  const refused=createAssistantWindowsBackground({platform:'win32',executable:'C:\\node.exe',readIdentity:async()=>identity,
+    verifyContact:async()=>{},resolveLoader:async()=>'C:\\plugin\\loader.mjs',runNative:async plan=>{
+      assert.equal(plan.requireOwnTaskWrite,true);throw Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_ACCESS_DENIED'});
+    },setPluginUpdates:()=>assert.fail('read-only native registration cannot enable or recover maintenance')});
+  await assert.rejects(refused('install',{autoUpdatePlugin:true}),{code:'ASSISTANT_BACKGROUND_ACCESS_DENIED'});
 });

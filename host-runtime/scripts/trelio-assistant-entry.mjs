@@ -143,7 +143,7 @@ export const createProductionAssistantBackground = async () => {
   return createAssistantWindowsBackground({
     signal,
     readIdentity: () => productionContext(client => client.identity, { signal }),
-    setPluginUpdates:(enabled,identity)=>productionContext((_client,host)=>host.withSetupLock(()=>host.setPluginUpdatesEnabled(enabled,identity)),{signal}),
+    setPluginUpdates:(enabled,identity,registration)=>productionContext((_client,host)=>host.withSetupLock(()=>host.setPluginUpdatesEnabled(enabled,identity,registration)),{signal}),
     verifyContact: () => productionContext(client => client.heartbeat(), { signal }),
     readDispatchStatus: ({signal:diagnosticSignal}) => readProductionAssistantDispatchStatus({signal:diagnosticSignal}),
     readMaintenanceStatus:({signal:diagnosticSignal})=>productionContext(async(_client,host)=>{

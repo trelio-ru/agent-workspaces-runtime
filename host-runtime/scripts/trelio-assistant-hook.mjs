@@ -234,7 +234,7 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
         ||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId)fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
       return value.autoUpdatePlugin;
     },
-    async setPluginUpdatesEnabled(enabled,expectedIdentity){
+    async setPluginUpdatesEnabled(enabled,expectedIdentity,{ownTaskWriteVerified=false}={}){
       const pluginPolicyFile=await maintenanceFile('policy');
       const current=await readIdentity();
       if(typeof enabled!=='boolean'||!current||['origin','assistantId','deviceId'].some(k=>current[k]!==expectedIdentity[k]))
@@ -244,6 +244,19 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       if(enabled&&await this.readActivePass()!==null)fail('ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');
       await ops.writePrivateJsonFile(pluginPolicyFile,{schemaVersion:1,assistantId:current.assistantId,deviceId:current.deviceId,autoUpdatePlugin:enabled});
       if(await this.readPluginUpdatesEnabled()!==enabled)fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      // Only a NEW explicit setup operation, after its exact native registration
+      // verified the principal's own write access, may resume a failed initial
+      // host handoff. No plugin was installed/restarted in this narrow state.
+      // Polling, a bare policy write and failures of a different candidate keep
+      // their latch; no provider/business action or hook approval is repeated.
+      if(enabled&&ownTaskWriteVerified===true){
+        const failed=await this.readPluginUpdate();
+        if(failed?.stage==='failed'&&failed.previousVersion===failed.targetVersion
+          &&failed.previousTreeSha256===failed.targetTreeSha256&&failed.failedVersion===failed.targetVersion
+          &&failed.desktopGeneration===null&&failed.restarts===0){
+          await this.writePluginUpdate(failed,{...failed,stage:'retargeting',failures:0,failedVersion:null});
+        }
+      }
     },
     async readPluginUpdate(){
       const pluginUpdateFile=await maintenanceFile('update');

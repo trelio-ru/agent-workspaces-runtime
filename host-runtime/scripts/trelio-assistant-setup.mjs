@@ -453,6 +453,16 @@ try {
     }
     $existing = $null
   }
+  if ($p.operation -eq 'install' -and $p.requireOwnTaskWrite) {
+    # Explicit maintenance opt-in must not succeed merely because this process
+    # has an elevated token. Its later InteractiveToken parent needs its OWN
+    # write ACE. Custom deny policies stay fail-closed, never rewritten here.
+    if (!$existing) { throw 'ASSISTANT_BACKGROUND_NOT_INSTALLED' }
+    $sd = [Security.AccessControl.RawSecurityDescriptor]::new($existing.GetSecurityDescriptor(7))
+    $write = @($sd.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier.Value -ceq $sid -and $_.AceQualifier -eq 'AccessAllowed' -and (($_.AccessMask -band 2) -eq 2 -or ($_.AccessMask -band 268435456) -eq 268435456) }).Count -gt 0
+    $denied = @($sd.DiscretionaryAcl | Where-Object { $_.AceQualifier -eq 'AccessDenied' }).Count -gt 0
+    if (!$write -or $denied) { throw 'ASSISTANT_BACKGROUND_ACCESS_DENIED' }
+  }
   $state = 'not_installed'
   if ($existing) { $state = 'registered'; if ($existing.State -eq 4) { $state = 'running' }; if ($existing.State -eq 2) { $state = 'queued' } }
   $result = @{schemaVersion=1; state=$state; installed=[bool]$existing; interactiveUserRequired=$true; startsAtUserLogon=[bool]$existing; businessReady=$false}
@@ -502,6 +512,7 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
     const plan = { schemaVersion: 1, operation, assistantId: identity.assistantId.toLowerCase(), deviceId: identity.deviceId.toLowerCase(),
       command: executable, arguments: `${[loader,...loaderArguments].map(quoteAssistantWindowsArgument).join(' ')} bridge assistant background`,
       workingDirectory: path.win32.dirname(executable) };
+    if(operation==='install'&&options.autoUpdatePlugin===true)plan.requireOwnTaskWrite=true;
     if(operation==='retarget'){
       plan.previousArguments=previousLoaders.map(loader=>`${quoteAssistantWindowsArgument(loader)} bridge assistant background`);
       plan.restartRequested=restartRequested;
@@ -515,7 +526,7 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
     remaining();
     const projected=projectAssistantBackgroundResult(result);
     if(operation==='install'&&Object.hasOwn(options,'autoUpdatePlugin')){
-      await setPluginUpdates(options.autoUpdatePlugin,identity);remaining();
+      await setPluginUpdates(options.autoUpdatePlugin,identity,{ownTaskWriteVerified:options.autoUpdatePlugin===true});remaining();
     }
     if(operation!=='status'||!readDispatchStatus&&!readMaintenanceStatus)return projected;
     // Network diagnostics cannot consume a new 45-second OS-status budget.

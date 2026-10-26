@@ -1896,6 +1896,31 @@ test('old devices remain opted out and an explicit policy remains bound to the c
   assert.equal(await host.readPluginUpdatesEnabled(),false);
 });
 
+test('explicit native-writable setup resumes only an untouched bootstrap, never a failed plugin or hook decision',async()=>{
+  const {host}=memorySetupHost({get:async()=>null});
+  const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};await host.saveIdentity(identity);
+  const failed={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+    previousVersion:'0.1.3',targetVersion:'0.1.3',previousTreeSha256:'a'.repeat(64),targetTreeSha256:'a'.repeat(64),
+    stage:'failed',failures:3,restarts:0,desktopGeneration:null,failedVersion:'0.1.3'};
+  await host.writePluginUpdate(null,failed);
+  await host.setPluginUpdatesEnabled(true,identity);
+  assert.deepEqual(await host.readPluginUpdate(),failed,'a bare policy write is not native registration evidence');
+  await host.setPluginUpdatesEnabled(true,identity,{ownTaskWriteVerified:true});
+  assert.deepEqual(await host.readPluginUpdate(),{...failed,stage:'retargeting',failures:0,failedVersion:null});
+  const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});
+  Object.assign(f.options,{identity,readState:()=>host.readPluginUpdate(),writeState:(a,b)=>host.writePluginUpdate(a,b),
+    bootstrapHost:true,upgrade:()=>assert.fail('bootstrap recovery never reinstalls the plugin'),activateHost:async()=>({state:'handoff'})});
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
+  assert.deepEqual(f.effects,[]);assert.equal(f.counts().installs,0);
+  for(const change of [
+    {targetVersion:'0.1.4',targetTreeSha256:'b'.repeat(64),failedVersion:'0.1.4'},
+    {failedVersion:'0.1.4'}, {stage:'hook_review',failedVersion:null}, {desktopGeneration:'100:1000',restarts:1},
+  ]){
+    const value={...failed,...change};await host.writePluginUpdate(await host.readPluginUpdate(),value);
+    await host.setPluginUpdatesEnabled(true,identity,{ownTaskWriteVerified:true});assert.deepEqual(await host.readPluginUpdate(),value);
+  }
+});
+
 
 test('re-pairing never adopts or destroys another device maintenance policy/journal',async()=>{
   const {host,files}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
