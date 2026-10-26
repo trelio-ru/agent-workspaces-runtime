@@ -4,6 +4,7 @@
 // must not enter nested controls without an explicit bound frame path.
 import Foundation
 import CoreFoundation
+import CoreGraphics
 import CryptoKit
 
 final class FixtureElement: NSObject {
@@ -22,6 +23,7 @@ final class FixtureElement: NSObject {
     func append(_ child: FixtureElement) { nodes.append(child); child.parent = self }
 }
 typealias AXUIElement = FixtureElement
+let kAXParentAttribute = "AXParent"
 let kAXTitleAttribute = "AXTitle"
 let kAXDescriptionAttribute = "AXDescription"
 let kAXRoleAttribute = "AXRole"
@@ -40,14 +42,21 @@ func text(_ element: AXUIElement, _ name: String) -> String? {
     preconditionFailure("Unexpected attribute read")
 }
 func attribute(_ element: AXUIElement, _ name: String) -> Any? {
+    if name == "AXHidden" { return !element.shown }
     precondition(name == kAXEnabledAttribute)
     return element.enabled
 }
+func elementAttribute(_ element: AXUIElement, _ name: String) -> AXUIElement? {
+    precondition(name == kAXParentAttribute)
+    return element.parent
+}
+func rectangle(_ element: AXUIElement) -> CGRect? { return CGRect(x: 0, y: 0, width: 200, height: 100) }
+
 func children(_ element: AXUIElement) -> [AXUIElement] {
     precondition(!element.forbidChildren, "Nested document traversal is forbidden")
     return element.delayedChildren?() ?? element.nodes
 }
-func documentURL(_ element: AXUIElement) -> String? { precondition(element.role == "AXWebArea"); return element.url }
+func documentURL(_ element: AXUIElement) -> String? { return element.role == "AXWebArea" ? element.url : nil }
 func visible(_ element: AXUIElement, in document: AXUIElement) -> Bool { return element.shown }
 func belongs(_ element: AXUIElement, to document: AXUIElement) -> Bool {
     var cursor: AXUIElement? = element
@@ -71,6 +80,49 @@ func AXUIElementPerformAction(_ element: AXUIElement, _ action: CFString) -> Fix
 }
 
 // PRODUCTION_CORE
+
+// Discovery must inspect document metadata without walking unrelated page
+// contents. A normal Chrome window can expose a much larger web tree than the
+// bank form; that tree must not consume the form's native traversal allowance.
+let discoveryApp = FixtureElement("AXApplication")
+let unrelatedPage = FixtureElement("AXWebArea"); unrelatedPage.url = "https://unrelated.example.test/large"
+for _ in 0..<12050 { unrelatedPage.append(FixtureElement("AXStaticText")) }
+let selectedPage = FixtureElement("AXWebArea"); selectedPage.url = "https://bank.example.test/login"
+discoveryApp.append(unrelatedPage); discoveryApp.append(selectedPage)
+let discovered = try Session.documents(discoveryApp)
+precondition(discovered.count == 2 && discovered[1] === selectedPage)
+// No fields of either selected or unrelated documents participate in discovery.
+unrelatedPage.forbidChildren = true; selectedPage.forbidChildren = true
+let aliases = try Session.documentCandidates([discoveryApp, discoveryApp, selectedPage])
+precondition(aliases.count == 2)
+// Native-object deduplication must not hide a second tab with the same URL.
+let anotherTab = FixtureElement("AXWebArea"); anotherTab.url = selectedPage.url; anotherTab.forbidChildren = true
+discoveryApp.append(anotherTab)
+let distinct = try Session.documents(discoveryApp)
+precondition(distinct.filter { $0.url == selectedPage.url }.count == 2)
+// A non-HTTP Electron shell is not an authorization boundary for its embedded
+// browser. Its actual HTTP child still needs ordinary exact URL selection.
+let shell = FixtureElement("AXWebArea"); shell.url = "codex://shell"
+let embedded = FixtureElement("AXWebArea"); embedded.url = "https://bank.example.test/login"; embedded.forbidChildren = true
+shell.append(embedded)
+let shellDocuments = try Session.documents(shell)
+precondition(shellDocuments.contains(where: { $0 === embedded }))
+// Aliases/cycles in native child arrays cannot consume the allowance repeatedly.
+let cycle = FixtureElement("AXGroup"); cycle.nodes = [cycle, cycle]
+let cycleDocuments = try Session.documents(cycle)
+precondition(cycleDocuments.isEmpty)
+func expectBounded(_ stage: WalkStage, _ limit: WalkLimit, _ operation: () throws -> Void) {
+    do { try operation(); preconditionFailure("Expected a bounded traversal refusal") }
+    catch Stop.bounded(let diagnostic) { precondition(diagnostic.stage == stage && diagnostic.limit == limit) }
+    catch { preconditionFailure("Unexpected traversal error") }
+}
+let crowdedShell = FixtureElement("AXGroup")
+for _ in 0..<12000 { crowdedShell.append(FixtureElement("AXStaticText")) }
+expectBounded(.documentDiscovery, .nodeCount) { _ = try Session.documents(crowdedShell) }
+// The SAME production budget enforces the monotonic deadline; no slow real AX
+// call, hidden fixture mode or altered production limit is required to test it.
+let expiredBudget = WalkBudget(stage: .frameDiscovery, deadline: ProcessInfo.processInfo.systemUptime - 1)
+expectBounded(.frameDiscovery, .deadline) { try expiredBudget.check(1) }
 
 let document = FixtureElement("AXWebArea")
 let username = FixtureElement("AXTextField", "username")

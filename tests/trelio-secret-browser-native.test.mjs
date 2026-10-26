@@ -590,6 +590,7 @@ test("macOS production resolver binds explicit nested documents and rejects stal
       section("func matchesTarget(", "func belongs("),
       section("func matchesField(", "final class Session {"),
       "final class Session {",
+      section("    static func documents(", "    static func applicationDocuments("),
       section("    static func boundDocument(", "    init(_ request: Request) throws {"),
       "}",
     ].join("\n"));
@@ -606,6 +607,36 @@ test("macOS production resolver binds explicit nested documents and rejects stal
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+// Timeout details remain local closed diagnostics; they cannot become another
+// browser selection or a value-consuming retry, even for an otherwise auto plan.
+for (const stage of ["document_discovery", "frame_discovery", "field_resolution", "activation_resolution"]) {
+  for (const limit of ["node_count", "deadline"]) {
+    test(`native traversal refusal identifies ${stage}/${limit} before any value delivery`, async () => {
+      const f = fixture({ status: "failed", reasonCode: "timeout", diagnostic: { stage, limit } });
+      await assert.rejects(prepareSecretBrowserSession(f.args), error => {
+        assert.equal(error.reasonCode, "timeout");
+        assert.ok(error.message.includes(`stage=${stage}; limit=${limit}`));
+        return true;
+      });
+      assert.deepEqual(f.requests.map(request => request.command), ["prepare"]);
+      assert.equal(f.chromePreflights, 0); assert.equal(f.chromeCalls, 0); assert.ok(f.closed);
+      assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/u);
+    });
+  }
+}
+for (const diagnostic of [null, { stage: "https://private.example.test/", limit: "deadline" },
+  { stage: "document_discovery", limit: "CANARY-private" },
+  { stage: "document_discovery", limit: "deadline", url: "https://private.example.test/" }]) {
+  test(`native traversal refuses malformed diagnostic ${JSON.stringify(diagnostic)}`, async () => {
+    const f = fixture({ status: "failed", reasonCode: "timeout", diagnostic });
+    await assert.rejects(prepareSecretBrowserSession(f.args), error => {
+      assert.equal(error.reasonCode, "adapter_error");
+      assert.doesNotMatch(error.message, /private|CANARY/u); return true;
+    });
+    assert.equal(f.chromePreflights, 0); assert.deepEqual(f.requests.map(request => request.command), ["prepare"]);
+  });
+}
+
 test("native activation preflight is never repeated after a write failure", async () => {
   const f = fixture({ status: "failed", reasonCode: "field_write_failed" });
   f.args.context.browserSteps[0].activationSelector = "#login-mode";
@@ -751,6 +782,43 @@ test("multi-step native fill requires an exact advance button", async () => {
   assert.equal(g.chromePreflights, 0);
   assert.equal(g.builds, 0);
 });
+test("native pipe accepts only the closed traversal diagnostic emitted by production Swift", {
+  skip: process.platform !== "darwin", timeout: 30_000,
+}, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-native-diagnostic-pipe-"));
+  try {
+    const source = await fs.readFile(new URL("../host-runtime/scripts/native-secret-browser/SecretBrowser.swift", import.meta.url), "utf8");
+    const section = (start, end) => {
+      assert.equal(source.split(start).length, 2); assert.equal(source.split(end).length, 2);
+      return source.slice(source.indexOf(start), source.indexOf(end));
+    };
+    // Real child stdin/stdout boundary, with the unchanged production reply
+    // encoder. The test-only invalid branch proves arbitrary native detail
+    // cannot reach a tool message, even if it resembles an accepted timeout.
+    const code = ["import Foundation", section("enum Stop: Error", "struct Request: Decodable"),
+      section("func reply(", "func attribute("), `
+while let line = readLine() {
+  if line.contains("valid") { reply("failed", "timeout", WalkDiagnostic(stage: .documentDiscovery, limit: .nodeCount)) }
+  else { let raw = #"{"status":"failed","reasonCode":"timeout","diagnostic":{"stage":"document_discovery","limit":"deadline","url":"CANARY-private-detail"}}"#; FileHandle.standardOutput.write(Data(raw.utf8)); FileHandle.standardOutput.write(Data([10])) }
+}
+`].join("\n");
+    const main = path.join(directory, "main.swift"), executable = path.join(directory, "fixture");
+    await fs.writeFile(main, code);
+    await promisify(execFile)("/usr/bin/swiftc", [main, "-o", executable], { timeout: 20_000 });
+    for (const command of ["valid", "extra"]) {
+      const channel = openNativeSecretBrowserChannel({ executable });
+      try {
+        if (command === "valid") assert.deepEqual(await channel.request({ command }), {
+          status: "failed", reasonCode: "timeout", diagnostic: { stage: "document_discovery", limit: "node_count" },
+        });
+        else await assert.rejects(channel.request({ command }), error => {
+          assert.equal(error.reasonCode, "adapter_error"); assert.doesNotMatch(error.message, /CANARY|detail/u); return true;
+        });
+      } finally { await channel.close(); }
+    }
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
 test("native helper compiles locally, caches exact bytes and rejects an unprepared value without UI access", {
   skip: !["darwin", "win32"].includes(process.platform), timeout: 90_000,
 }, async () => {
