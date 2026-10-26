@@ -615,6 +615,9 @@ publication tooling также остаются вне этого публичн
 - Dispatch uncertainty uses SAME independent device-health/owner notice latch; clear only after durable native/business completion + pass release + zero retained device uncertainty, never metadata/READY. Health protocol v2 preserves old closed readers.
 - Assistant maintenance: fixed signed worker, no replay/health shortcut; terminal retained-pass updates require the SAME coordinator lease/native evidence. MCP facade survives updates and signals changed catalogues. No Codex restart/trust. [Contract](docs/assistant-scheduler.md#model-free-maintenance).
 - Visible task chats reuse SAME native App Server + system URI opener. Empty bootstrap persists the explicit pair; ONLY the second GUI-queued READY earns provision. No exec/resume/hidden fallback, queue replay or model-mediated reconfiguration of old private history. See scheduler native invocation.
+  Stored history may project an active GUI turn as interrupted; keep its reader
+  until actual completion/failure or the original deadline. This snapshot never
+  certifies cancellation, pass release, a new invocation or recovery authority.
 - Native account preflight diagnoses login only from explicit missing auth, not
   prose or a cached catalogue. Only a fresh completed turn with exact read-back
   clears its current login latch; unrelated health incidents and delivery fences

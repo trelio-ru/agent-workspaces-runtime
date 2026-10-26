@@ -88,8 +88,8 @@ const nativeRpc = handler => (_executable, args, options) => {
 // Real-shaped public App Server fixture: a bootstrap owns only its empty
 // READY; business messages are accepted solely by the already opened GUI queue.
 const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onQueue=()=>{},
-  onRequest=()=>{},pair=execution,queued=[],terminal=true,children=[]}={}) => {
-  let input='',turnId=randomUUID();
+  onRequest=()=>{},pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[]}={}) => {
+  let input='',turnId=randomUUID(),phase='read',snapshot=0;
   const rpc=nativeRpc(request=>{
     onRequest(request);
     if(request.method==='thread/start'){onCreate(request);return {result:{thread:{id:threadId}}};}
@@ -97,16 +97,17 @@ const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},o
     if(request.method==='turn/start'){
       assert.equal(request.params.model,execution.modelId);assert.equal(request.params.effort,execution.effortLevel);
       assert.equal(request.params.collaborationMode.settings.reasoning_effort,execution.effortLevel);
-      input=request.params.input[0].text;onInput(input,'bootstrap');return {result:{turn:{id:turnId}},
+      input=request.params.input[0].text;phase='bootstrap';onInput(input,'bootstrap');return {result:{turn:{id:turnId}},
         notifications:[{method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}}]};
     }
     if(request.method==='thread/queue/list')return {result:{data:queued,nextCursor:null}};
     if(request.method==='thread/queue/add'){
-      onQueue(request);input=request.params.input[0].text;onInput(input,'desktop');turnId=randomUUID();
+      onQueue(request);input=request.params.input[0].text;phase='desktop';onInput(input,'desktop');turnId=randomUUID();
       return {result:{queuedSubmission:{id:randomUUID(),clientUserMessageId:request.params.clientUserMessageId,input:request.params.input}}};
     }
     assert.equal(request.method,'thread/turns/list');
-    return {result:{data:terminal?[{id:turnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:input}]}]}]:[],nextCursor:null}};
+    const status=phase==='desktop'&&snapshotStatuses.length?snapshotStatuses[Math.min(snapshot++,snapshotStatuses.length-1)]:'completed';
+    return {result:{data:terminal?[{id:turnId,status,items:[{type:'userMessage',content:[{type:'text',text:input}]}]}]:[],nextCursor:null}};
   });
   return (...args)=>{const child=rpc(...args);children.push(child);return child;};
 };
@@ -353,6 +354,45 @@ test('queue acceptance without an exact completed GUI turn stays uncertain and i
     spawnProcess:desktopRpc({threadId,terminal:false,onQueue:()=>{queues++;},children}),
   }),/DELIVERY_UNCERTAIN/);
   assert.equal(starts,1);assert.equal(queues,1);assert.ok(children.every(child=>child.killed));
+});
+
+test('stored interrupted history is uncertain, not a failed or completed receipt',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
+  for(const status of ['interrupted','failed']){
+    const result=await readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},
+      spawnProcess:nativeRpc(request=>request.method==='thread/read'?{result:{thread:{id:threadId,cwd:process.cwd()}}}:
+        {result:{data:[{id:turnId,status,items:[{type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nSynthetic input'}]}]}],nextCursor:null}})});
+    assert.equal(result.state,status==='interrupted'?'uncertain':'failed');
+    assert.equal(Object.hasOwn(result,'receipt'),status==='failed');
+  }
+});
+
+test('GUI stored history may say interrupted while its writer is active; retain one invocation until actual completion',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();let starts=0,queues=0,polls=0,reads=0,confirmed=0;
+  const result=await runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{
+    executable:process.execPath,environment:{},openDesktop:async()=>{},passTimeoutMs:8000,
+    readMetadata:async()=>({threadId,cwd:process.cwd()}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    readExecutionAvailability:async()=>true,startInvocation:()=>{starts++;},onAuthenticationConfirmed:()=>{confirmed++;},
+    readDelivery:async()=>++reads===1?{state:'uncertain'}:{state:'completed',turnId,receipt:`codex:${threadId}:${turnId}`},
+    spawnProcess:desktopRpc({threadId,snapshotStatuses:['interrupted','inProgress','completed'],onQueue:()=>{queues++;},
+      onRequest:request=>{if(request.method==='thread/turns/list'){polls++;assert.equal(confirmed,0);}}}),
+  });
+  assert.equal(result.state,'completed');assert.equal(polls,3,'provisional interruption cannot close the reader or protected pass');
+  assert.equal(starts,1);assert.equal(queues,1);assert.equal(reads,2);assert.equal(confirmed,1);
+});
+
+test('cancellation while stored history says interrupted closes only the reader without receipt or queue replay',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),controller=new AbortController();let starts=0,queues=0,reads=0;
+  await assert.rejects(runAssistantCodexPass({threadId,deliveryId,cwd:process.cwd(),taskContext,execution},{
+    executable:process.execPath,environment:{},openDesktop:async()=>{},signal:controller.signal,
+    readMetadata:async()=>({threadId,cwd:process.cwd()}),readHookReadiness:async()=>({fingerprint:'a'.repeat(64)}),
+    readExecutionAvailability:async()=>true,startInvocation:()=>{starts++;},
+    onAuthenticationConfirmed:()=>assert.fail('no completed GUI turn'),
+    readDelivery:async()=>{assert.equal(++reads,1,'provisional interruption must not exit into receipt read-back');return {state:'uncertain'};},
+    spawnProcess:desktopRpc({threadId,snapshotStatuses:['interrupted'],onQueue:()=>{queues++;},
+      onRequest:request=>{if(request.method==='thread/turns/list')setImmediate(()=>controller.abort());}}),
+  }),/DELIVERY_UNCERTAIN/);
+  assert.equal(starts,1);assert.equal(queues,1);assert.equal(reads,1);
 });
 
 test('external task context permits bounded structural refs only, without bodies/owner assertions/argv options',()=>{

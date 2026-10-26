@@ -304,7 +304,13 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
     if (matches.length !== 1 || !UUID.test(matches[0].id ?? '')) return { state: 'uncertain' };
     const turn = matches[0];
     if (turn.status === 'completed') return { state: 'completed', turnId: turn.id, receipt: `codex:${id(threadId)}:${id(turn.id)}` };
-    if (['failed','interrupted'].includes(turn.status)) return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}` };
+    if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}` };
+    // This is a stored-history reader, not the GUI's owning event stream. The
+    // current native client reconstructs an unfinished persisted turn as
+    // interrupted even while that exact GUI turn is executing tools. It is
+    // therefore NOT evidence of cancellation/failure or permission to end its
+    // protected pass. Only an actual completed/failed record earns a receipt.
+    if (turn.status === 'interrupted') return { state: 'uncertain', turnId: turn.id };
     return { state: 'running', turnId: turn.id };
   }, options);
 };
@@ -389,7 +395,11 @@ const deliveryFromTurns = (data, marker) => {
       input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(`${marker}\n`))));
   if(matches.length!==1||!UUID.test(matches[0].id??''))return null;
   const turn=matches[0];
-  return ['completed','failed','interrupted'].includes(turn.status)?{turnId:turn.id,status:turn.status}:null;
+  // Unlike the owning bootstrap's turn/completed notification, this stored
+  // snapshot cannot certify an interruption. Keep the original reader and
+  // lease alive until a real completion/failure or the unchanged deadline;
+  // never interrupt the GUI, resubmit the queue or consume another start bit.
+  return ['completed','failed'].includes(turn.status)?{turnId:turn.id,status:turn.status}:null;
 };
 const waitForNativeTurn = async (request, threadId, marker, signal) => {
   let polls=0;

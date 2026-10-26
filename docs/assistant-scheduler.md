@@ -207,6 +207,18 @@ absolute deadline. Timeout/cancellation closes only that reader, not the GUI
 turn/queue. Queue UUIDs correlate requests; they are not an idempotency guarantee,
 and an uncertain submission is never automatically requeued.
 
+The independent reader observes **stored** history, not the GUI writer's live
+event stream ([native read semantics](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming)).
+With the actual Windows 0.164 client, that history projected the exact ongoing
+GUI business turn as `interrupted` while the owning Desktop was still executing
+its tools. Such a snapshot is uncertain: it earns no failure/completion receipt,
+cannot release the protected pass or authorize another invocation, and does not
+end the polling reader. The reader retains its original absolute deadline and
+waits for actual `completed`/`failed` history. Cancellation/timeout still close
+only that owned reader; real unresolved interruptions remain uncertain. The
+initial empty bootstrap separately watches its OWN `turn/completed` event, where
+an actual interrupted notification is terminal and never earns READY.
+
 Windows live probes with the official 0.164 client confirmed both High and Ultra
 bootstrap → exact URI → GUI queue → actual turn_context/read-back, independent
 of the preceding GUI default. The SAME common signed URI opener also handed off
