@@ -2005,7 +2005,12 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
   if(process.env.TRELIO_ASSISTANT_INSPECTION_FIXTURE!=='1'){
     // Short synthetic HOME avoids adding an artificial Windows MAX_PATH limit
     // to the fixed common cache layout. Production path guards stay unchanged.
-    const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'ai-')));
+    // Actions supplies a short runner-owned temp root. A synthetic HOME nested
+    // under the real user-profile TEMP otherwise adds dozens of characters to
+    // every accepted Git object path, unlike the ordinary production layout.
+    const temporaryBase=process.platform==='win32'&&path.isAbsolute(process.env.RUNNER_TEMP??'')
+      ?await fs.realpath(process.env.RUNNER_TEMP):os.tmpdir();
+    const root=await fs.realpath(await fs.mkdtemp(path.join(temporaryBase,'ai-')));
     const {execFile}=await import('node:child_process'),{promisify}=await import('node:util'),{fileURLToPath}=await import('node:url');
     // NODE_TEST_CONTEXT belongs to the outer runner. Inheriting it makes a
     // nested --test process suppress its runner, so exit 0 alone is no proof
