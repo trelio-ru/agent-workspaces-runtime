@@ -862,43 +862,41 @@ test('a legacy baseline or changed owner registration cannot advance a channel c
   }finally{await f.coordinator.close();}
 });
 
-for(const provider of ['telegram','email'])test(`${provider} native routes reuse the canonical task chat and never ACK an unread body`,async t=>{
-  const f=await externalFixture(t),key=`${provider}-conversation/v1.${'a'.repeat(64)}`,unknown=`${provider}-conversation/v1.${'b'.repeat(64)}`;
+for(const provider of ['telegram','email'])test(`${provider} conversation history never assigns a new subject or wakes its former task`,async t=>{
+  const f=await externalFixture(t),key=`${provider}-conversation/v1.${'a'.repeat(64)}`;
   if(provider==='email')f.row.skillId='email-imap-smtp';
   const route={id:randomUUID(),sourceId:f.row.id,sourceRevision:0,conversationKey:key,bindingId:f.bindingId,bindingRevision:0,taskId:f.taskId};
-  let routingCalls=0;
-  f.options.client.sourceRoutes=async input=>{
-    routingCalls++;assert.equal(input.companyId,f.companyId);assert.equal(input.sourceId,f.row.id);
-    assert.equal(input.sourceRevision,0);
-    if(input.routeIds){assert.deepEqual(input.routeIds,[route.id]);return [route];}
-    assert.ok(input.conversationKeys.every(value=>value===key||value===unknown));
-    return input.conversationKeys.includes(key)?[route]:[];
-  };
+  f.options.client.sourceRoutes=async()=>[route]; // Also exercise an older native backend.
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
-    if(provider==='email')await f.coordinator.pollOnce(); // Complete the independently due empty initial history.
-    const threadId=f.coordinator.status()[0].threadId;
-    f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'messages',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],events:[
-      {id:provider==='email'?'uid:17:11':'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key},
-      {id:provider==='email'?'uid:17:12':'message:124:1',revision:'d'.repeat(64),kind:'new',outgoing:false,conversationKey:unknown},
-      {id:provider==='email'?'uid:17:13':'message:123:2',revision:'e'.repeat(64),kind:'new',outgoing:true,conversationKey:key}]}));
-    f.advance(300_000);await f.coordinator.pollOnce();
-    let runs=0;
-    f.options.native.run=async(input,options)=>{
-      assert.equal(input.threadId,threadId);assert.equal(input.taskContext.sourceReferences.length,2);
-      for(const ref of input.taskContext.sourceReferences){assert.equal(ref.sourceId,f.row.id);assert.equal(ref.accountId,f.row.localAccountId);assert.equal(ref.conversationKey,key);}
-      runs++;options.startInvocation();const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;
-    };
-    await f.coordinator.workOnce();assert.equal(runs,1);assert.equal(f.counts().provisions,1);
-    assert.equal(f.coordinator.status().length,1);assert.equal(f.coordinator.status()[0].source.provider,'trelio');
+    if(provider==='email')await f.coordinator.pollOnce();
+    f.read(async()=>({baselineOnly:false,nextCursor:'different-subject',hasMore:false,events:[{
+      id:provider==='email'?'uid:17:11':'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+    f.advance(300000);await f.coordinator.pollOnce();
     assert.equal(await f.coordinator.workOnce(),null);
-    assert.equal(f.inbox.claimAcknowledgements(f.scope()),null,'native/business completion is not an actual body read');
-    f.advance(300_000);await f.coordinator.pollOnce();assert.equal(await f.coordinator.workOnce(),null,'replayed metadata cannot cause another wake');
-    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,3);
-    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events WHERE processed=1 OR acked=1').get().n,0);
-    assert.ok(routingCalls>=2,'live route authority is rechecked immediately before native work');
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().provisions,1);
+    const event=f.database.prepare('SELECT * FROM assistant_inbox_events').get();
+    assert.equal(event.task_id,null);assert.equal(event.route_id,null);assert.equal(event.processed,0);assert.equal(event.acked,0);
   }finally{await f.coordinator.close();}
 });
+
+// ACK/revocation fixtures start AFTER classification. Admit an exact immutable
+// original batch through the real journal; a conversation lookup is no longer
+// a shortcut for setting up these independent read/processing/ACK assertions.
+const routeAcceptedBatch=(f,routes)=>{
+  const scope=f.scope(),pending=f.database.prepare('SELECT event_key FROM assistant_inbox_events WHERE task_id IS NULL AND provider_wake=1').all();
+  f.inbox.queueExistingTaskIntakes(scope,{sourceRevision:f.row.revision,eventKeys:pending.map(row=>row.event_key)});
+  for(const saved of f.inbox.ownerIntakes()){
+    if(saved.state!=='pending')continue;
+    const original=f.inbox.freezeExistingTaskIntake(saved.id),route=routes.find(route=>route.conversationKey===original.conversation_key);
+    if(!route)continue;
+    const selected={...route,eventIds:original.eventIds};
+    f.inbox.finishOwnerIntake(original.id,{state:'routed',receiptId:randomUUID(),routes:[selected]});
+    f.inbox.routeExternalEvents(scope,{canonicalSource:f.coordinator.status()[0].source,sourceRevision:f.row.revision,
+      eventKeys:original.originals.map(ref=>ref.event_key),routes:[selected],intakeId:original.id});
+    f.inbox.settleOwnerIntake(original.id);
+  }
+};
 
 test('route/source revocation immediately before native launch blocks delivery without a second chat, ACK or stale source adoption',async t=>{
   const f=await externalFixture(t),key=`telegram-conversation/v1.${'a'.repeat(64)}`;
@@ -908,7 +906,7 @@ test('route/source revocation immediately before native launch blocks delivery w
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
     f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}],
       nextCursor:'pending',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}));
-    f.advance(300_000);await f.coordinator.pollOnce();
+    f.advance(300_000);await f.coordinator.pollOnce();routeAcceptedBatch(f,[route]);
     f.options.client.sourceRoutes=async()=>[];
     await assert.rejects(f.coordinator.workOnce(),/SOURCE_CHANGED/);
     assert.equal(f.counts().runs,0);assert.equal(f.counts().provisions,1);
@@ -979,7 +977,7 @@ for(const scenario of ['telegram','email','email-history','max'])test(`${scenari
     f.read(async source=>({baselineOnly:false,nextCursor:history&&source.initialUnread?'history-end':'message',hasMore:false,
       ...(history&&source.initialUnread?{initialUnreadBackfill:true}:{}),channelsToSync:[],unresolvedDeletionIds:[],
       events:history&&!source.initialUnread?[]:[{id:eventId,revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
-    f.advance(300000);await f.coordinator.pollOnce();assert.deepEqual(calls,[]);
+    f.advance(300000);await f.coordinator.pollOnce();assert.deepEqual(calls,[]);routeAcceptedBatch(f,[route]);
     await f.coordinator.workOnce();await f.coordinator.pollOnce();assert.deepEqual(calls,[],'body read with omitted processing is never ACK eligible');
     selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();
     assert.deepEqual(calls,[false]);assert.equal(f.database.prepare('SELECT acked FROM assistant_inbox_events').get().acked,0);
@@ -1034,7 +1032,7 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
     f.read(async()=>({baselineOnly:false,nextCursor:'mixed',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
       events:keys.map((conversationKey,index)=>({id:`message:${123+index}:1`,revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey}))}));
-    f.advance(300000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    f.advance(300000);await f.coordinator.pollOnce();routeAcceptedBatch(f,routes);await f.coordinator.workOnce();
     const first=f.inbox.claimAcknowledgements(f.scope());f.inbox.startExternalAcknowledgements(f.scope(),first.token);
     const second=f.inbox.claimAcknowledgements(f.scope());assert.equal(second.events.length,1);
     // Reconstruct an older persisted attempt that could contain both chats.
@@ -1305,7 +1303,7 @@ for(const recovery of ['source_paused','lease_expired','release_pending'])test(`
 });
 
 
-for(const provider of ['telegram','email','max'])test(`${provider} first outgoing source hint binds before a reply resumes the SAME permanent chat`,async t=>{
+for(const provider of ['telegram','email','max'])test(`${provider} first outgoing correlation hint cannot automatically assign a future reply`,async t=>{
   const f=await externalFixture(t),key=`${provider}-conversation/v1.${'f'.repeat(64)}`;
   f.row.skillId={telegram:'telegram-mtproto',email:'email-imap-smtp',max:'max-web'}[provider];
   if(provider==='max')f.row.maxChatUrl='https://web.max.ru/123';
@@ -1340,16 +1338,17 @@ for(const provider of ['telegram','email','max'])test(`${provider} first outgoin
     f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'reply',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
       events:[{id:provider==='email'?'uid:17:11':'message:123:5',revision:'a'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
     f.advance(300000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
-    assert.equal(replies,1);assert.equal(sends,1);assert.equal(f.counts().provisions,1);
+    assert.equal(replies,0);assert.equal(sends,1);assert.equal(f.counts().provisions,1);
     assert.equal(f.coordinator.status()[0].threadId,threadId);
     assert.equal(f.inbox.claimAcknowledgements(f.scope()),null,'route/hint is not read or processing proof');
   }finally{await f.coordinator.close();}
 });
 
-for(const provider of ['telegram','email','max'])test(`${provider} existing-task triage freezes a batch, selects company before chat and routes without ACK`,async t=>{
+for(const provider of ['telegram','email','max'])for(const partitioned of [false,true])test(`${provider} existing-task triage ${partitioned?'partitions one conversation between two tasks and ignored originals':'retains legacy single-task results'} without ACK`,async t=>{
   const database=new DatabaseSync(':memory:');let clock=Date.now(),active=null,provisions=0,triageTurns=0,wait=true;
   const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID(),memberId=randomUUID();
   const sourceId=randomUUID(),accountId=randomUUID(),taskId=randomUUID(),bindingId=randomUUID(),key=`${provider}-conversation/v1.${'8'.repeat(64)}`;
+  const otherTaskId=randomUUID(),otherBindingId=randomUUID();
   const skillId={telegram:'telegram-mtproto',email:'email-imap-smtp',max:'max-web'}[provider];
   const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
   const source={id:sourceId,companyId,deviceId:identity.deviceId,localAccountId:accountId,projectId:null,skillId,state:'active',revision:0,
@@ -1357,10 +1356,9 @@ for(const provider of ['telegram','email','max'])test(`${provider} existing-task
   const intake=new Map(),markers=new Map(),begins=[];
   const client={identity,heartbeat:async()=>{},companies:async()=>[{companyId,memberId,execution:{state:'ready',configuration:execution}}],
     tasks:async()=>({bindings:[{id:bindingId,taskId,state:'accepted',revision:0}],nextCursor:null}),
-    task:async()=>({id:bindingId,taskId,state:'accepted',revision:0,execution:{state:'ready',configuration:execution}}),
+    task:async(_company,requested)=>({id:requested===otherTaskId?otherBindingId:bindingId,taskId:requested,state:'accepted',revision:0,execution:{state:'ready',configuration:execution}}),
     poll:async()=>({events:[],nextCursor:'0',hasMore:false}),acknowledge:async()=>({acknowledged:0}),sourceAccounts:async()=>[{...source}],
-    sourceRoutes:async input=>input.conversationKeys?[]:[...intake.values()].filter(value=>value.route&&input.routeIds.includes(value.route.id))
-      .map(value=>({...value.route,taskId})),
+    sourceRoutes:async input=>input.conversationKeys?[]:[...intake.values()].flatMap(value=>value.routes??(value.route?[{...value.route,taskId}]:[])).filter(route=>input.routeIds.includes(route.id)),
     beginSourceIntake:async input=>{
       begins.push(structuredClone(input));assert.equal(input.kind,'route_existing');assert.equal(input.ownerIdentityId,undefined);
       if(!intake.has(input.intakeId)){
@@ -1379,9 +1377,14 @@ for(const provider of ['telegram','email','max'])test(`${provider} existing-task
     run:async(input,options)=>{
       if(!input.intakeContext)throw Object.assign(new Error(),{code:'ASSISTANT_FIXTURE_TASK_BOUNDARY'});
       options.startInvocation();triageTurns++;assert.equal(input.intakeContext.intakeKind,'route_existing');
-      assert.equal(input.intakeContext.eventIds.length,2);assert.deepEqual(active.eventIds,input.intakeContext.eventIds);
+      assert.equal(input.intakeContext.eventIds.length,partitioned?3:2);assert.deepEqual(active.eventIds,input.intakeContext.eventIds);
       const current=intake.get(input.intakeContext.intakeId);Object.assign(current,{state:'routed',taskId,receiptId:randomUUID(),readConfirmed:true,
         route:{id:randomUUID(),sourceId,sourceRevision:0,bindingId,bindingRevision:0,conversationKey:key}});
+      if(partitioned){
+        const route=current.route,ids=input.intakeContext.eventIds;
+        current.routes=[{...route,taskId,eventIds:[ids[0]]},{...route,id:randomUUID(),taskId:otherTaskId,bindingId:otherBindingId,eventIds:[ids[1]]}];
+        current.ignoredEventIds=[ids[2]];current.taskId=null;delete current.route;
+      }
       const result={state:'completed',receipt:'fixture-triage'};markers.set(input.deliveryId,result);return result;
     }};
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
@@ -1391,7 +1394,7 @@ for(const provider of ['telegram','email','max'])test(`${provider} existing-task
   await coordinator.pollOnce();
   const inbox=createAssistantInbox({database,now:()=>clock}),scope={origin:identity.origin,assistantId:identity.assistantId,companyId,provider,accountId,bindingId:sourceId};
   inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
-  const poll=inbox.claimPoll(scope),events=[1,2].map(i=>({id:provider==='email'?`uid:12:${i}`:`message:123:${i}`,revision:String(i).repeat(64),
+  const poll=inbox.claimPoll(scope),events=(partitioned?[1,2,3]:[1,2]).map(i=>({id:provider==='email'?`uid:12:${i}`:`message:123:${i}`,revision:String(i).repeat(64),
     taskId:null,wake:false,providerWake:true,conversationKey:key}));
   inbox.commitPage(scope,{...poll,nextCursor:'2',hasMore:false,events});
   inbox.queueExistingTaskIntakes(scope,{sourceRevision:0,eventKeys:inbox.pendingExternalRoutes(scope).map(row=>row.event_key)});
@@ -1401,8 +1404,12 @@ for(const provider of ['telegram','email','max'])test(`${provider} existing-task
   clock+=300001;assert.equal((await coordinator.workOnce()).kind,'source_intake');assert.equal(triageTurns,1);assert.equal(provisions,2,'one permanent task chat and one selected-company triage chat');
   assert.equal(begins[0].threadId,null);assert.ok(begins.at(-1).threadId);assert.equal(active,null);
   await coordinator.workOnce().catch(error=>assert.match(error.code,/BOUNDARY|SETUP_REQUIRED|UNAVAILABLE/u));
+  if(partitioned)for(let i=0;i<3;i++)await coordinator.workOnce().catch(()=>{});
   const routed=database.prepare('SELECT * FROM assistant_inbox_events WHERE source_key=?').all(original.source_key);
-  assert.equal(routed.length,2);assert.ok(routed.every(row=>row.task_id===taskId&&row.route_id&&row.processed===0&&row.acked===0));
+  assert.equal(routed.length,partitioned?3:2);assert.ok(routed.every(row=>row.processed===0&&row.acked===0));
+  if(partitioned){assert.deepEqual(new Set(routed.map(row=>row.task_id)),new Set([taskId,otherTaskId,null]));
+    assert.equal(routed.filter(row=>row.route_id).length,2);assert.equal(provisions,3,'two permanent task chats and one shared classification chat');
+  }else assert.ok(routed.every(row=>row.task_id===taskId&&row.route_id));
   await coordinator.close();coordinator=createAssistantCoordinator(options);
   await coordinator.workOnce().catch(()=>{});assert.equal(triageTurns,1,'restart never reclassifies a frozen original batch');
 });

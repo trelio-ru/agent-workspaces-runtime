@@ -383,21 +383,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)||typeof client.sourceRoutes!=='function')return;
     const source=externalSourceFor(identity,row);
     if(!pending.length)return;
-    const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
+    await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
       conversationKeys:[...new Set(pending.map(event=>event.conversation_key))]},signal);lease();
     const canonicalSource=canonicalSourceFor(row.companyId);
-    // Native lookup selects only accepted current task bindings on THIS host.
-    // Refresh the existing task projection, never register/rebind a second
-    // source with the scheduler or provision a chat from a conversation key.
-    for(const taskId of new Set(routes.map(route=>route.taskId))){
-      const binding=await client.task(row.companyId,taskId,signal);lease();
-      if(binding.hostState==='other_device')fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
-      apply(canonicalSource,binding);
-    }
+    // Conversation bindings are historical correlation hints, never an
+    // inbound task selector: the same person/chat can discuss several tasks.
+    // Still require a successful native lookup before classification so an
+    // authority/transport failure cannot masquerade as an empty inventory.
     const current=await client.sourceAccounts(row.companyId,signal);lease();
     if(!sameRegistration(row,current.find(value=>value.id===row.id)))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
     inbox.routeExternalEvents(source,{canonicalSource,sourceRevision:row.revision,
-      eventKeys:pending.map(event=>event.event_key),routes});
+      eventKeys:pending.map(event=>event.event_key),routes:[]});
     // Absence is known only after this successful fresh native route lookup.
     // Read-only errors never enqueue a competing classification/model turn.
     const preferredFor=event=>{
@@ -412,7 +408,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     // inventory. Native company selection still asks the owner and alone grants
     // the selected scope; this preference grants no body/task/source authority.
     if(typeof client.beginSourceIntake==='function')inbox.queueExistingTaskIntakes(source,{sourceRevision:row.revision,
-      eventKeys:pending.filter(event=>preferredFor(event)?.id===row.id&&!routes.some(route=>route.conversationKey===event.conversation_key)).map(event=>event.event_key)});
+      eventKeys:pending.filter(event=>preferredFor(event)?.id===row.id).map(event=>event.event_key)});
   };
   const verifyExternalDelivery=async(job,binding,signal)=>{
     const external=job.events.filter(event=>JSON.parse(event.event_scope_json).provider!=='trelio');
@@ -670,21 +666,28 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       inbox.redirectOwnerIntake(row.id,{scope,sourceRevision:current.revision,receiptId:outcome.receiptId});
       inbox.settleOwnerIntake(row.id);return;
     }
-    if(!['created','routed'].includes(outcome.state)||!outcome.route||!uuid.test(outcome.taskId??''))fail('ASSISTANT_INTAKE_CHANGED');
+    const selected=outcome.routes??(outcome.route?[{...outcome.route,taskId:outcome.taskId}]:[]);
+    if(!['created','routed'].includes(outcome.state)||!selected.length||selected.length>100)fail('ASSISTANT_INTAKE_CHANGED');
     const companies=await client.companies(signal),company=companies.find(value=>value.companyId===row.scope.companyId);lease();
     if(!company)fail('ASSISTANT_INTAKE_CHANGED');
     const canonical=sourceFor(identity,company);inbox.register(canonical);
-    const binding=await client.task(row.scope.companyId,outcome.taskId,signal);lease();apply(canonical,binding);
-    if(binding.state!=='accepted'||binding.id!==outcome.route.bindingId||binding.revision!==outcome.route.bindingRevision)
-      fail('ASSISTANT_INTAKE_CHANGED');
-    // The original event route is installed only AFTER the ordinary task host
-    // has provisioned its permanent chat. No fabricated task/chat is created by
-    // this router, and no other message in the owner conversation is claimed.
-    if(!findSchedule(canonical,outcome.taskId))return;
+    // Validate and project EVERY target before routing ANY original. A partly
+    // provisioned batch survives restart under its original immutable receipt;
+    // it is never reclassified or delivered wholesale to the first task.
+    let ready=true;
+    for(const route of selected){
+      const binding=await client.task(row.scope.companyId,route.taskId,signal);lease();apply(canonical,binding);
+      if(binding.state!=='accepted'||binding.id!==route.bindingId||binding.revision!==route.bindingRevision)
+        fail('ASSISTANT_INTAKE_CHANGED');
+      if(!findSchedule(canonical,route.taskId))ready=false;
+    }
+    if(!ready)return;
     const routes=await client.sourceRoutes({companyId:row.scope.companyId,sourceId:row.scope.bindingId,
-      sourceRevision:row.source_revision,routeIds:[outcome.route.id]},signal);lease();
-    if(routes.length!==1||routes[0].taskId!==outcome.taskId)fail('ASSISTANT_INTAKE_CHANGED');
-    inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,eventKeys:row.kind==='route_existing'?row.originals.map(event=>event.event_key):[row.event_key],routes,intakeId:row.id});
+      sourceRevision:row.source_revision,routeIds:selected.map(route=>route.id)},signal);lease();
+    if(routes.length!==selected.length||selected.some(expected=>!routes.some(route=>route.id===expected.id&&route.taskId===expected.taskId
+      &&JSON.stringify(route.eventIds??[])===JSON.stringify(expected.eventIds??[]))))fail('ASSISTANT_INTAKE_CHANGED');
+    inbox.routeExternalEvents(row.scope,{canonicalSource:canonical,sourceRevision:row.source_revision,
+      eventKeys:row.kind==='route_existing'?row.originals.map(event=>event.event_key):[row.event_key],routes,intakeId:row.id});
     inbox.settleOwnerIntake(row.id);
   };
   const deferredIntake=row=>Object.freeze({state:'deferred',kind:'source_intake',intakeId:row.id});

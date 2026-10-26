@@ -58,7 +58,7 @@ publication tooling также остаются вне этого публичн
   private storage и native Codex adapters не заменяются состоянием очереди.
   Native source discovery/passive reads feed that same queue; unknown refs stay
   unrouted/non-waking. Channel hints retain their source position until initialized/backfilled.
-  Native known-conversation routes dispatch only through the canonical Trelio
+  Native per-original routes dispatch only through the canonical Trelio
   task source/permanent chat; source rows never rebind its scheduler. Fresh
   source/task generations and a synchronous pre-start snapshot fence are required.
   Native/business completion alone never processes an external body; dispatched
@@ -858,7 +858,9 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   journal before body access. Complete-inventory local queue preference grants no
   company authority. Native `routed` receipts install only original batch routes;
   presentation-only `intakeKind:'route_existing'` never grants read/ACK/binding.
-  Permanent task binding and material processing remain independent. See the
+  Conversation binding is nonexclusive correlation; every inbound batch is
+  partitioned by original UUID across tasks before delivery. Permanent task
+  routing and material processing remain independent. See the
   schema v10 section in `docs/assistant-inbox.md`; no per-message chats or new executor.
 
 - MAX account roots require native selected `maxChatUrl:null`, fresh

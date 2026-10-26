@@ -2017,7 +2017,7 @@ acknowledgement or human-command flag. Older servers that do not advertise them
 do not gain a local alias or alternate transport. New provider/admin/destructive
 operations stay closed until separately implemented and reviewed.
 
-### Canonical task wake from a known source conversation
+### Canonical task wake from classified original messages
 
 The live dedicated catalogue may expose `bind_assistant_source_conversation`.
 The host forwards its native schema/proof/immutable intent once; the server owns
@@ -2025,10 +2025,12 @@ source owner selection, accepted task binding, ordinary native ACL and CAS. A
 mapping is not a provider read, a new task command or a processing receipt. The
 fixed model-free source routing endpoint accepts opaque account HMACs only.
 
-The current coordinator projects those native routes into the SAME inbox and
-canonical Trelio task source. It never calls scheduler rebind/provision for an
-external source. Incoming mapped refs wake the existing permanent task chat;
-unknown conversations remain non-waking. Fresh route/source generations are
+The current coordinator classifies each inbound conversation batch into exact
+original-UUID task groups, then projects per-original native routes into the SAME
+inbox and canonical Trelio task source. Conversation bindings are nonexclusive
+correlation history, never a shortcut for assigning a new reply to a task. It never calls scheduler rebind/provision for an
+external source. Incoming classified refs wake only their selected permanent task chats;
+unclassified conversations remain non-waking. Fresh route/source generations are
 checked again before launch and during its watch. Queue `dispatched` and actual
 `processed` remain distinct: a successful native/business turn alone does not
 mark an external message read, nor does it cause endless immediate wake retries.
@@ -2598,9 +2600,9 @@ No key is computed by the model or host, and no whole source inventory is shown.
 
 The worker uses the existing `bind_assistant_source_conversation` with one exact
 native candidate, the provider key, fresh task snapshot and stable request UUID.
-Binding still needs its normal task/source/ACL/CAS/proof and rejects conflicts.
-Only the existing route/inbox/coordinator can wake a later incoming reply in the
-SAME permanent task chat; a hint is no route receipt, owner identity, new-task
+This optional nonexclusive correlation still needs task/source/ACL/CAS/proof.
+Each later inbound batch needs independent per-original classification before the
+existing route/inbox/coordinator may wake its selected permanent task chat; a hint is no route receipt, owner identity, new-task
 command, original-body read, processing proof or ACK authority.
 
 Optional hint, source outage/revocation, malformed key, missing selected source

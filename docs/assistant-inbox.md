@@ -418,8 +418,8 @@ absence. Native lookup receives opaque hints only, not provider IDs or bodies.
 `routeExternalEvents` validates the complete source/assistant/company partition,
 current native configuration revision and exact already accepted canonical task
 binding. It never provisions a task, changes a binding or rebinds the scheduler.
-Current mappings put incoming refs into the SAME task delivery as Trelio mentions
-and due cycles. Outgoing/deletion refs are context only; unknown conversations do
+Only exact classified original routes put incoming refs into the SAME task
+delivery as Trelio mentions and due cycles; conversation-only hints never do. Outgoing/deletion refs are context only; unknown conversations do
 not wake, create tasks or disclose bodies. Delivery scope remains the canonical
 Trelio source. Each event retains its own provider source for separate processing
 and ACK. Trelio notification poll/ACK never receives external provider IDs.
@@ -698,7 +698,7 @@ unknown-conversation intake remain separate capabilities.
 The SAME private inbox supports two closed intake kinds. `owner_command` keeps
 its proven native owner identity and original single-event creation workflow.
 `route_existing` has no owner identity, contains 1–100 immutable original UUIDs,
-and can select only an existing accessible accepted task. Bodies, senders,
+and can partition its originals between existing accessible accepted tasks. Bodies, senders,
 candidate titles, rules and answers never enter SQLite. The additional bounded
 batch-reference table contains only exact original/event/account IDs and ordering;
 the parent retains closed kind/freeze/redirect and native receipt/route/task IDs.
@@ -710,8 +710,10 @@ source inventory is never a singleton choice. A complete successful inventory
 selects one local queue source per physical account/provider (and configured MAX
 chat); this is a cost/dedup preference, never company authority. Same-account
 originals deduplicate across company source rows before body access. A direct
-owner-command claim takes precedence. A positive current native known route may
-remove only a still-local, unfrozen pending triage claim. Already classified or
+owner-command claim takes precedence. Conversation correlations never bypass triage or remove an unfrozen claim.
+The coordinator deliberately discards whole-conversation routing results,
+including results returned by an older backend. Exact route-ID reads remain
+mandatory for already classified originals and in-flight recovery. Already classified or
 ignored originals are not reconsidered; ignored is not processed or ACKed.
 
 Unfrozen originals coalesce by conversation/source generation. The first native
@@ -752,17 +754,21 @@ project sources load that project's exact effective rules through the SAME
 instruction builder. No plaintext server fallback or generic payload resolver
 is added.
 
-A native `routed` result still applies only to this original batch. It is settled
-into the ordinary existing permanent task chat after fresh task/source/route
-checks. The dispatcher may add presentation-only `intakeKind:'route_existing'`
-to an exact task source reference only from its settled native receipt with the
-same original, route, task and source generation. This is not a read selector,
-processing proof or binding permission. After actual read, the task worker uses
-the ordinary native conversation binder under its genuine current task pass and
-permanent chat before material completion. Only a confirmed whole-conversation
-binding makes later replies a known-route wake. Owner-command/new-task intake
-references have no such hint and must not bind the shared owner conversation.
-Processing and provider ACK remain separate ordinary task outcomes.
+A native `routed` receipt partitions the frozen original UUIDs through
+`routes:[{taskId,eventIds}]` and `ignoredEventIds`. Every original occurs exactly
+once, and task groups are distinct. Whole-batch legacy `taskId/route` receipts
+remain recoverable. Multi-target receipts have no singular task or route. The
+same private journal validates the full partition before retaining the terminal
+receipt and installs each subset only after ALL target task/source/route checks
+and real permanent chat provisioning. Failed/partial settlement reads back the
+same immutable receipt, never reruns classification or delivers the whole batch
+to its first task. Ignored originals remain unprocessed/unACKed.
+
+After actual exact reads, each task worker commits its own material and explicit
+original slots. Conversation binding is optional nonexclusive correlation, never
+a prerequisite for material completion or authority for a future reply. Later
+batches are classified together again. Processing and provider ACK retain their
+independent original read/material/receipt guards.
 
 Synthetic SQLite, hook, signed-child and coordinator tests cover this composition;
 they do not establish a live Windows/business messenger acceptance.

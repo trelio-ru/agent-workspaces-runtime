@@ -834,12 +834,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id);if(!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_CONFLICT');
       run("UPDATE assistant_owner_intakes SET state='uncertain' WHERE id=?",row.id);
     });},
-    finishOwnerIntake(id,{receiptId,state,route=null,taskId=null}){return transaction(()=>{
+    finishOwnerIntake(id,{receiptId,state,route=null,taskId=null,routes=null,ignoredEventIds=[]}){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
       if(!(row.kind==='route_existing'?['pending','ready','started','uncertain','waiting_owner']:['ready','started','uncertain','waiting_owner']).includes(row.state)||!['created','routed','ignored','waiting_owner','redirected','cancelled'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
       if(state==='routed'){
-        if(row.kind!=='route_existing'||!route||route.sourceId!==row.scope.bindingId||route.sourceRevision!==row.source_revision)fail('ASSISTANT_INBOX_CONFLICT');
-        run('UPDATE assistant_owner_intakes SET outcome_route_id=?,outcome_task_id=? WHERE id=?',uuid(route.id),uuid(taskId),row.id);
+        const selected=routes??(route?[{...route,taskId,eventIds:row.eventIds}]:[]);
+        const ids=[...selected.flatMap(item=>item.eventIds??[]),...ignoredEventIds];
+        if(row.kind!=='route_existing'||!selected.length||selected.length>100
+          ||selected.some(item=>item.sourceId!==row.scope.bindingId||item.sourceRevision!==row.source_revision||!Array.isArray(item.eventIds)||!item.eventIds.length)
+          ||ids.length!==row.eventIds.length||new Set(ids).size!==ids.length||ids.some(id=>!row.eventIds.includes(id)))fail('ASSISTANT_INBOX_CONFLICT');
+        for(const item of selected){uuid(item.id);uuid(item.taskId);}
+        run('UPDATE assistant_owner_intakes SET outcome_route_id=?,outcome_task_id=? WHERE id=?',selected.length===1?selected[0].id:null,selected.length===1?selected[0].taskId:null,row.id);
       }
       run('UPDATE assistant_owner_intakes SET state=?,outcome_receipt=?,outcome_state=?,settled=?,next_check_at=? WHERE id=?',
         state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled'].includes(state)),state==='waiting_owner'?time()+300000:0,row.id);
@@ -932,12 +937,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         ||eventKeys.some(key=>typeof key!=='string'||!/^[a-f0-9]{64}$/u.test(key))||new Set(eventKeys).size!==eventKeys.length)inputError();
       integer(sourceRevision,0,2_147_483_647);
       const projected=routes.map(row=>{
-        object(row,['id','sourceId','sourceRevision','conversationKey','bindingId','bindingRevision','taskId']);
+        object(row,['id','sourceId','sourceRevision','conversationKey','bindingId','bindingRevision','taskId','eventIds']);
         if(row.sourceId!==scope.bindingId||row.sourceRevision!==sourceRevision
           ||!assistantConversationKeyMatches(scope.provider,row.conversationKey))inputError();
         return {...row,id:uuid(row.id),taskId:uuid(row.taskId),bindingId:uuid(row.bindingId),bindingRevision:integer(row.bindingRevision,0,2_147_483_647)};
       });
-      if(new Set(projected.map(row=>row.conversationKey)).size!==projected.length)inputError();
+      if(new Set(projected.map(row=>row.id)).size!==projected.length||intakeId===null&&new Set(projected.map(row=>row.conversationKey)).size!==projected.length)inputError();
       return transaction(()=>{
         if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
         activeSource(canonical);
@@ -947,9 +952,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         if(intakeId!==null){
           const intake=get('SELECT * FROM assistant_owner_intakes WHERE id=?',uuid(intakeId));
           if(!intake||intake.source_key!==scope.key||!['started','uncertain','complete'].includes(intake.state)
-            ||projected.length!==1)fail('ASSISTANT_INBOX_CONFLICT');
+            ||!projected.length)fail('ASSISTANT_INBOX_CONFLICT');
           const originalKeys=all('SELECT event_key FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',intake.id).map(event=>event.event_key);
           if(selected.length!==originalKeys.length||selected.some(event=>!originalKeys.includes(event.event_key)))fail('ASSISTANT_INBOX_CONFLICT');
+          const originals=all('SELECT original_event_id,event_key FROM assistant_source_intake_events WHERE intake_id=?',intake.id);
+          const routed=projected.flatMap(route=>route.eventIds??(projected.length===1?originals.map(ref=>ref.original_event_id):[]));
+          if(new Set(routed).size!==routed.length||routed.some(id=>!originals.some(ref=>ref.original_event_id===id))
+            ||projected.some(route=>route.eventIds!==undefined&&(!Array.isArray(route.eventIds)||!route.eventIds.length)))fail('ASSISTANT_INBOX_CONFLICT');
         }
         for(const row of projected){
           const task=get('SELECT * FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',canonical.key,row.taskId);
@@ -973,7 +982,12 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // bounded keys. Absent/revoked routes lose dispatch eligibility, while
         // a failed network lookup never reaches this transaction or becomes [].
         for(const event of selected){
-          const route=projected.find(row=>row.conversationKey===event.conversation_key);
+          // Only a settled native intake may assign original messages. A
+          // new coordinator never passes conversation hints here. Legacy
+          // already-admitted deliveries retain the original internal adapter.
+          const original=intakeId===null?null:get('SELECT original_event_id FROM assistant_source_intake_events WHERE intake_id=? AND event_key=?',intakeId,event.event_key);
+          const route=projected.find(row=>row.conversationKey===event.conversation_key
+            &&(intakeId===null||(row.eventIds!==undefined?row.eventIds.includes(original?.original_event_id):projected.length===1)));
           if(route&&intakeId===null)releasePendingTriageOriginal(scope,{id:event.event_id,revision:event.event_revision});
           run(`UPDATE assistant_inbox_events SET task_id=?,dispatch_source_key=?,route_id=?,route_source_revision=?,route_checked_at=?
             WHERE event_key=?`,route?.taskId??null,route?canonical.key:null,route?.id??null,route?sourceRevision:null,time(),event.event_key);

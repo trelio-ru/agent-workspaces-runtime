@@ -1178,3 +1178,25 @@ test('same journal preserves twenty legacy starts and bounds each actual prerequ
   assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,last.clientRequestId,{started:true}),/CONFLICT/);
   assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,last.clientRequestId,{started:false}),/CONFLICT/);
 });
+
+test('same-conversation task partition rejects overlap and installs only exact originals atomically',async t=>{
+  const f=routedFixture(t),secondTask=randomUUID(),secondBinding=randomUUID();
+  f.advance(300000);page(f.inbox,f.external,[2,3].map(i=>({id:`message:123:${i+4}`,revision:String(i).repeat(64),taskId:null,wake:false,
+    conversationKey:f.route.conversationKey,providerWake:true})),'new');
+  f.inbox.applyTaskState(f.canonical,{taskId:secondTask,state:'accepted',expectedRevision:0,authority:{bindingId:secondBinding,revision:0}});
+  const pending=f.inbox.pendingExternalRoutes(f.external);f.inbox.queueExistingTaskIntakes(f.external,{sourceRevision:2,eventKeys:pending.map(row=>row.event_key)});
+  const intake=f.inbox.freezeExistingTaskIntake(f.inbox.ownerIntakes()[0].id);
+  const routes=[{...f.route,eventIds:[intake.eventIds[0]]},{...f.route,id:randomUUID(),taskId:secondTask,bindingId:secondBinding,bindingRevision:0,eventIds:[intake.eventIds[1]]}];
+  const receipt={state:'routed',receiptId:randomUUID(),routes,ignoredEventIds:[intake.eventIds[2]]};
+  assert.throws(()=>f.inbox.finishOwnerIntake(intake.id,{...receipt,ignoredEventIds:[]}),/CONFLICT/);
+  assert.throws(()=>f.inbox.finishOwnerIntake(intake.id,{...receipt,routes:[routes[0],{...routes[1],eventIds:routes[0].eventIds}]}),/CONFLICT/);
+  assert.equal(f.inbox.ownerIntake(intake.id).state,'pending');
+  f.inbox.finishOwnerIntake(intake.id,receipt);
+  const mapping={canonicalSource:f.canonical,sourceRevision:2,eventKeys:intake.originals.map(ref=>ref.event_key),routes,intakeId:intake.id};
+  assert.throws(()=>f.inbox.routeExternalEvents(f.external,{...mapping,routes:[routes[0],{...routes[1],eventIds:routes[0].eventIds}]}),/CONFLICT/);
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_events WHERE task_id IS NOT NULL').get().n,0);
+  f.inbox.routeExternalEvents(f.external,mapping);f.inbox.settleOwnerIntake(intake.id);
+  assert.deepEqual(new Set(f.database.prepare('SELECT task_id FROM assistant_inbox_events').all().map(row=>row.task_id)),new Set([f.taskId,secondTask,null]));
+  const first=await f.inbox.claimDelivery({authorize:authorized});assert.equal(first.events.length,1);
+  assert.equal(f.inbox.claimAcknowledgements(f.external),null,'classification and dispatch are neither read nor processed evidence');
+});

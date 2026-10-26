@@ -3490,3 +3490,30 @@ test('device-only terminal continuation uses SAME renew route, exact owner recei
   assert.equal(calls.at(-1).automatic,true);assert.equal(automatic.invocationId,reviewId);
   await assert.rejects(client.continueTaskPass({...base,reviewId,continuation:'read',automatic:false}),/INVALID_INPUT/);
 });
+
+test('multi-task intake read-back preserves an exact original partition and rejects mixed or incomplete receipts',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+  const eventIds=[randomUUID(),randomUUID(),randomUUID()],key=`telegram-conversation/v1.${'a'.repeat(64)}`;
+  const routes=eventIds.slice(0,2).map(eventId=>({id:randomUUID(),sourceId,sourceRevision:2,conversationKey:key,
+    bindingId:randomUUID(),bindingRevision:0,taskId:randomUUID(),eventIds:[eventId]}));
+  const original={schemaVersion:1,kind:'route_existing',id:intakeId,companyId,sourceId,sourceRevision:2,eventId:eventIds[0],eventIds,
+    threadId:randomUUID(),state:'routed',taskId:null,receiptId:randomUUID(),readConfirmed:true,routes,ignoredEventIds:[eventIds[2]],
+    execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
+  let value=structuredClone(original),calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential:`tda_${'x'.repeat(43)}`,expiresAt:1})},
+    http:async(operation,body)=>{calls++;assert.equal(operation,'intakeRead');assert.deepEqual(body,{companyId,sourceId,intakeId});return value;}});
+  const retained=await client.readSourceIntake({companyId,sourceId,intakeId});
+  assert.equal(retained.taskId,null);assert.equal(retained.route,undefined);assert.deepEqual(retained.routes,routes);
+  assert.deepEqual(retained.ignoredEventIds,[eventIds[2]]);
+  value={...structuredClone(original),kind:undefined,state:'created',taskId:routes[0].taskId,routes:undefined,
+    route:{...routes[0],eventIds:[eventIds[0]]},ignoredEventIds:undefined};
+  assert.deepEqual((await client.readSourceIntake({companyId,sourceId,intakeId})).route.eventIds,[eventIds[0]],
+    'owner-created singular receipts retain exact membership for native route-ID reconciliation');
+  for(const patch of [{ignoredEventIds:[]},{ignoredEventIds:[eventIds[0]]},
+    {routes:[routes[0],{...routes[1],eventIds:[randomUUID()]}]},
+    {routes:[routes[0],{...routes[1],sourceId:randomUUID()}]},
+    {routes:[routes[0],{...routes[1],taskId:routes[0].taskId}]}]){
+    value={...structuredClone(original),...patch};await assert.rejects(client.readSourceIntake({companyId,sourceId,intakeId}),/INVALID_RESPONSE/);
+  }
+  assert.equal(calls,7,'each malformed read has one attempt, no mutation or automatic retry');
+});

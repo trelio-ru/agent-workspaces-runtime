@@ -2346,6 +2346,12 @@ export const inspectAssistantSkillConsentForOwner=async({origin,companyId,fields
 /** Host-private client. Model tools receive only projections from these named
  * operations; no method returns the credential or delegates an arbitrary URL. */
 const intakeLocator=input=>({companyId:id(input.companyId),sourceId:id(input.sourceId),intakeId:id(input.intakeId)});
+// Exact original UUIDs remain structural references, never provider message
+// IDs. Validate their bounds before a native receipt can touch the journal.
+const sourceRouteEventIds=value=>{
+  if(!Array.isArray(value)||value.length>100||new Set(value).size!==value.length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return value.map(id);
+};
 const intakeProjection=(value,expected)=>{
   if(!object(value)||value.schemaVersion!==1||value.id!==expected.intakeId||value.sourceId!==expected.sourceId||value.companyId!==expected.companyId
     ||!['leased','ignored','created','routed','waiting_owner','redirected','cancelled'].includes(value.state)||typeof value.readConfirmed!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -2357,14 +2363,27 @@ const intakeProjection=(value,expected)=>{
   if(routing&&(!Array.isArray(value.eventIds)||!value.eventIds.length||value.eventIds.length>100||value.eventIds[0]!==value.eventId
     ||new Set(value.eventIds).size!==value.eventIds.length||value.eventIds.some(eventId=>!UUID.test(eventId??'')))
     ||!routing&&value.threadId===null||value.execution===null&&!(routing&&value.threadId===null&&['waiting_owner','redirected','cancelled'].includes(value.state)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  let routes;
+  if(value.routes!==undefined){
+    if(!routing||value.state!=='routed'||!Array.isArray(value.routes)||!value.routes.length||value.routes.length>100)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    routes=value.routes.map(route=>({id:id(route.id),sourceId:id(route.sourceId),sourceRevision:revision(route.sourceRevision),
+      bindingId:id(route.bindingId),bindingRevision:revision(route.bindingRevision),conversationKey:text(route.conversationKey,96),
+      taskId:id(route.taskId),eventIds:sourceRouteEventIds(route.eventIds)}));
+    const selected=[...routes.flatMap(route=>route.eventIds),...sourceRouteEventIds(value.ignoredEventIds??[])];
+    if(routes.some(route=>!route.eventIds.length||route.sourceId!==value.sourceId||route.sourceRevision!==value.sourceRevision)
+      ||new Set(routes.map(route=>route.id)).size!==routes.length||new Set(routes.map(route=>route.taskId)).size!==routes.length
+      ||selected.length!==value.eventIds.length||new Set(selected).size!==selected.length||selected.some(id=>!value.eventIds.includes(id)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  }
   return {schemaVersion:1,id:id(value.id),companyId:id(value.companyId),sourceId:id(value.sourceId),sourceRevision:revision(value.sourceRevision),
     ...(routing?{kind:'route_existing',eventIds:value.eventIds.map(id),...(value.companySelectionRequired===true?{companySelectionRequired:true}:{})}:{}),
     eventId:id(value.eventId),threadId:value.threadId===null?null:id(value.threadId),state:value.state,leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
     taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
     readConfirmed:value.readConfirmed,execution:value.execution===null?null:executionConfiguration(value.execution),
+    ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
     ...(value.redirect?{redirect:{sourceId:id(value.redirect.sourceId),companyId:id(value.redirect.companyId),sourceRevision:revision(value.redirect.sourceRevision)}}:{}),
     ...(value.route?{route:{id:id(value.route.id),sourceId:id(value.route.sourceId),sourceRevision:revision(value.route.sourceRevision),
-      bindingId:id(value.route.bindingId),bindingRevision:revision(value.route.bindingRevision),conversationKey:text(value.route.conversationKey,96)}}:{})};
+      bindingId:id(value.route.bindingId),bindingRevision:revision(value.route.bindingRevision),conversationKey:text(value.route.conversationKey,96),
+      ...(value.route.eventIds!==undefined?{eventIds:sourceRouteEventIds(value.route.eventIds)}:{})}}:{})};
 };
 
 export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, store, http }) => {
@@ -2439,7 +2458,8 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
           ||(ids?!body.routeIds.includes(row.id):!keys.includes(row.conversationKey))||seen.has(ids?row.id:row.conversationKey))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
         seen.add(ids?row.id:row.conversationKey);
         return {id:id(row.id),sourceId:body.sourceId,sourceRevision:body.sourceRevision,conversationKey:row.conversationKey,
-          bindingId:id(row.bindingId),bindingRevision:revision(row.bindingRevision),taskId:id(row.taskId)};
+          bindingId:id(row.bindingId),bindingRevision:revision(row.bindingRevision),taskId:id(row.taskId),
+          ...(row.eventIds!==undefined?{eventIds:sourceRouteEventIds(row.eventIds)}:{})};
       });
     },
     async readSourceHealth(companyId,sourceId,signal){
