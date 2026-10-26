@@ -69,8 +69,8 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
     inputSchema: schema({ enrollmentId: enrollment }) },
   { name: 'get_assistant_setup_status', description: 'Read local setup state and, for a paired device, verify live server contact. Does not imply task execution or background service readiness.',
     inputSchema: schema({ enrollmentId: enrollment }), annotations: { readOnlyHint: true, idempotentHint: true } },
-  { name: 'install_assistant_background', description: 'Register the paired assistant supervisor for this Windows user at sign-in. Requires an explicit setup request. No automatic logon, saved password, elevation, Codex restart or readiness assertion. Does not start it now.',
-    inputSchema: schema({}), annotations: { idempotentHint: true } },
+  { name: 'install_assistant_background', description: 'Register the paired assistant supervisor for this Windows user at sign-in. Requires an explicit setup request. No automatic logon, saved password, elevation or readiness assertion. autoUpdatePlugin opts into model-free plugin maintenance and a graceful idle Desktop restart; set it only when the human explicitly requests that setup policy. Changed hooks remain human-reviewed. Does not start it now.',
+    inputSchema: {type:'object',properties:{autoUpdatePlugin:{type:'boolean'}},required:[],additionalProperties:false}, annotations: { idempotentHint: true } },
   { name: 'get_assistant_background_status', description: 'Read back this paired Windows user\'s exact Task Scheduler registration and OS running state, plus a content-free dispatch diagnostic. Missing company model or reasoning is a configuration block, even with no queued events. Unknown is not idle. Does not prove delivery or business readiness.',
     inputSchema: schema({}), annotations: { readOnlyHint: true, idempotentHint: true } },
   { name: 'start_assistant_background', description: 'Start the exact registered paired Windows supervisor after setup. Reuses an already running instance. Native task/pass/owner/model/hook admission still gates every business action; registration or OS running state is not a successful pilot.',
@@ -85,10 +85,12 @@ const safeError = error => assistantHealthFailure(error) || assistantSetupRecove
 export const callAssistantSetupTool = async (setup, name, args) => {
   if (!codes.has(name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
   if (Object.hasOwn(backgroundTools, name)) {
-    if (!args || Object.getPrototypeOf(args) !== Object.prototype || Object.keys(args).length !== 0) {
+    if (!args || Object.getPrototypeOf(args) !== Object.prototype
+      ||Object.keys(args).some(key=>name!=='install_assistant_background'||key!=='autoUpdatePlugin')
+      ||Object.hasOwn(args,'autoUpdatePlugin')&&typeof args.autoUpdatePlugin!=='boolean') {
       throw Object.assign(new Error(), { code: 'ASSISTANT_SETUP_INVALID_INPUT' });
     }
-    return setup.background(backgroundTools[name]);
+    return setup.background(backgroundTools[name],args);
   }
   const expected = name === 'begin_assistant_setup' ? ['enrollmentId', 'deviceName'] : ['enrollmentId'];
   if (!args || Object.getPrototypeOf(args) !== Object.prototype
@@ -130,7 +132,7 @@ export const createProductionAssistantSetup = async ({expectedOrigin='https://tr
   return { ...Object.fromEntries(Object.entries(setup).map(([name, action]) => [name,
     (...args) => withPrivateProcessSession(async () => {
       return action(...args);
-    })])), background: async operation => (await createBackground())(operation) };
+    })])), background: async (operation,options) => (await createBackground())(operation,options) };
 };
 
 /** OS registration is composed only after an explicit setup call, never from
@@ -141,8 +143,14 @@ export const createProductionAssistantBackground = async () => {
   return createAssistantWindowsBackground({
     signal,
     readIdentity: () => productionContext(client => client.identity, { signal }),
+    setPluginUpdates:(enabled,identity)=>productionContext((_client,host)=>host.withSetupLock(()=>host.setPluginUpdatesEnabled(enabled,identity)),{signal}),
     verifyContact: () => productionContext(client => client.heartbeat(), { signal }),
     readDispatchStatus: ({signal:diagnosticSignal}) => readProductionAssistantDispatchStatus({signal:diagnosticSignal}),
+    readMaintenanceStatus:({signal:diagnosticSignal})=>productionContext(async(_client,host)=>{
+      const enabled=await host.readPluginUpdatesEnabled(),record=await host.readPluginUpdate();
+      return {enabled,stage:record?.stage??'not_checked',lastCheckedVersion:record?.targetVersion??null,
+        hookReviewRequired:record?.stage==='hook_review'};
+    },{signal:diagnosticSignal}),
   });
 };
 
@@ -659,11 +667,13 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
 };
 
 export const runAssistantEntry = async (args, options = {}) => {
-  if (args.length !== 1 || !['mcp', 'hook', 'request', 'background', 'workspace',
+  const pluginPolicy=args[0]==='background-install'&&args.length===2&&['--auto-update-plugin=on','--auto-update-plugin=off'].includes(args[1])
+    ?{autoUpdatePlugin:args[1].endsWith('=on')}:null;
+  if ((!pluginPolicy&&args.length !== 1) || !['mcp', 'hook', 'request', 'background', 'workspace',
     'background-install', 'background-status', 'background-start', 'background-remove'].includes(args[0])) throw new Error('ASSISTANT_COMMAND_UNSUPPORTED');
   if (args[0].startsWith('background-')) {
     const manage = await (options.createBackground ?? createProductionAssistantBackground)();
-    (options.output ?? process.stdout).write(JSON.stringify(await manage(args[0].slice('background-'.length))) + '\n');
+    (options.output ?? process.stdout).write(JSON.stringify(await manage(args[0].slice('background-'.length),pluginPolicy??{})) + '\n');
     return;
   }
   if (args[0] === 'workspace') return runAssistantWorkspaceWorker(options);
@@ -744,6 +754,8 @@ const assistantHealthCodes = Object.freeze({
   AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:'plugin_update_required',
   TRELIO_PLUGIN_RESTART_REQUIRED:'plugin_restart_required',
   ASSISTANT_PLUGIN_UPDATE_REQUIRED:'plugin_update_required',
+  ASSISTANT_PLUGIN_UPDATE_FAILED:'plugin_update_required',
+  ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE:'plugin_restart_required',
   ASSISTANT_RUNTIME_UPDATE_REQUIRED:'runtime_update_failed',
   AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED:'runtime_update_failed',
   ASSISTANT_MCP_RECONNECT_REQUIRED:'mcp_reconnect_required',
@@ -1094,13 +1106,75 @@ const waitForAssistantPoll = (milliseconds,signal) => new Promise(resolve=>{
   if(signal?.aborted)finish();
 });
 
+/** Only the supervisor's signed tick enters plugin maintenance. An idle
+ * model-facing MCP health call never closes the user's Desktop/setup chat.
+ * Keep the existing SQLite coordinator lease and protected setup identity;
+ * the common updater/retention and native executable resolver remain the only
+ * installation/process paths. No experimental plugin/install RPC is used. */
+export const runProductionAssistantPluginMaintenance = async (runtime,{context=productionContext,
+  environment=process.env,platform=process.platform,signal}={}) => {
+  if(platform!=='win32')return {state:'unsupported'};
+  // Existing setup explicitly excluded Desktop restart. Preserve that contract
+  // until the human opts this paired device into maintenance once at setup.
+  if(await context((_client,host)=>host.readPluginUpdatesEnabled())!==true)return {state:'disabled'};
+  const deadline=AbortSignal.timeout(150_000);
+  signal=signal?AbortSignal.any([signal,deadline]):deadline;
+  return runtime.coordinator.maintainPluginAtIdleBoundary(coordinatorGuard=>context(async (lockedClient,lockedHost)=>lockedHost.withSetupLock(async()=>{
+    const common=await import('./trelio-workspace.mjs');
+    const {resolveCodexExecutable,buildCodexEnvironment}=await import('./trelio-codex-conversation.mjs');
+    const {maintainAssistantPlugin,runAssistantWindowsDesktop}=await import('./trelio-assistant-setup.mjs');
+    const {readAssistantCodexPluginReadiness}=await import('./trelio-assistant-codex.mjs');
+    const executable=await resolveCodexExecutable(environment,{signal});
+    if(!executable)fail('ASSISTANT_CODEX_UNAVAILABLE');
+    const {promisify}=await import('node:util'),{execFile}=await import('node:child_process');
+    const execute=promisify(execFile),env=buildCodexEnvironment(environment);
+    const guard=async()=>{
+      await coordinatorGuard();signal.throwIfAborted();
+      if(['assistantId','deviceId','origin'].some(key=>lockedClient.identity[key]!==runtime.identity[key])
+        ||['pending_owner','quiescing'].includes((await lockedHost.readActivation())?.stage)
+        ||await lockedHost.readActivePass()!==null||await lockedHost.readPluginUpdatesEnabled()!==true)
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    };
+    const execFileCommand=async(_command,args,options)=>{
+      await guard();return execute(executable,args,{...options,env:{...env,GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat'},
+        timeout:40_000,signal,shell:false,windowsHide:true});
+    };
+    const inventory=()=>common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env});
+    const loadedPluginDirectory=environment.TRELIO_PLUGIN_ROOT;
+    if(!loadedPluginDirectory||!path.isAbsolute(loadedPluginDirectory))fail('TRELIO_PLUGIN_RESTART_REQUIRED');
+    return maintainAssistantPlugin({identity:runtime.identity,guard,inventory,
+      readState:()=>lockedHost.readPluginUpdate(),
+      writeState:(expected,next)=>lockedHost.writePluginUpdate(expected,next),
+      upgrade:(current,beforeInstall)=>common.updateCodexPluginMarketplace({profile:'assistant',onlyIfNewerThan:current,beforeInstall,
+        execFileCommand,environment:env,loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
+      rollback:(version,treeSha256)=>common.restoreAssistantCodexPluginVersion({version,treeSha256,execFileCommand,environment:env,
+        loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
+      desktop:(operation,generation)=>runAssistantWindowsDesktop(operation,generation,{environment,signal,guard}),
+      probe:async installed=>{
+        await readAssistantCodexPluginReadiness(process.cwd(),{environment,signal});
+        // Native global status may be null even with a cached catalogue. Prove
+        // the exact installed shell can start a fresh signed request worker and
+        // perform the genuine paired device read, without a model/new chat.
+        const result=await requestCurrentAssistantRuntime({operation:'call',name:'get_assistant_status',arguments:{}},
+          {environment,signal,timeoutMs:30_000,resolveLoader:async()=>path.join(installed.installedPath,'scripts','trelio-host-runtime-loader.mjs')});
+        const value=result?.structuredContent;
+        if(result?.isError||value?.assistantUserId!==runtime.identity.assistantId||value?.deviceId!==runtime.identity.deviceId)
+          fail('ASSISTANT_MCP_RECONNECT_REQUIRED');
+      },
+    });
+  }),{signal}),signal).catch(error=>{
+    if(assistantHealthFailure(error))throw error;
+    fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+  });
+};
+
 /** One worker owns one native pass, but keeps the model-free source poll alive
  * while that pass waits/runs. Return only after its result and durable recovery
  * boundary; source polling never starts a second native invocation. A later
  * worker reconstructs the same SQLite queue rather than replaying the pass.
  */
 export const runAssistantBackgroundTick = async ({createHost=createAssistantRuntimeHost,signal,
-  wait=waitForAssistantPoll}={}) => {
+  pluginMaintenance=runProductionAssistantPluginMaintenance,wait=waitForAssistantPoll}={}) => {
   if(signal?.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
   const host=await createHost();
   const reportDispatch=async(dispatch,error=null)=>{
@@ -1112,6 +1186,14 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
     if(failure&&host.reportDispatchFailure)try{await host.reportDispatchFailure(failure);}catch{}
   };
   try {
+    // The already-running stable supervisor selects this fresh signed worker;
+    // enabling maintenance needs no extra plugin ABI or manual parent restart.
+    const update=await pluginMaintenance(host,{signal});
+    if(update?.blockBusiness){
+      if(update.state==='hook_review')await reportDispatch(null,{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
+      return {schemaVersion:1,state:'blocked',reason:update.state};
+    }
+    if(update?.failedVersion||update?.state==='rolled_back')await reportDispatch(null,{code:'ASSISTANT_PLUGIN_UPDATE_FAILED'});
     await host.coordinator.pollOnce(signal);
     let done=false,pollFailure=null;
     const work=host.coordinator.workOnce(signal).then(value=>({value}),error=>({error})).finally(()=>{done=true;});
@@ -1283,10 +1365,14 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
     }
   }
   if(request.operation==='health_check') {
-    return context(async client=>{
+    return context(async (client,host)=>{
       let catalog=null;
       const state=await maintainAssistantHost({client,versions:versions(),update:async()=>{},
-        probe:async signal=>{const proxy=await proxyFor();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');catalog=assistantWorkerToolCatalogue(await proxy.listTools(signal));},
+        probe:async signal=>{
+          const update=await host.readPluginUpdate?.();
+          if(update?.failedVersion||update?.stage==='failed')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+          const proxy=await proxyFor();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');catalog=assistantWorkerToolCatalogue(await proxy.listTools(signal));
+        },
       });
       return {...state,...(catalog===null?{}:{catalogRevision:assistantCatalogRevision(catalog)})};
     });
@@ -1342,7 +1428,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
       }else if(sourceSetup){
         try{
           const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
-          const value=sourceVerification?await(request.name===ASSISTANT_MAX_VERIFY_TOOL.name?verifyMaxSource:verifySource)({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):
+          const perform=async()=>sourceVerification?await(request.name===ASSISTANT_MAX_VERIFY_TOOL.name?verifyMaxSource:verifySource)({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):
             interactiveSourceSetup?await(request.name===ASSISTANT_MAX_SETUP_TOOL.name?configureMaxSource:request.name===ASSISTANT_TELEGRAM_SETUP_TOOL.name?configureTelegramSource:configureSource)
               ({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()}):sourceArguments.sourceId===null?
             {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
@@ -1350,6 +1436,7 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
               provisionLocalAccount:source.provisionLocalAccount,
               ...(source.interactiveSetupAllowed===true?{interactiveSetupAllowed:true}:{}),executionVerified:false}))}:
             await prepareSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()});
+          const value=interactiveSourceSetup?await host.withSetupLock(perform):await perform();
           result={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
         }catch(error){const code=safeError(error);result={isError:true,content:[{type:'text',text:code}],structuredContent:{code}};}
       }else result=await(request.operation==='list'?proxy.listTools():proxy.callTool(request.name,request.arguments));

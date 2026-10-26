@@ -3547,7 +3547,7 @@ const runCodexPluginMutationWithRetention = async (
     preserveLoadedPlugin = true,
     loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
     loadedPluginVersion = PLUGIN_VERSION,
-    retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+    retentionDirectory, profile = "human",
   } = {},
 ) => {
   if (!preserveLoadedPlugin) return operation();
@@ -3555,7 +3555,7 @@ const runCodexPluginMutationWithRetention = async (
   await retainLoadedCodexPluginInstallation({
     loadedPluginDirectory,
     loadedPluginVersion,
-    retentionDirectory,
+    retentionDirectory, profile,
   });
 
   let operationResult;
@@ -3570,7 +3570,7 @@ const runCodexPluginMutationWithRetention = async (
     // Codex may prune versioned cache folders on both marketplace upgrade and
     // an otherwise harmless `plugin add`. Restoration therefore belongs in a
     // finally-equivalent path for every mutating CLI call, including failures.
-    await restoreRetainedCodexPluginInstallations({ retentionDirectory });
+    await restoreRetainedCodexPluginInstallations({ retentionDirectory, profile });
   } catch (retentionError) {
     throw new Error(
       "Codex обновил plugin cache, но Trelio не смог восстановить пути активных задач.",
@@ -3624,24 +3624,66 @@ const runCodexJsonCommand = async (
 
 const assertOfficialCodexMarketplace = async ({
   execFileCommand = execFileAsync,
-  environment = process.env,
+  environment = process.env, profile = "human",
 } = {}) => {
+  const selected = codexRetentionProfile(profile);
   const result = await runCodexJsonCommand(
     CODEX_MARKETPLACE_LIST_ARGUMENTS,
     { execFileCommand, environment },
   );
   const marketplace = Array.isArray(result?.marketplaces)
-    ? result.marketplaces.find((item) => item?.name === CODEX_MARKETPLACE_NAME)
+    ? result.marketplaces.find((item) => item?.name === selected.marketplace)
     : null;
 
   if (
     marketplace?.marketplaceSource?.sourceType !== "git"
-    || marketplace.marketplaceSource.source !== CODEX_OFFICIAL_MARKETPLACE_SOURCE
+    || marketplace.marketplaceSource.source !== (profile === "assistant"
+      ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE)
   ) {
     throw new Error(
       "Тихое обновление разрешено только для официального Git marketplace Trelio.",
     );
   }
+};
+
+/** Content-free native inventory for the same fixed updater/retention profile.
+ * Discovery is NOT installation: an absent/disabled plugin is never enabled by
+ * maintenance. Read only the exact marketplace root returned by Codex; never
+ * enumerate cache versions or accept a model-selected Git URL/ref/path. */
+export const readCodexPluginUpdateInventory = async ({profile = "human",
+  execFileCommand = execFileAsync, environment = process.env, filesystem = fs} = {}) => {
+  const selected = codexRetentionProfile(profile);
+  await assertOfficialCodexMarketplace({execFileCommand, environment, profile});
+  const catalog = await runCodexJsonCommand(CODEX_MARKETPLACE_LIST_ARGUMENTS, {execFileCommand, environment});
+  const matches = catalog.marketplaces.filter(row => row.name === selected.marketplace);
+  if (matches.length !== 1 || typeof matches[0].root !== "string" || !path.isAbsolute(matches[0].root))
+    throw new Error("Invalid native marketplace inventory.");
+  const manifestPath = path.join(matches[0].root, ".agents", "plugins", "marketplace.json");
+  const metadata = await filesystem.lstat(manifestPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 256 * 1024)
+    throw new Error("Unsafe marketplace manifest.");
+  const manifest = JSON.parse(await filesystem.readFile(manifestPath, "utf8"));
+  const entries = manifest.plugins?.filter(row => row.name === selected.name);
+  const source = entries?.length === 1 ? entries[0].source : null;
+  const official = profile === "assistant" ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE;
+  if (manifest.name !== selected.marketplace || source?.source !== "url" || source.url !== official
+    || typeof source.ref !== "string" || !/^plugin-v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$/u.test(source.ref))
+    throw new Error("Invalid immutable plugin source.");
+  const listing = await runCodexJsonCommand(["plugin", "list", "--marketplace", selected.marketplace, "--json"], {execFileCommand, environment});
+  if (!Array.isArray(listing.installed)) throw new Error("Invalid plugin inventory.");
+  const installed = listing.installed.filter(row => row.pluginId === selected.pluginId);
+  if (installed.length !== 1 || installed[0].installed !== true || installed[0].enabled !== true)
+    return {state: "disabled"};
+  const version = installed[0].version;
+  if (!parseStableVersion(version)) throw new Error("Invalid installed plugin version.");
+  const home = environment.CODEX_HOME || path.join(environment.USERPROFILE || environment.HOME || "", ".codex");
+  if (!path.isAbsolute(home)) throw new Error("Invalid Codex root.");
+  const installedPath = path.join(home, "plugins", "cache", selected.marketplace, selected.name, version);
+  // The SAME bounded immutable-tree inspector hashes every regular payload
+  // file and validates the native manifest, not merely version text.
+  const tree = await inspectImmutableCodexPluginTree(installedPath, version, {profile});
+  return {state: "installed", version, desiredVersion: source.ref.slice(8), installedPath,
+    treeSha256: tree.treeSha256};
 };
 
 export const resolveInstalledCodexPluginBridge = async ({
@@ -3653,21 +3695,22 @@ export const resolveInstalledCodexPluginBridge = async ({
   preserveLoadedPlugin = true,
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = PLUGIN_VERSION,
-  retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+  retentionDirectory, profile = "human",
 } = {}) => {
+  const selected = codexRetentionProfile(profile);
   if (verifyMarketplace) {
-    await assertOfficialCodexMarketplace({ execFileCommand, environment });
+    await assertOfficialCodexMarketplace({ execFileCommand, environment, profile });
   }
   const installation = await runCodexPluginMutationWithRetention(
     () => runCodexJsonCommand(
-      CODEX_PLUGIN_INSTALL_ARGUMENTS,
+      profile === "human" ? CODEX_PLUGIN_INSTALL_ARGUMENTS : ["plugin", "add", selected.pluginId, "--json"],
       { execFileCommand, environment },
     ),
     {
       preserveLoadedPlugin,
       loadedPluginDirectory,
       loadedPluginVersion,
-      retentionDirectory,
+      retentionDirectory, profile,
     },
   );
   const installedPath = typeof installation?.installedPath === "string"
@@ -3678,8 +3721,8 @@ export const resolveInstalledCodexPluginBridge = async ({
     : "";
 
   if (
-    installation?.pluginId !== CODEX_PLUGIN_ID
-    || installation?.marketplaceName !== CODEX_MARKETPLACE_NAME
+    installation?.pluginId !== selected.pluginId
+    || installation?.marketplaceName !== selected.marketplace
     || !installedPath
     || !parseStableVersion(version)
     || (minimumVersion && !isStableVersionAtLeast(version, minimumVersion))
@@ -3696,7 +3739,7 @@ export const resolveInstalledCodexPluginBridge = async ({
   }
 
   const manifestPath = path.join(installedPath, ".codex-plugin", "plugin.json");
-  const bridgePath = path.join(installedPath, "scripts", "trelio-workspace.mjs");
+  const bridgePath = path.join(installedPath, "scripts", profile === "assistant" ? "trelio-host-runtime-loader.mjs" : "trelio-workspace.mjs");
   const [manifestMetadata, bridgeMetadata, manifest] = await Promise.all([
     filesystem.lstat(manifestPath),
     filesystem.lstat(bridgePath),
@@ -3708,7 +3751,7 @@ export const resolveInstalledCodexPluginBridge = async ({
     || manifestMetadata.isSymbolicLink()
     || !bridgeMetadata.isFile()
     || bridgeMetadata.isSymbolicLink()
-    || manifest?.name !== "trelio-agent-workspaces"
+    || manifest?.name !== selected.name
     || manifest?.version !== version
   ) {
     throw new Error("Установленный Trelio plugin не прошёл проверку manifest/entrypoint.");
@@ -3723,6 +3766,7 @@ export const resolveInstalledCodexPluginBridge = async ({
 
 export const updateCodexPluginMarketplace = async ({
   minimumVersion = null,
+  onlyIfNewerThan = null, beforeInstall = null,
   execFileCommand = execFileAsync,
   environment = process.env,
   filesystem = fs,
@@ -3730,40 +3774,58 @@ export const updateCodexPluginMarketplace = async ({
   preserveLoadedPlugin = true,
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = PLUGIN_VERSION,
-  retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+  retentionDirectory, profile = "human",
 } = {}) => {
+  const selected = codexRetentionProfile(profile);
   let lastError = null;
 
-  await assertOfficialCodexMarketplace({ execFileCommand, environment });
+  await assertOfficialCodexMarketplace({ execFileCommand, environment, profile });
 
   for (
     let attempt = 0;
-    attempt <= PLUGIN_UPDATE_NETWORK_RETRY_DELAYS_MS.length;
+    attempt <= (profile === "assistant" ? 0 : PLUGIN_UPDATE_NETWORK_RETRY_DELAYS_MS.length);
     attempt += 1
   ) {
     try {
       const result = await runCodexPluginMutationWithRetention(
         () => runCodexJsonCommand(
-          CODEX_MARKETPLACE_UPDATE_ARGUMENTS,
+          profile === "human" ? CODEX_MARKETPLACE_UPDATE_ARGUMENTS : ["plugin", "marketplace", "upgrade", selected.marketplace, "--json"],
           { execFileCommand, environment },
         ),
         {
           preserveLoadedPlugin,
           loadedPluginDirectory,
           loadedPluginVersion,
-          retentionDirectory,
+          retentionDirectory, profile,
         },
       );
       const errors = Array.isArray(result?.errors) ? result.errors : [];
 
       if (
         !Array.isArray(result?.selectedMarketplaces)
-        || !result.selectedMarketplaces.includes(CODEX_MARKETPLACE_NAME)
+        || !result.selectedMarketplaces.includes(selected.marketplace)
         || errors.length > 0
       ) {
         throw new Error("Codex не подтвердил обновление Trelio marketplace.");
       }
 
+      if (profile === "assistant") {
+        const inventory = await readCodexPluginUpdateInventory({profile, execFileCommand, environment, filesystem});
+        if (inventory.state !== "installed") throw new Error("Plugin is disabled.");
+        if (onlyIfNewerThan && isStableVersionAtLeast(onlyIfNewerThan, inventory.desiredVersion))
+          return {...inventory, unchanged: true};
+        // Durable host intent precedes the one native installation. If its
+        // response is lost, maintenance reconciles native inventory, never
+        // reruns this mutation from an error/retry branch.
+        if (typeof beforeInstall !== "function") throw new Error("Missing assistant maintenance fence.");
+        // Preserve the last native-verified installed tree for rollback too.
+        // The long-lived supervisor may still use an older common shell; its
+        // own loaded-code watcher alone does not retain this newer distribution.
+        if (preserveLoadedPlugin) await retainLoadedCodexPluginInstallation({
+          profile,retentionDirectory,loadedPluginDirectory:inventory.installedPath,loadedPluginVersion:inventory.version,
+        });
+        await beforeInstall(inventory.desiredVersion);
+      }
       const installation = await resolveInstalledCodexPluginBridge({
         minimumVersion,
         execFileCommand,
@@ -3773,7 +3835,7 @@ export const updateCodexPluginMarketplace = async ({
         preserveLoadedPlugin,
         loadedPluginDirectory,
         loadedPluginVersion,
-        retentionDirectory,
+        retentionDirectory, profile,
       });
       if (!installation) {
         throw new Error(
@@ -3802,6 +3864,57 @@ export const updateCodexPluginMarketplace = async ({
   throw new Error(
     `Тихое обновление Trelio plugin не выполнено: ${buildChildProcessErrorDetail(lastError)}`,
   );
+};
+
+/** Recover the last verified assistant distribution through native Codex
+ * commands only. The official immutable source tag contains the marketplace
+ * reference for that SAME version. Marketplace remove/add is necessary because
+ * native Codex refuses changing an existing source ref. It preserves the plugin
+ * identity/configuration and never edits hook trust. Each lost phase is resolved
+ * by fresh native inventory; no cache folder/config file is rewritten by us. */
+export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,execFileCommand=execFileAsync,
+  environment=process.env,loadedPluginDirectory,loadedPluginVersion,retentionDirectory}={}) => {
+  if(!parseStableVersion(version)||!/^[0-9a-f]{64}$/u.test(treeSha256??''))throw new Error("Invalid rollback receipt.");
+  const profile="assistant",selected=codexRetentionProfile(profile);
+  const run=args=>runCodexPluginMutationWithRetention(()=>runCodexJsonCommand(args,{execFileCommand,environment}),
+    {profile,loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
+  const sources=async()=>{
+    const result=await runCodexJsonCommand(CODEX_MARKETPLACE_LIST_ARGUMENTS,{execFileCommand,environment});
+    if(!Array.isArray(result?.marketplaces))throw new Error("Invalid native marketplace inventory.");
+    const rows=result.marketplaces.filter(row=>row.name===selected.marketplace);
+    if(rows.length>1)throw new Error("Ambiguous native marketplace.");
+    if(rows.length&& (rows[0].marketplaceSource?.sourceType!=="git"
+      ||rows[0].marketplaceSource.source!=="https://github.com/trelio-ru/digital-assistants.git"))throw new Error("Foreign marketplace.");
+    return rows[0]??null;
+  };
+  const present=await sources();
+  // Even after losing the final response, an exact previously verified tree in
+  // the native installed inventory proves installation. Restore main discovery
+  // below without reinstalling/reopening that version a second time.
+  let installed=null;
+  if(present)installed=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+  if(installed?.state==="disabled")throw new Error("Plugin was disabled by its owner.");
+  if(installed?.version!==version||installed.treeSha256!==treeSha256){
+    if(present)await run(["plugin","marketplace","remove",selected.marketplace,"--json"]);
+    await run(["plugin","marketplace","add","https://github.com/trelio-ru/digital-assistants.git","--ref",`v${version}`,"--json"]);
+    // The rollback tag must itself point to the matching immutable distribution,
+    // not merely have a matching source tag name.
+    const metadata=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+    if(metadata.desiredVersion!==version)throw new Error("Rollback tag mismatch.");
+    const result=await resolveInstalledCodexPluginBridge({profile,minimumVersion:version,execFileCommand,environment,
+      loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
+    if(result?.version!==version)throw new Error("Rollback version mismatch.");
+    installed=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+    if(installed.version!==version||installed.treeSha256!==treeSha256)throw new Error("Rollback tree mismatch.");
+  }
+  // Restore the original official main source after selecting the known-good
+  // installed release. A marketplace refresh does NOT install its newer plugin;
+  // the caller's failed-version latch suppresses that exact bad candidate.
+  if(await sources())await run(["plugin","marketplace","remove",selected.marketplace,"--json"]);
+  await run(["plugin","marketplace","add","https://github.com/trelio-ru/digital-assistants.git","--ref","main","--json"]);
+  const restored=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+  if(restored.version!==version||restored.treeSha256!==treeSha256)throw new Error("Rollback read-back mismatch.");
+  return restored;
 };
 
 const removePlaintextBridgeSessionToken = async (

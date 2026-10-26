@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { PassThrough, Readable } from 'node:stream';
-import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+import { createAssistantSetup, maintainAssistantPlugin, runAssistantWindowsDesktop, ASSISTANT_WINDOWS_DESKTOP_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
@@ -454,7 +454,7 @@ test('email setup routes only exact locators under its private wait envelope and
   const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
     context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,true);return action({identity,
       readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
-      reportHealth:async value=>reports.push(value)}, {}, {});},
+      reportHealth:async value=>reports.push(value)}, {withSetupLock:action=>action()}, {});},
     proxyFor:async()=>({}),configureSource:async input=>{
       calls++;assert.equal(input.companyId,companyId);assert.equal(input.sourceId,sourceId);
       return {sourceId,state:'configuration_saved',incomingEnabled:true,connectionVerified:false};
@@ -476,7 +476,7 @@ test('Telegram setup selects only its exact native route and long input budget w
   const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
     context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,true);return action({identity:{},
       readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
-      reportHealth:async value=>reports.push(value)}, {}, {});},proxyFor:async()=>({}),
+      reportHealth:async value=>reports.push(value)}, {withSetupLock:action=>action()}, {});},proxyFor:async()=>({}),
     configureSource:async()=>assert.fail('Telegram cannot enter email configure'),configureTelegramSource:async input=>{
       calls++;assert.equal(input.companyId,companyId);assert.equal(input.sourceId,sourceId);
       return {sourceId,state:'session_authorized',incomingVerified:false,backgroundVerified:false};
@@ -494,7 +494,7 @@ test('email verification uses the normal read budget, preserves source reasons a
   const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
     context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,false);return action({identity:{},
       readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
-      reportHealth:async value=>reports.push(value)}, {}, {});},proxyFor:async()=>({}),
+      reportHealth:async value=>reports.push(value)}, {withSetupLock:action=>action()}, {});},proxyFor:async()=>({}),
     configureSource:async()=>assert.fail('verification cannot repeat configure'),verifySource:async input=>{
       calls++;assert.equal(input.companyId,companyId);assert.equal(input.sourceId,sourceId);
       throw Object.assign(new Error('PRIVATE_PROVIDER_MESSAGE'),{code:'EMAIL_MONITOR_UNAVAILABLE'});
@@ -712,7 +712,7 @@ test('production native health reports survive the delivery fence; only fresh co
 test('one background worker keeps model-free polling alive during a single native pass and closes after settlement',async()=>{
   let resolveWork,workCalls=0,pollCalls=0,waits=0,closed=0;
   const work=new Promise(resolve=>{resolveWork=resolve;});
-  const result=await runAssistantBackgroundTick({createHost:async()=>({coordinator:{
+  const result=await runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{
     pollOnce:async()=>{pollCalls++;},workOnce:()=>{workCalls++;return work;},dispatchStatus:async()=>({state:'idle'}),
   },close:async()=>{closed++;}}),wait:async(milliseconds)=>{
     assert.equal(milliseconds,30_000);if(++waits===2)resolveWork({state:'completed'});
@@ -723,7 +723,7 @@ test('one background worker keeps model-free polling alive during a single nativ
 
 test('background tick projects a company model block instead of reporting a false idle',async()=>{
   const dispatch={schemaVersion:1,state:'blocked',reasons:['model_selection_required'],pendingEvents:1};let closed=0;
-  const result=await runAssistantBackgroundTick({createHost:async()=>({coordinator:{pollOnce:async()=>{},
+  const result=await runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{pollOnce:async()=>{},
     workOnce:async()=>null,dispatchStatus:async()=>dispatch},close:async()=>{closed++;}})});
   assert.deepEqual(result,{schemaVersion:1,state:'blocked',dispatch});assert.equal(closed,1);
 });
@@ -824,7 +824,7 @@ test('a source failure during native work is retained after settlement without r
   let finishWork,polls=0,works=0,closes=0,waits=0;
   const work=new Promise(resolve=>{finishWork=resolve;});
   const failure=Object.assign(new Error('private source detail'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
-  await assert.rejects(runAssistantBackgroundTick({createHost:async()=>({coordinator:{
+  await assert.rejects(runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{
     pollOnce:async()=>{if(++polls>1)throw failure;},workOnce:()=>{works++;return work;},
   },close:async()=>{closes++;}}),wait:async()=>{if(++waits===2)finishWork({state:'completed'});}}),error=>error===failure);
   assert.equal(works,1);assert.equal(closes,1);
@@ -1289,7 +1289,7 @@ test('MAX setup and verification use distinct routes and wait budgets with no fa
     const deps={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
       context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,!verify);return action({identity:{},
         readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
-        reportHealth:async v=>reports.push(v)},{},{});},proxyFor:async()=>({}),
+        reportHealth:async v=>reports.push(v)},{withSetupLock:action=>action()},{});},proxyFor:async()=>({}),
       configureMaxSource:verify?async()=>assert.fail('probe cannot reopen login'):invoke,
       verifyMaxSource:verify?invoke:async()=>assert.fail('handoff cannot claim verification')};
     const request={operation:'call',name:verify?'verify_assistant_max_source':'configure_assistant_max_source',arguments:{companyId,sourceId}};
@@ -1597,7 +1597,7 @@ test('fresh tick worker reports retained/throwing uncertainty under an unchanged
     const reports=[];let work=0,closes=0;
     const failure=Object.assign(new Error('PRIVATE original native read failure'),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
     const dispatch={state:'blocked',reasons:[scenario==='model_blocked'?'model_selection_required':'delivery_uncertain']};
-    const tick=()=>runAssistantBackgroundTick({createHost:async()=>({coordinator:{pollOnce:async()=>{},
+    const tick=()=>runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{pollOnce:async()=>{},
       workOnce:async()=>{work++;if(['thrown','report_failed'].includes(scenario))throw failure;return null;},
       dispatchStatus:async()=>dispatch},reportDispatchFailure:async error=>{
         reports.push(error);if(scenario==='report_failed')throw new Error('PRIVATE diagnostic CAS/transport refusal');
@@ -1655,4 +1655,135 @@ test('status returns native company locators without exposing policy/content or 
   result={isError:true,structuredContent:{code:'ASSISTANT_DEVICE_REQUIRED'},content:[]};const before=reads;
   assert.deepEqual(await executeAssistantRuntimeRequest(request,options),result);
   assert.equal(reads,before,'native denial performs no additional discovery');
+});
+
+
+const pluginUpdateFixture=()=>{
+  let state=null,current={state:'installed',version:'0.1.3',desiredVersion:'0.1.4',treeSha256:'a'.repeat(64)},
+    generation='100:1000',starts=1,trusted=true,upgrades=0,installs=0;
+  const effects=[];const identity={assistantId:randomUUID(),deviceId:randomUUID()};
+  const options={identity,readState:async()=>structuredClone(state),writeState:async(expected,next)=>{
+    assert.deepEqual(expected,state);state=structuredClone(next);
+  },inventory:async()=>({...current}),upgrade:async(version,before)=>{
+    upgrades++;if(current.desiredVersion===version)return {unchanged:true};
+    await before(current.desiredVersion);assert.equal(state.stage,'installing');installs++;
+    current={...current,version:current.desiredVersion,treeSha256:'b'.repeat(64)};return {version:current.version};
+  },desktop:async(operation,expected)=>{
+    effects.push(operation);
+    if(operation==='close'){assert.equal(state.stage,'closing');assert.equal(generation,expected);generation=null;}
+    if(operation==='start'){assert.equal(state.stage,'verifying');generation=`${++starts*100}:${starts*1000}`;}
+    return {state:generation?'running':'stopped',generation};
+  },probe:async()=>{effects.push('probe');if(!trusted)throw Object.assign(new Error(),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});},guard:async()=>{}};
+  return {options,effects,state:()=>state,current:()=>current,generation:value=>{generation=value;},trust:value=>{trusted=value;},counts:()=>({upgrades,installs})};
+};
+
+test('plugin update is one native installation and graceful GUI restart, then current cycles do no GUI work',async()=>{
+  const f=pluginUpdateFixture();assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.4'});
+  assert.equal(f.state().stage,'ready');assert.equal(f.counts().installs,1);
+  assert.deepEqual(f.effects,['inspect','close','inspect','inspect','start','inspect','probe']);
+  f.effects.length=0;assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'current',version:'0.1.4'});
+  assert.deepEqual(f.effects,[]);assert.equal(f.counts().installs,1);
+});
+
+test('changed hooks wait durably for native human trust; approval resumes without reinstall/restart or config writes',async()=>{
+  const f=pluginUpdateFixture();f.trust(false);
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'hook_review',blockBusiness:true});
+  assert.equal(f.state().stage,'hook_review');f.effects.length=0;
+  await maintainAssistantPlugin(f.options);assert.deepEqual(f.effects,['inspect','probe']);
+  f.trust(true);f.effects.length=0;
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.4'});
+  assert.deepEqual(f.effects,['inspect','probe']);assert.deepEqual(f.counts(),{upgrades:3,installs:1});
+});
+
+test('lost install reply reconciles the exact installed version after restart, with zero native installation replay',async()=>{
+  const f=pluginUpdateFixture(),upgrade=f.options.upgrade;
+  f.options.upgrade=async(...args)=>{await upgrade(...args);throw Error('synthetic lost install acknowledgement');};
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');assert.equal(f.state().stage,'installing');
+  f.options.upgrade=()=>assert.fail('must read native outcome, not install again');
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');assert.equal(f.counts().installs,1);
+});
+
+test('lost close/start replies preserve their journal and inspect the process generation instead of replaying an effect',async()=>{
+  for(const operation of ['close','start']){
+    const f=pluginUpdateFixture(),desktop=f.options.desktop;let lost=true;
+    f.options.desktop=async(...args)=>{const result=await desktop(...args);if(args[0]===operation&&lost){lost=false;throw Error('lost native reply');}return result;};
+    assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');
+    assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');
+    assert.equal(f.effects.filter(value=>value===operation).length,1);assert.equal(f.counts().installs,1);
+  }
+});
+
+test('disabled native plugin and changed identity/pass fence cannot install, close GUI or alter hook trust',async()=>{
+  const f=pluginUpdateFixture();f.options.inventory=async()=>({state:'disabled'});
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'disabled',blockBusiness:true});
+  assert.equal(f.state(),null);assert.deepEqual(f.effects,[]);
+  f.options.guard=async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});};
+  await assert.rejects(maintainAssistantPlugin(f.options),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+  assert.deepEqual(f.counts(),{upgrades:0,installs:0});
+});
+
+test('plugin journal has identity/CAS/read-back and never accepts hook trust, commands, paths or company content',async()=>{
+  const {host}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  await host.saveIdentity(identity);assert.equal(await host.readPluginUpdate(),null);
+  const record={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,previousVersion:'0.1.3',targetVersion:'0.1.4',
+    targetTreeSha256:'a'.repeat(64),previousTreeSha256:'a'.repeat(64),failedVersion:null,failures:0,stage:'installing',desktopGeneration:null,restarts:0};
+  await host.writePluginUpdate(null,record);assert.deepEqual(await host.readPluginUpdate(),record);
+  await assert.rejects(host.writePluginUpdate(null,record),/STATE_INVALID/);
+  for(const patch of [{trusted:true},{command:'private'},{path:'private'},{targetVersion:'../bad'},{restarts:3},{assistantId:randomUUID()}])
+    await assert.rejects(host.writePluginUpdate(record,{...record,...patch}));
+});
+
+test('Desktop helper has only fixed registered package and graceful close, with closed pipe projection',async()=>{
+  const operations=[];
+  const result=await runAssistantWindowsDesktop('close','100:1000',{readPackagePath:async()=> 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_1',
+    runNative:async(plan,options)=>{operations.push(plan);assert.equal(options.script,ASSISTANT_WINDOWS_DESKTOP_SCRIPT);
+      assert.throws(()=>options.project({schemaVersion:1,state:'running',generation:'private path'}));
+      return options.project({schemaVersion:1,state:'stopped',generation:null});}});
+  assert.equal(result.state,'stopped');assert.equal(operations.length,1);
+  assert.doesNotMatch(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/Stop-Process|taskkill|TerminateProcess|trusted_hash|config\.toml|SendKeys/);
+  assert.match(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/CloseMainWindow/);assert.match(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/WaitForExit\(15000\)/);
+  await assert.rejects(runAssistantWindowsDesktop('kill'),/STATE_INVALID/);
+});
+
+
+test('bounded failed activation rolls back exact previous tree and latches the failed version without repeated installation',async()=>{
+  const f=pluginUpdateFixture();let rollbacks=0,good=false;
+  f.options.probe=async()=>{if(!good)throw Object.assign(new Error(),{code:'ASSISTANT_MCP_RECONNECT_REQUIRED'});};
+  f.options.rollback=async(version,hash)=>{rollbacks++;assert.equal(version,'0.1.3');assert.equal(hash,'a'.repeat(64));
+    Object.assign(f.current(),{version,treeSha256:hash});return {...f.current()};};
+  for(let i=0;i<3;i++)assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');
+  assert.equal(rollbacks,1);assert.equal(f.state().failedVersion,'0.1.4');good=true;
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'rolled_back');
+  f.effects.length=0;assert.equal((await maintainAssistantPlugin(f.options)).state,'current');
+  assert.equal(rollbacks,1);assert.equal(f.counts().installs,1);assert.deepEqual(f.effects,[]);
+});
+
+
+test('a newer fix can replace an awaiting-hooks version without trusting it or adopting it as rollback basis',async()=>{
+  const f=pluginUpdateFixture();f.trust(false);await maintainAssistantPlugin(f.options);
+  Object.assign(f.current(),{desiredVersion:'0.1.5'});await maintainAssistantPlugin(f.options);
+  assert.equal(f.state().targetVersion,'0.1.5');assert.equal(f.state().stage,'hook_review');
+  assert.equal(f.state().previousVersion,'0.1.3');assert.equal(f.state().previousTreeSha256,'a'.repeat(64));
+  assert.equal(f.counts().installs,2);f.trust(true);
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');
+  assert.equal(f.counts().installs,2);
+});
+
+test('old devices remain opted out and an explicit policy remains bound to the current protected identity',async()=>{
+  const {host}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  await host.saveIdentity(identity);assert.equal(await host.readPluginUpdatesEnabled(),false);
+  await host.setPluginUpdatesEnabled(true,identity);assert.equal(await host.readPluginUpdatesEnabled(),true);
+  await assert.rejects(host.setPluginUpdatesEnabled(true,{...identity,deviceId:randomUUID()}),/REBIND_REQUIRED/);
+  await host.setPluginUpdatesEnabled(false,identity);assert.equal(await host.readPluginUpdatesEnabled(),false);
+});
+
+
+test('re-pairing never adopts or destroys another device maintenance policy/journal',async()=>{
+  const {host,files}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  await host.saveIdentity(identity);await host.setPluginUpdatesEnabled(true,identity);
+  const saved=[...files.entries()].filter(([name])=>name.endsWith('policy.json'));
+  const identityPath=[...files.keys()].find(name=>path.basename(name)==='identity.json');
+  files.set(identityPath,{schemaVersion:1,...identity,deviceId:randomUUID()});
+  assert.equal(await host.readPluginUpdatesEnabled(),false);assert.equal(await host.readPluginUpdate(),null);
+  assert.deepEqual([...files.entries()].filter(([name])=>name.endsWith('policy.json')),saved);
 });

@@ -174,7 +174,7 @@ const readNative = async (threadId, project, options = {}) => {
         // RPC errors, provider prose and unavailable history remain unknown;
         // none may become a request to sign in or expose native diagnostics.
         finish(error instanceof AssistantCodexError && ['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_HOOK_REVIEW_REQUIRED',
-          'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_DELIVERY_NOT_STARTED'].includes(error.code)
+          'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_DELIVERY_NOT_STARTED','ASSISTANT_MCP_RECONNECT_REQUIRED'].includes(error.code)
           ? error.code : options.desktopOperation===true?'ASSISTANT_CODEX_DELIVERY_UNCERTAIN':'ASSISTANT_CODEX_READ_UNAVAILABLE');
       });
     } catch { abort(); }
@@ -215,6 +215,31 @@ export const readAssistantCodexHookReadiness = (cwd, options = {}) => {
     return Object.freeze({fingerprint:createHash('sha256').update(JSON.stringify({runtimeVersion,hooks:hooks
       .map(h=>[h.eventName,h.currentHash]).sort((a,b)=>a[0].localeCompare(b[0]))})).digest('hex')});
   },options);
+};
+
+/** Fresh native process/configuration probe after a verified GUI restart.
+ * This does not run a model, trust hooks, create/resume a chat or certify a
+ * business outcome. Native MCP discovery must actually connect this exact
+ * plugin/server and expose the stable setup surface; installed=true alone is
+ * insufficient. The Desktop process generation is verified independently. */
+export const readAssistantCodexPluginReadiness = async (cwd, options={}) => {
+  const signal=options.signal?AbortSignal.any([options.signal,AbortSignal.timeout(30_000)]):AbortSignal.timeout(30_000);
+  await readAssistantCodexHookReadiness(cwd,{...options,signal});
+  return readNative(null,async(_thread,request)=>{
+    await request('config/mcpServer/reload',{});
+    const result=await request('mcpServerStatus/list',{serverName:'trelio-assistant',detail:'toolsAndAuthOnly'});
+    const servers=result?.data;
+    if(!Array.isArray(servers)||servers.length!==1)fail('ASSISTANT_MCP_RECONNECT_REQUIRED');
+    const server=servers[0],required=['begin_assistant_setup','finish_assistant_setup','get_assistant_setup_status',
+      'install_assistant_background','start_assistant_background','get_assistant_background_status'];
+    if(server.name!=='trelio-assistant'||server.pluginId!=='trelio-digital-assistant@trelio-digital-assistants'
+      ||!['connected',null].includes(server.runtimeStatus)||server.toolsError!==null||!server.tools
+      ||required.some(name=>server.tools[name]?.name!==name))fail('ASSISTANT_MCP_RECONNECT_REQUIRED');
+    // A global native inventory can contain a cached catalogue and status
+    // null. This establishes configuration only. The updater separately starts
+    // the exact installed verified loader and requires a live device read.
+    return {state:'configuration_present'};
+  },{...options,signal});
 };
 
 /** Account-visible native capabilities are authoritative for availability.

@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
-  validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+  validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon,runAssistantWindowsDesktop } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const identity = { origin: 'https://trelio.ru', assistantId: randomUUID(), deviceId: randomUUID() };
@@ -69,7 +69,7 @@ test('setup tools and exact CLI commands expose no arbitrary principal, identity
   const setup = { background: async operation => ({ operation }) };
   for (const [name, operation] of [['install_assistant_background', 'install'], ['get_assistant_background_status', 'status'], ['start_assistant_background', 'start']]) {
     const tool = ASSISTANT_SETUP_TOOLS.find(value => value.name === name);
-    assert.deepEqual(tool.inputSchema, { type: 'object', properties: {}, required: [], additionalProperties: false });
+    assert.deepEqual(tool.inputSchema, { type: 'object', properties: name==='install_assistant_background'?{autoUpdatePlugin:{type:'boolean'}}:{}, required: [], additionalProperties: false });
     assert.deepEqual(await callAssistantSetupTool(setup, name, {}), { operation });
     for (const args of [null, { user: 'SYSTEM' }, { executable: 'cmd.exe' }, { assistantId: identity.assistantId }]) {
       await assert.rejects(callAssistantSetupTool(setup, name, args), error => error.code === 'ASSISTANT_SETUP_INVALID_INPUT');
@@ -480,4 +480,32 @@ test('Windows Task Scheduler actually registers, rereads, deduplicates, runs and
   }
   assert.equal(removed, true);
   assert.equal((await replacementController.inspect(fixture)).snapshot, null);
+});
+
+
+test('native Desktop inspection selects the GUI App from the real two-application manifest shape', {skip:process.platform!=='win32'},async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-desktop-manifest-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));await fs.mkdir(path.join(directory,'app'));
+  await fs.writeFile(path.join(directory,'app','ChatGPT.exe'),'synthetic non-executable fixture');
+  await fs.writeFile(path.join(directory,'AppxManifest.xml'),`<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"><Identity Name="OpenAI.Codex"/><Applications><Application Id="App" Executable="app/ChatGPT.exe"/><Application Id="CodexCoreCommandRunner" Executable="app/resources/codex-command-runner.exe"/></Applications></Package>`);
+  const observed=await runAssistantWindowsDesktop('inspect',null,{readPackagePath:async()=>directory});
+  assert.deepEqual(observed,{schemaVersion:1,state:'stopped',generation:null});
+  // Inspection never runs the fake executable or opens/activates a window.
+  await fs.writeFile(path.join(directory,'AppxManifest.xml'),'<Package><Identity Name="Other.App"/></Package>');
+  await assert.rejects(runAssistantWindowsDesktop('inspect',null,{readPackagePath:async()=>directory}));
+});
+
+
+test('plugin maintenance is a one-time explicit setup policy, recorded only after exact native registration',async()=>{
+  let writes=0,installed=0;const flags=[];
+  const manage=createAssistantWindowsBackground({platform:'win32',executable:'C:\\node.exe',readIdentity:async()=>identity,
+    verifyContact:async()=>{},resolveLoader:async()=>'C:\\plugin\\loader.mjs',runNative:async()=>{installed++;return registered();},
+    setPluginUpdates:async(enabled,current)=>{assert.deepEqual(current,identity);flags.push(enabled);writes++;}});
+  await manage('install');assert.equal(writes,0,'legacy installation cannot silently authorize Desktop restart');
+  await manage('install',{autoUpdatePlugin:true});await manage('install',{autoUpdatePlugin:false});
+  assert.deepEqual(flags,[true,false]);assert.equal(installed,3);
+  await assert.rejects(manage('start',{autoUpdatePlugin:true}),/INVALID_INPUT/);assert.equal(writes,2);
+  const output=new PassThrough();let supplied;
+  await runAssistantEntry(['background-install','--auto-update-plugin=on'],{output,createBackground:async()=>async(op,options)=>{supplied={op,options};return registered();}});
+  assert.deepEqual(supplied,{op:'install',options:{autoUpdatePlugin:true}});
 });

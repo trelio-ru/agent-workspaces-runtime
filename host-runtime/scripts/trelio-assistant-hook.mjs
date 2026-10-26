@@ -182,11 +182,36 @@ const activationRecord=value=>{
     fail('ASSISTANT_HOST_ACTIVATION_INVALID');
   return {schemaVersion:1,enrollmentId:value.enrollmentId,previous,next,authorization,stage:value.stage};
 };
+/** Technical updater journal, not task/owner authority or a trust store. The
+ * current paired identity and exact native version/tree are retained; no tool
+ * input, credential, hook hash/approval, process path or business text belongs
+ * here. A pending/failed update is never evidence that an action can be replayed. */
+const pluginUpdateRecord = value => {
+  if (!value || Object.getPrototypeOf(value)!==Object.prototype
+    || Object.keys(value).sort().join(',')!=='assistantId,desktopGeneration,deviceId,failedVersion,failures,previousTreeSha256,previousVersion,restarts,schemaVersion,stage,targetTreeSha256,targetVersion'
+    || value.schemaVersion!==1 || !uuid.test(value.assistantId??'') || !uuid.test(value.deviceId??'')
+    || !['ready','installing','installed','closing','starting','verifying','hook_review','rolling_back','failed'].includes(value.stage)
+    || ![value.previousVersion,value.targetVersion].every(v=>typeof v==='string'&&/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(v))
+    || !/^[0-9a-f]{64}$/u.test(value.previousTreeSha256??'')
+    || value.failedVersion!==null&&!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(value.failedVersion??'')
+    || !Number.isSafeInteger(value.failures)||value.failures<0||value.failures>3
+    || value.targetTreeSha256!==null && !/^[0-9a-f]{64}$/u.test(value.targetTreeSha256??'')
+    || value.desktopGeneration!==null && !/^[1-9]\d{0,9}:[0-9]{1,20}$/u.test(value.desktopGeneration??'')
+    || !Number.isSafeInteger(value.restarts) || value.restarts<0 || value.restarts>2)
+    fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+  return value;
+};
+
 export const createAssistantHostState=({directory,store,primitives={}})=>{
   if(!path.isAbsolute(directory??'') || !store) fail('ASSISTANT_HOST_STATE_INVALID');
   const ops={ensurePrivateDirectory,assertPrivatePathKind,readPrivateJsonFile,writePrivateJsonFile,...primitives};
   const file=path.join(directory,'identity.json');
   const activationFile=path.join(directory,'activation.json');
+  const maintenanceFile=async name=>{
+    const identity=await readIdentity();if(!identity)fail('ASSISTANT_HOST_NOT_CONFIGURED');
+    const root=path.join(directory,'plugin-maintenance',identity.assistantId,identity.deviceId);
+    await ops.ensurePrivateDirectory(root);return path.join(root,`${name}.json`);
+  };
   const readActivation=async()=>{
     await ops.ensurePrivateDirectory(directory);
     try{await ops.assertPrivatePathKind(activationFile,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
@@ -200,6 +225,40 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
   return {
     readIdentity,
     readActivation,
+    async readPluginUpdatesEnabled(){
+      const pluginPolicyFile=await maintenanceFile('policy');
+      try{await ops.assertPrivatePathKind(pluginPolicyFile,'file');}catch(error){if(error.code==='ENOENT')return false;throw error;}
+      const value=await ops.readPrivateJsonFile(pluginPolicyFile,{maximumBytes:4096}),current=await readIdentity();
+      if(!value||Object.keys(value).sort().join(',')!=='assistantId,autoUpdatePlugin,deviceId,schemaVersion'
+        ||value.schemaVersion!==1||typeof value.autoUpdatePlugin!=='boolean'||!current
+        ||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId)fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      return value.autoUpdatePlugin;
+    },
+    async setPluginUpdatesEnabled(enabled,expectedIdentity){
+      const pluginPolicyFile=await maintenanceFile('policy');
+      const current=await readIdentity();
+      if(typeof enabled!=='boolean'||!current||['origin','assistantId','deviceId'].some(k=>current[k]!==expectedIdentity[k]))
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      await ops.writePrivateJsonFile(pluginPolicyFile,{schemaVersion:1,assistantId:current.assistantId,deviceId:current.deviceId,autoUpdatePlugin:enabled});
+      if(await this.readPluginUpdatesEnabled()!==enabled)fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+    },
+    async readPluginUpdate(){
+      const pluginUpdateFile=await maintenanceFile('update');
+      try{await ops.assertPrivatePathKind(pluginUpdateFile,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
+      const value=pluginUpdateRecord(await ops.readPrivateJsonFile(pluginUpdateFile,{maximumBytes:4096}));
+      const current=await readIdentity();
+      if(!current||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId)fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      return value;
+    },
+    async writePluginUpdate(expected,value){
+      const pluginUpdateFile=await maintenanceFile('update');
+      const next=pluginUpdateRecord(value),current=await readIdentity();
+      if(!current||next.assistantId!==current.assistantId||next.deviceId!==current.deviceId
+        || JSON.stringify(await this.readPluginUpdate())!==JSON.stringify(expected))fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      await ops.writePrivateJsonFile(pluginUpdateFile,next);
+      if(JSON.stringify(await this.readPluginUpdate())!==JSON.stringify(next))fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      return next;
+    },
     withSetupLock:action=>(ops.withSetupLock??(run=>withRuntimeStateLock(path.join(directory,'setup'),run)))(action),
     async prepareSetupIntent(enrollmentId){
       const current=await readIdentity(),old=await readActivation();

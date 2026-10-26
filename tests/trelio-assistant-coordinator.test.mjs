@@ -1827,3 +1827,34 @@ for(const change of ['new_marker','identity'])test(`retained update refuses ${ch
     else assert.equal(await attempt(),false);
   }finally{await f.coordinator.close();}
 });
+
+
+test('plugin maintenance owns the SAME SQLite lease and never overlaps incomplete delivery or retained pass',async t=>{
+  const f=fixture(t);let calls=0;
+  assert.equal(await f.coordinator.maintainPluginAtIdleBoundary(async guard=>{
+    calls++;await guard();assert.equal(await f.coordinator.workOnce(),null);
+    const other=createAssistantCoordinator({...f.options});
+    try{await assert.rejects(other.workOnce(),{code:'ASSISTANT_COORDINATOR_BUSY'});}finally{await other.close();}
+    return {state:'current'};
+  }).then(v=>v.state),'current');
+  f.events.push({id:randomUUID(),revision:'plugin-update-pending',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();
+  // Start one native attempt and retain its uncertainty instead of inventing a
+  // completed receipt. Neither lease expiry nor a new updater permits restart.
+  f.options.native.provision=async(_input,options)=>{options.startInvocation();throw Object.assign(new Error(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});};
+  await assert.rejects(f.coordinator.workOnce());
+  assert.deepEqual(await f.coordinator.maintainPluginAtIdleBoundary(()=>assert.fail('must not update')),{state:'deferred'});
+  assert.equal(calls,1);
+});
+
+
+test('an unfinished native intake also defers plugin restart even before a protected pass or task delivery exists',async t=>{
+  const f=fixture(t);f.events.push({id:randomUUID(),revision:'intake-maintenance-fence',taskId:f.taskId,wake:true});
+  await f.coordinator.pollOnce();
+  const event=f.database.prepare('SELECT event_key,source_key FROM assistant_inbox_events LIMIT 1').get();
+  f.database.prepare(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
+    source_key,source_revision,state,provision_id,delivery_id,native_started,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(randomUUID(),randomUUID(),event.event_key,'synthetic-account','synthetic-native-event','v1',event.source_key,0,'provisioning',randomUUID(),randomUUID(),1,1);
+  assert.equal(f.activePass(),null);
+  assert.deepEqual(await f.coordinator.maintainPluginAtIdleBoundary(()=>assert.fail('native intake is not idle')),{state:'deferred'});
+});

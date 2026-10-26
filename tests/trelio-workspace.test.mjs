@@ -164,6 +164,7 @@ import {
   resolveWorkspaceBridgeConfigDirectory,
   retainCurrentContextObjects,
   updateCodexPluginMarketplace,
+  readCodexPluginUpdateInventory,
   unprotectWindowsBridgeSessionToken,
   validateHandoffTaskOutcome,
   validateEncryptedAgentWorkspaceDerivedArtifacts,
@@ -11756,4 +11757,42 @@ test("bridge keeps AGENTS.md, CLAUDE.md and .trelio as protected inline control 
   assert.equal(isProtectedWorkspaceControlPath("WORKSPACE_CONTEXT.md"), false);
   assert.equal(isProtectedWorkspaceControlPath("PROJECT_CONTEXT.md"), false);
   assert.equal(isProtectedWorkspaceControlPath("work/CLAUDE.md"), false);
+});
+
+
+test("assistant plugin updater reuses official native CLI and rejects disabled/foreign/ref-mismatched inventory",async t=>{
+  const fs=await import('node:fs/promises'),root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-plugin-updater-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const market=path.join(root,'market'),home=path.join(root,'codex'),name='trelio-digital-assistant',marketplace='trelio-digital-assistants';
+  const cache=v=>path.join(home,'plugins','cache',marketplace,name,v);
+  const writePlugin=async v=>{await fs.mkdir(path.join(cache(v),'.codex-plugin'),{recursive:true});await fs.mkdir(path.join(cache(v),'scripts'),{recursive:true});
+    await fs.writeFile(path.join(cache(v),'.codex-plugin','plugin.json'),JSON.stringify({name,version:v}));
+    await fs.writeFile(path.join(cache(v),'scripts','trelio-host-runtime-loader.mjs'),'// synthetic immutable loader');};
+  await writePlugin('0.1.3');await fs.mkdir(path.join(market,'.agents','plugins'),{recursive:true});
+  const writeMarket=ref=>fs.writeFile(path.join(market,'.agents','plugins','marketplace.json'),JSON.stringify({name:marketplace,
+    plugins:[{name,source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref}}]}));
+  await writeMarket('plugin-v0.1.3');let version='0.1.3',enabled=true,source='https://github.com/trelio-ru/digital-assistants.git',adds=0,prepared=null;
+  const argsSeen=[];
+  const execFileCommand=async(_command,args)=>{
+    argsSeen.push(args);let value;
+    if(args[1]==='marketplace'&&args[2]==='list')value={marketplaces:[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]};
+    else if(args[1]==='list')value={installed:[{pluginId:`${name}@${marketplace}`,version,installed:true,enabled}]};
+    else if(args[1]==='marketplace'&&args[2]==='upgrade'){
+      assert.equal(args[3],marketplace);await writeMarket('plugin-v0.1.4');value={selectedMarketplaces:[marketplace],errors:[]};
+    }else{
+      assert.deepEqual(args,['plugin','add',`${name}@${marketplace}`,'--json']);
+      assert.equal(prepared,'0.1.4','intent must be durable before native add');adds++;version='0.1.4';await writePlugin(version);
+      value={pluginId:`${name}@${marketplace}`,marketplaceName:marketplace,version,installedPath:cache(version)};
+    }
+    return {stdout:JSON.stringify(value)};
+  };
+  const options={profile:'assistant',environment:{CODEX_HOME:home},execFileCommand,preserveLoadedPlugin:false};
+  const before=await readCodexPluginUpdateInventory(options);assert.equal(before.version,'0.1.3');assert.match(before.treeSha256,/^[a-f0-9]{64}$/);
+  await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.3',beforeInstall:async target=>{prepared=target;}});
+  assert.equal(adds,1);const after=await readCodexPluginUpdateInventory(options);assert.equal(after.version,'0.1.4');assert.notEqual(after.treeSha256,before.treeSha256);
+  await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.4',beforeInstall:()=>assert.fail('unchanged must not install')});assert.equal(adds,1);
+  enabled=false;assert.deepEqual(await readCodexPluginUpdateInventory(options),{state:'disabled'});
+  source='https://github.com/other/foreign.git';await assert.rejects(readCodexPluginUpdateInventory(options));source='https://github.com/trelio-ru/digital-assistants.git';
+  await writeMarket('main');await assert.rejects(readCodexPluginUpdateInventory(options));
+  assert.ok(argsSeen.every(args=>!args.includes('trelio-plugins')&&!args.includes('trelio-agent-workspaces@trelio-plugins')));
 });

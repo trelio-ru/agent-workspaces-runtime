@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
@@ -533,4 +533,29 @@ test('lost queue response retains uncertainty, closes its own reader and never r
     spawnProcess:(...args)=>{const child=spawnProcess(...args);children.push(child);return child;},
   }),error=>error.code==='ASSISTANT_CODEX_DELIVERY_UNCERTAIN'&&!error.message.includes('PRIVATE'));
   assert.equal(queues,1);assert.equal(starts,1);assert.equal(children.length,1);assert.ok(children[0].killed);
+});
+
+
+test('fresh plugin readiness requires native trusted hooks plus connected MCP/tools, without experimental plugin RPC or a model',async()=>{
+  const hooks=['sessionStart','preToolUse','sessionEnd'].map(eventName=>({eventName,handlerType:'command',source:'plugin',
+    pluginId:'trelio-digital-assistant@trelio-digital-assistants',enabled:true,currentHash:'opaque-current-native-hash',trustStatus:'trusted'}));
+  const tools=Object.fromEntries(['begin_assistant_setup','finish_assistant_setup','get_assistant_setup_status',
+    'install_assistant_background','start_assistant_background','get_assistant_background_status'].map(name=>[name,{name}]));
+  const run=async(patch={},rows=hooks)=>{
+    const calls=[];
+    const value=await readAssistantCodexPluginReadiness(process.cwd(),{executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+      calls.push(request.method);
+      if(request.method==='hooks/list')return {result:{data:[{hooks:rows,errors:[],warnings:[]}]}};
+      if(request.method==='config/mcpServer/reload')return {result:{}};
+      assert.equal(request.method,'mcpServerStatus/list');assert.equal(request.params.serverName,'trelio-assistant');
+      return {result:{data:[{name:'trelio-assistant',pluginId:'trelio-digital-assistant@trelio-digital-assistants',
+        runtimeStatus:'connected',toolsError:null,tools,...patch}],nextCursor:null}};
+    })});
+    assert.deepEqual(calls,['hooks/list','config/mcpServer/reload','mcpServerStatus/list']);return value;
+  };
+  assert.deepEqual(await run(),{state:'configuration_present'});
+  assert.deepEqual(await run({runtimeStatus:null}),{state:'configuration_present'},'cached native status is configuration only, not activation');
+  for(const patch of [{runtimeStatus:'failed'},{toolsError:'PRIVATE native error'},{pluginId:'human@other'},{tools:{}}])
+    await assert.rejects(run(patch),{code:'ASSISTANT_MCP_RECONNECT_REQUIRED'});
+  await assert.rejects(run({},hooks.map(h=>({...h,trustStatus:'untrusted'}))),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
 });

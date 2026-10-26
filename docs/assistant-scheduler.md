@@ -877,7 +877,7 @@ readiness override, owner allowlist or separate pilot rollout is required.
 
 `bridge assistant background` is an explicit host-only entry. Its stable
 supervisor invokes current signed workers through the existing loader, never
-scans plugin caches or restarts the Codex app. Between cycles it runs normal
+scans plugin caches. Between cycles it runs normal
 model-free maintenance, then starts one `background_tick` worker. That worker
 keeps 30-second coordinator checks alive during its single native pass; actual
 source polls/discovery retain the five-minute cursor/clock policy. It settles
@@ -895,8 +895,9 @@ when the pass settles. Raw errors/content are not supervisor output.
 This entry is not installed by import or pairing. Explicit Windows registration
 is described below; actual next-run read-back, desktop availability and owner
 onboarding require independent live evidence after deployment. Pairing alone
-never installs or starts the service, and no user configuration changes on import. Automatic restart of Codex
-remains backlog-only.
+never installs or starts the service, and no user configuration changes on import.
+Automatic plugin maintenance/idle Desktop restart is a separate explicit setup
+opt-in described below; it never updates the Desktop application itself.
 
 ### Owned Windows console icon
 
@@ -1480,9 +1481,87 @@ Backend account notifications deduplicate incidents, copy to linked messengers
 with ordinary FIFO/retry rules, and send one recovery notice. The server detects
 missing health reports after 15 minutes even if Codex/host is gone. Unknown
 absence has no invented plugin/network diagnosis. Runtime update failures have
-a five-minute recovery window; owner-action errors are immediate. First mode
-requires the owner for plugin updates, restarting Codex, hook approval and login.
-Automatic external-supervisor restart of Codex is backlog, not implemented.
+a five-minute recovery window; owner-action errors are immediate. Legacy setup
+continues to exclude plugin updates/Desktop restart unless this device explicitly
+opts into the following maintenance policy. Hook review and login remain human.
+
+
+### Automatic assistant plugin maintenance (Windows)
+
+The human may opt this paired machine into plugin maintenance once through
+`install_assistant_background({autoUpdatePlugin:true})`, or the host-only
+`bridge assistant background-install --auto-update-plugin=on` command. The same
+installation path writes a bounded identity-bound private policy only after
+native registration/read-back. Omitting the option preserves existing policy;
+`false`/`--auto-update-plugin=off` disables it. No flag is a business/owner grant,
+a hook approval, a password, autologin or permission to update ChatGPT Desktop.
+A legacy setup with an explicit no-restart contract remains opted out.
+
+Each existing supervisor tick selects the current signed implementation, so the
+old independent parent can acquire this feature without restarting itself.
+Only that background path maintains plugins; ordinary MCP idle health never
+closes a human's setup chat. Windows first uses the SAME SQLite coordinator
+lease, refuses every retained pass/incomplete delivery (including uncertainty),
+renews the ordinary short lease and checks it before effects. The SAME setup
+mutex excludes re-pairing and interactive source login during maintenance.
+The current protected identity/policy/pass is rechecked, including immediately
+before native process launch. No task/chat/receipt/queue is removed or migrated.
+
+The shared human updater now has one closed assistant profile, reusing the
+native executable resolver, official Git marketplace, bounded JSON CLI,
+immutable-tree verifier and exact loaded-code retention. Commands are
+`plugin marketplace upgrade trelio-digital-assistants` then, only for a newer
+immutable `plugin-vX.Y.Z`, `plugin add trelio-digital-assistant@trelio-digital-assistants`.
+An absent/disabled plugin is not installed/enabled. There is no experimental
+`plugin/install` RPC, cache-version scan, copied executor, raw config edit or
+alternate credential route. The release channel/source cannot come from a task.
+
+A separate private structural journal records the previous verified tree,
+exact intended version and install/close/start/verify phases before side
+effects. Lost install replies reconcile the exact native inventory rather than
+repeat installation. Loaded old bytes remain preserved by the SAME retention
+watcher. Windows AppModel selects this user's exact Codex package; the fixed
+manifest GUI `App` is independent of its `CodexCoreCommandRunner` companion.
+The bounded public helper selects only this session's exact executable/window
+and process creation generation. Close uses `CloseMainWindow`/bounded exit wait,
+never force kill. Restart activates the registered package application; there
+is no UI input, elevation, shell command from a model, login or trust mutation.
+A known same generation permits at most one further graceful-close attempt;
+a lost successful close/start is observed, never replayed on another process.
+
+After a new process generation, a fresh native App Server probes the effective
+trusted three-hook definition and the configured assistant MCP/setup tools.
+Global native `runtimeStatus:null` is only catalogue/configuration evidence;
+a fresh child from the exact newly installed verified loader must also return
+the live matching assistant/device status. This is technical activation, not a business result or
+proof that every old chat refreshed. The next real task still uses its SAME
+permanent visible Desktop chat, normal native handoff, observed hook proof and
+business receipt. No hidden CLI work or replacement task chat is created.
+
+A native changed/untrusted hook definition yields `hook_review` and the existing
+owner notification/messenger route. The human reviews it in Codex; subsequent
+ticks detect approval and continue without reinstalling/restarting again.
+No approval/hash is written, copied or guessed. Mere native inventory does not
+clear the protected hook latch; only the existing successful business boundary
+may do that. Healthy current-version cycles perform no Desktop operations.
+
+Persistent activation failure is bounded to three observations. Recovery uses
+only the same previously verified tree and official immutable source tag via
+native marketplace remove/add/install, with exact read-back, then restores the
+main discovery source. Native Codex refuses a direct source-ref switch; the
+explicit intermediate journal survives that gap. This does not remove the
+plugin identity or edit trust/config by hand. An unavailable/unsafe/disabled
+snapshot fails closed. The failed candidate stays latched, preventing infinite
+reinstalls/restart loops; a newer release is independently eligible. Rollback
+never overrides component minimums/native ACL. Its incident remains visible
+through SAME device health until a new candidate is actually verified. Neither
+an updater failure nor rollback retries a business/provider operation.
+
+The implementation must pass native Windows manifest/process/CLI tests and a
+real dedicated Desktop update before unattended activation is called verified.
+Other operating systems leave this Windows policy inactive. Windows login is
+still required after reboot; SYSTEM/autologin and automatic Desktop application
+updates remain outside this feature.
 
 The production host reports a structurally confirmed native missing-login error
 before the coordinator replaces a post-admission failure with its durable

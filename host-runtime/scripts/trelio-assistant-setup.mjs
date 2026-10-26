@@ -423,12 +423,15 @@ try {
  * this with its completed protected pairing journal and current loaded shell.
  * Runtime-to-runtime injection is internal test composition, not a tool ABI.
  */
-export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,
+export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,readMaintenanceStatus=null,setPluginUpdates=null,
   platform = process.platform, environment = process.env, executable = process.execPath,
   resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[] } = {}) => {
   if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function' || readDispatchStatus!==null&&typeof readDispatchStatus!=='function'
     || !Array.isArray(loaderArguments) || loaderArguments.length>4 || loaderArguments.some(value=>typeof value!=='string'||value.length>4096||/[\x00-\x1f\x7f]/u.test(value))) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
-  return async operation => {
+  return async (operation,options={}) => {
+    if(!options||Object.keys(options).some(key=>key!=='autoUpdatePlugin')
+      ||Object.hasOwn(options,'autoUpdatePlugin')&&(operation!=='install'||typeof options.autoUpdatePlugin!=='boolean'||typeof setPluginUpdates!=='function'))
+      fail('ASSISTANT_BACKGROUND_INVALID_INPUT');
     const started = performance.now();
     const remaining = () => {
       const value = 45_000 - (performance.now() - started);
@@ -454,15 +457,20 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
     const result = await runNative(plan, { environment, timeoutMs: remaining(), signal });
     remaining();
     const projected=projectAssistantBackgroundResult(result);
-    if(operation!=='status'||!readDispatchStatus)return projected;
+    if(operation==='install'&&Object.hasOwn(options,'autoUpdatePlugin')){
+      await setPluginUpdates(options.autoUpdatePlugin,identity);remaining();
+    }
+    if(operation!=='status'||!readDispatchStatus&&!readMaintenanceStatus)return projected;
     // Network diagnostics cannot consume a new 45-second OS-status budget.
     // Keep the original deadline and reserve time for the final identity read.
     const diagnosticSignal=AbortSignal.timeout(Math.max(1,Math.min(10_000,remaining()-1_000)));
-    const dispatch=await readDispatchStatus({signal:signal?AbortSignal.any([signal,diagnosticSignal]):diagnosticSignal});
+    const statusSignal=signal?AbortSignal.any([signal,diagnosticSignal]):diagnosticSignal;
+    const dispatch=readDispatchStatus?await readDispatchStatus({signal:statusSignal}):null;
+    const pluginMaintenance=readMaintenanceStatus?await readMaintenanceStatus({signal:statusSignal}):null;
     remaining();
     const finalIdentity=await readIdentity();
     if(['origin','assistantId','deviceId'].some(key=>finalIdentity?.[key]!==identity[key]))fail('ASSISTANT_HOST_REBIND_REQUIRED');
-    return {...projected,dispatch};
+    return {...projected,...(dispatch?{dispatch}:{}),...(pluginMaintenance?{pluginMaintenance}:{})};
   };
 };
 
@@ -554,7 +562,8 @@ export const projectAssistantBackgroundResult = value => {
  * this boundary, and an ambiguous registration/start is never retried.
  */
 export const runAssistantWindowsBackgroundNative = (plan, { environment = process.env,
-  spawnProcess = spawn, timeoutMs = 40_000, signal } = {}) => new Promise((resolve, reject) => {
+  spawnProcess = spawn, timeoutMs = 40_000, signal,
+  script = ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, project = null } = {}) => new Promise((resolve, reject) => {
   const root = environment.SystemRoot ?? environment.SYSTEMROOT;
   if (!windowsPath(root) || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 40_000) {
     reject(Object.assign(new Error(), { code: 'ASSISTANT_BACKGROUND_UNAVAILABLE' })); return;
@@ -570,7 +579,7 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
   signal?.addEventListener('abort', abort, { once: true });
   try {
     child = spawnProcess(path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, 'utf16le').toString('base64')],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
       { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
         env: Object.fromEntries(['SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA']
           .filter(key => typeof environment[key] === 'string').map(key => [key, environment[key]])) });
@@ -589,7 +598,7 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
       // replacement receipt deliberately has no public readiness/install fields;
       // it must reach its own strict projector rather than being mistaken for
       // a malformed ordinary registration response. Never pass raw JSON through.
-      try { finish(null, ['replacement_inspect', 'replacement_remove'].includes(plan.operation)
+      try { finish(null, project ? project(value) : ['replacement_inspect', 'replacement_remove'].includes(plan.operation)
         ? projectAssistantBackgroundReplacementResult(value, plan, plan.operation === 'replacement_remove')
         : projectAssistantBackgroundResult(value)); } catch (error) { finish(error.code); }
     });
@@ -648,4 +657,191 @@ export const startAssistantWindowsConsoleIcon = async ({platform=process.platfor
       });
     }catch{closed=true;resolveClosed();finish({state:'unavailable'});}
   });
+};
+
+
+/** Fixed public-metadata Desktop control on this dedicated Windows user. No
+ * arbitrary process/window selector, executable, script or activation URI is
+ * accepted from tools. WM_CLOSE is graceful: there is no TerminateProcess,
+ * taskkill, elevation, autologin, UI input, trust edit or ChatGPT login here.
+ * A refused/hung close leaves the process alone. Native AppModel selection is
+ * rechecked by the host before each operation, independently of this script. */
+export const ASSISTANT_WINDOWS_DESKTOP_SCRIPT = String.raw`
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$PSModuleAutoLoadingPreference = 'None'
+try {
+  Microsoft.PowerShell.Core\Import-Module -Name ([System.IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
+  $p = ConvertFrom-Json ([Console]::In.ReadToEnd())
+  if ($p.operation -notin @('inspect','close','start')) { throw 'invalid' }
+  $manifestPath = [System.IO.Path]::Combine([string]$p.packageRoot, 'AppxManifest.xml')
+  if (([System.IO.FileInfo]$manifestPath).Length -gt 1048576) { throw 'invalid' }
+  $settings = [System.Xml.XmlReaderSettings]::new()
+  $settings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+  $settings.XmlResolver = $null
+  $reader = [System.Xml.XmlReader]::Create($manifestPath, $settings)
+  try { $xml = [System.Xml.XmlDocument]::new(); $xml.XmlResolver = $null; $xml.Load($reader) } finally { $reader.Close() }
+  if ($xml.Package.Identity.Name -ne 'OpenAI.Codex') { throw 'invalid' }
+  # The real package also contains CodexCoreCommandRunner. Select the fixed
+  # registered GUI App, never the first application or an auxiliary executable.
+  $apps = @($xml.Package.Applications.Application | Where-Object { $_.Id -eq 'App' })
+  if ($apps.Count -ne 1 -or [string]$apps[0].Executable -notin @('app/ChatGPT.exe','app/Codex.exe')) { throw 'invalid' }
+  $exe = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine([string]$p.packageRoot, [string]$apps[0].Executable))
+  $prefix = [System.IO.Path]::GetFullPath([string]$p.packageRoot) + '\'
+  if (!$exe.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase) -or ![System.IO.File]::Exists($exe)) { throw 'invalid' }
+  $own = [System.Diagnostics.Process]::GetCurrentProcess()
+  $found = @()
+  foreach ($item in [System.Diagnostics.Process]::GetProcessesByName([System.IO.Path]::GetFileNameWithoutExtension($exe))) {
+    if ($item.SessionId -ne $own.SessionId) { continue }
+    if ([string]::Equals($item.MainModule.FileName,$exe,[System.StringComparison]::OrdinalIgnoreCase) -and $item.MainWindowHandle -ne [IntPtr]::Zero) { $found += $item }
+  }
+  if ($found.Count -gt 1) { throw 'ambiguous' }
+  if ($p.operation -eq 'inspect') {
+    if ($found.Count -eq 0) { [Console]::Out.Write('{"schemaVersion":1,"state":"stopped","generation":null}'); exit 0 }
+    $generation = [string]$found[0].Id + ':' + [string]$found[0].StartTime.ToUniversalTime().Ticks
+    [Console]::Out.Write((ConvertTo-Json -Compress @{schemaVersion=1;state='running';generation=$generation})); exit 0
+  }
+  if ($p.operation -eq 'close') {
+    if ($found.Count -eq 0) { [Console]::Out.Write('{"schemaVersion":1,"state":"stopped","generation":null}'); exit 0 }
+    $generation = [string]$found[0].Id + ':' + [string]$found[0].StartTime.ToUniversalTime().Ticks
+    if ($generation -ne $p.generation) { throw 'changed' }
+    if (!$found[0].CloseMainWindow() -or !$found[0].WaitForExit(15000)) { throw 'blocked' }
+    [Console]::Out.Write('{"schemaVersion":1,"state":"stopped","generation":null}'); exit 0
+  }
+  if ($found.Count -ne 0) { throw 'changed' }
+  # ShellExecute activates the registered package application, not its protected
+  # internal executable and not a URI/path provided by a model or notification.
+  $start = [System.Diagnostics.ProcessStartInfo]::new()
+  $start.FileName = 'shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!' + [string]$apps[0].Id
+  $start.UseShellExecute = $true
+  [void][System.Diagnostics.Process]::Start($start)
+  [Console]::Out.Write('{"schemaVersion":1,"state":"starting","generation":null}'); exit 0
+} catch { [Console]::Out.Write('{"schemaVersion":1,"state":"unavailable","generation":null}'); exit 1 }
+`;
+
+export const runAssistantWindowsDesktop = async (operation, generation=null, {environment=process.env,
+  signal, readPackagePath, guard=async()=>{}, runNative=runAssistantWindowsBackgroundNative}={}) => {
+  if(!['inspect','close','start'].includes(operation) || generation!==null&&!/^[1-9]\d{0,9}:[0-9]{1,20}$/u.test(generation))
+    fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+  const read=readPackagePath??(await import('./trelio-codex-conversation.mjs')).readWindowsCodexPackagePath;
+  const packageRoot=await read({signal});
+  if(!packageRoot)fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+  await guard();
+  return runNative({operation,packageRoot,generation},{environment,signal,script:ASSISTANT_WINDOWS_DESKTOP_SCRIPT,
+    project:value=>{
+      if(!value||Object.keys(value).sort().join(',')!=='generation,schemaVersion,state'||value.schemaVersion!==1
+        ||!['running','stopped','starting'].includes(value.state)
+        ||(value.state==='running'?!/^[1-9]\d{0,9}:[0-9]{1,20}$/u.test(value.generation??''):value.generation!==null))
+        fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+      return value;
+    }});
+};
+
+/** Durable orchestration only. CLI/install/GUI/probe use shared host engines;
+ * receipt/journal transitions happen BEFORE the side effect. On restart an
+ * unfinished installation is reconciled from native inventory, and a new GUI
+ * process is observed rather than closed again. Business receipts and chats
+ * are never touched. A native hook-review result waits for the human unchanged. */
+export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,
+  guard=async()=>{}}) => {
+  let state=await readState();
+  const save=async patch=>{await guard();const next={...state,...patch};await writeState(state,next);state=next;};
+  const recover=async()=>{
+    await guard();
+    const restored=await rollback(state.previousVersion,state.previousTreeSha256);
+    if(restored.version!==state.previousVersion||restored.treeSha256!==state.previousTreeSha256)
+      fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+    // Keep the failed candidate latched until a NEWER release exists. Restoring
+    // main discovery must not reinstall the same broken version every cycle.
+    await save({targetVersion:restored.version,targetTreeSha256:restored.treeSha256,
+      stage:'installed',desktopGeneration:null,restarts:0,failures:0});
+    return restored;
+  };
+  await guard();
+  let current=state?.stage==='rolling_back'?await recover():await inventory();
+  if(current.state==='disabled')return {state:'disabled',blockBusiness:true};
+  if(!state)await save({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
+    previousVersion:current.version,previousTreeSha256:current.treeSha256,targetVersion:current.version,targetTreeSha256:current.treeSha256,
+    stage:'ready',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
+  try{
+    // An explicit native update outside this supervisor also needs activation;
+    // a cached ready journal cannot claim the newly installed version is loaded.
+    if(state.stage==='ready' && current.version!==state.targetVersion)
+      await save({previousVersion:state.targetVersion,previousTreeSha256:state.targetTreeSha256,
+        targetVersion:current.version,targetTreeSha256:current.treeSha256,stage:'installed',desktopGeneration:null,restarts:0,failures:0});
+    if(['ready','hook_review'].includes(state.stage)){
+      const awaitingHooks=state.stage==='hook_review';
+      if(current.treeSha256!==state.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      const result=await upgrade(state.failedVersion??current.version,async targetVersion=>{
+        await guard();await save({previousVersion:awaitingHooks?state.previousVersion:current.version,
+          previousTreeSha256:awaitingHooks?state.previousTreeSha256:current.treeSha256,
+          targetVersion,targetTreeSha256:null,stage:'installing',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
+      });
+      if(result.unchanged&&!awaitingHooks)return {state:'current',version:current.version,...(state.failedVersion?{failedVersion:state.failedVersion}:{})};
+      if(!result.unchanged)current=await inventory();
+    }
+    if(state.stage==='installing'){
+      if(current.version!==state.targetVersion){
+        // A positive unchanged old installation allows the SAME exact rollback
+        // read-back, never another attempt to install an uncertain candidate.
+        await save({stage:'rolling_back',failedVersion:state.targetVersion});
+        if(typeof rollback!=='function')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+        current=await recover();
+      }else await save({stage:'installed',targetTreeSha256:current.treeSha256});
+    }
+    if(current.version!==state.targetVersion || current.treeSha256!==state.targetTreeSha256)
+      fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+    if(state.stage==='failed')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+    if(state.stage==='installed'){
+      const before=await desktop('inspect');
+      await save({stage:before.state==='running'?'closing':'starting',desktopGeneration:before.generation,restarts:1});
+      if(before.state==='running'){await guard();await desktop('close',before.generation);}
+    }
+    if(state.stage==='closing'){
+      const observed=await desktop('inspect');
+      if(observed.state==='running'&&observed.generation===state.desktopGeneration){
+        // Retry only the idempotent graceful-close message to the SAME known
+        // still-running process, once, under a fresh idle fence. Never kill it.
+        if(state.restarts>=2)fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+        await save({restarts:2});await guard();await desktop('close',observed.generation);
+        return {state:'activating',blockBusiness:true};
+      }
+      await save({stage:observed.state==='stopped'?'starting':'verifying'});
+    }
+    if(state.stage==='starting'){
+      const observed=await desktop('inspect');
+      if(observed.state==='stopped'){
+        await save({stage:'verifying'});await guard();await desktop('start');
+      }else await save({stage:'verifying'});
+    }
+    if(['verifying','hook_review'].includes(state.stage)){
+      const observed=await desktop('inspect');
+      if(observed.state==='stopped'&&state.restarts<2){
+        await save({restarts:2});await guard();await desktop('start');return {state:'activating',blockBusiness:true};
+      }
+      if(observed.state!=='running'||observed.generation===state.desktopGeneration)
+        fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+      try{await probe(current);}
+      catch(error){
+        if(error.code==='ASSISTANT_HOOK_REVIEW_REQUIRED'){
+          await save({stage:'hook_review',failures:0});return {state:'hook_review',blockBusiness:true};
+        }
+        throw error;
+      }
+      await save({stage:'ready',desktopGeneration:observed.generation,failures:0});
+      return {state:state.failedVersion?'rolled_back':'updated',version:current.version};
+    }
+    fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+  }catch(error){
+    // A changed identity/pass or an aborted lease cannot authorize repair of
+    // another device. Native permission/unknown I/O is never an idle snapshot.
+    await guard();
+    if(state.stage==='hook_review')throw error;
+    if(state.failures<2){await save({failures:state.failures+1});return {state:'retrying',blockBusiness:true};}
+    if(typeof rollback==='function' && state.previousVersion!==state.targetVersion){
+      await save({stage:'rolling_back',failedVersion:state.targetVersion,failures:3});
+      await recover();return {state:'retrying',blockBusiness:true};
+    }
+    await save({stage:'failed',failures:3});throw error;
+  }
 };

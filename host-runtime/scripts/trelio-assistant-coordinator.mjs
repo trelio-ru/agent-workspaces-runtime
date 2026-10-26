@@ -1213,6 +1213,31 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   return {
     pollOnce,workOnce,
+    /** Plugin installation/GUI restart is stricter than a signed-runtime
+     * update: no retained pass OR incomplete delivery may exist. Keep the SAME
+     * coordinator lease throughout native CLI/GUI work, renew its ordinary
+     * lease while waiting, and recheck identity/pass before every side effect.
+     * No poll, task claim, receipt reset or recovery is performed here. */
+    async maintainPluginAtIdleBoundary(action,signal) {
+      if(typeof action!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+      if(closed||active||polling)return {state:'deferred'};
+      active=(async()=>{
+        signal=combinedSignal(signal);lease();
+        const guard=async()=>{
+          signal.throwIfAborted();lease();
+          if(!passHost || await passHost.readActivePass()!==null
+            || database.prepare("SELECT 1 FROM assistant_inbox_deliveries WHERE state IN ('leased','started','uncertain') LIMIT 1").get()
+            || database.prepare("SELECT 1 FROM assistant_owner_intakes WHERE state IN ('provisioning','started','uncertain') LIMIT 1").get())
+            fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        };
+        try{await guard();}catch(error){if(error.code==='ASSISTANT_PASS_REVIEW_REQUIRED')return {state:'deferred'};throw error;}
+        let leaseFailure=null;
+        const timer=setInterval(()=>{try{lease();}catch(error){leaseFailure=error;}},20_000);timer.unref();
+        try{return await action(async()=>{if(leaseFailure)throw leaseFailure;await guard();});}
+        finally{clearInterval(timer);}
+      })();
+      try{return await active;}finally{active=null;}
+    },
     async updateRuntimeAtBoundary(update,signal) {
       if(typeof update!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
       if(closed||active||polling)return false;
