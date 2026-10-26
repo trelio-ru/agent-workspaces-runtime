@@ -1846,6 +1846,14 @@ Run before non-open actions. Unknown/aborted execution is an outcome-review
 condition, never an automatic business retry or human OAuth fallback.
 
 The facade reuses the common finish progress registry and heartbeat manager.
+That coordinator is created lazily once for the stdio host, including across
+fresh per-call native proxies. Native authorisation/proof is repeated before
+every poll; no credential, OS worker or permission snapshot is cached there.
+EOF stops that host's heartbeat timers without cancelling a writer or erasing
+its files. Tests must cross the actual serial stdio request boundary.
+Native pre-handler `429/REQUEST_RATE_LIMITED` becomes the closed
+`ASSISTANT_TRANSPORT_RATE_LIMITED` outcome, without an automatic HTTP retry,
+new proof/pass, permission recovery or claim of completed work.
 One Run has one finish writer; repeated exact requests/polls join that writer,
 short-wait cancellation does not cancel saving, and another pass cannot receive
 its receipt. Heartbeat workers create fresh protected invocations; they do not

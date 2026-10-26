@@ -470,9 +470,18 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
  * exchanges from this client cannot race its one-use private journal. */
 export const runAssistantSetupMcp = async ({ input = process.stdin, output = process.stdout,
   createSetup = createProductionAssistantSetup, createMcp = createForwardingAssistantMcp,
+  createWorkspace = createAssistantWorkspaceExecutor,
   maintenanceRequest = requestCurrentAssistantRuntime, scheduleMaintenance = setInterval,
   environment=process.env, preservePlugin=startLoadedCodexPluginPreservation } = {}) => {
   let pluginPreservation=null;
+  // Only the progress/heartbeat coordinator belongs to the stdio host. Creating
+  // it inside each short private invocation lost the finish operation between
+  // its running response and the next status call. Keep ONE lazy coordinator,
+  // not the native proxy, OS worker, credential, proof or request context. Each
+  // call still constructs its fresh proxy and reauthorises the exact native
+  // plan before the shared registry can return a receipt or poll its writer.
+  let workspace;
+  const sharedWorkspace=async()=>workspace??=await createWorkspace();
   let setup, initialized = false, busy = false, maintenance = null, maintenanceController = null, catalogRevision = null, presentationProfile = 'task';
   const controller=new AbortController();
   const tick=()=>{
@@ -501,7 +510,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     const { withPrivateProcessSession, runtimeHookSignal } = await import('./trelio-hook-private-session.mjs');
     // One deadline covers journal/DPAPI, initialization, request, body and
     // cleanup. A long-lived stdio process never caches a private worker/token.
-    return withPrivateProcessSession(async () => action(await createMcp({presentationProfile}), runtimeHookSignal()),
+    return withPrivateProcessSession(async () => action(await createMcp({presentationProfile,createWorkspace:sharedWorkspace}), runtimeHookSignal()),
       AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000));
   };
   const dispatch = async message => {
@@ -623,6 +632,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
     if (pending.trim()) await consume('\n');
   } finally {
     if(timer)clearInterval(timer);controller.abort();await maintenance;
+    workspace?.stop();
     await pluginPreservation?.close?.();
   }
 };

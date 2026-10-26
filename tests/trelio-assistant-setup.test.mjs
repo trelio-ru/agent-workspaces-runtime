@@ -255,6 +255,7 @@ test('actual stdio frames discover setup without auth I/O and reject unknown fie
     {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'get_assistant_setup_status',arguments:{enrollmentId:randomUUID()}}}];
   const output=new PassThrough();let raw='',created=0,reads=0;output.on('data',chunk=>raw+=chunk);
   await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createWorkspace:async()=>assert.fail('unpaired discovery must not create a Workspace coordinator'),
     createMcp:async()=>null,createSetup:async()=>{created++;return {status:async()=>{reads++;return {state:'not_started'};}};}});
   const messages=raw.trim().split('\n').map(JSON.parse);
   assert.equal(messages.length,5);
@@ -831,6 +832,58 @@ test('a source failure during native work is retained after settlement without r
 
 const workspacePlan=()=>({prepared:true,scope:{assistantUserId:randomUUID(),deviceId:randomUUID(),companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},
   localAction:{schemaVersion:1,operation:'open',parameters:{workspaceId:randomUUID(),runId:randomUUID(),runtimeSessionId:randomUUID()}}});
+
+test('stdio retains the same finish registry across fresh per-call native proxies',async t=>{
+  const {createForwardingAssistantMcp,createAssistantWorkspaceExecutor}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-stdio-finish-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+  const plan=workspacePlan(),runIdentity={workspaceId:plan.localAction.parameters.workspaceId,runId:plan.localAction.parameters.runId};
+  let settle,launches=0,factories=0,proxies=0,requests=0,stops=0,deny=false;
+  const finished=new Promise(resolve=>{settle=resolve;});
+  const createWorkspace=async()=>{
+    factories++;
+    const executor=await createAssistantWorkspaceExecutor({configDirectory:root,finishOptions:{waitMs:2},
+      runPlan:async raw=>{assert.equal(raw.localAction.operation,'finish');launches++;await finished;
+        return {schemaVersion:1,operation:'finish',stdout:'synthetic accepted receipt'};}});
+    const stop=executor.stop;executor.stop=()=>{stops++;stop();};return executor;
+  };
+  const input=new PassThrough(),output=new PassThrough(),messages=[],waiters=new Map();let buffered='';
+  output.on('data',chunk=>{buffered+=chunk;let at;while((at=buffered.indexOf('\n'))>=0){
+    const value=JSON.parse(buffered.slice(0,at));buffered=buffered.slice(at+1);messages.push(value);
+    waiters.get(value.id)?.(value);waiters.delete(value.id);
+  }});
+  const send=(id,method,params)=>new Promise(resolve=>{waiters.set(id,resolve);input.write(JSON.stringify({jsonrpc:'2.0',id,method,...(params?{params}:{})})+'\n');});
+  const done=runAssistantSetupMcp({input,output,createWorkspace,preservePlugin:async()=>null,
+    createMcp:async options=>{proxies++;return createForwardingAssistantMcp({...options,configurationDirectory:root,
+      // The fallback reproduces the former per-request executor lifetime. A
+      // real stdio owner must supply one shared factory, while every native
+      // request still passes this fresh proxy/authorisation boundary.
+      createWorkspace:options.createWorkspace??createWorkspace,
+      request:async request=>{requests++;if(deny)throw new AssistantTransportError('ASSISTANT_ACCESS_DENIED',403);return {content:[],structuredContent:{...plan,
+        localAction:{schemaVersion:1,...request.arguments}}};}});}});
+  t.after(async()=>{settle();input.end();await done;});
+  await send(1,'initialize');
+  const started=await send(2,'tools/call',{name:'continue_assistant_workspace_action',arguments:{operation:'finish',runIdentity,
+    parameters:{summary:'Synthetic result',evidence:['Synthetic evidence'],nextAction:'Synthetic next step',taskOutcome:'no_status_change'}}});
+  assert.equal(started.result.structuredContent.state,'running');
+  deny=true;
+  const refused=await send(3,'tools/call',{name:'continue_assistant_workspace_action',arguments:started.result.structuredContent.nextCall.arguments});
+  assert.equal(refused.result.structuredContent.code,'ASSISTANT_ACCESS_DENIED');
+  assert.equal(refused.result.isError,true,'retained progress cannot bypass a fresh native refusal');
+  assert.equal(launches,1);
+  deny=false;
+  settle();
+  const polled=await send(4,'tools/call',{name:'continue_assistant_workspace_action',arguments:started.result.structuredContent.nextCall.arguments});
+  assert.equal(polled.result.structuredContent.state,'completed');
+  assert.equal(polled.result.structuredContent.operationId,started.result.structuredContent.operationId);
+  assert.equal(launches,1,'poll never starts another writer');
+  assert.equal(requests,3,'poll repeats the native authorisation boundary');
+  assert.equal(proxies,3,'the private/native proxy is not retained');
+  assert.equal(factories,1,'the host-lifetime finish registry is retained');
+  input.end();await done;assert.equal(stops,1,'EOF stops only this host heartbeat manager');
+});
 
 test('assistant Workspace plan rejects unreviewed paths/operations before private or child access',async()=>{
   const {validateAssistantWorkspacePlan,executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');

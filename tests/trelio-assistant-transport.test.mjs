@@ -582,6 +582,20 @@ test('fixed HTTPS requests omit cookies, refuse redirects and redact raw failure
   await assert.rejects(broken('companies',undefined,`tda_${'a'.repeat(43)}`),error=>error.message==='ASSISTANT_TRANSPORT_UNAVAILABLE');
 });
 
+test('native pre-handler rate limiting has a closed distinct result and never retries HTTP',async()=>{
+  for(const [status,code,expected] of [[429,'REQUEST_RATE_LIMITED','ASSISTANT_TRANSPORT_RATE_LIMITED'],
+    [403,'REQUEST_RATE_LIMITED','ASSISTANT_TRANSPORT_REJECTED'],[429,'OTHER_PRIVATE_CODE','ASSISTANT_TRANSPORT_REJECTED']]){
+    let calls=0;
+    const http=createAssistantHttp({origin:'https://assistant.test',fetchImpl:async()=>{
+      calls++;return new Response(JSON.stringify({code,message:'PRIVATE SERVER TEXT'}),
+        {status,headers:{'content-type':'application/json','retry-after':'60'}});
+    }});
+    await assert.rejects(http('passRead',{companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},`tda_${'a'.repeat(43)}`),
+      error=>error.code===expected&&error.status===status&&!error.message.includes('PRIVATE'));
+    assert.equal(calls,1,'rate limiting does not repeat a request or issue a new pass/proof');
+  }
+});
+
 test('fixed control-plane task admission carries the current loader version independently of model body fields',async()=>{
   const {getHostRuntimeVersion}=await import('../host-runtime/scripts/trelio-component-versions.mjs');
   const paths=['task','task/claim','schedule','task-pass/begin'];let calls=0;

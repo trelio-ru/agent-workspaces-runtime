@@ -360,6 +360,12 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
       let result; try { result = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); }
       chunks = [];
       if (!response.ok) {
+        // The common pre-handler limiter uses a non-assistant code. Preserve
+        // this exact closed outcome instead of reporting an opaque rejection
+        // from the hook. It grants neither auth recovery nor an automatic
+        // retry: a caller must retain the existing operation/pass and deadline.
+        if(response.status===429 && result?.code==='REQUEST_RATE_LIMITED')
+          fail('ASSISTANT_TRANSPORT_RATE_LIMITED',429);
         const code = typeof result?.code === 'string' && /^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,80}$/u.test(result.code)
           ? result.code : 'ASSISTANT_TRANSPORT_REJECTED';
         fail(code, response.status);
