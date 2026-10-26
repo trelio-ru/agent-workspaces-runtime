@@ -786,3 +786,10 @@ select exact current Trelio scopes; unresolved device-global delivery/intake
 fences stay visible even after that company's removal. No identifier/content is
 exported and no queued state is inferred from unknown/unrouted references or a
 future cycle. See [background status](assistant-scheduler.md#background-dispatch-diagnostics).
+
+
+Local-first connection reservations (`available`) are settings only. The native
+owner selection precedes their first SQLite registration; discovery filters them
+before `externalSourceFor` and `inbox.register`. Login/preparation/restart creates
+no source cursor, stream, body read, task wake or ACK. First native `active`
+generation follows the existing baseline/dedup/processing protocol unchanged.

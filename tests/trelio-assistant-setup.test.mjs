@@ -10,7 +10,7 @@ import { createAssistantSetup } from '../host-runtime/scripts/trelio-assistant-s
 import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,readProductionAssistantDispatchStatus,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,readProductionAssistantDispatchStatus,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const memorySetupHost=(store,{afterWrite}={})=>{
   const files=new Map();let queued=Promise.resolve();
@@ -391,7 +391,7 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
       return {sourceId,state:'prepared',loginVerified:false};
     }};
   const tools=await executeAssistantRuntimeRequest({operation:'list'},dependencies);
-  assert.deepEqual(tools,[ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL],'the current worker owns setup discovery');
+  assert.deepEqual(tools,[ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL],'the current worker owns setup discovery');
   const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
   const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
@@ -417,11 +417,11 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
 
 test('assistant hook permits setup and blocks task tools without an installed host profile', async () => {
   for(const tool of ['mcp__trelio_assistant__get_task','mcp__plugin_trelio-digital-assistant_trelio-assistant__clear_task_control',
-    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source','mcp__trelio_assistant__configure_assistant_telegram_source','mcp__trelio_assistant__configure_assistant_max_source','mcp__trelio_assistant__verify_assistant_max_source','mcp__trelio_assistant__prepare_assistant_company_encryption']){
+    'mcp__trelio_assistant__begin_assistant_setup','mcp__trelio_assistant__prepare_assistant_local_connection','mcp__trelio_assistant__prepare_assistant_source_account','mcp__trelio_assistant__configure_assistant_email_source','mcp__trelio_assistant__verify_assistant_email_source','mcp__trelio_assistant__configure_assistant_telegram_source','mcp__trelio_assistant__configure_assistant_max_source','mcp__trelio_assistant__verify_assistant_max_source','mcp__trelio_assistant__prepare_assistant_company_encryption']){
     const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
     await runAssistantEntry(['hook'],{input:Readable.from([JSON.stringify({hook_event_name:'PreToolUse',tool_name:tool})]),output,createHook:async()=>{throw Object.assign(new Error(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});}});
     const result=JSON.parse(raw);
-    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source','configure_assistant_telegram_source','configure_assistant_max_source','verify_assistant_max_source','prepare_assistant_company_encryption'].some(name=>tool.endsWith(name))?undefined:'deny');
+    assert.equal(result.hookSpecificOutput?.permissionDecision,['begin_assistant_setup','prepare_assistant_local_connection','prepare_assistant_source_account','configure_assistant_email_source','verify_assistant_email_source','configure_assistant_telegram_source','configure_assistant_max_source','verify_assistant_max_source','prepare_assistant_company_encryption'].some(name=>tool.endsWith(name))?undefined:'deny');
   }
 });
 
@@ -1610,4 +1610,25 @@ test('fresh tick worker reports retained/throwing uncertainty under an unchanged
     assert.deepEqual(reports,scenario==='model_blocked'?[]:[{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'}]);
     assert.ok(!JSON.stringify(reports).includes('PRIVATE'));
   }
+});
+
+
+test('local connection is taskless, validates before private I/O and reuses the current signed worker',async()=>{
+  const companyId=randomUUID(),clientRequestId=randomUUID(),sourceId=randomUUID();let contexts=0,prepares=0,active=null;
+  const request={operation:'call',name:'prepare_assistant_local_connection',arguments:{companyId,clientRequestId,skillId:'telegram-mtproto'}};
+  const client={identity:{origin:'https://source.test',assistantId:randomUUID(),deviceId:randomUUID()},
+    readHealth:async()=>({code:'ready',revision:0,compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),reportHealth:async()=>{}};
+  const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.20.0'}),
+    context:async action=>{contexts++;return action(client,{readActivePass:async()=>active},{});},
+    proxyFor:async()=>({callTool:()=>assert.fail('no native task/human alias')}),
+    prepareLocalConnection:async input=>{prepares++;assert.equal(input.clientRequestId,clientRequestId);assert.equal(input.client,client);
+      return {sourceId,state:'prepared',backgroundEnabled:false,loginVerified:false};}};
+  const value=await executeAssistantRuntimeRequest(request,dependencies);
+  assert.equal(value.structuredContent.backgroundEnabled,false);assert.equal(prepares,1);
+  active={passId:randomUUID()};
+  assert.equal((await executeAssistantRuntimeRequest(request,dependencies)).structuredContent.code,'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');
+  assert.equal(prepares,1,'an active task cannot create a local setup reservation');
+  const before=contexts;
+  await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:{...request.arguments,localAccountId:randomUUID()}},dependencies),/ASSISTANT_SETUP_INVALID_INPUT/);
+  assert.equal(contexts,before);
 });

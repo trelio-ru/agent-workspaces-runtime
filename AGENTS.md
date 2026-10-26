@@ -583,6 +583,7 @@ publication tooling также остаются вне этого публичн
   persisted owner consent remain independent. No human bridge or content journal.
 - Source owner identity uses fresh native bindings, never usernames or a task grant: [contract](docs/assistant-scheduler.md#owner-identity-metadata-for-source-routing).
 - Model-free source reads reuse common signature/cache/account execution under a fresh fixed device HTTP profile; no human admission cache, task pass, ACK or cursor reset. [Contract](docs/assistant-scheduler.md#model-free-source-reader).
+  Local-first setup reserves inert available refs; only owner activation enters the SAME inbox. See scheduler.
   Fixed device discovery returns scoped desired refs only, never login/readiness
   evidence; failed/foreign/malformed inventories are not empty configurations.
   Source/task reads share the managed device namespace without human import or

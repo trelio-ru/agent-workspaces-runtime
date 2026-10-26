@@ -198,7 +198,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const syncExternalSources=async(companyId,signal)=>{
     const rows=await client.sourceAccounts(companyId,signal);lease();
-    const refs=rows.map(row=>({row,scope:externalSourceFor(identity,row)}));
+    // Local setup reservations are discoverable settings, never inbox sources.
+    // Keep them out of SQLite entirely until the native owner activation. No
+    // initial cursor, history scan, model wake or ACK can be created by login.
+    const refs=rows.filter(row=>row.state!=='available').map(row=>({row,scope:externalSourceFor(identity,row)}));
     for(const old of inbox.listSources()){
       if(old.scope.companyId!==companyId || old.scope.provider==='trelio' || old.state==='revoked'
         || refs.some(({scope})=>sameSource(scope,old.scope)))continue;

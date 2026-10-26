@@ -222,7 +222,7 @@ const projectAssistantSourceAccounts = (value, { assistantId, deviceId, companyI
   return Object.freeze(value.sources.map(row => {
     if (!object(row) || responseId(row.companyId) !== companyId || responseId(row.deviceId) !== deviceId
       || !['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId)
-      || !['active','paused','revoked'].includes(row.state) || row.executionVerified !== false
+      || !['available','active','paused','revoked'].includes(row.state) || row.executionVerified !== false
       || row.bindFromSourceId!=null&&!UUID.test(row.bindFromSourceId)
       || row.provisionLocalAccount !== undefined && typeof row.provisionLocalAccount !== 'boolean'
       || row.ownerTaskIntakeAllowed !== undefined && typeof row.ownerTaskIntakeAllowed !== 'boolean'
@@ -296,6 +296,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['ownerIdentities',['GET','/runtime/owner-identities']],
     ['sourceAccounts',['GET','/runtime/source-skills/accounts']],
+    ['prepareLocalConnection',['POST','/runtime/source-skills/accounts/prepare']],
     ['sourceRoutes',['POST','/runtime/source-skills/routing']],
     ['sourceHealthRead',['GET','/runtime/source-skills/health']],['sourceHealthReport',['POST','/runtime/source-skills/health']],
     ['tasks',['POST','/runtime/tasks']], ['task',['POST','/runtime/task']],
@@ -2399,6 +2400,18 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // No task pass, current model, human cookie or owner OAuth is involved.
       return projectAssistantOwnerIdentities(await call('ownerIdentities',undefined,signal),assistantId);
     },
+    async prepareLocalConnection(input, signal) {
+      if(!object(input)||Object.keys(input).sort().join(',')!=='clientRequestId,companyId,skillId'
+        ||!['telegram-mtproto','email-imap-smtp','max-web'].includes(input.skillId))fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={companyId:id(input.companyId),clientRequestId:id(input.clientRequestId),skillId:input.skillId};
+      const value=await call('prepareLocalConnection',body,signal);
+      if(!object(value)||typeof value.replayed!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      const [source]=projectAssistantSourceAccounts({schemaVersion:1,assistantUserId:assistantId,deviceId,companyId:body.companyId,
+        sources:[value.source]},{assistantId,deviceId,companyId:body.companyId});
+      if(source.skillId!==body.skillId||!source.provisionLocalAccount||!source.interactiveSetupAllowed||source.bindFromSourceId)
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return source;
+    },
     async sourceAccounts(companyId, signal) {
       // Validate input before private credential I/O. Read fresh every time;
       // no model turn, task pass, account import/setup or provider launch here.
@@ -4482,6 +4495,21 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
  * second account engine. The common catalogue commits metadata, binding and
  * an exact native-intent receipt atomically, so a lost response can be read
  * back without adopting an unrelated account or resetting a provider session. */
+export const prepareAssistantLocalConnection = async ({identity,host,store,client,companyId,skillId,clientRequestId,signal}) => {
+  companyId=id(companyId);clientRequestId=id(clientRequestId);
+  if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(skillId)||!identity||!client
+    ||['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+  const source=await client.prepareLocalConnection({companyId,skillId,clientRequestId},signal);
+  // Only the native-generated UUID may enter the existing account engine.
+  // Preparation has an exact atomic catalogue receipt; it never launches a
+  // provider or retries a human login. Revoked/replayed rows remain revoked.
+  if(!['available','active'].includes(source.state))fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
+  const prepared=await prepareAssistantSourceAccount({identity,host,store,client,companyId,sourceId:source.id,signal});
+  return Object.freeze({...prepared,companyId,backgroundEnabled:source.state==='active',
+    nextAction:{tool:skillId==='telegram-mtproto'?'configure_assistant_telegram_source':skillId==='max-web'?'configure_assistant_max_source':'configure_assistant_email_source',
+      arguments:{companyId,sourceId:source.id}}});
+};
+
 export const prepareAssistantSourceAccount = async ({identity,host,store,client,companyId,sourceId,signal}) => {
   companyId=id(companyId);sourceId=id(sourceId);
   if(!identity || !client || typeof client.sourceAccounts!=='function'
@@ -4491,7 +4519,7 @@ export const prepareAssistantSourceAccount = async ({identity,host,store,client,
   // a model-authored local JSON or an existing UUID can supply neither.
   const rows=await client.sourceAccounts(companyId,signal);
   const source=rows.find(row=>row.id===sourceId);
-  if(!source || source.state!=='active' || source.provisionLocalAccount!==true&&!source.bindFromSourceId)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
+  if(!source || !['active','available'].includes(source.state) || source.provisionLocalAccount!==true&&!source.bindFromSourceId)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
   const scope={companyId,projectId:source.projectId,skillId:source.skillId};
   try{
     return await withAssistantSourcePackage({identity,host,store,scope,signal,
@@ -4538,7 +4566,7 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
   const rows=await client.sourceAccounts(companyId,signal),source=rows.find(row=>row.id===sourceId);
   const telegram=kind==='telegram',max=kind==='max'||kind==='max-verify',verify=kind==='max-verify';
   const skillId=max?'max-web':telegram?'telegram-mtproto':'email-imap-smtp',operation=verify?'verify_login':telegram||max?'login':'configure';
-  if(!source || source.state!=='active' || source.skillId!==skillId
+  if(!source || !['active','available'].includes(source.state) || source.skillId!==skillId
     || source.provisionLocalAccount!==true || source.interactiveSetupAllowed!==true)fail('ASSISTANT_SOURCE_SETUP_REQUIRED');
   const scope={companyId,projectId:source.projectId,skillId:source.skillId};
   try{
@@ -4594,7 +4622,7 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
       // Neither stdout nor the fact that the window closed is owner authority.
       return Object.freeze({sourceId,localAccountId:source.localAccountId,state:'configuration_saved',
         incomingEnabled:value.connectionMode==='imap_smtp',connectionVerified:false,
-        ...(value.connectionMode==='imap_smtp'?{nextAction:{tool:'verify_assistant_email_source',arguments:{companyId,sourceId}}}:{})});
+        ...(value.connectionMode==='imap_smtp'&&source.state==='active'?{nextAction:{tool:'verify_assistant_email_source',arguments:{companyId,sourceId}}}:{})});
     });
   }catch(error){rethrowAssistantSourceError(error,{signal,setup:true});}
 };
@@ -4640,7 +4668,7 @@ export const verifyAssistantEmailSource = async ({identity,host,store,client,com
     queuePositionChanged:false,readStateChanged:false});
 };
 
-export const readAssistantSourceMonitor = async ({identity,host,store,source,signal}) => {
+export const readAssistantSourceMonitor = async ({identity,host,store,client=null,source,signal}) => {
   if(!object(source) || Object.keys(source).some(key=>!['companyId','projectId','skillId','accountId','chat','folder','cursor','initialUnread','initialAccountCursor','sourceId','sourceRevision'].includes(key)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
   const accountId=id(source.accountId),cursor=source.cursor??null,chat=source.chat??null,folder=source.folder??null;
@@ -4660,7 +4688,18 @@ export const readAssistantSourceMonitor = async ({identity,host,store,source,sig
     || scope.skillId==='telegram-mtproto' && (folder!==null || chat!==null && !/^-?[1-9]\d{0,18}$/u.test(chat))
     || scope.skillId==='max-web' && (folder!==null || !maxAccount&&!assistantMaxChatUrl(chat) ||maxAccount&&(initialUnread||initialAccountCursor!==null||cursor!==null&&!maxAccountPosition(cursor)))
     || scope.skillId==='email-imap-smtp' && (chat!==null || folder!==null && (typeof folder!=='string' || !folder.length || folder.length>256 || /[\x00-\x1f\x7f]/u.test(folder))))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+  // One original upper bound covers owner-selected additional-company binding
+  // AND the read. Binding reuses the exact native intent/atomic catalogue receipt;
+  // it never imports, copies a credential, logs in or retries a provider action.
+  signal=signal?AbortSignal.any([signal,AbortSignal.timeout(120_000)]):AbortSignal.timeout(120_000);
   try{
+    if(client && source.sourceId!==undefined && cursor===null){
+      if(['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+      const row=(await client.sourceAccounts(scope.companyId,signal)).find(row=>row.id===source.sourceId);
+      if(!row || row.state!=='active' || row.revision!==source.sourceRevision || row.localAccountId!==accountId
+        ||row.projectId!==scope.projectId || row.skillId!==scope.skillId)fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+      if(row.bindFromSourceId)await prepareAssistantSourceAccount({identity,host,store,client,companyId:scope.companyId,sourceId:row.id,signal});
+    }
     return await withAssistantSourcePackage({identity,host,store,scope,signal,
       sourceSelection:source.sourceId===undefined?null:{sourceId:source.sourceId,expectedRevision:source.sourceRevision}},async({engine,profile,materialized,resolution,signal:combined})=>{
       // A fresh source cannot durably claim a baseline while silently losing

@@ -543,11 +543,33 @@ local accounts, import sessions, register queue sources, poll providers, dispatc
 chats or ACK messages. Owner device onboarding and production orchestration
 remain separate gates; no model tool or timer is added by this client.
 
+Local-first setup starts in the visible Desktop chat on the paired computer.
+`prepare_assistant_local_connection(companyId, skillId, clientRequestId)` reserves
+one NEW account UUID through the SAME fixed device writer and prepares its empty
+entry through the SAME signed loader/catalogue. It returns the exact existing
+configure/login tool, never opens or replays a form itself. Reuse the request UUID
+after lost preparation; an uncertain provider login still permits no replay.
+An active task pass refuses this taskless settings action. No human OAuth,
+account UUID override, import, credentials, second vault or executor is involved.
+
+The native row starts `available`, with polling/intake disabled. It appears in
+owner settings, not the private SQLite inbox. Only the direct owner's first CAS
+activation selects polling and optionally verified-owner task intake. Existing
+active/paused/revoked rows and their immutable flags are unchanged. Supported
+connections may be explicitly reused in another independently readable company;
+that decision binds the SAME account/session and never enables the origin.
+The first baseline read performs the exact native bind through the existing
+atomic catalogue intent under its original deadline. No second copied prompt,
+login, provider retry, credential transfer or new binding store is needed.
+Runtime >=3.20.0 projects this enum; old workers receive only their understood
+rows. Native local preparation requires the compatible version. Availability is
+structural setup metadata, not proof of provider login, incoming access or ACK.
+
 The current signed request worker exposes `prepare_assistant_source_account`
 through the existing dynamic catalogue, not a new stable-plugin setup method.
 `companyId` plus `sourceId:null` discovers only scoped owner-configured structural
 refs. An exact `sourceId` can prepare a new EMPTY local account only when the
-server's persisted owner intent has `provisionLocalAccount=true`. Existing-account
+server's persisted owner intent or inert local reservation has `provisionLocalAccount=true`. Existing-account
 references do not authorize binding, adoption, import or login. Device identity,
 current owner membership, project access, device write grant and exact source
 revision are checked by native resolution/package endpoints. The model supplies
@@ -607,7 +629,7 @@ A closed window is not successful configuration, and saved credentials are not
 network readiness, sending authority, processed messages or a passed Windows
 business pilot. Setup metadata does not clear hook/login health latches.
 
-For IMAP configuration the saved result supplies a separate exact
+For an already active IMAP source the saved result supplies a separate exact
 `verify_assistant_email_source` continuation (company/source UUIDs only).
 It uses the SAME source inventory, signed passive monitor, managed account and
 native provider engine under the ordinary read budget; it never opens another

@@ -13,7 +13,7 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
+const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 // Exercise the SAME source/config/ACK engine against a non-production HTTPS
@@ -249,6 +249,16 @@ test('native owner setup uses the same signed loader/catalogue, has atomic creat
   assert.equal((await prepare()).replayed,true);
   assert.equal((await catalogue.list()).revision,before.revision+1,'the same native intent reads back its own committed receipt');
   assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls,'no importer, provider login or monitor process is launched');
+  // A local-first reservation uses this same signed loader and atomic account
+  // receipt before the owner chooses any background source. No provider runs.
+  setupFixture={...source(),state:'available',interactiveSetupAllowed:true};
+  const clientRequestId=randomUUID();let reservations=0;
+  client.prepareLocalConnection=async input=>{reservations++;assert.deepEqual(input,{companyId,skillId:scope.skillId,clientRequestId});return setupFixture;};
+  const local=()=>prepareAssistantLocalConnection({identity,host,store,client,companyId,skillId:scope.skillId,clientRequestId});
+  const connected=await local();assert.equal(connected.backgroundEnabled,false);assert.equal(connected.loginVerified,false);
+  assert.deepEqual(connected.nextAction,{tool:'configure_assistant_telegram_source',arguments:{companyId,sourceId:setupFixture.id}});
+  assert.equal((await local()).replayed,true);assert.equal(reservations,2);
+  assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls,'local-first preparation still cannot launch/import/login');
   const stable=await catalogue.list();
   setupFixture=source();let phases=0;
   resolveOverride=()=>++phases===1?new Response(JSON.stringify(resolution()),{headers:{'content-type':'application/json'}}):
@@ -1657,7 +1667,7 @@ test('owner intake rereads one exact signed original, rechecks native owner and 
 test('additional company binding reuses same catalogue, preserves sessions and reads back only its exact native intent',async t=>{
  const saved={...scope};t.after(()=>{Object.assign(scope,saved);setupFixture=null;resolveOverride=null;});scope.skillId='telegram-mtproto';
  const originCompany=randomUUID(),originMember=randomUUID(),accountId=randomUUID();
- const dir=path.join(directory,'bind-package');await fs.mkdir(dir);await fs.writeFile(path.join(dir,'main.mjs'),"throw new Error('A bind must never launch a provider');");
+ const dir=path.join(directory,'bind-package');await fs.mkdir(dir);await fs.writeFile(path.join(dir,'main.mjs'),"import assert from 'node:assert/strict'; assert.equal(process.argv[2],'monitor'); process.stdout.write("+JSON.stringify(JSON.stringify({...page(),baselineOnly:true,events:[]}))+");");
  artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:dir,
    entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
  const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope}),root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
@@ -1672,6 +1682,24 @@ test('additional company binding reuses same catalogue, preserves sessions and r
  assert.equal((await original.select(accountId)).name,'Preserved account');
  const target=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),io});
  assert.equal((await target.select(accountId)).name,'Preserved account');
+ // The first background baseline after owner selection binds automatically;
+ // no copied setup prompt or login is required on the assistant computer.
+ const secondId=randomUUID();await original.change({operation:'create',id:secondId,name:'Second preserved account',expectedRevision:(await original.list()).revision});
+ const row={...setupFixture,id:randomUUID(),localAccountId:secondId};
+ const oldFetch=globalThis.fetch;t.after(()=>{globalThis.fetch=oldFetch;sourceSelectionFixture=null;});
+ globalThis.fetch=async(url,options)=>{
+   if(new URL(url).pathname===prefix+'/resolve'){
+     const body=JSON.parse(options.body);setupFixture=body.accountSetup?row:null;
+     sourceSelectionFixture=body.sourceSelection??null;
+   }
+   return oldFetch(url,options);
+ };
+ const client={identity,sourceAccounts:async()=>[row]};
+ const observed=await readAssistantSourceMonitor({identity,host,store,client,source:{...scope,sourceId:row.id,sourceRevision:0,accountId:secondId,cursor:null}});
+ assert.equal(observed.nextCursor,nextCursor);
+ assert.equal((await target.select(secondId)).name,'Second preserved account');
+ assert.equal((await original.select(secondId)).name,'Second preserved account');
+ globalThis.fetch=oldFetch;sourceSelectionFixture=null;setupFixture={...row};
  const before=await target.list();setupFixture={...setupFixture,id:randomUUID()};
  await assert.rejects(prepareAssistantSourceAccount({...input,sourceId:setupFixture.id}),/ACCOUNT_ID_CONFLICT/);
  assert.deepEqual(await target.list(),before,'another native intent cannot adopt a pre-existing binding');

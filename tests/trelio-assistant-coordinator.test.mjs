@@ -549,6 +549,18 @@ const externalFixture=async (t,{sourceHealth=null,acknowledgeSource=null}={})=>{
     failSources:value=>{inventoryFailure=value;},reads:()=>reads,position:()=>f.database.prepare('SELECT scope_json,cursor FROM assistant_inbox_sources').all().find(value=>JSON.parse(value.scope_json).bindingId===row.id)?.cursor,restart:async()=>{await coordinator.close();coordinator=createAssistantCoordinator(options);}};
 };
 
+test('local connection remains outside the real SQLite inbox until native owner selection',async t=>{
+  const f=await externalFixture(t);f.row.state='available';
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    assert.equal(f.reads(),0);assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+    assert.ok(f.inbox.listSources().every(row=>row.scope.provider==='trelio'),'setup creates no external cursor/queue');
+    await f.restart();f.advance(300000);await f.coordinator.pollOnce();assert.equal(f.reads(),0);
+    f.row.state='active';f.row.revision++;f.advance(300000);await f.coordinator.pollOnce();
+    assert.equal(f.reads(),1);assert.equal(f.position(),'baseline');
+  }finally{await f.coordinator.close();}
+});
+
 test('native source refs poll every five minutes into durable unrouted SQLite refs without model starts or read ACKs',async t=>{
   const f=await externalFixture(t);
   try{
