@@ -803,12 +803,12 @@ export const runAssistantWindowsDesktop = async (operation, generation=null, {en
   const read=readPackagePath??(await import('./trelio-codex-conversation.mjs')).readWindowsCodexPackagePath;
   const packageRoot=await read({signal});
   if(!packageRoot)fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
-  const worker=operation==='close'?await (selectWorker??(async()=>{
+  const worker=operation!=='start'?await (selectWorker??(async()=>{
     const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
   }))():null;
   await guard();
   return runNative({operation,packageRoot,generation},{environment,signal,script:ASSISTANT_WINDOWS_DESKTOP_SCRIPT,
-    ...(worker?{nativeCommand:{executable:worker.executable,args:['--codex-desktop-close',generation]}}:{}),
+    ...(worker?{nativeCommand:{executable:worker.executable,args:operation==='close'?['--codex-desktop-close',generation]:['--codex-desktop-inspect']}}:{}),
     project:value=>{
       if(!value||Object.keys(value).sort().join(',')!=='generation,schemaVersion,state'||value.schemaVersion!==1
         ||!['running','stopped','starting'].includes(value.state)

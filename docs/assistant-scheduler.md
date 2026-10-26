@@ -1572,7 +1572,10 @@ in the system tray. The SAME signed native worker instead requests a normal
 Windows Restart Manager shutdown of ONE registered Codex process. It independently
 checks current user/session, AppModel executable and exact creation time, keeps
 its original process handle, rejects any expanded resource list, and never sets
-the force flag or opens termination rights. Refusal/timeout retains the original
+the force flag or opens termination rights. Inspection selects the unique package
+application root from its same-user/session process tree, including a hidden tray
+window; renderer children cannot become an application and a hidden old process
+cannot masquerade as a freshly activated plugin. Refusal/timeout retains the original
 uncertain phase; there is no window-only fallback, local compilation or retry of
 another generation. The existing enclosing deadline and idle fences remain.
 Restart activates the registered package application; there

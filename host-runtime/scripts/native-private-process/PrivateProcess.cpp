@@ -10,6 +10,7 @@
 #include <appmodel.h>
 #include <restartmanager.h>
 #include <limits>
+#include <optional>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -478,6 +479,54 @@ int codexPackagePath() {
   write(encoded.value); write("\"}\n"); return 0;
 }
 
+struct DesktopIdentity { DWORD pid; FILETIME created; };
+std::optional<DesktopIdentity> currentCodexDesktop() {
+  const auto root=currentCodexPackagePath();require(!root.empty());
+  DWORD session=0;require(ProcessIdToSessionId(GetCurrentProcessId(),&session)!=FALSE);
+  struct Item { DWORD pid,parent;FILETIME created;HANDLE handle; };
+  struct Items { std::vector<Item> values;~Items(){for(const auto& item:values)CloseHandle(item.handle);} } items;
+  Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0));require(snapshot.value!=INVALID_HANDLE_VALUE);
+  PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);require(Process32FirstW(snapshot.value,&entry)!=FALSE);
+  do {
+    if(_wcsicmp(entry.szExeFile,L"ChatGPT.exe")!=0 && _wcsicmp(entry.szExeFile,L"Codex.exe")!=0)continue;
+    DWORD targetSession=0;
+    if(!ProcessIdToSessionId(entry.th32ProcessID,&targetSession)){require(GetLastError()==ERROR_INVALID_PARAMETER);continue;}
+    if(targetSession!=session)continue;
+    Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,entry.th32ProcessID));
+    if(!process.value){require(GetLastError()==ERROR_INVALID_PARAMETER);continue;}
+    if(WaitForSingleObject(process.value,0)==WAIT_OBJECT_0)continue;
+    wchar_t image[32768]{};DWORD length=32768;
+    require(QueryFullProcessImageNameW(process.value,0,image,&length)!=FALSE);
+    if(_wcsicmp(image,(root+L"\\app\\ChatGPT.exe").c_str())!=0
+      && _wcsicmp(image,(root+L"\\app\\Codex.exe").c_str())!=0)continue;
+    if(!samePresentationUser(process.value))continue;
+    FILETIME created{},exited{},kernel{},user{};
+    require(GetProcessTimes(process.value,&created,&exited,&kernel,&user)!=FALSE);
+    require(items.values.size()<256);
+    items.values.push_back({entry.th32ProcessID,entry.th32ParentProcessID,created,process.value});process.value=nullptr;
+  }while(Process32NextW(snapshot.value,&entry));
+  require(GetLastError()==ERROR_NO_MORE_FILES);
+  std::optional<DesktopIdentity> selected;
+  for(const auto& item:items.values){
+    bool child=false;
+    for(const auto& other:items.values)if(other.pid==item.parent && CompareFileTime(&other.created,&item.created)<=0){child=true;break;}
+    if(child)continue;
+    // Electron renderers share the executable. The one application root is the
+    // process whose original parent is outside this exact package/user/session
+    // tree. Keep all handles through selection; parent creation time excludes
+    // PID reuse. A tray-hidden root is still running, never a stopped GUI.
+    require(!selected.has_value());selected=DesktopIdentity{item.pid,item.created};
+  }
+  require(items.values.empty()||selected.has_value());return selected;
+}
+int inspectCodexDesktop(){
+  const auto current=currentCodexDesktop();
+  if(!current){write("{\"schemaVersion\":1,\"state\":\"stopped\",\"generation\":null}\n");return 0;}
+  ULARGE_INTEGER time{};time.LowPart=current->created.dwLowDateTime;time.HighPart=current->created.dwHighDateTime;
+  write("{\"schemaVersion\":1,\"state\":\"running\",\"generation\":\"");
+  write(std::to_string(current->pid));write(":");write(std::to_string(time.QuadPart+504911232000000000ULL));write("\"}\n");return 0;
+}
+
 // Closing a window can leave the Electron application in the system tray.
 // Restart Manager's NORMAL shutdown asks the exact application to exit, including
 // its normal cleanup; there is deliberately no force flag/TerminateProcess.
@@ -502,6 +551,7 @@ int closeCodexDesktop(std::string_view generation) {
     write("{\"schemaVersion\":1,\"state\":\"stopped\",\"generation\":null}\n"); return 0;
   }
   require(process.value && samePresentationUser(process.value));
+  const auto app=currentCodexDesktop();require(app.has_value() && app->pid==pid);
   DWORD ownSession=0,targetSession=0;
   require(ProcessIdToSessionId(GetCurrentProcessId(),&ownSession) && ProcessIdToSessionId(static_cast<DWORD>(pid),&targetSession)
     && ownSession==targetSession);
@@ -547,6 +597,10 @@ int main(int argc, char* argv[]) {
       catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\",\"generation\":null}\n"); } catch (...) {} return 1; }
     }
     if (argc != 2) return 1;
+    if (std::string_view(argv[1]) == "--codex-desktop-inspect") {
+      try { return inspectCodexDesktop(); }
+      catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\",\"generation\":null}\n"); } catch (...) {} return 1; }
+    }
     if (std::string_view(argv[1]) == "--codex-package-path") {
       try { return codexPackagePath(); }
       catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\"}\n"); } catch (...) {} return 0; }

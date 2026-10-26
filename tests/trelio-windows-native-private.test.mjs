@@ -119,6 +119,15 @@ test('native fixed current-user Codex AppModel query has no private protocol or 
   // API evidence, not a positive installed-CLI or account acceptance claim.
 });
 
+test('native Desktop root discovery has no selector or private protocol and reports only closed metadata',windows,async()=>{
+  const result=await run(windowsPrivateWorkerOptions().executable,['--codex-desktop-inspect']);
+  assert.equal(result.stderr,'');const value=JSON.parse(result.stdout);
+  assert.deepEqual(Object.keys(value).sort(),['generation','schemaVersion','state']);assert.equal(value.schemaVersion,1);
+  assert.ok(['running','stopped','unavailable'].includes(value.state));
+  if(value.state==='running'){assert.equal(result.code,0);assert.match(value.generation,/^[1-9]\d{0,9}:[1-9]\d{0,19}$/u);}
+  else assert.equal(value.generation,null);
+});
+
 test('native Desktop shutdown rejects malformed or non-Codex generations without a private session',windows,async()=>{
   const options=windowsPrivateWorkerOptions();
   for(const generation of ['caller-path','0:1','1:0','1:18446744073709551616',`${process.pid}:1`]){
@@ -126,6 +135,8 @@ test('native Desktop shutdown rejects malformed or non-Codex generations without
     assert.notEqual(result.code,0);assert.equal(result.stderr,'');
     assert.deepEqual(JSON.parse(result.stdout),{schemaVersion:1,state:'unavailable',generation:null});
   }
+  const inspect=await run(options.executable,['--codex-desktop-inspect','caller-selector']);
+  assert.notEqual(inspect.code,0);assert.equal(inspect.stdout,'');
   const extra=await run(options.executable,['--codex-desktop-close','1:1','extra']);
   assert.notEqual(extra.code,0);assert.equal(extra.stdout,'');
 });

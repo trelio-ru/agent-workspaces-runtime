@@ -1857,6 +1857,9 @@ test('Desktop helper has only fixed registered package and graceful close, with 
       assert.deepEqual(options.nativeCommand.args,['--codex-desktop-close','100:1000']);
       return options.project({schemaVersion:1,state:'stopped',generation:null});}});
   assert.equal(result.state,'stopped');assert.equal(operations.length,1);
+  await runAssistantWindowsDesktop('inspect',null,{readPackagePath:async()=> 'C:/fixed',
+    runNative:async(_plan,options)=>{assert.deepEqual(options.nativeCommand.args,['--codex-desktop-inspect']);
+      return options.project({schemaVersion:1,state:'running',generation:'100:1000'});}});
   assert.doesNotMatch(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/Stop-Process|taskkill|TerminateProcess|trusted_hash|config\.toml|SendKeys/);
   assert.doesNotMatch(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/CloseMainWindow|WaitForExit/);
   // No window-only fallback: generation-less/extra operations fail before any

@@ -10,7 +10,7 @@ import { PassThrough } from 'node:stream';
 import { gunzipSync } from 'node:zlib';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
-  validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon,runAssistantWindowsDesktop } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
+  validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon,runAssistantWindowsDesktop,ASSISTANT_WINDOWS_DESKTOP_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const identity = { origin: 'https://trelio.ru', assistantId: randomUUID(), deviceId: randomUUID() };
@@ -606,16 +606,18 @@ $ownWrite=@($sd.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -eq $s
   await steady('retarget');assert.equal(await triggerCount(),1,'the confirmed parent restores the original steady-state logon definition');
 });
 
-test('native Desktop inspection selects the GUI App from the real two-application manifest shape', {skip:process.platform!=='win32'},async t=>{
+test('native registered-GUI startup parser selects App from the real two-application manifest shape', {skip:process.platform!=='win32'},async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-desktop-manifest-'));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));await fs.mkdir(path.join(directory,'app'));
   await fs.writeFile(path.join(directory,'app','ChatGPT.exe'),'synthetic non-executable fixture');
   await fs.writeFile(path.join(directory,'AppxManifest.xml'),`<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"><Identity Name="OpenAI.Codex"/><Applications><Application Id="App" Executable="app/ChatGPT.exe"/><Application Id="CodexCoreCommandRunner" Executable="app/resources/codex-command-runner.exe"/></Applications></Package>`);
-  const observed=await runAssistantWindowsDesktop('inspect',null,{readPackagePath:async()=>directory});
+  const inspectFixture=()=>runAssistantWindowsBackgroundNative({operation:'inspect',packageRoot:directory,generation:null},
+    {script:ASSISTANT_WINDOWS_DESKTOP_SCRIPT,project:value=>{assert.deepEqual(value,{schemaVersion:1,state:'stopped',generation:null});return value;}});
+  const observed=await inspectFixture();
   assert.deepEqual(observed,{schemaVersion:1,state:'stopped',generation:null});
   // Inspection never runs the fake executable or opens/activates a window.
   await fs.writeFile(path.join(directory,'AppxManifest.xml'),'<Package><Identity Name="Other.App"/></Package>');
-  await assert.rejects(runAssistantWindowsDesktop('inspect',null,{readPackagePath:async()=>directory}));
+  await assert.rejects(inspectFixture());
 });
 
 
