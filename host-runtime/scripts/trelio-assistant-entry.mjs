@@ -10,7 +10,7 @@ import { requireTrelioComponentVersions } from './trelio-component-versions.mjs'
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
-  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret } from './trelio-assistant-transport.mjs';
+  validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
@@ -24,8 +24,8 @@ const schema = properties => ({ type: 'object', properties, required: Object.key
 // facade. A runtime update can expose this tool through the existing list-change
 // mechanism without a plugin/Codex restart or duplicating the stable setup ABI.
 export const ASSISTANT_LOCAL_CONNECTION_TOOL=Object.freeze({name:'prepare_assistant_local_connection',
-  description:'Start connection setup in this visible assistant Desktop chat BEFORE choosing background polling in Trelio. Reserve a NEW empty device-local account for one supported skill/company, then use the returned fixed setup tool and human-only protected login form. Reuse clientRequestId after lost preparation; never repeat an uncertain login. No old-account import, polling, sending, intake or readiness claim.',
-  inputSchema:schema({companyId:enrollment,skillId:{type:'string',enum:['telegram-mtproto','email-imap-smtp','max-web']},clientRequestId:enrollment}),annotations:{idempotentHint:true}});
+  description:'Start connection setup in this visible Desktop chat before choosing polling in Trelio. Use companyId:null when unknown: the sole native company is selected automatically; multiple companies return choices without creating an account. get_assistant_status also lists company IDs/slugs. Never ask the human to find an internal ID or use browser/human OAuth for company discovery. Then use the returned setup tool and human-only protected login form. Reuse clientRequestId after lost preparation; never repeat uncertain login. No import, polling, sending, intake or readiness claim.',
+  inputSchema:schema({companyId:{anyOf:[enrollment,{type:'null'}]},skillId:{type:'string',enum:['telegram-mtproto','email-imap-smtp','max-web']},clientRequestId:enrollment}),annotations:{idempotentHint:true}});
 export const ASSISTANT_SOURCE_SETUP_TOOL=Object.freeze({name:'prepare_assistant_source_account',
   description:'With sourceId=null list owner-configured source refs for one company. With an exact sourceId prepare only its owner-requested empty local account through the common signed loader/catalogue. No login, old-account bind/import, secrets, polling or readiness claim.',
   inputSchema:schema({companyId:enrollment,sourceId:{anyOf:[enrollment,{type:'null'}]}}),annotations:{idempotentHint:true}});
@@ -1297,7 +1297,8 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
   const localConnection=request.operation==='call'&&request.name===ASSISTANT_LOCAL_CONNECTION_TOOL.name;
   if(localConnection&&(!request.arguments||Object.getPrototypeOf(request.arguments)!==Object.prototype
     ||Object.keys(request.arguments).sort().join(',')!=='clientRequestId,companyId,skillId'
-    ||![request.arguments.companyId,request.arguments.clientRequestId].every(value=>new RegExp(UUID,'u').test(value??''))
+    ||request.arguments.companyId!==null&&!new RegExp(UUID,'u').test(request.arguments.companyId??'')
+    ||!new RegExp(UUID,'u').test(request.arguments.clientRequestId??'')
     ||!['telegram-mtproto','email-imap-smtp','max-web'].includes(request.arguments.skillId)))fail('ASSISTANT_SETUP_INVALID_INPUT');
   const sourceSetup=request.operation==='call'&&sourceToolNames().includes(request.name);
   const interactiveSourceSetup=sourceSetup&&interactiveSourceTool(request.name);
@@ -1352,6 +1353,16 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
           result={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
         }catch(error){const code=safeError(error);result={isError:true,content:[{type:'text',text:code}],structuredContent:{code}};}
       }else result=await(request.operation==='list'?proxy.listTools():proxy.callTool(request.name,request.arguments));
+      if(request.operation==='call'&&request.name==='get_assistant_status'&&!result?.isError){
+        // Reuse the SAME authenticated runtime inventory, not the human MCP or
+        // an owner browser. Slugs/UUIDs are structural locators only; no company
+        // names/content or execution policy is copied into the setup chat.
+        if(!result?.structuredContent||typeof result.structuredContent!=='object')fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+        const companies=projectAssistantSetupCompanies(await client.companies(runtimeHookSignal()));
+        const status={...result.structuredContent,companies};
+        result={...result,structuredContent:status,content:[{type:'text',text:JSON.stringify(status)}]};
+      }
       if(request.operation==='list')result=assistantWorkerToolCatalogue(result);
       const code=result?.isError?assistantHealthFailure(result.structuredContent):null;
       if(code)await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code}).catch(()=>undefined);

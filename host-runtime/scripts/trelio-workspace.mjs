@@ -8131,9 +8131,13 @@ export const resolveTrustedPythonInvocation = async ({
     }
   }
 
-  throw new Error(
+  // This is a prerequisite failure BEFORE any provider process, not a failed
+  // login or an uncertain subprocess outcome. Preserve a closed code across
+  // the assistant source boundary without exporting searched paths/probe errors
+  // or weakening fixed-root discovery into PATH fallback.
+  throw Object.assign(new Error(
     "Не найден подходящий Python 3.10+ в стандартных каталогах вне workspace/temp/plugin cache. Проверьте версию и расположение установленного Python; установка для всех пользователей не обязательна.",
-  );
+  ), { code: "TRELIO_SKILL_PYTHON_REQUIRED" });
 };
 
 const PYTHON_ISOLATED_RUNTIME_BOOTSTRAP = [

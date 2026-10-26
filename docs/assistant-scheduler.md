@@ -544,6 +544,15 @@ chats or ACK messages. Owner device onboarding and production orchestration
 remain separate gates; no model tool or timer is added by this client.
 
 Local-first setup starts in the visible Desktop chat on the paired computer.
+`get_assistant_status` includes fresh company UUID/slug references from the SAME
+authenticated runtime inventory; it exports no names, content or execution policy.
+The local connection tool accepts `companyId:null`: one native company is chosen
+algorithmically; multiple/empty inventories return choices/unavailability without
+reserving an account. A failed inventory is an error, never an empty list. The
+model matches a supplied slug or asks only a real multi-company choice; it never
+asks the human for an internal UUID or opens an owner browser to discover one.
+The original request UUID remains bound by the native writer to its first scope,
+including after an uncertain preparation and a changed company inventory.
 `prepare_assistant_local_connection(companyId, skillId, clientRequestId)` reserves
 one NEW account UUID through the SAME fixed device writer and prepares its empty
 entry through the SAME signed loader/catalogue. It returns the exact existing

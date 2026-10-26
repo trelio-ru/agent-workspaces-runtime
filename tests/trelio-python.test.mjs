@@ -16,6 +16,19 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+test("missing trusted Python is a typed pre-launch prerequisite, without probe paths", async () => {
+  // A root runtime directory intentionally overlaps every fixed candidate on
+  // every OS. No actual interpreter/provider may be launched for this case.
+  await assert.rejects(resolveTrustedPythonInvocation({
+    runtimeDirectory: path.parse(process.cwd()).root,
+  }), error => {
+    assert.equal(error.code, "TRELIO_SKILL_PYTHON_REQUIRED");
+    assert.match(error.message, /установка для всех пользователей не обязательна/u);
+    assert.doesNotMatch(error.message, /[A-Z]:\\|\/Users\/|\/home\//u);
+    return true;
+  });
+});
+
 test("Windows Python discovery includes standard per-user installations with stale PATH", () => {
   const userRoot = "C:\\Users\\Owner\\AppData\\Local\\Programs\\Python";
   const candidates = buildPythonInvocationCandidates({

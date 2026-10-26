@@ -13,6 +13,18 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
+const {rethrowAssistantSourceError}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+
+test('source setup preserves the SAME actual Python prerequisite, without private cause or retry',async()=>{
+  const error=await engine.resolveTrustedPythonInvocation({runtimeDirectory:path.parse(process.cwd()).root}).catch(error=>error);
+  assert.equal(error.code,'TRELIO_SKILL_PYTHON_REQUIRED');
+  error.message='PRIVATE_PROBE_PATH';error.cause={path:'PRIVATE_PROBE_PATH'};
+  assert.throws(()=>rethrowAssistantSourceError(error,{setup:true}),projected=>{
+    assert.equal(projected.code,'TRELIO_SKILL_PYTHON_REQUIRED');
+    assert.doesNotMatch(JSON.stringify(projected)+projected.message,/PRIVATE_PROBE_PATH/);
+    return true;
+  });
+});
 const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
@@ -254,10 +266,27 @@ test('native owner setup uses the same signed loader/catalogue, has atomic creat
   setupFixture={...source(),state:'available',interactiveSetupAllowed:true};
   const clientRequestId=randomUUID();let reservations=0;
   client.prepareLocalConnection=async input=>{reservations++;assert.deepEqual(input,{companyId,skillId:scope.skillId,clientRequestId});return setupFixture;};
-  const local=()=>prepareAssistantLocalConnection({identity,host,store,client,companyId,skillId:scope.skillId,clientRequestId});
+  const local=(selected=companyId)=>prepareAssistantLocalConnection({identity,host,store,client,companyId:selected,skillId:scope.skillId,clientRequestId});
   const connected=await local();assert.equal(connected.backgroundEnabled,false);assert.equal(connected.loginVerified,false);
   assert.deepEqual(connected.nextAction,{tool:'configure_assistant_telegram_source',arguments:{companyId,sourceId:setupFixture.id}});
   assert.equal((await local()).replayed,true);assert.equal(reservations,2);
+  client.companies=async()=>[{companyId,companySlug:'native-company',privateCanary:'PRIVATE_COMPANY_CONTENT'}];
+  assert.equal((await local(null)).companyId,companyId,'the genuine sole company is selected without asking for its UUID');
+  assert.equal(reservations,3);
+  const otherCompanyId=randomUUID(),beforeChoices=await catalogue.list();
+  client.companies=async()=>[{companyId,companySlug:'first',privateCanary:'PRIVATE_COMPANY_CONTENT'},
+    {companyId:otherCompanyId,companySlug:'second',encryptionState:'PRIVATE_MODE'}];
+  const choices=await local(null);
+  assert.equal(choices.state,'company_selection_required');
+  assert.deepEqual(choices.companies,[{companyId,companySlug:'first'},{companyId:otherCompanyId,companySlug:'second'}]);
+  assert.ok(!JSON.stringify(choices).includes('PRIVATE'));
+  client.companies=async()=>[];assert.equal((await local(null)).state,'company_unavailable');
+  client.companies=async()=>[{companyId},{companyId}];
+  await assert.rejects(local(null),error=>error.code==='ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  client.companies=async()=>{throw Object.assign(new Error('PRIVATE network failure'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});};
+  await assert.rejects(local(null),error=>error.code==='ASSISTANT_SOURCE_UNAVAILABLE');
+  assert.equal(reservations,3,'ambiguous, empty, malformed and failed inventories cannot reserve an account');
+  assert.deepEqual(await catalogue.list(),beforeChoices,'company discovery cannot change the shared account catalogue');
   assert.equal(await fs.readFile(path.join(directory,'native-calls'),'utf8'),calls,'local-first preparation still cannot launch/import/login');
   const stable=await catalogue.list();
   setupFixture=source();let phases=0;

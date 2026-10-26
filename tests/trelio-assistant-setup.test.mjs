@@ -1625,10 +1625,34 @@ test('local connection is taskless, validates before private I/O and reuses the 
       return {sourceId,state:'prepared',backgroundEnabled:false,loginVerified:false};}};
   const value=await executeAssistantRuntimeRequest(request,dependencies);
   assert.equal(value.structuredContent.backgroundEnabled,false);assert.equal(prepares,1);
+  assert.equal((await executeAssistantRuntimeRequest({...request,arguments:{...request.arguments,companyId:null}},dependencies))
+    .structuredContent.backgroundEnabled,false,'null chooses discovery in the current worker, not a browser or human alias');
+  assert.equal(prepares,2);
   active={passId:randomUUID()};
   assert.equal((await executeAssistantRuntimeRequest(request,dependencies)).structuredContent.code,'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');
-  assert.equal(prepares,1,'an active task cannot create a local setup reservation');
+  assert.equal(prepares,2,'an active task cannot create a local setup reservation');
   const before=contexts;
   await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:{...request.arguments,localAccountId:randomUUID()}},dependencies),/ASSISTANT_SETUP_INVALID_INPUT/);
   assert.equal(contexts,before);
+});
+
+test('status returns native company locators without exposing policy/content or hiding a failed inventory',async()=>{
+  const identity={origin:'https://company-discovery.test',assistantId:randomUUID(),deviceId:randomUUID()},companyId=randomUUID();
+  const native={structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,businessReady:true},content:[]};
+  let rows=[{companyId,companySlug:'native-company',memberId:randomUUID(),execution:{privateCanary:'PRIVATE_POLICY'},name:'PRIVATE_NAME'}],reads=0,result=native;
+  const client={identity,readHealth:async()=>({code:'ready',revision:0,compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
+    reportHealth:async()=>{},companies:async()=>{reads++;if(rows instanceof Error)throw rows;return rows;}};
+  const options={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.20.1'}),context:async action=>action(client,{},{}),
+    proxyFor:async()=>({callTool:async(name,args)=>{assert.equal(name,'get_assistant_status');assert.deepEqual(args,{});return result;}})};
+  const request={operation:'call',name:'get_assistant_status',arguments:{}};
+  const actual=await executeAssistantRuntimeRequest(request,options);
+  assert.deepEqual(actual.structuredContent.companies,[{companyId,companySlug:'native-company'}]);
+  assert.deepEqual(JSON.parse(actual.content[0].text),actual.structuredContent);
+  assert.ok(!JSON.stringify(actual).includes('PRIVATE'));assert.equal(native.structuredContent.companies,undefined);
+  rows=Object.assign(new Error('PRIVATE inventory failure'),{code:'ASSISTANT_SOURCE_ACCESS_DENIED'});
+  await assert.rejects(executeAssistantRuntimeRequest(request,options),error=>error.code==='ASSISTANT_SOURCE_ACCESS_DENIED');
+  rows=[];assert.deepEqual((await executeAssistantRuntimeRequest(request,options)).structuredContent.companies,[]);
+  result={isError:true,structuredContent:{code:'ASSISTANT_DEVICE_REQUIRED'},content:[]};const before=reads;
+  assert.deepEqual(await executeAssistantRuntimeRequest(request,options),result);
+  assert.equal(reads,before,'native denial performs no additional discovery');
 });

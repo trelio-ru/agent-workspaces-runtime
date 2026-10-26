@@ -185,6 +185,13 @@ Python runtime требует Python 3.10+ и использует фиксир�
 права администратора для этого не требуются. Нестандартные директории, venv
 и WindowsApps aliases не добавляются автоматически.
 
+Если подходящего интерпретатора нет, общий resolver возвращает
+`TRELIO_SKILL_PYTHON_REQUIRED` до запуска provider. Assistant setup сохраняет
+этот code вместо общего `ASSISTANT_SOURCE_SETUP_UNAVAILABLE`: установите
+официальный Python в стандартный каталог текущего Windows-пользователя и
+повторно проверьте prerequisite. Это не повод перепривязывать аккаунт, менять
+PATH/права или повторять неизвестный результат входа.
+
 Profile текущей OS identity определяется через `os.userInfo()`, без выбора
 пользователя из окружения навыка. Canonical executable не может находиться в
 workspace, temp или plugin cache; user installation не может перенаправляться

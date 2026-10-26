@@ -69,7 +69,7 @@ publication tooling также остаются вне этого публичн
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.
 
-- Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login.
+- Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login. Local setup/status resolve native company UUID/slug references; a sole company is selected in code, without browser/UUID questions. See the local-first scheduler contract.
   Public signed human-input setup also selects the bounded setup view without
   pending device consent, including encrypted task instructions/execution reads.
   Test task discovery → existing list change → exact
@@ -446,7 +446,8 @@ publication tooling также остаются вне этого публичн
   проверяется Windows job по [контракту](docs/agent-workspace-runtime.md#browser-bootstrap).
 - Python discovery учитывает стандартную per-user установку Windows без
   ambient PATH, сохраняя canonical-path проверки и isolated startup. Не требуй
-  all-users reinstall из-за отсутствия PATH; контракт и Windows fixture –
+  all-users reinstall из-за отсутствия PATH; missing prerequisite сохраняет
+  `TRELIO_SKILL_PYTHON_REQUIRED` до provider launch. Контракт и Windows fixture –
   [README](README.md#поиск-python-для-agent-skills).
 - Encrypted mirror – восстановимый кэш: текущий снимок, один ограниченный
   предыдущий и короткий compatibility grace. Startup cleanup охватывает старые

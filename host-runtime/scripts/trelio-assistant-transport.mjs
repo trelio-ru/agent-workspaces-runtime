@@ -3838,6 +3838,7 @@ export const rethrowAssistantSourceError=(error,{signal,setup=false}={})=>{
   if(error instanceof AssistantTransportError)throw error;
   const code=error?.code;
   if(SOURCE_BACKEND_ERROR_CODES.includes(code) || PROCESS_DIAGNOSTIC_CODES.includes(code)
+    || code==='TRELIO_SKILL_PYTHON_REQUIRED'
     || setup&&ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(code))fail(code);
   if(['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ACCOUNT_SETUP_REQUIRED','ACCOUNT_SELECTION_REQUIRED'].includes(code))fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
   fail(signal?.aborted?'ASSISTANT_SOURCE_DEADLINE':setup?'ASSISTANT_SOURCE_SETUP_UNAVAILABLE':'ASSISTANT_SOURCE_UNAVAILABLE');
@@ -4491,14 +4492,37 @@ export const withAssistantSourcePackage = async ({identity,host,store,scope,sour
   finally{clearTimeout(timer);profile?.close();}
 };
 
-/** Owner-authorized empty account preparation, not provider onboarding or a
- * second account engine. The common catalogue commits metadata, binding and
- * an exact native-intent receipt atomically, so a lost response can be read
- * back without adopting an unrelated account or resetting a provider session. */
+/** Project only native company locators, never names, rules, encryption state,
+ * execution settings or model-authored references. Discovery is not authority:
+ * the existing writer still rechecks both principals and exact request scope. */
+export const projectAssistantSetupCompanies = rows => {
+  if(!Array.isArray(rows)||rows.length>256)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  const seen=new Set();
+  return Object.freeze(rows.map(row=>{
+    if(!object(row)||!UUID.test(row.companyId??'')||seen.has(row.companyId)
+      ||row.companySlug!==undefined&&(typeof row.companySlug!=='string'||!row.companySlug.length
+        ||row.companySlug.length>120||/[\x00-\x20\x7f]/u.test(row.companySlug)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    seen.add(row.companyId);
+    return Object.freeze({companyId:row.companyId,...(row.companySlug===undefined?{}:{companySlug:row.companySlug})});
+  }));
+};
+
 export const prepareAssistantLocalConnection = async ({identity,host,store,client,companyId,skillId,clientRequestId,signal}) => {
-  companyId=id(companyId);clientRequestId=id(clientRequestId);
+  companyId=companyId===null?null:id(companyId);clientRequestId=id(clientRequestId);
   if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(skillId)||!identity||!client
     ||['origin','assistantId','deviceId'].some(key=>client.identity?.[key]!==identity[key]))fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+  if(companyId===null){
+    if(typeof client.companies!=='function')fail('ASSISTANT_SOURCE_BINDING_CHANGED');
+    const companies=projectAssistantSetupCompanies(await client.companies(signal));
+    // The unambiguous choice belongs to code. Multiple/empty inventories never
+    // reserve an account. Transport failure cannot masquerade as an empty list.
+    if(companies.length!==1)return Object.freeze({state:companies.length?'company_selection_required':'company_unavailable',
+      companies,skillId,clientRequestId,backgroundEnabled:false,loginVerified:false});
+    companyId=companies[0].companyId;
+    // Native creationRequestId is unique per assistant and binds the original
+    // company too: a changed inventory after a lost response cannot redirect an
+    // existing intent. The SAME writer returns its exact receipt or a conflict.
+  }
   const source=await client.prepareLocalConnection({companyId,skillId,clientRequestId},signal);
   // Only the native-generated UUID may enter the existing account engine.
   // Preparation has an exact atomic catalogue receipt; it never launches a
@@ -4510,6 +4534,8 @@ export const prepareAssistantLocalConnection = async ({identity,host,store,clien
       arguments:{companyId,sourceId:source.id}}});
 };
 
+/** Owner-authorized empty account preparation through the SAME catalogue and
+ * atomic intent receipt. A lost response never adopts or resets a session. */
 export const prepareAssistantSourceAccount = async ({identity,host,store,client,companyId,sourceId,signal}) => {
   companyId=id(companyId);sourceId=id(sourceId);
   if(!identity || !client || typeof client.sourceAccounts!=='function'
