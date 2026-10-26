@@ -631,7 +631,7 @@ export const projectAssistantBackgroundResult = value => {
  */
 export const runAssistantWindowsBackgroundNative = (plan, { environment = process.env,
   spawnProcess = spawn, timeoutMs = 40_000, signal,
-  script = ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, project = null } = {}) => new Promise((resolve, reject) => {
+  script = ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, project = null, nativeCommand = null } = {}) => new Promise((resolve, reject) => {
   const root = environment.SystemRoot ?? environment.SYSTEMROOT;
   if (!windowsPath(root) || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 40_000) {
     reject(Object.assign(new Error(), { code: 'ASSISTANT_BACKGROUND_UNAVAILABLE' })); return;
@@ -660,8 +660,8 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
       encoded=Buffer.from(bootstrap,'utf16le').toString('base64');
     }
     if(encoded.length>24_000)throw new Error();
-    child = spawnProcess(path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+    child = spawnProcess(nativeCommand?.executable??path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      nativeCommand?.args??['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
       { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
         env: Object.fromEntries(['SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA']
           .filter(key => typeof environment[key] === 'string').map(key => [key, environment[key]])) });
@@ -744,7 +744,8 @@ export const startAssistantWindowsConsoleIcon = async ({platform=process.platfor
 
 /** Fixed public-metadata Desktop control on this dedicated Windows user. No
  * arbitrary process/window selector, executable, script or activation URI is
- * accepted from tools. WM_CLOSE is graceful: there is no TerminateProcess,
+ * accepted from tools. Native Restart Manager requests a normal application exit:
+ * closing an Electron window alone may only hide it to the system tray. No TerminateProcess,
  * taskkill, elevation, autologin, UI input, trust edit or ChatGPT login here.
  * A refused/hung close leaves the process alone. Native AppModel selection is
  * rechecked by the host before each operation, independently of this script. */
@@ -755,7 +756,7 @@ $PSModuleAutoLoadingPreference = 'None'
 try {
   Microsoft.PowerShell.Core\Import-Module -Name ([System.IO.Path]::Combine($PSHOME, 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
   $p = ConvertFrom-Json ([Console]::In.ReadToEnd())
-  if ($p.operation -notin @('inspect','close','start')) { throw 'invalid' }
+  if ($p.operation -notin @('inspect','start')) { throw 'invalid' }
   $manifestPath = [System.IO.Path]::Combine([string]$p.packageRoot, 'AppxManifest.xml')
   if (([System.IO.FileInfo]$manifestPath).Length -gt 1048576) { throw 'invalid' }
   $settings = [System.Xml.XmlReaderSettings]::new()
@@ -783,13 +784,6 @@ try {
     $generation = [string]$found[0].Id + ':' + [string]$found[0].StartTime.ToUniversalTime().Ticks
     [Console]::Out.Write((ConvertTo-Json -Compress @{schemaVersion=1;state='running';generation=$generation})); exit 0
   }
-  if ($p.operation -eq 'close') {
-    if ($found.Count -eq 0) { [Console]::Out.Write('{"schemaVersion":1,"state":"stopped","generation":null}'); exit 0 }
-    $generation = [string]$found[0].Id + ':' + [string]$found[0].StartTime.ToUniversalTime().Ticks
-    if ($generation -ne $p.generation) { throw 'changed' }
-    if (!$found[0].CloseMainWindow() -or !$found[0].WaitForExit(15000)) { throw 'blocked' }
-    [Console]::Out.Write('{"schemaVersion":1,"state":"stopped","generation":null}'); exit 0
-  }
   if ($found.Count -ne 0) { throw 'changed' }
   # ShellExecute activates the registered package application, not its protected
   # internal executable and not a URI/path provided by a model or notification.
@@ -802,14 +796,19 @@ try {
 `;
 
 export const runAssistantWindowsDesktop = async (operation, generation=null, {environment=process.env,
-  signal, readPackagePath, guard=async()=>{}, runNative=runAssistantWindowsBackgroundNative}={}) => {
+  signal, readPackagePath, guard=async()=>{}, runNative=runAssistantWindowsBackgroundNative, selectWorker}={}) => {
   if(!['inspect','close','start'].includes(operation) || generation!==null&&!/^[1-9]\d{0,9}:[0-9]{1,20}$/u.test(generation))
     fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+  if(operation==='close'&&generation===null)fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
   const read=readPackagePath??(await import('./trelio-codex-conversation.mjs')).readWindowsCodexPackagePath;
   const packageRoot=await read({signal});
   if(!packageRoot)fail('ASSISTANT_PLUGIN_DESKTOP_UNAVAILABLE');
+  const worker=operation==='close'?await (selectWorker??(async()=>{
+    const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
+  }))():null;
   await guard();
   return runNative({operation,packageRoot,generation},{environment,signal,script:ASSISTANT_WINDOWS_DESKTOP_SCRIPT,
+    ...(worker?{nativeCommand:{executable:worker.executable,args:['--codex-desktop-close',generation]}}:{}),
     project:value=>{
       if(!value||Object.keys(value).sort().join(',')!=='generation,schemaVersion,state'||value.schemaVersion!==1
         ||!['running','stopped','starting'].includes(value.state)

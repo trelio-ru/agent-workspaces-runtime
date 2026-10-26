@@ -119,6 +119,17 @@ test('native fixed current-user Codex AppModel query has no private protocol or 
   // API evidence, not a positive installed-CLI or account acceptance claim.
 });
 
+test('native Desktop shutdown rejects malformed or non-Codex generations without a private session',windows,async()=>{
+  const options=windowsPrivateWorkerOptions();
+  for(const generation of ['caller-path','0:1','1:0','1:18446744073709551616',`${process.pid}:1`]){
+    const result=await run(options.executable,['--codex-desktop-close',generation]);
+    assert.notEqual(result.code,0);assert.equal(result.stderr,'');
+    assert.deepEqual(JSON.parse(result.stdout),{schemaVersion:1,state:'unavailable',generation:null});
+  }
+  const extra=await run(options.executable,['--codex-desktop-close','1:1','extra']);
+  assert.notEqual(extra.code,0);assert.equal(extra.stdout,'');
+});
+
 // x64 Windows can execute x86 too. The separate hosted ARM64 gate exercises
 // the third published binary natively; packaging requires all three hashes.
 for (const arch of process.arch === 'x64' ? ['x64','ia32'] : [process.arch]) {

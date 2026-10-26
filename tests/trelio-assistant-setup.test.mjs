@@ -1854,10 +1854,16 @@ test('Desktop helper has only fixed registered package and graceful close, with 
   const result=await runAssistantWindowsDesktop('close','100:1000',{readPackagePath:async()=> 'C:\\Program Files\\WindowsApps\\OpenAI.Codex_1',
     runNative:async(plan,options)=>{operations.push(plan);assert.equal(options.script,ASSISTANT_WINDOWS_DESKTOP_SCRIPT);
       assert.throws(()=>options.project({schemaVersion:1,state:'running',generation:'private path'}));
+      assert.deepEqual(options.nativeCommand.args,['--codex-desktop-close','100:1000']);
       return options.project({schemaVersion:1,state:'stopped',generation:null});}});
   assert.equal(result.state,'stopped');assert.equal(operations.length,1);
   assert.doesNotMatch(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/Stop-Process|taskkill|TerminateProcess|trusted_hash|config\.toml|SendKeys/);
-  assert.match(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/CloseMainWindow/);assert.match(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/WaitForExit\(15000\)/);
+  assert.doesNotMatch(ASSISTANT_WINDOWS_DESKTOP_SCRIPT,/CloseMainWindow|WaitForExit/);
+  // No window-only fallback: generation-less/extra operations fail before any
+  // worker launch, and the existing idle guard still precedes native close.
+  await assert.rejects(runAssistantWindowsDesktop('close',null,{readPackagePath:()=>assert.fail('invalid generation before IO')}),/STATE_INVALID/);
+  await assert.rejects(runAssistantWindowsDesktop('close','100:1000',{readPackagePath:async()=> 'C:\\fixed',
+    guard:async()=>{throw Object.assign(Error(),{code:'SYNTHETIC_NOT_IDLE'});},runNative:()=>assert.fail('must not close')}),{code:'SYNTHETIC_NOT_IDLE'});
   await assert.rejects(runAssistantWindowsDesktop('kill'),/STATE_INVALID/);
 });
 

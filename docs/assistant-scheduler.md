@@ -1567,8 +1567,15 @@ repeat installation. Loaded old bytes remain preserved by the SAME retention
 watcher. Windows AppModel selects this user's exact Codex package; the fixed
 manifest GUI `App` is independent of its `CodexCoreCommandRunner` companion.
 The bounded public helper selects only this session's exact executable/window
-and process creation generation. Close uses `CloseMainWindow`/bounded exit wait,
-never force kill. Restart activates the registered package application; there
+and process creation generation. Closing an Electron window may merely hide it
+in the system tray. The SAME signed native worker instead requests a normal
+Windows Restart Manager shutdown of ONE registered Codex process. It independently
+checks current user/session, AppModel executable and exact creation time, keeps
+its original process handle, rejects any expanded resource list, and never sets
+the force flag or opens termination rights. Refusal/timeout retains the original
+uncertain phase; there is no window-only fallback, local compilation or retry of
+another generation. The existing enclosing deadline and idle fences remain.
+Restart activates the registered package application; there
 is no UI input, elevation, shell command from a model, login or trust mutation.
 A known same generation permits at most one further graceful-close attempt;
 a lost successful close/start is observed, never replayed on another process.

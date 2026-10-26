@@ -8,6 +8,8 @@
 #include <wincrypt.h>
 #include <tlhelp32.h>
 #include <appmodel.h>
+#include <restartmanager.h>
+#include <limits>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -437,13 +439,13 @@ int assistantConsoleIcon() {
 // console presentation. AppModel selects only this user's registered Codex
 // main package. Ambiguity during an update is unavailable, never "newest".
 // The returned path is data: this mode never launches, copies or changes it.
-int codexPackagePath() {
+std::wstring currentCodexPackagePath() {
   constexpr PCWSTR family = L"OpenAI.Codex_2p2nqsd0c76g0";
   UINT32 count = 0, length = 0;
   LONG status = FindPackagesByPackageFamily(family, PACKAGE_FILTER_HEAD,
     &count, nullptr, &length, nullptr, nullptr);
   if (status == ERROR_SUCCESS && count == 0) {
-    write("{\"schemaVersion\":1,\"state\":\"unavailable\"}\n"); return 0;
+    return {};
   }
   require(status == ERROR_INSUFFICIENT_BUFFER && count == 1 && length > 0 && length < 32768);
   std::vector<PWSTR> names(count);
@@ -458,12 +460,17 @@ int codexPackagePath() {
     && pathLength > 1 && pathLength < 32768);
   std::vector<WCHAR> packagePath(pathLength);
   require(GetPackagePathByFullName(names[0], &pathLength, packagePath.data()) == ERROR_SUCCESS);
-  int utf8Length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, packagePath.data(),
+  return std::wstring(packagePath.data());
+}
+int codexPackagePath() {
+  const auto packagePath = currentCodexPackagePath();
+  if (packagePath.empty()) { write("{\"schemaVersion\":1,\"state\":\"unavailable\"}\n"); return 0; }
+  int utf8Length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, packagePath.c_str(),
     -1, nullptr, 0, nullptr, nullptr);
   require(utf8Length > 1 && utf8Length < 16384);
   Text utf8;
   utf8.value.resize(static_cast<size_t>(utf8Length));
-  require(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, packagePath.data(), -1,
+  require(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, packagePath.c_str(), -1,
     utf8.value.data(), utf8Length, nullptr, nullptr) == utf8Length);
   Text encoded;
   encode(reinterpret_cast<const BYTE*>(utf8.value.data()), static_cast<DWORD>(utf8Length - 1), encoded);
@@ -471,8 +478,74 @@ int codexPackagePath() {
   write(encoded.value); write("\"}\n"); return 0;
 }
 
+// Closing a window can leave the Electron application in the system tray.
+// Restart Manager's NORMAL shutdown asks the exact application to exit, including
+// its normal cleanup; there is deliberately no force flag/TerminateProcess.
+// This public maintenance mode is separate from private ACL/DPAPI startup.
+int closeCodexDesktop(std::string_view generation) {
+  const auto colon = generation.find(':');
+  require(colon != std::string_view::npos && generation.find(':', colon + 1) == std::string_view::npos);
+  const auto number = [](std::string_view value) {
+    require(!value.empty() && value.size() <= 20 && value.front() != '0');
+    uint64_t result = 0;
+    for (const char c : value) {
+      require(c >= '0' && c <= '9' && result <= (std::numeric_limits<uint64_t>::max() - (c-'0')) / 10);
+      result = result * 10 + (c-'0');
+    }
+    return result;
+  };
+  const uint64_t pid = number(generation.substr(0,colon)), ticks = number(generation.substr(colon+1));
+  require(pid <= std::numeric_limits<DWORD>::max());
+  const auto packageRoot = currentCodexPackagePath(); require(!packageRoot.empty());
+  Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid)));
+  if (!process.value && GetLastError() == ERROR_INVALID_PARAMETER) {
+    write("{\"schemaVersion\":1,\"state\":\"stopped\",\"generation\":null}\n"); return 0;
+  }
+  require(process.value && samePresentationUser(process.value));
+  DWORD ownSession=0,targetSession=0;
+  require(ProcessIdToSessionId(GetCurrentProcessId(),&ownSession) && ProcessIdToSessionId(static_cast<DWORD>(pid),&targetSession)
+    && ownSession==targetSession);
+  FILETIME created{},exited{},kernel{},user{};
+  require(GetProcessTimes(process.value,&created,&exited,&kernel,&user));
+  ULARGE_INTEGER fileTime{}; fileTime.LowPart=created.dwLowDateTime; fileTime.HighPart=created.dwHighDateTime;
+  // .NET Process.StartTime uses the year-0001 epoch; Win32 FILETIME uses 1601.
+  require(ticks >= 504911232000000000ULL && fileTime.QuadPart == ticks-504911232000000000ULL);
+  wchar_t image[32768]{}; DWORD length=32768;
+  require(QueryFullProcessImageNameW(process.value,0,image,&length));
+  require(_wcsicmp(image,(packageRoot+L"\\app\\ChatGPT.exe").c_str())==0
+    || _wcsicmp(image,(packageRoot+L"\\app\\Codex.exe").c_str())==0);
+  // Load only the system DLL after all owner/session/package/generation checks.
+  // Register ONE process, not a file/service: unrelated applications cannot be
+  // pulled into the resource list. The original handle also excludes PID reuse.
+  HMODULE library=LoadLibraryExW(L"rstrtmgr.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);require(library);
+  try {
+    const auto start=presentationFunction<decltype(&RmStartSession)>(library,"RmStartSession");
+    const auto add=presentationFunction<decltype(&RmRegisterResources)>(library,"RmRegisterResources");
+    const auto list=presentationFunction<decltype(&RmGetList)>(library,"RmGetList");
+    const auto shutdown=presentationFunction<decltype(&RmShutdown)>(library,"RmShutdown");
+    const auto end=presentationFunction<decltype(&RmEndSession)>(library,"RmEndSession");
+    DWORD session=0;WCHAR key[CCH_RM_SESSION_KEY+1]{};require(start(&session,0,key)==ERROR_SUCCESS);
+    try {
+      RM_UNIQUE_PROCESS target{static_cast<DWORD>(pid),created};
+      require(add(session,0,nullptr,1,&target,0,nullptr)==ERROR_SUCCESS);
+      UINT needed=0,count=1;DWORD reboot=0;RM_PROCESS_INFO info{};
+      require(list(session,&needed,&count,&info,&reboot)==ERROR_SUCCESS && count==1 && reboot==0
+        && info.Process.dwProcessId==target.dwProcessId && CompareFileTime(&info.Process.ProcessStartTime,&created)==0);
+      require(shutdown(session,0,nullptr)==ERROR_SUCCESS); // NORMAL, never RmForceShutdown
+      require(WaitForSingleObject(process.value,15000)==WAIT_OBJECT_0);
+    } catch (...) { end(session);throw; }
+    require(end(session)==ERROR_SUCCESS);
+  } catch (...) { FreeLibrary(library);throw; }
+  FreeLibrary(library);
+  write("{\"schemaVersion\":1,\"state\":\"stopped\",\"generation\":null}\n");return 0;
+}
+
 int main(int argc, char* argv[]) {
   if (argc != 1) {
+    if (argc == 3 && std::string_view(argv[1]) == "--codex-desktop-close") {
+      try { return closeCodexDesktop(argv[2]); }
+      catch (...) { try { write("{\"schemaVersion\":1,\"state\":\"unavailable\",\"generation\":null}\n"); } catch (...) {} return 1; }
+    }
     if (argc != 2) return 1;
     if (std::string_view(argv[1]) == "--codex-package-path") {
       try { return codexPackagePath(); }

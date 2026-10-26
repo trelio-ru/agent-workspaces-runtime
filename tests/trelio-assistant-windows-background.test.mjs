@@ -135,6 +135,24 @@ test('Windows executes the large constant-code carrier and still reads the origi
     assert.deepEqual(await runAssistantWindowsBackgroundNative({operation:'status'},{script}),registered());
   });
 
+test('Desktop close reaches the same bounded native pipe once, without PowerShell or a window-only fallback',async()=>{
+  let selected=0,guarded=0,spawned=0;
+  const result=await runAssistantWindowsDesktop('close','100:639288200000000000',{
+    environment:{SystemRoot:'C:\\Windows'},readPackagePath:async()=> 'C:\\WindowsApps\\OpenAI.Codex_1',
+    selectWorker:async()=>{selected++;return {executable:'C:\\signed\\trelio-private-process.exe'};},
+    guard:async()=>{guarded++;},runNative:(plan,options)=>runAssistantWindowsBackgroundNative(plan,{...options,
+      spawnProcess:(executable,args,spawnOptions)=>{
+        spawned++;assert.equal(guarded,1);assert.equal(executable,'C:\\signed\\trelio-private-process.exe');
+        assert.deepEqual(args,['--codex-desktop-close','100:639288200000000000']);
+        assert.equal(spawnOptions.shell,false);assert.equal(spawnOptions.windowsHide,true);
+        const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};
+        queueMicrotask(()=>{child.stdout.end('{"schemaVersion":1,"state":"stopped","generation":null}');child.emit('close',0);});
+        return child;
+      }})});
+  assert.deepEqual(result,{schemaVersion:1,state:'stopped',generation:null});
+  assert.equal(selected,1);assert.equal(spawned,1);
+});
+
 test('abort, timeout and oversized native output terminate one attempt without retry or raw error', async () => {
   for (const mode of ['abort', 'timeout', 'overflow', 'native-error']) {
     const controller = new AbortController(); let calls = 0, killed = false;
