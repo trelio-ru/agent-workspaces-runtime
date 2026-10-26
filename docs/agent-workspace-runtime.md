@@ -581,6 +581,20 @@ Native id locators сохраняют прежний ABI. Явный `input[type
 смена URL/объекта либо перекрывающиеся id/role mappings дают отказ.
 Native object identity и роль перепроверяются до каждого setter.
 
+macOS AX lookup по-прежнему не входит во вложенные WebArea. Если после
+обычного bounded ожидания заданный control отсутствует в основном документе,
+а уже прочитанный обход содержит видимую границу вложенного документа,
+helper возвращает private diagnostic `nested_document_unsupported`.
+Bridge сообщает, что поля не найдены в основном документе и iframe пока не
+поддерживается; это не утверждение о расположении полей внутри iframe или о
+неверном пароле. URL, содержимое и controls вложенного документа не читаются.
+Отказ терминален до checkout, без нового native retry или Chrome fallback;
+серверный outcome ABI сохраняет `field_not_found`. Этот diagnostic не
+разрешает рекурсивный поиск, вход в shadow roots либо обход подтверждений банка.
+Top-level форма с посторонним iframe сохраняет прежний readiness grace,
+уникальность и object binding. Hidden/disabled, ambiguity и write failures
+сохраняют свои причины. После consume прежний запрет повтора сохраняется.
+
 Только план с этим явным password locator расширяет discovery native клиента
 на работающий Google Chrome: macOS проверяет bundle `com.google.Chrome` и
 Apple team `EQHXZ8M8AV`, Windows – Authenticode `Google LLC` и product
@@ -605,6 +619,9 @@ password locator; общедоступные non-secret поля заполня�
 Проверки – production controller в synthetic SMTP DOM, native request/binding
 regressions, compilation macOS helper и настоящие UIA secure-edit fixtures
 в Windows CI. Fixtures содержат только искусственные canary credentials.
+macOS in-memory AX fixture компилирует production walk/resolver/readiness
+без изменений, проверяет непересечение границы WebArea и конкретный отказ;
+это проверка алгоритма, без утверждения о live-доступности полей BBVA.
 
 <a id="browser-bootstrap"></a>
 

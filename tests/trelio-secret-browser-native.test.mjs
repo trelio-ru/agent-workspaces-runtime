@@ -544,6 +544,66 @@ test("macOS native preflight distinguishes an unwritable field from an unpressab
   assert.match(source, /Stop\.failed\("submit_press_unavailable"\)/u);
   assert.match(source, /Stop\.failed\("field_value_unsettable"\)/u);
 });
+for (const mode of ["auto", "embedded"]) {
+  test("nested-document refusal explains the limit before checkout without retry/fallback: " + mode, async () => {
+    const f = fixture({ status: "failed", reasonCode: "nested_document_unsupported" });
+    await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode }), (error) => {
+      // The private helper's capability detail must not expand the server's
+      // outcome schema or turn into the generic field-miss Chrome fallback.
+      assert.equal(error.reasonCode, "field_not_found");
+      assert.match(error.message, /iframe.*пока не поддерживается/u);
+      assert.match(error.message, /Секрет не запрошен этой попыткой/u);
+      assert.match(error.message, /не результат проверки пароля банком/u);
+      assert.match(error.message, /вручную в исходной вкладке/u);
+      return true;
+    });
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.requests[0].command, "prepare");
+    assert.equal(f.chromePreflights, 0);
+    assert.equal(f.chromeCalls, 0);
+    assert.ok(f.closed);
+    assert.doesNotMatch(JSON.stringify(f.requests), /CANARY/u);
+  });
+}
+
+test("macOS production resolver diagnoses excluded nested documents without traversing their controls", {
+  skip: process.platform !== "darwin", timeout: 90_000,
+}, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-native-ax-tree-test-"));
+  try {
+    const source = await fs.readFile(new URL("../host-runtime/scripts/native-secret-browser/SecretBrowser.swift", import.meta.url), "utf8");
+    const section = (start, end) => {
+      assert.equal(source.split(start).length, 2, "production start anchor must be unique");
+      assert.equal(source.split(end).length, 2, "production end anchor must be unique");
+      const body = source.slice(source.indexOf(start), source.indexOf(end));
+      assert.ok(body.length > 0);
+      return body;
+    };
+    // Compile the unchanged production traversal/resolver/readiness methods
+    // against an in-memory AX tree. No TCC grant, signed-app bypass or fixture
+    // mode enters the shipped helper. The separate native-helper test still
+    // compiles the complete source against actual macOS AX APIs.
+    const fixtureSource = await fs.readFile(new URL("./fixtures/native-secret-browser-macos.swift", import.meta.url), "utf8");
+    const code = fixtureSource.replace("// PRODUCTION_CORE", [
+      section("enum Stop: Error", "struct Request: Decodable"),
+      section("func matchesField(", "final class Session {"),
+      "final class Session {",
+      section("    static func controls(", "    init(_ request: Request) throws {"),
+      "}",
+    ].join("\n"));
+    assert.notEqual(code, fixtureSource);
+    const main = path.join(directory, "main.swift");
+    const executable = path.join(directory, "fixture");
+    await fs.writeFile(main, code);
+    const exec = promisify(execFile);
+    await exec("/usr/bin/swiftc", [main, "-o", executable], { timeout: 45_000 });
+    const result = await exec(executable, [], { timeout: 30_000 });
+    assert.equal(result.stdout.trim(), "Native AX nested-document diagnostics passed");
+    assert.equal(result.stderr, "");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
 test("native activation preflight is never repeated after a write failure", async () => {
   const f = fixture({ status: "failed", reasonCode: "field_write_failed" });
   f.args.context.browserSteps[0].activationSelector = "#login-mode";

@@ -433,6 +433,21 @@ export const prepareSecretBrowserSession = async ({
         channel = null;
         return chrome(ready.reasonCode);
       }
+      // This native-only diagnostic is deliberately terminal before checkout.
+      // Do not fold it into the generic field_not_found fallback decision above:
+      // a new profile cannot safely resolve an unbound iframe/shadow-root form.
+      // Keep the existing backend outcome ABI; the specific explanation belongs
+      // to this preparation error, never to a post-consume retry or audit text.
+      if (ready.status === "failed" && ready.reasonCode === "nested_document_unsupported") {
+        throw new SecretBrowserFillError(
+          "В основном документе не найдены заданные поля или элемент входа. "
+            + "На странице есть вложенный web-документ (iframe); защищённое заполнение внутри него пока не поддерживается. "
+            + "Секрет не запрошен этой попыткой, реквизиты не переданы. Это не результат проверки пароля банком. "
+            + "Выполните вход вручную в исходной вкладке, включая подтверждения банка. "
+            + "Не передавайте реквизиты в чат и не повторяйте выдачу в другой вкладке или через другой transport.",
+          "field_not_found",
+        );
+      }
       // Some embedded Chromium buttons are visible and clickable through the
       // browser tool but expose no AXPress action to the native helper. This
       // failure happens before secret delivery, so the caller may request a

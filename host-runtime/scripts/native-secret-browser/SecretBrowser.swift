@@ -199,9 +199,15 @@ final class Session {
     }
     static func controls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
         let nodes = try walk(document, stopAtWebArea: true)
+        // The traversal includes each iframe's WebArea boundary, but never its
+        // controls. Its presence explains a top-document miss without reading
+        // the child URL, identifiers or values, and is NOT authority to enter
+        // that document. A page can also have an unrelated iframe: report the
+        // observed limitation, not a claim that the requested fields are there.
+        let missingReason = missingControlReason(document, nodes)
         func find(_ field: Field, button: Bool) throws -> AXUIElement {
             let found = nodes.filter { matchesField($0, field) && belongs($0, to: document) }
-            guard !found.isEmpty else { throw Stop.failed("field_not_found") }
+            guard !found.isEmpty else { throw Stop.failed(missingReason) }
             guard found.count == 1 else { throw Stop.failed("field_ambiguous") }
             let target = found[0]
             guard (attribute(target, kAXEnabledAttribute) as? Bool) == true, visible(target, in: document) else {
@@ -229,9 +235,16 @@ final class Session {
         let button = try step.submitId.map { try find(Field(fieldKey: "", id: $0, passwordInput: nil), button: true) }
         return (fields, button)
     }
+    static func missingControlReason(_ document: AXUIElement, _ nodes: [AXUIElement]) -> String {
+        return nodes.contains {
+            !CFEqual($0, document) && text($0, kAXRoleAttribute) == "AXWebArea"
+                && visible($0, in: document)
+        } ? "nested_document_unsupported" : "field_not_found"
+    }
     static func preparedControls(_ document: AXUIElement, _ step: Step) throws -> ([AXUIElement], AXUIElement?) {
         let deadline = Date().addingTimeInterval(20)
         var activated = step.activationId == nil
+        var missingReason = "field_not_found"
         while Date() < deadline {
             do {
                 if !activated, let activationId = step.activationId {
@@ -243,6 +256,7 @@ final class Session {
                     guard let action = matches.first,
                           (attribute(action, kAXEnabledAttribute) as? Bool) == true,
                           visible(action, in: document) else {
+                        missingReason = matches.isEmpty ? missingControlReason(document, nodes) : "field_not_found"
                         Thread.sleep(forTimeInterval: 0.1)
                         continue
                     }
@@ -258,11 +272,15 @@ final class Session {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
                 return try controls(document, step)
-            } catch Stop.failed("field_not_found") {
+            } catch Stop.failed(let reason) where reason == "field_not_found" || reason == "nested_document_unsupported" {
+                // Preserve the ordinary readiness grace: an unrelated iframe
+                // must not make a still-loading top-level form fail early.
+                // Only the last observed miss explains the final refusal.
+                missingReason = reason
                 Thread.sleep(forTimeInterval: 0.1)
             }
         }
-        throw Stop.failed("field_not_found")
+        throw Stop.failed(missingReason)
     }
     init(_ request: Request) throws {
         lease = try NativeLease()
