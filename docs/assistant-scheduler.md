@@ -1682,6 +1682,18 @@ child HOME and requires an explicit end-of-flow sentinel. It removes inherited
 
 ### Encrypted Run and accepted material completion
 
+The common incremental writer must also read an existing v2 accepted base
+manifest on the second and later saves. Only the authenticated native storage
+capabilities select that manifest: the protected profile records its exact UUID
+in memory, bound to own Run/Workspace/base and current scope/epoch. GET/HEAD uses
+the existing file route and own Run header, with no query/body. Native resolves
+that exact current accepted manifest independently and rechecks live Run, task,
+pass and recipient before streaming. Content files, guessed IDs, stale bases,
+other Runs and revoked envelopes never inherit this admission. General company
+file reads retain their separate profile. The SAME manifest decryption and
+file-ID reuse algorithm runs unchanged; no extra key, cache, endpoint or model
+instruction replaces it.
+
 The SAME native lifecycle, shared Git and v2 encrypted upload/chain engines run
 under one exact `workspaceRun` profile. Only prepare/open/status/heartbeat,
 checkpoint/finish/pause and their reviewed native storage paths are admitted.

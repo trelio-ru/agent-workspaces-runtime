@@ -1060,6 +1060,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   const withCredential=async action=>action(await loadAssistantDeviceCredential({...identity,store}));
   if(!identity || !uuid.test(identity.assistantId??'') || !uuid.test(identity.deviceId??'')
     || !path.isAbsolute(lockDirectory??'') || !host || !client || !store) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+  let baseManifestSelection=null;
   let origin;try{origin=new URL(identity.origin);}catch{fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');}
   if(origin.protocol!=='https:' || origin.origin!==identity.origin || origin.username || origin.password) fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   const expectedIdentity=Object.freeze({schemaVersion:1,origin:identity.origin,assistantId:identity.assistantId,deviceId:identity.deviceId});
@@ -1422,6 +1423,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return inspection;
     },
     async prepareWorkspaceRun(){
+      baseManifestSelection=null;
       if(!ownRun)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
       lifecycle=null;lifecycleEncryption=null;inspectionPayloads=null;
       await assertLivePass();
@@ -1439,6 +1441,24 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       lifecycleEncryption=opened;inspectionPayloads=new Map();
       await assertLivePass();
       return {...opened,requestOrigin:routing.requestOrigin};
+    },
+    async observeEncryptedWorkspaceStorage(capabilities,metadata){
+      baseManifestSelection=null;
+      await assertLivePass();
+      const scope=lifecycleEncryption?.runtime.scope,projection=capabilities?.projection;
+      if(!lifecycle||!scope||metadata.runId!==ownRun.runId||metadata.workspaceId!==ownRun.workspaceId
+        ||capabilities.workspaceId!==ownRun.workspaceId||capabilities.baseHead!==metadata.baseHead)
+        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      if(!projection||projection.formatVersion!==2||capabilities.baseRevision.scopeId!==scope.id
+        ||capabilities.baseRevision.scopeEpoch!==scope.epoch)return;
+      const manifests=projection.files.filter(file=>file.id===projection.manifestFileId&&file.kind==='manifest');
+      if(projection.workspaceHead!==capabilities.baseHead||!uuid.test(projection.id??'')
+        ||!uuid.test(projection.manifestFileId??'')||manifests.length!==1)
+        fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+      // Only the exact native capability response, not an input UUID, opens
+      // this one immutable ciphertext read. Native repeats own Run/current
+      // base/manifest/recipient checks independently at the point of send.
+      baseManifestSelection=Object.freeze({fileId:projection.manifestFileId,baseHead:capabilities.baseHead});
     },
     async readWorkspaceJsonResponse(response){
       if(!lifecycleEncryption&&!companyReadEncryption)return response.json();
@@ -1914,7 +1934,10 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
             `/workspaces/${ownRun.workspaceId}/runs/${ownRun.runId}`,
             `/workspaces/${ownRun.workspaceId}/read-snapshot`,`/workspaces/${ownRun.workspaceId}/encrypted-bundle`].includes(suffix);
           const control=['/bridge-routing','/bridge-compatibility'].includes(suffix);
-          if(!runPath && !workspacePath && !control && suffix!=='/encryption/payloads'
+          const baseManifest=assistantWorkspaceEncryptedBaseManifestRoute(method,route.routePattern)
+            && baseManifestSelection && suffix===`/files/${baseManifestSelection.fileId}/encrypted-content`
+            && !url.search && options.body===undefined;
+          if(!runPath && !workspacePath && !control && !baseManifest && suffix!=='/encryption/payloads'
             || requestOrigin!==(control?identity.origin:lifecycle.requestOrigin)
             || !control && !lifecycleEncryption)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
           if(suffix==='/encryption/payloads'){
@@ -3679,11 +3702,18 @@ export const assistantWorkspaceEncryptedInspectionReadRoute = (method, route) =>
     "/bridge-compatibility", "/bridge-routing", "/workspaces/:workspaceId/read-snapshot",
     "/workspaces/:workspaceId/encrypted-bundle",
 ].some(path => route === ASSISTANT_WORKSPACE_PREFIX + path);
+/** The common incremental writer reads exactly its native-selected accepted
+ * base manifest. A Run header selects this narrower cell; the server still
+ * resolves the manifest/current base/own Run and recipient before any stream.
+ * The same URL without that header retains the independent company-read ACL. */
+export const assistantWorkspaceEncryptedBaseManifestRoute = (method, route) => (method === "GET" || method === "HEAD")
+    && route === ASSISTANT_WORKSPACE_PREFIX + "/files/:fileId/encrypted-content";
 /** Reviewed Run lifecycle of the SAME engine. This classification does not
  * grant a key, allow server Git/plaintext, admit general fields/proposals or
  * replace current own-Run/recipient/lease/CAS/native writer authorization. */
 export const assistantWorkspaceEncryptedLifecycleRoute = (method, route) => {
-    if (assistantWorkspaceEncryptedInspectionReadRoute(method, route))
+    if (assistantWorkspaceEncryptedInspectionReadRoute(method, route)
+        || assistantWorkspaceEncryptedBaseManifestRoute(method, route))
         return true;
     const suffix = route.startsWith(ASSISTANT_WORKSPACE_PREFIX + "/")
         ? route.slice(ASSISTANT_WORKSPACE_PREFIX.length) : "";

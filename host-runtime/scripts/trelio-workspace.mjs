@@ -15817,6 +15817,10 @@ const resolveEncryptedWorkspaceStorage = async ({ metadata, origin, token, compa
   const capabilities = await withEncryptedWorkspaceRequestRetry(async () => validateEncryptedWorkspaceCapabilities(
     await (await request(resolveCompanyEncryptionRequestOrigin(origin, companyEncryption), token,
       `/api/agent-workspaces/runs/${metadata.runId}/encrypted-storage`)).json(), metadata));
+  // Only the authenticated, validated native response selects a reusable base
+  // manifest for a managed writer. This private hook grants no generic file
+  // route and does not alter human parsing, crypto or deduplication semantics.
+  await currentWorkspaceExecutionProfile()?.observeEncryptedWorkspaceStorage?.(capabilities, metadata);
   companyEncryption.storageCapabilitiesKey = cacheKey;
   companyEncryption.storageCapabilities = capabilities;
   return capabilities;

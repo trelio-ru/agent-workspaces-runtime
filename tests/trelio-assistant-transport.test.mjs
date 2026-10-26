@@ -2102,6 +2102,25 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     // authority payloads and real Git/container materializer. A second profile
     // grants no inspection/history shortcuts and never borrows human auth.
     mode='valid';
+    // This is the SECOND encrypted save: seed the accepted base's real v2
+    // manifest, not a projection:null fixture that never exercises dedup reads.
+    const baseProjectionId=randomUUID(),baseManifestId=randomUUID();
+    const baseFiles=await Promise.all(['result.md','WORKSPACE_CONTEXT.md'].map(async filePath=>{
+      const body=await fs.readFile(path.join(root,filePath));
+      return {id:randomUUID(),path:filePath,name:filePath,contentType:'text/plain; charset=utf-8',sizeBytes:body.length,plaintextSha256:digest(body)};
+    }));
+    const baseManifest={schemaVersion:1,kind:'agent-workspace-browser-manifest',projectionId:baseProjectionId,
+      workspaceId:descriptor.workspaceId,workspaceHead:head,files:baseFiles};
+    const manifestPlain=path.join(os.homedir(),'base-manifest.json'),manifestCipher=path.join(os.homedir(),'base-manifest.trelioe1');
+    await fs.writeFile(manifestPlain,canonicalJson(baseManifest));
+    await encryptFileToCompanyContainer({sourcePath:manifestPlain,destinationPath:manifestCipher,scopePublicEncryptionJwk:publicJwk,
+      originalName:'workspace-files.json',mimeType:'application/json',aad:{companyId:company.id,scopeId,scopeEpoch:1,
+        entityType:'agent_workspace_browser_manifest',entityId:baseManifestId,entityRevision:1,schemaVersion:1}});
+    const baseManifestBytes=await fs.readFile(manifestCipher);
+    const baseProjection={id:baseProjectionId,formatVersion:2,workspaceHead:head,manifestFileId:baseManifestId,fileCount:baseFiles.length,
+      files:[{id:baseManifestId,kind:'manifest',sizeBytes:baseManifestBytes.length,ciphertextSha256:digest(baseManifestBytes)},
+        ...baseFiles.map(file=>({id:file.id,kind:'content',sizeBytes:file.sizeBytes+1024,ciphertextSha256:'b'.repeat(64)}))]};
+    let baseManifestReads=0,reusedFileCount=0;
     const runId=randomUUID(),runIdentity={workspaceId:descriptor.workspaceId,runId};
     let nativeRun={id:runId,workspaceId:descriptor.workspaceId,status:'running',baseHead:head,draftHead:null,candidateHead:null,
       leaseId:randomUUID(),fencingToken:1,leaseExpiresAt:new Date(Date.now()+300_000).toISOString(),
@@ -2113,6 +2132,12 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null;
     globalThis.fetch=async(url,options)=>{
       const parsed=new URL(url),base='/api/digital-assistants/runtime/workspace';
+      if(parsed.pathname===`${base}/files/${baseManifestId}/encrypted-content`){
+        assert.equal(parsed.origin,descriptor.requestOrigin);assert.equal(parsed.search,'');
+        assert.equal(options.headers.get('x-trelio-assistant-workspace-run'),runId);
+        assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),cryptoDeviceId);
+        baseManifestReads++;return new Response(baseManifestBytes);
+      }
       const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
       const scoped=context=>json({schemaVersion:1,context,encryptedPayloads:storedPayloads});
       if(parsed.pathname===`${base}/workspaces/${descriptor.workspaceId}`)
@@ -2138,7 +2163,7 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
       if(parsed.pathname===storage)return json({protocolVersion:2,workspaceId:descriptor.workspaceId,baseHead:head,
         limits:{partSizeBytes:8*1024*1024,maxFileBytes:24*1024*1024,maxFiles:10000,maxManifestBytes:8*1024*1024,
           maxContainerBytes:4*1024**4,maxChainLength:128,legacyBundleBytes:100*1024*1024},
-        baseRevision:{id:revisionId,head,chainLength:1,scopeId,scopeEpoch:1},projection:null});
+        baseRevision:{id:revisionId,head,chainLength:1,scopeId,scopeEpoch:1},projection:baseProjection});
       if(parsed.pathname===storage+'/publication')return json(null);
       if(parsed.pathname===storage+'/uploads'){
         const input=JSON.parse(options.body);assert.equal(input.writerDeviceId,cryptoDeviceId);
@@ -2162,6 +2187,8 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
       }
       if(parsed.pathname===storage+'/projection'){
         const input=JSON.parse(options.body);assert.ok(uploads.get(input.manifestFileId)?.state==='ready');
+        reusedFileCount=input.files.filter(file=>baseFiles.some(original=>original.id===file.id)).length;
+        assert.ok(input.files.some(file=>file.id===baseFiles[0].id),'unchanged result.md reuses its exact prior random ID');
         return json({projectionId:input.projectionId,workspaceHead:input.workspaceHead,fileCount:input.files.length-1,state:'staging'});
       }
       if(parsed.pathname===`${base}/runs/${runId}/encrypted-derived-artifacts`){
@@ -2257,6 +2284,15 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     catch(error){throw new Error((deniedFixtureRoute??'fixture-native')+' '+error.code);}
 
     assert.equal(finished.operation,'finish');assert.equal(nativeRun.status,'accepted');assert.equal(acceptedPublications,1);
+    assert.equal(baseManifestReads,1,'a second save reads the native selected encrypted base manifest once');
+    assert.ok(reusedFileCount>=1);
+    await common.withWorkspaceExecutionProfile(writerProfile,async()=>{
+      for(const pathname of [`/api/agent-workspaces/files/${randomUUID()}/encrypted-content`,
+        `/api/agent-workspaces/files/${baseFiles[0].id}/encrypted-content`,
+        `/api/agent-workspaces/files/${baseManifestId}/encrypted-content?head=${head}`])
+        await assert.rejects(common.request(descriptor.requestOrigin,await writerProfile.requireToken(f.identity.origin),pathname),
+          {code:'ASSISTANT_WORKSPACE_ORIGIN_DENIED'});
+    });
     assert.ok(acceptedRevisionBytes?.subarray(0,8).equals(Buffer.from('TRELIOE1')));
     assert.equal(acceptedRevisionBytes.includes(Buffer.from('SYNTHETIC_ENCRYPTED_DELIVERABLE')),false);
     const acceptedCipher=path.join(os.homedir(),'accepted-result.trelioe1'),acceptedBundle=path.join(os.homedir(),'accepted-result.bundle');
