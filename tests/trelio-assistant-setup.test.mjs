@@ -1542,6 +1542,10 @@ test('Workspace lifetime does not inherit a setup timer or extend an enclosing h
   assert.equal(assistantProductionContextSignal({workspaceRun:run},timer),undefined);
   assert.equal(assistantProductionContextSignal({workspaceRun:run,signal:caller.signal},timer),caller.signal);
   assert.deepEqual(calls,[45_000,660_000],'the bridge reuses the human private-session lifetime, not another enlarged timer');
+  const maintenance=assistantProductionContextSignal({pluginMaintenance:true,signal:caller.signal},timer);
+  assert.deepEqual(calls,[45_000,660_000,150_000],'only the closed technical maintenance profile owns its bounded update budget');
+  assert.throws(()=>assistantProductionContextSignal({pluginMaintenance:true,interactiveSourceSetup:true},timer),/INVALID/);
+  assert.throws(()=>assistantProductionContextSignal({pluginMaintenance:true,workspaceRun:run},timer),/PROFILE_DENIED/);
   for(const bad of [false,{},[],{...run,extra:true},{...run,runId:'invalid'}])
     assert.throws(()=>assistantProductionContextSignal({workspaceRun:bad},timer),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
   assert.throws(()=>assistantProductionContextSignal({workspaceRun:run,interactiveSourceSetup:true},timer),
@@ -1551,6 +1555,7 @@ test('Workspace lifetime does not inherit a setup timer or extend an enclosing h
   await withPrivateProcessSession(async()=>{
     await withPrivateProcessSession(async()=>{
       assert.equal(runtimeHookSignal(),caller.signal);caller.abort();
+      assert.equal(maintenance.aborted,true,'maintenance cannot extend the original enclosing signal');
       assert.throws(()=>assertRuntimeHookBudget(),{code:'TRELIO_RUNTIME_HOOK_FAILED'});
     },assistantProductionContextSignal({workspaceRun:run},timer));
   },caller.signal);
@@ -1747,6 +1752,15 @@ test('a legacy parent bootstraps the current registered implementation without a
   f.options.activateHost=async()=>({state:'handoff'});
   assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
   assert.equal(f.state().targetVersion,'0.1.3');assert.equal(f.state().stage,'retargeting');assert.deepEqual(f.effects,[]);
+});
+
+test('a positively busy setup/coordinator defers maintenance without reporting a false update failure',async()=>{
+  const {runProductionAssistantPluginMaintenance}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  for(const code of ['TRELIO_RUNTIME_LOCK_TIMEOUT','ASSISTANT_COORDINATOR_BUSY']){
+    const runtime={coordinator:{maintainPluginAtIdleBoundary:async()=>{throw Object.assign(new Error(),{code});}}};
+    assert.deepEqual(await runProductionAssistantPluginMaintenance(runtime,{platform:'win32',context:async()=>true}),
+      {state:'deferred',blockBusiness:true});
+  }
 });
 
 test('supervisor generations use the protected identity namespace without granting hook or task authority',async()=>{

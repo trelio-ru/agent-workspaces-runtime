@@ -1519,6 +1519,9 @@ closes a human's setup chat. Windows first uses the SAME SQLite coordinator
 lease, refuses every retained pass/incomplete delivery (including uncertainty),
 renews the ordinary short lease and checks it before effects. The SAME setup
 mutex excludes re-pairing and interactive source login during maintenance.
+The closed maintenance profile has one 150-second private-process budget and
+preserves every enclosing cancellation/deadline. Positive coordinator/setup
+lock contention quietly defers this tick, without an update-failure notice.
 The current protected identity/policy/pass is rechecked, including immediately
 before native process launch. No task/chat/receipt/queue is removed or migrated.
 

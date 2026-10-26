@@ -873,18 +873,20 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
  * every HTTP request still rechecks the genuine pass, own Run and native lease.
  * Killing that private session at 45s discarded healthy saves near publication.
  * This internal selector is not a model deadline/grant: only the closed own-Run
- * cell can omit the setup timer, and a caller/outer hook signal always survives.
+ * cell can omit the setup timer. Technical plugin maintenance has its own fixed
+ * bounded budget; neither profile can extend a caller/outer hook signal.
  */
-export const assistantProductionContextSignal = ({signal,interactiveSourceSetup=false,workspaceRun=null}={},
+export const assistantProductionContextSignal = ({signal,interactiveSourceSetup=false,workspaceRun=null,pluginMaintenance=false}={},
   timeout=milliseconds=>AbortSignal.timeout(milliseconds)) => {
+  if(typeof pluginMaintenance!=='boolean'||pluginMaintenance&&interactiveSourceSetup)fail('ASSISTANT_REQUEST_INVALID');
   if(workspaceRun!==null){
-    if(interactiveSourceSetup || !workspaceRun || Object.getPrototypeOf(workspaceRun)!==Object.prototype
+    if(pluginMaintenance || interactiveSourceSetup || !workspaceRun || Object.getPrototypeOf(workspaceRun)!==Object.prototype
       || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
       || Object.values(workspaceRun).some(value=>typeof value!=='string'||!new RegExp(UUID,'u').test(value)))
       fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
     return signal;
   }
-  const deadline=timeout(interactiveSourceSetup?11*60_000:45_000);
+  const deadline=timeout(pluginMaintenance?150_000:interactiveSourceSetup?11*60_000:45_000);
   return signal?AbortSignal.any([signal,deadline]):deadline;
 };
 
@@ -1189,7 +1191,8 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
           fail('ASSISTANT_MCP_RECONNECT_REQUIRED');
       },
     });
-  }),{signal}),signal).catch(error=>{
+  }),{signal,pluginMaintenance:true}),signal).catch(error=>{
+    if(['TRELIO_RUNTIME_LOCK_TIMEOUT','ASSISTANT_COORDINATOR_BUSY'].includes(error?.code))return {state:'deferred',blockBusiness:true};
     if(assistantHealthFailure(error))throw error;
     fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
   });
