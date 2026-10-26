@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
+import { gunzipSync } from 'node:zlib';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
   validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon,runAssistantWindowsDesktop } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
@@ -110,7 +111,11 @@ test('native helper uses constant code, JSON stdin, bounded closed output and no
     environment: { SystemRoot: 'C:\\Windows', USERPROFILE: 'C:\\Users\\Irina', PRIVATE_TOKEN: 'DO_NOT_COPY', PSModulePath: 'C:\\UntrustedModules' } });
   assert.deepEqual(result, registered());
   assert.equal(supplied.executable, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-  assert.equal(Buffer.from(supplied.args.at(-1), 'base64').toString('utf16le'), ASSISTANT_WINDOWS_BACKGROUND_SCRIPT);
+  const wire=Buffer.from(supplied.args.at(-1), 'base64').toString('utf16le');
+  const compressed=wire.match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/u);
+  assert.ok(compressed,'the real scheduler constant exceeds the Windows argv budget and must use the bounded memory carrier');
+  assert.equal(gunzipSync(Buffer.from(compressed[1],'base64')).toString('utf8'),ASSISTANT_WINDOWS_BACKGROUND_SCRIPT);
+  assert.ok(supplied.args.at(-1).length<=24_000,'the actual encoded command must fit CreateProcess with executable/flags');
   assert.equal(supplied.options.shell, false);
   assert.equal(supplied.options.env.PRIVATE_TOKEN, undefined);
   assert.equal(supplied.options.env.PSModulePath, undefined, 'the public helper never loads an inherited module catalogue');
@@ -123,6 +128,12 @@ test('native helper uses constant code, JSON stdin, bounded closed output and no
     assert.throws(() => projectAssistantBackgroundResult({ code }), error => error.code === code);
   }
 });
+
+test('Windows executes the large constant-code carrier and still reads the original JSON stdin exactly once',
+  {skip:process.platform!=='win32'},async()=>{
+    const script='# synthetic padding '+ 'x'.repeat(13_000)+`\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nif($p.operation -cne 'status'){exit 7}\n[Console]::Out.Write('${JSON.stringify(registered())}')`;
+    assert.deepEqual(await runAssistantWindowsBackgroundNative({operation:'status'},{script}),registered());
+  });
 
 test('abort, timeout and oversized native output terminate one attempt without retry or raw error', async () => {
   for (const mode of ['abort', 'timeout', 'overflow', 'native-error']) {

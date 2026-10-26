@@ -3,6 +3,7 @@
  * inside the common OS-backed store and fixed HTTPS transport. */
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { resolveHostRuntimeLoader } from './trelio-host-runtime-recovery.mjs';
 import { createAssistantPairingClient, createAssistantDeviceClient } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
@@ -628,8 +629,22 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
   if (signal?.aborted) return abort();
   signal?.addEventListener('abort', abort, { once: true });
   try {
+    // CreateProcess limits the entire Windows command line to 32,767 UTF-16
+    // characters. Encoding the reviewed scheduler helper as UTF-16/base64 can
+    // exceed that limit before PowerShell starts. Compress ONLY this host-owned
+    // constant code in memory; keep the original JSON stdin/closed projector,
+    // deadlines and single launch unchanged. No temp script or model code is
+    // introduced. The conservative wire bound leaves room for executable/flags.
+    if(typeof script!=='string'||!script.length||script.length>65_536)throw new Error();
+    let encoded=Buffer.from(script,'utf16le').toString('base64');
+    if(encoded.length>24_000){
+      const code=gzipSync(Buffer.from(script,'utf8')).toString('base64');
+      const bootstrap=`$s=[IO.MemoryStream]::new([Convert]::FromBase64String('${code}'));$g=[IO.Compression.GZipStream]::new($s,[IO.Compression.CompressionMode]::Decompress);$r=[IO.StreamReader]::new($g,[Text.Encoding]::UTF8);try{& ([scriptblock]::Create($r.ReadToEnd()))}finally{$r.Dispose();$g.Dispose();$s.Dispose()}`;
+      encoded=Buffer.from(bootstrap,'utf16le').toString('base64');
+    }
+    if(encoded.length>24_000)throw new Error();
     child = spawnProcess(path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
       { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
         env: Object.fromEntries(['SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA']
           .filter(key => typeof environment[key] === 'string').map(key => [key, environment[key]])) });

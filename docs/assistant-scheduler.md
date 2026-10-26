@@ -1051,6 +1051,10 @@ The constant helper emits only closed script/encoding/module/input/identity/
 scheduler/folder/lookup/result stage names on stderr. Production discards that pipe; the hosted fixture may
 print only the explicit enum to locate startup/EOF/COM timeouts. No OS value,
 task definition, account, path or exception is added to diagnostic output.
+Large host-owned constants use a bounded in-memory gzip carrier before UTF-16
+base64 encoding, keeping the actual command below the Windows CreateProcess
+limit. The original JSON stdin, one native invocation and deadlines are unchanged;
+no temporary script, model code or credential-bearing argument is introduced.
 
 The deterministic task belongs to the current Windows SID with least privilege
 and `InteractiveToken`. A single logon trigger waits 15 seconds; unlimited task
