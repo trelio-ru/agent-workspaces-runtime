@@ -745,6 +745,7 @@ export const runAssistantWindowsDesktop = async (operation, generation=null, {en
 export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,
   guard=async()=>{}}) => {
   let state=await readState();
+  let startedThisTick=false;
   const save=async patch=>{await guard();const next={...state,...patch};await writeState(state,next);state=next;};
   const recover=async()=>{
     await guard();
@@ -811,11 +812,16 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     if(state.stage==='starting'){
       const observed=await desktop('inspect');
       if(observed.state==='stopped'){
-        await save({stage:'verifying'});await guard();await desktop('start');
+        await save({stage:'verifying'});await guard();await desktop('start');startedThisTick=true;
       }else await save({stage:'verifying'});
     }
     if(['verifying','hook_review'].includes(state.stage)){
       const observed=await desktop('inspect');
+      // Shell activation acknowledges a request before Windows necessarily
+      // creates the GUI. A still-stopped immediate read is not evidence that
+      // this request failed. Let the next tick observe it before the one
+      // bounded recovery attempt; never activate the package twice in a tick.
+      if(observed.state==='stopped'&&startedThisTick)return {state:'activating',blockBusiness:true};
       if(observed.state==='stopped'&&state.restarts<2){
         await save({restarts:2});await guard();await desktop('start');return {state:'activating',blockBusiness:true};
       }

@@ -1695,6 +1695,22 @@ test('changed hooks wait durably for native human trust; approval resumes withou
   assert.deepEqual(f.effects,['inspect','probe']);assert.deepEqual(f.counts(),{upgrades:3,installs:1});
 });
 
+test('asynchronous Windows activation is observed on a later tick without a second launch in the same tick',async()=>{
+  const f=pluginUpdateFixture(),desktop=f.options.desktop;let launches=0;
+  f.options.desktop=async(operation,...args)=>{
+    if(operation==='start'){
+      launches++;assert.equal(f.state().stage,'verifying');f.generation(null);
+      return {state:'starting',generation:null};
+    }
+    return desktop(operation,...args);
+  };
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'activating',blockBusiness:true});
+  assert.equal(launches,1);assert.equal(f.state().restarts,1);assert.equal(f.state().failures,0);
+  f.generation('200:2000');
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.4'});
+  assert.equal(launches,1);assert.equal(f.counts().installs,1);
+});
+
 test('lost install reply reconciles the exact installed version after restart, with zero native installation replay',async()=>{
   const f=pluginUpdateFixture(),upgrade=f.options.upgrade;
   f.options.upgrade=async(...args)=>{await upgrade(...args);throw Error('synthetic lost install acknowledgement');};

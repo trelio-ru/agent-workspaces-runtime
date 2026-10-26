@@ -1528,6 +1528,8 @@ never force kill. Restart activates the registered package application; there
 is no UI input, elevation, shell command from a model, login or trust mutation.
 A known same generation permits at most one further graceful-close attempt;
 a lost successful close/start is observed, never replayed on another process.
+An asynchronously starting GUI is observed on the next tick; an immediate
+stopped read never causes a second activation in the same tick.
 
 After a new process generation, a fresh native App Server probes the effective
 trusted three-hook definition and the configured assistant MCP/setup tools.
