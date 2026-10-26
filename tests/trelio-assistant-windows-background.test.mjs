@@ -269,7 +269,8 @@ test('the signed worker brands only an isolated visible parent console and reads
         await fs.writeFile(fixture,`import fs from 'node:fs/promises';
           import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
           import {spawn} from 'node:child_process';
-          await fs.writeFile(${JSON.stringify(ready)},String(process.pid));
+          await fs.writeFile(${JSON.stringify(ready+'.staging')},String(process.pid));
+          await fs.rename(${JSON.stringify(ready+'.staging')},${JSON.stringify(ready)});
           let released=false;
           for(let attempt=0;attempt<500;attempt++){
             try{await fs.access(${JSON.stringify(release)});released=true;break;}catch{}
@@ -342,6 +343,7 @@ public static class AssistantIconPseudoConsoleFixture {
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
   [DllImport("kernel32.dll")] static extern bool SetStdHandle(int kind,IntPtr handle);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr window,int command);
   [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
   [DllImport("kernel32.dll")] static extern int WaitForSingleObject(IntPtr handle,int milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process,out int code);
@@ -370,7 +372,13 @@ public static class AssistantIconPseudoConsoleFixture {
       IntPtr window=IntPtr.Zero;StringBuilder name=new StringBuilder(64);
       while(DateTime.UtcNow<deadline) {
         window=GetConsoleWindow();name.Clear();
-        if(window!=IntPtr.Zero&&GetClassName(window,name,64)>0&&name.ToString()=="ConsoleWindowClass"&&IsWindowVisible(window)!=hidden)break;
+        if(window!=IntPtr.Zero&&GetClassName(window,name,64)>0&&name.ToString()=="ConsoleWindowClass") {
+          // Only the fixture's independently verified classic HWND is changed.
+          // Establish visible/hidden preconditions without relying on terminal
+          // startup defaults or activating another application's window.
+          if(IsWindowVisible(window)==hidden)ShowWindow(window,hidden?0:4);
+          if(IsWindowVisible(window)!=hidden)break;
+        }
         System.Threading.Thread.Sleep(20);
       }
       if(window==IntPtr.Zero)return 32;
