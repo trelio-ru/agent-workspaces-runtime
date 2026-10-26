@@ -261,7 +261,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
       prepareSkillAccountSetupArguments:profile.prepareSkillAccountSetupArguments,
       encryptedTaskRead:profile.encryptedTaskRead,assertEncryptedTaskReadCurrent:profile.assertEncryptedTaskReadCurrent,
       withSecretGenerationKey:profile.withSecretGenerationKey}));
-  },{signal});
+  },{signal,workspaceRun});
 };
 
 /** Same private process/OS identity composition as the Workspace engine,
@@ -851,7 +851,29 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   });
 };
 
-const productionContext = async (action, { signal, interactiveSourceSetup=false } = {}) => {
+/** The setup request deadline is not the lifetime of a Workspace bridge.
+ * A finish can stream several files while its existing coordinator owns the
+ * child. As in the human CLI, private startup/each IPC request stay bounded;
+ * every HTTP request still rechecks the genuine pass, own Run and native lease.
+ * Killing that private session at 45s discarded healthy saves near publication.
+ * This internal selector is not a model deadline/grant: only the closed own-Run
+ * cell can omit the setup timer, and a caller/outer hook signal always survives.
+ */
+export const assistantProductionContextSignal = ({signal,interactiveSourceSetup=false,workspaceRun=null}={},
+  timeout=milliseconds=>AbortSignal.timeout(milliseconds)) => {
+  if(workspaceRun!==null){
+    if(interactiveSourceSetup || !workspaceRun || Object.getPrototypeOf(workspaceRun)!==Object.prototype
+      || Object.keys(workspaceRun).sort().join(',')!=='runId,workspaceId'
+      || Object.values(workspaceRun).some(value=>typeof value!=='string'||!new RegExp(UUID,'u').test(value)))
+      fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+    return signal;
+  }
+  const deadline=timeout(interactiveSourceSetup?11*60_000:45_000);
+  return signal?AbortSignal.any([signal,deadline]):deadline;
+};
+
+const productionContext = async (action, options = {}) => {
+  const signal=assistantProductionContextSignal(options);
   const [{createAssistantPrivateStore},{createAssistantHostState},{createAssistantDeviceClient,createAssistantHttp},common,
     {withPrivateProcessSession}]=await Promise.all([
     import('./trelio-assistant-private.mjs'),import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-transport.mjs'),
@@ -865,8 +887,7 @@ const productionContext = async (action, { signal, interactiveSourceSetup=false 
     if(!identity)return null;
     if(identity.origin!=='https://trelio.ru')fail('ASSISTANT_HOST_STATE_INVALID');
     return action(createAssistantDeviceClient({...identity,store,http:createAssistantHttp({origin:identity.origin})}),host,store);
-  }, signal ? AbortSignal.any([signal, AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000)])
-    : AbortSignal.timeout(interactiveSourceSetup?11*60_000:45_000));
+  },signal);
 };
 
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',

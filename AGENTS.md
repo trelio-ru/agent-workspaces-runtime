@@ -528,6 +528,8 @@ publication tooling также остаются вне этого публичн
   The stdio host owns one lazy finish/heartbeat coordinator across fresh native
   proxies; every poll reauthorises before registry access. EOF stops its timers,
   not a writer or private state. Exercise real serial MCP frames, not one proxy.
+  Exact own-Run lifecycle reuses the human bridge private-session lifetime, not
+  setup's 45s timer; caller/outer-hook cancellation and per-IPC/native lease checks remain.
   Native pre-handler 429/REQUEST_RATE_LIMITED has a closed distinct transport
   result; it never authorises request replay, pass release or auth replacement.
   Lost finish handles return only a fresh native-authorised read nextCall, never

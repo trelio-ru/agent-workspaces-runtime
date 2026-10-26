@@ -1867,6 +1867,16 @@ The facade reuses the common finish progress registry and heartbeat manager.
 That coordinator is created lazily once for the stdio host, including across
 fresh per-call native proxies. Native authorisation/proof is repeated before
 every poll; no credential, OS worker or permission snapshot is cached there.
+For the strictly validated own-Run lifecycle, the fresh worker reuses the SAME
+human bridge private-process session lifetime. The unrelated 45-second setup
+timer must not abort a multi-file checkpoint/finish before publication. This
+does not introduce a larger hook/proof/Run lease: caller cancellation and any
+enclosing hook deadline still win, Windows startup/each private IPC request
+keep their existing 20s/10s bounds, HTTP calls keep their own deadlines, and
+every request repeats the native pass/own-Run/lease/recipient checks. All setup,
+secret, skill and other short contexts retain their previous deadlines. No
+model timeout option, background restart, credential cache or save replay is
+added. A native completed save remains required for pass completion.
 EOF stops that host's heartbeat timers without cancelling a writer or erasing
 its files. Tests must cross the actual serial stdio request boundary.
 Native pre-handler `429/REQUEST_RATE_LIMITED` becomes the closed

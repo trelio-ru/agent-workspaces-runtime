@@ -1531,6 +1531,32 @@ test('QA launcher composes the same protected factories and fresh bounded worker
     configurationFile:file,configurationSha256:hash,modules}),error=>error.code==='ASSISTANT_QA_PILOT_UNAVAILABLE');
 });
 
+test('Workspace lifetime does not inherit a setup timer or extend an enclosing hook/caller deadline',async()=>{
+  const {assistantProductionContextSignal}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  const {withPrivateProcessSession,runtimeHookSignal,assertRuntimeHookBudget}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
+  const calls=[],timer=milliseconds=>{calls.push(milliseconds);return new AbortController().signal;};
+  const run={workspaceId:randomUUID(),runId:randomUUID()},caller=new AbortController();
+  assert.ok(assistantProductionContextSignal({},timer));
+  assert.ok(assistantProductionContextSignal({interactiveSourceSetup:true},timer));
+  assert.deepEqual(calls,[45_000,660_000],'short setup and human-input budgets remain unchanged');
+  assert.equal(assistantProductionContextSignal({workspaceRun:run},timer),undefined);
+  assert.equal(assistantProductionContextSignal({workspaceRun:run,signal:caller.signal},timer),caller.signal);
+  assert.deepEqual(calls,[45_000,660_000],'the bridge reuses the human private-session lifetime, not another enlarged timer');
+  for(const bad of [false,{},[],{...run,extra:true},{...run,runId:'invalid'}])
+    assert.throws(()=>assistantProductionContextSignal({workspaceRun:bad},timer),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+  assert.throws(()=>assistantProductionContextSignal({workspaceRun:run,interactiveSourceSetup:true},timer),
+    {code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+  // A nested bridge cannot replace the original hook's cancellation scope.
+  // This exercises the real shared ALS session rather than a copied deadline.
+  await withPrivateProcessSession(async()=>{
+    await withPrivateProcessSession(async()=>{
+      assert.equal(runtimeHookSignal(),caller.signal);caller.abort();
+      assert.throws(()=>assertRuntimeHookBudget(),{code:'TRELIO_RUNTIME_HOOK_FAILED'});
+    },assistantProductionContextSignal({workspaceRun:run},timer));
+  },caller.signal);
+  assert.equal(assistantProductionContextSignal({workspaceRun:run,signal:caller.signal},timer).aborted,true);
+});
+
 test('trusted Workspace context retains attachment reader and isolates actual account/inspection profile paths',async()=>{
   const {withProductionAssistantWorkspace}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
@@ -1540,6 +1566,7 @@ test('trusted Workspace context retains attachment reader and isolates actual ac
   const configurationDirectory=path.join(os.tmpdir(),'qa-profile-context');
   const host=Object.freeze({configurationDirectory,readIdentity:async()=>identity,readActivePass:async()=>pass});
   const client={identity};
+  const workspaceRun={workspaceId:randomUUID(),runId:randomUUID()};let contextOptions;
   await withProductionAssistantWorkspace(async current=>{
     assert.equal(current.identity.origin,identity.origin);assert.equal(current.host.configurationDirectory,configurationDirectory);
     assert.equal(typeof current.prepareAttachmentRead,'function','the SAME encrypted attachment reader survives factory composition');
@@ -1548,7 +1575,8 @@ test('trusted Workspace context retains attachment reader and isolates actual ac
     const inspection=await profile.resolveInspectionDirectory(path.join(os.tmpdir(),'unselected-production-state'));
     assert.ok(accounts.startsWith(configurationDirectory+path.sep));assert.ok(inspection.startsWith(configurationDirectory+path.sep));
     assert.doesNotMatch(accounts+inspection,/unselected-production-state/);
-  },{context:async action=>action(client,host,{})});
+  },{workspaceRun,context:async(action,options)=>{contextOptions=options;return action(client,host,{});}});
+  assert.deepEqual(contextOptions,{signal:undefined,workspaceRun},'the genuine factory forwards only its exact own-Run cell');
 });
 
 
