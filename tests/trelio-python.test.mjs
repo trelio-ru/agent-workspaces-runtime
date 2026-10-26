@@ -16,9 +16,11 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-test("missing trusted Python is a typed pre-launch prerequisite, without probe paths", async () => {
-  // A root runtime directory intentionally overlaps every fixed candidate on
-  // every OS. No actual interpreter/provider may be launched for this case.
+test("missing trusted Python is a typed pre-launch prerequisite, without probe paths", async (t) => {
+  // A hosted Windows checkout and installed Python can be on different drives.
+  // Model absent fixed candidates at the filesystem boundary instead of
+  // assuming the checkout's drive root overlaps every installation.
+  t.mock.method(fs, "realpath", async () => { throw Object.assign(new Error("missing"), {code:"ENOENT"}); });
   await assert.rejects(resolveTrustedPythonInvocation({
     runtimeDirectory: path.parse(process.cwd()).root,
   }), error => {

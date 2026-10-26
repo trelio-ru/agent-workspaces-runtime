@@ -15,7 +15,8 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
 const {rethrowAssistantSourceError}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 
-test('source setup preserves the SAME actual Python prerequisite, without private cause or retry',async()=>{
+test('source setup preserves the SAME actual Python prerequisite, without private cause or retry',async t=>{
+  t.mock.method(fs,'realpath',async()=>{throw Object.assign(new Error('missing'),{code:'ENOENT'});});
   const error=await engine.resolveTrustedPythonInvocation({runtimeDirectory:path.parse(process.cwd()).root}).catch(error=>error);
   assert.equal(error.code,'TRELIO_SKILL_PYTHON_REQUIRED');
   error.message='PRIVATE_PROBE_PATH';error.cause={path:'PRIVATE_PROBE_PATH'};
