@@ -1676,6 +1676,12 @@ roll back into a legacy combined bundle alongside a newly trusted companion.
 Unchanged dependencies are never reinstalled. Native preflight rejects mixed
 legacy+companion hooks and requires exact version/source path, full inventory/
 executable byte integrity and three genuinely trusted native definitions.
+Native Git-URL installation leaves an optional `.git` directory in the cache.
+It is checkout metadata, outside executable payload verification; native Codex
+fingerprint/trust checks remain independent. Accept only that exact root directory, never a gitdir file,
+junction or symlink; do not traverse/read its config. All declared payload
+files and hashes remain mandatory, and every other unknown sibling is refused.
+Regression uses a real Git clone, alongside altered-payload/metadata negatives.
 
 Explicit INITIAL background install prepares this dependency through that SAME
 journal/installer even when future automatic updates are opted out. It retains

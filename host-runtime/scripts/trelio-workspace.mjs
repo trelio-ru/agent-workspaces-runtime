@@ -3748,6 +3748,15 @@ export const verifyAssistantHookComponentIntegrity = async (root,{version,integr
     if(!metadata.isDirectory()||metadata.isSymbolicLink())throw new Error('Unsafe hook component directory.');
     for(const name of await filesystem.readdir(directory)){
       const child=relative?`${relative}/${name}`:name;
+      // Native Codex clones a Git-URL source into its versioned cache. Its
+      // own .git directory is checkout metadata, not hook bundle bytes. Never
+      // traverse it or accept a gitdir file/junction/symlink; every executable
+      // and inventory byte below remains mandatory and unknown siblings fail.
+      if(relative===''&&name==='.git'){
+        const gitMetadata=await filesystem.lstat(path.join(directory,name));
+        if(!gitMetadata.isDirectory()||gitMetadata.isSymbolicLink())throw new Error('Unsafe hook checkout metadata.');
+        continue;
+      }
       if(!(relative===''&&directories.has(name))&&child!=='package-integrity.json'&&!allowed.has(child))
         throw new Error('Unexpected hook component file.');
     }

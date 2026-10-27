@@ -167,6 +167,7 @@ import {
   readCodexPluginUpdateInventory,
   readAssistantPluginPublishedRef,
   inspectAssistantHookComponent,
+  verifyAssistantHookComponentIntegrity,
   installAssistantHookComponent,
   unprotectWindowsBridgeSessionToken,
   validateHandoffTaskOutcome,
@@ -11817,8 +11818,17 @@ test('stable assistant hook dependency uses the SAME official installer, exact b
   for(const file of ['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs','trelio-host-runtime-loader.mjs','trelio-host-runtime-shell.mjs','trelio-mcp-startup-budget.mjs'])files[`scripts/${file}`]='// synthetic immutable executable';
   const inventory={schemaVersion:1,plugin:name,version:'0.1.0',sharedShell:{},files:Object.entries(files).map(([p,text])=>({path:p,mode:0o644,size:Buffer.byteLength(text),sha256:digest(text)}))};
   const bytes=JSON.stringify(inventory)+'\n',requirement={pluginId:`${name}@${marketplace}`,version:'0.1.0',integritySha256:digest(bytes)};
-  const create=async()=>{for(const [p,text] of [...Object.entries(files),['package-integrity.json',bytes]]){
-    await fs.mkdir(path.dirname(path.join(cache('0.1.0'),p)),{recursive:true});await fs.writeFile(path.join(cache('0.1.0'),p),text);}};
+  const create=async()=>{
+    // Match the actual native Git-URL cache, not a directory-copy fixture:
+    // Codex leaves its real .git metadata alongside the immutable payload.
+    const sourceDirectory=path.join(root,'published-source');
+    for(const [p,text] of [...Object.entries(files),['package-integrity.json',bytes]]){
+      await fs.mkdir(path.dirname(path.join(sourceDirectory,p)),{recursive:true});await fs.writeFile(path.join(sourceDirectory,p),text);
+    }
+    await runGit(sourceDirectory,['init','-q']);await runGit(sourceDirectory,['add','.']);
+    await runGit(sourceDirectory,['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','Immutable fixture']);
+    await runGit(root,['clone','--quiet','--no-hardlinks',sourceDirectory,cache('0.1.0')]);
+  };
   await fs.mkdir(path.join(market,'.agents/plugins'),{recursive:true});
   await fs.writeFile(path.join(market,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:[{name,source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref:'hooks-v0.1.0'}}]}));
   let present=false,enabled=true,source='https://github.com/trelio-ru/digital-assistants.git',adds=0,intent=null;
@@ -11839,6 +11849,15 @@ test('stable assistant hook dependency uses the SAME official installer, exact b
   published=true;
   const installed=await installAssistantHookComponent({...options,beforeInstall:async record=>{intent=record;}});
   assert.equal(installed.matches,true);assert.equal(adds,1);
+  assert.equal((await fs.lstat(path.join(cache('0.1.0'),'.git'))).isDirectory(),true);
+  const gitDirectory=path.join(cache('0.1.0'),'.git');
+  await assert.rejects(verifyAssistantHookComponentIntegrity(cache('0.1.0'),{...requirement,filesystem:{...fs,
+    lstat:async p=>p===gitDirectory?{isDirectory:()=>true,isSymbolicLink:()=>true}:fs.lstat(p)}}),/Unsafe hook checkout metadata/);
+  const savedMetadata=path.join(root,'saved-git');await fs.rename(gitDirectory,savedMetadata);
+  await fs.writeFile(gitDirectory,'gitdir: external\n');await assert.rejects(inspectAssistantHookComponent(options),/Unsafe hook checkout metadata/);
+  await fs.rm(gitDirectory);await fs.rename(savedMetadata,gitDirectory);
+  await fs.writeFile(path.join(cache('0.1.0'),'.git-extra'),'untrusted sibling');
+  await assert.rejects(inspectAssistantHookComponent(options),/Unexpected hook component file/);await fs.rm(path.join(cache('0.1.0'),'.git-extra'));
   assert.equal((await installAssistantHookComponent({...options,beforeInstall:()=>assert.fail('unchanged executable component cannot require a new install intent')})).unchanged,true);
   enabled=false;await assert.rejects(installAssistantHookComponent(options));assert.equal(adds,1,'a human-disabled component is never enabled');enabled=true;
   source='https://github.com/foreign/plugin.git';await assert.rejects(inspectAssistantHookComponent(options));source='https://github.com/trelio-ru/digital-assistants.git';
