@@ -2515,6 +2515,10 @@ definitions read from that SAME native source view, even before pass activation.
 Execution still selects only the active pass view: advertised task methods cannot
 run in a taskless intake, and intake methods cannot run under a task pass. Both
 metadata reads share one original deadline and never invoke a business tool.
+The same two-name policy also crosses facade/current-worker dispatch; a metadata
+listing alone is not a successful executable tool. A real serial stdio regression
+exercises context and reply through that worker, managed argument seam and native
+MCP transport, with no task call from the intake.
 Legacy catalogues with neither intake definition stay legacy; a partial pair
 fails. No schemas are copied or inferred.
 

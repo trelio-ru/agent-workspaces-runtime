@@ -10,7 +10,7 @@ import { createAssistantSetup, maintainAssistantPlugin, runAssistantWindowsDeskt
 import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,readProductionAssistantDispatchStatus,resolveAssistantPluginHandoffLoaders,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,withAssistantEncryptedWorkspaceArguments,readProductionAssistantDispatchStatus,resolveAssistantPluginHandoffLoaders,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 test('plugin handoff validates only the new loader while retaining literal pruned-old native comparators',async t=>{
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-pruned-handoff-'));
@@ -2116,4 +2116,50 @@ test('a legacy worker waiting for missing main hooks can prepare the new depende
   assert.equal((await maintainAssistantPlugin(f.options)).state,'hook_review');assert.equal(adds,1);
   f.trust(true);assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');assert.equal(adds,1);
   assert.equal(f.counts().installs,1,'a main package already installed by the prior worker is never installed again');
+});
+
+
+test('real stdio facade and current worker route both intake methods through SAME managed/native transport',async()=>{
+ const origin='https://intake-seam.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+ const locator={companyId,sourceId,intakeId},credential=`tda_${'s'.repeat(43)}`,proof={schemaVersion:1,fixture:'synthetic observed admission'};
+ let active={kind:'source_intake'},bodyReads=0,replies=0;const wire=[],managed=[];
+ const nativeTool=name=>({name,description:'Synthetic native definition',inputSchema:{type:'object',properties:{intakePass:{type:'object'},
+  runtimeSessionProof:{type:'object'},decision:{type:'string'},clientRequestId:{type:'string'},replyText:{type:'string'}},additionalProperties:false}});
+ const proxy=createAssistantMcpClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential,expiresAt:1})},readActivePass:async()=>active,
+  withWorkspaceArguments:(request,send)=>withAssistantEncryptedWorkspaceArguments(request,send,{withManagedContent:async(request,send)=>{
+   managed.push(request.name);return send({...request.args,intakePass:locator,runtimeSessionProof:proof});}}),
+  materializeSourceIntake:async({result})=>{bodyReads++;return {content:[],structuredContent:{...result.structuredContent,ownerMessage:{text:'SYNTHETIC_QUESTION',verifiedNativeOwner:true}}};},
+  materializeSourceReply:async({result})=>{replies++;return {content:[],structuredContent:{...result.structuredContent,state:'replied',nativeMessageId:93}};},
+  httpRequest:async input=>{
+   const response=result=>({sessionId:'intake-native',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+   if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+   if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+   const sourceView=input.config.headers['x-trelio-assistant-capability-profile']==='source_intake';
+   if(input.payload.method==='tools/list')return response({tools:(sourceView?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']:
+    ['get_assistant_status','get_task']).map(nativeTool)});
+   assert.equal(input.payload.method,'tools/call');assert.equal(sourceView,true);
+   const call=input.payload.params;wire.push(call.name);assert.deepEqual(call.arguments.intakePass,locator);assert.deepEqual(call.arguments.runtimeSessionProof,proof);
+   return response({content:[],structuredContent:{id:intakeId,state:call.name==='resolve_assistant_intake'?'reply_pending':'leased'}});
+  }});
+ const dependencies={context:async action=>action({identity:{origin,assistantId,deviceId},reportHealth:async()=>{},readHealth:async()=>({code:'ready',revision:0,
+  compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null},latchedCodes:[]})},{},{}),
+  versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.22.1'}),proxyFor:async()=>proxy};
+ const output=new PassThrough();let raw='';output.on('data',chunk=>raw+=chunk);
+ const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+  {jsonrpc:'2.0',id:2,method:'tools/list'},
+  {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'get_assistant_intake_context',arguments:{}}},
+  {jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'resolve_assistant_intake',arguments:{decision:'reply_owner',clientRequestId:randomUUID(),replyText:'SYNTHETIC_REPLY'}}},
+  {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'get_task',arguments:{}}}];
+ await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+  createSetup:async()=>assert.fail('no enrollment/owner approval'),createMcp:async()=>({
+   listTools:()=>executeAssistantRuntimeRequest({operation:'list'},dependencies),
+   callTool:(name,args)=>executeAssistantRuntimeRequest({operation:'call',name,arguments:args},dependencies)})});
+ const responses=raw.trim().split('\n').map(JSON.parse),get=id=>responses.find(frame=>frame.id===id);
+ assert.equal(get(2).error,undefined);assert.ok(get(2).result.tools.some(tool=>tool.name==='get_assistant_intake_context'));
+ assert.equal(get(3).error,undefined);assert.equal(get(3).result.structuredContent.ownerMessage.text,'SYNTHETIC_QUESTION');
+ assert.equal(get(4).error,undefined);assert.equal(get(4).result.structuredContent.state,'replied');
+ assert.equal(get(5).result.isError,true);assert.equal(get(5).result.structuredContent.code,'ASSISTANT_CAPABILITY_UNAVAILABLE');
+ assert.deepEqual(wire,['get_assistant_intake_context','resolve_assistant_intake']);assert.deepEqual(managed,wire);
+ assert.equal(bodyReads,1);assert.equal(replies,1);assert.ok(!raw.includes(credential));
+ active={kind:'task'};await assert.rejects(executeAssistantRuntimeRequest({operation:'call',name:'resolve_assistant_intake',arguments:{decision:'reply_owner'}},dependencies),/CAPABILITY_UNAVAILABLE/);
 });

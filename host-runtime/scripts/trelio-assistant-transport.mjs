@@ -2861,8 +2861,12 @@ export const ASSISTANT_COMPANY_CONTEXT_READ_TOOLS = assistantCompanyContextReadT
 // checked natively. Default task discovery remains the exact prior tool set.
 export const ASSISTANT_MCP_READ_TOOLS = Object.freeze([...new Set([
   ...ASSISTANT_TASK_MCP_READ_TOOLS, ...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, 'download_registry_document', 'download_knowledge_base_attachment', 'get_trelio_tool_contract'])]);
+// The SAME two names must cross facade/worker dispatch before the active-pass
+// profile narrows execution. Advertising them without this boundary stranded
+// real Desktop intake calls; this global names set grants no task/source ACL.
+export const ASSISTANT_INTAKE_MCP_TOOLS=Object.freeze(['get_assistant_intake_context','resolve_assistant_intake']);
 export const ASSISTANT_MCP_TOOLS = Object.freeze([...new Set([
-  ...ASSISTANT_TASK_MCP_TOOLS, ...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, 'download_registry_document', 'download_knowledge_base_attachment', 'get_trelio_tool_contract'])]);
+  ...ASSISTANT_INTAKE_MCP_TOOLS, ...ASSISTANT_TASK_MCP_TOOLS, ...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, 'download_registry_document', 'download_knowledge_base_attachment', 'get_trelio_tool_contract'])]);
 /** Hook-owned admission fields never belong to the model's tool arguments.
  * Keep the live backend validators as the wire authority, while removing only
  * these root fields from model discovery. PreToolUse still injects them
@@ -3019,7 +3023,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   if (!['task','remote_mcp','skill_setup','company_context'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
-  const intakeToolNames=Object.freeze(['get_assistant_intake_context','resolve_assistant_intake']);
+  const intakeToolNames=ASSISTANT_INTAKE_MCP_TOOLS;
   const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
     return !metadata&&pass?.kind==='source_intake'?intakeToolNames:presentationProfile==='remote_mcp'
@@ -3107,7 +3111,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       return result;
     },
     async callTool(name, args, signal) {
-      if (![...ASSISTANT_MCP_TOOLS,"get_assistant_intake_context","resolve_assistant_intake"].includes(name) || ["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(name) && typeof materializeAttachment !== "function" || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
+      if (!ASSISTANT_MCP_TOOLS.includes(name) || ["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(name) && typeof materializeAttachment !== "function" || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");
       // Snapshot once before asynchronous private/network I/O, as in the shared
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
