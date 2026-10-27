@@ -1727,6 +1727,11 @@ top-level entries и open-lock; возраст сам по себе не раз�
 выполняется непосредственно перед удалением. Источники, вытесненные из активного
 registry exact same-Run recovery, остаются в `retainedRoots` до этой проверки;
 confirmed `ENOENT` и успешное удаление очищают обе части индекса.
+После всех проверок под lock bridge удаляет фиксированный managed `context/`
+общим no-follow helper: read-only related snapshots сначала получают права
+на удаление только внутри этого контекста. Git-worktree и общие hard-linked
+objects не проходят recursive chmod; symlink targets не меняются. Dry-run и
+пропущенные roots сохраняют исходные файлы и права.
 Открытыми считаются `running`, `waiting_for_human` и совместимый `review`;
 истёкший sibling Run не блокирует terminal root. Содержательный `expired` Run
 сохраняется для возможного claim. Active, unknown и dirty roots сохраняются;

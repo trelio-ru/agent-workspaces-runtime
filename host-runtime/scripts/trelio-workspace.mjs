@@ -18931,6 +18931,13 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
 
     for (const candidate of deletionCandidates) {
       assertSafeRegisteredRunRoot(candidate, registeredRoots);
+      // Only a freshly authorised, clean, terminal root reaches this point.
+      // Materialised related snapshots deliberately use 0555 directories;
+      // plain recursive rm otherwise fails after deleting part of the root.
+      // Reuse the context owner's no-follow removal instead of chmod'ing the
+      // whole checkout (Git objects may be hard-linked outside this root).
+      // Planning and every skipped/active/dirty root retain their permissions.
+      await removeBridgeOwnedContextEntry(path.join(candidate.rootDirectory, "context"));
       await fs.rm(candidate.rootDirectory, { recursive: true, force: true });
     }
   } finally {

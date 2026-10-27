@@ -490,6 +490,8 @@ publication tooling также остаются вне этого публичн
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
 - Recovery roots имеют собственные 3 дня retention; sibling Runs не продлевают срок.
   Проверенный recovery source остаётся в retention-only индексе, не в выборе writable root.
+  Read-only managed context удаляется общим no-follow helper только после всех guards;
+  permissions skipped roots, symlink targets и Git objects не меняются.
   Все native/Git/lock guards обязательны: [cleanup](docs/agent-workspace-runtime.md#restore-и-cleanup).
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
   opt-in startup trace пишет только закрытые этапы и process clocks в stderr,

@@ -5041,6 +5041,28 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     const acceptedRoot = await createLocalRunRoot(origin, "accepted-clean", acceptedRunId);
     await writeFile(path.join(acceptedRoot, ".DS_Store"), "finder metadata\n", "utf8");
     const dirtyRoot = await createLocalRunRoot(origin, "accepted-dirty", dirtyRunId, { dirty: true });
+    // Real materialized related snapshots contain 0555 directories and 0444
+    // files. A clean Git tree alone must not make recursive POSIX removal fail
+    // halfway through an otherwise authorised cleanup. The dirty sibling must
+    // retain both its snapshot and the original read-only protection.
+    const readonlySnapshots = [];
+    for (const root of [acceptedRoot, dirtyRoot]) {
+      const sources = path.join(root, "context", "related", "11111111-1111-4111-8111-111111111111", "sources");
+      await mkdir(sources, { recursive: true });
+      await writeFile(path.join(sources, "snapshot.json"), "{}\n");
+      if (process.platform !== "win32") {
+        await chmod(path.join(sources, "snapshot.json"), 0o444);
+        await chmod(sources, 0o555);
+        await chmod(path.dirname(sources), 0o555);
+      }
+      readonlySnapshots.push(sources);
+    }
+    const outsideContextFile = path.join(temporaryDirectory, "outside-context.txt");
+    await writeFile(outsideContextFile, "Do not chmod or remove\n");
+    if (process.platform !== "win32") {
+      await chmod(outsideContextFile, 0o444);
+      await symlink(outsideContextFile, path.join(acceptedRoot, "context", "external-link"));
+    }
     const activeRoot = await createLocalRunRoot(origin, "active", activeRunId);
     const unknownRoot = await createLocalRunRoot(origin, "unknown", unknownRunId);
     const recentRoot = await createLocalRunRoot(origin, "recent", recentRunId, {
@@ -5168,6 +5190,10 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     assert.match(preview.stdout, /unmanaged · unmanaged_root_entry · accepted/);
     assert.match(preview.stdout, /unsafe-system-metadata · unmanaged_root_entry · accepted/);
     assert.equal(await pathExists(acceptedRoot), true, "dry-run must not delete candidates");
+    if (process.platform !== "win32") {
+      assert.equal((await stat(readonlySnapshots[0])).mode & 0o777, 0o555,
+        "planning never changes snapshot permissions");
+    }
     assert.equal(
       JSON.parse(await readFile(path.join(configDirectory, "runs.json"), "utf8")).roots
         .includes(missingRegistryRoot),
@@ -5189,6 +5215,14 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     assert.equal(await pathExists(acceptedRoot), false);
     assert.equal(await pathExists(expiredSiblingRoot), false);
     assert.equal(await pathExists(dirtyRoot), true);
+    assert.equal(await readFile(path.join(readonlySnapshots[1], "snapshot.json"), "utf8"), "{}\n");
+    assert.equal(await readFile(outsideContextFile, "utf8"), "Do not chmod or remove\n");
+    if (process.platform !== "win32") {
+      assert.equal((await stat(readonlySnapshots[1])).mode & 0o777, 0o555,
+        "a rejected root keeps its read-only snapshot unchanged");
+      assert.equal((await stat(outsideContextFile)).mode & 0o777, 0o444,
+        "cleanup never follows a context symlink to chmod its target");
+    }
     assert.equal(await pathExists(activeRoot), true);
     assert.equal(await pathExists(unknownRoot), true);
     assert.equal(await pathExists(recentRoot), true, "recent local use restarts retention");
@@ -5219,6 +5253,9 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    if (process.platform !== "win32") {
+      await execFileAsync("chmod", ["-R", "u+w", temporaryDirectory]).catch(() => undefined);
+    }
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
