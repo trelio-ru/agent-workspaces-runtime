@@ -569,6 +569,8 @@ for(const skillId of ['telegram-mtproto','max-web'])test(`${skillId} attention g
     assert.equal(f.position(),'attention-page');
     assert.deepEqual(f.database.prepare('SELECT event_id FROM assistant_inbox_events ORDER BY rowid').all().map(row=>row.event_id),
       ['message:123:2','message:123:3','message:123:4']);
+    assert.deepEqual(f.database.prepare('SELECT automatic_ack FROM assistant_inbox_events ORDER BY rowid').all().map(row=>row.automatic_ack),[1,0,0],
+      'handled group requests never grant a range read receipt over skipped discussion');
     const intake=f.inbox.ownerIntake(f.inbox.ownerIntakes()[0].id);assert.equal(intake.eventIds.length,3,'all addressed originals share the existing bounded batch');
     assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
     await f.restart();f.advance(300000);await f.coordinator.pollOnce();

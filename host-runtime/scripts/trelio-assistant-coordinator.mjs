@@ -365,7 +365,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const admitted=incoming.filter(event=>row.skillId==='email-imap-smtp'||event.attention!=='none');
       const page={...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
         events:[...admitted,...result.events.filter(event=>event.kind==='delete'||event.outgoing===true),...deletions]
-          .map(({id,revision,conversationKey,kind,outgoing,forwarded,viaBot,senderNamespace,senderUserId})=>({id,revision,taskId:null,wake:false,
+          .map(({id,revision,conversationKey,kind,outgoing,forwarded,viaBot,senderNamespace,senderUserId,attention})=>({id,revision,taskId:null,wake:false,
+          // Group read receipts cover a range containing intentionally skipped
+          // discussion. A handled mention cannot grant ACK of that whole range.
+          ...(row.skillId!=='email-imap-smtp'&&['mention','reply'].includes(attention)?{automaticAck:false}:{}),
           ...(owner&&senderNamespace===(row.skillId==='max-web'?'max_user_id':'telegram_user_id')&&senderUserId===owner.externalUserId&&kind==='new'&&outgoing===false&&forwarded===false&&(row.skillId==='max-web'||viaBot===false)&&conversationKey
             ?{ownerIdentityId:owner.bindingId}:{}),
           ...(conversationKey?{conversationKey,providerWake:row.skillId==='email-imap-smtp'||kind!=='delete' && outgoing===false}:{})}))};

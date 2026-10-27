@@ -58,7 +58,8 @@ const scopeOf = value => {
   return { ...scope, key: digest(scope) };
 };
 const eventOf = value => {
-  object(value, ['id', 'revision', 'taskId', 'wake', 'ownerQuestionId', 'conversationKey', 'providerWake', 'ownerIdentityId']);
+  object(value, ['id', 'revision', 'taskId', 'wake', 'ownerQuestionId', 'conversationKey', 'providerWake', 'ownerIdentityId','automaticAck']);
+  if(value.automaticAck!==undefined&&typeof value.automaticAck!=='boolean')inputError();
   if (typeof value.wake !== 'boolean' || value.ownerQuestionId !== undefined && (!value.wake || value.taskId === null)) inputError();
   if(value.conversationKey!==undefined && (typeof value.conversationKey!=='string'
     || !['telegram','email','max'].some(provider=>assistantConversationKeyMatches(provider,value.conversationKey))
@@ -67,7 +68,7 @@ const eventOf = value => {
   return { ownerQuestionId: value.ownerQuestionId === undefined ? null : uuid(value.ownerQuestionId), id: opaque(value.id), revision: opaque(value.revision, 128),
     taskId: value.taskId === null ? null : uuid(value.taskId), wake: value.wake,
     conversationKey:value.conversationKey??null,providerWake:Boolean(value.providerWake),
-    ownerIdentityId:value.ownerIdentityId===undefined?null:uuid(value.ownerIdentityId) };
+    ownerIdentityId:value.ownerIdentityId===undefined?null:uuid(value.ownerIdentityId),automaticAck:value.automaticAck!==false };
 };
 const LEASE_MS = 120_000;
 const MAX_PAGE = 100;
@@ -126,7 +127,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -192,8 +193,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
-    if(versions[0]?.version===14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
       CREATE TABLE IF NOT EXISTS assistant_inbox_sources (
@@ -355,8 +356,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       ordinal INTEGER NOT NULL CHECK(ordinal>=1), prerequisite_key TEXT NOT NULL,
       intent_json TEXT NOT NULL, PRIMARY KEY(delivery_id,ordinal));
       CREATE INDEX IF NOT EXISTS assistant_continuation_budget ON assistant_pass_continuations(delivery_id,prerequisite_key);`);
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=14');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (14)');
+    const hasAckPolicy=all('PRAGMA table_info(assistant_inbox_events)').some(column=>column.name==='automatic_ack');
+    if(versions[0]?.version===15&&!hasAckPolicy)fail('ASSISTANT_INBOX_CONFLICT');
+    if(!hasAckPolicy)db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN automatic_ack INTEGER NOT NULL DEFAULT 1 CHECK(automatic_ack IN (0,1))');
+    // A restrictive structural policy only. Existing rows, cursors, processed
+    // bits and unknown write fences are preserved; migration never claims ACK.
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=15');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (15)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -413,9 +419,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     let added=0;
     for(const event of page){
       const key=digest([scope.key,event.id,event.revision]);
+      if(scope.provider==='trelio'&&!event.automaticAck)inputError();
       if(event.conversationKey && !assistantConversationKeyMatches(scope.provider,event.conversationKey))inputError();
       const existing=get('SELECT original_task_id,wake,owner_question_id,conversation_key,provider_wake FROM assistant_inbox_events WHERE event_key=?',key);
       if(existing){
+        // Replayed legacy metadata cannot re-enable a suppressed range ACK.
+        // Already-started attempts retain their original verify-only fence.
+        if(!event.automaticAck)run('UPDATE assistant_inbox_events SET automatic_ack=0 WHERE event_key=?',key);
         if(existing.original_task_id!==event.taskId || existing.wake!==Number(event.wake)
           || existing.owner_question_id!==event.ownerQuestionId)fail('ASSISTANT_INBOX_EVENT_CHANGED');
         if(event.conversationKey===null && ['telegram','email','max'].includes(scope.provider))continue; // Never erase a newer hint on legacy replay.
@@ -430,8 +440,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const pending=get('SELECT count(*) AS total FROM assistant_inbox_events WHERE processed=0').total;
       const total=get('SELECT count(*) AS total FROM assistant_inbox_events').total;
       if(pending>=MAX_PENDING || total>=MAX_EVENTS)fail('ASSISTANT_INBOX_FULL');
-      run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id,conversation_key,provider_wake) VALUES (?,?,?,?,?,?,?,?,?,?)',
-        key,scope.key,event.id,event.revision,event.taskId,event.taskId,Number(event.wake),event.ownerQuestionId,event.conversationKey,Number(event.providerWake));
+      run('INSERT INTO assistant_inbox_events(event_key,source_key,event_id,event_revision,original_task_id,task_id,wake,owner_question_id,conversation_key,provider_wake,automatic_ack) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+        key,scope.key,event.id,event.revision,event.taskId,event.taskId,Number(event.wake),event.ownerQuestionId,event.conversationKey,Number(event.providerWake),Number(event.automaticAck));
       if(event.ownerIdentityId!==null){
         if(!['telegram','max'].includes(scope.provider)||!event.conversationKey||!event.providerWake||event.taskId!==null||event.wake)inputError();
         const accountKey=digest([scope.origin,scope.assistantId,scope.provider,scope.accountId]);
@@ -1395,6 +1405,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=get(`SELECT e.rowid AS ordinal FROM assistant_inbox_events e
         JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
         WHERE e.source_key=? AND e.acked=0 AND e.processed=1 AND t.state IN ('accepted','done')
+        AND (e.automatic_ack=1 OR e.ack_started=1)
         AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 1`,scope.key,time(),time());
       return row?.ordinal??null;
     },
@@ -1409,7 +1420,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const current=activeSource(scope);
       const row=get(`SELECT
         sum(CASE WHEN acked=0 AND ack_started=1 THEN 1 ELSE 0 END) AS uncertain,
-        sum(CASE WHEN acked=0 AND ack_retry_at>0 THEN 1 ELSE 0 END) AS blocked,
+        sum(CASE WHEN acked=0 AND ack_retry_at>0 AND (automatic_ack=1 OR ack_started=1) THEN 1 ELSE 0 END) AS blocked,
         sum(CASE WHEN acked=1 AND route_source_revision=? THEN 1 ELSE 0 END) AS confirmed
         FROM assistant_inbox_events WHERE source_key=?`,current.configuration_revision,scope.key);
       // A fresh native read-back of historical slots can confirm this current
@@ -1435,6 +1446,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
           WHERE e.source_key=? AND e.acked=0 AND (t.state='accepted' OR (?!='trelio' AND t.state='done'))
           AND (?='trelio' OR e.processed=1)
+          AND (e.automatic_ack=1 OR e.ack_started=1)
           AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_retry_at,e.rowid LIMIT 100`, scope.key, scope.provider, scope.provider, time(), time());
         // Rotate previously deferred conversations behind never-attempted work
         // and earlier retries. At a five-minute tick, repeatedly picking the
@@ -1502,7 +1514,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           // read-back. Resume never adopts an old route for a new write or
           // changes the original committed receipt slots.
           ||row.ack_verify_only!==Number(verifyOnly)
-          ||(!verifyOnly&&row.original_source_revision!==sourceRevision)
+          ||(!verifyOnly&&(row.original_source_revision!==sourceRevision||row.automatic_ack!==1))
           ||(verifyOnly&&(!Number.isSafeInteger(row.original_source_revision)
             ||row.original_source_revision<0||row.original_source_revision>sourceRevision))
           ||row.route_id!==row.original_route_id||parts.length!==5||parts[0]!=='assistant'||parts[2]!=='codex'
@@ -1520,8 +1532,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(scope.provider==='trelio')inputError();
       return transaction(()=>{
         activeSource(scope);
-        const rows=all('SELECT ack_started,ack_verify_only,processed,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
-        if(!rows.length || rows.some(row=>row.ack_started!==0 || row.ack_verify_only!==0 || row.processed!==1 || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
+        const rows=all('SELECT automatic_ack,ack_started,ack_verify_only,processed,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
+        if(!rows.length || rows.some(row=>row.automatic_ack!==1||row.ack_started!==0 || row.ack_verify_only!==0 || row.processed!==1 || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET ack_started=1,ack_attempt_token=? WHERE source_key=? AND ack_token=? AND acked=0',token,scope.key,token);
       });
     },

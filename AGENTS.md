@@ -26,6 +26,8 @@ publication tooling также остаются вне этого публичн
   private incoming or native mention/direct reply. Ordinary group history stays
   at provider; scheduled review uses accepted per-task WORK.md bookmarks, not
   the poll cursor/unread flag. Missing native attention preserves the checkpoint.
+  Group originals suppress automatic range ACK (schema15); never mark skipped
+  discussion read or erase an existing unknown-write reconciliation fence.
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
   требует committed processing и отдельного native read proof.
   Exact body reads reuse the SAME signed executor and private inbox.

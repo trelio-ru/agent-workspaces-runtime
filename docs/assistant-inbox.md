@@ -63,6 +63,14 @@ busy group cannot fill the pending queue with context-only rows. Unjournaled
 cloud deletions are therefore ignored; ambiguous known account references still
 refuse without guessing. Filtering never earns processing or ACK.
 
+Schema v15 adds only `automatic_ack` to original rows. Addressed group originals
+use zero: Telegram/MAX range receipts must not mark intentionally skipped
+discussion read. Direct messages and email retain automatic ACK. This policy
+does not claim ACK success or unhealthy delivery; source due/claim/health skip
+these intentional non-attempts. Legacy rows default to one; unknown started
+writes always retain verify-only reconciliation. Replay may tighten this policy,
+never re-enable it. Cursors, processed bits, receipts and leases are unchanged.
+
 The durable delivery's existing scheduled bit selects `scheduled:true` in task
 stdin, including recovery. On that pass the worker reviews new history for the
 exact account/chat/topic links already recorded in accepted WORK.md. Each task
