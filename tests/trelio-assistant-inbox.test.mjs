@@ -521,6 +521,25 @@ test('durable child streams preserve new hints across concurrent final reads, re
     Object.assign(Object.create(null),{task_id:null,wake:0,processed:0,acked:0}));
 });
 
+test('legacy email unread streams remain intact across reopen but never become automatic pending work',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-email-history-retention-')),file=path.join(directory,'queue.sqlite');
+  let db=new DatabaseSync(file);t.after(async()=>{db.close();await fs.rm(directory,{recursive:true,force:true});});
+  const source=scope({provider:'email'}),streamId='email-initial-unread/v1';
+  let inbox=createAssistantInbox({database:db,now:()=>1_000_000});inbox.register(source);
+  inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'original-forward',hasMore:false,events:[],
+    streams:[{id:streamId,revision:'original-signal',initialCursor:'original-seed'}]});
+  const before={...db.prepare('SELECT * FROM assistant_inbox_streams').get()};
+  assert.equal(inbox.hasPendingStreams(source),false);assert.deepEqual(inbox.dueStreamPolls(source),[]);
+  assert.equal(inbox.claimStreamPoll(source,streamId),null);
+  db.close();db=new DatabaseSync(file);inbox=createAssistantInbox({database:db,now:()=>2_000_000});
+  assert.equal(inbox.hasPendingStreams(source),false);assert.deepEqual(inbox.dueStreamPolls(source),[]);
+  assert.equal(inbox.claimStreamPoll(source,streamId),null);
+  assert.deepEqual({...db.prepare('SELECT * FROM assistant_inbox_streams').get()},before);
+  assert.equal(inbox.claimPoll(source).cursor,'original-forward','forward polling continues from its durable checkpoint');
+  inbox.setSourceState(source,{state:'paused',expectedRevision:0});
+  assert.throws(()=>inbox.claimStreamPoll(source,streamId),/SOURCE_INACTIVE/,'legacy filtering still checks native source state');
+});
+
 test('stream hints and cursor roll back with conflicting refs or capacity; child pages retain the same event bounds',t=>{
   const {inbox,database,advance}=memory(t),source=scope({provider:'telegram'}),streamId='-1000000000055';inbox.register(source);
   const incoming=event(null,false,'message:-1000000000055:9');

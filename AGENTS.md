@@ -52,8 +52,9 @@ publication tooling также остаются вне этого публичн
   Email routing hashes untrusted threading headers, never owner identity. The
   SAME journal v8 binds exact full RFC822 SHA to the independent read slot; one
   UID per fresh ACK, all original UIDs on unknown read-back, never a thread STORE.
-  New email baselines atomically retain forward + original initial-unread stream
-  seeds in that SAME journal; fixed ceiling, no reset of existing positions.
+  New email sources take a forward-only baseline, never an unread history seed.
+  Legacy initial-unread streams remain retained but are not automatically polled;
+  existing forward positions, events and uncertain ACK fences are never reset.
   SQLite хранит только bounded structural refs; child stream hints/cursors
   commit in that SAME journal, never as guessed task/ACK authority. Final
   streams sleep until a new native hint; new hints cannot be consumed by an
@@ -909,11 +910,12 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
   schema v10 section in `docs/assistant-inbox.md`; no per-message chats or new executor.
 
 - MAX account roots require native selected `maxChatUrl:null`, fresh
-  `maxAccountDiscovery:true` admission and signed provider >=2.12.0. Observe only
+  `maxAccountDiscovery:true` admission and signed provider >=2.13.0. Observe only
   the browser-emitted full sync/list chain through marker zero; no partial unread
   folder becomes an account cursor. Persist native dialog hints and original
-  account-time seed atomically in SAME streams, then exact native history covers
-  that seed plus unread range. Read-elsewhere flags never filter new references.
+  account-time seed atomically in SAME streams. First inventory has zero hints;
+  exact native history covers only NEW rows strictly after that original seed.
+  Old unread never becomes automatic work; full unread ACK coverage stays separate. Read-elsewhere flags never filter new references.
   Exact-chat rows retain >=2.11.0 semantics; body/material/ACK/owner proof remain
   independent, and root/exact duplicates choose only one local triage queue.
   [Contract](docs/assistant-inbox.md#native-max-through-the-same-source-journal).

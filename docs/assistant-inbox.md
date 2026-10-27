@@ -548,42 +548,33 @@ from a local flag. Real Windows business E2E, unknown
 conversation intake, encrypted execution and the other full product gates remain
 required; `businessReady` stays false and no installation is performed here.
 
-### Initial unread email in the same stream journal
+### New email messages only
 
-For a NEW email source with no durable forward position, the SAME signed reader
-requires reviewed provider >=2.6.6 and opts into `monitor --unread-backfill`.
-Older packages refuse this initialization before account/provider launch with
-`ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED`; existing forward cursors retain
-their old passive path and are never reset or silently seeded after an upgrade.
+Automatic checking starts with the native forward UID/UIDVALIDITY checkpoint.
+It never opts into `monitor --unread-backfill`, creates an initial-unread seed or
+classifies the pre-connection unread backlog. The checkpoint is confirmed by
+the first successful provider baseline, not an untrusted Date header or the
+local button-click clock. Subsequent native UIDs are read independently of Seen,
+including new mail already read on another device.
 
-The initial native baseline returns its ordinary forward cursor and a separate
-bounded v2 initial-unread cursor. The SAME SQLite `commitPage` transaction stores
-the forward position plus one `email-initial-unread/v1` child stream with its
-ORIGINAL seed. No schema migration, second queue, message snapshot or credential
-store is introduced. Restart/conflict/full inbox retains both positions together.
+The SAME SQLite journal atomically retains the forward position and accepted
+refs. Restart, pause/resume and upgrades never reset an established position.
+Legacy `email-initial-unread/v1` rows remain byte-for-byte available for inspection,
+but are excluded from automatic due/pending/claim selection. No old stream cursor,
+original event, committed processing receipt or uncertain ACK fence is erased or
+converted into a read/processing outcome. Explicit provider history tools remain
+separate from automatic checking and preserve their ordinary authorization.
 
-Child polls use their durable cursor or, only before the first page, that stored
-seed. They reuse the SAME signed account/process engine and the existing four
-oldest-due source/stream slots per tick across companies. Backlog pages cannot
-occupy the worker indefinitely or postpone the independent forward stream.
-Terminal history sleeps. Every read keeps the live source generation checks,
-original deadline, private path and native routing/processing/ACK boundaries.
-
-Wire validation keeps exact v1/v2 scope/UIDVALIDITY/ceiling bindings and progress;
-history refs lie inside the frozen original range. UNSEEN applies only to these
-historical pages. New forward UIDs remain independent of read flags, including
-messages read on another device. Historical flags are observed per page, not as
-an atomic snapshot at enrollment. Already-read/deleted old mail is not claimed
-as recovered. Body, address/subject, owner identity and guessed task mappings
-still do not enter SQLite, and history capture alone never marks mail read.
-
+A returned history seed is rejected, including on the first baseline. Failure,
+late source changes and SQLite rollback preserve the prior position. No body,
+subject/address, guessed mapping or read receipt is introduced by initialization.
 
 ## Native MAX through the same source journal
 
 The native registration optionally selects one canonical numeric `maxChatUrl`
 (`https://web.max.ru/<signed-64-bit-chat-id>`), including its generation/CAS.
 A null selector is the native owner-selected account root and requires signed
-provider >=2.12.0 plus native `maxAccountDiscovery:true`. Explicit old URL rows
+provider >=2.13.0 plus native `maxAccountDiscovery:true`. Explicit old URL rows
 retain their exact selector and >=2.11.0 contract. No title, handle, default
 conversation, human catalogue or legacy-session import is used.
 
@@ -593,14 +584,16 @@ list cannot advance its v3 account cursor. At most 1,000 genuine signed-64-bit
 dialog IDs are admitted; incomplete/oversized/stale chains preserve the original
 position. The browser emits every request; the runtime never sends protocol
 packets or reads its auth storage. `lastEventTime` changes signal histories even
-when a different device already marked the message read. Initial unread or
-unknown-counter rows also signal history. Native server scan time scopes the
+when a different device already marked the message read. The first complete
+scan is only a checkpoint with zero hints, regardless of old unread counters. Native server scan time scopes the
 opaque original seed; no dialog titles, message bodies or auth packets persist.
 
 Account cursor and conversation hints commit atomically in the SAME existing
 SQLite stream table before any child read. New children preserve their ORIGINAL
 account seed through later scans and restart; the first signed history must cover
-that interval and complete unread range, including already-read newer messages.
+that exclusive native-time interval, including already-read newer messages.
+Old unread messages never enter the initial classification; they do not need to
+fit this bounded window. The signed coverage must confirm `newMessagesOnly:true`.
 Missing rendered/native coverage refuses advancement. Later child reads use the
 existing exact v2 message cursor, independent of unread flags. Shared stream
 fairness and one-page worker bounds stay in force. No new queue/schema is needed.
@@ -611,8 +604,10 @@ never selects a company, owner identity or task on its own.
 Both MAX modes run through the SAME account catalogue,
 package verifier/cache and subprocess engine. It observes only the same
 browser's native history and correlates genuine sender/message IDs with the
-selected DOM history. Initial polling requires a complete native unread interval;
-subsequent v2 opaque cursor positions are independent of read flags elsewhere.
+selected DOM history. Exact-chat initialization is a zero-event forward baseline;
+account child initialization uses only native timestamps AFTER the original
+server checkpoint. Subsequent v2 positions are independent of read flags elsewhere.
+An independently authorized manual history read never becomes automatic backfill.
 Malformed/changed scope, missing anchors, incomplete historical windows or
 unknown native wire shapes preserve the old position instead of skipping.
 

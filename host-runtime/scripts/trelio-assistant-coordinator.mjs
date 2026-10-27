@@ -20,7 +20,6 @@ const sourceFor = (identity,company) => ({ origin:identity.origin,assistantId:id
   provider:'trelio',accountId:company.memberId,bindingId:identity.deviceId });
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const externalProviders=Object.freeze({'telegram-mtproto':'telegram','email-imap-smtp':'email','max-web':'max'});
-const EMAIL_INITIAL_UNREAD_STREAM='email-initial-unread/v1';
 const externalSourceFor=(identity,row)=>({origin:identity.origin,assistantId:identity.assistantId,companyId:row.companyId,
   provider:externalProviders[row.skillId],accountId:row.localAccountId,bindingId:row.id});
 
@@ -292,20 +291,18 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(max&&(maxAccount?streamId!==null&&!assistantMaxChatUrl(`https://web.max.ru/${streamId}`):!assistantMaxChatUrl(row.maxChatUrl)||streamId!==null))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(streamId!==null && poll.cursor===null && typeof poll.initialCursor!=='string')fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const email=row.skillId==='email-imap-smtp';
-      const initialEmail=email&&streamId===null&&poll.cursor===null;
-      if(email&&streamId!==null&&streamId!==EMAIL_INITIAL_UNREAD_STREAM)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
-      // The forward position and the original history seed share one journal
-      // commit. Only a never-started email source requests a new seed. Child
-      // pages use that ORIGINAL seed until their own first committed cursor;
-      // no restart, source resume or provider upgrade resets a forward cursor.
+      if(email&&streamId!==null)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      // Automatic checking starts at the provider's first forward checkpoint.
+      // Unread is not an arrival boundary: never request an old-mail seed.
+      // Existing forward cursors and retained history/ACK records stay intact.
       // Native linked ID is observed before AND after the signed metadata
       // read. A username, quoted author or saved inbox label supplies no owner
       // candidate. Only its structural binding UUID is persisted with refs.
       const ownerBefore=row.ownerTaskIntakeAllowed===true&&['telegram-mtproto','max-web'].includes(row.skillId)
         ?await client.ownerIdentities(signal):null;
       const result=await readSourceMonitor({companyId:row.companyId,projectId:row.projectId,skillId:row.skillId,sourceId:row.id,sourceRevision:row.revision,
-        accountId:row.localAccountId,cursor:email&&streamId!==null?poll.cursor??poll.initialCursor:poll.cursor,
-        ...(max?{...(maxAccount?streamId===null?{}:{chat:`https://web.max.ru/${streamId}`,...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})}:{chat:row.maxChatUrl,...(poll.cursor===null?{initialUnread:true}:{})})}:email?(initialEmail||streamId!==null?{initialUnread:true}:{}):streamId===null?{}:{chat:streamId,
+        accountId:row.localAccountId,cursor:poll.cursor,
+        ...(max?{...(maxAccount?streamId===null?{}:{chat:`https://web.max.ru/${streamId}`,...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})}:{chat:row.maxChatUrl})}:email?{}:streamId===null?{}:{chat:streamId,
           ...(poll.cursor===null?{initialAccountCursor:poll.initialCursor}:{})})},signal);lease();
       // A native Channel constructor supplies a positive channel ID, not an
       // untyped chat number. Apply Telethon's documented marked representation
@@ -321,6 +318,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           channelId,result.nextCursor])).digest('hex'),initialCursor:poll.cursor};
       });
       const maxHints=result.conversationsToSync??[];
+      if(poll.cursor===null&&maxHints?.length)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(!Array.isArray(maxHints)||maxHints.length>1000||new Set(maxHints).size!==maxHints.length
         ||maxHints.length&&(!maxAccount||streamId!==null)||maxHints.some(chatId=>!assistantMaxChatUrl(`https://web.max.ru/${chatId}`)))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(maxAccount&&streamId===null){
@@ -329,16 +327,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         for(const chatId of maxHints)streams.push({id:chatId,revision:createHash('sha256').update(JSON.stringify([
           'max-conversation-signal/v1',source,chatId,result.nextCursor])).digest('hex'),initialCursor:result.initialAccountCursor});
       }else if(result.initialAccountCursor!==undefined)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
-      if(initialEmail){
-        if(result.baselineOnly!==true||!Array.isArray(result.events)||result.events.length
-          ||typeof result.initialUnreadCursor!=='string'||!result.initialUnreadCursor.length
-          ||result.initialUnreadCursor.length>2048)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
-        streams.push({id:EMAIL_INITIAL_UNREAD_STREAM,revision:createHash('sha256')
-          .update(JSON.stringify([EMAIL_INITIAL_UNREAD_STREAM,source,result.initialUnreadCursor])).digest('hex'),
-          initialCursor:result.initialUnreadCursor});
-      }else if(result.initialUnreadCursor!==undefined)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
+      if(result.initialUnreadCursor!==undefined)fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       if(streamId!==null && ((maxAccount?result.baselineOnly!==(poll.cursor===null&&result.events?.length===0):result.baselineOnly!==false) || (result.unresolvedDeletionIds??[]).length
-        || (email?result.initialUnreadBackfill!==true:maxAccount?poll.cursor===null&&result.initialAccountBackfill!==true:row.skillId!=='telegram-mtproto'
+        || (maxAccount?poll.cursor===null&&result.initialAccountBackfill!==true:row.skillId!=='telegram-mtproto'
           || poll.cursor===null && result.initialAccountBackfill!==true)))fail('ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED');
       const deletions=resolveCloudDeletions(source,result);
       if(!Array.isArray(result.events)||result.events.length+deletions.length>100)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');

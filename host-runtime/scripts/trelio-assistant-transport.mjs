@@ -4394,8 +4394,9 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
       ||seed.scope!==next.scope||raw.initialAccountCursor!==(cursor??raw.nextCursor)
       ||raw.schemaVersion!==1||raw.baselineOnly!==true||raw.hasMore!==false||!Array.isArray(raw.events)||raw.events.length
       ||raw.coverage?.accountDiscovery!==true||raw.coverage.nativeDialogIds!==true||raw.coverage.complete!==true
-      ||raw.coverage.snapshotAtomic!==false||raw.coverage.unreadOnly!==false||raw.readState?.readReceiptsSent!==false
+      ||raw.coverage.snapshotAtomic!==false||raw.coverage.unreadOnly!==false||raw.coverage.newMessagesOnly!==true||raw.readState?.readReceiptsSent!==false
       ||!Array.isArray(raw.conversationsToSync)||raw.conversationsToSync.length>1000
+      ||cursor===null&&raw.conversationsToSync.length>0
       ||new Set(raw.conversationsToSync).size!==raw.conversationsToSync.length
       ||raw.conversationsToSync.some(value=>!assistantMaxChatUrl(`https://web.max.ru/${value}`)))invalid();
     return {schemaVersion:1,baselineOnly:true,events:[],nextCursor:raw.nextCursor,hasMore:false,
@@ -4404,7 +4405,7 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
   if(nativeMax&&!assistantMaxChatUrl(chat))invalid();
   const maxSeed=nativeMax&&initialAccountCursor!==null;
   if(maxSeed){
-    if(initialUnread||cursor!==null||!maxAccountPosition(initialAccountCursor)||raw.coverage?.initialAccountInterval!==true
+    if(initialUnread||cursor!==null||!maxAccountPosition(initialAccountCursor)||raw.coverage?.initialAccountInterval!==true||raw.coverage.newMessagesOnly!==true
       ||raw.coverage.snapshotAtomic!==false||backfill!==(raw.events?.length>0)||raw.baselineOnly!==(raw.events?.length===0))invalid();
   }
   let emailPrevious=null,emailNext=null;
@@ -4835,9 +4836,10 @@ export const readAssistantSourceMonitor = async ({identity,host,store,client=nul
     }
     return await withAssistantSourcePackage({identity,host,store,scope,signal,
       sourceSelection:source.sourceId===undefined?null:{sourceId:source.sourceId,expectedRevision:source.sourceRevision}},async({engine,profile,materialized,resolution,signal:combined})=>{
-      // A fresh source cannot durably claim a baseline while silently losing
-      // its historical unread seed. Existing forward positions are untouched.
-      if(scope.skillId==='max-web'&&!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,maxAccount||maxSeed?'2.12.0':'2.11.0'))
+      // Account discovery/initial child history require the reviewed NEW-only
+      // provider contract. Older packages would enqueue old unread rows. Never
+      // launch those packages or reset an existing forward position as fallback.
+      if(scope.skillId==='max-web'&&!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,maxAccount||maxSeed?'2.13.0':'2.11.0'))
         fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
       if(emailInitial&&!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.6.6'))
         fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');

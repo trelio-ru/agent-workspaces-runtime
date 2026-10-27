@@ -623,17 +623,21 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope=scopeOf(scopeInput);activeSource(scope);integer(limit,1,MAX_PAGE);
       return all(`SELECT stream_id,next_poll_at FROM assistant_inbox_streams WHERE source_key=?
         AND signal_generation>completed_generation AND next_poll_at<=?
-        AND (poll_token IS NULL OR poll_expires_at<=?) ORDER BY next_poll_at,stream_id LIMIT ?`,scope.key,time(),time(),limit)
+        AND NOT (?='email' AND stream_id='email-initial-unread/v1')
+        AND (poll_token IS NULL OR poll_expires_at<=?) ORDER BY next_poll_at,stream_id LIMIT ?`,scope.key,time(),scope.provider,time(),limit)
         .map(row=>({streamId:row.stream_id,nextPollAt:row.next_poll_at}));
     },
     hasPendingStreams(scopeInput) {
       const scope=scopeOf(scopeInput);activeSource(scope);
-      return Boolean(get('SELECT 1 FROM assistant_inbox_streams WHERE source_key=? AND signal_generation>completed_generation LIMIT 1',scope.key));
+      // Legacy unread seeds remain durable for inspection; they are no longer
+      // automatic work. Do not consume/reset their cursor or any event/ACK fence.
+      return Boolean(get("SELECT 1 FROM assistant_inbox_streams WHERE source_key=? AND signal_generation>completed_generation AND NOT (?='email' AND stream_id='email-initial-unread/v1') LIMIT 1",scope.key,scope.provider));
     },
     claimStreamPoll(scopeInput,streamId) {
       const scope=scopeOf(scopeInput);streamId=opaque(streamId,64);
       return transaction(()=>{
         activeSource(scope);
+        if(scope.provider==='email'&&streamId==='email-initial-unread/v1')return null;
         const row=get('SELECT * FROM assistant_inbox_streams WHERE source_key=? AND stream_id=?',scope.key,streamId),timestamp=time();
         if(!row || row.signal_generation<=row.completed_generation || row.next_poll_at>timestamp
           || row.poll_token && row.poll_expires_at>timestamp)return null;

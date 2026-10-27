@@ -610,7 +610,7 @@ test('production host composes real SQLite, fresh private calls and the native a
       sourceHealthReads++;assert.equal(company,companyId);assert.equal(source,sourceId);assert.equal(sourcePolls,sourceHealthReads-1);
       return {revision:0,sourceRevision:0,code:'not_checked'};
     },reportSourceHealth:async input=>{
-      assert.equal(sourcePolls,2);sourceReports.push(input);assert.equal(input.sourceId,sourceId);
+      assert.equal(sourcePolls,1);sourceReports.push(input);assert.equal(input.sourceId,sourceId);
       assert.equal(input.companyId,companyId);assert.equal(input.expectedRevision,0);assert.equal(input.sourceRevision,0);
       assert.equal(input.code,'ready');return {revision:1,sourceRevision:0,code:'ready'};
     },reportHealth:async()=>assert.fail('source observation cannot clear global health'),
@@ -631,9 +631,8 @@ test('production host composes real SQLite, fresh private calls and the native a
     contextCalls++;return action({...client,identity:currentIdentity},{readActivePass:async()=>null,readIdentity:async()=>currentIdentity,readActivation:async()=>null,withSetupLock:action=>action()});
   },dependencies:{directory:taskConfig,
     readSourceMonitor:async(source,signal)=>{sourcePolls++;assert.ok(signal);assert.deepEqual(source,{companyId,projectId:null,
-      skillId:'email-imap-smtp',sourceId,sourceRevision:0,accountId:sourceAccountId,cursor:sourcePolls===1?null:'email-history',initialUnread:true});
-      return {baselineOnly:sourcePolls===1,events:[],nextCursor:sourcePolls===1?'email-baseline':'email-end',hasMore:false,
-        ...(sourcePolls===1?{initialUnreadCursor:'email-history'}:{initialUnreadBackfill:true})};},
+      skillId:'email-imap-smtp',sourceId,sourceRevision:0,accountId:sourceAccountId,cursor:null});
+      return {baselineOnly:true,events:[],nextCursor:'email-baseline',hasMore:false};},
     ensureDirectory:async()=>{},openDatabase:async directory=>{
       assert.equal(path.basename(directory),identity.deviceId);
       return {database,close:async()=>{databaseClosed++;database.close();}};
@@ -643,14 +642,14 @@ test('production host composes real SQLite, fresh private calls and the native a
   try {
     await host.coordinator.pollOnce();
     assert.equal(sourcePolls,1);assert.equal(sourceInventories,3,'source inventory and both sides of the read re-enter the protected context');
-    assert.equal(sourceHealthReads,1);assert.equal(sourceReports.length,0,'an unfinished initial history cannot claim the whole source is ready');
+    assert.equal(sourceHealthReads,1);assert.equal(sourceReports.length,1,'a confirmed forward baseline needs no old-unread history before source readiness');
     await assert.rejects(host.coordinator.workOnce(),error=>error.code==='ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     assert.equal(starts,0,'a running source poll and configured native adapter do not enable model work');
     businessReady=true;
     await host.coordinator.workOnce();
     assert.equal(starts,1);
     await host.coordinator.pollOnce();
-    assert.equal(sourceHealthReads,2);assert.equal(sourceReports.length,1,'production composition reports ready only after the same history stream completes');
+    assert.equal(sourceHealthReads,1);assert.equal(sourcePolls,1);assert.equal(sourceReports.length,1,'no history child or repeated health write bypasses the five-minute forward schedule');
     assert.equal(reported,1);
     assert.equal(host.coordinator.status().length,1);
     assert.ok(contextCalls>=8,'operations re-enter the private context rather than retaining its token/worker');

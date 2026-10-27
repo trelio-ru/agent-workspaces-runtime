@@ -1459,7 +1459,7 @@ test('derived ACK profile preserves short original grant budget and one-use spaw
 for(const encrypted of [false,true])for(const accountWide of [false,true])test(`MAX native source and committed ACK reuse one signed child/account engine with exact range and uncertain read-back (encrypted=${encrypted}, accountWide=${accountWide})`,async t=>{
   const saved={...scope},savedVersion=providerVersion;
   t.after(()=>{Object.assign(scope,saved);providerVersion=savedVersion;ackFixture=null;resolveOverride=null;maxAccountFixture=false;sourceSelectionFixture=null;});
-  scope.skillId='max-web';providerVersion=accountWide?'2.12.0':'2.11.0';maxAccountFixture=accountWide;
+  scope.skillId='max-web';providerVersion=accountWide?'2.13.0':'2.11.0';maxAccountFixture=accountWide;
   const chat='https://web.max.ru/77',accountId=randomUUID(),sourceId=randomUUID(),routeId=randomUUID(),receiptId=randomUUID();
   const source={...scope,id:sourceId,deviceId,localAccountId:accountId,maxChatUrl:accountWide?null:chat,state:'active',revision:0};
   const key='max-conversation/v1.'+'f'.repeat(64),revision='a'.repeat(64),maxScope='b'.repeat(64);
@@ -1468,10 +1468,10 @@ for(const encrypted of [false,true])for(const accountWide of [false,true])test(`
   const event={id:reference.id,revision,kind:'new',chatId:'77',messageId:'11',conversationKey:key,
     senderUserId:'123',senderNamespace:'max_user_id',outgoing:false,forwarded:false,text:'PRIVATE_BODY'};
   const accountCursor=(startedAt=100)=>Buffer.from(JSON.stringify({v:3,scope:maxScope,startedAt})).toString('base64url');
-  const accountMonitor={schemaVersion:1,baselineOnly:true,events:[],nextCursor:accountCursor(200),initialAccountCursor:accountCursor(),conversationsToSync:['77'],hasMore:false,coverage:{accountDiscovery:true,nativeDialogIds:true,complete:true,snapshotAtomic:false,unreadOnly:false},readState:{readReceiptsSent:false}};
+  const accountMonitor={schemaVersion:1,baselineOnly:true,events:[],nextCursor:accountCursor(200),initialAccountCursor:accountCursor(),conversationsToSync:['77'],hasMore:false,coverage:{accountDiscovery:true,nativeDialogIds:true,complete:true,snapshotAtomic:false,unreadOnly:false,newMessagesOnly:true},readState:{readReceiptsSent:false}};
   const monitor={schemaVersion:1,baselineOnly:false,events:[event],nextCursor:cursor(),hasMore:false,
     coverage:{historicalBackfill:true,initialUnreadOnly:true,snapshotAtomic:false,ownerIdentityAvailable:true,
-      nativeMessageVerified:true,earlierEditsIncluded:false,otherChatsIncluded:false,...(accountWide?{initialAccountInterval:true,initialUnreadOnly:undefined}:{})},readState:{readReceiptsSent:false}};
+      nativeMessageVerified:true,earlierEditsIncluded:false,otherChatsIncluded:false,...(accountWide?{initialAccountInterval:true,initialUnreadOnly:undefined,newMessagesOnly:true}:{})},readState:{readReceiptsSent:false}};
   if(accountWide)sourceSelectionFixture={sourceId,expectedRevision:0};
   let selectedStore=store,connectionId=null,encryptedWire=null,encryptionRuntime=null,cryptoMode='valid',bodyThread=null;
   const savedFetch=globalThis.fetch;
@@ -1655,9 +1655,9 @@ for(const encrypted of [false,true])for(const accountWide of [false,true])test(`
     assert.doesNotMatch(JSON.stringify(skill),/~e1:|ciphertext|scopePrivateEncryptionJwk|trelio-local/);
     await build();
   }
-  const before=await fs.readFile(marker,'utf8');providerVersion='2.10.2';await build();
+  const before=await fs.readFile(marker,'utf8');providerVersion=accountWide?'2.12.1':'2.10.2';await build();
   await assert.rejects(readAssistantSourceMonitor({identity,host,store:selectedStore,source:{...scope,accountId,chat,cursor:null,...(accountWide?{initialAccountCursor:accountCursor()}:{initialUnread:true}),...(encrypted||accountWide?{sourceId,sourceRevision:0}:{})}}),/CAPABILITY_REQUIRED/);
-  assert.equal(await fs.readFile(marker,'utf8'),before,'old package cannot start a provider or claim a baseline');providerVersion=accountWide?'2.12.0':'2.11.0';sourceSelectionFixture=null;
+  assert.equal(await fs.readFile(marker,'utf8'),before,'old package cannot start a provider or claim a baseline');providerVersion=accountWide?'2.13.0':'2.11.0';sourceSelectionFixture=null;
   ackFixture={intent:{sourceId,sourceRevision:0,receipts:[{receiptId,eventOrdinals:[0]}]},admission:{schemaVersion:1,
     sourceId,sourceRevision:0,localAccountId:accountId,slots:[{receiptId,routeId,eventOrdinal:0}]}};
   const client={identity,sourceAccounts:async()=>[source]};let starts=0;
@@ -1705,6 +1705,13 @@ test('MAX native projection binds exact numeric chat, native identity and unchan
   assert.throws(()=>project({...raw,coverage:{...raw.coverage,nativeMessageVerified:false}}),/INVALID_RESPONSE/);
   const empty={...raw,baselineOnly:true,events:[],nextCursor:cursor(null,null),coverage:{...raw.coverage,historicalBackfill:false}};
   assert.equal(project(empty).baselineOnly,true);
+  const initialAccountCursor=Buffer.from(JSON.stringify({v:3,scope,startedAt:100})).toString('base64url');
+  const account={...raw,coverage:{...raw.coverage,initialUnreadOnly:undefined,initialAccountInterval:true,newMessagesOnly:true}};
+  const fromAccount=value=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify(value)},
+    {skillId:'max-web',chat,cursor:null,initialAccountCursor,nativeMax:true});
+  assert.equal(fromAccount(account).events.length,1);
+  for(const value of [undefined,false])assert.throws(()=>fromAccount({...account,coverage:{...account.coverage,newMessagesOnly:value}}),/INVALID_RESPONSE/);
+
   assert.throws(()=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify({...raw,events:[],nextCursor:cursor('12'),coverage:{...raw.coverage,historicalBackfill:false,initialUnreadOnly:undefined}})},
     {skillId:'max-web',chat,cursor:cursor(),nativeMax:true}),/INVALID_RESPONSE/);
 });
@@ -2071,12 +2078,14 @@ test('existing-task triage reads exact signed Telegram/email/MAX bodies without 
 test('MAX account projector requires complete native scope/chain and never treats unread DOM fragments as a cursor',()=>{
   const position=(time,scope='a'.repeat(64))=>Buffer.from(JSON.stringify({v:3,scope,startedAt:time})).toString('base64url');
   const raw={schemaVersion:1,baselineOnly:true,events:[],nextCursor:position(200),initialAccountCursor:position(100),
-    conversationsToSync:['77','-88'],hasMore:false,coverage:{accountDiscovery:true,nativeDialogIds:true,complete:true,snapshotAtomic:false,unreadOnly:false},readState:{readReceiptsSent:false}};
+    conversationsToSync:['77','-88'],hasMore:false,coverage:{accountDiscovery:true,nativeDialogIds:true,complete:true,snapshotAtomic:false,unreadOnly:false,newMessagesOnly:true},readState:{readReceiptsSent:false}};
   const options={skillId:'max-web',cursor:position(100),chat:null,nativeMax:true};
   const project=value=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify(value)},options);
   assert.deepEqual(project(raw).conversationsToSync,['77','-88']);
+  assert.throws(()=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify({...raw,initialAccountCursor:raw.nextCursor})},{...options,cursor:null}),/INVALID_RESPONSE/,'a first account inventory never admits old unread chat hints');
   for(const value of [{...raw,events:[{id:'unread-only'}]},{...raw,hasMore:true},{...raw,conversationsToSync:['77','77']},
     {...raw,conversationsToSync:['0']},{...raw,initialAccountCursor:position(200)},{...raw,nextCursor:position(99)},
     {...raw,nextCursor:position(200,'b'.repeat(64))},{...raw,coverage:{...raw.coverage,complete:false}},
-    {...raw,coverage:{...raw.coverage,unreadOnly:true}},{...raw,readState:{readReceiptsSent:true}}])assert.throws(()=>project(value),/INVALID_RESPONSE/);
+    {...raw,coverage:{...raw.coverage,unreadOnly:true}},{...raw,coverage:{...raw.coverage,newMessagesOnly:undefined}},
+    {...raw,coverage:{...raw.coverage,newMessagesOnly:false}},{...raw,readState:{readReceiptsSent:true}}])assert.throws(()=>project(value),/INVALID_RESPONSE/);
 });
