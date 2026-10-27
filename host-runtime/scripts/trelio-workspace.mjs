@@ -3050,6 +3050,13 @@ const inspectImmutableCodexPluginTree = async (
   onRootValidated?.();
 
   const treeHash = crypto.createHash("sha256");
+  // Keep the historical whole-tree digest unchanged: schema-v1 snapshots and
+  // updater journals must still verify their original bytes exactly. A second,
+  // ephemeral digest compares executable/package bytes when native Codex has
+  // changed ONLY its real root .git checkout metadata. Never persist this as a
+  // replacement receipt or use it to validate a damaged retained snapshot.
+  const payloadHash = crypto.createHash("sha256");
+  let hasCheckoutMetadata = false;
   let fileCount = 0;
   let totalBytes = 0;
 
@@ -3072,6 +3079,7 @@ const inspectImmutableCodexPluginTree = async (
         throw new Error(`Retention запрещает symlink в plugin: ${relativePath}`);
       }
       if (metadata.isDirectory()) {
+        if (relativePath === ".git") hasCheckoutMetadata = true;
         await inspectDirectory(absolutePath, relativePath);
         continue;
       }
@@ -3095,6 +3103,12 @@ const inspectImmutableCodexPluginTree = async (
       treeHash.update(relativePath, "utf8");
       treeHash.update(`:${bytes.byteLength}:`);
       treeHash.update(bytes);
+      if (!relativePath.startsWith(".git/")) {
+        payloadHash.update(`${Buffer.byteLength(relativePath, "utf8")}:`);
+        payloadHash.update(relativePath, "utf8");
+        payloadHash.update(`:${bytes.byteLength}:`);
+        payloadHash.update(bytes);
+      }
     }
   };
 
@@ -3115,6 +3129,8 @@ const inspectImmutableCodexPluginTree = async (
     installedPath: absoluteDirectory,
     version: expectedVersion,
     treeSha256: treeHash.digest("hex"),
+    payloadTreeSha256: payloadHash.digest("hex"),
+    hasCheckoutMetadata,
     fileCount,
     totalBytes,
   };
@@ -3203,7 +3219,17 @@ const assertRetainedCodexPluginEntry = async (entry) => {
 };
 
 const restoreOneRetainedCodexPlugin = async (entry) => {
-  await assertRetainedCodexPluginEntry(entry);
+  const retained = await assertRetainedCodexPluginEntry(entry);
+  // Native Git may refresh index/log/config after our snapshot but before the
+  // next maintenance cycle. Existing code must match every retained payload
+  // byte; differing checkout metadata is accepted in-place, never restored or
+  // executed. Both trees were fully bounded/type-checked above, including .git;
+  // a gitdir file, symlink, changed hook/manifest or corrupted copy cannot pass.
+  // This also handles old schema-v1 copies without changing hashes, migrating
+  // metadata, clearing an update latch or touching native hook approvals.
+  const matchesRetained = existing => existing.treeSha256 === entry.treeSha256
+    || existing.hasCheckoutMetadata && retained.hasCheckoutMetadata
+      && existing.payloadTreeSha256 === retained.payloadTreeSha256;
 
   try {
     const existing = await inspectImmutableCodexPluginTree(
@@ -3211,7 +3237,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
       entry.version,
       { profile: entry.profile },
     );
-    if (existing.treeSha256 !== entry.treeSha256) {
+    if (!matchesRetained(existing)) {
       throw new Error(
         `Codex cache уже содержит другие bytes версии ${entry.version}.`,
       );
@@ -3298,7 +3324,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
         if (error.code === "EPERM") throw error;
         throw verificationError;
       }
-      if (concurrent.treeSha256 !== entry.treeSha256) throw error;
+      if (!matchesRetained(concurrent)) throw error;
     }
   } finally {
     await fs.rm(temporaryPath, { recursive: true, force: true });

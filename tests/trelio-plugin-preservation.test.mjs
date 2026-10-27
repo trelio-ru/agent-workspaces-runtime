@@ -8,7 +8,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/scripts/trelio-assistant-entry.mjs";
-import { retainLoadedCodexPluginInstallation, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const execute = promisify(execFile);
 const waitUntil = async (predicate) => {
@@ -37,6 +37,67 @@ const fixture = async (profile = "human") => {
     TRELIO_HOST_RUNTIME_VERSION: "3.18.0",
   } };
 };
+
+for (const profile of ["human", "assistant"]) {
+  test(`${profile} legacy retention accepts native Git metadata changes without overwriting them`, async () => {
+    const f = await fixture(profile);
+    try {
+      // Use a genuine native Git clone, not a directory called .git. Codex's
+      // Git-backed install refreshes this mutable index/config independently
+      // of the immutable plugin payload and the schema-v1 retained receipt.
+      const source = path.join(f.root, "source"), hooks = path.join(f.root, "empty-hooks");
+      await fs.mkdir(hooks);
+      await fs.rename(f.plugin, source);
+      const git = (cwd, ...args) => execute("git", ["-c", `core.hooksPath=${hooks}`, ...args], {
+        cwd, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull },
+      });
+      await git(source, "init");
+      await git(source, "add", ".");
+      await git(source, "-c", "user.name=Synthetic", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture");
+      await git(f.root, "clone", "--no-hardlinks", source, f.plugin);
+      const version = path.basename(f.plugin);
+      const entry = await retainLoadedCodexPluginInstallation({
+        profile, retentionDirectory: f.retentionDirectory, loadedPluginDirectory: f.plugin, loadedPluginVersion: version,
+      });
+      const metadataPath = path.join(entry.entryDirectory, "metadata.json"), metadata = await fs.readFile(metadataPath);
+      assert.equal(JSON.parse(metadata).schemaVersion, 1);
+      await git(f.plugin, "update-index", "--assume-unchanged", "scripts/hook.mjs");
+      await git(f.plugin, "config", "trelioFixture.changed", "true");
+      const index = await fs.readFile(path.join(f.plugin, ".git/index"));
+      const config = await fs.readFile(path.join(f.plugin, ".git/config"));
+      assert.notDeepEqual(index, await fs.readFile(path.join(entry.pluginDirectory, ".git/index")));
+
+      assert.equal(await restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), 1);
+      assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/index")), index);
+      assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/config")), config);
+      assert.deepEqual(await fs.readFile(metadataPath), metadata, "old immutable receipts are not rewritten");
+
+      // Every payload byte still matters, even alongside a legitimate native
+      // metadata change. No other file may be excluded as checkout metadata.
+      const hookPath = path.join(f.plugin, "scripts/hook.mjs"), originalHook = await fs.readFile(hookPath);
+      await fs.writeFile(hookPath, "changed executable");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /другие bytes/);
+      assert.equal(await fs.readFile(hookPath, "utf8"), "changed executable", "refusal does not overwrite an existing installation");
+      await fs.writeFile(hookPath, originalHook);
+      await fs.writeFile(path.join(f.plugin, ".gitignore"), "a payload file, not checkout metadata\n");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /другие bytes/);
+      await fs.rm(path.join(f.plugin, ".gitignore"));
+
+      // A gitdir file cannot borrow the directory exception. The retained
+      // snapshot itself must always pass its historical COMPLETE digest too.
+      await fs.rename(path.join(f.plugin, ".git"), path.join(f.root, "moved-git"));
+      await fs.writeFile(path.join(f.plugin, ".git"), "gitdir: elsewhere\n");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /другие bytes/);
+      await fs.rm(path.join(f.plugin, ".git"));
+      await fs.rename(path.join(f.root, "moved-git"), path.join(f.plugin, ".git"));
+      await fs.appendFile(path.join(entry.pluginDirectory, ".git/config"), "\ncorrupted retained metadata\n");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /повреждена/);
+      assert.deepEqual(await fs.readFile(metadataPath), metadata);
+    } finally {
+      await fs.rm(f.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("dedicated assistant MCP preserves only its exact loaded shell and stops after EOF",async()=>{
   const f=await fixture("assistant"),input=new PassThrough(),output=new PassThrough();
