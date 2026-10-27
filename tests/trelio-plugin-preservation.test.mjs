@@ -46,10 +46,15 @@ for (const profile of ["human", "assistant"]) {
       // Git-backed install refreshes this mutable index/reflog independently
       // of the immutable plugin payload and the schema-v1 retained receipt.
       const source = path.join(f.root, "source"), hooks = path.join(f.root, "empty-hooks");
+      // Git for Windows does not accept Node's extended \\.\nul device as
+      // GIT_CONFIG_GLOBAL. Use an actual empty fixture file on every OS; the
+      // real user's global configuration is never read or modified.
+      const globalConfig = path.join(f.root, "empty-git-config");
+      await fs.writeFile(globalConfig, "");
       await fs.mkdir(hooks);
       await fs.rename(f.plugin, source);
       const git = (cwd, ...args) => execute("git", ["-c", `core.hooksPath=${hooks}`, ...args], {
-        cwd, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull },
+        cwd, env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: globalConfig },
       });
       await git(source, "init");
       await git(source, "add", ".");
