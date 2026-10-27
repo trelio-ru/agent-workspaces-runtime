@@ -365,7 +365,7 @@ public static class AssistantIconPseudoConsoleFixture {
   }
   [DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(IntPtr window,ref Guid iid,[MarshalAs(UnmanagedType.Interface)] out Properties store);
   [DllImport("ole32.dll")] static extern int PropVariantClear(ref Value value);
-  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern uint ExtractIconEx(string file,int index,[Out] IntPtr[] large,[Out] IntPtr[] small,uint count);
+  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern uint ExtractIconEx(string file,int index,out IntPtr large,out IntPtr small,uint count);
   [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
   [DllImport("shlwapi.dll",CharSet=CharSet.Unicode)] static extern int SHLoadIndirectString(string source,StringBuilder value,uint length,IntPtr reserved);
   static string[] ReadShell(IntPtr window) {
@@ -462,9 +462,13 @@ public static class AssistantIconPseudoConsoleFixture {
         string system=Environment.GetFolderPath(Environment.SpecialFolder.System);
         if(actual[0]!="\""+system+"\\schtasks.exe\" /Run /TN \"Trelio-DigitalAssistant-"+assistantId+"\"")return 41;
         if(actual[3]!="Trelio.DigitalAssistant."+assistantId)return 42;
-        if(!actual[2].EndsWith(",-1")||actual[1]!="@"+actual[2].Substring(0,actual[2].Length-3)+",-101")return 43;
-        IntPtr[] large=new IntPtr[1];uint extracted=ExtractIconEx(actual[2].Substring(0,actual[2].Length-3),-1,large,null,1);
-        if(extracted!=1)return 44;if(large[0]==IntPtr.Zero)return 48;DestroyIcon(large[0]);
+        if(!actual[2].EndsWith(",-102")||actual[1]!="@"+actual[2].Substring(0,actual[2].Length-5)+",-101")return 43;
+        // Resource ID 102 deliberately avoids ExtractIconEx's special -1
+        // icon-count sentinel. Scalar out handles cannot be lost to array
+        // marshaling; require real large AND small icons, never just a count.
+        IntPtr large,small;uint extracted=ExtractIconEx(actual[2].Substring(0,actual[2].Length-5),-102,out large,out small,1);
+        try { if(extracted!=1)return 44;if(large==IntPtr.Zero||small==IntPtr.Zero)return 48; }
+        finally { if(large!=IntPtr.Zero)DestroyIcon(large);if(small!=IntPtr.Zero)DestroyIcon(small); }
         StringBuilder label=new StringBuilder(128);
         if(SHLoadIndirectString(actual[1],label,128,IntPtr.Zero)!=0||label.ToString()!="Цифровой ассистент")return 45;
         System.IO.File.WriteAllText(receipt+".inspected","verified");

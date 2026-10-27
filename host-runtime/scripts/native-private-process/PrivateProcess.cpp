@@ -388,7 +388,7 @@ struct AssistantTaskbarProperties {
     // Node or a versioned plugin path. IgnoreNew remains the scheduler's guard;
     // setting these properties never executes this command or starts work.
     assigned = {L"\"" + std::wstring(system) + L"\\schtasks.exe\" /Run /TN \"Trelio-DigitalAssistant-" + assistantId + L"\"",
-      L"@" + std::wstring(module) + L",-101", std::wstring(module) + L",-1", L"Trelio.DigitalAssistant." + assistantId};
+      L"@" + std::wstring(module) + L",-101", std::wstring(module) + L",-102", L"Trelio.DigitalAssistant." + assistantId};
     for (size_t index = 0; index < keys.size(); ++index)
       require(SUCCEEDED(store->GetValue(keys[index], &previous[index])));
     for (size_t index = 0; index < keys.size(); ++index) {
