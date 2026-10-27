@@ -938,7 +938,8 @@ are separate shortcuts and are not silently rewritten.
 The icon uses the exact three bars/cursor geometry from the dedicated plugin's
 `assets/trelio-assistant-logo.svg` (SVG SHA-256
 `fbf526b22fb2324623e64aaa89fa5474d8d4cd6b4bb64c3255d22cdd1263131e`).
-The hosted builder wraps the SAME reviewed 64px PNG array in a disposable ICO
+The hosted builder decodes the SAME reviewed 64px PNG array without resizing
+into a conventional BGRA DIB/AND-mask ICO for the Shell's legacy icon extractor
 and compiles it into the SAME x64/ia32/arm64 PE along with the fixed display name.
 There is no extra runtime package asset, local compilation or Node.exe edit;
 two complete hosted builds must still be byte-identical.

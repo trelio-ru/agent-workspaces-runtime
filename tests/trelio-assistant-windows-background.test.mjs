@@ -365,7 +365,7 @@ public static class AssistantIconPseudoConsoleFixture {
   }
   [DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(IntPtr window,ref Guid iid,[MarshalAs(UnmanagedType.Interface)] out Properties store);
   [DllImport("ole32.dll")] static extern int PropVariantClear(ref Value value);
-  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern uint ExtractIconEx(string file,int index,IntPtr[] large,IntPtr[] small,uint count);
+  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern uint ExtractIconEx(string file,int index,[Out] IntPtr[] large,[Out] IntPtr[] small,uint count);
   [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
   [DllImport("shlwapi.dll",CharSet=CharSet.Unicode)] static extern int SHLoadIndirectString(string source,StringBuilder value,uint length,IntPtr reserved);
   static string[] ReadShell(IntPtr window) {
@@ -464,7 +464,7 @@ public static class AssistantIconPseudoConsoleFixture {
         if(actual[3]!="Trelio.DigitalAssistant."+assistantId)return 42;
         if(!actual[2].EndsWith(",-1")||actual[1]!="@"+actual[2].Substring(0,actual[2].Length-3)+",-101")return 43;
         IntPtr[] large=new IntPtr[1];uint extracted=ExtractIconEx(actual[2].Substring(0,actual[2].Length-3),-1,large,null,1);
-        if(extracted!=1||large[0]==IntPtr.Zero)return 44;DestroyIcon(large[0]);
+        if(extracted!=1)return 44;if(large[0]==IntPtr.Zero)return 48;DestroyIcon(large[0]);
         StringBuilder label=new StringBuilder(128);
         if(SHLoadIndirectString(actual[1],label,128,IntPtr.Zero)!=0||label.ToString()!="Цифровой ассистент")return 45;
         System.IO.File.WriteAllText(receipt+".inspected","verified");

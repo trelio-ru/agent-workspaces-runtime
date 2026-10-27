@@ -17,11 +17,37 @@ $resourcePath = Join-Path $outputRoot "assistant.rc"
 $stream = [System.IO.MemoryStream]::new()
 $writer = [System.IO.BinaryWriter]::new($stream)
 try {
-  # One PNG-compressed 64px image in a standard ICO container. The native
-  # window helper scales this same PNG to the current small/large metrics.
+  # Keep a conventional 32-bit DIB inside the ICO/PE. The Shell's legacy icon
+  # extractor is a different consumer from CreateIconFromResourceEx and must
+  # also read the resource, including on ARM64. Decode the SAME PNG only on the
+  # hosted builder, without resizing or another tracked artwork copy.
+  Add-Type -AssemblyName System.Drawing
+  $pngStream = [System.IO.MemoryStream]::new($png)
+  $bitmap = [System.Drawing.Bitmap]::new($pngStream)
+  $dibStream = [System.IO.MemoryStream]::new()
+  $dib = [System.IO.BinaryWriter]::new($dibStream)
+  try {
+    if ($bitmap.Width -ne 64 -or $bitmap.Height -ne 64) { throw "Invalid assistant dimensions" }
+    $dib.Write([uint32]40); $dib.Write([int32]64); $dib.Write([int32]128)
+    $dib.Write([uint16]1); $dib.Write([uint16]32)
+    foreach ($value in @(0, 16384, 0, 0, 0, 0)) { $dib.Write([uint32]$value) }
+    # DIB rows are bottom-up BGRA. The 1-bit AND mask retains transparent pixels
+    # for Shell consumers which still consult it even for a 32-bit alpha icon.
+    for ($y = 63; $y -ge 0; $y--) {
+      for ($x = 0; $x -lt 64; $x++) { $pixel = $bitmap.GetPixel($x, $y); $dib.Write([byte[]]@($pixel.B, $pixel.G, $pixel.R, $pixel.A)) }
+    }
+    for ($y = 63; $y -ge 0; $y--) {
+      for ($group = 0; $group -lt 8; $group++) {
+        $mask = 0
+        for ($bit = 0; $bit -lt 8; $bit++) { if ($bitmap.GetPixel($group * 8 + $bit, $y).A -eq 0) { $mask = $mask -bor (128 -shr $bit) } }
+        $dib.Write([byte]$mask)
+      }
+    }
+    $image = $dibStream.ToArray()
+  } finally { $dib.Dispose(); $dibStream.Dispose(); $bitmap.Dispose(); $pngStream.Dispose() }
   foreach ($value in @(0, 1, 1)) { $writer.Write([uint16]$value) }
   $writer.Write([byte[]]@(64, 64, 0, 0)); $writer.Write([uint16]1); $writer.Write([uint16]32)
-  $writer.Write([uint32]$png.Length); $writer.Write([uint32]22); $writer.Write($png)
+  $writer.Write([uint32]$image.Length); $writer.Write([uint32]22); $writer.Write([byte[]]$image)
   [System.IO.File]::WriteAllBytes($iconPath, $stream.ToArray())
 } finally { $writer.Dispose(); $stream.Dispose() }
 $resourceIcon = $iconPath.Replace('\', '\\')
