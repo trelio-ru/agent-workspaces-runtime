@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { resolveCodexExecutable, buildCodexEnvironment } from './trelio-codex-conversation.mjs';
 import { assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
-import { openBrowser } from './trelio-workspace.mjs';
+import { openBrowser, readAssistantHookComponentRequirement, verifyAssistantHookComponentIntegrity } from './trelio-workspace.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantCodexError extends Error {
@@ -192,28 +192,61 @@ export const readAssistantCodexMetadata = (threadId, options) => readNative(id(t
  * changing enabled/trust state or returning commands, paths or trust hashes.
  * The digest partitions a bounded recovery budget after a real definition
  * change; native pass/lease, marker and observed proof still authorize work. */
-export const readAssistantCodexHookReadiness = (cwd, options = {}) => {
+export const readAssistantCodexHookReadiness = async (cwd, options = {}) => {
   if(typeof cwd!=='string'||!path.isAbsolute(cwd))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  const deadline=AbortSignal.timeout(options.readTimeoutMs??15_000);
+  options={...options,signal:options.signal?AbortSignal.any([options.signal,deadline]):deadline};
   // The stable verified loader supplies this exact immutable worker version,
   // not a model argument or a caller-selected retry generation. A runtime fix
   // can legitimately repair a prerequisite without changing stable hook bytes.
   const runtimeVersion=(options.environment??process.env).TRELIO_HOST_RUNTIME_VERSION??null;
   if(runtimeVersion!==null&&(typeof runtimeVersion!=='string'||!/^\d+\.\d+\.\d+$/u.test(runtimeVersion)))fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
+  const environment=options.environment??process.env;
+  let component=null;
+  try{if(environment.TRELIO_PLUGIN_ROOT)component=await readAssistantHookComponentRequirement(environment.TRELIO_PLUGIN_ROOT);}
+  catch{fail('ASSISTANT_HOOK_REVIEW_REQUIRED');}
+  if(options.signal.aborted)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
   return readNative(null,async(_thread,request)=>{
     const result=await request('hooks/list',{cwds:[cwd]});
     if(!Array.isArray(result?.data)||result.data.length!==1)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
     const row=result.data[0];
     if(!Array.isArray(row?.hooks)||row.hooks.length>1024||!Array.isArray(row.errors)||row.errors.length
       ||!Array.isArray(row.warnings)||row.warnings.length)fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-    const hooks=row.hooks.filter(h=>h?.pluginId==='trelio-digital-assistant@trelio-digital-assistants');
+    const expectedPluginId=component?.pluginId??'trelio-digital-assistant@trelio-digital-assistants';
+    const ownIds=['trelio-digital-assistant@trelio-digital-assistants','trelio-digital-assistant-hooks@trelio-digital-assistants'];
+    const owned=row.hooks.filter(h=>ownIds.includes(h?.pluginId));
+    const hooks=owned.filter(h=>h.pluginId===expectedPluginId);
     const events=['preToolUse','sessionEnd','sessionStart'];
-    if(hooks.length!==3||hooks.some(h=>h.source!=='plugin'||h.enabled!==true||h.trustStatus!=='trusted'
+    if(owned.length!==3||hooks.length!==3||hooks.some(h=>h.source!=='plugin'||h.enabled!==true||h.trustStatus!=='trusted'
       // Codex hashes are opaque versioned strings, not necessarily hex SHA256
       // (the real Windows 0.164 client returns143 characters). Bound/hash the
       // native value without inventing a digest grammar or exposing it.
       ||h.handlerType!=='command'||typeof h.currentHash!=='string'||!h.currentHash.length
       ||h.currentHash.length>1024||h.currentHash.includes('\0'))
       ||hooks.map(h=>h.eventName).sort().join(',')!==events.join(','))fail('ASSISTANT_HOOK_REVIEW_REQUIRED');
+    if(component){
+      // Native trust remains authoritative. Additionally bind discovery to the
+      // exact immutable dependency selected by the VERIFIED main package, not
+      // a similarly named hook, another version or a duplicate legacy source.
+      const home=environment.CODEX_HOME||path.join(environment.USERPROFILE||environment.HOME||'','.codex');
+      if(!path.isAbsolute(home))fail('ASSISTANT_HOOK_REVIEW_REQUIRED');
+      const root=path.join(home,'plugins','cache','trelio-digital-assistants','trelio-digital-assistant-hooks',component.version);
+      const source=path.join(root,'hooks','hooks.json');
+      try{
+        await verifyAssistantHookComponentIntegrity(root,component);
+        // Native absolute paths may use Windows extended prefixes or the OS
+        // /var -> /private/var alias. Compare canonical paths AND real file
+        // identities, without accepting a symlink entry inside the package or
+        // a different version/root merely containing equal-looking text.
+        const expectedPath=await fs.realpath(source),expectedStat=await fs.stat(source,{bigint:true});
+        for(const hook of hooks){
+          if(typeof hook.sourcePath!=='string'||!path.isAbsolute(hook.sourcePath))fail('ASSISTANT_HOOK_REVIEW_REQUIRED');
+          const nativePath=await fs.realpath(hook.sourcePath),nativeStat=await fs.stat(hook.sourcePath,{bigint:true});
+          const equal=process.platform==='win32'?nativePath.toLowerCase()===expectedPath.toLowerCase():nativePath===expectedPath;
+          if(!equal||nativeStat.dev!==expectedStat.dev||nativeStat.ino!==expectedStat.ino)fail('ASSISTANT_HOOK_REVIEW_REQUIRED');
+        }
+      }catch{fail('ASSISTANT_HOOK_REVIEW_REQUIRED');}
+    }
     return Object.freeze({fingerprint:createHash('sha256').update(JSON.stringify({runtimeVersion,hooks:hooks
       .map(h=>[h.eventName,h.currentHash]).sort((a,b)=>a[0].localeCompare(b[0]))})).digest('hex')});
   },options);

@@ -165,6 +165,8 @@ import {
   retainCurrentContextObjects,
   updateCodexPluginMarketplace,
   readCodexPluginUpdateInventory,
+  inspectAssistantHookComponent,
+  installAssistantHookComponent,
   unprotectWindowsBridgeSessionToken,
   validateHandoffTaskOutcome,
   validateEncryptedAgentWorkspaceDerivedArtifacts,
@@ -11795,4 +11797,37 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
   source='https://github.com/other/foreign.git';await assert.rejects(readCodexPluginUpdateInventory(options));source='https://github.com/trelio-ru/digital-assistants.git';
   await writeMarket('main');await assert.rejects(readCodexPluginUpdateInventory(options));
   assert.ok(argsSeen.every(args=>!args.includes('trelio-plugins')&&!args.includes('trelio-agent-workspaces@trelio-plugins')));
+});
+
+test('stable assistant hook dependency uses the SAME official installer, exact bytes and one durable attempt',async t=>{
+  const fs=await import('node:fs/promises'),root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-hook-component-test-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const home=path.join(root,'codex'),market=path.join(root,'market'),name='trelio-digital-assistant-hooks',marketplace='trelio-digital-assistants';
+  const cache=v=>path.join(home,'plugins','cache',marketplace,name,v),digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+  const files={'.gitattributes':'* -text\n','.codex-plugin/plugin.json':JSON.stringify({name,version:'0.1.0',hooks:'./hooks/hooks.json'}),'hooks/hooks.json':'{}'};
+  for(const file of ['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs','trelio-host-runtime-loader.mjs','trelio-host-runtime-shell.mjs','trelio-mcp-startup-budget.mjs'])files[`scripts/${file}`]='// synthetic immutable executable';
+  const inventory={schemaVersion:1,plugin:name,version:'0.1.0',sharedShell:{},files:Object.entries(files).map(([p,text])=>({path:p,mode:0o644,size:Buffer.byteLength(text),sha256:digest(text)}))};
+  const bytes=JSON.stringify(inventory)+'\n',requirement={pluginId:`${name}@${marketplace}`,version:'0.1.0',integritySha256:digest(bytes)};
+  const create=async()=>{for(const [p,text] of [...Object.entries(files),['package-integrity.json',bytes]]){
+    await fs.mkdir(path.dirname(path.join(cache('0.1.0'),p)),{recursive:true});await fs.writeFile(path.join(cache('0.1.0'),p),text);}};
+  await fs.mkdir(path.join(market,'.agents/plugins'),{recursive:true});
+  await fs.writeFile(path.join(market,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:[{name,source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref:'hooks-v0.1.0'}}]}));
+  let present=false,enabled=true,source='https://github.com/trelio-ru/digital-assistants.git',adds=0,intent=null;
+  const execFileCommand=async(_c,args)=>{
+    let result;
+    if(args[1]==='marketplace'&&args[2]==='list')result={marketplaces:[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]};
+    else if(args[1]==='list')result={installed:present?[{pluginId:requirement.pluginId,version:'0.1.0',installed:true,enabled}]:[]};
+    else {assert.deepEqual(args,['plugin','add',requirement.pluginId,'--json']);assert.deepEqual(intent,{...requirement,previousVersion:null});adds++;await create();present=true;
+      result={pluginId:requirement.pluginId,marketplaceName:marketplace,version:'0.1.0',installedPath:cache('0.1.0')};}
+    return {stdout:JSON.stringify(result)};
+  };
+  const options={requirement,environment:{CODEX_HOME:home},execFileCommand};
+  assert.equal((await inspectAssistantHookComponent(options)).state,'absent');
+  const installed=await installAssistantHookComponent({...options,beforeInstall:async record=>{intent=record;}});
+  assert.equal(installed.matches,true);assert.equal(adds,1);
+  assert.equal((await installAssistantHookComponent({...options,beforeInstall:()=>assert.fail('unchanged executable component cannot require a new install intent')})).unchanged,true);
+  enabled=false;await assert.rejects(installAssistantHookComponent(options));assert.equal(adds,1,'a human-disabled component is never enabled');enabled=true;
+  source='https://github.com/foreign/plugin.git';await assert.rejects(inspectAssistantHookComponent(options));source='https://github.com/trelio-ru/digital-assistants.git';
+  await fs.appendFile(path.join(cache('0.1.0'),'scripts/trelio-host-runtime-loader.mjs'),'\n// tampered');
+  await assert.rejects(inspectAssistantHookComponent(options));assert.equal(adds,1,'changed installed bytes cannot be overwritten by replay');
 });

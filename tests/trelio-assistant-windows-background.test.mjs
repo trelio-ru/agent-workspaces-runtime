@@ -724,3 +724,16 @@ test('plugin maintenance is a one-time explicit setup policy, recorded only afte
     },setPluginUpdates:()=>assert.fail('read-only native registration cannot enable or recover maintenance')});
   await assert.rejects(refused('install',{autoUpdatePlugin:true}),{code:'ASSISTANT_BACKGROUND_ACCESS_DENIED'});
 });
+
+test('initial hook dependency installation belongs only to explicit background install and retains the pairing fence',async()=>{
+  let dependencies=0,mutations=0,current=identity;
+  const make=prepareDependencies=>createAssistantWindowsBackground({platform:'win32',executable:'C:\\node.exe',
+    readIdentity:async()=>current,verifyContact:async()=>{},resolveLoader:async()=> 'C:\\plugin\\loader.mjs',prepareDependencies,
+    runNative:async()=>{mutations++;return registered();}});
+  const manage=make(async({identity:selected})=>{assert.deepEqual(selected,identity);dependencies++;});
+  await manage('status');await manage('start');assert.equal(dependencies,0,'status/start do not install software');
+  await manage('install');assert.equal(dependencies,1,'initial dependency setup does not depend on enabling unattended future updates');
+  const before=mutations;
+  await assert.rejects(make(async()=>{current={...identity,deviceId:randomUUID()};})('install'),{code:'ASSISTANT_HOST_REBIND_REQUIRED'});
+  assert.equal(mutations,before,'changed device cannot register old background after a slow dependency operation');
+});

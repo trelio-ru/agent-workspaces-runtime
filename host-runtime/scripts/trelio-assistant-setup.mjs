@@ -485,6 +485,7 @@ try {
  * Runtime-to-runtime injection is internal test composition, not a tool ABI.
  */
 export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,readMaintenanceStatus=null,setPluginUpdates=null,
+  prepareDependencies=null,
   platform = process.platform, environment = process.env, executable = process.execPath,
   resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[], previousLoaders=null,restartRequested=false } = {}) => {
   if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function' || readDispatchStatus!==null&&typeof readDispatchStatus!=='function'
@@ -522,6 +523,11 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
     // device midway cannot install an old identity's scheduled task.
     const current = await readIdentity();
     if (['origin', 'assistantId', 'deviceId'].some(key => current?.[key] !== identity[key])) fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    if(operation==='install'&&prepareDependencies){
+      await prepareDependencies({signal,identity});remaining();
+      const afterDependencies=await readIdentity();
+      if(['origin','assistantId','deviceId'].some(key=>afterDependencies?.[key]!==identity[key]))fail('ASSISTANT_HOST_REBIND_REQUIRED');
+    }
     const result = await runNative(plan, { environment, timeoutMs: remaining(), signal });
     remaining();
     const projected=projectAssistantBackgroundResult(result);
@@ -829,11 +835,17 @@ export const runAssistantWindowsDesktop = async (operation, generation=null, {en
  * unfinished installation is reconciled from native inventory, and a new GUI
  * process is observed rather than closed again. Business receipts and chats
  * are never touched. A native hook-review result waits for the human unchanged. */
-export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,activateHost=null,bootstrapHost=false,
+export const maintainAssistantPlugin = async ({identity,readState,writeState,inventory,upgrade,desktop,probe,rollback,hooks=null,activateHost=null,bootstrapHost=false,
   guard=async()=>{}}) => {
   let state=await readState();
   let startedThisTick=false,optionalDiscovery=false,hostCurrent=false;
-  const save=async patch=>{await guard();const next={...state,...patch};await writeState(state,next);state=next;};
+  const save=async patch=>{
+    await guard();const next={...state,...patch};
+    // Dropping only an old technical dependency intent when a NEW main
+    // installation begins is not trust migration or mutation replay.
+    if(patch.hookComponent===null)delete next.hookComponent;
+    await writeState(state,next);state=next;
+  };
   const recover=async()=>{
     await guard();
     const restored=await rollback(state.previousVersion,state.previousTreeSha256);
@@ -850,13 +862,13 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
   if(current.state==='disabled')return {state:'disabled',blockBusiness:true};
   if(!state)await save({schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
     previousVersion:current.version,previousTreeSha256:current.treeSha256,targetVersion:current.version,targetTreeSha256:current.treeSha256,
-    stage:'ready',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
+    stage:current.hookComponent?'installed':'ready',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
   try{
     // An explicit native update outside this supervisor also needs activation;
     // a cached ready journal cannot claim the newly installed version is loaded.
     if(state.stage==='ready' && current.version!==state.targetVersion)
       await save({previousVersion:state.targetVersion,previousTreeSha256:state.targetTreeSha256,
-        targetVersion:current.version,targetTreeSha256:current.treeSha256,stage:'installed',desktopGeneration:null,restarts:0,failures:0});
+        targetVersion:current.version,targetTreeSha256:current.treeSha256,stage:'installed',desktopGeneration:null,restarts:0,failures:0,hookComponent:null});
     if(bootstrapHost&&state.stage==='ready'){
       if(current.treeSha256!==state.targetTreeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
       if(typeof activateHost!=='function')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
@@ -872,7 +884,7 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
         optionalDiscovery=false;
         await guard();await save({previousVersion:awaitingActivation?state.previousVersion:current.version,
           previousTreeSha256:awaitingActivation?state.previousTreeSha256:current.treeSha256,
-          targetVersion,targetTreeSha256:null,stage:'installing',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
+          targetVersion,targetTreeSha256:null,stage:'installing',desktopGeneration:null,restarts:0,failures:0,failedVersion:null,hookComponent:null});
       });
       optionalDiscovery=false;
       if(result.unchanged&&!awaitingActivation)return {state:'current',version:current.version,...(state.failedVersion?{failedVersion:state.failedVersion}:{})};
@@ -886,6 +898,26 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
         if(typeof rollback!=='function')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
         current=await recover();
       }else await save({stage:'installed',targetTreeSha256:current.treeSha256});
+    }
+    if(state.stage==='hook_installing'){
+      if(typeof hooks!=='function'||!current.hookComponent
+        ||['pluginId','version','integritySha256'].some(key=>current.hookComponent[key]!==state.hookComponent?.[key]))
+        fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      // Restart/EOF/unknown install result allows ONLY exact native read-back.
+      // Absence is not permission for a second add invocation.
+      if((await hooks('inspect',current.hookComponent))?.matches!==true)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      await save({stage:'installed'});
+    }
+    if(['installed','closing','starting','verifying','hook_review','retargeting'].includes(state.stage)&&current.hookComponent){
+      if(typeof hooks!=='function')fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
+      const result=await hooks('ensure',current.hookComponent,async admission=>{
+        await save({stage:'hook_installing',hookComponent:admission});
+      });
+      if(result?.matches!==true)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      // An older signed worker may already have activated the main-only
+      // package and stopped at missing hooks. Installing its NEW dependency
+      // now needs a fresh activation, not an endless hook-review loop.
+      if(state.stage==='hook_installing')await save({stage:'installed',desktopGeneration:null,restarts:0});
     }
     if(current.version!==state.targetVersion || current.treeSha256!==state.targetTreeSha256)
       fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
@@ -960,7 +992,11 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     if(state.stage==='ready'&&optionalDiscovery)return {state:'current',version:current.version,updateDeferred:true};
     if(['hook_review','failed'].includes(state.stage))throw error;
     if(state.failures<2){await save({failures:state.failures+1});return {state:'retrying',blockBusiness:true};}
-    if(typeof rollback==='function' && state.previousVersion!==state.targetVersion){
+    const changedHookComponent=state.hookComponent&&state.hookComponent.previousVersion!==state.hookComponent.version;
+    // A legacy combined plugin and a newly trusted companion must never run
+    // together after rollback. A dependency-changing transition therefore
+    // stays fenced on failure; do not manufacture a mixed rollback baseline.
+    if(!changedHookComponent&&typeof rollback==='function' && state.previousVersion!==state.targetVersion){
       await save({stage:'rolling_back',failedVersion:state.targetVersion,failures:3});
       await recover();return {state:'retrying',blockBusiness:true};
     }

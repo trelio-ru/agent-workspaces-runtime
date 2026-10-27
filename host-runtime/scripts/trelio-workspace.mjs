@@ -2988,7 +2988,7 @@ export const isStableVersionAtLeast = (rawVersion, rawMinimumVersion) => {
   return true;
 };
 
-// Both installed shells use ONE immutable-code retention engine. Profiles are
+// Installed shells/components use ONE immutable-code retention engine. Profiles are
 // closed host constants, never tool input or discovery of another cache version.
 // Separate code-copy namespaces preserve the human store's legacy metadata and
 // keep an assistant lifecycle from restoring the human plugin (or vice versa).
@@ -2998,6 +2998,13 @@ const codexRetentionProfiles = Object.freeze({
   assistant: Object.freeze({ name: "trelio-digital-assistant", marketplace: "trelio-digital-assistants",
     pluginId: "trelio-digital-assistant@trelio-digital-assistants",
     directory: path.join(CONFIG_DIRECTORY, "codex-assistant-plugin-retention") }),
+  // Native Codex pins ALL files in a hook-owning bundle. This separately
+  // installed, immutable executable component has no MCP/skills or mutable
+  // main-version metadata. Reuse the same verifier/retention engine; do not
+  // migrate trust, rewrite hashes or smuggle changing files into exclusions.
+  assistantHooks: Object.freeze({ name: "trelio-digital-assistant-hooks", marketplace: "trelio-digital-assistants",
+    pluginId: "trelio-digital-assistant-hooks@trelio-digital-assistants",
+    directory: path.join(CONFIG_DIRECTORY, "codex-assistant-hook-plugin-retention") }),
 });
 const codexRetentionProfile = profile => {
   if (!Object.hasOwn(codexRetentionProfiles, profile)) throw new Error("Unknown plugin retention profile.");
@@ -3439,7 +3446,7 @@ export const startLoadedCodexPluginPreservation = ({
 } = {}) => {
   const loadedPluginDirectory = environment.TRELIO_PLUGIN_ROOT;
   const shellComponentVersion = environment.TRELIO_PLUGIN_VERSION;
-  // Exact cache layout establishes one of the two installed shells. Neither
+  // Exact cache layout establishes one of the closed installed components. Neither
   // CLAUDE_PLUGIN_ROOT nor a similar directory name may choose a profile/store.
   // Source checkouts and other clients remain outside this code-only lifecycle.
   let profile;
@@ -3458,12 +3465,12 @@ export const startLoadedCodexPluginPreservation = ({
       // a "latest" version. The immutable-tree inspector below independently
       // requires the assistant's native manifest to match that exact version.
       // Keep the human profile's existing environment/version equality intact.
-      const version = key === "assistant"
+      const version = key !== "human"
         ? path.basename(path.resolve(loadedPluginDirectory)) : shellComponentVersion;
       return sameLocalPath(loadedPluginDirectory, path.join(cacheRoot, item.marketplace, item.name, version));
     });
     if (!profile) throw new Error("Not the exact Codex cache.");
-    loadedPluginVersion = profile === "assistant"
+    loadedPluginVersion = profile !== "human"
       ? path.basename(path.resolve(loadedPluginDirectory)) : shellComponentVersion;
     assertCodexPluginVersionPath(loadedPluginDirectory, loadedPluginVersion, profile);
     retentionDirectory ??= codexRetentionProfile(profile).directory;
@@ -3637,7 +3644,7 @@ const assertOfficialCodexMarketplace = async ({
 
   if (
     marketplace?.marketplaceSource?.sourceType !== "git"
-    || marketplace.marketplaceSource.source !== (profile === "assistant"
+    || marketplace.marketplaceSource.source !== (profile !== "human"
       ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE)
   ) {
     throw new Error(
@@ -3665,13 +3672,15 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   const manifest = JSON.parse(await filesystem.readFile(manifestPath, "utf8"));
   const entries = manifest.plugins?.filter(row => row.name === selected.name);
   const source = entries?.length === 1 ? entries[0].source : null;
-  const official = profile === "assistant" ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE;
+  const official = profile !== "human" ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE;
+  const sourceVersion=typeof source?.ref==='string'?(profile==='assistantHooks'?/^hooks-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u:/^plugin-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u).exec(source.ref)?.[1]:null;
   if (manifest.name !== selected.marketplace || source?.source !== "url" || source.url !== official
-    || typeof source.ref !== "string" || !/^plugin-v[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}$/u.test(source.ref))
+    || !sourceVersion)
     throw new Error("Invalid immutable plugin source.");
   const listing = await runCodexJsonCommand(["plugin", "list", "--marketplace", selected.marketplace, "--json"], {execFileCommand, environment});
   if (!Array.isArray(listing.installed)) throw new Error("Invalid plugin inventory.");
   const installed = listing.installed.filter(row => row.pluginId === selected.pluginId);
+  if(profile==='assistantHooks'&&installed.length===0)return {state:'absent',desiredVersion:sourceVersion};
   if (installed.length !== 1 || installed[0].installed !== true || installed[0].enabled !== true)
     return {state: "disabled"};
   const version = installed[0].version;
@@ -3682,8 +3691,105 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   // The SAME bounded immutable-tree inspector hashes every regular payload
   // file and validates the native manifest, not merely version text.
   const tree = await inspectImmutableCodexPluginTree(installedPath, version, {profile});
-  return {state: "installed", version, desiredVersion: source.ref.slice(8), installedPath,
-    treeSha256: tree.treeSha256};
+  const requirement=profile==='assistant'?await readAssistantHookComponentRequirement(installedPath):null;
+  let integritySha256=null;
+  if(profile==='assistantHooks'){
+    integritySha256=await verifyAssistantHookComponentIntegrity(installedPath,{version,filesystem});
+  }
+  return {state: "installed", version, desiredVersion: sourceVersion, installedPath,
+    treeSha256: tree.treeSha256,...(requirement?{hookComponent:requirement}:{}),...(integritySha256?{integritySha256}:{})};
+};
+
+export const validateAssistantHookComponentRequirement = value => {
+  if(!value||Object.getPrototypeOf(value)!==Object.prototype
+    ||Object.keys(value).sort().join(',')!=='integritySha256,pluginId,version'
+    ||value.pluginId!=='trelio-digital-assistant-hooks@trelio-digital-assistants'
+    ||!parseStableVersion(value.version)||!/^[a-f0-9]{64}$/u.test(value.integritySha256??''))
+    throw new Error('Invalid assistant hook component requirement.');
+  return {...value};
+};
+
+/** Validate the whole executable dependency, not merely a version or its
+ * inventory text. The native trust decision remains separate and mandatory.
+ * No mutable main instructions, credentials or new executor belong here. */
+export const verifyAssistantHookComponentIntegrity = async (root,{version,integritySha256=null,filesystem=fs}={}) => {
+  if(!path.isAbsolute(root)||!parseStableVersion(version))throw new Error('Invalid hook component root.');
+  const names=['.gitattributes','.codex-plugin/plugin.json','hooks/hooks.json',
+    ...['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs',
+      'trelio-host-runtime-loader.mjs','trelio-host-runtime-shell.mjs','trelio-mcp-startup-budget.mjs'].map(name=>`scripts/${name}`)];
+  const allowed=new Set(names),directories=new Set(['.codex-plugin','hooks','scripts']);
+  for(const relative of ['',...directories]){
+    const directory=path.join(root,relative),metadata=await filesystem.lstat(directory);
+    if(!metadata.isDirectory()||metadata.isSymbolicLink())throw new Error('Unsafe hook component directory.');
+    for(const name of await filesystem.readdir(directory)){
+      const child=relative?`${relative}/${name}`:name;
+      if(!(relative===''&&directories.has(name))&&child!=='package-integrity.json'&&!allowed.has(child))
+        throw new Error('Unexpected hook component file.');
+    }
+  }
+  const file=path.join(root,'package-integrity.json'),metadata=await filesystem.lstat(file);
+  if(!metadata.isFile()||metadata.isSymbolicLink()||metadata.size>256*1024)throw new Error('Unsafe hook component inventory.');
+  const bytes=await filesystem.readFile(file),hash=crypto.createHash('sha256').update(bytes).digest('hex');
+  if(integritySha256!==null&&hash!==integritySha256)throw new Error('Hook component integrity differs from required bytes.');
+  const inventory=JSON.parse(bytes);
+  if(!inventory||inventory.schemaVersion!==1||inventory.plugin!=='trelio-digital-assistant-hooks'||inventory.version!==version
+    ||Object.keys(inventory).sort().join(',')!=='files,plugin,schemaVersion,sharedShell,version'
+    ||!Array.isArray(inventory.files)||inventory.files.length!==names.length)throw new Error('Invalid hook component inventory.');
+  for(const entry of inventory.files){
+    if(!entry||Object.keys(entry).sort().join(',')!=='mode,path,sha256,size'||!allowed.delete(entry.path)
+      ||![0o644,0o755].includes(entry.mode)||!Number.isSafeInteger(entry.size)||entry.size<0||entry.size>1024*1024
+      ||!/^[a-f0-9]{64}$/u.test(entry.sha256??''))throw new Error('Invalid hook component entry.');
+    const target=path.join(root,entry.path),stat=await filesystem.lstat(target);
+    if(!stat.isFile()||stat.isSymbolicLink()||stat.size!==entry.size)throw new Error('Unsafe hook component entry.');
+    const contents=await filesystem.readFile(target);
+    if(contents.length!==entry.size||crypto.createHash('sha256').update(contents).digest('hex')!==entry.sha256)
+      throw new Error('Hook component bytes changed.');
+  }
+  return hash;
+};
+
+/** Metadata from the exact already selected main bundle, never a model path or
+ * a sibling cache scan. Legacy combined bundles legitimately have no field.
+ * A malformed present descriptor is never a legacy/no-hook fallback. */
+export const readAssistantHookComponentRequirement = async root => {
+  if(typeof root!=='string'||!path.isAbsolute(root))throw new Error('Invalid assistant plugin root.');
+  const file=path.join(root,'package-integrity.json');let metadata;
+  try{metadata=await fs.lstat(file);}catch(error){if(error.code==='ENOENT')return null;throw error;}
+  if(!metadata.isFile()||metadata.isSymbolicLink()||metadata.size>256*1024)throw new Error('Unsafe assistant plugin inventory.');
+  const inventory=JSON.parse(await fs.readFile(file,'utf8'));
+  if(!Object.hasOwn(inventory,'hookComponent'))return null;
+  if(inventory.schemaVersion!==1||inventory.plugin!=='trelio-digital-assistant')throw new Error('Invalid assistant plugin inventory.');
+  return validateAssistantHookComponentRequirement(inventory.hookComponent);
+};
+
+export const inspectAssistantHookComponent = async ({requirement,...options}) => {
+  const expected=validateAssistantHookComponentRequirement(requirement);
+  const current=await readCodexPluginUpdateInventory({...options,profile:'assistantHooks'});
+  return {...current,matches:current.state==='installed'&&current.version===expected.version
+    &&current.integritySha256===expected.integritySha256};
+};
+
+/** ONE native dependency installation through the existing official updater.
+ * Its caller persists the exact intent before this function reaches native
+ * add. A lost reply must use inspectAssistantHookComponent, NEVER call this
+ * installer again. Disabled, newer or same-version/tampered installations are
+ * not silently enabled, downgraded or overwritten. This writes no trust. */
+export const installAssistantHookComponent = async ({requirement,beforeInstall,...options}) => {
+  const expected=validateAssistantHookComponentRequirement(requirement);
+  const before=await inspectAssistantHookComponent({...options,requirement:expected});
+  if(before.matches)return {...before,unchanged:true};
+  if(before.state==='disabled'||before.desiredVersion!==expected.version
+    ||before.state==='installed'&&isStableVersionAtLeast(before.version,expected.version)
+    ||typeof beforeInstall!=='function')throw new Error('Assistant hook component is unavailable.');
+  if(before.state==='installed')await retainLoadedCodexPluginInstallation({profile:'assistantHooks',
+    loadedPluginDirectory:before.installedPath,loadedPluginVersion:before.version});
+  await beforeInstall({...expected,previousVersion:before.state==='installed'?before.version:null});
+  await resolveInstalledCodexPluginBridge({...options,profile:'assistantHooks',minimumVersion:expected.version,
+    preserveLoadedPlugin:before.state==='installed',
+    loadedPluginDirectory:before.installedPath,loadedPluginVersion:before.version});
+  const installed=await inspectAssistantHookComponent({...options,requirement:expected});
+  if(!installed.matches)throw new Error('Assistant hook component installation was not confirmed.');
+  return {...installed,unchanged:false};
 };
 
 export const resolveInstalledCodexPluginBridge = async ({
@@ -3739,7 +3845,7 @@ export const resolveInstalledCodexPluginBridge = async ({
   }
 
   const manifestPath = path.join(installedPath, ".codex-plugin", "plugin.json");
-  const bridgePath = path.join(installedPath, "scripts", profile === "assistant" ? "trelio-host-runtime-loader.mjs" : "trelio-workspace.mjs");
+  const bridgePath = path.join(installedPath, "scripts", profile !== "human" ? "trelio-host-runtime-loader.mjs" : "trelio-workspace.mjs");
   const [manifestMetadata, bridgeMetadata, manifest] = await Promise.all([
     filesystem.lstat(manifestPath),
     filesystem.lstat(bridgePath),

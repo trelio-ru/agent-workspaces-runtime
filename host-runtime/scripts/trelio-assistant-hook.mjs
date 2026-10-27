@@ -187,17 +187,27 @@ const activationRecord=value=>{
  * input, credential, hook hash/approval, process path or business text belongs
  * here. A pending/failed update is never evidence that an action can be replayed. */
 const pluginUpdateRecord = value => {
+  const keys='assistantId,desktopGeneration,deviceId,failedVersion,failures,previousTreeSha256,previousVersion,restarts,schemaVersion,stage,targetTreeSha256,targetVersion';
+  const actual=value&&Object.keys(value).filter(key=>key!=='hookComponent').sort().join(',');
+  const component=value?.hookComponent;
   if (!value || Object.getPrototypeOf(value)!==Object.prototype
-    || Object.keys(value).sort().join(',')!=='assistantId,desktopGeneration,deviceId,failedVersion,failures,previousTreeSha256,previousVersion,restarts,schemaVersion,stage,targetTreeSha256,targetVersion'
+    || actual!==keys
     || value.schemaVersion!==1 || !uuid.test(value.assistantId??'') || !uuid.test(value.deviceId??'')
-    || !['ready','installing','installed','closing','starting','verifying','hook_review','retargeting','rolling_back','failed'].includes(value.stage)
+    || !['ready','installing','installed','hook_installing','closing','starting','verifying','hook_review','retargeting','rolling_back','failed'].includes(value.stage)
     || ![value.previousVersion,value.targetVersion].every(v=>typeof v==='string'&&/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(v))
     || !/^[0-9a-f]{64}$/u.test(value.previousTreeSha256??'')
     || value.failedVersion!==null&&!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(value.failedVersion??'')
     || !Number.isSafeInteger(value.failures)||value.failures<0||value.failures>3
     || value.targetTreeSha256!==null && !/^[0-9a-f]{64}$/u.test(value.targetTreeSha256??'')
     || value.desktopGeneration!==null && !/^[1-9]\d{0,9}:[0-9]{1,20}$/u.test(value.desktopGeneration??'')
-    || !Number.isSafeInteger(value.restarts) || value.restarts<0 || value.restarts>2)
+    || !Number.isSafeInteger(value.restarts) || value.restarts<0 || value.restarts>2
+    || Object.hasOwn(value,'hookComponent')&&(!component||Object.getPrototypeOf(component)!==Object.prototype
+      ||Object.keys(component).sort().join(',')!=='integritySha256,pluginId,previousVersion,version'
+      ||component.pluginId!=='trelio-digital-assistant-hooks@trelio-digital-assistants'
+      ||!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(component.version??'')
+      ||component.previousVersion!==null&&!/^\d{1,9}\.\d{1,9}\.\d{1,9}$/u.test(component.previousVersion??'')
+      ||!/^[a-f0-9]{64}$/u.test(component.integritySha256??''))
+    ||value.stage==='hook_installing'&&component===undefined)
     fail('ASSISTANT_PLUGIN_UPDATE_STATE_INVALID');
   return value;
 };

@@ -1580,12 +1580,15 @@ lock contention quietly defers this tick, without an update-failure notice.
 The current protected identity/policy/pass is rechecked, including immediately
 before native process launch. No task/chat/receipt/queue is removed or migrated.
 
-The shared human updater now has one closed assistant profile, reusing the
+The shared human updater has closed assistant-main and assistant-hook profiles, reusing the
 native executable resolver, official Git marketplace, bounded JSON CLI,
 immutable-tree verifier and exact loaded-code retention. Commands are
 `plugin marketplace upgrade trelio-digital-assistants` then, only for a newer
 immutable `plugin-vX.Y.Z`, `plugin add trelio-digital-assistant@trelio-digital-assistants`.
-An absent/disabled plugin is not installed/enabled. There is no experimental
+An absent/disabled MAIN plugin is not installed/enabled. A required missing hook
+companion may be installed from the SAME official marketplace; a human-disabled
+companion is never enabled. Its exact independent version/inventory digest
+come only from the verified main package, never model input. There is no experimental
 `plugin/install` RPC, cache-version scan, copied executor, raw config edit or
 alternate credential route. The release channel/source cannot come from a task.
 
@@ -1645,6 +1648,31 @@ the live matching assistant/device status. This is technical activation, not a b
 proof that every old chat refreshed. The next real task still uses its SAME
 permanent visible Desktop chat, normal native handoff, observed hook proof and
 business receipt. No hidden CLI work or replacement task chat is created.
+
+The hook-owning companion contains only its native manifest, hooks and exact
+pinned shared shell. Codex fingerprints its entire bundle. The mutable main MCP/
+skill plugin therefore owns NO hooks and includes only a closed dependency
+descriptor. A main-only update must preserve all native hook hashes; changing
+hook/loader bytes must still invalidate native trust. No mutable code/instructions
+are hidden in fingerprint exclusions, symlinks or indirect unverified launchers.
+
+The SAME updater journal has an optional closed `hookComponent` receipt and a
+`hook_installing` phase. Persist it before ONE native add. On an interrupted or
+lost reply, only matching native inventory/full byte verification releases that
+phase; absence/unknown cannot repeat add. A dependency-changing failure cannot
+roll back into a legacy combined bundle alongside a newly trusted companion.
+Unchanged dependencies are never reinstalled. Native preflight rejects mixed
+legacy+companion hooks and requires exact version/source path, full inventory/
+executable byte integrity and three genuinely trusted native definitions.
+
+Explicit INITIAL background install prepares this dependency through that SAME
+journal/installer even when future automatic updates are opted out. It retains
+the original 45-second setup deadline, live paired identity and setup lock,
+never restarts Desktop or grants hook trust from setup. A rebind/active pass
+fences native install/OS registration. Other setup/status/start operations do
+not install dependencies. With automatic maintenance enabled, the ordinary
+supervisor performs the subsequent activation; otherwise native user review/
+client activation remains explicit, with no false business-readiness receipt.
 
 A native changed/untrusted hook definition yields `hook_review` and the existing
 owner notification/messenger route. The human reviews it in Codex; subsequent

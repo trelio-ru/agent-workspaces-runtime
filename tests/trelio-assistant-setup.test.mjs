@@ -1940,3 +1940,51 @@ test('re-pairing never adopts or destroys another device maintenance policy/jour
   assert.equal(await host.readPluginUpdatesEnabled(),false);assert.equal(await host.readPluginUpdate(),null);
   assert.deepEqual([...files.entries()].filter(([name])=>name.endsWith('policy.json')),saved);
 });
+
+test('stable hook install survives lost reply by read-back only, then native trust resumes the SAME update',async()=>{
+  const f=pluginUpdateFixture(),requirement={pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.0',integritySha256:'c'.repeat(64)};
+  const upgrade=f.options.upgrade;f.options.upgrade=async(...args)=>{const result=await upgrade(...args);f.current().hookComponent=requirement;return result;};
+  let component=false,adds=0,reads=0;
+  f.options.hooks=async(operation,expected,beforeInstall)=>{
+    assert.deepEqual(expected,requirement);
+    if(operation==='inspect'){reads++;return {matches:component};}
+    if(component)return {matches:true,unchanged:true};
+    await beforeInstall({...requirement,previousVersion:null});assert.equal(f.state().stage,'hook_installing');
+    adds++;component=true;throw Error('synthetic lost native reply');
+  };
+  f.trust(false);
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');assert.equal(f.state().stage,'hook_installing');assert.equal(adds,1);
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'hook_review');assert.equal(reads,1);assert.equal(adds,1);
+  f.trust(true);assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');
+  assert.equal(adds,1);assert.equal(f.counts().installs,1);assert.equal(f.state().stage,'ready');
+  assert.equal(f.effects.filter(e=>e==='close').length,1);assert.equal(f.effects.filter(e=>e==='start').length,1);
+});
+
+test('unknown hook dependency install neither replays add nor rolls back into duplicate legacy hooks',async()=>{
+  const f=pluginUpdateFixture(),requirement={pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.0',integritySha256:'c'.repeat(64)};
+  const upgrade=f.options.upgrade;f.options.upgrade=async(...args)=>{const result=await upgrade(...args);f.current().hookComponent=requirement;return result;};
+  let adds=0;f.options.rollback=()=>assert.fail('a dependency-changing update cannot restore a combined legacy hook plugin');
+  f.options.hooks=async(operation,_expected,beforeInstall)=>{
+    if(operation==='inspect')return {matches:false};
+    await beforeInstall({...requirement,previousVersion:null});adds++;throw Error('synthetic unknown native result');
+  };
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'retrying');
+  await assert.rejects(maintainAssistantPlugin(f.options),{code:'ASSISTANT_PLUGIN_UPDATE_FAILED'});
+  assert.equal(adds,1);assert.equal(f.state().stage,'failed');assert.equal(f.effects.length,0,'no Desktop or business operation follows unknown installation');
+});
+
+test('a legacy worker waiting for missing main hooks can prepare the new dependency without an endless review loop',async()=>{
+  const f=pluginUpdateFixture();f.trust(false);
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'hook_review');
+  const requirement={pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.0',integritySha256:'c'.repeat(64)};
+  f.current().hookComponent=requirement;let present=false,adds=0;
+  f.options.hooks=async(operation,_expected,before)=>{
+    if(operation==='inspect')return {matches:present};
+    if(present)return {matches:true,unchanged:true};
+    await before({...requirement,previousVersion:null});adds++;present=true;return {matches:true};
+  };
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'hook_review');assert.equal(adds,1);
+  f.trust(true);assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');assert.equal(adds,1);
+  assert.equal(f.counts().installs,1,'a main package already installed by the prior worker is never installed again');
+});

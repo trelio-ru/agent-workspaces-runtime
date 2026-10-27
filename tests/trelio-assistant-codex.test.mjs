@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -565,4 +565,32 @@ test('fresh plugin readiness requires native trusted hooks plus connected MCP/to
   for(const patch of [{runtimeStatus:'failed'},{toolsError:'PRIVATE native error'},{pluginId:'human@other'},{tools:{}}])
     await assert.rejects(run(patch),{code:'ASSISTANT_MCP_RECONNECT_REQUIRED'});
   await assert.rejects(run({},hooks.map(h=>({...h,trustStatus:'untrusted'}))),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
+});
+
+test('separate native hook trust survives main metadata changes but refuses missing, duplicated or modified executable components',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-stable-hook-native-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const home=path.join(root,'codex'),main=path.join(root,'main'),component=path.join(home,'plugins/cache/trelio-digital-assistants/trelio-digital-assistant-hooks/0.1.0');
+  const digest=text=>createHash('sha256').update(text).digest('hex');
+  const files={'.gitattributes':'* -text\n','.codex-plugin/plugin.json':'{"name":"trelio-digital-assistant-hooks","version":"0.1.0"}','hooks/hooks.json':'{}'};
+  for(const file of ['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs','trelio-host-runtime-loader.mjs','trelio-host-runtime-shell.mjs','trelio-mcp-startup-budget.mjs'])files[`scripts/${file}`]='// synthetic executable dependency';
+  for(const [name,text] of Object.entries(files)){await fs.mkdir(path.dirname(path.join(component,name)),{recursive:true});await fs.writeFile(path.join(component,name),text);}
+  const inventory=JSON.stringify({schemaVersion:1,plugin:'trelio-digital-assistant-hooks',version:'0.1.0',sharedShell:{},files:Object.entries(files).map(([p,text])=>({path:p,mode:0o644,size:Buffer.byteLength(text),sha256:digest(text)}))});
+  await fs.writeFile(path.join(component,'package-integrity.json'),inventory);await fs.mkdir(main);
+  const requirement={pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.0',integritySha256:digest(inventory)};
+  const mainInventory=version=>fs.writeFile(path.join(main,'package-integrity.json'),JSON.stringify({schemaVersion:1,plugin:'trelio-digital-assistant',version,hookComponent:requirement}));
+  await mainInventory('0.1.5');
+  let trustStatus='trusted',extra=false,wrongPath=false;
+  const hooks=()=>['preToolUse','sessionEnd','sessionStart'].map(eventName=>({eventName,pluginId:requirement.pluginId,source:'plugin',enabled:true,
+    trustStatus,handlerType:'command',currentHash:'synthetic-native-immutable-hook-hash',sourcePath:path.join(component,wrongPath?'other.json':'hooks/hooks.json')}));
+  const options={executable:process.execPath,environment:{TRELIO_PLUGIN_ROOT:main,CODEX_HOME:home},spawnProcess:nativeRpc(request=>{
+    assert.equal(request.method,'hooks/list');return {result:{data:[{hooks:[...hooks(),...(extra?[{...hooks()[0],pluginId:'trelio-digital-assistant@trelio-digital-assistants'}]:[])],errors:[],warnings:[]}]}};
+  })};
+  const before=await readAssistantCodexHookReadiness(root,options);await mainInventory('0.1.6');
+  assert.deepEqual(await readAssistantCodexHookReadiness(root,options),before,'only the executable component participates in native hook trust');
+  for(const status of ['untrusted','modified']){trustStatus=status;await assert.rejects(readAssistantCodexHookReadiness(root,options),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});}trustStatus='trusted';
+  extra=true;await assert.rejects(readAssistantCodexHookReadiness(root,options),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});extra=false;
+  wrongPath=true;await assert.rejects(readAssistantCodexHookReadiness(root,options),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});wrongPath=false;
+  await fs.appendFile(path.join(component,'scripts/trelio-host-runtime-loader.mjs'),'\n// changed executable');
+  await assert.rejects(readAssistantCodexHookReadiness(root,options),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
 });

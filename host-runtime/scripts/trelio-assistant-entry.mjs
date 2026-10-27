@@ -144,6 +144,7 @@ export const createProductionAssistantBackground = async () => {
   const signal = AbortSignal.timeout(45_000);
   return createAssistantWindowsBackground({
     signal,
+    prepareDependencies:({identity})=>prepareAssistantHookComponentBootstrap({signal,expectedIdentity:identity}),
     readIdentity: () => productionContext(client => client.identity, { signal }),
     setPluginUpdates:(enabled,identity,registration)=>productionContext((_client,host)=>host.withSetupLock(()=>host.setPluginUpdatesEnabled(enabled,identity,registration)),{signal}),
     verifyContact: () => productionContext(client => client.heartbeat(), { signal }),
@@ -155,6 +156,51 @@ export const createProductionAssistantBackground = async () => {
     },{signal:diagnosticSignal}),
   });
 };
+
+/** Explicit initial background installation also needs its executable hook
+ * dependency, even when ongoing automatic updates are opted out. Reuse the
+ * SAME private update intent and official native installer; no Desktop/trust
+ * operation is performed from this setup call. Unknown installation replies
+ * can be reconciled on another explicit call, never replayed. */
+export const prepareAssistantHookComponentBootstrap = async ({context=productionContext,environment=process.env,signal,expectedIdentity}={}) =>
+  context(async(client,host)=>host.withSetupLock(async()=>{
+    const common=await import('./trelio-workspace.mjs');
+    const {resolveCodexExecutable,buildCodexEnvironment}=await import('./trelio-codex-conversation.mjs');
+    const {promisify}=await import('node:util'),{execFile}=await import('node:child_process'),execute=promisify(execFile);
+    const executable=await resolveCodexExecutable(environment,{signal}),env=buildCodexEnvironment(environment);
+    if(!executable)fail('ASSISTANT_CODEX_UNAVAILABLE');
+    const guard=async()=>{
+      signal?.throwIfAborted();
+      const current=await host.readIdentity();
+      if(['assistantId','deviceId','origin'].some(key=>current?.[key]!==client.identity[key]
+        ||expectedIdentity&&client.identity[key]!==expectedIdentity[key])||await host.readActivePass())
+        fail('ASSISTANT_BACKGROUND_BUSY');
+    };
+    const execFileCommand=async(_c,args,options)=>{await guard();return execute(executable,args,{...options,env:{...env,GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat'},signal,timeout:30_000,shell:false,windowsHide:true});};
+    const inventory=await common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env});
+    if(inventory.state!=='installed')fail('ASSISTANT_PLUGIN_UPDATE_REQUIRED');
+    if(!inventory.hookComponent)return {state:'legacy'};
+    let state=await host.readPluginUpdate();
+    const save=async patch=>{
+      await guard();const next={...state,...patch};await host.writePluginUpdate(state,next);state=next;
+    };
+    if(state&&(['failed','rolling_back','installing','closing','starting','verifying','retargeting'].includes(state.stage)
+      ||state.targetVersion!==inventory.version||state.targetTreeSha256!==inventory.treeSha256))fail('ASSISTANT_BACKGROUND_BUSY');
+    const options={requirement:inventory.hookComponent,execFileCommand,environment:env};
+    if(state?.stage==='hook_installing'){
+      if(['pluginId','version','integritySha256'].some(key=>state.hookComponent?.[key]!==inventory.hookComponent[key])
+        ||(await common.inspectAssistantHookComponent(options)).matches!==true)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      await save({stage:'installed'});return {state:'installed'};
+    }
+    const result=await common.installAssistantHookComponent({...options,beforeInstall:async admission=>{
+      await save({...(!state?{schemaVersion:1,assistantId:client.identity.assistantId,deviceId:client.identity.deviceId,
+        previousVersion:inventory.version,previousTreeSha256:inventory.treeSha256,targetVersion:inventory.version,
+        targetTreeSha256:inventory.treeSha256,desktopGeneration:null,restarts:0,failures:0,failedVersion:null}:{}),
+        stage:'hook_installing',hookComponent:admission});
+    }});
+    if(state?.stage==='hook_installing')await save({stage:'installed'});
+    return {state:result.unchanged?'current':'installed'};
+  }),{signal,pluginMaintenance:true});
 
 /** The existing status tool may inspect the SAME private inbox only after a
  * fresh native company/device check. It does not construct a coordinator or
@@ -1159,6 +1205,9 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
       writeState:(expected,next)=>lockedHost.writePluginUpdate(expected,next),
       upgrade:(current,beforeInstall)=>common.updateCodexPluginMarketplace({profile:'assistant',onlyIfNewerThan:current,beforeInstall,
         execFileCommand,environment:env,loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
+      hooks:(operation,requirement,beforeInstall)=>operation==='inspect'
+        ?common.inspectAssistantHookComponent({requirement,execFileCommand,environment:env})
+        :common.installAssistantHookComponent({requirement,beforeInstall,execFileCommand,environment:env}),
       rollback:(version,treeSha256)=>common.restoreAssistantCodexPluginVersion({version,treeSha256,execFileCommand,environment:env,
         loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
       desktop:(operation,generation)=>runAssistantWindowsDesktop(operation,generation,{environment,signal,guard}),
@@ -1183,7 +1232,7 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
         return {state:restartRequested?'handoff':'current'};
       },
       probe:async installed=>{
-        await readAssistantCodexPluginReadiness(process.cwd(),{environment,signal});
+        await readAssistantCodexPluginReadiness(process.cwd(),{environment:{...environment,TRELIO_PLUGIN_ROOT:installed.installedPath},signal});
         // Native global status may be null even with a cached catalogue. Prove
         // the exact installed shell can start a fresh signed request worker and
         // perform the genuine paired device read, without a model/new chat.
