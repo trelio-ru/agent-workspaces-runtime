@@ -926,6 +926,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id);if(!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_CONFLICT');
       run("UPDATE assistant_owner_intakes SET state='uncertain' WHERE id=?",row.id);
     });},
+    /** Candidates come only from signed monitor refs in this exact private
+     * source/account/conversation. No provider ID is guessed and no neighboring
+     * body is stored. The native reader still verifies direction/header/text. */
+    ownerReplyCandidates(id){
+      const row=this.ownerIntake(id),pieces=row.native_event_id.split(':');
+      if(row.kind!=='owner_command'||pieces.length!==3||!row.reply_receipt_id)return [];
+      return all('SELECT event_id FROM assistant_inbox_events WHERE source_key=? AND conversation_key=? AND provider_wake=0 ORDER BY rowid DESC LIMIT 100',row.source_key,row.conversation_key)
+        .map(value=>value.event_id.split(':')).filter(value=>value.length===3&&value[0]==='message'&&value[1]===pieces[1]
+          &&/^[1-9]\d{0,9}$/u.test(value[2])&&Number(value[2])>Number(pieces[2])&&Number(value[2])<2147483648)
+        .map(value=>Number(value[2])).filter((value,index,all)=>all.indexOf(value)===index).slice(0,4);
+    },
     startOwnerReply(id,receiptId){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
       if(row.kind!=='owner_command'||row.state!=='started'||row.source_state!=='active'

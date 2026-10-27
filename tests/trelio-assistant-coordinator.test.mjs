@@ -1167,12 +1167,12 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
 });
 
 
-for(const loseConfirmation of [false,true])test(`owner-private answer settles without task/Run and restores only positive receipt after restart (lost=${loseConfirmation})`,async t=>{
+for(const loseConfirmation of [false,true,'provider_result'])test(`owner-private answer settles without task/Run and restores only positive receipt after restart (lost=${loseConfirmation})`,async t=>{
  const f=fixture(t,{ownsDatabase:false});await f.coordinator.close();f.authority.state='done';
  const sourceId=randomUUID(),accountId=randomUUID(),ownerIdentityId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
  const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
    skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true,executionVerified:false};
- let clock=Date.now(),poll=0,active=null,intake=null,turns=0,confirms=0,recoveries=0,lose=loseConfirmation;
+ let clock=Date.now(),poll=0,active=null,intake=null,turns=0,confirms=0,recoveries=0,lose=loseConfirmation===true,verified=0;
  const client={...f.options.client,sourceAccounts:async()=>[source],tasks:async()=>({bindings:[],nextCursor:null}),
    sourceRoutes:async()=>[],ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
    beginSourceIntake:async input=>{intake??={schemaVersion:1,id:input.intakeId,companyId:f.companyId,sourceId,sourceRevision:0,
@@ -1186,23 +1186,25 @@ for(const loseConfirmation of [false,true])test(`owner-private answer settles wi
    assert.ok(input.intakeContext);assert.equal(input.taskContext,undefined);turns++;options.startInvocation();
    intake.state='reply_pending';intake.receiptId=randomUUID();intake.ownerPrivateRead=true;intake.readConfirmed=true;
    const inbox=createAssistantInbox({database:f.database});inbox.startOwnerReply(intake.id,intake.receiptId);
-   inbox.confirmOwnerReply(intake.id,{receiptId:intake.receiptId,messageId:91});
+   if(loseConfirmation!=='provider_result')inbox.confirmOwnerReply(intake.id,{receiptId:intake.receiptId,messageId:91});
    const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
-   f.deliveries.set(input.deliveryId,result);return result;}};
- const options={...f.options,client,native,now:()=>clock,onBusinessConfirmed:()=>{recoveries++;},passHost:{readActivePass:async()=>active,
+   f.deliveries.set(input.deliveryId,result);if(loseConfirmation==='provider_result')throw Object.assign(new Error(),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});return result;},
+   readOwnerReply:async(thread,delivery,locator)=>{assert.equal(thread,intake.threadId);assert.equal(locator.intakeId,intake.id);assert.equal(f.deliveries.get(delivery).state,'completed');return 'Synthetic answer';}};
+ const options={...f.options,client,native,now:()=>clock,verifyOwnerReply:async input=>{verified++;assert.equal(input.candidateMessageId,91);assert.equal(input.replyText,'Synthetic answer');return {receiptId:intake.receiptId,messageId:91};},onBusinessConfirmed:()=>{recoveries++;},passHost:{readActivePass:async()=>active,
    activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async outcome=>{
      assert.equal(outcome.state,'replied');assert.equal(outcome.id,active.passId);active=null;}},
    workspaceForIntake:async()=>process.cwd(),readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,
      nextCursor:String(poll++),hasMore:false,events:poll===1?[]:[{id:'message:123:8',revision:'b'.repeat(64),
-       conversationKey:key,kind:'new',outgoing:false,attention:'direct',forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
+       conversationKey:key,kind:'new',outgoing:false,attention:'direct',forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'},...(poll>=3?[{id:'message:123:91',revision:'c'.repeat(64),conversationKey:key,kind:'new',outgoing:true,attention:'none',forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'456'}]:[])]})};
  let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();f.database.close();});
  await coordinator.pollOnce();clock+=300001;await coordinator.pollOnce();
  if(loseConfirmation){
-   await assert.rejects(coordinator.workOnce(),/TRANSPORT_UNAVAILABLE/);assert.ok(active);assert.equal(turns,1);
+   await assert.rejects(coordinator.workOnce(),loseConfirmation==='provider_result'?/OWNER_REPLY_UNCERTAIN/:/TRANSPORT_UNAVAILABLE/);assert.ok(active);assert.equal(turns,1);
    await coordinator.close();coordinator=createAssistantCoordinator(options);
+   if(loseConfirmation==='provider_result'){clock+=300001;await coordinator.pollOnce();}
  }
  await coordinator.workOnce();assert.equal(intake.state,'replied');assert.equal(active,null);assert.equal(turns,1);
- assert.equal(confirms,loseConfirmation?2:1);
+ assert.equal(confirms,loseConfirmation===true?2:1);assert.equal(verified,loseConfirmation==='provider_result'?1:0);
  assert.equal(recoveries,1,'only the durably settled positive reply can clear the SAME independent health latch');
  const row=f.database.prepare('SELECT state,settled,outcome_state,reply_message_id FROM assistant_owner_intakes').get();
  assert.deepEqual({...row},{state:'complete',settled:1,outcome_state:'replied',reply_message_id:91});

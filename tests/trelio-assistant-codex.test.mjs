@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionConfiguration, readAssistantCodexExecutionAvailability,readAssistantCodexExecutionAvailabilitySet, readAssistantCodexHookReadiness, readAssistantCodexPluginReadiness, readAssistantCodexDelivery, readAssistantCodexOwnerReply, runAssistantCodexPass, provisionAssistantCodexChat } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
@@ -593,4 +593,20 @@ test('separate native hook trust survives main metadata changes but refuses miss
   wrongPath=true;await assert.rejects(readAssistantCodexHookReadiness(root,options),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});wrongPath=false;
   await fs.appendFile(path.join(component,'scripts/trelio-host-runtime-loader.mjs'),'\n// changed executable');
   await assert.rejects(readAssistantCodexHookReadiness(root,options),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});
+});
+
+
+test('owner reply recovery reads one completed exact native call, never invokes a model or accepts ambiguous history',async()=>{
+ const threadId=randomUUID(),deliveryId=randomUUID(),pass={companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()};
+ const original={id:randomUUID(),status:'completed',items:[{type:'userMessage',content:[{type:'text',text:assistantDeliveryMarker(deliveryId)+'\nprivate scope'}]},
+  {type:'mcpToolCall',server:'trelio-assistant',tool:'resolve_assistant_intake',arguments:{intakePass:pass,clientRequestId:pass.intakeId,decision:'reply_owner',replyText:'Synthetic answer'}}]};
+ let turns=[original];const spawnProcess=nativeRpc(request=>{
+  assert.equal(request.method,'thread/read');return {result:{thread:{id:threadId,cwd:process.cwd(),...(request.params.includeTurns?{turns}:{})}}};});
+ const options={executable:process.execPath,environment:{},spawnProcess};
+ assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),'Synthetic answer');
+ for(const changed of [{...original,status:'interrupted'},{...original,items:[...original.items,original.items[1]]},
+  {...original,items:[original.items[0],{...original.items[1],arguments:{...original.items[1].arguments,intakePass:{...pass,sourceId:randomUUID()}}}]}]){
+   turns=[changed];assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),null);
+ }
+ turns=[original,original];assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),null);
 });

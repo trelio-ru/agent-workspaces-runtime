@@ -1082,7 +1082,7 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
   let coordinator,closed=false;
   try {
     const native=dependencies.native??{provision:nativeRuntime.provisionAssistantCodexChat,run:nativeRuntime.runAssistantCodexPass,
-      readDelivery:nativeRuntime.readAssistantCodexDelivery};
+      readDelivery:nativeRuntime.readAssistantCodexDelivery,readOwnerReply:nativeRuntime.readAssistantCodexOwnerReply};
     if(['provision','run','readDelivery'].some(name=>typeof native[name]!=='function'))fail('ASSISTANT_COORDINATOR_SETUP_REQUIRED');
     // Observe the native boundary before the coordinator deliberately replaces
     // a post-admission error with its durable delivery-uncertain fence. That
@@ -1156,9 +1156,20 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       const current=runtimeHookSignal(),combined=signal?AbortSignal.any([signal,current]):current;
       return acknowledgeAssistantSource({identity:stableIdentity,host,store,client:live,...input,signal:combined});
     }));
+    const verifyOwnerReply=dependencies.verifyOwnerReply??((input,signal)=>invoke(async(live,host,store)=>{
+      const {verifyAssistantOwnerReply}=await import('./trelio-assistant-transport.mjs');
+      const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
+      const current=runtimeHookSignal(),combined=signal?AbortSignal.any([signal,current]):current;
+      const row=input.row,pass=await host.readActivePass();
+      if(pass?.kind!=='source_intake'||pass.passId!==row.id||pass.threadId!==row.thread_id)fail('ASSISTANT_INTAKE_CHANGED');
+      const source=(await live.sourceAccounts(pass.companyId,combined)).find(value=>value.id===pass.sourceId);
+      return verifyAssistantOwnerReply({identity:stableIdentity,client:live,host,store,pass,source,signal:combined,
+        receiptId:input.outcome.receiptId,replyText:input.replyText,candidateMessageId:input.candidateMessageId,
+        reference:{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key}});
+    }));
     coordinator=createAssistantCoordinator({database:database.database,client:{...client,
       sourceAccounts:(...args)=>invoke(live=>live.sourceAccounts(...args)),
-      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,acknowledgeSource,
+      sourceRoutes:(...args)=>invoke(live=>live.sourceRoutes(...args))},passHost,readSourceMonitor,acknowledgeSource,verifyOwnerReply,
       sourceHealth:{read:(row,signal)=>invoke(live=>live.readSourceHealth(row.companyId,row.id,signal)),
         report:(row,observation,signal)=>invoke(live=>live.reportSourceHealth({companyId:row.companyId,sourceId:row.id,...observation},signal))},
       native:{...observedNative,

@@ -46,7 +46,7 @@ test('source setup preserves the SAME actual Python prerequisite, without privat
     return true;
   });
 });
-const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake}=
+const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake,verifyAssistantOwnerReply}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 // Exercise the SAME source/config/ACK engine against a non-production HTTPS
@@ -64,7 +64,7 @@ const store={get:async slot=>{
 let setupFixture=null,ackFixture=null,intakeFixture=null,maxAccountFixture=false,sourceSelectionFixture=null;
 const baseAdmission=()=>{
   if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
-    protocol:intakeFixture.admission.kind==='reply_owner'?'telegram-owner-reply/v1':scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='reply_owner'?'reply-reference':'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    protocol:intakeFixture.admission.kind==='reply_owner'?'telegram-owner-reply/v1':intakeFixture.admission.kind==='verify_owner_reply'?'telegram-owner-reply-read/v1':scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='reply_owner'?'reply-reference':intakeFixture.admission.kind==='verify_owner_reply'?'read':'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
@@ -1773,7 +1773,7 @@ for(const encrypted of [false,true])test(`owner-private reply uses signed source
    intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId:randomUUID(),ownerExternalUserId:'123456'}};
  const dir=path.join(directory,`owner-private-reply-${encrypted}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
  const replyText='Здравствуйте! Уже проверяю';
- const positive={schemaVersion:1,protocol:'telegram-owner-reply/v1',sent:true,automaticRetryAllowed:false,
+ const positive={ok:true,schemaVersion:1,protocol:'telegram-owner-reply/v1',sent:true,automaticRetryAllowed:false,
    reference:{id:reference.id,revision:reference.revision,conversationKey:reference.conversationKey},replyToMessageId:8,messageId:91};
  await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
    assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});
@@ -1799,9 +1799,30 @@ for(const encrypted of [false,true])test(`owner-private reply uses signed source
  assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  state='replied';await assert.rejects(replyAssistantOwnerIntake(input),/INTAKE_CHANGED/);
+ state='reply_pending';
+ intakeFixture.intent.replyVerificationMessageId=91;intakeFixture.admission.kind='verify_owner_reply';intakeFixture.admission.verificationMessageId=91;
+ const verification={ok:true,chat:{id:123456,title:'Synthetic'},message:{id:91,outgoing:true,text:replyText,textTruncated:false,hasMedia:false,
+   replyContext:{messageId:8,chat:{id:123456}}},readState:{mode:'history-only',marksRead:false}};
+ const verificationOutput=path.join(dir,'verification.json');await fs.writeFile(verificationOutput,JSON.stringify(verification));
+ await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+   assert.deepEqual(process.argv.slice(2),['read','--chat','123456','--message-id','91']);
+   assert.equal(fs.readFileSync(0,'utf8'),'');fs.appendFileSync(${JSON.stringify(marker)},'verified;');
+   process.stdout.write(fs.readFileSync(${JSON.stringify(verificationOutput)},'utf8'));`);
+ artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',
+   sourceDirectory:dir,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+ assert.deepEqual(await verifyAssistantOwnerReply({...input,candidateMessageId:91}),{receiptId,messageId:91});
+ for(const invalid of [{...verification,ok:false},{...verification,message:{...verification.message,outgoing:false}},
+   {...verification,message:{...verification.message,text:'different'}},{...verification,message:{...verification.message,replyContext:{messageId:9,chat:{id:123456}}}},
+   {...verification,message:{...verification.message,replyContext:{messageId:8,chat:{id:654321}}}},{...verification,chat:{id:654321}}]){
+   await fs.writeFile(verificationOutput,JSON.stringify(invalid));assert.equal(await verifyAssistantOwnerReply({...input,candidateMessageId:91}),null);
+ }
+ const afterVerification=await fs.readFile(marker,'utf8');assert.equal(afterVerification.split('sent;').length-1,1,'reconciliation never sends');
+ if(encrypted){for(const mode of ['selection','recipient','missing']){setMode(mode);await assert.rejects(verifyAssistantOwnerReply({...input,candidateMessageId:91}));assert.equal(await fs.readFile(marker,'utf8'),afterVerification);}setMode('valid');}
+ intakeFixture.intent.replyVerificationMessageId=undefined;delete intakeFixture.intent.replyVerificationMessageId;
+ delete intakeFixture.admission.verificationMessageId;intakeFixture.admission.kind='reply_owner';
  state='reply_pending';attempt=false;intakeFixture.admission.ownerExternalUserId='654321';
  await assert.rejects(replyAssistantOwnerIntake(input),/INVALID_RESPONSE/);assert.equal(attempt,false);
- assert.equal(await fs.readFile(marker,'utf8'),'sent;','wrong owner/native receipt cannot launch a child');
+ assert.equal(await fs.readFile(marker,'utf8'),afterVerification,'wrong owner/native receipt cannot launch a child');
 });
 
 test('additional company binding reuses same catalogue, preserves sessions and reads back only its exact native intent',async t=>{

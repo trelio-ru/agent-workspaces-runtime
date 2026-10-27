@@ -679,6 +679,17 @@ process engine persists the attempt at its final spawn boundary. Exact signed
 send/read-back is persisted before native `replied` confirmation. A lost HTTP
 confirmation is a receipt-only technical retry, even after SessionEnd; it never
 starts another model/provider invocation or invents fresh observed model proof.
+The actual CLI success envelope includes `ok:true`; the strict positive reply
+validator retains that field and all exact reference/message checks. A lost
+provider result can be reconciled without sending: read one completed original
+Codex tool call as the private comparison text, select at most four candidates
+from signed monitor refs in the SAME source/conversation, then use the SAME
+signed provider's exact `read --message-id`. Fresh native admission pins the
+original pending receipt, linked owner and candidate ID; only verification may
+outlive the old model lease. Native outgoing direction, original reply header,
+peer and full expected text must all match before persisting the positive ID.
+No body reaches the model or journal; no source/task creation, read ACK, changed
+reference, missing/duplicate marker or absent message authorizes a resend.
 Missing/ambiguous provider evidence stays fenced; the original is not resent.
 Reply receipt alone does not borrow the task-material processing/ACK path.
 

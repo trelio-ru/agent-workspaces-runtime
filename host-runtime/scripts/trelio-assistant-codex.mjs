@@ -375,6 +375,31 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
   }, options);
 };
 
+/** Read back ONE already completed native tool invocation. Its text is only
+ * a private comparison value for a read-only provider check, never fresh send
+ * authority or a recovered instruction. Duplicate markers/calls, unknown turns
+ * and changed task/source/intake selectors cannot yield a candidate body. */
+export const readAssistantCodexOwnerReply=(threadId,deliveryId,intakePass,options={})=>{
+  threadId=id(threadId);const marker=assistantDeliveryMarker(deliveryId);
+  if(!intakePass||Object.keys(intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+    ||Object.values(intakePass).some(value=>!UUID.test(value??'')))fail('ASSISTANT_CODEX_INVALID_INPUT');
+  return readNative(threadId,async(_thread,request)=>{
+    const result=await request('thread/read',{threadId,includeTurns:true});
+    if(result.thread?.id!==threadId||!Array.isArray(result.thread.turns)||result.thread.turns.length>200)return null;
+    const turns=result.thread.turns.filter(turn=>Array.isArray(turn.items)&&turn.items.some(item=>item.type==='userMessage'
+      &&Array.isArray(item.content)&&item.content.some(input=>input.type==='text'&&input.text?.startsWith(`${marker}\n`))));
+    if(turns.length!==1||!['completed','failed'].includes(turns[0].status))return null;
+    const calls=turns[0].items.filter(item=>item.type==='mcpToolCall'&&item.server==='trelio-assistant'&&item.tool==='resolve_assistant_intake');
+    if(calls.length!==1)return null;
+    let args=calls[0].arguments;try{if(typeof args==='string')args=JSON.parse(args);}catch{return null;}
+    if(!args||args.decision!=='reply_owner'||args.clientRequestId!==intakePass.intakeId
+      ||!args.intakePass||Object.keys(args.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+      ||Object.entries(intakePass).some(([key,value])=>args.intakePass[key]!==value)
+      ||typeof args.replyText!=='string'||!args.replyText.trim()||args.replyText.length>4096||args.replyText.includes('\0'))return null;
+    return args.replyText.trim();
+  },options);
+};
+
 /**
  * The runtime owns cyclic launches through the visible Desktop writer. The
  * permanent UUID is opened before its one queue submission; no exec/resume

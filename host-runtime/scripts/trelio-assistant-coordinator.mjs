@@ -63,10 +63,11 @@ export const assistantDispatchDiagnostics = ({companies=null,summary=null,now=Da
 };
 
 export const createAssistantCoordinator = ({ database, client, native, workspaceForTask, timeZone,
-  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
+  passHost = null, workspaceForIntake = null, readSourceMonitor = null, acknowledgeSource = null, verifyOwnerReply = null, sourceHealth = null, onBusinessConfirmed = null, now = Date.now, notify = () => {}, watchIntervalMs = 30_000 }) => {
   if (!client?.identity || !native || typeof workspaceForTask !== 'function' || typeof native.ready !== 'function'
     || typeof notify !== 'function' || !Number.isSafeInteger(watchIntervalMs) || watchIntervalMs < 100 || watchIntervalMs > 30_000) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(passHost!==null && ['readActivePass','activatePass','releasePass'].some(key=>typeof passHost[key]!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
+  if(verifyOwnerReply!==null&&typeof verifyOwnerReply!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(onBusinessConfirmed!==null&&typeof onBusinessConfirmed!=='function')fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(sourceHealth!==null&&(!sourceHealth||typeof sourceHealth.read!=='function'||typeof sourceHealth.report!=='function'))fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
   if(readSourceMonitor!==null && (typeof readSourceMonitor!=='function' || typeof client.sourceAccounts!=='function')) fail('ASSISTANT_COORDINATOR_INVALID_INPUT');
@@ -657,12 +658,19 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   const intakeLocator=row=>({companyId:row.scope.companyId,sourceId:row.scope.bindingId,intakeId:row.id});
   const reconcileIntakeReply=async(row,outcome,signal)=>{
     if(outcome.state!=='reply_pending')return outcome;
-    if(outcome.receiptId!==row.reply_receipt_id||row.reply_message_id===null){
-      // The signed provider has not yielded a durably verified send/read-back.
-      // Only the original marker may settle; never invoke the model/provider
-      // again merely because the deadline passed or a response was lost.
-      fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+    if(outcome.receiptId!==row.reply_receipt_id)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+    if(row.reply_message_id===null&&verifyOwnerReply&&typeof native.readOwnerReply==='function'){
+      // Reconcile only after the exact original model turn is terminal. The
+      // historical text is a private equality target, not a second command;
+      // each candidate is an existing signed monitor ref. This path has no
+      // send callback, start fence, model invocation, ACK or absence-as-retry.
+      const replyText=await native.readOwnerReply(row.thread_id,row.delivery_id,intakeLocator(row),{signal});lease();
+      if(replyText){for(const candidateMessageId of inbox.ownerReplyCandidates(row.id)){
+        const positive=await verifyOwnerReply({row,outcome,replyText,candidateMessageId},signal);lease();
+        if(positive){inbox.confirmOwnerReply(row.id,positive);row=inbox.ownerIntake(row.id);break;}
+      }}
     }
+    if(row.reply_message_id===null)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
     const confirmed=await client.confirmOwnerReply({intakePass:intakeLocator(row),receiptId:row.reply_receipt_id},signal);
     lease();return confirmed;
   };
