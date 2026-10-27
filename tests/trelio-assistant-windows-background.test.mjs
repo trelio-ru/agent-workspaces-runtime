@@ -332,7 +332,16 @@ test('the signed worker brands only an isolated visible parent console and verif
         const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.consoleHost,[string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release,[string]$p.receipt,[string]$p.assistantId,[bool]$p.inspect)";
         const code=await new Promise((resolve,reject)=>{
           const child=spawn(resolveWindowsPowerShellExecutable(process.env),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
-            {shell:false,windowsHide:true,stdio:['pipe','ignore','ignore'],timeout:60000});
+            {shell:false,windowsHide:true,stdio:['pipe','ignore','pipe'],timeout:60000});
+          let diagnostic='';
+          child.stderr.on('data',chunk=>{
+            diagnostic+=chunk.toString('utf8');
+            for(;;){const end=diagnostic.indexOf('\n');if(end<0)break;
+              const line=diagnostic.slice(0,end).trim();diagnostic=diagnostic.slice(end+1);
+              if(/^TRELIO_ICON_CHECK (?:0|1|2|error) (?:large|no_large) (?:small|no_small)$/u.test(line))console.log(line);
+            }
+            if(diagnostic.length>512)diagnostic='';
+          });
           child.once('error',reject);child.once('close',resolve);
           child.stdin.end(JSON.stringify({consoleHost:path.join(process.env.SystemRoot,'System32','conhost.exe'),executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release,receipt,assistantId,inspect:mode==='visible'}));
         });
@@ -467,6 +476,9 @@ public static class AssistantIconPseudoConsoleFixture {
         // icon-count sentinel. Scalar out handles cannot be lost to array
         // marshaling; require real large AND small icons, never just a count.
         IntPtr large,small;uint extracted=ExtractIconEx(actual[2].Substring(0,actual[2].Length-5),-102,out large,out small,1);
+        // Closed fixture evidence only: no path, window handle, OS error or
+        // content. Distinguish resource lookup from output-handle delivery.
+        Console.Error.WriteLine("TRELIO_ICON_CHECK "+(extracted<=2?extracted.ToString():"error")+" "+(large!=IntPtr.Zero?"large":"no_large")+" "+(small!=IntPtr.Zero?"small":"no_small"));
         try { if(extracted!=1)return 44;if(large==IntPtr.Zero||small==IntPtr.Zero)return 48; }
         finally { if(large!=IntPtr.Zero)DestroyIcon(large);if(small!=IntPtr.Zero)DestroyIcon(small); }
         StringBuilder label=new StringBuilder(128);
