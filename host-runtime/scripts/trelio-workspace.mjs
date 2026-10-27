@@ -19095,7 +19095,7 @@ export const installDeepseekBundle = async ({ pluginRoot = process.env.TRELIO_PL
       if (await fs.readFile(file, "utf8") !== bytes) throw new Error("TRELIO_HARNESS_BUNDLE_CHANGED");
     }
   }
-  return { experimental: true, bundleDirectory: directory, qualifiedHarnessVersion: DEEPSEEK_HARNESS_QUALIFIED_VERSION,
+  return { bundleDirectory: directory, qualifiedHarnessVersion: DEEPSEEK_HARNESS_QUALIFIED_VERSION,
     supportedHarnessVersionRange: DEEPSEEK_HARNESS_VERSION_RANGE,
     installedInHarness: false, nextAction: "Use dsh plugin --profile <actual-profile> add <bundleDirectory>; reload that profile, then call trelio_connect." };
 };

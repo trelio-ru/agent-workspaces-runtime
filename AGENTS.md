@@ -926,8 +926,10 @@ or value retry. Private legacy holder/AAD and company ACL remain separate.
 Pre-native reservation recovery: SAME delivery v12/bit0/lease and native history, not a new invocation; see docs/assistant-scheduler.md.
 
 
-Native DeepSeek Harness preview принадлежит host runtime; его bootstrap,
-compatibility range, exact qualification fixture и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-preview).
+Native DeepSeek Harness connection принадлежит host runtime; его bootstrap,
+compatibility range, exact qualification fixture и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-connection).
 Folder planner и apply dispatcher используют общий exact client predicate;
 проверяй returned action целиком для setup и refresh, а не только file writer.
 Public plugin shell для этого клиента не меняется.
+Потерянная MCP-сессия восстанавливается только по полному pre-dispatch отказу
+из этого же контракта: один handshake/retry, без OAuth и blind mutation replay.

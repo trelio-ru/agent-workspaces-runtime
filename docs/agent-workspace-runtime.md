@@ -2587,7 +2587,7 @@ Refresh уже существующей exact managed-привязки допу�
 и Git isolation. Для папки без привязки dedicated-folder gate сохраняется.
 
 
-## Native DeepSeek Harness preview
+## Native DeepSeek Harness connection
 
 `trelio-remote-mcp.mjs.deepseekHarnessPlugin` — Cordis plugin для Harness `>=0.2.1-rc.2`,
 без Codex/Claude compatibility hooks. `Session.requestHeader().config` даёт
@@ -2626,6 +2626,21 @@ args/results/env/files; Keychain/DPAPI/Secret Service отказ не даёт f
 запускают login и не повторяются при ambiguous transport. Каталог реальный,
 с pagination/лимитом и без App-only tools; после pairing/access changes explicit
 connect обновляет его без повторного OAuth действующего grant.
+
+MCP-сессия восстанавливается отдельно от OAuth. Только полный HTTP 404 JSON
+response на запрос с session header, `jsonrpc=2.0`, `id=null`, code `-32001`
+и exact message `MCP session not found.` даёт закрытый
+`REMOTE_MCP_SESSION_NOT_FOUND`. Error body ограничен 4 КиБ и не отражается
+в result/log. Native connection сбрасывает только отклонённое поколение,
+объединяет конкурентные initialize и один раз повторяет запрос: server
+отказал до tool dispatch, поэтому idempotency key и ещё не использованный
+method proof сохраняются. Повторный session rejection завершает вызов и
+очищает только его session; цикла повторов нет. Обычный 404, 401/403,
+незавершённый/неверный JSON, timeout/reset/5xx и tool-level ошибки не дают
+такого повтора или нового login. Cancellation проверяется перед handshake
+и повторной отправкой. Новый initialize никогда не несёт старый session header.
+Подключение, OAuth client name и installer result используют обычное название
+клиента; реальные ограничения возможностей описываются отдельно.
 
 Remote и local tools исполняют общий transport/dispatcher. Native prefix сохраняет remote и local MCP инструкции; text содержит
 полный structured authority/routes, PTC получает тот же public envelope;

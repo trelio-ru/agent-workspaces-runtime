@@ -1425,7 +1425,7 @@ export const remoteMcpHttpRequest = ({
         let receivedBytes = 0;
 
         if (statusCode < 200 || statusCode >= 300) {
-          fail(new RemoteMcpHostError(
+          const httpError = new RemoteMcpHostError(
             statusCode === 401
               ? "REMOTE_MCP_AUTH_REJECTED"
               : statusCode === 403
@@ -1436,7 +1436,34 @@ export const remoteMcpHttpRequest = ({
               : statusCode === 403
                 ? "Remote MCP отказал в доступе к операции или scope."
                 : `Remote MCP завершил запрос с HTTP ${statusCode}.`,
-          ));
+          );
+          // Only this complete, bounded JSON-RPC rejection proves that the
+          // server rejected a retired session BEFORE dispatching any tool.
+          // A proxy's 404, a tool error or an interrupted response is not that
+          // evidence. Never retain/reflect an arbitrary HTTP error body.
+          if (statusCode !== 404 || !sessionId || !contentType.includes("application/json")) {
+            fail(httpError);
+            return;
+          }
+          const errorChunks = [];
+          let errorBytes = 0;
+          incoming.on("data", chunk => {
+            if (settled) return;
+            errorBytes += chunk.byteLength;
+            if (errorBytes > 4 * 1024) { fail(httpError); return; }
+            errorChunks.push(chunk);
+          });
+          incoming.once("aborted", () => fail(httpError));
+          incoming.once("error", () => fail(httpError));
+          incoming.once("end", () => {
+            if (settled) return;
+            let rejection;
+            try { rejection = JSON.parse(Buffer.concat(errorChunks).toString("utf8")); } catch { /* Not session evidence. */ }
+            fail(rejection?.jsonrpc === "2.0" && rejection.id === null && !Object.hasOwn(rejection, "result")
+              && rejection.error?.code === -32001 && rejection.error.message === "MCP session not found."
+              ? new RemoteMcpHostError("REMOTE_MCP_SESSION_NOT_FOUND", "Remote MCP больше не хранит эту MCP-сессию.")
+              : httpError);
+          });
           return;
         }
 
@@ -6927,7 +6954,7 @@ if (isDirectModuleInvocation(import.meta.url)) {
 }
 
 
-/** Experimental native client entry alongside the ordinary stdio host.
+/** Native client entry alongside the ordinary stdio host.
  * Keep one shared transport implementation and the frozen 100-file package
  * inventory. This closure isolates native registration names from stdio state;
  * it performs no OAuth, filesystem or tool registration until apply is called.
@@ -6969,7 +6996,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
    */
   const observeHarnessRuntime = execution => {
     const session = execution?.agent?.session;
-    // A future preview may remove or reshape this API. Refuse before preparing
+    // A future Harness release may reshape this API. Refuse before preparing
     // proof or contacting Trelio; never substitute saved/default model identity.
     const header = typeof session?.requestHeader === "function" ? session.requestHeader()?.config : undefined;
     if (!record(header) || !identifier.test(header.provider ?? "") || !identifier.test(header.model ?? "")
@@ -7070,8 +7097,9 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
 
   /** Fixed-origin OAuth and MCP transport. Dependency injection is source-test
    * only; no model-facing field selects a URL, bearer, executable or auth store.
-   * Business calls are single-attempt. An expired/rejected grant requires the
-   * explicit connect action, never an automatic login or mutation replay.
+   * Only a proven pre-dispatch session rejection permits one new handshake and
+   * request attempt. Ambiguous failures never replay a business call; a rejected
+   * grant still requires the explicit connect action, never automatic login.
    */
   const createHarnessConnection = ({
     httpRequest = remoteMcpHttpRequest, httpJson = oauthHttpJson,
@@ -7103,18 +7131,42 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         "Подключите Trelio инструментом trelio_connect. Вход выполняется только в браузере.");
       return current.accessToken;
     };
-    const rpc = async (method, params, signal, token) => {
+    const rpcOnce = async (method, params, signal, token, targetSession = session) => {
+      throwIfAborted(signal);
       const response = await httpRequest({ config: config(), credential: token ?? await credential(signal),
-        sessionId: session?.sessionId, payload: { jsonrpc: "2.0", id: ++sequence, method, ...(params ? { params } : {}) } }, { signal });
+        sessionId: targetSession?.sessionId, payload: { jsonrpc: "2.0", id: ++sequence, method, ...(params ? { params } : {}) } }, { signal });
       return { response, result: assertJsonRpcResult(response, method) };
+    };
+    const sessionMissing = error => error instanceof RemoteMcpHostError && error.code === "REMOTE_MCP_SESSION_NOT_FOUND";
+    const rpc = async (method, params, signal) => {
+      // Join a recovery already started between call()/catalogue setup and
+      // dispatch instead of emitting a headerless request during that window.
+      const rejectedSession = await initialize(signal);
+      try { return await rpcOnce(method, params, signal, undefined, rejectedSession); }
+      catch (error) {
+        if (!rejectedSession?.sessionId || !sessionMissing(error)) throw error;
+        // Parallel requests may report the old rejection after another request
+        // already recovered. Invalidate only that exact generation; initialize
+        // coalesces concurrent recovery and never reuses the retired header.
+        if (session === rejectedSession) session = null;
+        throwIfAborted(signal);
+        const recoveredSession = await initialize(signal);
+        try { return await rpcOnce(method, params, signal, undefined, recoveredSession); }
+        catch (retryError) {
+          // One recovery per invocation. A second explicit rejection leaves the
+          // next invocation free to negotiate, without looping or changing OAuth.
+          if (session === recoveredSession && sessionMissing(retryError)) session = null;
+          throw retryError;
+        }
+      }
     };
     const initialize = async signal => {
       if (session) return session;
       if (initializing) return initializing;
       initializing = (async () => {
         const token = await credential(signal);
-        const { response, result } = await rpc("initialize", { protocolVersion: PROTOCOL, capabilities: {},
-          clientInfo: { name: "trelio-deepseek-harness", version: getHostRuntimeVersion() } }, signal, token);
+        const { response, result } = await rpcOnce("initialize", { protocolVersion: PROTOCOL, capabilities: {},
+          clientInfo: { name: "trelio-deepseek-harness", version: getHostRuntimeVersion() } }, signal, token, null);
         if (result?.protocolVersion !== PROTOCOL) throw fail("TRELIO_HARNESS_PROTOCOL_INVALID", "Trelio не согласовал MCP protocol.");
         const next = { sessionId: response.sessionId ?? null, instructions: result.instructions ?? "" };
         await httpRequest({ config: config(), credential: token, sessionId: next.sessionId,
@@ -7131,7 +7183,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         const current = await store.read(ORIGIN, target);
         if (reauthorize || !current || current.expiresAt <= Date.now()) {
           const created = await connectOAuth(config(), { signal, resolveEndpoint: resolveSafeRemoteMcpEndpoint,
-            clientName: "Trelio – DeepSeek Harness (experimental)", resource: RESOURCE,
+            clientName: "Trelio – DeepSeek Harness", resource: RESOURCE,
             maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
           await store.write(ORIGIN, target, created);
           const saved = await store.read(ORIGIN, target);
@@ -7141,7 +7193,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
         // repeats the prior business tool or revives a retired OAuth profile.
         session = null;
         await initialize(signal);
-        return { connected: true, protectedRead: "not_checked", saving: "not_checked", experimental: true };
+        return { connected: true, protectedRead: "not_checked", saving: "not_checked" };
       },
       async listTools(signal) {
         await initialize(signal);
@@ -7180,7 +7232,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     connection = createHarnessConnection(), prepare = prepareNativeRuntimeToolArguments,
     localMessage = handleLocalMcpMessage,
   } = {}) => {
-    // Newer Harness releases are allowed, but preview APIs can still break.
+    // Newer Harness releases are allowed; verify their native API explicitly.
     // Check the native registration surface before catalogue/OAuth/vault I/O;
     // per-call session observation remains an independent dispatch guard.
     if (typeof ctx?.tools?.register !== "function" || typeof ctx?.inject !== "function"
@@ -7209,7 +7261,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
           if (disposed) throw fail("TRELIO_HARNESS_DISPOSED", "Плагин Trelio остановлен.");
           let input = cleanInput(raw);
           // Browser fill requires a trusted client browser delivery surface. This
-          // experimental native transport has none and must not issue a grant.
+          // native transport has none and must not issue a grant.
           if (tool.name === "prepare_agent_secret_browser_fill"
             || input.parameters?.nativeTool === "prepare_agent_secret_browser_fill"
             || ["secret_browser_prepare", "secret_browser_fill"].includes(input.operation)
@@ -7255,7 +7307,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       catch (error) { for (const dispose of disposers) dispose(); disposers = []; throw error; }
     }, signal);
     ctx.tools.register({ name: "trelio_connect",
-      description: "Connect or explicitly reconnect Trelio in the system browser. Never supply tokens or authorization codes in chat. Also refreshes the live tool catalogue; it does not retry a previous business action.",
+      description: "Connect Trelio or refresh its MCP session and catalogue, reusing valid OAuth. Browser consent is needed for a missing, expired or explicitly replaced grant. Never supply tokens or codes in chat; previous business actions are not replayed.",
       parameters: { type: "object", properties: { reauthorize: { type: "boolean", description: "Explicitly replace a revoked or insufficient OAuth grant in the browser." } }, additionalProperties: false },
       output: { schema: { type: "object", properties: {}, additionalProperties: true },
         render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }] },

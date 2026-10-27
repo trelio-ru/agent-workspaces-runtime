@@ -2439,6 +2439,45 @@ test("request headers add only bearer auth and host-controlled MCP metadata", ()
   assert.equal(headers["mcp-write-spaces"], undefined);
 });
 
+test("Remote MCP recognizes only a complete bounded pre-dispatch session rejection", { timeout: 5_000 }, async () => {
+  const rejection = { jsonrpc: "2.0", id: null, error: { code: -32001, message: "MCP session not found." } };
+  const cases = [
+    { body: JSON.stringify(rejection), expected: "REMOTE_MCP_SESSION_NOT_FOUND" },
+    { body: JSON.stringify(rejection), status: 500 },
+    { body: JSON.stringify(rejection), sessionId: null },
+    { body: JSON.stringify({ ...rejection, id: 1 }) },
+    { body: JSON.stringify({ ...rejection, result: {} }) },
+    { body: JSON.stringify({ ...rejection, error: { ...rejection.error, code: -32000 } }) },
+    { body: JSON.stringify({ ...rejection, error: { ...rejection.error, message: "PRIVATE-ERROR-BODY" } }) },
+    { body: JSON.stringify({ jsonrpc: "2.0", id: 1, result: rejection }) },
+    { body: "<html>PRIVATE-ERROR-BODY</html>", contentType: "text/html" },
+    { body: '{"PRIVATE-ERROR-BODY":' },
+    { body: JSON.stringify(rejection), incomplete: true },
+    { body: JSON.stringify({ ...rejection, padding: "PRIVATE-ERROR-BODY".repeat(300) }) },
+  ];
+  let current;
+  const server = await listenOnLoopback((_request, response) => {
+    response.writeHead(current.status ?? 404, { "content-type": current.contentType ?? "application/json",
+      ...(current.incomplete ? { "content-length": Buffer.byteLength(current.body) + 1, connection: "close" } : {}) });
+    response.end(current.body);
+  });
+  try {
+    for (current of cases) {
+      await assert.rejects(remoteMcpHttpRequest({
+        config: { ...remoteKnowledgeConfig, endpoint: `http://remote-mcp.test:${server.address().port}/mcp` },
+        credential: "synthetic-native-token", sessionId: Object.hasOwn(current, "sessionId") ? current.sessionId : "synthetic-retired",
+        payload: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "update_task_title", arguments: {} } },
+      }, { resolveEndpoint: createPinnedLoopbackResolver(), timeoutMs: 1_000 }), error => {
+        assert.ok(error instanceof RemoteMcpHostError);
+        assert.equal(error.code, current.expected ?? "REMOTE_MCP_HTTP_ERROR");
+        assert.equal(error.details, null);
+        assert.doesNotMatch(error.message, /PRIVATE-/u);
+        return true;
+      });
+    }
+  } finally { await closeTestServer(server); }
+});
+
 test("Remote MCP request completes on a matching SSE response without waiting for stream end", {
   timeout: 2_000,
 }, async () => {

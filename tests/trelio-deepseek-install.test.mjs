@@ -14,6 +14,7 @@ test("native bundle is immutable, uses signed selection and never edits a Harnes
   const options = { pluginRoot: pluginDirectory, configDirectory: directory };
   const installed = await installDeepseekBundle(options);
   assert.equal(installed.installedInHarness, false);
+  assert.equal(Object.hasOwn(installed, "experimental"), false);
   assert.deepEqual(await installDeepseekBundle(options), installed);
   const pkg = JSON.parse(await fs.readFile(path.join(installed.bundleDirectory, "package.json"), "utf8"));
   assert.equal(pkg.engines.dsh, DEEPSEEK_HARNESS_VERSION_RANGE);

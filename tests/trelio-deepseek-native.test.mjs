@@ -6,9 +6,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import http from "node:http";
 import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "../host-runtime/scripts/trelio-component-versions.mjs";
 import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuations,
-  harnessToolName, observeHarnessRuntime, projectHarnessMcpResult, AGENT_SKILL_ROUTING_INSTRUCTIONS } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+  harnessToolName, observeHarnessRuntime, projectHarnessMcpResult, AGENT_SKILL_ROUTING_INSTRUCTIONS,
+  remoteMcpHttpRequest, RemoteMcpHostError } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
 const require = createRequire(new URL("./fixtures/deepseek-native/package.json", import.meta.url));
 const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)).href);
@@ -137,6 +139,7 @@ test("fixed-origin connection reuses vault, negotiates once and never retries bu
     connectOAuth: async (config, options) => {
       logins++; assert.equal(config.endpoint, "https://trelio.ru/mcp");
       assert.equal(options.resource, config.endpoint);
+      assert.equal(options.clientName, "Trelio – DeepSeek Harness");
       return { accessToken: "synthetic-native-token", expiresAt: Date.now() + 10_000 };
     },
     httpRequest: async ({ payload, credential, config }) => {
@@ -150,12 +153,135 @@ test("fixed-origin connection reuses vault, negotiates once and never retries bu
     },
   });
   await assert.rejects(connection.listTools(), { code: "TRELIO_HARNESS_AUTH_REQUIRED" });
-  await connection.connect(); await connection.listTools(); await connection.listTools();
+  const connected = await connection.connect();
+  assert.equal(Object.hasOwn(connected, "experimental"), false);
+  await connection.listTools(); await connection.listTools();
   assert.equal(logins, 1); assert.equal(initializations, 1);
   await assert.rejects(connection.call("update_task_title", {}, signal()), { code: "REMOTE_MCP_HTTP_ERROR" });
   assert.equal(calls, 1); assert.equal(logins, 1);
   await connection.connect(); assert.equal(logins, 1);
   await connection.connect(signal(), true); assert.equal(logins, 2);
+});
+
+// These transports never open the user's OAuth vault or contact Trelio. The
+// real HTTP fixture below still exercises the production response classifier.
+const syntheticConnection = httpRequest => createHarnessConnection({
+  httpRequest,
+  httpJson: async () => ({ body: { issuer: "https://trelio.ru", scopes_supported: ["mcp:read"] } }),
+  vault: { read: async () => ({ accessToken: "synthetic-native-token", expiresAt: Date.now() + 60_000 }),
+    write: async () => assert.fail("session recovery must not replace OAuth") },
+  connectOAuth: async () => assert.fail("session recovery must not open OAuth"),
+});
+const sessionRejected = () => new RemoteMcpHostError("REMOTE_MCP_SESSION_NOT_FOUND", "synthetic retired session");
+const rpcSuccess = (payload, sessionId) => ({ sessionId, message: { jsonrpc: "2.0", id: payload.id,
+  result: payload.method === "initialize" ? { protocolVersion: "2025-03-26" }
+    : payload.method === "tools/list" ? { tools: [] } : { content: [] } } });
+
+test("Harness recovers an expired HTTP session without OAuth or duplicate mutation dispatch", { timeout: 5_000 }, async t => {
+  let activeSession, initializations = 0, rejected = 0, writes = 0;
+  const acceptedArguments = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks));
+    if (payload.method === "initialize") {
+      assert.equal(request.headers["mcp-session-id"], undefined, "fresh initialize cannot carry the retired header");
+      activeSession = `synthetic-session-${++initializations}`;
+    } else if (request.headers["mcp-session-id"] !== activeSession) {
+      rejected++;
+      response.writeHead(404, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "MCP session not found." } }));
+      return;
+    }
+    if (payload.method === "notifications/initialized") { response.writeHead(202); response.end(); return; }
+    if (payload.params?.name === "update_task_title") { writes++; acceptedArguments.push(payload.params.arguments); }
+    response.writeHead(200, { "content-type": "application/json", "mcp-session-id": activeSession });
+    response.end(JSON.stringify(rpcSuccess(payload, activeSession).message));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const connection = syntheticConnection((args, options) => remoteMcpHttpRequest(args, {
+    ...options, timeoutMs: 1_000,
+    resolveEndpoint: async () => ({ endpoint: new URL(`http://mcp.test:${server.address().port}/mcp`), address: "127.0.0.1", family: 4 }),
+  }));
+  await connection.listTools();
+  activeSession = null; // Same observable rejection as idle expiry/server restart.
+  const args = { title: "Synthetic title", clientRequestId: "synthetic-request", runtimeSessionProof: { nonce: "synthetic-proof" } };
+  await connection.call("update_task_title", args);
+  assert.equal(initializations, 2);
+  assert.equal(rejected, 1);
+  assert.equal(writes, 1, "the rejected attempt never reached the mutation handler");
+  assert.deepEqual(acceptedArguments, [args], "keep the original idempotency key and unconsumed method proof");
+});
+
+test("concurrent late rejections share one recovery and cannot retire the new generation", { timeout: 5_000 }, async () => {
+  let initializations = 0, oldRequests = 0, releaseLateRejection;
+  const lateRejection = new Promise(resolve => { releaseLateRejection = resolve; });
+  const connection = syntheticConnection(async ({ payload, sessionId }) => {
+    if (payload.method === "initialize") {
+      assert.equal(sessionId, undefined);
+      initializations++;
+      return rpcSuccess(payload, `synthetic-${initializations}`);
+    }
+    if (payload.method === "tools/call" && sessionId === "synthetic-1") {
+      if (++oldRequests === 2) await lateRejection;
+      throw sessionRejected();
+    }
+    if (payload.method === "tools/call" && sessionId === "synthetic-2") releaseLateRejection();
+    return rpcSuccess(payload, sessionId);
+  });
+  await connection.listTools();
+  await Promise.all([connection.call("list_companies", {}), connection.call("get_my_context", {})]);
+  await connection.call("get_my_context", {});
+  assert.equal(initializations, 2);
+  assert.equal(oldRequests, 2);
+});
+
+test("repeated session rejection is bounded and leaves the next call able to negotiate", async () => {
+  let initializations = 0, attempts = 0, reject = true;
+  const connection = syntheticConnection(async ({ payload, sessionId }) => {
+    if (payload.method === "initialize") return rpcSuccess(payload, `synthetic-${++initializations}`);
+    if (payload.method === "tools/call") { attempts++; if (reject) throw sessionRejected(); }
+    return rpcSuccess(payload, sessionId);
+  });
+  await assert.rejects(connection.call("get_my_context", {}), { code: "REMOTE_MCP_SESSION_NOT_FOUND" });
+  assert.equal(initializations, 2); assert.equal(attempts, 2);
+  reject = false;
+  await connection.call("get_my_context", {});
+  assert.equal(initializations, 3); assert.equal(attempts, 3);
+});
+
+test("catalogue recovery is bounded; ambiguous/auth failures never retry a mutation", async () => {
+  for (const code of ["REMOTE_MCP_HTTP_ERROR", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE", "REMOTE_MCP_TIMEOUT", "REMOTE_MCP_CONNECTION_CLOSED"]) {
+    let initializations = 0, attempts = 0;
+    const connection = syntheticConnection(async ({ payload, sessionId }) => {
+      if (payload.method === "initialize") return rpcSuccess(payload, `synthetic-${++initializations}`);
+      if (payload.method === "tools/call") { attempts++; throw new RemoteMcpHostError(code, "synthetic failure"); }
+      return rpcSuccess(payload, sessionId);
+    });
+    await assert.rejects(connection.call("update_task_title", {}), { code });
+    assert.equal(initializations, 1); assert.equal(attempts, 1);
+  }
+  let initializations = 0, catalogues = 0;
+  const connection = syntheticConnection(async ({ payload, sessionId }) => {
+    if (payload.method === "initialize") return rpcSuccess(payload, `synthetic-${++initializations}`);
+    if (payload.method === "tools/list" && ++catalogues === 1) throw sessionRejected();
+    return rpcSuccess(payload, sessionId);
+  });
+  await connection.listTools();
+  assert.equal(initializations, 2); assert.equal(catalogues, 2);
+});
+
+test("cancellation after session rejection prevents handshake and replay", async () => {
+  const controller = new AbortController();
+  let initializations = 0, attempts = 0;
+  const connection = syntheticConnection(async ({ payload, sessionId }) => {
+    if (payload.method === "initialize") return rpcSuccess(payload, `synthetic-${++initializations}`);
+    if (payload.method === "tools/call") { attempts++; controller.abort(); throw sessionRejected(); }
+    return rpcSuccess(payload, sessionId);
+  });
+  await assert.rejects(connection.call("update_task_title", {}, controller.signal), error => error === controller.signal.reason);
+  assert.equal(initializations, 1); assert.equal(attempts, 1);
 });
 
 test("explicit recovery survives a revoked grant without silently replacing it", async t => {
