@@ -85,6 +85,11 @@ is built for every PR and consumed by the signed-chain/package fixtures. Test
 selection is not permission to reuse stale native source/binaries or skip the
 ordinary release signature/policy/read-back chain.
 
+Full Windows also executes the real Workspace recovery/cleanup fixtures from
+`trelio-workspace.test.mjs`: isolated retention with live siblings, protected
+local changes, retention-only source discovery, persistent checkout reuse and
+repeat recovery opens. Path-parser tests alone do not cover native deletion.
+
 ## Exact tag verification
 
 Planning uploads `runtime-ci-plan/ci-plan.json`, binding schema/policy version,
