@@ -479,7 +479,9 @@ public static class AssistantIconPseudoConsoleFixture {
         // Closed fixture evidence only: no path, window handle, OS error or
         // content. Distinguish resource lookup from output-handle delivery.
         Console.Error.WriteLine("TRELIO_ICON_CHECK "+(extracted<=2?extracted.ToString():"error")+" "+(large!=IntPtr.Zero?"large":"no_large")+" "+(small!=IntPtr.Zero?"small":"no_small"));
-        try { if(extracted!=1)return 44;if(large==IntPtr.Zero||small==IntPtr.Zero)return 48; }
+        // The native result counts HICONs, not resource groups: requesting
+        // both sizes returns TWO icons for this one RT_GROUP_ICON resource.
+        try { if(extracted!=2)return 44;if(large==IntPtr.Zero||small==IntPtr.Zero)return 48; }
         finally { if(large!=IntPtr.Zero)DestroyIcon(large);if(small!=IntPtr.Zero)DestroyIcon(small); }
         StringBuilder label=new StringBuilder(128);
         if(SHLoadIndirectString(actual[1],label,128,IntPtr.Zero)!=0||label.ToString()!="Цифровой ассистент")return 45;
