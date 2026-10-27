@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { installDeepseekBundle } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { pluginDirectory } from "./test-layout.mjs";
+import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "../host-runtime/scripts/trelio-component-versions.mjs";
 
 test("native bundle is immutable, uses signed selection and never edits a Harness profile", async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-dsh-install-"));
@@ -15,7 +16,9 @@ test("native bundle is immutable, uses signed selection and never edits a Harnes
   assert.equal(installed.installedInHarness, false);
   assert.deepEqual(await installDeepseekBundle(options), installed);
   const pkg = JSON.parse(await fs.readFile(path.join(installed.bundleDirectory, "package.json"), "utf8"));
-  assert.equal(pkg.engines.dsh, "0.2.1-rc.2");
+  assert.equal(pkg.engines.dsh, DEEPSEEK_HARNESS_VERSION_RANGE);
+  assert.equal(installed.supportedHarnessVersionRange, pkg.engines.dsh);
+  assert.equal(installed.qualifiedHarnessVersion, DEEPSEEK_HARNESS_QUALIFIED_VERSION);
   const entry = await fs.readFile(path.join(installed.bundleDirectory, "index.mjs"), "utf8");
   assert.match(entry, /await selectHostRuntime\(\)/);
   assert.match(entry, /selected.runtimeVersion/);

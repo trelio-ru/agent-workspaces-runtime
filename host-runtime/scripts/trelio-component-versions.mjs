@@ -7,6 +7,13 @@ const STABLE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
 // hook or MCP code.
 export const DEVELOPMENT_COMPONENT_VERSION = "0.0.0";
 
+// Harness evaluates engines.dsh with includePrerelease=true. The minimum keeps
+// older incompatible APIs out; newer releases need no per-version approval.
+// Qualification is test evidence, not a second installation gate. Bundle and
+// diagnostics share these values so their compatibility claims cannot drift.
+export const DEEPSEEK_HARNESS_VERSION_RANGE = ">=0.2.1-rc.2";
+export const DEEPSEEK_HARNESS_QUALIFIED_VERSION = "0.2.1-rc.3";
+
 const normalizeStableVersion = (value) => {
   const normalized = typeof value === "string" ? value.trim() : "";
   return STABLE_VERSION_PATTERN.test(normalized) ? normalized : null;

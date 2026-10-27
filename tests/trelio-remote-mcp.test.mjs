@@ -5729,7 +5729,8 @@ test("Harness diagnostics preserve native identity and never inspect foreign Hoo
     publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }),
   });
   const payload = JSON.parse(result.content[0].text);
-  assert.equal(payload.clientInspection.nativeAdapter.qualifiedVersion, "0.2.1-rc.2");
+  assert.equal(payload.clientInspection.nativeAdapter.qualifiedVersion, "0.2.1-rc.3");
+  assert.equal(payload.clientInspection.nativeAdapter.supportedVersionRange, ">=0.2.1-rc.2");
   assert.equal(payload.liveVerification.hook.state, "not_applicable");
   assert.equal(payload.clientInspection.nativeAdapter.state, "not_checked");
 });

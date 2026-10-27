@@ -69,6 +69,8 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import {
+  DEEPSEEK_HARNESS_VERSION_RANGE,
+  DEEPSEEK_HARNESS_QUALIFIED_VERSION,
   HOST_RUNTIME_VERSION,
   PLUGIN_VERSION,
   getHostRuntimeVersion,
@@ -18907,7 +18909,7 @@ export const buildDeepseekBundle = ({ pluginRoot }) => {
   const shell = pathToFileURL(path.join(pluginRoot, "scripts", "trelio-host-runtime-shell.mjs")).href;
   return {
     "package.json": `${JSON.stringify({ name: "@trelio/deepseek-harness", version: "0.1.0",
-      private: true, type: "module", main: "./index.mjs", engines: { node: ">=24.9.0", dsh: "0.2.1-rc.2" },
+      private: true, type: "module", main: "./index.mjs", engines: { node: ">=24.9.0", dsh: DEEPSEEK_HARNESS_VERSION_RANGE },
       dsh: { bundle: { patch: "./cordis.patch.yml" } } }, null, 2)}\n`,
     "cordis.patch.yml": "- insert:\n    - id: trelio-deepseek-harness\n      name: ./index.mjs\n",
     "index.mjs": `// Generated native bootstrap. Business code stays in the signed runtime.\nimport { pathToFileURL } from 'node:url';\nimport path from 'node:path';\nimport { selectHostRuntime } from ${JSON.stringify(loader)};\nimport { PLUGIN_VERSION } from ${JSON.stringify(shell)};\nconst selected = await selectHostRuntime();\nif (!selected) throw new Error('TRELIO_HOST_RUNTIME_REQUIRED');\nprocess.env.TRELIO_PLUGIN_ROOT = ${JSON.stringify(pluginRoot)};\nprocess.env.TRELIO_PLUGIN_VERSION = PLUGIN_VERSION;\nprocess.env.TRELIO_HOST_RUNTIME_VERSION = selected.runtimeVersion;\nconst native = await import(pathToFileURL(path.join(selected.runtimeDirectory, 'scripts', 'trelio-remote-mcp.mjs')).href).then(module => module.deepseekHarnessPlugin);\nexport const name = native.name;\nexport const inject = native.inject;\nexport const apply = native.apply;\n`,
@@ -18941,7 +18943,8 @@ export const installDeepseekBundle = async ({ pluginRoot = process.env.TRELIO_PL
       if (await fs.readFile(file, "utf8") !== bytes) throw new Error("TRELIO_HARNESS_BUNDLE_CHANGED");
     }
   }
-  return { experimental: true, bundleDirectory: directory, qualifiedHarnessVersion: "0.2.1-rc.2",
+  return { experimental: true, bundleDirectory: directory, qualifiedHarnessVersion: DEEPSEEK_HARNESS_QUALIFIED_VERSION,
+    supportedHarnessVersionRange: DEEPSEEK_HARNESS_VERSION_RANGE,
     installedInHarness: false, nextAction: "Use dsh plugin --profile <actual-profile> add <bundleDirectory>; reload that profile, then call trelio_connect." };
 };
 

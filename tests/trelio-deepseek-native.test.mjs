@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "../host-runtime/scripts/trelio-component-versions.mjs";
 import { applyHarnessAdapter, createHarnessConnection, createHarnessContinuations,
   harnessToolName, observeHarnessRuntime, projectHarnessMcpResult, AGENT_SKILL_ROUTING_INSTRUCTIONS } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
@@ -13,7 +14,7 @@ const require = createRequire(new URL("./fixtures/deepseek-native/package.json",
 const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)).href);
 const [{ Context }, { default: Tools }, { default: Prompt }, { Session }] = await Promise.all(
   ["cordis", "dsh-tools", "dsh-system-prompt", "dsh-session"].map(load));
-assert.equal(require("@deepseek-ai/dsh-tools/package.json").version, "0.2.1-rc.2");
+assert.equal(require("@deepseek-ai/dsh-tools/package.json").version, DEEPSEEK_HARNESS_QUALIFIED_VERSION);
 const signal = () => new AbortController().signal;
 const agent = (id = "native-test") => {
   const session = Session.create(id);
@@ -27,6 +28,29 @@ const tool = (name, extra = {}) => ({ name, inputSchema: { type: "object", addit
 const result = { content: [{ type: "text", text: "Routing summary only" }],
   structuredContent: { effectiveInstructions: { markdown: "FULL authority {{no interpolation}}" },
     data: { value: "полный результат" } }, _meta: { secretAppGrant: "hidden-test" } };
+
+test("Harness engine range accepts newer releases without an upper bound", () => {
+  // Match upstream app-boot's actual SemVer options. Without includePrerelease,
+  // a range test could accidentally reject newer prereleases.
+  const semver = require("semver");
+  for (const version of ["0.2.1-rc.2", "0.2.1-rc.3", "0.2.1-rc.10", "0.2.1", "0.2.2-rc.1", "0.2.9", "0.3.0-alpha.1", "0.3.0", "1.0.0"]) {
+    assert.equal(semver.satisfies(version, DEEPSEEK_HARNESS_VERSION_RANGE, { includePrerelease: true }), true, version);
+  }
+  for (const version of ["0.2.0", "0.2.1-alpha.5", "0.2.1-rc.1", "invalid"]) {
+    assert.equal(semver.satisfies(version, DEEPSEEK_HARNESS_VERSION_RANGE, { includePrerelease: true }), false, version);
+  }
+});
+
+test("incompatible registration API refuses before catalogue or private I/O", async () => {
+  for (const missing of ["tools", "inject", "effect"]) {
+    const ctx = { tools: { register: () => assert.fail("must not register") }, inject() {}, effect() {} };
+    delete ctx[missing];
+    await assert.rejects(applyHarnessAdapter(ctx, {
+      connection: { listTools: async () => assert.fail("must not contact Trelio") },
+      localMessage: async () => assert.fail("must not inspect local state"),
+    }), { code: "TRELIO_HARNESS_API_INCOMPATIBLE" });
+  }
+});
 
 test("real native pipeline preserves structured authority and hides dispatch-only proof", async t => {
   const ctx = new Context(); new Prompt(ctx, {}); new Tools(ctx);
@@ -71,6 +95,7 @@ test("real native pipeline preserves structured authority and hides dispatch-onl
 
 test("native observation refuses missing request header; binary and hidden metadata are never text", () => {
   assert.throws(() => observeHarnessRuntime({ agent: { session: Session.create("missing") } }), { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
+  assert.throws(() => observeHarnessRuntime({ agent: { session: { requestHeader: "removed API" } } }), { code: "TRELIO_RUNTIME_OBSERVATION_REQUIRED" });
   const projected = projectHarnessMcpResult({ ...result,
     content: [...result.content, { type: "image", data: "private-binary", mimeType: "image/png" }] });
   assert.ok(!JSON.stringify(projected).includes("private-binary"));

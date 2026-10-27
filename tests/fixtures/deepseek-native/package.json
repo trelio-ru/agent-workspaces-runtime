@@ -4,6 +4,7 @@
   "type": "module",
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.5",
-    "@deepseek-ai/dsh-tools": "0.2.1-rc.2"
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "semver": "7.8.5"
   }
 }

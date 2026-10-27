@@ -6969,7 +6969,9 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
    */
   const observeHarnessRuntime = execution => {
     const session = execution?.agent?.session;
-    const header = session?.requestHeader?.()?.config;
+    // A future preview may remove or reshape this API. Refuse before preparing
+    // proof or contacting Trelio; never substitute saved/default model identity.
+    const header = typeof session?.requestHeader === "function" ? session.requestHeader()?.config : undefined;
     if (!record(header) || !identifier.test(header.provider ?? "") || !identifier.test(header.model ?? "")
         || typeof session?.header?.id !== "string" || !session.header.id || session.header.id.length > 256) {
       throw fail("TRELIO_RUNTIME_OBSERVATION_REQUIRED", "Harness не предоставил текущие provider/model/session.");
@@ -7178,6 +7180,13 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     connection = createHarnessConnection(), prepare = prepareNativeRuntimeToolArguments,
     localMessage = handleLocalMcpMessage,
   } = {}) => {
+    // Newer Harness releases are allowed, but preview APIs can still break.
+    // Check the native registration surface before catalogue/OAuth/vault I/O;
+    // per-call session observation remains an independent dispatch guard.
+    if (typeof ctx?.tools?.register !== "function" || typeof ctx?.inject !== "function"
+      || typeof ctx?.effect !== "function") {
+      throw fail("TRELIO_HARNESS_API_INCOMPATIBLE", "Harness не предоставил совместимый native API плагина Trelio.");
+    }
     let disposed = false;
     let disposers = [];
     const continuations = createHarnessContinuations();

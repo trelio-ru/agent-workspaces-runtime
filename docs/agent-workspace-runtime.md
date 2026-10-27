@@ -2536,7 +2536,7 @@ Refresh уже существующей exact managed-привязки допу�
 
 ## Native DeepSeek Harness preview
 
-`trelio-remote-mcp.mjs.deepseekHarnessPlugin` — Cordis plugin для exact Harness 0.2.1-rc.2,
+`trelio-remote-mcp.mjs.deepseekHarnessPlugin` — Cordis plugin для Harness `>=0.2.1-rc.2`,
 без Codex/Claude compatibility hooks. `Session.requestHeader().config` даёт
 actual provider/model/effort, `session.header.id` — native session, с префиксом
 `dsh:` в общем private signing state. `deepseek_native/local_observed` проходит
@@ -2547,10 +2547,19 @@ execute. Runtime observation не является MCP/CLI аргументом.
 требует отдельный `deepseekHarnessAction=allow`, default deny; допуск all-model.
 
 Native wrapper строится `bridge deepseek install`: immutable private bundle,
-engines.dsh exact, без изменения Harness profile. Wrapper импортирует existing
+engines.dsh задаёт только минимальную версию, без изменения Harness profile.
+Upstream проверяет SemVer с `includePrerelease=true`: все новые версии, включая
+prerelease и следующие minor/major, разрешены без отдельной квалификации. Общие version metadata задают
+диапазон и отдельно exact qualification fixture 0.2.1-rc.3 для installer/diagnostics;
+qualified version не является pin. Adapter проверяет tools.register/inject/effect
+до catalogue/private I/O, при несовместимости возвращает
+`TRELIO_HARNESS_API_INCOMPATIBLE`. Request header проверяется при каждом protected
+вызове; исчезнувший API не заменяется defaults или старой identity. Wrapper импортирует existing
 stable shell `selectHostRuntime` и shell version по постоянному plugin root;
 подпись/full inventory проверяются до import native module. Изменённый bundle
-не заменяется. Официальный shell нельзя держать во временной папке. Установка
+не заменяется. Новый диапазон меняет digest и создаёт новый bundle; старую
+установку обновляют повторным installer и native add нового каталога с reload,
+без правки прежнего manifest. Официальный shell нельзя держать во временной папке. Установка
 в профиль — только `dsh plugin --profile <actual-profile> add <bundleDirectory>`,
 затем reload. Installer остаётся в bridge, native adapter — в local MCP module: package
 сохраняет frozen 100-file limit без изменения verifier. Public plugin ABI/manifests/hooks не меняются. Загруженный native
@@ -2588,4 +2597,4 @@ not_checked. Actual native core fixture + shared proof/installer/OAuth tests
 запускаются в full hosted gate на Linux/macOS/Windows. Живой OAuth/E2EE save
 проверяется отдельно после signed artifact и backend rollout; offline gate не
 является live readiness. Fixture зависимости не входят в runtime artifact.
-Upstream rc.2 pins Zod 4.6.5 с [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5); bundle не исправляет Harness.
+Qualification fixture rc.3 содержит Zod 4.4.3 с [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5); bundle не исправляет Harness.

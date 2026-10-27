@@ -9,6 +9,7 @@
  */
 
 import { CODEX_TRELIO_DIRECT_TOOL_INSTRUCTIONS, CODEX_TRELIO_DIRECT_TOOL_NAMESPACES } from "./trelio-codex-routing.mjs";
+import { DEEPSEEK_HARNESS_VERSION_RANGE, DEEPSEEK_HARNESS_QUALIFIED_VERSION } from "./trelio-component-versions.mjs";
 
 export const TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME = "diagnose_trelio_installation";
 
@@ -177,7 +178,8 @@ const buildClientInspection = (clientKind, intent, requiredActions) => (
         },
       }
     : clientKind === "deepseek-harness" ? {
-        nativeAdapter: { state: "not_checked", qualifiedVersion: "0.2.1-rc.2",
+        nativeAdapter: { state: "not_checked", qualifiedVersion: DEEPSEEK_HARNESS_QUALIFIED_VERSION,
+          supportedVersionRange: DEEPSEEK_HARNESS_VERSION_RANGE,
           checks: ["native_bundle_loaded", "current_request_provider_model", "safe_protected_read"],
           instructions: "Проверь native bundle в фактическом профиле Harness и текущие tools. OAuth выполняется trelio_connect, reauthorize=true только для замены отозванного/недостаточного grant. Не устанавливай Codex/Claude hooks. Успех CLI не доказывает protected read или сохранение. MCP Apps и browser-fill не поддержаны." },
       } : ["cursor", "antigravity"].includes(clientKind) ? {
