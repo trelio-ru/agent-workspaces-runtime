@@ -784,7 +784,7 @@ test('paired background dispatch status is SELECT-only, preserves the journal an
 test('background supervisor resolves a fresh worker only between cycles and preserves uncertain delivery recovery',async()=>{
   const controller=new AbortController(),operations=[];let waits=0,reports=0,icons=0,iconsClosed=0;
   const identity={assistantId:randomUUID(),deviceId:randomUUID()};
-  const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),verifyRegistration:async()=>{},startConsoleIcon:async()=>{icons++;return {close:async()=>{iconsClosed++;}};},request:async(request,options)=>{
+  const result=await runAssistantBackground({signal:controller.signal,readHost:async()=>({identity,activation:null}),verifyRegistration:async()=>{},startConsoleIcon:async actual=>{assert.deepEqual(actual,identity);icons++;return {close:async()=>{iconsClosed++;}};},request:async(request,options)=>{
     operations.push(request.operation);assert.equal(options.signal.aborted,false);
     if(request.operation==='background_tick'){
       assert.equal(options.timeoutMs,35*60_000);

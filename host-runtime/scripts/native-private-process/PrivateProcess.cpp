@@ -9,6 +9,10 @@
 #include <tlhelp32.h>
 #include <appmodel.h>
 #include <restartmanager.h>
+#include <shellapi.h>
+#include <propsys.h>
+#include <propkey.h>
+#include <array>
 #include <limits>
 #include <optional>
 #include <cstring>
@@ -338,12 +342,103 @@ void presentationSkipped(std::string_view reason) {
   write("{\"schemaVersion\":1,\"state\":\"skipped\",\"reason\":\"");
   write(reason); write("\"}\n");
 }
+
+// Window icons alone do not change Explorer's application grouping: a hosted
+// Node console otherwise keeps Node's taskbar identity and executable icon.
+// All four Shell properties belong to this exact console, never the Node
+// installation, registry, existing pinned shortcuts or another terminal host.
+struct AssistantTaskbarProperties {
+  HMODULE ole32 = nullptr, shell32 = nullptr;
+  IPropertyStore* store = nullptr;
+  bool initialized = false;
+  using Clear = HRESULT(WINAPI*)(PROPVARIANT*);
+  Clear clear = nullptr;
+  decltype(&CoUninitialize) uninitialize = nullptr;
+  const std::array<PROPERTYKEY, 4> keys{PKEY_AppUserModel_RelaunchCommand,
+    PKEY_AppUserModel_RelaunchDisplayNameResource, PKEY_AppUserModel_RelaunchIconResource, PKEY_AppUserModel_ID};
+  std::array<PROPVARIANT, 4> previous{};
+  std::array<std::wstring, 4> assigned{};
+  std::array<bool, 4> changed{};
+
+  bool equals(size_t index) const {
+    PROPVARIANT value{};
+    const HRESULT result = store->GetValue(keys[index], &value);
+    const bool same = SUCCEEDED(result) && value.vt == VT_LPWSTR && value.pwszVal
+      && assigned[index] == value.pwszVal;
+    clear(&value); return same;
+  }
+  void apply(HWND window, const std::wstring& assistantId) {
+    // GUI/COM DLLs are loaded only in this presentation mode. Ordinary private
+    // worker startup still has no Shell/COM dependency or new readiness step.
+    ole32 = LoadLibraryExW(L"ole32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    shell32 = LoadLibraryExW(L"shell32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    require(ole32 && shell32);
+    clear = presentationFunction<Clear>(ole32, "PropVariantClear");
+    uninitialize = presentationFunction<decltype(&CoUninitialize)>(ole32, "CoUninitialize");
+    const auto initialize = presentationFunction<decltype(&CoInitializeEx)>(ole32, "CoInitializeEx");
+    require(SUCCEEDED(initialize(nullptr, COINIT_APARTMENTTHREADED))); initialized = true;
+    const auto get = presentationFunction<decltype(&SHGetPropertyStoreForWindow)>(shell32, "SHGetPropertyStoreForWindow");
+    require(SUCCEEDED(get(window, __uuidof(IPropertyStore), reinterpret_cast<void**>(&store))));
+
+    wchar_t module[32768]{}, system[32768]{};
+    const DWORD moduleLength = GetModuleFileNameW(nullptr, module, 32768);
+    const UINT systemLength = GetSystemDirectoryW(system, 32768);
+    require(moduleLength > 0 && moduleLength < 32768 && systemLength > 0 && systemLength < 32768);
+    // Explorer's relaunch targets the SAME pre-verified native task, not bare
+    // Node or a versioned plugin path. IgnoreNew remains the scheduler's guard;
+    // setting these properties never executes this command or starts work.
+    assigned = {L"\"" + std::wstring(system) + L"\\schtasks.exe\" /Run /TN \"Trelio-DigitalAssistant-" + assistantId + L"\"",
+      L"@" + std::wstring(module) + L",-101", std::wstring(module) + L",-1", L"Trelio.DigitalAssistant." + assistantId};
+    for (size_t index = 0; index < keys.size(); ++index)
+      require(SUCCEEDED(store->GetValue(keys[index], &previous[index])));
+    for (size_t index = 0; index < keys.size(); ++index) {
+      PROPVARIANT value{}; value.vt = VT_LPWSTR; value.pwszVal = assigned[index].data();
+      // AppID LAST: setting it notifies Explorer to refresh the group, so the
+      // fixed name, icon resource and relaunch command must already be present.
+      require(SUCCEEDED(store->SetValue(keys[index], value))); changed[index] = true;
+      require(equals(index));
+    }
+  }
+  ~AssistantTaskbarProperties() {
+    if (store) {
+      // Restore resources before AppID (the last refresh), and only values
+      // still owned by this attempt. Exceptions/partial startup also roll back;
+      // later changes made by somebody else must never be overwritten at EOF.
+      for (size_t index = 0; index < keys.size(); ++index) {
+        if (changed[index] && equals(index)) store->SetValue(keys[index], previous[index]);
+        clear(&previous[index]);
+      }
+      store->Release();
+    }
+    if (initialized) uninitialize();
+    if (shell32) FreeLibrary(shell32);
+    if (ole32) FreeLibrary(ole32);
+  }
+};
+
+std::wstring presentationAssistantId(HANDLE input) {
+  // Only a canonical assistant UUID can cross this private control pipe. In
+  // particular no caller-supplied executable, command, resource or HWND exists.
+  std::wstring result;
+  for (size_t index = 0; index <= 36; ++index) {
+    BYTE byte = 0; DWORD count = 0;
+    require(ReadFile(input, &byte, 1, &count, nullptr) && count == 1);
+    if (index == 36) { require(byte == '\n'); break; }
+    const bool dash = index == 8 || index == 13 || index == 18 || index == 23;
+    require(dash ? byte == '-' : ((byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f')));
+    result.push_back(static_cast<wchar_t>(byte));
+  }
+  require(result[14] >= L'1' && result[14] <= L'8'
+    && (result[19] == L'8' || result[19] == L'9' || result[19] == L'a' || result[19] == L'b'));
+  return result;
+}
 int assistantConsoleIcon() {
   // This closed CLI mode never enters private readiness/request processing.
   // Import user32 only here: ordinary ACL/DPAPI startup does not initialize GUI
   // DLLs or inherit a second deadline. No HWND/PID/image is accepted as input.
   const HANDLE input = GetStdHandle(STD_INPUT_HANDLE), output = GetStdHandle(STD_OUTPUT_HANDLE);
   require(GetFileType(input) == FILE_TYPE_PIPE && GetFileType(output) == FILE_TYPE_PIPE);
+  const auto assistantId = presentationAssistantId(input);
   const DWORD parentId = directParent();
   Handle parent(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, parentId));
   if (parent.value == nullptr || !samePresentationUser(parent.value)) {
@@ -412,16 +507,25 @@ int assistantConsoleIcon() {
   const bool stillOwned = exclusiveParentConsole(parentId) && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT;
   const bool smallSet = stillOwned && message(WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon), oldSmall);
   const bool largeSet = smallSet && message(WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(largeIcon), oldLarge);
-  const bool verified = largeSet && message(WM_GETICON, ICON_SMALL, 0, gotSmall)
+  const bool iconsVerified = largeSet && message(WM_GETICON, ICON_SMALL, 0, gotSmall)
     && message(WM_GETICON, ICON_BIG, 0, gotLarge)
     && gotSmall == reinterpret_cast<DWORD_PTR>(smallIcon) && gotLarge == reinterpret_cast<DWORD_PTR>(largeIcon);
-  if (verified) {
-    write(before == foreground() ? "{\"schemaVersion\":1,\"state\":\"applied\",\"verified\":true,\"foregroundUnchanged\":true}\n"
-      : "{\"schemaVersion\":1,\"state\":\"applied\",\"verified\":true,\"foregroundUnchanged\":false}\n");
-    // HICON belongs to this process. Retain it for exactly this supervisor's
-    // pipe lifetime; no timer/poll/private worker is kept alive for branding.
-    BYTE unused = 0; DWORD count = 0;
-    ReadFile(input, &unused, 1, &count, nullptr);
+  bool taskbarVerified = false;
+  {
+    AssistantTaskbarProperties taskbar;
+    try {
+      if (iconsVerified && exclusiveParentConsole(parentId) && WaitForSingleObject(parent.value, 0) == WAIT_TIMEOUT) {
+        taskbar.apply(window, assistantId); taskbarVerified = true;
+      }
+    } catch (...) { /* Cosmetic failure still restores this attempt's window icons below. */ }
+    if (taskbarVerified) {
+      write(before == foreground() ? "{\"schemaVersion\":1,\"state\":\"applied\",\"verified\":true,\"taskbarVerified\":true,\"foregroundUnchanged\":true}\n"
+        : "{\"schemaVersion\":1,\"state\":\"applied\",\"verified\":true,\"taskbarVerified\":true,\"foregroundUnchanged\":false}\n");
+      // HICON belongs to this process. Retain it for exactly this supervisor's
+      // pipe lifetime; no timer/poll/private worker is kept alive for branding.
+      BYTE unused = 0; DWORD count = 0;
+      ReadFile(input, &unused, 1, &count, nullptr);
+    }
   }
   // Restore only handles still owned by this presentation attempt, never a
   // later icon installed by somebody else. No window activation/show occurs.
@@ -432,7 +536,7 @@ int assistantConsoleIcon() {
     DWORD_PTR ignored = 0; message(WM_SETICON, ICON_BIG, static_cast<LPARAM>(oldLarge), ignored);
   }
   destroy(smallIcon); destroy(largeIcon); FreeLibrary(user32);
-  if (!verified) throw Failure{};
+  if (!taskbarVerified) throw Failure{};
   return 0;
 }
 

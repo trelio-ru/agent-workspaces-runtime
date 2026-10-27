@@ -691,12 +691,15 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
 /** Optional presentation for the supervisor's OWN visible classic console.
  * The fixed signed helper derives its direct parent/window internally. Nothing
  * here accepts a HWND, PID, icon, executable, title or model-visible argument.
+ * The paired assistant UUID comes only from the supervisor's verified host;
+ * the native helper constructs the fixed Task Scheduler relaunch metadata.
  * A missing/shared/hidden/ConPTY console remains unchanged. This never installs
  * or starts a service, obtains private state, or gates business readiness. */
-export const startAssistantWindowsConsoleIcon = async ({platform=process.platform,environment=process.env,
+export const startAssistantWindowsConsoleIcon = async ({identity,platform=process.platform,environment=process.env,
   spawnProcess=spawn,selectWorker,timeoutMs=2000}={}) => {
   const noop=state=>Object.freeze({...state,close:async()=>{}});
   if(platform!=='win32')return noop({state:'skipped',reason:'unsupported_platform'});
+  const assistantId=id(identity?.assistantId);
   if(!Number.isSafeInteger(timeoutMs)||timeoutMs<1||timeoutMs>2000)return noop({state:'unavailable'});
   const selected=await (selectWorker??(async()=>{
     const {windowsPrivateWorkerOptions}=await import('./trelio-hook-private-session.mjs');return windowsPrivateWorkerOptions();
@@ -728,15 +731,18 @@ export const startAssistantWindowsConsoleIcon = async ({platform=process.platfor
         if(!buffer.endsWith('\n'))return;
         try{
           const value=JSON.parse(buffer),keys=Object.keys(value).sort().join(',');
-          if(value.schemaVersion===1&&value.state==='applied'&&value.verified===true&&typeof value.foregroundUnchanged==='boolean'
-            &&keys==='foregroundUnchanged,schemaVersion,state,verified')
-            return finish({state:'applied',verified:true,foregroundUnchanged:value.foregroundUnchanged});
+          if(value.schemaVersion===1&&value.state==='applied'&&value.verified===true&&value.taskbarVerified===true
+            &&typeof value.foregroundUnchanged==='boolean'&&keys==='foregroundUnchanged,schemaVersion,state,taskbarVerified,verified')
+            return finish({state:'applied',verified:true,taskbarVerified:true,foregroundUnchanged:value.foregroundUnchanged});
           if(value.schemaVersion===1&&value.state==='skipped'&&keys==='reason,schemaVersion,state'
             &&['no_console','console_already_attached','console_attach_failed','not_visible_classic_console','shared_console','parent_identity_unavailable'].includes(value.reason))
             return finish({state:'skipped',reason:value.reason});
         }catch{}
         child.kill();finish({state:'unavailable'});
       });
+      // Keep the pipe open after this one bounded structural line: EOF still
+      // controls the native icon/property lifetime. No path or command crosses it.
+      child.stdin.write(assistantId+'\n');
     }catch{closed=true;resolveClosed();finish({state:'unavailable'});}
   });
 };

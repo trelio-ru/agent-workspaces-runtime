@@ -1315,7 +1315,7 @@ export const maintainAssistantUnavailableWorker = async ({environment,signal}={}
 export const runAssistantBackground = async ({signal,request=requestCurrentAssistantRuntime,
   readHost=()=>productionContext(async(client,host)=>({identity:client.identity,activation:await host.readActivation()})),
   verifyRegistration=async()=>process.platform==='win32'?(await createProductionAssistantBackground())('status'):null,
-  startConsoleIcon=async()=>(await import('./trelio-assistant-setup.mjs')).startAssistantWindowsConsoleIcon(),
+  startConsoleIcon=async identity=>(await import('./trelio-assistant-setup.mjs')).startAssistantWindowsConsoleIcon({identity}),
   wait=waitForAssistantPoll,reportFailure=reportAssistantMaintenanceFailure,
   environment=process.env,preservePlugin=startLoadedCodexPluginPreservation,
   recordSupervisor=async()=>{},maintainUnavailableWorker=async()=>({state:'disabled'})}={}) => {
@@ -1345,7 +1345,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
     // Cosmetic only, after the exact identity/OS registration checks. The
     // helper refuses shared/hidden/terminal-host windows; a failed icon never
     // changes admission, native work, its deadline or a running window's focus.
-    try{consoleIcon=await startConsoleIcon();}catch{}
+    try{consoleIcon=await startConsoleIcon(initial.identity);}catch{}
     while(!effective.aborted) {
       try {
         const current=await readHost();

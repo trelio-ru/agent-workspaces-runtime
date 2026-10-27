@@ -899,46 +899,68 @@ never installs or starts the service, and no user configuration changes on impor
 Automatic plugin maintenance/idle Desktop restart is a separate explicit setup
 opt-in described below; it never updates the Desktop application itself.
 
-### Owned Windows console icon
+<a id="owned-windows-console-icon"></a>
+
+### Owned Windows console and taskbar identity
 
 An explicitly running Windows supervisor may have a visible **classic console**.
 After protected identity and the exact OS registration are checked, the SAME
-packaged native worker has one fixed, presentation-only `--assistant-console-icon`
-mode. It attaches only to its direct Node parent, verifies the current user and
-parent lifetime, and requires that console to contain exactly that parent and
-its helper. No PID, HWND, path, image or command can be selected by a model.
+packaged native worker uses the presentation-only `--assistant-console-icon`
+mode. Its control pipe receives exactly the canonical assistant UUID from that
+verified host. It accepts no executable, command, resource, PID or HWND. The
+helper attaches only to its direct Node parent, verifies the current user and
+parent lifetime, and requires exactly that parent and its helper in the console.
 
 The worker sets `ICON_SMALL` and `ICON_BIG` with
-[WM_SETICON](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-seticon),
-then verifies the actual window handles through WM_GETICON. This changes the
-owned window's caption/Alt+Tab icons, rather than merely a shortcut. Its icon
-uses the exact three bars/cursor geometry from the dedicated plugin's
+[WM_SETICON](https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-seticon)
+and verifies both with WM_GETICON. It then uses the window's
+[Shell property store](https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shgetpropertystoreforwindow)
+to set the assistant's taskbar identity, separately from Node:
+
+- `System.AppUserModel.ID` is `Trelio.DigitalAssistant.<assistant UUID>`, stable
+  across runtime versions and restarts, separate for each assistant
+- `RelaunchIconResource` points to icon resource 1 of this signed native worker
+- `RelaunchDisplayNameResource` points to its string resource 101,
+  `Цифровой ассистент`
+- `RelaunchCommand` uses the absolute inbox `schtasks.exe /Run /TN` with the
+  SAME pre-verified `Trelio-DigitalAssistant-<assistant UUID>` task. Setting it
+  does not execute anything; a later explicit Shell launch still uses the
+  scheduler's existing registration/principal/IgnoreNew guards
+
+The three relaunch properties are written **before** AppID so Explorer refreshes
+only after the complete taskbar presentation exists. Every value is read back;
+a window-only receipt without verified taskbar properties is not success.
+GUI/COM DLLs load only in this mode; ordinary private-worker startup is unchanged.
+No Node executable, registry, default terminal, existing pinned shortcut, task
+definition or business authority is modified. Existing user-created Node pins
+are separate shortcuts and are not silently rewritten.
+
+The icon uses the exact three bars/cursor geometry from the dedicated plugin's
 `assets/trelio-assistant-logo.svg` (SVG SHA-256
 `fbf526b22fb2324623e64aaa89fa5474d8d4cd6b4bb64c3255d22cdd1263131e`).
-The fixed 64px raster is embedded in the existing reviewed C++ source/binary;
-there is no extra package file or Node.exe modification.
+The hosted builder wraps the SAME reviewed 64px PNG array in a disposable ICO
+and compiles it into the SAME x64/ia32/arm64 PE along with the fixed display name.
+There is no extra runtime package asset, local compilation or Node.exe edit;
+two complete hosted builds must still be byte-identical.
 
-No console is allocated, shown, activated or brought forward. A shared or hidden
-console is unchanged. In
-[a pseudoconsole](https://learn.microsoft.com/en-us/windows/console/getconsolewindow),
-the returned handle is not the terminal's displayed window: Windows Terminal and
-other terminal hosts are deliberately left alone. This is not a promise to
-replace every host's taskbar/pinned icon or the executable icon in Task Manager.
-Icon handles remain alive in the same helper until the supervisor closes its
-pipe; cleanup restores only icons still owned by that attempt. The private
-request protocol, ACL/DPAPI startup, background task definition and work
-admission/deadlines stay unchanged. Branding failure is cosmetic and never
-blocks or grants business readiness. Native Windows/ARM fixtures verify actual
-WM_GETICON, unchanged foreground, and shared/hidden/ConPTY no-op behavior. A
-classic-console fixture first holds its own initialized Node child at a test-only
-file gate and proves its HWND/class/visibility through an independent AttachConsole
-read, then detaches before releasing the child. The presentation helper detaches
-itself before attaching to its parent even when its previous headless association
-has no HWND; FreeConsole never detaches the parent. Production attach refusals use
-closed reasons only; they never expose a PID, HWND, path or raw OS error. The
-positive native fixture also keeps the restored stdin pipe open after receipt,
-requires the keeper to remain alive, then verifies clean exit at EOF without a
-kill. No unavailable console becomes a successful branding receipt.
+No console is allocated, shown, activated or brought forward. Shared/hidden
+consoles and Windows Terminal/ConPTY hosts stay unchanged; their host application
+icons and Node's Task Manager executable icon are outside this window identity.
+Only this helper detaches before parent attach, even if its previous headless
+association has no HWND. No unavailable console becomes a successful receipt.
+Closed diagnostics expose no PID, HWND, path or raw OS error.
+
+HICONs and the window properties live until the supervisor closes its pipe.
+Partial startup and normal EOF restore only values still owned by this attempt,
+leaving later independent changes intact. Branding failure stays cosmetic and
+never blocks or grants business readiness or changes work deadlines.
+Native Windows/ARM fixtures independently inspect the exact owned window's
+Shell properties, extract its PE icon and display name, verify restoration at
+EOF and unchanged foreground, and retain shared/hidden/ConPTY no-op checks.
+The classic-console fixture first proves its own HWND/class/visibility, then
+detaches before release; Shell inspection never adds a third console process.
+It requires the keeper to survive the successful receipt and exit cleanly on
+EOF. Fixture inspection and child exit share the original bounded wait budget.
 
 ### Optional source-tree QA launcher
 

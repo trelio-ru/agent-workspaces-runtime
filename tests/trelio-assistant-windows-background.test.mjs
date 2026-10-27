@@ -245,18 +245,20 @@ test('the actual bounded native pipe selects the strict replacement receipt befo
 });
 
 test('console branding uses one fixed native mode with bounded closed output and retains icons only until supervisor close',async()=>{
-  for(const scenario of ['applied','shared','console_already_attached','console_attach_failed','malformed','overflow','exit']){
+  for(const scenario of ['applied','old_window_only','shared','console_already_attached','console_attach_failed','malformed','overflow','exit']){
     let child,spawned=0,ended=0,killed=0;
-    const icon=await startAssistantWindowsConsoleIcon({platform:'win32',environment:{SystemRoot:'C:\Windows',PRIVATE:'never-inherited'},
+    const icon=await startAssistantWindowsConsoleIcon({identity,platform:'win32',environment:{SystemRoot:'C:\Windows',PRIVATE:'never-inherited'},
       selectWorker:async()=>({executable:'C:\signed\trelio-private-process.exe',args:[]}),
       spawnProcess:(executable,args,options)=>{
         spawned++;assert.equal(executable,'C:\signed\trelio-private-process.exe');assert.deepEqual(args,['--assistant-console-icon']);
         assert.deepEqual(options.env,{SystemRoot:'C:\Windows',PATH:''});assert.equal(options.shell,false);assert.equal(options.windowsHide,true);
         child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{killed++;child.emit('close',1);};
+        child.stdin.on('data',chunk=>assert.equal(chunk.toString(),identity.assistantId+'\n'));
         child.stdin.on('finish',()=>{ended++;child.emit('close',0);});
         queueMicrotask(()=>{
           if(scenario==='exit'){child.emit('close',1);return;}
-          const value=scenario==='applied'?{schemaVersion:1,state:'applied',verified:true,foregroundUnchanged:true}
+          const value=scenario==='applied'?{schemaVersion:1,state:'applied',verified:true,taskbarVerified:true,foregroundUnchanged:true}
+            :scenario==='old_window_only'?{schemaVersion:1,state:'applied',verified:true,foregroundUnchanged:true}
             :['shared','console_already_attached','console_attach_failed'].includes(scenario)?{schemaVersion:1,state:'skipped',reason:scenario==='shared'?'shared_console':scenario}
             :{schemaVersion:1,state:'applied',verified:true,rawWindow:'PRIVATE'};
           child.stdout.write(scenario==='overflow'?'PRIVATE'.repeat(100):JSON.stringify(value)+'\n');
@@ -270,17 +272,21 @@ test('console branding uses one fixed native mode with bounded closed output and
   }
   const skipped=await startAssistantWindowsConsoleIcon({platform:'linux',selectWorker:async()=>assert.fail('non-Windows never resolves worker')});
   assert.equal(skipped.reason,'unsupported_platform');
+  for(const assistantId of [undefined,'node.exe','../other','60000000-0000-0000-0000-000000000001',identity.assistantId+'\nother'])
+    await assert.rejects(startAssistantWindowsConsoleIcon({platform:'win32',identity:{assistantId},
+      selectWorker:async()=>assert.fail('invalid identity must precede native selection')}),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
 });
 
-test('the signed worker brands only an isolated visible parent console and reads actual WM_GETICON without changing focus',
+test('the signed worker brands only an isolated visible parent console and verifies its Shell taskbar identity and actual WM_GETICON without changing focus',
   {skip:process.platform!=='win32'},async()=>{
     const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-icon-classic-'));
     const fixture=path.join(directory,'fixture.mjs'),receipt=path.join(directory,'receipt.json');
     const ready=path.join(directory,'ready'),release=path.join(directory,'release');
+    const assistantId='60000000-0000-4000-8000-000000000001';
     const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
     try{
       for(const mode of ['visible','shared','hidden']){
-        await Promise.all([ready,release,receipt].map(file=>fs.rm(file,{force:true})));
+        await Promise.all([ready,release,receipt,...['branded','inspected','closed','restored'].map(stage=>receipt+'.'+stage)].map(file=>fs.rm(file,{force:true})));
         // libuv's detached:true means DETACHED_PROCESS, not CREATE_NEW_CONSOLE.
         // The test-only native launcher explicitly creates a classic console;
         // production branding itself never creates or shows a window.
@@ -301,29 +307,38 @@ test('the signed worker brands only an isolated visible parent console and reads
             await new Promise((resolve,reject)=>{sibling.once('spawn',resolve);sibling.once('error',reject);});
           }
           let presentationChild;
-          const icon=await startAssistantWindowsConsoleIcon({spawnProcess:(...args)=>{presentationChild=spawn(...args);return presentationChild;}});
+          const icon=await startAssistantWindowsConsoleIcon({identity:{assistantId:'60000000-0000-4000-8000-000000000001'},spawnProcess:(...args)=>{presentationChild=spawn(...args);return presentationChild;}});
           const result=Object.fromEntries(Object.entries(icon).filter(([key])=>key!=='close'));
           if(icon.state==='applied'){
             // The actual native receipt has crossed the restored stdout pipe.
             // Keep stdin open and prove the keeper does not exit until EOF.
             await new Promise(resolve=>setTimeout(resolve,100));
             result.keeperAliveBeforeClose=presentationChild.exitCode===null;
+            const waitFor=async stage=>{
+              for(let i=0;i<400;i++){try{await fs.access(${JSON.stringify(receipt)}+'.'+stage);return;}catch{}await new Promise(resolve=>setTimeout(resolve,10));}
+              process.exit(127);
+            };
+            await fs.writeFile(${JSON.stringify(receipt)}+'.branded','ready');
+            await waitFor('inspected');result.shellReadbackVerified=true;
+            await icon.close();
+            await fs.writeFile(${JSON.stringify(receipt)}+'.closed','ready');
+            await waitFor('restored');result.shellRestoredAtEof=true;
           }
           await icon.close();
           if(icon.state==='applied')result.closedAtEof=presentationChild.exitCode===0&&!presentationChild.killed;
           await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify(result));
           if(sibling)sibling.kill();`);
         const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
-        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.consoleHost,[string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release)";
+        const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::RunClassic([string]$p.consoleHost,[string]$p.executable,[string]$p.arguments,[bool]$p.hidden,[string]$p.ready,[string]$p.release,[string]$p.receipt,[string]$p.assistantId,[bool]$p.inspect)";
         const code=await new Promise((resolve,reject)=>{
           const child=spawn(resolveWindowsPowerShellExecutable(process.env),['-NoLogo','-NoProfile','-NonInteractive','-Command',script],
             {shell:false,windowsHide:true,stdio:['pipe','ignore','ignore'],timeout:60000});
           child.once('error',reject);child.once('close',resolve);
-          child.stdin.end(JSON.stringify({consoleHost:path.join(process.env.SystemRoot,'System32','conhost.exe'),executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release}));
+          child.stdin.end(JSON.stringify({consoleHost:path.join(process.env.SystemRoot,'System32','conhost.exe'),executable:process.execPath,arguments:quoteAssistantWindowsArgument(fixture),hidden:mode==='hidden',ready,release,receipt,assistantId,inspect:mode==='visible'}));
         });
         assert.equal(code,0,`the synthetic native classic-console host must complete (closed precondition stage ${code})`);
         const result=JSON.parse(await fs.readFile(receipt,'utf8'));
-        if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,foregroundUnchanged:true,keeperAliveBeforeClose:true,closedAtEof:true});
+        if(mode==='visible')assert.deepEqual(result,{state:'applied',verified:true,taskbarVerified:true,foregroundUnchanged:true,keeperAliveBeforeClose:true,shellReadbackVerified:true,shellRestoredAtEof:true,closedAtEof:true});
         else if(mode==='shared')assert.deepEqual(result,{state:'skipped',reason:'shared_console'});
         else{assert.equal(result.state,'skipped');assert.ok(['no_console','not_visible_classic_console'].includes(result.reason));}
       }
@@ -338,6 +353,38 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 public static class AssistantIconPseudoConsoleFixture {
+  [StructLayout(LayoutKind.Sequential)] struct Key { public Guid Format; public uint Id; }
+  [StructLayout(LayoutKind.Explicit,Size=24)] struct Value { [FieldOffset(0)] public ushort Kind; [FieldOffset(8)] public IntPtr Text; }
+  [ComImport,Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+  interface Properties {
+    [PreserveSig] int GetCount(out uint count);
+    [PreserveSig] int GetAt(uint index,out Key key);
+    [PreserveSig] int GetValue(ref Key key,out Value value);
+    [PreserveSig] int SetValue(ref Key key,ref Value value);
+    [PreserveSig] int Commit();
+  }
+  [DllImport("shell32.dll")] static extern int SHGetPropertyStoreForWindow(IntPtr window,ref Guid iid,[MarshalAs(UnmanagedType.Interface)] out Properties store);
+  [DllImport("ole32.dll")] static extern int PropVariantClear(ref Value value);
+  [DllImport("shell32.dll",CharSet=CharSet.Unicode)] static extern uint ExtractIconEx(string file,int index,IntPtr[] large,IntPtr[] small,uint count);
+  [DllImport("user32.dll")] static extern bool DestroyIcon(IntPtr icon);
+  [DllImport("shlwapi.dll",CharSet=CharSet.Unicode)] static extern int SHLoadIndirectString(string source,StringBuilder value,uint length,IntPtr reserved);
+  static string[] ReadShell(IntPtr window) {
+    Guid iid=typeof(Properties).GUID;Properties store;Check(SHGetPropertyStoreForWindow(window,ref iid,out store)==0);
+    try {
+      uint[] ids={2,4,3,5};string[] values=new string[ids.Length];
+      for(int i=0;i<ids.Length;i++) {
+        Key key=new Key {Format=new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"),Id=ids[i]};Value value;
+        Check(store.GetValue(ref key,out value)==0);
+        try { Check(value.Kind==0||value.Kind==31);values[i]=value.Kind==0?null:Marshal.PtrToStringUni(value.Text); }
+        finally { PropVariantClear(ref value); }
+      }
+      return values;
+    } finally { Marshal.ReleaseComObject(store); }
+  }
+  static bool WaitFile(string file,DateTime deadline) {
+    while(DateTime.UtcNow<deadline) { if(System.IO.File.Exists(file))return true;System.Threading.Thread.Sleep(10); }
+    return false;
+  }
   [StructLayout(LayoutKind.Sequential)] struct Coord { public short X, Y; }
   [StructLayout(LayoutKind.Sequential)] struct Security { public int Length; public IntPtr Descriptor; [MarshalAs(UnmanagedType.Bool)] public bool Inherit; }
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
@@ -370,7 +417,7 @@ public static class AssistantIconPseudoConsoleFixture {
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process,int code);
   static void Check(bool value) { if(!value)throw new Exception("synthetic pseudoconsole API failed"); }
-  public static int RunClassic(string consoleHost,string executable,string arguments,bool hidden,string ready,string release) {
+  public static int RunClassic(string consoleHost,string executable,string arguments,bool hidden,string ready,string release,string receipt,string assistantId,bool inspect) {
     ProcessInfo process=new ProcessInfo();bool released=false,attached=false;IntPtr client=IntPtr.Zero;
     IntPtr input=GetStdHandle(-10),output=GetStdHandle(-11),error=GetStdHandle(-12);
     try {
@@ -402,10 +449,32 @@ public static class AssistantIconPseudoConsoleFixture {
       if(window==IntPtr.Zero)return 32;
       if(name.ToString()!="ConsoleWindowClass")return name.ToString()=="PseudoConsoleWindow"?36:33;
       if(IsWindowVisible(window)==hidden)return 34;
+      // Read the exact owned HWND directly after detaching. Inspection must not
+      // attach a third process and accidentally change the exclusivity guard.
+      string[] previous=inspect?ReadShell(window):null;
       Check(FreeConsole());attached=false;
       SetStdHandle(-10,input);SetStdHandle(-11,output);SetStdHandle(-12,error);
       System.IO.File.WriteAllText(release,"release");released=true;
-      if(WaitForSingleObject(client,15000)!=0) { TerminateProcess(client,124);throw new Exception("synthetic classic console timeout"); }
+      DateTime finishDeadline=DateTime.UtcNow.AddSeconds(15);
+      if(inspect) {
+        if(!WaitFile(receipt+".branded",finishDeadline))return 40;
+        string[] actual=ReadShell(window);
+        string system=Environment.GetFolderPath(Environment.SpecialFolder.System);
+        if(actual[0]!="\""+system+"\\schtasks.exe\" /Run /TN \"Trelio-DigitalAssistant-"+assistantId+"\"")return 41;
+        if(actual[3]!="Trelio.DigitalAssistant."+assistantId)return 42;
+        if(!actual[2].EndsWith(",-1")||actual[1]!="@"+actual[2].Substring(0,actual[2].Length-3)+",-101")return 43;
+        IntPtr[] large=new IntPtr[1];uint extracted=ExtractIconEx(actual[2].Substring(0,actual[2].Length-3),-1,large,null,1);
+        if(extracted!=1||large[0]==IntPtr.Zero)return 44;DestroyIcon(large[0]);
+        StringBuilder label=new StringBuilder(128);
+        if(SHLoadIndirectString(actual[1],label,128,IntPtr.Zero)!=0||label.ToString()!="Цифровой ассистент")return 45;
+        System.IO.File.WriteAllText(receipt+".inspected","verified");
+        if(!WaitFile(receipt+".closed",finishDeadline))return 46;
+        string[] restored=ReadShell(window);
+        for(int i=0;i<previous.Length;i++)if(previous[i]!=restored[i])return 47;
+        System.IO.File.WriteAllText(receipt+".restored","verified");
+      }
+      int remaining=(int)Math.Max(0,(finishDeadline-DateTime.UtcNow).TotalMilliseconds);
+      if(WaitForSingleObject(client,remaining)!=0) { TerminateProcess(client,124);throw new Exception("synthetic classic console timeout"); }
       int result;Check(GetExitCodeProcess(client,out result));return result;
     } finally {
       if(attached)FreeConsole();
@@ -453,7 +522,7 @@ test('a real Windows pseudoconsole stays unbranded without opening or selecting 
     const setupUrl=new URL('../host-runtime/scripts/trelio-assistant-setup.mjs',import.meta.url).href;
     try{
       await fs.writeFile(fixture,`import fs from 'node:fs/promises';import {startAssistantWindowsConsoleIcon} from ${JSON.stringify(setupUrl)};
-        const icon=await startAssistantWindowsConsoleIcon();await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify({state:icon.state,reason:icon.reason}));await icon.close();`);
+        const icon=await startAssistantWindowsConsoleIcon({identity:{assistantId:'60000000-0000-4000-8000-000000000001'}});await fs.writeFile(${JSON.stringify(receipt)},JSON.stringify({state:icon.state,reason:icon.reason}));await icon.close();`);
       const {resolveWindowsPowerShellExecutable}=await import('../host-runtime/scripts/trelio-workspace.mjs');
       const script="$ErrorActionPreference='Stop'\nAdd-Type -TypeDefinition @'\n"+PSEUDOCONSOLE_FIXTURE+"\n'@\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nexit [AssistantIconPseudoConsoleFixture]::Run([string]$p.executable,[string]$p.arguments)";
       const code=await new Promise((resolve,reject)=>{

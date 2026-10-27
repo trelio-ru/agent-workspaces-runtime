@@ -673,14 +673,17 @@ publication tooling также остаются вне этого публичн
   It loads only the fixed OS utility manifest with process-local autoload off;
   slow module discovery never permits extra time or OS mutation replay.
   [Contract](docs/assistant-scheduler.md#per-user-windows-autostart).
-- Optional Windows console branding uses the SAME signed native binary and a
-  fixed no-input presentation mode after host/registration checks. Only the
-  direct parent's exclusive visible classic console may receive WM_SETICON;
-  no hidden/shared/ConPTY host, foreground change, new window or Node.exe patch.
-  Keep icon lifetime scoped to its supervisor pipe and the private worker mode
-  unchanged. Detach only the helper unconditionally before parent attach: a
-  headless association can have no HWND. Closed diagnostics expose no PID/HWND/path; native fixtures
-  must independently prove their classic-console precondition before testing icons. See [contract](docs/assistant-scheduler.md#owned-windows-console-icon).
+- Windows console/taskbar branding uses the SAME signed native binary after
+  host/registration checks. Its pipe accepts only that host's assistant UUID;
+  only the direct parent's exclusive visible classic console may change.
+  Shell relaunch/name/icon properties precede its version-independent AppID;
+  relaunch targets only the SAME registered task, never bare Node/plugin paths.
+  Window HICONs and PE taskbar artwork derive from one reviewed PNG array.
+  No hidden/shared/ConPTY host, foreground change, new window, registry/pin edit
+  or Node.exe patch. Restore only own values at EOF/partial failure; private
+  worker startup stays unchanged. Native fixtures independently read Shell
+  properties/resources and EOF restoration, not only WM_GETICON receipts.
+  See [contract](docs/assistant-scheduler.md#owned-windows-console-and-taskbar-identity).
 
 ## Граница plugin/runtime
 
