@@ -8660,15 +8660,17 @@ export const runMaterializedAgentSkill = async ({
       // Decode only after the pipe is complete. Chunk-level toString() can
       // corrupt a multibyte character; replacement decoding could turn an
       // invalid native ID/checkpoint into a different valid JSON reference.
-      // Only this private native-ACK profile consumes the reviewed provider's
-      // failure DTO from stderr. No stderr is added to normal/task responses,
-      // errors or diagnostics; the adapter projects closed fields immediately.
+      // Only the private native-ACK and source-setup adapters consume a failed
+      // provider's stderr. Both immediately project a closed result; stderr is
+      // never attached to a public Error or returned by normal/task calls.
+      // Setup providers deliberately leave stdout empty on failure. Reading
+      // stdout in that case would hide the original failure behind a JSON error.
       // A credential setup is deliberately output-free: even a reviewed
       // provider could echo/encode the granted value. Do not project its text,
       // image or stderr to the model. A separate native auth probe must verify
       // login; process success alone neither proves login nor completes work.
       const stdout = privateSetup ? JSON.stringify({schemaVersion:1,state:'command_completed',verificationRequired:true})
-        : new TextDecoder('utf-8', { fatal: true }).decode(sourceAckCapture && result.exitCode !== 0 ? result.stderr : result.stdout);
+        : new TextDecoder('utf-8', { fatal: true }).decode((sourceAckCapture || sourceSetupCapture) && result.exitCode !== 0 ? result.stderr : result.stdout);
       return captureExitCode ? { stdout, exitCode: result.exitCode } : { stdout };
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.

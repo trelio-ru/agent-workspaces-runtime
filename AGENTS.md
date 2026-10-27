@@ -614,6 +614,11 @@ publication tooling также остаются вне этого публичн
   It never accepts credentials/terminal args or upgrades passive reader limits.
   Telegram QR/2FA onboarding uses the SAME protected provider and catalogue;
   exact native `login` admission is separate from email configure/empty-create.
+  Telegram receives only `login --qr`; the SAME catalogue selects its account
+  through host metadata, never an invented provider `--account` argument.
+  Failed setup projects only closed stderr categories or the original process
+  exit through the SAME worker/facade; empty stdout never hides a failed child
+  as malformed success. Raw provider text/fields stay private, with no retry.
   MAX reuses the same handoff path; only a fresh short native probe verifies
   its structural login, never owner identity/streams/processing readiness.
   Login never proves owner identity, enables intake/ACK or clears hook trust.

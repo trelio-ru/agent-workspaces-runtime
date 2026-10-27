@@ -6,7 +6,7 @@ import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime
 import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
-import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
+import { PROCESS_DIAGNOSTIC_CODES, skillRuntimeExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -3856,6 +3856,29 @@ export const ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES=Object.freeze(['ACCOUNT_CATALO
 export const ASSISTANT_SOURCE_MONITOR_ERROR_CODES=Object.freeze(['TELEGRAM','EMAIL','MAX'].flatMap(prefix=>
   ['INVALID_CURSOR','SCOPE_CHANGED','UIDVALIDITY_CHANGED','GAP','INVALID_RESPONSE','REFERENCE_UNAVAILABLE','UNAVAILABLE']
     .map(suffix=>`${prefix}_MONITOR_${suffix}`)));
+/** Source setup receives only complete private process output. Preserve known
+ * provider categories, never their prose, details, next actions or extra keys.
+ * Unknown/non-JSON failures retain the real process-exit category instead of
+ * becoming INVALID_RESPONSE. Neither path authorizes an automatic login retry. */
+export const projectAssistantSourceSetupResult=(result,{skillId})=>{
+  if(!object(result)||!Number.isSafeInteger(result.exitCode)||result.exitCode<0||result.exitCode>0xffffffff
+    ||typeof result.stdout!=='string'||Buffer.byteLength(result.stdout)>1024*1024
+    ||!Object.hasOwn(SOURCE_PROTOCOLS,skillId))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  let raw;try{raw=JSON.parse(result.stdout);}catch{
+    if(result.exitCode!==0)throw skillRuntimeExitError(result.exitCode);
+    fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  }
+  if(result.exitCode!==0){
+    // This is the reviewed source adapter's protocol, not a generic prefix
+    // allowlist: a foreign provider or invented code cannot supply a diagnosis.
+    const allowed=skillId==='telegram-mtproto'?['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_RATE_LIMITED',
+      'TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED']:[];
+    if(object(raw)&&raw.ok===false&&allowed.includes(raw.code))fail(`ASSISTANT_SOURCE_SETUP_${raw.code}`);
+    throw skillRuntimeExitError(result.exitCode);
+  }
+  if(!object(raw))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
+  return raw;
+};
 const SOURCE_BACKEND_ERROR_CODES=Object.freeze(['ASSISTANT_SOURCE_AUTH_REQUIRED','ASSISTANT_SOURCE_ACCESS_DENIED','ASSISTANT_SOURCE_SCOPE_UNAVAILABLE',
   'ASSISTANT_SOURCE_INPUT_INVALID','ASSISTANT_SOURCE_PROTOCOL_REQUIRED','ASSISTANT_SOURCE_PROTOCOL_UNAVAILABLE',
   'ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_SOURCE_ENCRYPTED_UNAVAILABLE','ASSISTANT_SOURCE_SKILL_UNAVAILABLE',
@@ -4118,7 +4141,7 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
         || (context.localIdentity?.connectionId??null)!==approved.connectionId || context.account?.id!==approved.accountId
         || JSON.stringify(runtimeArguments)!==JSON.stringify(scope.skillId==='max-web'
           ?(interactiveCommand==='probe'?['probe']:['login','--headed','--hold-ms','540000'])
-          :interactiveCommand==='login'?['login','--account',approved.accountId,'--qr']
+          :interactiveCommand==='login'?['login','--qr']
           :['configure','--account',approved.accountId,'--password-input','browser']))
         fail('ASSISTANT_SKILL_SETUP_REQUIRED');
       interactiveUsed=true;
@@ -4642,7 +4665,10 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
       const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,
         companyConnection:resolution.companyConnection};
       const args=max?[...(verify?['probe']:['login','--headed','--hold-ms','540000']),'--local-account',source.localAccountId]:
-        telegram?['login','--local-account',source.localAccountId,'--account',source.localAccountId,'--qr']:
+        // Telegram consumes the selected account solely from the host-owned
+        // catalogue environment. Unlike email, its parser has no --account:
+        // forwarding that invented option exits before bootstrap or QR input.
+        telegram?['login','--local-account',source.localAccountId,'--qr']:
         ['configure','--local-account',source.localAccountId,'--account',source.localAccountId,'--password-input','browser'];
       const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
         runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
@@ -4655,7 +4681,7 @@ const configureAssistantInteractiveSource = async ({identity,host,store,client,c
         captureMode:'assistant_source_setup',timeoutMs:verify?Math.min(60000,remaining):remaining,signal:currentSignal});
       await profile.remainingMs();
       if(currentSignal.aborted)fail('ASSISTANT_SOURCE_DEADLINE');
-      let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_SOURCE_INVALID_RESPONSE');}
+      const value=projectAssistantSourceSetupResult(result,{skillId});
       if(max){
         // Closing a login window or reaching its hold limit proves no login.
         // Drop the provider's private profile/path/fingerprint and never repeat

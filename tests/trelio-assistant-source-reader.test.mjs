@@ -13,7 +13,25 @@ for(const key of ['HOME','USERPROFILE','XDG_CONFIG_HOME','XDG_CACHE_HOME','LOCAL
   await fs.mkdir(process.env[key],{recursive:true,mode:0o700});
 }
 const engine=await import('../host-runtime/scripts/trelio-workspace.mjs');
-const {rethrowAssistantSourceError}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+const {rethrowAssistantSourceError,projectAssistantSourceSetupResult}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+
+test('source setup keeps only closed provider failure codes and the original process exit',()=>{
+  const read=(stdout,exitCode=2,skillId='telegram-mtproto')=>projectAssistantSourceSetupResult({stdout,exitCode},{skillId});
+  const payload={ok:false,code:'TELEGRAM_NETWORK_UNAVAILABLE',error:'PRIVATE_FACTOR',
+    details:{path:'PRIVATE_PATH',diagnostic:{category:'PRIVATE_CATEGORY'}},nextAction:{command:'PRIVATE_COMMAND'}};
+  assert.throws(()=>read(JSON.stringify(payload)),error=>{
+    assert.equal(error.code,'ASSISTANT_SOURCE_SETUP_TELEGRAM_NETWORK_UNAVAILABLE');
+    assert.doesNotMatch(JSON.stringify(error)+error.message,/PRIVATE/);return true;
+  });
+  for(const stdout of ['', 'PRIVATE_TRACEBACK', JSON.stringify({...payload,ok:true}),
+    JSON.stringify({...payload,code:'TELEGRAM_NETWORK_UNAVAILABLE_PRIVATE'}), 'null',
+    JSON.stringify({authorized:true})]){
+    assert.throws(()=>read(stdout),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_2');
+  }
+  assert.throws(()=>read(JSON.stringify(payload),2,'email-imap-smtp'),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_2');
+  assert.throws(()=>read('',0),error=>error.code==='ASSISTANT_SOURCE_INVALID_RESPONSE');
+  assert.deepEqual(read('{"authorized":true}',0),{authorized:true});
+});
 
 test('source setup preserves the SAME actual Python prerequisite, without private cause or retry',async t=>{
   t.mock.method(fs,'realpath',async()=>{throw Object.assign(new Error('missing'),{code:'ENOENT'});});
@@ -447,13 +465,17 @@ for(const encrypted of [false,true])test(`Telegram QR setup uses the same signed
   }
   const sourceDir=path.join(directory,`telegram-login-package-${encrypted}`);await fs.mkdir(sourceDir);
   const marker=path.join(directory,`telegram-login-native-calls-${encrypted}`);
+  const failure=path.join(directory,`telegram-login-native-failure-${encrypted}`);
   await fs.writeFile(path.join(sourceDir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
-    assert.deepEqual(process.argv.slice(2),['login','--account',${JSON.stringify(accountId)},'--qr']);
+    assert.deepEqual(process.argv.slice(2),['login','--qr']);
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
     assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.TRELIO_SECRET_FILE,undefined);
     if(${encrypted})assert.deepEqual(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON),{setup:'ENCRYPTED_SETUP_CONFIG_CANARY'});
     let input='';for await(const chunk of process.stdin)input+=chunk;assert.equal(input,'');
     fs.appendFileSync(${JSON.stringify(marker)},'1');
+    if(fs.existsSync(${JSON.stringify(failure)})){
+      process.stderr.write(fs.readFileSync(${JSON.stringify(failure)}));process.exit(2);
+    }
     process.stdout.write(JSON.stringify({authorized:true,userId:12345,username:'PRIVATE_USERNAME',qr:'PRIVATE_QR',password:'PRIVATE_FACTOR'}));`);
   artifactId=randomUUID();releaseId=randomUUID();
   packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',sourceDirectory:sourceDir,
@@ -474,11 +496,24 @@ for(const encrypted of [false,true])test(`Telegram QR setup uses the same signed
   assert.deepEqual(result,{sourceId,localAccountId:accountId,state:'session_authorized',incomingVerified:false,backgroundVerified:false});
   assert.doesNotMatch(JSON.stringify(result),/PRIVATE|userId|username|password|qr|owner/i);
   assert.equal(await markerValue(),'1');
+  // Run the actual signed child with empty stdout and a failed stderr DTO.
+  // A pure parser fixture alone cannot prove the shared executor delivered
+  // the original failure instead of silently discarding the private pipe.
+  await fs.writeFile(failure,JSON.stringify({ok:false,code:'TELEGRAM_NETWORK_UNAVAILABLE',error:'PRIVATE_FACTOR'}));
+  await assert.rejects(configure(),error=>{
+    assert.equal(error.code,'ASSISTANT_SOURCE_SETUP_TELEGRAM_NETWORK_UNAVAILABLE');
+    assert.doesNotMatch(JSON.stringify(error)+error.message,/PRIVATE/);return true;
+  });
+  assert.equal(await markerValue(),'11','one failed login does not replay its child');
+  await fs.writeFile(failure,'PRIVATE_TRACEBACK');
+  await assert.rejects(configure(),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_2');
+  assert.equal(await markerValue(),'111');
+  await fs.unlink(failure);
   // Native registration is reread after the successful child. A changed owner
   // intent cannot publish a successful setup receipt; the child is never replayed.
   const read=client.sourceAccounts;let late=0;
   client.sourceAccounts=async()=>{const rows=await read();if(++late===2)rows[0].revision++;return rows;};
-  await assert.rejects(configure(),/BINDING_CHANGED/);assert.equal(await markerValue(),'11');
+  await assert.rejects(configure(),/BINDING_CHANGED/);assert.equal(await markerValue(),'1111');
   assert.ok(inventoryCalls>=5);
   const profile=await createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope,
     accountSetup:{sourceId,expectedRevision:0,operation:'login'}});
@@ -488,10 +523,11 @@ for(const encrypted of [false,true])test(`Telegram QR setup uses the same signed
   const raw=resolution(),normalized=engine.normalizeResolvedSkillRuntimeArtifact(raw,{transportProfile:'assistant_source'});
   await profile.bindResolution(normalized,raw.sourceAdmission);
   const context={...scope,releaseId,localIdentity:normalized.localIdentity,companyConnection:null,account:{id:accountId}};
-  for(const runtimeArguments of [['login','--account',accountId,'--qr','--terminal-prompts'],['login','--account',accountId,'--code'],
-    ['login','--account',randomUUID(),'--qr'],['login','--account',accountId,'--qr','--qr-timeout','600']])
+  for(const runtimeArguments of [['login','--qr','--terminal-prompts'],['login','--code'],
+    ['login','--account',accountId,'--qr'],['login','--qr','--qr-timeout','600']])
     await assert.rejects(profile.authorizeInteractiveSourceSetup({artifact:normalized.artifact,executionContext:context,runtimeArguments}),/SETUP_REQUIRED/);
-  const exact={artifact:normalized.artifact,executionContext:context,runtimeArguments:['login','--account',accountId,'--qr']};
+  const exact={artifact:normalized.artifact,executionContext:context,runtimeArguments:['login','--qr']};
+  await assert.rejects(profile.authorizeInteractiveSourceSetup({...exact,executionContext:{...context,account:{id:randomUUID()}}}),/SETUP_REQUIRED/);
   await profile.authorizeInteractiveSourceSetup(exact);
   await assert.rejects(profile.authorizeInteractiveSourceSetup(exact),/SETUP_REQUIRED/);profile.close();
   await assert.rejects(createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope:{...scope,skillId:'email-imap-smtp'},

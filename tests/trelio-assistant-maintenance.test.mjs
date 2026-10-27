@@ -80,6 +80,23 @@ test('worker preserves one response and never exposes raw exceptions or copies c
   assert.ok(!raw.includes('PRIVATE'));assert.equal(JSON.parse(raw).failure,'ASSISTANT_SETUP_UNAVAILABLE');
 });
 
+test('source setup failures survive the worker and facade without private diagnostics or replay',async()=>{
+  for(const code of ['ASSISTANT_SOURCE_SETUP_TELEGRAM_NETWORK_UNAVAILABLE','TRELIO_SKILL_RUNTIME_EXIT_2',
+    'TRELIO_SKILL_RUNTIME_OUTPUT_INVALID','TRELIO_SKILL_PYTHON_REQUIRED']){
+    const output=new PassThrough();let raw='',executions=0,spawns=0;
+    output.on('data',chunk=>raw+=chunk);
+    await runAssistantEntry(['request'],{input:Readable.from([JSON.stringify({operation:'list'})]),output,
+      executeRequest:async()=>{executions++;throw Object.assign(new Error('PRIVATE_FACTOR'),{code,details:{path:'PRIVATE_PATH'}});}});
+    assert.deepEqual(JSON.parse(raw),{failure:code});assert.equal(executions,1);
+    await assert.rejects(requestCurrentAssistantRuntime({operation:'list'},{resolveLoader:async()=>'/fixture/loader.mjs',
+      spawnProcess:()=>{
+        spawns++;const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();child.kill=()=>{};
+        child.stdin.resume();child.stdin.on('finish',()=>queueMicrotask(()=>{child.stdout.write(raw);child.emit('close',0);}));return child;
+      }}),error=>error.code===code);
+    assert.equal(spawns,1);assert.doesNotMatch(raw,/PRIVATE/);
+  }
+});
+
 test('the longer private worker wait is reserved for the fixed protected setup tools, never general commands',async()=>{
   let spawns=0;
   const options={timeoutMs:11*60_000,resolveLoader:async()=>'/fixture/loader.mjs',spawnProcess:()=>{

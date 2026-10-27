@@ -632,8 +632,14 @@ claiming hot-update readiness. No new stable-plugin method or automatic restart
 is added. A lost/cancelled/failed invocation never replays the provider.
 
 Only `configuration_saved`, `incomingEnabled`, exact structural IDs and
-`connectionVerified:false` cross the private result boundary. Provider errors,
-mailbox address, paths, field values and diagnostics stay out of MCP/logs/SQLite.
+`connectionVerified:false` cross the successful private result boundary. Failed
+source setup consumes the completed stderr pipe through the SAME executor and
+projects only a reviewed provider error-code category. Unknown or non-JSON
+failures retain the original process-exit category; malformed successful output
+remains an invalid response. Both worker and facade preserve the closed process
+codes, including numeric exit buckets. Raw provider errors, mailbox addresses,
+paths, field values, details and next-action prose stay out of MCP/logs/SQLite.
+No failure projection launches or repeats a form.
 A closed window is not successful configuration, and saved credentials are not
 network readiness, sending authority, processed messages or a passed Windows
 business pilot. Setup metadata does not clear hook/login health latches.
@@ -666,7 +672,10 @@ an old account UUID or a model boolean cannot authorize the provider launch.
 An older backend lacking this exact operation fails closed; host support alone
 does not enable owner onboarding or business readiness.
 
-The sole provider syntax is `login --account <native UUID> --qr`. It opens the
+The sole provider syntax is `login --qr`. The SAME host catalogue consumes
+`--local-account <native UUID>` before launch and passes the bound account in
+the host-owned environment; Telegram has no provider `--account` option. The
+one-use admission independently rechecks that exact account. It opens the
 existing protected local Telegram QR/2FA page; the human scans/enters factors
 there. No terminal prompts, phone/code/password/QR values, application identity,
 human-session import or configurable timeout cross the host API. It shares the

@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
+import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
 import { startLoadedCodexPluginPreservation } from './trelio-workspace.mjs';
@@ -79,6 +80,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
 const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
 const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
 const safeError = error => assistantHealthFailure(error) || assistantSetupRecovery(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code)
+  || PROCESS_DIAGNOSTIC_CODES.includes(error?.code)
   || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error?.code) || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
   ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
@@ -849,6 +851,7 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
         try {
           const value=JSON.parse(output+decoder.end());
           if(value?.failure && (/^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(value.failure)
+            ||PROCESS_DIAGNOSTIC_CODES.includes(value.failure)||value.failure==='TRELIO_SKILL_PYTHON_REQUIRED'
             ||assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status}))) {
             const allowed=Object.keys(value).sort().join(',') === 'failure'
               || ['failure,setupRecovery','failure,setupRecovery,status'].includes(Object.keys(value).sort().join(','))
