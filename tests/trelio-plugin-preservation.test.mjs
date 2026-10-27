@@ -43,7 +43,7 @@ for (const profile of ["human", "assistant"]) {
     const f = await fixture(profile);
     try {
       // Use a genuine native Git clone, not a directory called .git. Codex's
-      // Git-backed install refreshes this mutable index/config independently
+      // Git-backed install refreshes this mutable index/reflog independently
       // of the immutable plugin payload and the schema-v1 retained receipt.
       const source = path.join(f.root, "source"), hooks = path.join(f.root, "empty-hooks");
       await fs.mkdir(hooks);
@@ -62,7 +62,7 @@ for (const profile of ["human", "assistant"]) {
       const metadataPath = path.join(entry.entryDirectory, "metadata.json"), metadata = await fs.readFile(metadataPath);
       assert.equal(JSON.parse(metadata).schemaVersion, 1);
       await git(f.plugin, "update-index", "--assume-unchanged", "scripts/hook.mjs");
-      await git(f.plugin, "config", "trelioFixture.changed", "true");
+      await git(f.plugin, "reflog", "expire", "--expire=now", "--all");
       const index = await fs.readFile(path.join(f.plugin, ".git/index"));
       const config = await fs.readFile(path.join(f.plugin, ".git/config"));
       assert.notDeepEqual(index, await fs.readFile(path.join(entry.pluginDirectory, ".git/index")));
@@ -71,6 +71,19 @@ for (const profile of ["human", "assistant"]) {
       assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/index")), index);
       assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/config")), config);
       assert.deepEqual(await fs.readFile(metadataPath), metadata, "old immutable receipts are not rewritten");
+
+      // Git control files can select commands and filters. They remain strict
+      // code bytes, even though native index/reflog changes are permitted.
+      await git(f.plugin, "config", "trelioFixture.changed", "true");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /другие bytes/);
+      await fs.writeFile(path.join(f.plugin, ".git/config"), config);
+      const checkoutHook = path.join(f.plugin, ".git/hooks/post-checkout");
+      await fs.writeFile(checkoutHook, "never execute this synthetic changed hook\n");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /другие bytes/);
+      await fs.rm(checkoutHook);
+      await git(f.plugin, "update-ref", "refs/heads/retention-fixture", "HEAD");
+      await assert.rejects(restoreRetainedCodexPluginInstallations({ profile, retentionDirectory: f.retentionDirectory }), /другие bytes/);
+      await git(f.plugin, "update-ref", "-d", "refs/heads/retention-fixture");
 
       // Every payload byte still matters, even alongside a legitimate native
       // metadata change. No other file may be excluded as checkout metadata.

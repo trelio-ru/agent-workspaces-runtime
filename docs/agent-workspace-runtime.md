@@ -149,17 +149,18 @@ Codex layout и не создают retention store. Integrity/type/permission f
 сохраняет обычный fail-closed отказ, а не обход admission. Повторная очистка
 cache обрабатывается тем же живым MCP без restart.
 
-Git-backed native cache может менять `.git/index`, checkout logs и config после
+Git-backed native cache может менять `.git/index` и `.git/logs/**` после
 снимка. Уже существующая установка допускает только такие различия внутри
 настоящего root `.git` directory при полном совпадении всех остальных bytes.
-Оба дерева проходят прежние bounds/type/symlink проверки; gitdir file не получает
+Git config/hooks/refs/objects остаются строгими bytes. Оба дерева проходят прежние
+bounds/type/symlink проверки; gitdir file не получает
 исключение. Это in-place read-back: runtime не восстанавливает Git metadata и
 не читает её как команды. Полный digest сохранённого schema-v1 snapshot остаётся
 обязательным, его metadata/hash не переписываются. Отдельный ephemeral payload
 digest не заменяет updater journal, native trust или проверку сохранённой копии.
 Changed hook/loader/manifest/instructions и повреждённый snapshot по-прежнему
 останавливают maintenance до marketplace mutation. Regression использует real
-Git clone для обоих profiles, проверяет index/config и сохранение старого receipt.
+Git clone для обоих profiles, проверяет index/reflog и сохранение старого receipt.
 
 Обязательная regression `tests/trelio-plugin-preservation.test.mjs` запускает
 production `runStdioHost`, удаляет старую shell внешним действием, создаёт новую,

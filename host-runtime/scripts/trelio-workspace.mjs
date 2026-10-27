@@ -3053,7 +3053,10 @@ const inspectImmutableCodexPluginTree = async (
   // Keep the historical whole-tree digest unchanged: schema-v1 snapshots and
   // updater journals must still verify their original bytes exactly. A second,
   // ephemeral digest compares executable/package bytes when native Codex has
-  // changed ONLY its real root .git checkout metadata. Never persist this as a
+  // changed ONLY its real root .git index/reflog metadata. Git config, hooks,
+  // refs, attributes, objects and every package file remain in the comparison: they
+  // must not gain an exception that could select commands or replacement code.
+  // Never persist this as a
   // replacement receipt or use it to validate a damaged retained snapshot.
   const payloadHash = crypto.createHash("sha256");
   let hasCheckoutMetadata = false;
@@ -3103,7 +3106,8 @@ const inspectImmutableCodexPluginTree = async (
       treeHash.update(relativePath, "utf8");
       treeHash.update(`:${bytes.byteLength}:`);
       treeHash.update(bytes);
-      if (!relativePath.startsWith(".git/")) {
+      const checkoutState = relativePath === ".git/index" || relativePath.startsWith(".git/logs/");
+      if (!checkoutState) {
         payloadHash.update(`${Buffer.byteLength(relativePath, "utf8")}:`);
         payloadHash.update(relativePath, "utf8");
         payloadHash.update(`:${bytes.byteLength}:`);
@@ -3220,10 +3224,10 @@ const assertRetainedCodexPluginEntry = async (entry) => {
 
 const restoreOneRetainedCodexPlugin = async (entry) => {
   const retained = await assertRetainedCodexPluginEntry(entry);
-  // Native Git may refresh index/log/config after our snapshot but before the
+  // Native Git may refresh index/reflog data after our snapshot but before the
   // next maintenance cycle. Existing code must match every retained payload
-  // byte; differing checkout metadata is accepted in-place, never restored or
-  // executed. Both trees were fully bounded/type-checked above, including .git;
+  // byte AND Git config/hooks/refs/objects; only index/reflog data may differ in
+  // place, never be restored or executed. Both trees were fully bounded/type-checked above, including .git;
   // a gitdir file, symlink, changed hook/manifest or corrupted copy cannot pass.
   // This also handles old schema-v1 copies without changing hashes, migrating
   // metadata, clearing an update latch or touching native hook approvals.
