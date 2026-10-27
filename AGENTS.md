@@ -720,6 +720,10 @@ publication tooling также остаются вне этого публичн
   verified publication; concurrent bytes/permission errors stay protected.
   Handoff validates the new loader; exact old journal paths are native CAS
   comparators only and need not survive cache pruning.
+  A freshly verified/retained newer native main may supersede settled pending
+  activation only at the official desired version, preserving the rollback
+  basis and normal trust/GUI/MCP/parent gates; unknown install/dependency phases
+  and the failed version never authorize adoption or another native add.
   Hook-free assistant main re-clones reconcile only through the same saved
   receipt, detached commit/content and bounded Git reader; see preservation.
   Dedicated cache/native-manifest version is independent of the pinned common

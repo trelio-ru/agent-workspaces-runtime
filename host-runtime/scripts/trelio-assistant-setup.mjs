@@ -864,6 +864,26 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
     previousVersion:current.version,previousTreeSha256:current.treeSha256,targetVersion:current.version,targetTreeSha256:current.treeSha256,
     stage:current.hookComponent?'installed':'ready',desktopGeneration:null,restarts:0,failures:0,failedVersion:null});
   try{
+    // Native Codex can materialize a newer official marketplace version while
+    // an older, positively installed candidate is still being activated (for
+    // example after restoring main discovery during rollback). The production
+    // inventory has already verified AND retained this exact new tree. Adopt
+    // that observation, never reinstall it or pretend the previous activation
+    // succeeded. Keep the original known-good rollback receipt, and require
+    // normal GUI, trusted-hook, live-MCP and registered-parent verification.
+    // An unresolved install/dependency mutation is deliberately excluded; a
+    // changed hook dependency also retains its original no-legacy-rollback
+    // fence rather than erasing that receipt under another main candidate.
+    if(current.version!==state.targetVersion && current.desiredVersion===current.version
+      && state.targetTreeSha256!==null
+      && ['installed','closing','starting','verifying','hook_review','retargeting','failed'].includes(state.stage)
+      && !(state.hookComponent&&state.hookComponent.previousVersion!==state.hookComponent.version)){
+      const {isStableVersionAtLeast}=await import('./trelio-workspace.mjs');
+      const newerThan=basis=>isStableVersionAtLeast(current.version,basis)&&!isStableVersionAtLeast(basis,current.version);
+      if(newerThan(state.targetVersion) && (!state.failedVersion || newerThan(state.failedVersion)))
+        await save({targetVersion:current.version,targetTreeSha256:current.treeSha256,
+          stage:'installed',desktopGeneration:null,restarts:0,failures:0,failedVersion:null,hookComponent:null});
+    }
     // An explicit native update outside this supervisor also needs activation;
     // a cached ready journal cannot claim the newly installed version is loaded.
     if(state.stage==='ready' && current.version!==state.targetVersion)

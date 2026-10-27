@@ -1603,6 +1603,17 @@ verified current plugin and does not block business work. A failed activation
 stays blocked for that exact version; a newer release can replace it while
 preserving the last verified rollback basis.
 
+Native Codex may already materialize a genuinely newer official main while a
+previous installed candidate is still awaiting activation. Fresh verified and
+retained inventory can adopt that exact version only when it equals current
+marketplace discovery and exceeds both the pending and failed versions. Preserve
+the original known-good rollback receipt, journal a new activation before GUI
+effects and perform the ordinary hook/MCP/registered-parent checks. Never run
+another native add, reset trust or infer readiness from this observation. An
+unresolved main/dependency installation, absent original tree receipt, changed
+hook dependency, stale discovery, downgrade or the failed candidate itself
+cannot use this transition.
+
 A separate private structural journal records the previous verified tree,
 exact intended version and install/close/start/verify phases before side
 effects. Lost install replies reconcile the exact native inventory rather than

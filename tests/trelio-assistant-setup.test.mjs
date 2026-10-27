@@ -1836,6 +1836,71 @@ test('an installed-tree mismatch is never treated as an optional marketplace out
   assert.equal(f.counts().installs,0);assert.deepEqual(f.effects,[]);
 });
 
+test('a verified newer native installation supersedes pending activation without another install or losing rollback',async()=>{
+  for(const stage of ['installed','closing','starting','verifying','hook_review','retargeting','failed']){
+    const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});
+    await maintainAssistantPlugin(f.options);f.effects.length=0;
+    // Real failure shape: rollback installed 0.1.3, 0.1.4 remains failed, but
+    // native marketplace discovery has already materialized the newer 0.1.5.
+    Object.assign(f.state(),{stage,failedVersion:'0.1.4',failures:stage==='failed'?3:2});
+    Object.assign(f.current(),{version:'0.1.5',desiredVersion:'0.1.5',treeSha256:'c'.repeat(64)});
+    const before=f.counts();f.options.upgrade=()=>assert.fail('the observed installation must not run native add again');
+    const writes=[],write=f.options.writeState;
+    f.options.writeState=async(expected,next)=>{writes.push(structuredClone(next));await write(expected,next);};
+    assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.5'},stage);
+    assert.equal(writes[0].stage,'installed');assert.equal(writes[0].targetVersion,'0.1.5');
+    assert.equal(writes[0].desktopGeneration,null);assert.equal(writes[0].failures,0);
+    assert.equal(f.state().previousVersion,'0.1.3');assert.equal(f.state().previousTreeSha256,'a'.repeat(64));
+    assert.equal(f.state().targetTreeSha256,'c'.repeat(64));assert.equal(f.state().stage,'ready');
+    assert.equal(f.state().failedVersion,null,'only the genuinely newer candidate releases the previous version latch');
+    assert.deepEqual(f.effects,['inspect','close','inspect','inspect','start','inspect','probe']);
+    assert.deepEqual(f.counts(),before);
+  }
+});
+
+test('new native main adoption still requires human hook trust and the registered parent handoff',async()=>{
+  const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});
+  await maintainAssistantPlugin(f.options);Object.assign(f.state(),{stage:'failed',failedVersion:'0.1.4',failures:3});
+  Object.assign(f.current(),{version:'0.1.5',desiredVersion:'0.1.5',treeSha256:'c'.repeat(64)});f.trust(false);
+  let activations=0;f.options.activateHost=async()=>{activations++;return {state:'handoff'};};
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'hook_review',blockBusiness:true});
+  assert.equal(activations,0);assert.equal(f.counts().installs,0);
+  const starts=f.effects.filter(value=>value==='start').length;
+  f.trust(true);
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'host_handoff',blockBusiness:true});
+  assert.equal(f.state().stage,'retargeting');assert.equal(activations,1);
+  assert.equal(f.effects.filter(value=>value==='start').length,starts,'trust observation never restarts the GUI again');
+  assert.equal(f.counts().installs,0);
+});
+
+test('pending native mutations, changed dependency, stale discovery, downgrades and a latched version never become new activation',async()=>{
+  const cases=[
+    {stage:'installing'},
+    {stage:'hook_installing'},
+    {stage:'verifying',hookComponent:{pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.1',previousVersion:'0.1.0',integritySha256:'d'.repeat(64)}},
+    {stage:'verifying',desiredVersion:'0.1.6'},
+    {stage:'failed',failedVersion:'0.1.5'},
+    {stage:'failed',failedVersion:'0.1.05'},
+    {stage:'failed',failedVersion:'0.1.6'},
+    {stage:'verifying',targetVersion:'0.1.6'},
+    {stage:'verifying',targetVersion:'0.1.5'},
+    {stage:'verifying',targetVersion:'0.1.05'},
+    {stage:'verifying',targetTreeSha256:null},
+  ];
+  for(const row of cases){
+    const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});await maintainAssistantPlugin(f.options);
+    Object.assign(f.state(),{stage:row.stage,targetVersion:row.targetVersion??'0.1.4',targetTreeSha256:row.targetTreeSha256===null?null:'b'.repeat(64),
+      failedVersion:row.failedVersion??null,...(row.hookComponent?{hookComponent:row.hookComponent}:{})});
+    Object.assign(f.current(),{version:'0.1.5',desiredVersion:row.desiredVersion??'0.1.5',treeSha256:'c'.repeat(64)});
+    f.effects.length=0;f.options.upgrade=()=>assert.fail('mismatching native state cannot authorize discovery/install');
+    const target=f.state().targetVersion;
+    await maintainAssistantPlugin(f.options).catch(error=>assert.equal(error.code,'ASSISTANT_PLUGIN_UPDATE_FAILED'));
+    assert.equal(f.state().targetVersion,target,JSON.stringify(row));
+    assert.equal(f.state().targetTreeSha256,row.targetTreeSha256===null?null:'b'.repeat(64));
+    assert.deepEqual(f.effects,[]);assert.equal(f.counts().installs,0);
+  }
+});
+
 test('lost install reply reconciles the exact installed version after restart, with zero native installation replay',async()=>{
   const f=pluginUpdateFixture(),upgrade=f.options.upgrade;
   f.options.upgrade=async(...args)=>{await upgrade(...args);throw Error('synthetic lost install acknowledgement');};
