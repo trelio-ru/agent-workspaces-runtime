@@ -3059,12 +3059,12 @@ const inspectImmutableCodexPluginTree = async (
   // updater journals must still verify their original bytes exactly. A second,
   // ephemeral digest compares executable/package bytes when native Codex has
   // changed ONLY its real root .git index/reflog metadata. Git config, hooks,
-  // refs, attributes, objects and every package file remain in the comparison: they
-  // must not gain an exception that could select commands or replacement code.
-  // The separate repack digest below selects a stricter decoded-object check;
-  // neither ephemeral digest replaces a receipt or validates a damaged copy.
+  // refs, attributes, objects and every package file stay in that comparison.
+  // Repack/re-clone digests below only select additional bounded object checks;
+  // they never validate a damaged snapshot or select replacement code.
   const payloadHash = crypto.createHash("sha256");
   const repackHash = crypto.createHash("sha256");
+  const recloneHash = crypto.createHash("sha256");
   let hasCheckoutMetadata = false;
   let fileCount = 0;
   let totalBytes = 0;
@@ -3131,6 +3131,17 @@ const inspectImmutableCodexPluginTree = async (
         repackHash.update(`:${bytes.byteLength}:`);
         repackHash.update(bytes);
       }
+      // A native re-clone of a detached immutable distribution may carry a
+      // newer INACTIVE main ref/tag inventory and more valid packed history.
+      // This comparison is usable ONLY for hook-free assistant main bundles,
+      // with identical detached HEAD/commit content and decoded object checks.
+      // Config/hooks/alternates/loose objects/all package bytes stay strict.
+      if (!checkoutState && !objectPack && ![".git/packed-refs", ".git/refs/heads/main"].includes(relativePath)) {
+        recloneHash.update(`${Buffer.byteLength(relativePath, "utf8")}:`);
+        recloneHash.update(relativePath, "utf8");
+        recloneHash.update(`:${bytes.byteLength}:`);
+        recloneHash.update(bytes);
+      }
     }
   };
 
@@ -3153,6 +3164,7 @@ const inspectImmutableCodexPluginTree = async (
     treeSha256: treeHash.digest("hex"),
     payloadTreeSha256: payloadHash.digest("hex"),
     repackTreeSha256: repackHash.digest("hex"),
+    recloneTreeSha256: recloneHash.digest("hex"),
     hasCheckoutMetadata,
     fileCount,
     totalBytes,
@@ -3248,7 +3260,7 @@ const assertRetainedCodexPluginEntry = async (entry) => {
  * checkout, GC, source writes or new executable/provider path is permitted.
  * Raw object bytes remain local and bounded, and never enter a receipt/log.
  */
-const readRetainedPluginGitObjects = async (pluginDirectory, signal) => {
+const readRetainedPluginGitObjects = async (pluginDirectory, signal, selectedCommit = null) => {
   let temporaryDirectory;
   let bytes;
   let stage = "object-store";
@@ -3286,7 +3298,7 @@ const readRetainedPluginGitObjects = async (pluginDirectory, signal) => {
       throw new Error();
     stage = "object-framing";
     const digest = crypto.createHash("sha256");
-    let offset = 0, count = 0, previous = "";
+    let offset = 0, count = 0, previous = "", selectedSha256 = null;
     while (offset < bytes.length) {
       const newline = bytes.indexOf(10, offset);
       if (newline < offset || newline - offset > 100) throw new Error();
@@ -3302,11 +3314,15 @@ const readRetainedPluginGitObjects = async (pluginDirectory, signal) => {
       if (crypto.createHash("sha1").update(`${match[2]} ${size}\0`).update(body).digest("hex") !== match[1])
         throw new Error();
       digest.update(header + "\n");
-      digest.update(crypto.createHash("sha256").update(body).digest("hex") + "\n");
+      const bodySha256 = crypto.createHash("sha256").update(body).digest("hex");
+      digest.update(bodySha256 + "\n");
+      if (match[1] === selectedCommit && match[2] === "commit") selectedSha256 = bodySha256;
       previous = match[1]; offset = end + 1;
     }
     if (!count) throw new Error();
-    return digest.digest("hex");
+    const inventorySha256 = digest.digest("hex");
+    if (selectedCommit !== null && selectedSha256 === null) throw new Error();
+    return selectedCommit === null ? inventorySha256 : {inventorySha256, selectedSha256};
   } catch {
     // Native stderr/stdout can contain object contents or local paths. Do not
     // expose it through the updater's error chain or retry the failed action.
@@ -3320,33 +3336,53 @@ const readRetainedPluginGitObjects = async (pluginDirectory, signal) => {
   }
 };
 
-const restoreOneRetainedCodexPlugin = async (entry) => {
-  const retained = await assertRetainedCodexPluginEntry(entry);
+const matchesRetainedCodexPluginTree = async (entry, retained, existing) => {
   // Native Git may refresh index/reflog data after our snapshot but before the
   // next maintenance cycle, or repack an unchanged complete object inventory.
-  // Payload/config/hooks/refs remain byte-exact; a changed pack additionally
-  // needs independent SHA-256 equality of EVERY decoded object. Nothing is
+  // The default comparison keeps payload/config/hooks/refs byte-exact; a
+  // changed pack needs equality of EVERY decoded object. The narrow hook-free
+  // detached re-clone branch below additionally admits inactive main history.
+  // Nothing is
   // restored/executed in place. Both trees were bounded/type-checked above;
   // a gitdir file, symlink, changed hook/manifest or corrupted copy cannot pass.
   // This also handles old schema-v1 copies without changing hashes, migrating
   // metadata, clearing an update latch or touching native hook approvals.
-  const matchesRetained = async existing => {
     if (existing.treeSha256 === entry.treeSha256
       || existing.hasCheckoutMetadata && retained.hasCheckoutMetadata
         && existing.payloadTreeSha256 === retained.payloadTreeSha256) return true;
-    if (!existing.hasCheckoutMetadata || !retained.hasCheckoutMetadata
-      || existing.repackTreeSha256 !== retained.repackTreeSha256) return false;
+    if (!existing.hasCheckoutMetadata || !retained.hasCheckoutMetadata) return false;
+    let selectedCommit = null;
+    if (existing.repackTreeSha256 !== retained.repackTreeSha256) {
+      if (entry.profile !== "assistant" || existing.recloneTreeSha256 !== retained.recloneTreeSha256) return false;
+      // Never extend the hook-owner/legacy human comparison. Only a main
+      // bundle explicitly delegating its hooks to the independent immutable
+      // component can ignore inactive native clone refs. An inline/default
+      // hook declaration or any executable hook path keeps the strict refusal.
+      if (!await readAssistantHookComponentRequirement(entry.pluginDirectory)) return false;
+      const manifest = JSON.parse(await fs.readFile(path.join(entry.pluginDirectory, ".codex-plugin/plugin.json"), "utf8"));
+      if (Object.hasOwn(manifest, "hooks")) return false;
+      for (const name of ["hooks", "hooks.json"]) {
+        try { await fs.lstat(path.join(entry.pluginDirectory, name)); return false; }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
+      selectedCommit = (await fs.readFile(path.join(entry.pluginDirectory, ".git/HEAD"), "utf8")).trim();
+      if (!/^[a-f0-9]{40}$/u.test(selectedCommit)) return false;
+    }
     const signal = AbortSignal.timeout(10_000); // ONE budget for both object stores.
-    const before = await readRetainedPluginGitObjects(entry.pluginDirectory, signal);
-    const after = await readRetainedPluginGitObjects(entry.installedPath, signal);
-    if (before !== after) return false;
+    const before = await readRetainedPluginGitObjects(entry.pluginDirectory, signal, selectedCommit);
+    const after = await readRetainedPluginGitObjects(entry.installedPath, signal, selectedCommit);
+    if (selectedCommit === null ? before !== after : before.selectedSha256 !== after.selectedSha256) return false;
     // A reader cannot bless a concurrently changing pack/config/payload. The
     // historical schema-v1 hash and the complete observed installed tree must
     // STILL match after decoding. No source or metadata is rewritten.
     const saved = await assertRetainedCodexPluginEntry(entry);
     const current = await inspectImmutableCodexPluginTree(entry.installedPath, entry.version, {profile: entry.profile});
     return saved.treeSha256 === retained.treeSha256 && current.treeSha256 === existing.treeSha256;
-  };
+};
+
+const restoreOneRetainedCodexPlugin = async (entry) => {
+  const retained = await assertRetainedCodexPluginEntry(entry);
+  const matchesRetained = existing => matchesRetainedCodexPluginTree(entry, retained, existing);
 
   try {
     const existing = await inspectImmutableCodexPluginTree(
@@ -3819,7 +3855,8 @@ const assertOfficialCodexMarketplace = async ({
  * maintenance. Read only the exact marketplace root returned by Codex; never
  * enumerate cache versions or accept a model-selected Git URL/ref/path. */
 export const readCodexPluginUpdateInventory = async ({profile = "human",
-  execFileCommand = execFileAsync, environment = process.env, filesystem = fs} = {}) => {
+  execFileCommand = execFileAsync, environment = process.env, filesystem = fs,
+  receipt = null, retentionDirectory} = {}) => {
   const selected = codexRetentionProfile(profile);
   await assertOfficialCodexMarketplace({execFileCommand, environment, profile});
   const catalog = await runCodexJsonCommand(CODEX_MARKETPLACE_LIST_ARGUMENTS, {execFileCommand, environment});
@@ -3860,13 +3897,33 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   // The SAME bounded immutable-tree inspector hashes every regular payload
   // file and validates the native manifest, not merely version text.
   const tree = await inspectImmutableCodexPluginTree(installedPath, version, {profile});
+  let receiptTreeSha256 = tree.treeSha256;
+  if (receipt !== null) {
+    if (profile !== "assistant" || !parseStableVersion(receipt.version) || !/^[a-f0-9]{64}$/u.test(receipt.treeSha256 ?? ""))
+      throw new Error("Invalid protected assistant plugin receipt.");
+    if (receipt.version === version && receipt.treeSha256 !== tree.treeSha256) {
+      // The protected updater's ORIGINAL digest selects one immutable snapshot,
+      // never a latest sibling/hash guess. A native re-clone may have changed
+      // metadata only: reuse the SAME strict retention comparison, including
+      // full saved-digest validation and end-of-read fences. No journal, source,
+      // Git metadata or Codex approval is rewritten to make a mismatch pass.
+      const entries = (await readRetainedCodexPluginEntries(retentionDirectory ?? selected.directory, profile))
+        .filter(entry => entry.version === version && entry.treeSha256 === receipt.treeSha256
+          && sameLocalPath(entry.installedPath, installedPath));
+      if (entries.length !== 1) throw new Error("Original assistant plugin receipt is unavailable.");
+      const retained = await assertRetainedCodexPluginEntry(entries[0]);
+      if (!await matchesRetainedCodexPluginTree(entries[0], retained, tree)) throw new Error("Assistant plugin receipt bytes differ.");
+      receiptTreeSha256 = receipt.treeSha256;
+    }
+  }
   const requirement=profile==='assistant'?await readAssistantHookComponentRequirement(installedPath):null;
   let integritySha256=null;
   if(profile==='assistantHooks'){
     integritySha256=await verifyAssistantHookComponentIntegrity(installedPath,{version,filesystem});
   }
   return {state: "installed", version, desiredVersion: sourceVersion, installedPath,
-    treeSha256: tree.treeSha256,...(requirement?{hookComponent:requirement}:{}),...(integritySha256?{integritySha256}:{})};
+    treeSha256: receiptTreeSha256,...(receiptTreeSha256 !== tree.treeSha256 ? {observedTreeSha256:tree.treeSha256} : {}),
+    ...(requirement?{hookComponent:requirement}:{}),...(integritySha256?{integritySha256}:{})};
 };
 
 /** A marketplace source commit can advertise a version BEFORE its generated
@@ -4194,6 +4251,8 @@ export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,exe
   environment=process.env,loadedPluginDirectory,loadedPluginVersion,retentionDirectory}={}) => {
   if(!parseStableVersion(version)||!/^[0-9a-f]{64}$/u.test(treeSha256??''))throw new Error("Invalid rollback receipt.");
   const profile="assistant",selected=codexRetentionProfile(profile);
+  const readInventory=()=>readCodexPluginUpdateInventory({profile,execFileCommand,environment,retentionDirectory,
+    receipt:{version,treeSha256}});
   const run=args=>runCodexPluginMutationWithRetention(()=>runCodexJsonCommand(args,{execFileCommand,environment}),
     {profile,loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
   const sources=async()=>{
@@ -4210,19 +4269,19 @@ export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,exe
   // the native installed inventory proves installation. Restore main discovery
   // below without reinstalling/reopening that version a second time.
   let installed=null;
-  if(present)installed=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+  if(present)installed=await readInventory();
   if(installed?.state==="disabled")throw new Error("Plugin was disabled by its owner.");
   if(installed?.version!==version||installed.treeSha256!==treeSha256){
     if(present)await run(["plugin","marketplace","remove",selected.marketplace,"--json"]);
     await run(["plugin","marketplace","add","https://github.com/trelio-ru/digital-assistants.git","--ref",`v${version}`,"--json"]);
     // The rollback tag must itself point to the matching immutable distribution,
     // not merely have a matching source tag name.
-    const metadata=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+    const metadata=await readInventory();
     if(metadata.desiredVersion!==version)throw new Error("Rollback tag mismatch.");
     const result=await resolveInstalledCodexPluginBridge({profile,minimumVersion:version,execFileCommand,environment,
       loadedPluginDirectory,loadedPluginVersion,retentionDirectory});
     if(result?.version!==version)throw new Error("Rollback version mismatch.");
-    installed=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+    installed=await readInventory();
     if(installed.version!==version||installed.treeSha256!==treeSha256)throw new Error("Rollback tree mismatch.");
   }
   // Restore the original official main source after selecting the known-good
@@ -4230,7 +4289,7 @@ export const restoreAssistantCodexPluginVersion = async ({version,treeSha256,exe
   // the caller's failed-version latch suppresses that exact bad candidate.
   if(await sources())await run(["plugin","marketplace","remove",selected.marketplace,"--json"]);
   await run(["plugin","marketplace","add","https://github.com/trelio-ru/digital-assistants.git","--ref","main","--json"]);
-  const restored=await readCodexPluginUpdateInventory({profile,execFileCommand,environment});
+  const restored=await readInventory();
   if(restored.version!==version||restored.treeSha256!==treeSha256)throw new Error("Rollback read-back mismatch.");
   return restored;
 };

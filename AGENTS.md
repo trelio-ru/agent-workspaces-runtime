@@ -720,12 +720,14 @@ publication tooling также остаются вне этого публичн
   verified publication; concurrent bytes/permission errors stay protected.
   Handoff validates the new loader; exact old journal paths are native CAS
   comparators only and need not survive cache pruning.
+  Hook-free assistant main re-clones reconcile only through the same saved
+  receipt, detached commit/content and bounded Git reader; see preservation.
   Dedicated cache/native-manifest version is independent of the pinned common
   loader's TRELIO_PLUGIN_VERSION; exercise the actual differing versions.
   Native root .git index/reflog changes require all remaining bytes to match.
   Repacked pack/idx/rev additionally require the SAME isolated verified Git to
   decode ALL objects, independently check their Git IDs and compare SHA-256
-  content, then fence both complete trees. Config/hooks/refs remain byte-strict;
+  content, then fence both complete trees. Legacy config/hooks/refs remain byte-strict;
   retained schema-v1 copies keep their full historical digest. Never
   rewrite receipts, overwrite checkout metadata or relax changed-code/trust guards.
   Lifecycle работает и для signed runtime: независимый runtime не делает

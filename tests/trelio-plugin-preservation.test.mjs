@@ -8,7 +8,8 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/scripts/trelio-assistant-entry.mjs";
-import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation,
+  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const execute = promisify(execFile);
 const waitUntil = async (predicate) => {
@@ -37,6 +38,85 @@ const fixture = async (profile = "human") => {
     TRELIO_HOST_RUNTIME_VERSION: "3.18.0",
   } };
 };
+
+test("hook-free main rollback reconciles a real native re-clone against its original receipt without rewriting Git or trust", async t => {
+  const f = await fixture("assistant");
+  t.after(() => fs.rm(f.root, {recursive: true, force: true}));
+  await fs.rm(path.join(f.plugin, "hooks"), {recursive: true});
+  await fs.writeFile(path.join(f.plugin, "package-integrity.json"), JSON.stringify({schemaVersion: 1,
+    plugin: "trelio-digital-assistant", hookComponent: {pluginId: "trelio-digital-assistant-hooks@trelio-digital-assistants",
+      version: "0.1.1", integritySha256: "a".repeat(64)}}));
+  const source = path.join(f.root, "source"), hooks = path.join(f.root, "empty-hooks");
+  const config = path.join(f.root, "empty-git-config");
+  await fs.mkdir(hooks); await fs.writeFile(config, ""); await fs.rename(f.plugin, source);
+  const git = (cwd, ...args) => execute("git", ["-c", `core.hooksPath=${hooks}`, ...args], {
+    cwd, env: {...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: config},
+  });
+  const commit = cwd => git(cwd, "-c", "user.name=Synthetic", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture");
+  await git(source, "init"); await git(source, "branch", "-M", "main"); await git(source, "add", "."); await commit(source);
+  const detached = (await git(source, "rev-parse", "HEAD")).stdout.trim();
+  await git(source, "repack", "-ad", "-n");
+  await git(f.root, "clone", "--no-hardlinks", source, f.plugin); await git(f.plugin, "checkout", "--detach", detached);
+  const entry = await retainLoadedCodexPluginInstallation({profile: "assistant", retentionDirectory: f.retentionDirectory,
+    loadedPluginDirectory: f.plugin, loadedPluginVersion: "0.1.3"});
+  const receiptBytes = await fs.readFile(path.join(entry.entryDirectory, "metadata.json"));
+  // The official repository advanced after the first install. Reinstalling
+  // the SAME immutable old commit now clones newer inactive main/tag history.
+  // Only the disposable fixture is pruned; no live/native cache is touched.
+  await fs.writeFile(path.join(source, "newer-source-only"), "not part of the old distribution\n");
+  await git(source, "add", "."); await commit(source); await git(source, "tag", "future-version"); await git(source, "repack", "-ad", "-n");
+  await fs.rm(f.plugin, {recursive: true});
+  await git(f.root, "clone", "--no-hardlinks", source, f.plugin); await git(f.plugin, "checkout", "--detach", detached);
+  const currentRefs = await fs.readFile(path.join(f.plugin, ".git/packed-refs"));
+  const market = path.join(f.root, "market"); await fs.mkdir(path.join(market, ".agents/plugins"), {recursive: true});
+  await fs.writeFile(path.join(market, ".agents/plugins/marketplace.json"), JSON.stringify({name: "trelio-digital-assistants",
+    plugins: [{name: "trelio-digital-assistant", source: {source: "url", url: "https://github.com/trelio-ru/digital-assistants.git", ref: "plugin-v0.1.3"}}]}));
+  const mutations = []; let present = true;
+  const execFileCommand = async (_command, args) => {
+    let result;
+    if (args[1] === "marketplace" && args[2] === "list") result = {marketplaces: present ? [{name: "trelio-digital-assistants", root: market,
+      marketplaceSource: {sourceType: "git", source: "https://github.com/trelio-ru/digital-assistants.git"}}] : []};
+    else if (args[1] === "list") result = {installed: [{pluginId: "trelio-digital-assistant@trelio-digital-assistants", version: "0.1.3", installed: true, enabled: true}]};
+    else {
+      mutations.push(args);
+      assert.equal(args[1], "marketplace", "a positive rollback read-back NEVER repeats plugin add");
+      if (args[2] === "remove") {present = false; result = {};}
+      else {assert.deepEqual(args, ["plugin", "marketplace", "add", "https://github.com/trelio-ru/digital-assistants.git", "--ref", "main", "--json"]); present = true; result = {};}
+    }
+    return {stdout: JSON.stringify(result)};
+  };
+  const options = {profile: "assistant", execFileCommand, environment: f.environment, retentionDirectory: f.retentionDirectory};
+  const receipt = {version: "0.1.3", treeSha256: entry.treeSha256};
+  const raw = await readCodexPluginUpdateInventory(options);
+  assert.notEqual(raw.treeSha256, receipt.treeSha256, "the real clone must have different physical Git bytes");
+  const observed = await readCodexPluginUpdateInventory({...options, receipt});
+  assert.equal(observed.treeSha256, receipt.treeSha256);
+  assert.equal(observed.observedTreeSha256, raw.treeSha256);
+  assert.equal(await restoreRetainedCodexPluginInstallations({profile: "assistant", retentionDirectory: f.retentionDirectory}), 1);
+  const restored = await restoreAssistantCodexPluginVersion({...options, ...receipt,
+    loadedPluginDirectory: f.plugin, loadedPluginVersion: "0.1.3"});
+  assert.equal(restored.treeSha256, receipt.treeSha256);
+  assert.equal(mutations.length, 2, "only official main discovery is restored, once");
+  assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/packed-refs")), currentRefs);
+  assert.deepEqual(await fs.readFile(path.join(entry.entryDirectory, "metadata.json")), receiptBytes);
+
+  for (const name of [".git/config", ".git/HEAD", ".git/refs/heads/foreign", ".git/hooks/post-checkout", "skills/example/SKILL.md"]) {
+    const file = path.join(f.plugin, name); let original = null;
+    try { original = await fs.readFile(file); } catch (error) { if (error.code !== "ENOENT") throw error; }
+    await fs.mkdir(path.dirname(file), {recursive: true}); await fs.writeFile(file, "changed authority or executable bytes\n");
+    await assert.rejects(readCodexPluginUpdateInventory({...options, receipt}), undefined, name);
+    assert.equal(await fs.readFile(file, "utf8"), "changed authority or executable bytes\n", "refusal never repairs/overwrites changed bytes");
+    if (original === null) await fs.rm(file); else await fs.writeFile(file, original);
+  }
+  await assert.rejects(readCodexPluginUpdateInventory({...options, receipt: {...receipt, treeSha256: "f".repeat(64)}}), /unavailable/);
+  const packDirectory=path.join(f.plugin,'.git/objects/pack');
+  const pack=path.join(packDirectory,(await fs.readdir(packDirectory)).find(name=>name.endsWith('.pack')));
+  const originalPack=await fs.readFile(pack),mode=(await fs.stat(pack)).mode&0o777;
+  await fs.chmod(pack,0o600);const corrupt=Buffer.from(originalPack);corrupt[20]^=0xff;await fs.writeFile(pack,corrupt);
+  await assert.rejects(readCodexPluginUpdateInventory({...options,receipt}),/could not be verified/);
+  await fs.writeFile(pack,originalPack);await fs.chmod(pack,mode);
+  assert.equal(mutations.length, 2, "negative receipt checks are read-only");
+});
 
 for (const profile of ["human", "assistant"]) {
   test(`${profile} live preservation restores an in-place empty native version root`, async () => {

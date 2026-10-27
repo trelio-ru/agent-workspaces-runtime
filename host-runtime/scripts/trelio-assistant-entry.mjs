@@ -58,6 +58,20 @@ const sourceSetupArguments=args=>{
     throw Object.assign(new Error(),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
   return {companyId:args.companyId,sourceId:args.sourceId};
 };
+
+// Owner UI navigation is deterministic runtime metadata, not something the
+// model should reconstruct from usernames, remembered UUIDs or a task pass.
+// IDs come only from the current paired client and exact native source scope;
+// this link grants nothing and never claims that polling actually succeeded.
+const assistantSourceSettings = (identity,companyId,sourceId,skillId) => {
+  const label={'telegram-mtproto':'Telegram','email-imap-smtp':'Почта','max-web':'MAX'}[skillId];
+  if(!label||![identity?.assistantId,companyId,sourceId].every(value=>new RegExp(UUID,'u').test(value??'')))return {};
+  const url=new URL('/profile/',identity.origin);
+  if(url.protocol!=='https:')fail('ASSISTANT_HOST_STATE_INVALID');
+  url.searchParams.set('assistantSources',identity.assistantId);
+  url.searchParams.set('sourceCompany',companyId);url.searchParams.set('source',sourceId);url.hash='account-assistants';
+  return {sourceLabel:`${label} · ${sourceId.slice(-8)}`,settingsUrl:url.href};
+};
 export const assistantWorkerToolCatalogue=tools=>{
   if(!Array.isArray(tools)||tools.some(tool=>hostSetupToolNames().includes(tool?.name)))
     throw Object.assign(new Error(),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
@@ -1213,7 +1227,22 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
       await guard();return execute(executable,args,{...options,env:{...env,GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat'},
         timeout:40_000,signal,shell:false,windowsHide:true});
     };
-    const inventory=()=>common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env});
+    const inventory=async()=>{
+      const journal=await lockedHost.readPluginUpdate();
+      const version=journal?.stage==='rolling_back'?journal.previousVersion:journal?.targetVersion;
+      const treeSha256=journal?.stage==='rolling_back'?journal.previousTreeSha256:journal?.targetTreeSha256;
+      const current=await common.readCodexPluginUpdateInventory({profile:'assistant',execFileCommand,environment:env,
+        receipt:version&&treeSha256?{version,treeSha256}:null});
+      if(current.state==='installed'&&(!treeSha256||current.version!==version)){
+        // Pin the exact NEW native candidate before maintenance adopts its
+        // digest. A later GUI/native metadata refresh must still have that
+        // original immutable basis; never manufacture it from changed bytes.
+        const retained=await common.retainLoadedCodexPluginInstallation({profile:'assistant',
+          loadedPluginDirectory:current.installedPath,loadedPluginVersion:current.version});
+        if(retained.treeSha256!==current.treeSha256)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
+      }
+      return current;
+    };
     const loadedPluginDirectory=environment.TRELIO_PLUGIN_ROOT;
     if(!loadedPluginDirectory||!path.isAbsolute(loadedPluginDirectory))fail('TRELIO_PLUGIN_RESTART_REQUIRED');
     const parent=await lockedHost.readPluginSupervisor();
@@ -1564,9 +1593,13 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
             {sources:(await client.sourceAccounts(sourceArguments.companyId,runtimeHookSignal())).map(source=>({sourceId:source.id,
               skillId:source.skillId,projectId:source.projectId,state:source.state,revision:source.revision,
               provisionLocalAccount:source.provisionLocalAccount,
+              ...assistantSourceSettings(client.identity,sourceArguments.companyId,source.id,source.skillId),
               ...(source.interactiveSetupAllowed===true?{interactiveSetupAllowed:true}:{}),executionVerified:false}))}:
             await prepareSource({identity:client.identity,client,host,store,...sourceArguments,signal:runtimeHookSignal()});
-          const value=interactiveSourceSetup?await host.withSetupLock(perform):await perform();
+          let value=interactiveSourceSetup?await host.withSetupLock(perform):await perform();
+          if(request.name===ASSISTANT_TELEGRAM_SETUP_TOOL.name&&value?.state==='session_authorized'
+            &&value.sourceId===sourceArguments.sourceId)value={...value,
+              ...assistantSourceSettings(client.identity,sourceArguments.companyId,value.sourceId,'telegram-mtproto')};
           result={content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
         }catch(error){const code=safeError(error);result={isError:true,content:[{type:'text',text:code}],structuredContent:{code}};}
       }else result=await(request.operation==='list'?proxy.listTools():proxy.callTool(request.name,request.arguments));

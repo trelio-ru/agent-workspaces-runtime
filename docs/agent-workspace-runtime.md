@@ -157,6 +157,24 @@ retained-копии публикация удаляет только полож�
 snapshot, реальный permission failure остаётся terminal. Immutable receipt,
 native plugin inventory и hook trust не переписываются.
 
+Native rollback может заново клонировать тот же detached distribution commit
+после появления новых коммитов в official `main`. Только hook-free assistant
+main с явным отдельным hookComponent допускает различия inactive
+`.git/refs/heads/main`, `packed-refs` и pack-контейнеров. Все прочие bytes,
+включая HEAD, config, hooks, alternates, loose objects и payload, совпадают;
+HEAD обязан быть detached. Тот же isolated Git reader декодирует и независимо
+проверяет каждый объект, а SHA-256 самого выбранного commit совпадает со
+снимком. Extra valid packed history не становится исполняемым кодом/authority.
+Оба полных дерева проверяются ещё раз после чтения. Legacy/human/hook-owner
+ветви сохраняют прежнее равенство полного object inventory и refs.
+
+Protected updater journal может передать exact version/full historical digest
+в native inventory. Только соответствующий immutable retained snapshot и эта
+же проверка позволяют сопоставить свежий clone с исходной квитанцией;
+`observedTreeSha256` отдельно отражает физические bytes. Другая версия, снимок,
+изменённый HEAD/config/code или неполное чтение не принимаются. Старые schema-v1
+квитанции, Git metadata, hooks trust и journal hashes не переписываются.
+
 Git-backed native cache может менять `.git/index` и `.git/logs/**` после
 снимка. Уже существующая установка допускает только такие различия внутри
 настоящего root `.git` directory при полном совпадении всех остальных bytes.

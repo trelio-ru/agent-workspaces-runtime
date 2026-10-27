@@ -691,6 +691,12 @@ It does not verify background polling, process/ACK messages or clear login/hooks
 health latches. Native owner control-plane/UI opt-in and a real Windows business
 pilot remain independent gates.
 
+The paired setup result and source-list attach content-free `sourceLabel` and
+`settingsUrl`, built from the current assistant identity and exact native
+company/source IDs. The owner link selects that exact profile row; the model
+does not reconstruct IDs or require a task to enable model-free auto-checks.
+The URL grants no ACL and neither login nor an `active` setting proves a poll.
+
 `configure_assistant_max_source` uses that SAME account/process engine and the
 existing MAX protected browser, with explicit native owner opt-in and fixed
 `accountSetup.operation=login`, `max-login/v1`. Its only provider command is
@@ -1606,6 +1612,11 @@ resolver, but derives old action arguments literally from the loader-selected
 root and protected previous/failed versions. Those old paths are native CAS
 comparators, never executables: native cache pruning must not block forward
 activation or rollback. Principal/marker/definition checks remain unchanged.
+Rollback/native inventory reconcile the original protected receipt through the
+SAME retained-code verifier. Hook-free detached main re-clones may carry newer
+inactive Git history, but not changed commit/config/hooks/payload; the complete
+preservation contract defines that narrow comparison. Physical observed digest
+stays separate; no failed-version latch or historical receipt is reset.
 Windows AppModel selects this user's exact Codex package; the fixed
 manifest GUI `App` is independent of its `CodexCoreCommandRunner` companion.
 The bounded public helper selects only this session's exact executable/window

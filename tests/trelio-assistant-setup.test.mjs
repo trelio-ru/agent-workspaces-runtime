@@ -417,7 +417,8 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
   const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
   assert.deepEqual(discovered.structuredContent,{sources:[{sourceId,skillId:'telegram-mtproto',projectId:null,state:'active',revision:0,
-    provisionLocalAccount:true,executionVerified:false}]});
+    provisionLocalAccount:true,executionVerified:false,sourceLabel:`Telegram · ${sourceId.slice(-8)}`,
+    settingsUrl:`https://source.test/profile/?assistantSources=${client.identity.assistantId}&sourceCompany=${companyId}&source=${sourceId}#account-assistants`}]});
   assert.equal(calls,0,'listing refs never prepares an account');assert.ok(!JSON.stringify(discovered).includes('PRIVATE_LABEL'));
   const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
     {jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'prepare_assistant_source_account',arguments:{companyId,sourceId}}},
@@ -493,9 +494,9 @@ test('email setup routes only exact locators under its private wait envelope and
 
 
 test('Telegram setup selects only its exact native route and long input budget without clearing hook trust',async()=>{
-  const companyId=randomUUID(),sourceId=randomUUID(),reports=[];let calls=0,contexts=0;
+  const companyId=randomUUID(),sourceId=randomUUID(),assistantId=randomUUID(),reports=[];let calls=0,contexts=0;
   const dependencies={versions:()=>({pluginVersion:'3.2.3',hostRuntimeVersion:'3.10.2'}),
-    context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,true);return action({identity:{},
+    context:async(action,options)=>{contexts++;assert.equal(options.interactiveSourceSetup,true);return action({identity:{origin:'https://setup.test',assistantId},
       readHealth:async()=>({code:'hook_review_required',revision:0,latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:null}}),
       reportHealth:async value=>reports.push(value)}, {withSetupLock:action=>action()}, {});},proxyFor:async()=>({}),
     configureSource:async()=>assert.fail('Telegram cannot enter email configure'),configureTelegramSource:async input=>{
@@ -503,7 +504,10 @@ test('Telegram setup selects only its exact native route and long input budget w
       return {sourceId,state:'session_authorized',incomingVerified:false,backgroundVerified:false};
     }};
   const request={operation:'call',name:'configure_assistant_telegram_source',arguments:{companyId,sourceId}};
-  assert.equal((await executeAssistantRuntimeRequest(request,dependencies)).structuredContent.state,'session_authorized');
+  const connected=(await executeAssistantRuntimeRequest(request,dependencies)).structuredContent;
+  assert.equal(connected.state,'session_authorized');assert.equal(connected.backgroundVerified,false);
+  assert.equal(connected.sourceLabel,`Telegram · ${sourceId.slice(-8)}`);
+  assert.equal(connected.settingsUrl,`https://setup.test/profile/?assistantSources=${assistantId}&sourceCompany=${companyId}&source=${sourceId}#account-assistants`);
   for(const arguments_ of [{companyId,sourceId:null},{companyId,sourceId,qr:'PRIVATE_FACTOR'},
     {companyId,sourceId,terminalPrompts:true},{companyId,sourceId,timeoutMs:600000}])
     await assert.rejects(executeAssistantRuntimeRequest({...request,arguments:arguments_},dependencies),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
