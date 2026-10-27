@@ -127,7 +127,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -193,7 +193,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
   transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -357,12 +357,19 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       intent_json TEXT NOT NULL, PRIMARY KEY(delivery_id,ordinal));
       CREATE INDEX IF NOT EXISTS assistant_continuation_budget ON assistant_pass_continuations(delivery_id,prerequisite_key);`);
     const hasAckPolicy=all('PRAGMA table_info(assistant_inbox_events)').some(column=>column.name==='automatic_ack');
-    if(versions[0]?.version===15&&!hasAckPolicy)fail('ASSISTANT_INBOX_CONFLICT');
+    if(versions[0]?.version>=15&&!hasAckPolicy)fail('ASSISTANT_INBOX_CONFLICT');
     if(!hasAckPolicy)db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN automatic_ack INTEGER NOT NULL DEFAULT 1 CHECK(automatic_ack IN (0,1))');
     // A restrictive structural policy only. Existing rows, cursors, processed
     // bits and unknown write fences are preserved; migration never claims ACK.
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=15');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (15)');
+    const replyColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version===16&&(!replyColumns.includes('reply_receipt_id')||!replyColumns.includes('reply_message_id')))
+      fail('ASSISTANT_INBOX_CONFLICT');
+    if(!replyColumns.includes('reply_receipt_id'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN reply_receipt_id TEXT');
+    if(!replyColumns.includes('reply_message_id'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN reply_message_id INTEGER CHECK(reply_message_id IS NULL OR (reply_message_id>0 AND reply_message_id<2147483648))');
+    // Only attempt/positive-native IDs persist. A missing result remains
+    // unknown across restart; neither text nor a new task/Run is journaled.
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=16');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (16)');
   });
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
@@ -844,9 +851,25 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id);if(!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_CONFLICT');
       run("UPDATE assistant_owner_intakes SET state='uncertain' WHERE id=?",row.id);
     });},
+    startOwnerReply(id,receiptId){return transaction(()=>{
+      const row=this.ownerIntake(id);receiptId=uuid(receiptId);
+      if(row.kind!=='owner_command'||row.state!=='started'||row.source_state!=='active'
+        ||row.source_revision!==row.configuration_revision||row.reply_receipt_id!==null)
+        fail('ASSISTANT_INBOX_CONFLICT');
+      // The SAME process engine calls this once at its final spawn boundary.
+      // Persist before any bytes reach Telegram. There is no retry/clear edge.
+      run('UPDATE assistant_owner_intakes SET reply_receipt_id=? WHERE id=?',receiptId,row.id);
+    });},
+    confirmOwnerReply(id,{receiptId,messageId}){return transaction(()=>{
+      const row=this.ownerIntake(id);receiptId=uuid(receiptId);messageId=integer(messageId,1,2147483647);
+      if(row.kind!=='owner_command'||row.reply_receipt_id!==receiptId||!['started','uncertain'].includes(row.state)
+        ||row.reply_message_id!==null&&row.reply_message_id!==messageId)fail('ASSISTANT_INBOX_CONFLICT');
+      run('UPDATE assistant_owner_intakes SET reply_message_id=? WHERE id=?',messageId,row.id);
+    });},
     finishOwnerIntake(id,{receiptId,state,route=null,taskId=null,routes=null,ignoredEventIds=[]}){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
-      if(!(row.kind==='route_existing'?['pending','ready','started','uncertain','waiting_owner']:['ready','started','uncertain','waiting_owner']).includes(row.state)||!['created','routed','ignored','waiting_owner','redirected','cancelled'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
+      if(!(row.kind==='route_existing'?['pending','ready','started','uncertain','waiting_owner']:['ready','started','uncertain','waiting_owner']).includes(row.state)||!['created','routed','ignored','waiting_owner','redirected','cancelled','replied'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
+      if(state==='replied'&&(row.kind!=='owner_command'||row.reply_receipt_id!==receiptId||row.reply_message_id===null))fail('ASSISTANT_INBOX_CONFLICT');
       if(state==='routed'){
         const selected=routes??(route?[{...route,taskId,eventIds:row.eventIds}]:[]);
         const ids=[...selected.flatMap(item=>item.eventIds??[]),...ignoredEventIds];
@@ -857,7 +880,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run('UPDATE assistant_owner_intakes SET outcome_route_id=?,outcome_task_id=? WHERE id=?',selected.length===1?selected[0].id:null,selected.length===1?selected[0].taskId:null,row.id);
       }
       run('UPDATE assistant_owner_intakes SET state=?,outcome_receipt=?,outcome_state=?,settled=?,next_check_at=? WHERE id=?',
-        state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled'].includes(state)),state==='waiting_owner'?time()+300000:0,row.id);
+        state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled','replied'].includes(state)),state==='waiting_owner'?time()+300000:0,row.id);
     });},
     redirectOwnerIntake(id,{scope:targetScope,sourceRevision,receiptId}){return transaction(()=>{
       const row=this.ownerIntake(id),target=scopeOf(targetScope);receiptId=uuid(receiptId);

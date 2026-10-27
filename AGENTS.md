@@ -868,7 +868,9 @@ publication tooling также остаются вне этого публичн
 
 
 - Verified owner source intake is taskless, uses the SAME observer/proof/native
-  creator/question/account engines and never fabricates task authority. Native
+  creator/question/account engines; private owner replies use signed exact peer
+  and schema16 attempt/positive receipts without task/Run. Never replay unknown
+  sends or borrow task ACK. Native
   incoming/original linked sender ID is separate from model command assessment.
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an

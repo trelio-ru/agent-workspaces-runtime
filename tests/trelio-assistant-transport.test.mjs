@@ -502,6 +502,15 @@ test('managed key readiness opens a real recipient envelope and verifies the com
         return {content:[],structuredContent:{state:'created',receiptId:randomUUID(),taskId:randomUUID()}};
       });
       assert.equal(result.structuredContent.state,'created');assert.ok(intakeReads>=3,'terminal native read-back is not treated as an executable lease');
+      intakeState='leased';
+      const reply=await withAssistantManagedContentArguments({...input,name:'resolve_assistant_intake',args:{
+        decision:'reply_owner',replyText:'OWNER_REPLY_BODY_CANARY',clientRequestId:intake.passId,
+        intakePass:{companyId,sourceId:intake.sourceId,intakeId:intake.passId}}},async wire=>{
+        assert.doesNotMatch(JSON.stringify(wire),/OWNER_REPLY_BODY_CANARY/);
+        assert.match(wire.replyText,/^~e1:[0-9a-f-]{36}:reply_text~$/u);
+        intakeState='reply_pending';return {content:[],structuredContent:{state:'reply_pending',receiptId:randomUUID()}};
+      });
+      assert.equal(reply.structuredContent.state,'reply_pending');
       intake.intakeKind='route_existing';intake.eventIds=[intake.eventId,randomUUID()];intakeState='leased';
       const projectId=randomUUID(),taskId=randomUUID();
       client.readSourceIntake=async()=>({state:intakeState,kind:'route_existing',eventIds:intake.eventIds,threadId:intake.threadId,eventId:intake.eventId,

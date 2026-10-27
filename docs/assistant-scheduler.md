@@ -2472,6 +2472,21 @@ independent of natural command assessment. Clear owner commands need no second
 approval; ambiguous context uses the SAME owner questions with Other+text.
 See the schema-v9 inbox contract for cancellation, restart and per-event routing.
 
+Simple verified-owner private Telegram questions use the SAME visible source
+intake chat and `reply_owner`; they never become tasks/Workspace Runs. Clear direct
+work commands alone select `create_task`. The native one-attempt receipt, exact
+peer/revision/key and signed provider >=2.14.0 fence conversational sending.
+No model-selected recipient/account/file/schedule or human transport is accepted.
+Native positive settlement is a fixed device endpoint over the original receipt,
+not a new business action/approval; current device/source/owner ACL remains live.
+See [reply receipts](assistant-inbox.md#verified-owner-intake-schema-v9-reply-receipts-v16).
+
+For signed Telegram >=2.14.0 the model-free poll explicitly opts into native
+`account.updateStatus(offline=false)`. Older releases receive no unknown flag.
+The provider never forces offline or alters privacy settings; Telegram controls
+visibility/expiration. Presence failure does not discard a valid page or repeat
+a send, and last-seen is not proof of the poll schedule/processing/ACK.
+
 Owner-selected existing managed accounts can gain an additional company binding
 through the SAME native source registration and `prepare_assistant_source_account`.
 An immutable origin source/revision supplies SAME device/provider/account evidence;
@@ -2493,7 +2508,7 @@ two native intake tools. A view change fails rather than upgrading that session.
 The protected pass discriminator chooses it, never model arguments. Header alone
 supplies no native authority; strict original schema/proof/device/source checks
 remain in each handler. Both full raw catalogues retain the common 65,536-byte
-bound, with no schema copies, new endpoint or second executor.
+bound, with no schema copies, new MCP endpoint or second executor.
 
 ### Encrypted source and exact public task skill
 

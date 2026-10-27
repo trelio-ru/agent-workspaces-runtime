@@ -46,7 +46,7 @@ test('source setup preserves the SAME actual Python prerequisite, without privat
     return true;
   });
 });
-const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage}=
+const {parseAssistantSourceReadReference,createAssistantSourceRuntimeProfile,acknowledgeAssistantSource,projectAssistantSourceAcknowledgement,readAssistantSourceMonitor,projectAssistantMonitorPage,prepareAssistantLocalConnection,prepareAssistantSourceAccount,configureAssistantEmailSource,configureAssistantTelegramSource,verifyAssistantEmailSource,configureAssistantMaxSource,verifyAssistantMaxSource,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake}=
   await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
 const {accountScope,createAccountCatalogue}=await import('../host-runtime/scripts/trelio-skill-accounts.mjs');
 // Exercise the SAME source/config/ACK engine against a non-production HTTPS
@@ -64,7 +64,7 @@ const store={get:async slot=>{
 let setupFixture=null,ackFixture=null,intakeFixture=null,maxAccountFixture=false,sourceSelectionFixture=null;
 const baseAdmission=()=>{
   if(intakeFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
-    protocol:scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
+    protocol:intakeFixture.admission.kind==='reply_owner'?'telegram-owner-reply/v1':scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1',command:intakeFixture.admission.kind==='reply_owner'?'reply-reference':'read-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
     issuedAt:'2026-10-21T00:00:00.000Z',expiresAt:'2026-10-21T00:02:00.000Z',intake:intakeFixture.admission};
   if(ackFixture)return {schemaVersion:1,assistantUserId:assistantId,deviceId,provider:scope.skillId==='email-imap-smtp'?'email':scope.skillId==='max-web'?'max':'telegram',
     protocol:scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1',command:'ack-reference',pollIntervalSeconds:300,maximumDurationMs:60000,
@@ -160,7 +160,7 @@ test('source reader composes real signature/cache/account/executor and resolves 
       if(args.includes('--chat')){
         const unread=args.includes('--unread-backfill'),account=args.includes('--initial-account-cursor');
         assert.deepEqual(args,['monitor','--chat','-1000000000055',...(unread?['--unread-backfill']:
-          [account?'--initial-account-cursor':'--cursor',${JSON.stringify(previousCursor)}]),'--limit','100']);
+          [account?'--initial-account-cursor':'--cursor',${JSON.stringify(previousCursor)}]),'--online-presence','--limit','100']);
         result.stream={kind:'channel',chatId:'-1000000000055'};result.channelsToSync=[];
         result.events[0].chatId='-1000000000055';result.events[0].id='message:-1000000000055:5';
         result.hasMore=true;Object.assign(result.coverage,{historicalBackfill:true,[unread?'initialUnreadOnly':'initialAccountInterval']:true,
@@ -1735,13 +1735,56 @@ test('owner intake rereads one exact signed original, rechecks native owner and 
     coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false,nativeMessageVerified:true},readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}};
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
-  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,ownerIdentityId,ownerExternalUserId:'123456'});
+  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,ownerIdentityId,ownerExternalUserId:'123456',privateOwnerConversation:false});
   for(const patch of [{senderUserId:'654321'},{outgoing:true},{forwarded:true},...(!max?[{viaBot:true}]:[])]){
     await fs.writeFile(output,JSON.stringify({...message,reference:{...message.reference,...patch}}));
     await assert.rejects(readAssistantOwnerIntakeMessage(input),/OWNER_UNVERIFIED/);
   }
   assert.match(await fs.readFile(marker,'utf8'),/^read;+/);assert.equal((await catalogue.list()).accounts.length>=1,true);
  }
+});
+
+test('owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence',async t=>{
+ const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
+ scope.skillId='telegram-mtproto';
+ const sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),receiptId=randomUUID();
+ const source={id:sourceId,...scope,deviceId,localAccountId:accountId,state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ const pass={schemaVersion:1,kind:'source_intake',assistantId,deviceId,companyId,sourceId,sourceRevision:0,passId:intakeId,deliveryId:randomUUID(),eventId,threadId};
+ const reference={eventId,id:'message:123456:8',revision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`};
+ const args=['reply-reference','--chat','123456','--message-id','8','--expected-revision',reference.revision,
+   '--expected-conversation-key',reference.conversationKey,'--expected-owner-id','123456','--confirm'];
+ intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,replyReceiptId:receiptId},admission:{schemaVersion:1,kind:'reply_owner',
+   intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId:randomUUID(),ownerExternalUserId:'123456'}};
+ const dir=path.join(directory,'owner-private-reply');await fs.mkdir(dir);const marker=path.join(dir,'calls');
+ const replyText='Здравствуйте! Уже проверяю';
+ const positive={schemaVersion:1,protocol:'telegram-owner-reply/v1',sent:true,automaticRetryAllowed:false,
+   reference:{id:reference.id,revision:reference.revision,conversationKey:reference.conversationKey},replyToMessageId:8,messageId:91};
+ await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
+   assert.deepEqual(process.argv.slice(2),${JSON.stringify(args)});
+   assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
+   assert.equal(process.env.CODEX_THREAD_ID,undefined);
+   const input=JSON.parse(fs.readFileSync(0,'utf8'));assert.deepEqual(input,${JSON.stringify({text:replyText})});
+   assert.equal(Object.values(process.env).some(value=>value.includes(input.text)),false);
+   fs.appendFileSync(${JSON.stringify(marker)},'sent;');process.stdout.write(${JSON.stringify(JSON.stringify(positive))});`);
+ artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:scope.skillId,runtimeVersion:'2.99.42',
+   sourceDirectory:dir,entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
+ const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope}),root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
+ const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId}),
+   io:{ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
+ await catalogue.change({operation:'create',id:accountId,name:'Synthetic reply',expectedRevision:(await catalogue.list()).revision});
+ let attempt=false,confirmed=null,state='reply_pending';
+ const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state,receiptId,ownerPrivateRead:true,threadId,eventId,
+   sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
+ const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference,receiptId,replyText,
+   beforeInvoke:async()=>{assert.equal(attempt,false,'a persisted attempt never dispatches twice');attempt=true;},
+   onConfirmed:async value=>{confirmed=value;}};
+ assert.deepEqual(await replyAssistantOwnerIntake(input),{receiptId,messageId:91});assert.deepEqual(confirmed,{receiptId,messageId:91});
+ assert.equal(await fs.readFile(marker,'utf8'),'sent;');
+ await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(await fs.readFile(marker,'utf8'),'sent;');
+ state='replied';await assert.rejects(replyAssistantOwnerIntake(input),/INTAKE_CHANGED/);
+ state='reply_pending';attempt=false;intakeFixture.admission.ownerExternalUserId='654321';
+ await assert.rejects(replyAssistantOwnerIntake(input),/INVALID_RESPONSE/);assert.equal(attempt,false);
+ assert.equal(await fs.readFile(marker,'utf8'),'sent;','wrong owner/native receipt cannot launch a child');
 });
 
 test('additional company binding reuses same catalogue, preserves sessions and reads back only its exact native intent',async t=>{

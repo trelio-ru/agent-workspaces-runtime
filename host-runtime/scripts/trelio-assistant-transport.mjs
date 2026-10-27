@@ -126,6 +126,11 @@ export const assistantTaskStorageDirectory = (configDirectory, scope) => {
   return path.join(configDirectory,'digital-assistants','tasks',createHash('sha256').update(JSON.stringify(identity)).digest('hex'));
 };
 const object = value => value && Object.getPrototypeOf(value) === Object.prototype;
+// Bound the actual private pipe envelope before native admission/attempt.
+// JSON escaping can exceed the plain UTF-8 size; malformed UTF-16 must not be
+// silently replaced by a later encoder after the one-attempt fence is saved.
+const assistantOwnerReplyText=value=>typeof value==='string'&&value.trim().length>0
+  &&value.length<=4096&&value.isWellFormed()&&Buffer.byteLength(JSON.stringify({text:value}),'utf8')<=16384;
 const revision = value => {
   if (!Number.isSafeInteger(value) || value < 0) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE'); return value;
 };
@@ -306,7 +311,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
     ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']], ['registerRuntime',['POST','/runtime/session/register']],
     ['endRuntime',['POST','/runtime/session/end']],
-    ...['begin','read','session/register','session/end','read-confirm','cancel'].map((suffix,index)=>[['intakeBegin','intakeRead','intakeRegister','intakeEnd','intakeReadConfirm','intakeCancel'][index],['POST',`/runtime/source-skills/intake/${suffix}`]]),
+    ...['begin','read','session/register','session/end','read-confirm','cancel','reply-confirm'].map((suffix,index)=>[['intakeBegin','intakeRead','intakeRegister','intakeEnd','intakeReadConfirm','intakeCancel','intakeReplyConfirm'][index],['POST',`/runtime/source-skills/intake/${suffix}`]]),
   ]);
   return async (operation, body, credential = null, signal = null) => {
     const route = routes.get(operation);
@@ -763,6 +768,10 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
   // the native Zod validator. Preserve its question/choice contract BEFORE
   // sealing; these local guards grant no action or owner decision authority.
   const question=name==='ask_assistant_owner'||name==='resolve_assistant_intake'&&business.decision==='ask_owner';
+  if(name==='resolve_assistant_intake'&&business.decision==='reply_owner'){
+    if(!assistantOwnerReplyText(business.replyText))fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
+    business.replyText=business.replyText.trim();
+  }
   if(question){
     if(typeof business.questionText!=='string'||!business.questionText.trim()
       ||Buffer.byteLength(business.questionText.trim(),'utf8')>16384)fail('ASSISTANT_ENCRYPTED_CONTENT_INVALID');
@@ -1014,7 +1023,7 @@ export const withAssistantManagedContentArguments=async({identity,host,client,st
         return {...result,content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
       }
       const terminal=result?.structuredContent?.managedEncryptedContent?.context?.state??result?.structuredContent?.state;
-      if(name==='resolve_assistant_intake'&&['ignored','created','routed','waiting_owner','redirected'].includes(terminal))publicationTerminal=terminal;
+      if(name==='resolve_assistant_intake'&&['ignored','created','routed','waiting_owner','redirected','reply_pending'].includes(terminal))publicationTerminal=terminal;
       const bundle=result?.structuredContent?.managedEncryptedContent;
       if(skillArguments&&!bundle)fail('ASSISTANT_MCP_INVALID_RESPONSE');
       if(!bundle){await current();return result;}
@@ -2365,7 +2374,8 @@ const sourceRouteEventIds=value=>{
 };
 const intakeProjection=(value,expected)=>{
   if(!object(value)||value.schemaVersion!==1||value.id!==expected.intakeId||value.sourceId!==expected.sourceId||value.companyId!==expected.companyId
-    ||!['leased','ignored','created','routed','waiting_owner','redirected','cancelled'].includes(value.state)||typeof value.readConfirmed!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+    ||!['leased','ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied'].includes(value.state)||typeof value.readConfirmed!=='boolean'
+    ||value.ownerPrivateRead!==undefined&&typeof value.ownerPrivateRead!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.eventId!==undefined&&value.eventId!==expected.eventId||expected.sourceRevision!==undefined&&value.sourceRevision!==expected.sourceRevision
     ||expected.threadId!==undefined&&expected.threadId!==null&&value.threadId!==expected.threadId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(value.kind!==undefined&&!['owner_command','route_existing'].includes(value.kind))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
@@ -2389,7 +2399,7 @@ const intakeProjection=(value,expected)=>{
     ...(routing?{kind:'route_existing',eventIds:value.eventIds.map(id),...(value.companySelectionRequired===true?{companySelectionRequired:true}:{})}:{}),
     eventId:id(value.eventId),threadId:value.threadId===null?null:id(value.threadId),state:value.state,leaseExpiresAt:isoTimestamp(value.leaseExpiresAt),
     taskId:value.taskId===null?null:id(value.taskId),receiptId:value.receiptId===null?null:id(value.receiptId),
-    readConfirmed:value.readConfirmed,execution:value.execution===null?null:executionConfiguration(value.execution),
+    readConfirmed:value.readConfirmed,ownerPrivateRead:value.ownerPrivateRead===true,execution:value.execution===null?null:executionConfiguration(value.execution),
     ...(routes?{routes,ignoredEventIds:sourceRouteEventIds(value.ignoredEventIds??[])}:{}),
     ...(value.redirect?{redirect:{sourceId:id(value.redirect.sourceId),companyId:id(value.redirect.companyId),sourceRevision:revision(value.redirect.sourceRevision)}}:{}),
     ...(value.route?{route:{id:id(value.route.id),sourceId:id(value.route.sourceId),sourceRevision:revision(value.route.sourceRevision),
@@ -2665,6 +2675,12 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const value=await call('intakeReadConfirm',input,signal);
       if(value.schemaVersion!==1||value.intakeId!==input.intakePass?.intakeId||value.readConfirmed!==true)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return {readConfirmed:true};
+    },
+    async confirmOwnerReply(input,signal){
+      const locator=intakeLocator(input.intakePass),receiptId=id(input.receiptId);
+      const value=intakeProjection(await call('intakeReplyConfirm',{intakePass:locator,receiptId},signal),locator);
+      if(value.state!=='replied'||value.receiptId!==receiptId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return value;
     },
     async endRuntime(input,signal) {
       const value=await call('endRuntime',{companyId:id(input.companyId),taskId:id(input.taskId),passId:id(input.passId),
@@ -2973,7 +2989,7 @@ export const validateAssistantNativeInputShape=(nativeSchema,raw,{omittedRootFie
   if(!walk(root,input))fail('ASSISTANT_MCP_INPUT_INVALID');
 };
 export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store, httpRequest, materializeAttachment, materializeCompanyFile,
-  materializeEncryptedTask, materializeEncryptedSkill, materializeEncryptedCompanyContext, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, presentationProfile='task', timeoutMs = 30_000 }) => {
+  materializeEncryptedTask, materializeEncryptedSkill, materializeEncryptedCompanyContext, withWorkspaceArguments, readActivePass=null, materializeSourceIntake=null, materializeSourceReply=null, presentationProfile='task', timeoutMs = 30_000 }) => {
   if (!['task','remote_mcp','skill_setup','company_context'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
@@ -3122,6 +3138,10 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(name==='get_assistant_intake_context'&&value.isError!==true){
           if(typeof materializeSourceIntake!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           return materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal});
+        }
+        if(name==='resolve_assistant_intake'&&argumentsSnapshot.decision==='reply_owner'&&value.isError!==true){
+          if(typeof materializeSourceReply!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+          return materializeSourceReply({result:value,arguments:argumentsSnapshot,signal});
         }
         // Binary plans never enter model context. The trusted production
         // callback composes the common device/pass HTTP profile and private
@@ -4046,17 +4066,27 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
   }else if(acknowledgementExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   if(sourceIntake!==null){
     const routing=intakeExecution?.kind==='route_existing';
+    const replying=intakeExecution?.kind==='reply_owner';
     if(accountSetup||sourceAcknowledgement||!['telegram-mtproto','email-imap-smtp','max-web'].includes(scope.skillId)||!object(sourceIntake)
-      ||Object.keys(sourceIntake).sort().join(',')!=='expectedRevision,intakeId,sourceId'||!object(intakeExecution)
-      ||Object.keys(intakeExecution).sort().join(',')!==['accountId','beforeInvoke','eventId','runtimeArguments','threadId',...(routing?['kind','eventIds']:[])].sort().join(',')
+      ||Object.keys(sourceIntake).sort().join(',')!==['expectedRevision','intakeId','sourceId',...(replying?['replyReceiptId']:[])].sort().join(',')||!object(intakeExecution)
+      ||Object.keys(intakeExecution).sort().join(',')!==['accountId','beforeInvoke','eventId','runtimeArguments','threadId',...(routing?['kind','eventIds']:replying?['kind','replyText']:[])].sort().join(',')
       ||typeof intakeExecution.beforeInvoke!=='function'||!routing&&scope.skillId==='email-imap-smtp')fail('ASSISTANT_SOURCE_INVALID_INPUT');
-    sourceIntake=Object.freeze({intakeId:id(sourceIntake.intakeId),sourceId:id(sourceIntake.sourceId),expectedRevision:revision(sourceIntake.expectedRevision)});
-    const args=intakeExecution.runtimeArguments,parsed=parseAssistantSourceReadReference({skillId:scope.skillId,arguments:args});
+    sourceIntake=Object.freeze({intakeId:id(sourceIntake.intakeId),sourceId:id(sourceIntake.sourceId),expectedRevision:revision(sourceIntake.expectedRevision),
+      ...(replying?{replyReceiptId:id(sourceIntake.replyReceiptId)}:{})});
+    const args=intakeExecution.runtimeArguments;
+    if(replying&&(scope.skillId!=='telegram-mtproto'||!Array.isArray(args)||args.length!==12||args[0]!=='reply-reference'
+      ||args[9]!=='--expected-owner-id'||args[10]!==args[2]||!/^[1-9]\d{0,18}$/u.test(args[10]??'')||args[11]!=='--confirm'
+      ||!assistantOwnerReplyText(intakeExecution.replyText)))fail('ASSISTANT_SOURCE_INVALID_INPUT');
+    // Reuse the original reference grammar; this closed wrapper adds only the
+    // private owner target and literal confirmation. No provider selector,
+    // body, file path or arbitrary argument comes from MCP tool input.
+    const parsed=parseAssistantSourceReadReference({skillId:scope.skillId,arguments:replying?['read-reference',...args.slice(1,9)]:args});
     if(!parsed||parsed.accountId!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
     if(routing&&(!Array.isArray(intakeExecution.eventIds)||!intakeExecution.eventIds.length||intakeExecution.eventIds.length>100
       ||new Set(intakeExecution.eventIds).size!==intakeExecution.eventIds.length||intakeExecution.eventIds[0]!==intakeExecution.eventId))fail('ASSISTANT_SOURCE_INVALID_INPUT');
     intakeExecution=Object.freeze({accountId:id(intakeExecution.accountId),eventId:id(intakeExecution.eventId),threadId:id(intakeExecution.threadId),
       ...(routing?{kind:'route_existing',eventIds:Object.freeze(intakeExecution.eventIds.map(id))}:{}),
+      ...(replying?{kind:'reply_owner',replyText:intakeExecution.replyText}:{}),
       runtimeArguments:Object.freeze([...args]),beforeInvoke:intakeExecution.beforeInvoke});
   }else if(intakeExecution!==null)fail('ASSISTANT_SOURCE_INVALID_INPUT');
   const interactive=accountSetup?.operation==='configure'||accountSetup?.operation==='login';
@@ -4186,6 +4216,14 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
     },
     async readIntakeOwner(){await assertCurrent();if(!intakeStarted||intakeAdmission.kind==='route_existing')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
       return {ownerIdentityId:intakeAdmission.ownerIdentityId,ownerExternalUserId:intakeAdmission.ownerExternalUserId};},
+    async readSourceReplyInput(){
+      await assertCurrent();
+      if(!intakeStarted||intakeExecution?.kind!=='reply_owner'||intakeAdmission?.kind!=='reply_owner')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+      // This value exists only in the active signed host closure and child
+      // stdin. Passive readers cannot obtain it; no body file/journal/env or
+      // second process executor is introduced.
+      return Buffer.from(JSON.stringify({text:intakeExecution.replyText}),'utf8');
+    },
     async requireToken(requestOrigin){
       if(requestOrigin!==origin)fail('ASSISTANT_SOURCE_ORIGIN_DENIED');
       await assertCurrent();return handle;
@@ -4237,9 +4275,9 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       const issued=Date.parse(admission?.issuedAt),expires=Date.parse(admission?.expiresAt);
       if(!resolveSent || packagePath!==null || !object(admission) || admission.schemaVersion!==1
         || admission.assistantUserId!==assistantId || admission.deviceId!==deviceId
-        || admission.provider!==protocol.provider || admission.protocol!==(sourceIntake?(scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
+        || admission.provider!==protocol.provider || admission.protocol!==(sourceIntake?(intakeExecution.kind==='reply_owner'?'telegram-owner-reply/v1':scope.skillId==='email-imap-smtp'?'email-message-read/v1':scope.skillId==='max-web'?'max-message-read/v1':'telegram-message-read/v1'):sourceAcknowledgement
           ?(scope.skillId==='email-imap-smtp'?'email-read-state/v1':scope.skillId==='max-web'?'max-message-ack/v1':'telegram-message-ack/v1'):setupCommand?interactiveProtocol:protocol.protocol)
-        || admission.command!==(sourceIntake?'read-reference':sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
+        || admission.command!==(sourceIntake?(intakeExecution.kind==='reply_owner'?'reply-reference':'read-reference'):sourceAcknowledgement?'ack-reference':setupCommand?interactiveCommand:'monitor')
         || admission.pollIntervalSeconds!==300 || admission.maximumDurationMs!==(interactive?10*60_000:60_000)
         || typeof admission.issuedAt!=='string' || typeof admission.expiresAt!=='string'
         || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(admission.issuedAt)
@@ -4282,16 +4320,18 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
           ...(approved.verifyOnly?{verifyOnly:true}:{})});
       }else if(admission.acknowledgement!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(sourceIntake){
-        const approved=admission.intake,routing=intakeExecution.kind==='route_existing';
-        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId',...(routing?['kind','eventIds']:['ownerExternalUserId','ownerIdentityId']),'schemaVersion','sourceId','sourceRevision','threadId',...(scope.skillId==='max-web'?['maxChatUrl',...(maxAccountDiscovery?['maxAccountDiscovery']:[])]:[])].sort().join(',')
+        const approved=admission.intake,routing=intakeExecution.kind==='route_existing',replying=intakeExecution.kind==='reply_owner';
+        if(!object(approved)||Object.keys(approved).sort().join(',')!==['eventId','intakeId','localAccountId',...(routing?['kind','eventIds']:['ownerExternalUserId','ownerIdentityId',...(replying?['kind','receiptId']:[])]),'schemaVersion','sourceId','sourceRevision','threadId',...(scope.skillId==='max-web'?['maxChatUrl',...(maxAccountDiscovery?['maxAccountDiscovery']:[])]:[])].sort().join(',')
           ||approved.schemaVersion!==1||approved.intakeId!==sourceIntake.intakeId||approved.sourceId!==sourceIntake.sourceId
           ||approved.sourceRevision!==sourceIntake.expectedRevision||approved.localAccountId!==intakeExecution.accountId
           ||approved.eventId!==intakeExecution.eventId||approved.threadId!==intakeExecution.threadId
+          ||replying&&(approved.kind!=='reply_owner'||approved.receiptId!==sourceIntake.replyReceiptId
+            ||approved.ownerExternalUserId!==intakeExecution.runtimeArguments[2])
           ||scope.skillId==='max-web'&&(maxAccountDiscovery?approved.maxChatUrl!==null||approved.maxAccountDiscovery!==true:!assistantMaxChatUrl(approved.maxChatUrl)||approved.maxChatUrl!==intakeExecution.runtimeArguments[2])
           ||(routing?approved.kind!=='route_existing'||JSON.stringify(approved.eventIds)!==JSON.stringify(intakeExecution.eventIds)
             :!UUID.test(approved.ownerIdentityId??'')||!(/^[1-9]\d{0,18}$/u).test(approved.ownerExternalUserId??'')))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
         intakeAdmission=Object.freeze({artifactId:id(resolution.artifact.id),releaseId:id(resolution.releaseId),memberId:id(resolution.localIdentity.memberId),
-          connectionId:resolution.localIdentity.connectionId??null,...(routing?{kind:'route_existing'}:{ownerIdentityId:approved.ownerIdentityId,ownerExternalUserId:approved.ownerExternalUserId})});
+          connectionId:resolution.localIdentity.connectionId??null,...(routing?{kind:'route_existing'}:{...(replying?{kind:'reply_owner'}:{}),ownerIdentityId:approved.ownerIdentityId,ownerExternalUserId:approved.ownerExternalUserId})});
       }else if(admission.intake!==undefined)fail('ASSISTANT_SOURCE_INVALID_RESPONSE');
       if(accountSetup){
         const approved=admission.accountSetup;
@@ -4810,7 +4850,12 @@ export const readAssistantSourceMonitor = async ({identity,host,store,client=nul
         // Existing providers keep their passive ABI. Only a reviewed newer
         // signed email release is asked for bounded threading-header refs.
         ...(scope.skillId==='max-web'||scope.skillId==='email-imap-smtp'&&engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.6.5')
-          ?['--conversation-references']:[]),'--limit',scope.skillId==='email-imap-smtp'?'20':'100'];
+          ?['--conversation-references']:[]),
+        // Only a reviewed new Telegram runtime understands this explicit
+        // presence opt-in. It publishes native online while actively polling;
+        // the provider never forces offline or changes privacy settings.
+        ...(scope.skillId==='telegram-mtproto'&&engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.14.0')
+          ?['--online-presence']:[]),'--limit',scope.skillId==='email-imap-smtp'?'20':'100'];
       const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,
         runtimeDirectory:materialized.runtimeDirectory,executionContext,runtimeArguments:args});
       if(selected.handled || selected.account?.id!==accountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
@@ -5000,7 +5045,7 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
     intakeExecution:{accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,runtimeArguments:args,beforeInvoke:check,
       ...(routing?{kind:'route_existing',eventIds:pass.eventIds}:{})}},
   async({engine,profile,materialized,resolution,signal:combined})=>{
-    if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,email?'2.7.3':max?(source.maxChatUrl==null?'2.12.0':'2.11.0'):'2.13.1')
+    if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,email?'2.7.3':max?(source.maxChatUrl==null?'2.12.0':'2.11.0'):routing?'2.13.1':'2.14.0')
       ||max&&source.maxChatUrl==null&&!profile.allowsMaxAccountDiscovery())fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
     const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection};
     const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
@@ -5032,6 +5077,68 @@ export const readAssistantOwnerIntakeMessage=async({identity,client,host,store,p
     await check();
     // Native identity is returned ONLY to the private confirmation callback.
     // The model gets the original text after native read-confirm succeeds.
-    return {text:value.message.text,...owner};
+    // Telegram's signed native marked peer is positive ONLY for a User. A
+    // linked sender in a group can issue a direct work command, but may never
+    // grant owner-private reply authority. Do not infer this from display text,
+    // the opaque conversation hash, forwarding metadata or a model assertion.
+    return {text:value.message.text,...owner,
+      privateOwnerConversation:!max&&pieces[1]===owner.ownerExternalUserId};
+  });
+};
+
+/** A conversational response uses the SAME signed source/account executor.
+ * The model chooses its text, but cannot choose a recipient, account, original
+ * or provider command. Native admission has already fenced one owner-private
+ * original. Persist the local attempt at the common final-spawn boundary, and
+ * persist a verified positive result BEFORE any fallible follow-up HTTP read.
+ * A lost/invalid provider result never permits this method to be called again. */
+export const replyAssistantOwnerIntake=async({identity,client,host,store,pass,source,reference,receiptId,replyText,beforeInvoke,onConfirmed,signal})=>{
+  pass=validateAssistantActivePass(pass,identity);receiptId=id(receiptId);
+  if(pass.kind!=='source_intake'||pass.intakeKind||source?.skillId!=='telegram-mtproto'
+    ||source.id!==pass.sourceId||source.companyId!==pass.companyId||source.revision!==pass.sourceRevision
+    ||source.state!=='active'||source.ownerTaskIntakeAllowed!==true||reference.eventId!==pass.eventId
+    ||!assistantOwnerReplyText(replyText)
+    ||typeof beforeInvoke!=='function'||typeof onConfirmed!=='function')fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const pieces=reference.id?.split(':')??[];
+  const readArgs=['read-reference','--chat',pieces[1],'--message-id',pieces[2],
+    '--expected-revision',reference.revision,'--expected-conversation-key',reference.conversationKey];
+  if(pieces.length!==3||pieces[0]!=='message'||!(/^[1-9]\d{0,18}$/u).test(pieces[1]??'')
+    ||parseAssistantSourceReadReference({skillId:source.skillId,arguments:readArgs})?.eventId!==reference.id)
+    fail('ASSISTANT_INTAKE_ACCESS_DENIED');
+  const args=['reply-reference',...readArgs.slice(1),'--expected-owner-id',pieces[1],'--confirm'];
+  const check=async()=>{
+    if(JSON.stringify(validateAssistantActivePass(await host.readActivePass(),identity))!==JSON.stringify(pass))fail('ASSISTANT_INTAKE_CHANGED');
+    const current=await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal);
+    if(current.state!=='reply_pending'||current.receiptId!==receiptId||current.ownerPrivateRead!==true
+      ||current.threadId!==pass.threadId||current.eventId!==pass.eventId||current.sourceRevision!==pass.sourceRevision
+      ||Date.parse(current.leaseExpiresAt)<=Date.now())fail('ASSISTANT_INTAKE_CHANGED');
+    const sources=await client.sourceAccounts(pass.companyId,signal);
+    if(!sameAssistantSourceRegistration(source,sources.find(row=>row.id===source.id)))fail('ASSISTANT_INTAKE_CHANGED');
+  };
+  await check();
+  const scope=sourceScope({companyId:source.companyId,projectId:source.projectId,skillId:source.skillId});
+  return withAssistantSourcePackage({identity,host,store,scope,signal,
+    sourceIntake:{intakeId:pass.passId,sourceId:source.id,expectedRevision:source.revision,replyReceiptId:receiptId},
+    intakeExecution:{kind:'reply_owner',accountId:source.localAccountId,eventId:pass.eventId,threadId:pass.threadId,
+      runtimeArguments:args,replyText,beforeInvoke:async()=>{await check();await beforeInvoke();}}},
+  async({engine,profile,materialized,resolution,signal:combined})=>{
+    if(!engine.isStableVersionAtLeast(materialized.artifact.runtimeVersion,'2.14.0'))fail('ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED');
+    const executionContext={...scope,releaseId:resolution.releaseId,localIdentity:resolution.localIdentity,companyConnection:resolution.companyConnection};
+    const selected=await engine.prepareSkillAccount({origin:identity.origin,artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+      executionContext,runtimeArguments:['reply-reference','--local-account',source.localAccountId,...args.slice(1)]});
+    if(selected.handled||selected.account?.id!==source.localAccountId)fail('ASSISTANT_SOURCE_ACCOUNT_REQUIRED');
+    executionContext.account=selected.account;
+    const result=await engine.runMaterializedAgentSkill({artifact:materialized.artifact,runtimeDirectory:materialized.runtimeDirectory,
+      executionContext,runtimeArguments:selected.runtimeArguments,captureMode:'assistant_source_reply',captureOutput:true,captureExitCode:true,
+      timeoutMs:Math.min(60000,await profile.remainingMs()),signal:combined});
+    let value;try{value=JSON.parse(result.stdout);}catch{fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');}
+    if(result.exitCode!==0||!object(value)||Object.keys(value).sort().join(',')!=='automaticRetryAllowed,messageId,protocol,reference,replyToMessageId,schemaVersion,sent'
+      ||value.schemaVersion!==1||value.protocol!=='telegram-owner-reply/v1'||value.sent!==true||value.automaticRetryAllowed!==false
+      ||!object(value.reference)||Object.keys(value.reference).sort().join(',')!=='conversationKey,id,revision'
+      ||['id','revision','conversationKey'].some(key=>value.reference[key]!==reference[key])
+      ||value.replyToMessageId!==Number(pieces[2])||!Number.isSafeInteger(value.messageId)||value.messageId<1||value.messageId>=2147483648)
+      fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+    await onConfirmed({receiptId,messageId:value.messageId});
+    return {receiptId,messageId:value.messageId};
   });
 };

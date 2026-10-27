@@ -664,6 +664,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return selected;
   };
   const intakeLocator=row=>({companyId:row.scope.companyId,sourceId:row.scope.bindingId,intakeId:row.id});
+  const reconcileIntakeReply=async(row,outcome,signal)=>{
+    if(outcome.state!=='reply_pending')return outcome;
+    if(outcome.receiptId!==row.reply_receipt_id||row.reply_message_id===null){
+      // The signed provider has not yielded a durably verified send/read-back.
+      // Only the original marker may settle; never invoke the model/provider
+      // again merely because the deadline passed or a response was lost.
+      fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+    }
+    const confirmed=await client.confirmOwnerReply({intakePass:intakeLocator(row),receiptId:row.reply_receipt_id},signal);
+    lease();return confirmed;
+  };
   const settleIntake=async(row,outcome,signal)=>{
     if(outcome.id!==row.id||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||!uuid.test(outcome.receiptId??'')
       ||row.kind==='route_existing'&&(outcome.kind!=='route_existing'||JSON.stringify(outcome.eventIds)!==JSON.stringify(row.eventIds)))
@@ -674,6 +685,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(activePass){
       if(activePass.kind!=='source_intake'||activePass.passId!==row.id)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
       await passHost.releasePass(outcome);
+    }
+    if(outcome.state==='replied'){
+      // This is real positive business work, not metadata/login success.
+      // Reuse the SAME all-device uncertainty check before clearing dispatch
+      // health; another retained task/intake still prevents false recovery.
+      await businessConfirmed();return;
     }
     if(['waiting_owner','ignored','cancelled'].includes(outcome.state))return;
     if(outcome.state==='redirected'){
@@ -754,7 +771,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         // exact native lease; only its positive cancelled receipt may seed a
         // later owner-resumed generation. Unknown never becomes a new attempt.
         try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
-          if(!['created','routed','ignored','redirected','cancelled'].includes(closed.state))throw error;
+          if(!['created','routed','ignored','redirected','cancelled','replied'].includes(closed.state))throw error;
           await settleIntake(row,closed,signal);
         }catch(closing){if(saved)throw closing;inbox.deferOwnerIntake(row.id);}
         return deferredIntake(row);
@@ -783,7 +800,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     catch(error){
       if(saved?.passId===row.id||['started','uncertain'].includes(row.state)){
         const outcome=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
-        if(!['created','routed','ignored','redirected','cancelled'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
+        if(!['created','routed','ignored','redirected','cancelled','replied'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
         if(row.native_started===1&&!await nativeIntakeStopped(row,signal))return blockedIntake();
         inbox.finishOwnerIntake(row.id,outcome);if(saved)await passHost.releasePass(outcome);
         // Source revocation does not prove an old native process stopped.
@@ -793,14 +810,15 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(['created','routed','redirected'].includes(outcome.state))inbox.settleOwnerIntake(row.id);
       }else if(row.state==='ready'||row.kind==='route_existing'&&row.state==='pending'&&row.frozen){
         try{const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
-          if(!['created','routed','ignored','redirected','cancelled'].includes(closed.state))throw error;
+          if(!['created','routed','ignored','redirected','cancelled','replied'].includes(closed.state))throw error;
           inbox.finishOwnerIntake(row.id,closed);if(['created','routed','redirected'].includes(closed.state))inbox.settleOwnerIntake(row.id);
         }catch{inbox.deferOwnerIntake(row.id);}
       }else inbox.deferOwnerIntake(row.id);
       return deferredIntake(row);
     }
     if(['started','uncertain'].includes(row.state)){
-      const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
+      let outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
+      outcome=await reconcileIntakeReply(row,outcome,signal);
       const nativeResult=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
       if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
         await settleIntake(row,outcome,signal);return deferredIntake(row);
@@ -892,7 +910,8 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         intakeContext:{assistantId:identity.assistantId,companyId:row.scope.companyId,sourceId:source.id,sourceRevision:source.revision,
           intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
       if(cancelledOutcome)return settleOwnedCancellation();
-      const outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
+      let outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
+      outcome=await reconcileIntakeReply(inbox.ownerIntake(row.id),outcome,combined);
       if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
       await settleIntake(inbox.ownerIntake(row.id),outcome,combined);return {state:'completed',kind:'source_intake'};
     }catch(error){

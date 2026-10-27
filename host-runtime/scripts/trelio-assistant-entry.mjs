@@ -421,7 +421,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',c
     try{await fs.lstat(path.join(common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants','identity.json'));}
     catch(error){if(error.code==='ENOENT')return null;throw error;}
   }
-  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage}=await import('./trelio-assistant-transport.mjs');
+  const {createAssistantMcpClient,readAssistantOwnerIntakeMessage,replyAssistantOwnerIntake}=await import('./trelio-assistant-transport.mjs');
   return context(async(sourceClient,host,store)=>{
   const identity=sourceClient.identity;
   const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
@@ -469,12 +469,42 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',c
         if(JSON.stringify(latest)!==JSON.stringify(pass)||saved?.ended||!saved?.state||saved.threadId!==pass.threadId)
           throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
         await sourceClient.confirmIntakeRead({intakePass:args.intakePass,...(routing?{kind:'route_existing',eventIds:pass.eventIds}
-          :{ownerIdentityId:message.ownerIdentityId,senderExternalUserId:message.ownerExternalUserId}),runtimeSessionProof:buildRuntimeSessionProof({state:saved.state,
+          :{ownerIdentityId:message.ownerIdentityId,senderExternalUserId:message.ownerExternalUserId,
+            ...(message.privateOwnerConversation?{privateOwnerConversation:true}:{})}),runtimeSessionProof:buildRuntimeSessionProof({state:saved.state,
             toolName:'confirm_assistant_intake_read',now:new Date()})},signal);
       });
       const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text})=>({eventId,text}))}
-        :{ownerMessage:{text:message.text,verifiedNativeOwner:true}})};
+        :{ownerMessage:{text:message.text,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
       delete value.sourceRead;
+      return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
+    },
+    materializeSourceReply:async({result,arguments:args,signal})=>{
+      const [{validateAssistantActivePass},{openAssistantDatabase},{createAssistantInbox}]=await Promise.all([
+        import('./trelio-assistant-hook.mjs'),import('./trelio-assistant-private.mjs'),import('./trelio-assistant-inbox.mjs')]);
+      const pass=validateAssistantActivePass(await host.readActivePass(),identity),admitted=result.structuredContent;
+      if(pass.kind!=='source_intake'||pass.intakeKind||args.intakePass?.intakeId!==pass.passId
+        ||admitted?.state!=='reply_pending'||admitted.id!==pass.passId||admitted.eventId!==pass.eventId
+        ||admitted.threadId!==pass.threadId||admitted.sourceId!==pass.sourceId||admitted.sourceRevision!==pass.sourceRevision
+        ||admitted.reply?.receiptId!==admitted.receiptId||admitted.reply?.delivery!=='not_observed')
+        throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+      const withInbox=async action=>{
+        const opened=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
+        try{return await action(createAssistantInbox({database:opened.database}));}finally{await opened.close();}
+      };
+      const row=await withInbox(inbox=>inbox.ownerIntake(pass.passId));
+      if(row.kind!=='owner_command'||row.state!=='started'||row.thread_id!==pass.threadId||row.original_event_id!==pass.eventId
+        ||row.scope.bindingId!==pass.sourceId||row.source_revision!==pass.sourceRevision||row.reply_receipt_id!==null)
+        throw Object.assign(new Error(),{code:'ASSISTANT_INTAKE_CHANGED'});
+      const source=(await sourceClient.sourceAccounts(pass.companyId,signal)).find(value=>value.id===pass.sourceId);
+      await replyAssistantOwnerIntake({identity,client:sourceClient,host,store,pass,source,signal,
+        receiptId:admitted.receiptId,replyText:args.replyText,
+        reference:{eventId:row.original_event_id,id:row.native_event_id,revision:row.native_revision,conversationKey:row.conversation_key},
+        beforeInvoke:()=>withInbox(inbox=>inbox.startOwnerReply(pass.passId,admitted.receiptId)),
+        onConfirmed:positive=>withInbox(inbox=>inbox.confirmOwnerReply(pass.passId,positive))});
+      // Positive provider evidence is already durable in SAME private SQLite.
+      // A failed/lost confirmation is retried by coordinator as receipt-only
+      // settlement, including after SessionEnd; it can never resend the text.
+      const value=await sourceClient.confirmOwnerReply({intakePass:args.intakePass,receiptId:admitted.receiptId},signal);
       return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
     },
     materializeEncryptedTask: ({descriptor,signal}) => withProfile(async current => {
@@ -974,7 +1004,7 @@ const productionContext = async (action, options = {}) => {
 
 const coordinatorMethods = ['heartbeat','companies','tasks','task','poll','acknowledge','claimTaskHost',
   'beginTaskPass','readTaskPass','renewTaskPass','readBusinessOutcome','reportSchedule','ownerIdentities',
-  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake'];
+  'beginSourceIntake','readSourceIntake','registerIntakeRuntime','endIntakeRuntime','cancelSourceIntake','confirmOwnerReply'];
 const businessCapabilities = ['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service'];
 /** Reuse the host setup mutex at the final NEW-work HTTP boundary. This is a
  * denial/CAS check, never domain admission: native owner/device/task guards

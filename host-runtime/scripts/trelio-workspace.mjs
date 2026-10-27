@@ -8857,13 +8857,14 @@ export const runMaterializedAgentSkill = async ({
   const taskSetupCapture = captureMode === 'assistant_skill_setup';
   const sourceAckCapture = captureMode === 'assistant_source_ack';
   const sourceIntakeCapture = captureMode === 'assistant_source_intake';
+  const sourceReplyCapture = captureMode === 'assistant_source_reply';
   const profile = currentWorkspaceExecutionProfile();
   const privateSetup = privateSecretSetup !== null;
   if(privateSetup && (!taskCapture || profile?.kind!=='digital_assistant'
     || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
     || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
     throw Object.assign(new Error('Private setup requires its exact task profile.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-  if (!['monitor','assistant_task','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake'].includes(captureMode)
+  if (!['monitor','assistant_task','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake','assistant_source_reply'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
     || taskSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
@@ -8877,9 +8878,12 @@ export const runMaterializedAgentSkill = async ({
       || typeof profile.startSourceAcknowledgement !== 'function')
     || sourceIntakeCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
       || typeof profile.authorizeSourceIntake !== 'function' || typeof profile.startSourceIntake !== 'function')
+    || sourceReplyCapture && (!captureOutput || profile?.kind !== 'digital_assistant_source'
+      || typeof profile.authorizeSourceIntake !== 'function' || typeof profile.startSourceIntake !== 'function'
+      || typeof profile.readSourceReplyInput !== 'function' || runtimeArguments?.[0]!=='reply-reference')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && runtimeArguments[0] !== 'monitor'
+    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && !sourceReplyCapture && runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture || taskSetupCapture ? 10 * 60_000 : 180_000)
@@ -8917,7 +8921,7 @@ export const runMaterializedAgentSkill = async ({
       throw Object.assign(new Error('Invalid acknowledgement budget.'), {code:'ASSISTANT_SOURCE_ACK_REQUIRED'});
     timeoutMs = Math.min(timeoutMs,remaining);
   }
-  if (sourceIntakeCapture) {
+  if (sourceIntakeCapture || sourceReplyCapture) {
     const remaining = await profile.authorizeSourceIntake({artifact,executionContext,runtimeArguments});
     if (!Number.isSafeInteger(remaining) || remaining < 1000 || remaining > 60000)
       throw Object.assign(new Error('Invalid owner intake budget.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
@@ -9007,21 +9011,25 @@ export const runMaterializedAgentSkill = async ({
       if (signal?.aborted || remaining <= 0) throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED',
         'Истёк срок native ACK.', {operation:'skill_run'});
     }
-    if(sourceIntakeCapture){
+    if(sourceIntakeCapture || sourceReplyCapture){
       await profile.startSourceIntake();remaining=budget-(performance.now()-runtimeStartedClock);
       if(signal?.aborted||remaining<=0)throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED','Owner intake expired.',{operation:'skill_run'});
     }
     let result;
+    const replyInput=sourceReplyCapture?await profile.readSourceReplyInput():null;
+    if(sourceReplyCapture&&(!Buffer.isBuffer(replyInput)||replyInput.length<1||replyInput.length>16384))
+      throw Object.assign(new Error('Invalid private reply input.'),{code:'ASSISTANT_INTAKE_ACCESS_DENIED'});
     try {
       const pending = execFileAsync(executable, args, {
         cwd: runtimeDirectory, env: runtimeEnvironment, shell: false, windowsHide: true,
         encoding: 'buffer', maxBuffer: (taskCapture ? 3 : 1) * 1024 * 1024, timeout: Math.max(1, Math.floor(remaining)),
         killSignal: 'SIGKILL', ...(signal ? { signal } : {}),
       });
-      // No input values are supplied. Close immediately so a misconfigured
-      // provider fails rather than consuming the user's terminal/session.
+      // Only the exact native-admitted owner reply has bounded private input.
+      // All passive reads still close stdin immediately. The body never enters
+      // argv/env/a temporary file, and the common process/deadline is unchanged.
       pending.child.stdin.on('error', () => {});
-      pending.child.stdin.end();
+      pending.child.stdin.end(replyInput??undefined,()=>replyInput?.fill(0));
       try {
         result = { ...await pending, exitCode: 0 };
       } catch (error) {
@@ -9077,6 +9085,7 @@ export const runMaterializedAgentSkill = async ({
       // Do not retain the extra byte copies after successful decode or failure.
       result?.stdout?.fill(0);
       result?.stderr?.fill(0);
+      replyInput?.fill(0);
     }
   }
   const exitCode = await new Promise((resolve, reject) => {

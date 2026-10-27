@@ -1180,6 +1180,51 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
 });
 
 
+for(const loseConfirmation of [false,true])test(`owner-private answer settles without task/Run and restores only positive receipt after restart (lost=${loseConfirmation})`,async t=>{
+ const f=fixture(t,{ownsDatabase:false});await f.coordinator.close();f.authority.state='done';
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerIdentityId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
+   skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true,executionVerified:false};
+ let clock=Date.now(),poll=0,active=null,intake=null,turns=0,confirms=0,recoveries=0,lose=loseConfirmation;
+ const client={...f.options.client,sourceAccounts:async()=>[source],tasks:async()=>({bindings:[],nextCursor:null}),
+   sourceRoutes:async()=>[],ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
+   beginSourceIntake:async input=>{intake??={schemaVersion:1,id:input.intakeId,companyId:f.companyId,sourceId,sourceRevision:0,
+     eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:new Date(clock+1800000).toISOString(),
+     taskId:null,receiptId:null,execution:f.execution.configuration,readConfirmed:false};return structuredClone(intake);},
+   readSourceIntake:async()=>structuredClone(intake),
+   confirmOwnerReply:async input=>{confirms++;assert.equal(input.receiptId,intake.receiptId);
+     if(lose){lose=false;throw Object.assign(new Error('synthetic lost confirm'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});}
+     intake.state='replied';return structuredClone(intake);}};
+ const native={...f.options.native,run:async(input,options)=>{
+   assert.ok(input.intakeContext);assert.equal(input.taskContext,undefined);turns++;options.startInvocation();
+   intake.state='reply_pending';intake.receiptId=randomUUID();intake.ownerPrivateRead=true;intake.readConfirmed=true;
+   const inbox=createAssistantInbox({database:f.database});inbox.startOwnerReply(intake.id,intake.receiptId);
+   inbox.confirmOwnerReply(intake.id,{receiptId:intake.receiptId,messageId:91});
+   const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+   f.deliveries.set(input.deliveryId,result);return result;}};
+ const options={...f.options,client,native,now:()=>clock,onBusinessConfirmed:()=>{recoveries++;},passHost:{readActivePass:async()=>active,
+   activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async outcome=>{
+     assert.equal(outcome.state,'replied');assert.equal(outcome.id,active.passId);active=null;}},
+   workspaceForIntake:async()=>process.cwd(),readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,
+     nextCursor:String(poll++),hasMore:false,events:poll===1?[]:[{id:'message:123:8',revision:'b'.repeat(64),
+       conversationKey:key,kind:'new',outgoing:false,attention:'direct',forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
+ let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();f.database.close();});
+ await coordinator.pollOnce();clock+=300001;await coordinator.pollOnce();
+ if(loseConfirmation){
+   await assert.rejects(coordinator.workOnce(),/TRANSPORT_UNAVAILABLE/);assert.ok(active);assert.equal(turns,1);
+   await coordinator.close();coordinator=createAssistantCoordinator(options);
+ }
+ await coordinator.workOnce();assert.equal(intake.state,'replied');assert.equal(active,null);assert.equal(turns,1);
+ assert.equal(confirms,loseConfirmation?2:1);
+ assert.equal(recoveries,1,'only the durably settled positive reply can clear the SAME independent health latch');
+ const row=f.database.prepare('SELECT state,settled,outcome_state,reply_message_id FROM assistant_owner_intakes').get();
+ assert.deepEqual({...row},{state:'complete',settled:1,outcome_state:'replied',reply_message_id:91});
+ assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_deliveries').get().n,0,'no task delivery or fake business pass');
+ assert.equal(f.passes.size,0,'ordinary task pass creator is never called');
+ await coordinator.close();coordinator=createAssistantCoordinator(options);await coordinator.workOnce();assert.equal(turns,1);
+ assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0,'reply evidence is not a blanket read ACK');
+});
+
 for(const firstState of ['policy_blocked','waiting_owner','unknown_provision','unknown_provision_no_thread',
   'created_revoked','created_changed','created_denied','created_network'])test(`${firstState} owner intake retains its event while another company intake and ordinary task proceed`,async t=>{
   const f=fixture(t);await f.coordinator.close();

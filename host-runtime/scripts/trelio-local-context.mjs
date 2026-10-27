@@ -951,6 +951,7 @@ const LOCAL_ACTION_PROTECTED_FIELDS = new Map([
   ["message", "message"],
   ["perspective", "perspective"],
   ["questionText", "question_text"],
+  ["replyText", "reply_text"],
   ["intentJson", "intent_json"],
   ["relationType", "relation_type"],
   ["rationale", "rationale"],

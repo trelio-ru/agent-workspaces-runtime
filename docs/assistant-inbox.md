@@ -650,7 +650,7 @@ production publication or Windows business E2E; those remain independent release
 gates and `businessReady` stays false until the entire product passes them.
 
 
-## Verified owner intake (schema v9)
+## Verified owner intake (schema v9, reply receipts v16)
 
 The SAME private inbox now retains structural `assistant_owner_intakes` records
 beside original refs/cursors. Only incoming, original Telegram/MAX refs with a
@@ -666,6 +666,24 @@ context/resolve tools are visible. Private host reads the exact original through
 the SAME signed account/process engine, repeats source/pass/owner checks and
 confirms native read before returning original text in RAM. Quoted/forwarded,
 outgoing, via-bot and mismatched native senders cannot create tasks.
+
+For a simple private Telegram owner question, native `reply_owner` commits a
+`reply_pending` receipt after the host has proved that the native private peer
+equals the current linked owner. A group sender match is insufficient. The SAME
+restricted visible chat answers without creating a task, Workspace, Run or route.
+An older host never supplies this new private-peer fact, so it cannot accidentally
+commit a reply it cannot execute. The new host requires provider >=2.14.0 before
+confirming the owner-body read; passive/triage readers retain their prior ABI.
+
+Schema16 adds only nullable `reply_receipt_id` and positive `reply_message_id`
+to the SAME private SQLite journal; migration preserves old refs/cursors/fences.
+Text is transient RAM/private child stdin, never SQLite/argv/env. The ordinary
+process engine persists the attempt at its final spawn boundary. Exact signed
+send/read-back is persisted before native `replied` confirmation. A lost HTTP
+confirmation is a receipt-only technical retry, even after SessionEnd; it never
+starts another model/provider invocation or invents fresh observed model proof.
+Missing/ambiguous provider evidence stays fenced; the original is not resent.
+Reply receipt alone does not borrow the task-material processing/ACK path.
 
 Clear owner commands use the SAME native creator/BOTH ACL and commit task,
 accepted new assignment, receipt and per-event route atomically. Ordinary task

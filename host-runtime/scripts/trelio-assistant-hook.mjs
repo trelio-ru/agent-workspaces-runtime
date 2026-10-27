@@ -48,7 +48,7 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
       if(JSON.stringify(active)!==JSON.stringify(pass)) fail('ASSISTANT_HOOK_TASK_MISMATCH');
       const live=await client[intake?'readSourceIntake':'readTaskPass'](locator,runtimeHookSignal());
       const ending=event.hook_event_name==='SessionEnd';
-      if((live.state!=='leased' && !(ending && (intake?['ignored','created','routed','waiting_owner','redirected','cancelled'].includes(live.state):live.state==='closed')))
+      if((live.state!=='leased' && !(ending && (intake?['ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied'].includes(live.state):live.state==='closed')))
         || live.threadId!==pass.threadId || (intake?live.eventId!==pass.eventId || live.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(pass.eventIds))
           :live.deliveryId!==pass.deliveryId || live.bindingId!==pass.bindingId || live.bindingRevision!==pass.bindingRevision)
@@ -397,7 +397,7 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const old=await store.get(slot);if(!old)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       const pass=validateAssistantActivePass(old,identity);
       const intake=pass.kind==='source_intake';
-      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','routed','waiting_owner','redirected','cancelled'].includes(outcome.state):outcome.state!=='confirmed')
+      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','routed','waiting_owner','redirected','cancelled','replied'].includes(outcome.state):outcome.state!=='confirmed')
         || !uuid.test(outcome.receiptId??'') || (intake?outcome.id!==pass.passId || outcome.sourceId!==pass.sourceId || outcome.eventId!==pass.eventId||outcome.threadId!==pass.threadId||outcome.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(outcome.kind!=='route_existing'||JSON.stringify(outcome.eventIds)!==JSON.stringify(pass.eventIds))
           :['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>outcome[key]!==pass[key])))
