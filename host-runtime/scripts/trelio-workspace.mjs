@@ -39,6 +39,7 @@ import {
   WorkspaceLocalRecoveryRequiredError,
   WorkspaceRunReclaimRequiredError,
   workspaceRecoveryDirectory,
+  isWorkspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
 import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
@@ -552,6 +553,7 @@ const SKILL_RUNTIME_CACHE_DIRECTORY = path.join(
 );
 const DEFAULT_LOCAL_SETTINGS = Object.freeze({
   workspaceRetentionDays: 30,
+  recoveryRetentionDays: 3,
   objectCacheMaxAgeDays: 30,
   objectCacheMaxBytes: 10 * 1024 * 1024 * 1024,
   skillRuntimeCacheMaxAgeDays: 90,
@@ -11507,6 +11509,12 @@ const readLocalSettings = async () => {
       1,
       365,
     ),
+    recoveryRetentionDays: readBoundedInteger(
+      rawSettings.recoveryRetentionDays,
+      DEFAULT_LOCAL_SETTINGS.recoveryRetentionDays,
+      1,
+      365,
+    ),
     objectCacheMaxAgeDays: readBoundedInteger(
       rawSettings.objectCacheMaxAgeDays,
       DEFAULT_LOCAL_SETTINGS.objectCacheMaxAgeDays,
@@ -11534,22 +11542,27 @@ const readLocalSettings = async () => {
   };
 };
 
-export const readRunRegistry = async ({configurationDirectory=CONFIG_DIRECTORY}={}) => {
+const readRunRegistryState = async (configurationDirectory = CONFIG_DIRECTORY) => {
   // Trusted host composition may select its already isolated configuration
   // root (including a synthetic QA/test root). Keep ONE registry codec; this
   // is not a model path parameter, a credential store or workspace authority.
   if(!path.isAbsolute(configurationDirectory))throw new Error('Workspace registry configuration root must be absolute.');
   try {
     const payload = JSON.parse(await fs.readFile(path.join(configurationDirectory,'runs.json'), "utf8"));
-    return Array.isArray(payload?.roots)
-      ? payload.roots.filter((item) => typeof item === "string" && path.isAbsolute(item))
-      : [];
+    const paths = (value) => Array.isArray(value)
+      ? value.filter((item) => typeof item === "string" && path.isAbsolute(item)) : [];
+    return { roots: paths(payload?.roots), retainedRoots: paths(payload?.retainedRoots) };
   } catch (error) {
     if (error.code === "ENOENT") {
-      return [];
+      return { roots: [], retainedRoots: [] };
     }
     throw error;
   }
+};
+
+export const readRunRegistry = async ({ configurationDirectory = CONFIG_DIRECTORY, includeRetained = false } = {}) => {
+  const state = await readRunRegistryState(configurationDirectory);
+  return includeRetained ? [...new Set([...state.roots, ...state.retainedRoots])] : state.roots;
 };
 
 const acquireRunRegistryLock = async () => {
@@ -11639,7 +11652,8 @@ const withRunRegistryLock = async (handler) => {
   }
 };
 
-const writeRunRegistry = async (roots) => {
+const writeRunRegistry = async (roots, retainedRoots = undefined) => {
+  const retained = retainedRoots ?? (await readRunRegistryState()).retainedRoots;
   await fs.mkdir(CONFIG_DIRECTORY, { recursive: true, mode: 0o700 });
   const temporaryPath = `${RUN_REGISTRY_FILE}.tmp-${crypto.randomUUID()}`;
 
@@ -11649,6 +11663,7 @@ const writeRunRegistry = async (roots) => {
       `${JSON.stringify({
         schemaVersion: 1,
         roots: [...new Set(roots.map((item) => path.resolve(item)))].sort(),
+        retainedRoots: [...new Set(retained.map((item) => path.resolve(item)))].sort(),
       }, null, 2)}\n`,
       { mode: 0o600 },
     );
@@ -11658,11 +11673,12 @@ const writeRunRegistry = async (roots) => {
   }
 };
 
-const registerRunRoot = async (rootDirectory) => {
+const registerRunRoot = async (rootDirectory, { loadSourceRun = null } = {}) => {
   await withRunRegistryLock(async () => {
     const roots = await readRunRegistry();
     const target = path.resolve(rootDirectory);
     let retained = roots;
+    const retentionOnly = (await readRunRegistryState()).retainedRoots;
     if (/^r-[A-Za-z0-9_-]{43}$/u.test(path.basename(target))) {
       const current = await readOptionalRunMetadata(target);
       if (!current) throw new Error("Recovery registration requires completed Run metadata.");
@@ -11679,17 +11695,32 @@ const registerRunRoot = async (rootDirectory) => {
           retained.push(source); continue;
         }
         const previous = await readOptionalRunMetadata(source);
-        if (previous?.workspaceId !== current.workspaceId || previous?.runId !== current.runId) {
+        if (previous?.workspaceId !== current.workspaceId) {
           retained.push(source); continue;
         }
         await assertValidMaterializedRoot(source, previous, current.workspaceId, normalizeOrigin(current.origin));
-        if (!Number.isSafeInteger(current.fencingToken) || !Number.isSafeInteger(previous.fencingToken)
-          || current.fencingToken <= previous.fencingToken) {
-          throw new Error("Recovery registration has no newer native Run fence.");
+        if (previous.runId === current.runId) {
+          if (!Number.isSafeInteger(current.fencingToken) || !Number.isSafeInteger(previous.fencingToken)
+            || current.fencingToken <= previous.fencingToken) {
+            throw new Error("Recovery registration has no newer native Run fence.");
+          }
+        } else {
+          // A new Run can recover beside an old terminal checkout as well.
+          // Local terminal markers/age cannot authorize switching its locator:
+          // require the same exact native source read under this open's ACL and
+          // encrypted route. An unknown/live source remains actively ambiguous.
+          const sourceRun = loadSourceRun ? await loadSourceRun(previous.runId) : null;
+          if (!TERMINAL_RUN_STATUSES.has(sourceRun?.status)) {
+            retained.push(source); continue;
+          }
         }
+        // Superseded sources must leave active path selection, but
+        // cannot disappear from retention discovery. Their dirty bytes stay
+        // protected until ordinary native/Git checks eventually permit cleanup.
+        retentionOnly.push(source);
       }
     }
-    await writeRunRegistry([...retained, target]);
+    await writeRunRegistry([...retained, target], retentionOnly.filter((item) => !sameLocalPath(item, target)));
   });
 };
 
@@ -12435,8 +12466,13 @@ const resolveWorkspaceRootDirectory = async ({
   }
 
   const legacyPersistentRoot = path.join(LEGACY_DEFAULT_WORKSPACES_DIRECTORY, workspaceId);
+  const registryState = await readRunRegistryState();
+  // A canonical source can remain physically present with unsaved changes
+  // after a verified recovery handoff. Its retention-only locator must not
+  // override the active registered replacement on every subsequent open.
+  const persistentRootSuperseded = registryState.retainedRoots.some((item) => sameLocalPath(item, legacyPersistentRoot));
 
-  if (await pathEntryExists(legacyPersistentRoot)) {
+  if (!persistentRootSuperseded && await pathEntryExists(legacyPersistentRoot)) {
     if (!runId || await readOptionalRunMetadata(legacyPersistentRoot)) {
       return {
         rootDirectory: legacyPersistentRoot,
@@ -13089,6 +13125,11 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
     loadRunState,
     loadRunSnapshot,
   });
+  const registerOpenedRoot = () => registerRunRoot(rootDirectory, {
+    loadSourceRun: async (sourceRunId) => (await loadExactWorkspaceRun({
+      origin: workspaceOrigin, token, workspaceId, runId: sourceRunId, companyEncryption,
+    }))?.run ?? null,
+  });
 
   if (!requestedRunId && directoryPreflight.existingMetadata) {
     const acceptedHead = runOverview?.workspace?.acceptedHead;
@@ -13442,7 +13483,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       objects,
       lastUsedAt: new Date().toISOString(),
     });
-    await registerRunRoot(rootDirectory);
+    await registerOpenedRoot();
     await synchronizeRunCodexTitle({ metadata: refreshedMetadata, workspaceOrigin, token, companyEncryption });
     process.stdout.write(`${workspaceDirectory}\n`);
     return;
@@ -13564,7 +13605,7 @@ const openWorkspaceLocked = async (origin, options, workspaceId) => {
       lastUsedAt: now,
     };
     await writeRunMetadata(metadataPath, metadata);
-    await registerRunRoot(rootDirectory);
+    await registerOpenedRoot();
     await synchronizeRunCodexTitle({ metadata, workspaceOrigin, token, companyEncryption });
     process.stdout.write(`${workspaceDirectory}\n`);
   } catch (error) {
@@ -16952,7 +16993,7 @@ const submit = async (options) => withRun(async ({
       finishRecovery: undefined,
       terminalAt: result.run.acceptedAt || new Date().toISOString(),
       lastUsedAt: new Date().toISOString(),
-      cleanupEligibleAfterDays: (await readLocalSettings()).workspaceRetentionDays,
+      cleanupEligibleAfterDays: workspaceRootRetentionDays({ rootDirectory: path.dirname(metadataPath), metadata }, await readLocalSettings()),
       encryptedDerivedArtifacts: undefined,
     });
     // A terminal, confirmed Run no longer needs resumable ciphertext. Failed
@@ -17013,7 +17054,7 @@ const submit = async (options) => withRun(async ({
         finishRecovery: undefined,
         terminalAt: result.run.acceptedAt || new Date().toISOString(),
         lastUsedAt: new Date().toISOString(),
-        cleanupEligibleAfterDays: (await readLocalSettings()).workspaceRetentionDays,
+        cleanupEligibleAfterDays: workspaceRootRetentionDays({ rootDirectory: path.dirname(metadataPath), metadata }, await readLocalSettings()),
       });
       process.stdout.write("Результат записан в рабочее пространство Trelio.\n");
       process.stdout.write("Статус: принят автоматически.\n");
@@ -18125,7 +18166,7 @@ const discoverDefaultRunRoots = async () => {
 };
 
 const discoverRegisteredRunRoots = async () => {
-  const registeredRoots = await readRunRegistry();
+  const registeredRoots = await readRunRegistry({ includeRetained: true });
   const registeredRootSet = new Set(registeredRoots.map((item) => path.resolve(item)));
   const roots = [...new Set([
     ...registeredRoots,
@@ -18165,7 +18206,8 @@ const discoverRegisteredRunRoots = async () => {
     // ENOENT каждого exact path и удаляем только такие записи. Параллельно
     // зарегистрированный или вновь появившийся root остаётся в текущем файле.
     await withRunRegistryLock(async () => {
-      const currentRoots = await readRunRegistry();
+      const currentState = await readRunRegistryState();
+      const currentRoots = [...new Set([...currentState.roots, ...currentState.retainedRoots])];
       const retainedRoots = [];
       for (const currentRoot of currentRoots) {
         const resolvedRoot = path.resolve(currentRoot);
@@ -18180,7 +18222,9 @@ const discoverRegisteredRunRoots = async () => {
           if (error.code !== "ENOENT") retainedRoots.push(currentRoot);
         }
       }
-      await writeRunRegistry(retainedRoots);
+      const surviving = new Set(retainedRoots);
+      await writeRunRegistry(currentState.roots.filter((item) => surviving.has(item)),
+        currentState.retainedRoots.filter((item) => surviving.has(item)));
     });
   }
 
@@ -18626,6 +18670,18 @@ const isLegacyRunSubdirectory = (root) => (
   )
 );
 
+const isRecoveryRunRoot = (root) => isWorkspaceRecoveryDirectory(
+  root.rootDirectory, root.metadata.workspaceId, root.metadata.runId,
+);
+
+// A recovery is a separate checkout, not the persistent working directory of
+// the whole Workspace. New sibling Runs cannot extend its own retention clock.
+// The shorter policy changes only eligibility time: native terminal/Git/ignored
+// data/lock checks below remain mandatory on both the plan and deletion pass.
+const workspaceRootRetentionDays = (root, settings) => isRecoveryRunRoot(root)
+  ? settings.recoveryRetentionDays
+  : settings.workspaceRetentionDays;
+
 const hasUnmanagedWorkspaceRootEntries = async (rootDirectory) => {
   const rootEntries = await fs.readdir(rootDirectory, { withFileTypes: true });
 
@@ -18655,7 +18711,6 @@ const planWorkspaceCleanup = async ({
     latestRunActivityByWorkspaceId,
     workspacesWithOpenRuns,
   } = await readRunStatusMap({ origin, token, roots });
-  const retentionMs = settings.workspaceRetentionDays * 24 * 60 * 60 * 1000;
   const candidates = [];
   const skippedRoots = [];
 
@@ -18676,6 +18731,8 @@ const planWorkspaceCleanup = async ({
 
     const runState = statusByRunId.get(root.metadata.runId);
     const legacyRunSubdirectory = isLegacyRunSubdirectory(root);
+    const isolatedRunRoot = legacyRunSubdirectory || isRecoveryRunRoot(root);
+    const retentionMs = workspaceRootRetentionDays(root, settings) * 24 * 60 * 60 * 1000;
 
     if (!runState) {
       skipRoot(root, "run_status_unknown");
@@ -18697,7 +18754,7 @@ const planWorkspaceCleanup = async ({
       continue;
     }
 
-    if (!legacyRunSubdirectory && workspacesWithOpenRuns.has(root.metadata.workspaceId)) {
+    if (!isolatedRunRoot && workspacesWithOpenRuns.has(root.metadata.workspaceId)) {
       skipRoot(root, "workspace_has_open_run", runState);
       continue;
     }
@@ -18719,7 +18776,7 @@ const planWorkspaceCleanup = async ({
       // The persistent root is shared by successive Runs; old UUID child
       // roots are not. A new Run must not reset retention for an unrelated,
       // verified old child that still has its own exact Git and server proof.
-      legacyRunSubdirectory
+      isolatedRunRoot
         ? Number.NEGATIVE_INFINITY
         : (latestRunActivityByWorkspaceId.get(root.metadata.workspaceId)
           || Number.NEGATIVE_INFINITY),
@@ -18779,7 +18836,7 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
     throw error;
   }
 
-  const registeredRoots = new Set((await readRunRegistry()).map((item) => path.resolve(item)));
+  const registeredRoots = new Set((await readRunRegistry({ includeRetained: true })).map((item) => path.resolve(item)));
   const cacheCandidates = await planObjectCachePrune({
     roots: cleanupPlan.roots,
     settings,
@@ -18901,8 +18958,10 @@ const cleanLocalRuns = async ({ origin, token, dryRun, automatic = false }) => {
     deletionCandidates.map((item) => path.resolve(item.rootDirectory)),
   );
   await withRunRegistryLock(async () => {
+    const state = await readRunRegistryState();
     await writeRunRegistry(
-      (await readRunRegistry()).filter((item) => !deletedRootSet.has(path.resolve(item))),
+      state.roots.filter((item) => !deletedRootSet.has(path.resolve(item))),
+      state.retainedRoots.filter((item) => !deletedRootSet.has(path.resolve(item))),
     );
   });
 

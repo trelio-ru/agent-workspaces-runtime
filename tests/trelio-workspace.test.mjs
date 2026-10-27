@@ -177,7 +177,7 @@ import {
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { saveRuntimeChatBinding } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
-import { parseWorkspaceDraftRecoveryRequiredError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
+import { parseWorkspaceDraftRecoveryRequiredError, parseWorkspaceLocalRecoveryRequiredError } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   COMPANY_ENCRYPTION_SUITE,
   createAgentEncryptionDevice,
@@ -3322,6 +3322,8 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
   const workspaceId = "44444444-4444-4444-8444-444444444444";
   const secondRunId = "55555555-5555-4555-8555-555555555555";
   const thirdRunId = "66666666-6666-4666-8666-666666666666";
+  const fourthRunId = "12121212-1212-4212-8212-121212121212";
+  let thirdRunStatus = "running";
   const firstExport = await createExportBundle(path.join(temporaryDirectory, "first"), {
     "WORKSPACE_CONTEXT.md": "# Persistent workspace\n",
     "shared.md": "first accepted version\n",
@@ -3461,7 +3463,7 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
         events.push("exact-third-run");
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({
-          run: { ...serializeRun(thirdRunId, secondExport.head, "running"), workspaceId },
+          run: { ...serializeRun(thirdRunId, secondExport.head, thirdRunStatus), workspaceId },
           latestCheckpoint: {
             id: "99999999-9999-4999-8999-999999999999",
             runId: thirdRunId,
@@ -3478,6 +3480,18 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       ) {
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify(serializeRun(thirdRunId, secondExport.head, "running")));
+        return;
+      }
+
+      if (request.method === "GET"
+        && request.url === `/api/agent-workspaces/workspaces/${workspaceId}/runs/${fourthRunId}`) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ run: { ...serializeRun(fourthRunId, secondExport.head, "running"), workspaceId }, latestCheckpoint: null }));
+        return;
+      }
+      if (request.method === "POST" && request.url === `/api/agent-workspaces/runs/${fourthRunId}/claim`) {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify(serializeRun(fourthRunId, secondExport.head, "running")));
         return;
       }
 
@@ -3518,6 +3532,11 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       }
 
       if (request.url === `/api/agent-workspaces/runs/${thirdRunId}/bundle`) {
+        response.setHeader("content-type", "application/vnd.git.bundle");
+        response.end(secondExport.bundle);
+        return;
+      }
+      if (request.url === `/api/agent-workspaces/runs/${fourthRunId}/bundle`) {
         response.setHeader("content-type", "application/vnd.git.bundle");
         response.end(secondExport.bundle);
         return;
@@ -3724,6 +3743,23 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
       path.dirname(expectedWorkspaceDirectory), "context", "run-checkpoint.json",
     ), "utf8"));
     assert.equal(checkpoint.summary, "Resume this exact Run");
+    thirdRunStatus = "accepted";
+    await writeFile(path.join(expectedWorkspaceDirectory, "preserved-source.md"), "Unsaved source must stay\n");
+    const recoveryFailure = await execFileAsync(process.execPath,
+      [...command, "--run", fourthRunId], executionOptions).then(() => null, (error) => error);
+    const recovery = parseWorkspaceLocalRecoveryRequiredError(recoveryFailure?.stderr, workspaceId, fourthRunId);
+    assert.ok(recovery, "a new Run preserves a dirty terminal canonical source");
+    const recoveryRoot = recovery.details.suggestedDirectory;
+    await execFileAsync(process.execPath,
+      [...command, "--run", fourthRunId, "--dir", recoveryRoot], executionOptions);
+    const repeatedRecovery = await execFileAsync(process.execPath,
+      [...command, "--run", fourthRunId], executionOptions);
+    assert.equal(repeatedRecovery.stdout.trim(), path.join(recoveryRoot, "workspace"),
+      "the old default path cannot keep forcing another recovery after a proven terminal-source handoff");
+    assert.equal(await readFile(path.join(expectedWorkspaceDirectory, "preserved-source.md"), "utf8"), "Unsaved source must stay\n");
+    const registry = JSON.parse(await readFile(path.join(homeDirectory, ".config", "trelio", "workspace-bridge", "runs.json"), "utf8"));
+    assert.equal(registry.roots.includes(path.dirname(expectedWorkspaceDirectory)), false);
+    assert.equal(registry.retainedRoots.includes(path.dirname(expectedWorkspaceDirectory)), true);
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -4264,6 +4300,20 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       readFile(path.join(recoveryDirectory, "workspace", "artifacts", "local-only.md"), "utf8"),
       { code: "ENOENT" },
     );
+    const registryPath = path.join(firstHomeDirectory, ".config", "trelio", "workspace-bridge", "runs.json");
+    const recoveredRegistry = JSON.parse(await readFile(registryPath, "utf8"));
+    assert.equal(recoveredRegistry.roots.includes(firstRootDirectory), false,
+      "the superseded source cannot reintroduce duplicate-Run selection ambiguity");
+    assert.equal(recoveredRegistry.retainedRoots.includes(firstRootDirectory), true,
+      "the preserved source remains indexed for safe future retention checks");
+    const reopened = await execFileAsync(process.execPath, [bridgePath, "open", "--origin", origin,
+      "--workspace", writableWorkspaceId, "--run", runId], {
+      cwd: temporaryDirectory, encoding: "utf8", timeout: 10_000,
+      env: { ...process.env, HOME: firstHomeDirectory, TRELIO_WORKSPACE_DISABLE_KEYCHAIN: "1" },
+    });
+    assert.ok(reopened.stdout.includes(path.join(recoveryDirectory, "workspace")),
+      "a repeated exact open reuses the registered recovery instead of creating another copy");
+    assert.equal((await readdir(path.dirname(recoveryDirectory))).filter((name) => /^r-/.test(name)).length, 1);
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -4795,9 +4845,15 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       unmanaged = false,
       unsafeSystemMetadata = false,
       legacy = false,
+      recovery = null,
     } = {},
   ) => {
-    const rootDirectory = legacy
+    const currentWorkspaceId = workspaceIdByRunId.get(currentRunId);
+    const recoveryName = recovery === "compact" ? "r-" + "A".repeat(43)
+      : recovery === "historic" ? "recovery-" + currentRunId
+      : currentWorkspaceId + "-recovery-" + currentRunId.slice(0, 8)
+        + (recovery === "nested" ? "-recovery-" + currentRunId.slice(0, 8) : "");
+    const rootDirectory = recovery ? path.join(temporaryDirectory, name, recoveryName) : legacy
       ? path.join(homeDirectory, "Trelio Workspaces", workspaceIdByRunId.get(currentRunId), currentRunId)
       : path.join(temporaryDirectory, name);
     const workspaceDirectory = path.join(rootDirectory, "workspace");
@@ -4920,7 +4976,7 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
               }]
           : [];
         if (currentRunId === busyTerminalRunId) {
-          currentRuns.push({ id: busyActiveRunId, status: "running", updatedAt: oldTimestamp });
+          currentRuns.push({ id: busyActiveRunId, status: "running", updatedAt: new Date().toISOString() });
         }
         if (currentRunId === expiredSiblingTerminalRunId) {
           currentRuns.push({ id: expiredSiblingRunId, status: "expired", updatedAt: oldTimestamp });
@@ -5001,6 +5057,29 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
       unsafeSystemMetadataRunId,
       { unsafeSystemMetadata: true },
     );
+    const recoveryRoots = [];
+    for (const recovery of ["legacy", "nested", "compact", "historic"]) {
+      recoveryRoots.push(await createLocalRunRoot(origin, "recovery-" + recovery,
+        busyTerminalRunId, { recovery }));
+    }
+    const recentRecoveryRoot = await createLocalRunRoot(origin, "recent-recovery", busyTerminalRunId, {
+      recovery: "compact", lastUsedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const dirtyRecoveryRoot = await createLocalRunRoot(origin, "dirty-recovery", busyTerminalRunId, {
+      recovery: "legacy", dirty: true,
+    });
+    const committedRecoveryRoot = await createLocalRunRoot(origin, "committed-recovery", busyTerminalRunId, {
+      recovery: "compact", committed: true,
+    });
+    const ignoredRecoveryRoot = await createLocalRunRoot(origin, "ignored-recovery", busyTerminalRunId, {
+      recovery: "legacy", ignored: true,
+    });
+    const unmanagedRecoveryRoot = await createLocalRunRoot(origin, "unmanaged-recovery", busyTerminalRunId, {
+      recovery: "historic", unmanaged: true,
+    });
+    const retainedOnlyRoot = await createLocalRunRoot(origin, "retained-recovery", busyTerminalRunId, {
+      recovery: "nested",
+    });
     const missingRegistryRoot = path.join(temporaryDirectory, "already-removed-root");
     await mkdir(configDirectory, { recursive: true });
     await writeFile(
@@ -5031,8 +5110,11 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
           expiredCheckpointRoot,
           legacyOldRoot,
           unsafeSystemMetadataRoot,
+          ...recoveryRoots, recentRecoveryRoot, dirtyRecoveryRoot, committedRecoveryRoot,
+          ignoredRecoveryRoot, unmanagedRecoveryRoot,
           missingRegistryRoot,
         ],
+        retainedRoots: [retainedOnlyRoot],
       }, null, 2)}\n`,
       { mode: 0o600 },
     );
@@ -5046,7 +5128,9 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
         env: { ...process.env, HOME: homeDirectory },
       },
     );
-    assert.match(preview.stdout, /Inactive Workspace roots: 4/);
+    assert.match(preview.stdout, /Inactive Workspace roots: 9/);
+    for (const root of recoveryRoots) assert.ok(preview.stdout.includes(root + " · accepted"));
+    assert.ok(preview.stdout.includes(recentRecoveryRoot + " · retention_period_active · accepted"));
     assert.match(preview.stdout, /accepted-clean/);
     assert.match(preview.stdout, /workspace-with-expired-sibling/);
     assert.match(preview.stdout, /accepted-dirty · workspace_dirty · accepted/);
@@ -5087,6 +5171,14 @@ test("clean lists exact reclaimable roots and never removes active, unknown or d
     assert.equal(await pathExists(expiredLocalRoot), false, "an old empty expired Run is reclaimed");
     assert.equal(await pathExists(expiredCheckpointRoot), true, "a checkpoint keeps an expired Run resumable");
     assert.equal(await pathExists(legacyOldRoot), false, "a new active Run does not retain a clean old legacy child");
+    for (const root of [...recoveryRoots, retainedOnlyRoot]) {
+      assert.equal(await pathExists(root), false, "an active sibling does not retain a verified isolated recovery");
+    }
+    for (const root of [recentRecoveryRoot, dirtyRecoveryRoot, committedRecoveryRoot, ignoredRecoveryRoot, unmanagedRecoveryRoot]) {
+      assert.equal(await pathExists(root), true, "short recovery retention preserves recent or unsaved material");
+    }
+    assert.deepEqual(JSON.parse(await readFile(path.join(configDirectory, "runs.json"), "utf8")).retainedRoots, [],
+      "deleted retention-only sources leave no dangling registry entry");
     assert.ok(
       maximumConcurrentOverviewRequests > 1 && maximumConcurrentOverviewRequests <= 4,
       "cleanup should read distinct Workspace states through the bounded pool",

@@ -1598,7 +1598,16 @@ Recovery directory – сосед с постоянной длиной имен�
 некоторые Git for Windows metadata probes всё ещё ограничены MAX_PATH.
 После успешного native open общий registry заменяет только точный same-Run
 source locator, доказанный этим digest и большей новой fencingToken в metadata.
-Исходные файлы и metadata сохраняются. Посторонние duplicate roots остаются
+Исходные файлы и metadata сохраняются; source переходит в `retainedRoots` того же
+owner-private registry. Этот список участвует только в безопасной очистке и
+защите object cache, но не в выборе writable root или exact Run. Повторный exact
+open использует уже зарегистрированный recovery, без ещё одной копии.
+Для recovery нового Run поверх другого terminal Run действует тот же переход
+source в retention-only, но лишь после fresh exact native read, подтверждающего
+`accepted` или `cancelled` прежнего Run. Неизвестный/живой source не вытесняется.
+Физически оставшийся default root из retention-only больше не перехватывает
+ordinary open: выбирается активный registered root с прежними ACL/Git guards.
+Посторонние duplicate roots остаются
 неоднозначными; ни возраст файла, ни максимальный fence не выбирают путь.
 
 Этот recovery code, его model-facing action contract и local MCP description
@@ -1705,6 +1714,19 @@ Workspace есть другой открытый Run.
 его собственному Run: новые Runs того же Workspace не продлевают хранение
 старой копии и не блокируют её проверенную очистку. Для общего persistent root
 активность всего Workspace по-прежнему учитывается.
+Recovery-копии также независимы от активности и открытых sibling Runs того же
+Workspace. После трёх дней без собственной локальной/server Run-активности
+они допускаются к тем же проверкам terminal status, Git, ignored content,
+top-level entries и open-lock; возраст сам по себе не разрешает удаление.
+Распознаются exact `r-<SHA256-base64url>`, исторические
+`<workspace-id>-recovery-<8hex>` (включая повторные suffix) и `recovery-<run-id>`.
+Похожее имя custom root не меняет его policy; registry и валидная metadata
+обязательны независимо от имени. Настройка `recoveryRetentionDays` меняет
+отдельный срок в пределах 1–365 дней, default – 3; `workspaceRetentionDays`
+сохраняет default 30 для остальных roots. Повторная проверка под общим lock
+выполняется непосредственно перед удалением. Источники, вытесненные из активного
+registry exact same-Run recovery, остаются в `retainedRoots` до этой проверки;
+confirmed `ENOENT` и успешное удаление очищают обе части индекса.
 Открытыми считаются `running`, `waiting_for_human` и совместимый `review`;
 истёкший sibling Run не блокирует terminal root. Содержательный `expired` Run
 сохраняется для возможного claim. Active, unknown и dirty roots сохраняются;

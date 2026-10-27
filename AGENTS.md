@@ -488,6 +488,9 @@ publication tooling также остаются вне этого публичн
   encrypted accepted bundle с ephemeral private Git по тому же контракту;
   unknown/ACL/crypto/stale ошибки не разрешают fallback или пропуск Workspace.
 - Сохраняй чужие изменения и отделяй scope текущей задачи.
+- Recovery roots имеют собственные 3 дня retention; sibling Runs не продлевают срок.
+  Проверенный recovery source остаётся в retention-only индексе, не в выборе writable root.
+  Все native/Git/lock guards обязательны: [cleanup](docs/agent-workspace-runtime.md#restore-и-cleanup).
 - Диагностика local MCP следует [контракту](README.md#статистика-ошибок-local-mcp):
   opt-in startup trace пишет только закрытые этапы и process clocks в stderr,
   не request content; запись initialize не доказывает получение клиентом.
