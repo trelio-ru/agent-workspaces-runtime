@@ -23,6 +23,8 @@ test('source setup keeps only closed provider failure codes and the original pro
     assert.equal(error.code,'ASSISTANT_SOURCE_SETUP_TELEGRAM_NETWORK_UNAVAILABLE');
     assert.doesNotMatch(JSON.stringify(error)+error.message,/PRIVATE/);return true;
   });
+  assert.throws(()=>read(JSON.stringify({...payload,code:'TELEGRAM_WINDOWS_NATIVE_FAILURE'})),
+    error=>error.code==='ASSISTANT_SOURCE_SETUP_TELEGRAM_WINDOWS_NATIVE_FAILURE');
   for(const stdout of ['', 'PRIVATE_TRACEBACK', JSON.stringify({...payload,ok:true}),
     JSON.stringify({...payload,code:'TELEGRAM_NETWORK_UNAVAILABLE_PRIVATE'}), 'null',
     JSON.stringify({authorized:true})]){

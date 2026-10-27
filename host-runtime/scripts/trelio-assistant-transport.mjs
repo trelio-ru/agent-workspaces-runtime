@@ -3872,7 +3872,8 @@ export const projectAssistantSourceSetupResult=(result,{skillId})=>{
     // This is the reviewed source adapter's protocol, not a generic prefix
     // allowlist: a foreign provider or invented code cannot supply a diagnosis.
     const allowed=skillId==='telegram-mtproto'?['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_RATE_LIMITED',
-      'TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED']:[];
+      'TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED',
+      'TELEGRAM_WINDOWS_NATIVE_FAILURE']:[];
     if(object(raw)&&raw.ok===false&&allowed.includes(raw.code))fail(`ASSISTANT_SOURCE_SETUP_${raw.code}`);
     throw skillRuntimeExitError(result.exitCode);
   }
