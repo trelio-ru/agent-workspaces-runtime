@@ -127,7 +127,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -191,9 +191,19 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   // Prefix-owned tables coexist with a future host schema. Unknown versions
   // are never "repaired" by truncation, deleting the file or resetting cursors.
   db.exec(`CREATE TABLE IF NOT EXISTS assistant_inbox_meta (version INTEGER NOT NULL);`);
-  transaction(() => {
+  // Follow SQLite's documented generalized ALTER TABLE procedure. Only the
+  // migration connection suspends FK enforcement outside the transaction; the
+  // complete foreign_key_check BEFORE COMMIT and finally restoration are
+  // mandatory. No writable_schema, ignored violation or production reset.
+  // https://www.sqlite.org/lang_altertable.html#making_other_kinds_of_table_schema_changes
+  const priorVersion=all('SELECT version FROM assistant_inbox_meta');
+  const rebuilding=priorVersion.length===0||priorVersion.length===1&&Number.isInteger(priorVersion[0].version)
+    &&priorVersion[0].version>=1&&priorVersion[0].version<17;
+  const foreignKeys=get('PRAGMA foreign_keys').foreign_keys;
+  if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
+  try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -297,7 +307,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       db.exec('ALTER TABLE assistant_inbox_events ADD COLUMN read_original_sha256 TEXT CHECK(read_original_sha256 IS NULL OR (length(read_original_sha256)=64 AND read_original_sha256 NOT GLOB \'*[^0-9a-f]*\'))');
       run('UPDATE assistant_inbox_meta SET version=8');
     }
-    const createIntakes=()=>db.exec(`CREATE TABLE IF NOT EXISTS assistant_owner_intakes(
+    const createIntakes=(table='assistant_owner_intakes')=>db.exec(`CREATE TABLE IF NOT EXISTS ${table}(
       id TEXT PRIMARY KEY, original_event_id TEXT NOT NULL, event_key TEXT NOT NULL REFERENCES assistant_inbox_events(event_key),
       account_key TEXT NOT NULL, native_event_id TEXT NOT NULL, native_revision TEXT NOT NULL,
       owner_identity_id TEXT, source_key TEXT NOT NULL REFERENCES assistant_inbox_sources(source_key), source_revision INTEGER NOT NULL,
@@ -314,10 +324,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       // Forward migration preserves every original UUID, native-start fence,
       // lease, source generation and receipt. Only route_existing has no owner
       // identity. Empty/legacy rows never acquire that new role by inference.
-      db.exec('ALTER TABLE assistant_owner_intakes RENAME TO assistant_owner_intakes_v9');
-      createIntakes();
+      createIntakes('assistant_owner_intakes_v10');
       const oldColumns='id,original_event_id,event_key,account_key,native_event_id,native_revision,owner_identity_id,source_key,source_revision,state,provision_id,delivery_id,thread_id,native_started,outcome_receipt,outcome_state,settled,next_check_at,created_at';
-      db.exec(`INSERT INTO assistant_owner_intakes(${oldColumns}) SELECT ${oldColumns} FROM assistant_owner_intakes_v9; DROP TABLE assistant_owner_intakes_v9;`);
+      db.exec(`INSERT INTO assistant_owner_intakes_v10(${oldColumns}) SELECT ${oldColumns} FROM assistant_owner_intakes; DROP TABLE assistant_owner_intakes; ALTER TABLE assistant_owner_intakes_v10 RENAME TO assistant_owner_intakes;`);
     }
     db.exec(`UPDATE assistant_owner_intakes SET conversation_key=(SELECT e.conversation_key FROM assistant_inbox_events e WHERE e.event_key=assistant_owner_intakes.event_key) WHERE conversation_key IS NULL;
       CREATE TABLE IF NOT EXISTS assistant_source_intake_events(
@@ -362,15 +371,45 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // A restrictive structural policy only. Existing rows, cursors, processed
     // bits and unknown write fences are preserved; migration never claims ACK.
     const replyColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
-    if(versions[0]?.version===16&&(!replyColumns.includes('reply_receipt_id')||!replyColumns.includes('reply_message_id')))
+    if(versions[0]?.version>=16&&(!replyColumns.includes('reply_receipt_id')||!replyColumns.includes('reply_message_id')))
       fail('ASSISTANT_INBOX_CONFLICT');
     if(!replyColumns.includes('reply_receipt_id'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN reply_receipt_id TEXT');
     if(!replyColumns.includes('reply_message_id'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN reply_message_id INTEGER CHECK(reply_message_id IS NULL OR (reply_message_id>0 AND reply_message_id<2147483648))');
     // Only attempt/positive-native IDs persist. A missing result remains
     // unknown across restart; neither text nor a new task/Run is journaled.
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=16');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (16)');
-  });
+    const recoveryColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version>=17&&['retry_of_id','retry_ordinal','retry_prerequisite','retry_terminal_turn_id'].some(name=>!recoveryColumns.includes(name)))fail('ASSISTANT_INBOX_CONFLICT');
+    if(!recoveryColumns.includes('retry_of_id')){
+      // SQLite cannot drop the original five-column UNIQUE constraint. Rebuild
+      // this ONE owned table transactionally, retaining every old row/column,
+      // FK name, positive receipt and monotonic native-start bit. Retry rows
+      // append a new native intake/marker; they never rewrite an old attempt.
+      const constraint='UNIQUE(account_key,native_event_id,native_revision,source_key,source_revision)';
+      const ddl=get("SELECT sql FROM sqlite_master WHERE type='table' AND name='assistant_owner_intakes'")?.sql;
+      if(typeof ddl!=='string'||ddl.split(constraint).length!==2
+        ||recoveryColumns.some(name=>!/^[a-z_]+$/u.test(name)))fail('ASSISTANT_INBOX_CONFLICT');
+      const next=ddl.replace(/^CREATE TABLE (?:IF NOT EXISTS )?(?:"assistant_owner_intakes"|assistant_owner_intakes)(?=\s*\()/iu,'CREATE TABLE assistant_owner_intakes_v17')
+        .replace(constraint,`retry_of_id TEXT, retry_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(retry_ordinal>=0 AND retry_ordinal<=20),
+          retry_prerequisite TEXT, retry_terminal_turn_id TEXT,
+          UNIQUE(account_key,native_event_id,native_revision,source_key,source_revision,retry_ordinal)`);
+      if(next===ddl||!next.startsWith('CREATE TABLE assistant_owner_intakes_v17'))fail('ASSISTANT_INBOX_CONFLICT');
+      const indexes=all("SELECT type,name FROM sqlite_master WHERE tbl_name='assistant_owner_intakes' AND type IN('index','trigger')");
+      if(indexes.some(value=>value.type==='trigger'||!value.name.startsWith('sqlite_autoindex_')&&value.name!=='assistant_route_intake_active'))fail('ASSISTANT_INBOX_CONFLICT');
+      db.exec(next);
+      const columns=recoveryColumns.map(name=>`"${name}"`).join(',');
+      db.exec(`INSERT INTO assistant_owner_intakes_v17(${columns}) SELECT ${columns} FROM assistant_owner_intakes;
+        DROP TABLE assistant_owner_intakes; ALTER TABLE assistant_owner_intakes_v17 RENAME TO assistant_owner_intakes;
+        CREATE UNIQUE INDEX assistant_route_intake_active ON assistant_owner_intakes(source_key,source_revision,conversation_key)
+          WHERE kind='route_existing' AND state!='complete';`);
+      if(all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
+    }
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS assistant_intake_retry_parent ON assistant_owner_intakes(retry_of_id) WHERE retry_of_id IS NOT NULL');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=17');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (17)');
+    if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
+  });}finally{
+    if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
+  }
   const source = scope => {
     const row = get('SELECT * FROM assistant_inbox_sources WHERE source_key=?', scope.key);
     if (!row || row.scope_json !== JSON.stringify(scope)) fail('ASSISTANT_INBOX_SOURCE_REQUIRED');
@@ -462,7 +501,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         assertIntakeRoom(1);
         run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
           owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-          ON CONFLICT(account_key,native_event_id,native_revision,source_key,source_revision) DO NOTHING`,randomUUID(),randomUUID(),key,accountKey,event.id,event.revision,
+          ON CONFLICT(account_key,native_event_id,native_revision,source_key,source_revision,retry_ordinal) DO NOTHING`,randomUUID(),randomUUID(),key,accountKey,event.id,event.revision,
           event.ownerIdentityId,scope.key,revision,randomUUID(),randomUUID(),time());
       }
       added++;
@@ -554,7 +593,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           AND i.outcome_state='cancelled' AND i.outcome_receipt IS NOT NULL AND i.source_revision<?
           AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.account_key=i.account_key
             AND n.native_event_id=i.native_event_id AND n.native_revision=i.native_revision
-            AND (n.outcome_state IN('created','routed') OR n.source_key=i.source_key AND n.source_revision>i.source_revision))`,scope.key,nativeRevision);
+            AND (n.outcome_state IN('created','routed','replied','ignored','redirected') OR n.source_key=i.source_key
+              AND (n.source_revision>i.source_revision OR n.source_revision=i.source_revision AND n.retry_ordinal>i.retry_ordinal)))`,scope.key,nativeRevision);
         for(const old of cancelled){
           const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
           assertIntakeRoom(originals.length);
@@ -811,6 +851,37 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
      * host still rereads the exact signed body and linked native owner ID. */
     // Preserve unknown native fences ahead of due rows, but keep future owner
     // questions from occupying the entire bounded page after every restart.
+    unreadCancelledIntakes(){return all(`SELECT i.id FROM assistant_owner_intakes i
+      JOIN assistant_inbox_sources s ON s.source_key=i.source_key
+      WHERE i.kind='owner_command' AND i.state='complete' AND i.outcome_state='cancelled'
+        AND i.settled=1 AND i.native_started=1 AND i.reply_receipt_id IS NULL AND i.reply_message_id IS NULL
+        AND i.outcome_task_id IS NULL AND i.source_revision=s.configuration_revision AND s.state='active'
+        AND i.next_check_at<=? AND i.retry_ordinal<20 AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.retry_of_id=i.id)
+      ORDER BY i.created_at,i.id LIMIT 20`,time()).map(value=>this.ownerIntake(value.id));},
+    retryUnreadOwnerIntake(id,{receiptId,terminalTurnId,prerequisiteKey}){return transaction(()=>{
+      const old=this.ownerIntake(id);receiptId=uuid(receiptId);terminalTurnId=uuid(terminalTurnId);
+      if(typeof prerequisiteKey!=='string'||!/^[a-f0-9]{64}$/u.test(prerequisiteKey)
+        ||old.kind!=='owner_command'||old.state!=='complete'||old.outcome_state!=='cancelled'||old.settled!==1
+        ||old.outcome_receipt!==receiptId||old.native_started!==1||!old.thread_id||old.reply_receipt_id!==null
+        ||old.reply_message_id!==null||old.outcome_task_id!==null||old.source_state!=='active'
+        ||old.source_revision!==old.configuration_revision||old.retry_ordinal>=20)fail('ASSISTANT_INBOX_CONFLICT');
+      const child=get('SELECT id,retry_prerequisite,retry_terminal_turn_id FROM assistant_owner_intakes WHERE retry_of_id=?',old.id);
+      if(child){if(child.retry_prerequisite!==prerequisiteKey||child.retry_terminal_turn_id!==terminalTurnId)fail('ASSISTANT_INBOX_CONFLICT');return this.ownerIntake(child.id);}
+      if(get(`SELECT 1 FROM assistant_owner_intakes WHERE account_key=? AND native_event_id=? AND native_revision=?
+        AND source_key=? AND source_revision=? AND retry_prerequisite=?`,old.account_key,old.native_event_id,old.native_revision,
+        old.source_key,old.source_revision,prerequisiteKey))fail('ASSISTANT_INBOX_CONFLICT');
+      const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
+      assertIntakeRoom(originals.length);const next=randomUUID();
+      run(`INSERT INTO assistant_owner_intakes(id,original_event_id,event_key,account_key,native_event_id,native_revision,
+        owner_identity_id,source_key,source_revision,provision_id,delivery_id,created_at,kind,conversation_key,
+        retry_of_id,retry_ordinal,retry_prerequisite,retry_terminal_turn_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        next,old.original_event_id,old.event_key,old.account_key,old.native_event_id,old.native_revision,old.owner_identity_id,
+        old.source_key,old.source_revision,randomUUID(),randomUUID(),time(),old.kind,old.conversation_key,
+        old.id,old.retry_ordinal+1,prerequisiteKey,terminalTurnId);
+      for(const original of originals)run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,?)',
+        next,original.original_event_id,original.event_key,original.account_key,original.native_event_id,original.native_revision,original.ordinal);
+      return this.ownerIntake(next);
+    });},
     ownerIntakes(){return all(`SELECT i.*,s.scope_json FROM assistant_owner_intakes i
       JOIN assistant_inbox_sources s ON s.source_key=i.source_key WHERE (i.state!='complete' OR i.settled=0)
       ORDER BY CASE WHEN i.state IN('started','uncertain') OR (i.state='provisioning' AND i.native_started=1) THEN 0
@@ -827,7 +898,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     prepareOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='pending'||row.source_state!=='active'||row.source_revision!==row.configuration_revision)
         fail('ASSISTANT_INBOX_CONFLICT');
-      const previous=row.kind==='route_existing'
+      const previous=row.retry_of_id?null:row.kind==='route_existing'
         ?get("SELECT thread_id FROM assistant_owner_intakes WHERE source_key=? AND source_revision=? AND conversation_key=? AND kind='route_existing' AND state='complete' AND settled=1 AND thread_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",row.source_key,row.source_revision,row.conversation_key)
         :get("SELECT thread_id FROM assistant_owner_intakes WHERE source_key=? AND owner_identity_id=? AND kind='owner_command' AND state='complete' AND thread_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",row.source_key,row.owner_identity_id);
       run('UPDATE assistant_owner_intakes SET state=?,thread_id=? WHERE id=?',previous?'ready':'provisioning',previous?.thread_id??null,row.id);
@@ -884,7 +955,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run('UPDATE assistant_owner_intakes SET outcome_route_id=?,outcome_task_id=? WHERE id=?',selected.length===1?selected[0].id:null,selected.length===1?selected[0].taskId:null,row.id);
       }
       run('UPDATE assistant_owner_intakes SET state=?,outcome_receipt=?,outcome_state=?,settled=?,next_check_at=? WHERE id=?',
-        state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled','replied'].includes(state)),state==='waiting_owner'?time()+300000:0,row.id);
+        state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled','replied'].includes(state)),['waiting_owner','cancelled'].includes(state)?time()+300000:0,row.id);
     });},
     redirectOwnerIntake(id,{scope:targetScope,sourceRevision,receiptId}){return transaction(()=>{
       const row=this.ownerIntake(id),target=scopeOf(targetScope);receiptId=uuid(receiptId);

@@ -728,10 +728,41 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const result=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
     return ['completed','failed'].includes(result.state);
   };
+  const recoverUnreadCancelledIntake=async signal=>{
+    if(typeof native.readPrerequisites!=='function')return;
+    if(await native.ready(identity,signal)!==true)return;lease();
+    // The native cancellation lock has already excluded late domain writes.
+    // This narrowly repairs a terminal PRE-BODY failure, not uncertain sends,
+    // classified/declined work, owner questions or general triage. The original
+    // row/marker/cancelled receipt remain immutable; a fresh native intake gets
+    // the SAME original event and fresh owner/source/model admission.
+    for(const row of inbox.unreadCancelledIntakes()){
+      try{
+        await intakeSource(row,signal);
+        const outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
+        if(outcome.id!==row.id||outcome.sourceId!==row.scope.bindingId||outcome.sourceRevision!==row.source_revision
+          ||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||outcome.state!=='cancelled'
+          ||outcome.receiptId!==row.outcome_receipt||outcome.readConfirmed!==false||outcome.taskId!==null)continue;
+        const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+        if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??''))continue;
+        const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+        const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
+        if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||row.retry_prerequisite===prerequisite.fingerprint)continue;
+        await intakeSource(row,signal);
+        inbox.retryUnreadOwnerIntake(row.id,{receiptId:outcome.receiptId,terminalTurnId:terminal.turnId,
+          prerequisiteKey:prerequisite.fingerprint});
+        return;
+      }catch{
+        // No mutation/provider is retried by a failed observation. Back off
+        // this exact closed row so another company's work remains eligible.
+      }finally{inbox.deferOwnerIntake(row.id);}
+    }
+  };
   const workIntake=async(signal,visited)=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
     if(saved&&saved.kind!=='source_intake')return null;
+    if(!saved)await recoverUnreadCancelledIntake(signal);
     const candidates=inbox.ownerIntakes(),rowSaved=saved?inbox.ownerIntake(saved.passId):null;
     // Preserve a closed receipt's read-only ACL/transport backoff across ticks.
     // Otherwise its previously accepted task could immediately re-enter normal

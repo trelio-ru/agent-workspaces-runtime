@@ -2505,10 +2505,35 @@ Intake uses a presentation-only `x-trelio-assistant-capability-profile:source_in
 view on the SAME `/mcp/assistant`. It is fixed at session initialization and only
 narrows discovery: task view omits intake tools; intake view exposes status and
 two native intake tools. A view change fails rather than upgrading that session.
-The protected pass discriminator chooses it, never model arguments. Header alone
-supplies no native authority; strict original schema/proof/device/source checks
-remain in each handler. Both full raw catalogues retain the common 65,536-byte
-bound, with no schema copies, new MCP endpoint or second executor.
+The protected pass discriminator chooses the execution session, never model
+arguments. Header alone supplies no native authority; strict original
+schema/proof/device/source checks remain in each handler.
+
+Desktop caches a chat catalogue before the first intake. Model discovery
+therefore unions its normal presentation profile with exactly the two intake
+definitions read from that SAME native source view, even before pass activation.
+Execution still selects only the active pass view: advertised task methods cannot
+run in a taskless intake, and intake methods cannot run under a task pass. Both
+metadata reads share one original deadline and never invoke a business tool.
+Legacy catalogues with neither intake definition stay legacy; a partial pair
+fails. No schemas are copied or inferred.
+
+Both raw native catalogues AND their combined model projection retain the
+65,536-byte bound. Only if needed, the projection omits equivalent MCP annotation
+defaults and a root draft-07 declaration proven to use the ref-free vocabulary
+shared with MCP's default dialect. Unknown keywords, refs/IDs, tuple items and
+non-equivalent dialects retain their declarations. Every description, property,
+constraint and business value remains intact; actual native validators never
+change. If the lossless projection still exceeds the bound, discovery fails.
+Effectless terminal owner-intake recovery is described in the inbox schema17
+contract: no body read, positive native cancellation and independent terminal
+marker, bounded fresh fingerprint, preserved originals and a fresh visible
+restricted chat. This never renews/replays an uncertain send.
+
+The current signed request worker reports this catalogue fingerprint even when
+maintenance is blocked, so the existing long-lived facade emits its ordinary
+`tools/list_changed` notification without clearing a health latch, restarting
+Codex or replaying a call. No new endpoint, plugin ABI or executor.
 
 ### Encrypted source and exact public task skill
 

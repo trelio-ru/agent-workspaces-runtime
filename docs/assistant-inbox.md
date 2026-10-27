@@ -645,7 +645,7 @@ production publication or Windows business E2E; those remain independent release
 gates and `businessReady` stays false until the entire product passes them.
 
 
-## Verified owner intake (schema v9, reply receipts v16)
+## Verified owner intake (schema v9, reply receipts v16, unread recovery v17)
 
 The SAME private inbox now retains structural `assistant_owner_intakes` records
 beside original refs/cursors. Only incoming, original Telegram/MAX refs with a
@@ -657,7 +657,9 @@ account/event/revision is initially considered once across configured companies.
 Intake provisions/reuses one restricted chat per source/owner binding through the
 SAME native Codex adapter and observed session/proof engine. Its taskless pass is
 an explicit discriminator, never fabricated task/binding metadata. Only native
-context/resolve tools are visible. Private host reads the exact original through
+context/resolve tools are executable in that taskless pass. Their definitions
+remain available in cached Desktop task catalogues before activation; metadata
+does not authorize the other advertised tools. Private host reads the exact original through
 the SAME signed account/process engine, repeats source/pass/owner checks and
 confirms native read before returning original text in RAM. Quoted/forwarded,
 outgoing, via-bot and mismatched native senders cannot create tasks.
@@ -696,10 +698,39 @@ selected configured company/model. Unknown outcomes retain their original fence.
 
 Native cancellation is serialized with create and returns either the already
 committed receipt or a positive cancelled receipt. The host never guesses closure
-from a failed read. Only that positive cancellation and a later explicit source
-generation can clone an unfinished original candidate; old receipt remains
-immutable, original-event UUID is retained and native global created-event
-uniqueness prevents duplicate tasks. A paused waiting question is cancelled by
+from a failed read. The ordinary retry still requires that positive cancellation
+and a later explicit source generation; original receipts/UUIDs and global native
+created-event uniqueness stay effective.
+
+Schema17 adds one narrow automatic technical recovery for owner-command intakes
+that never reached the original body. Fresh native read-back must confirm the
+same source/revision/device/thread/event, `cancelled`, the exact saved receipt,
+`readConfirmed:false` and no task. The original native marker must independently
+be completed/failed with a real turn UUID. Current source/owner/model admission
+and trusted native hook preflight are checked again. The SAME fingerprint binds
+runtime version and actual hook definitions; one retry per fingerprint and at
+most20 appended attempts in a source generation prevent loops. A five-minute
+backoff separates cancellation from recovery.
+
+The new attempt preserves the original event UUID and native message reference,
+gets new intake/provision/delivery IDs, and provisions a fresh visible restricted
+Desktop chat with current metadata. This never creates a task or Workspace Run.
+The old native-start bit, marker, cancellation receipt and attempt remain in the
+SAME SQLite ledger. Only its ordinary next-check metadata changes. Source
+revocation, policy denial, an unknown marker/receipt, any confirmed body read,
+owner dialogue or a reply attempt cannot take this edge. A later explicit source
+generation clones only the latest cancelled attempt once; a later positive reply
+suppresses the whole original chain.
+
+The v16-to-v17 UNIQUE-key migration follows SQLite's documented generalized
+ALTER procedure on the migration connection: one transaction, exact old columns,
+all rows/FK names, mandatory foreign_key_check before commit, and restoration of
+foreign-key enforcement on success AND failure. Unexpected owned indexes/triggers
+or malformed schema refuse before rebuild; no writable_schema, reset or dropped
+unknown history. Tests reopen a real FK-enabled v16 file, inject a rejected
+rebuild, verify rollback and preserve unknown send fences.
+
+ A paused waiting question is cancelled by
 that same native path. Inaccessible rows without a running pass defer without
 blocking unrelated companies. The bounded existing page skips a policy-blocked
 or unanswered row after recording its next check, so every five-minute worker

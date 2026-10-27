@@ -415,6 +415,12 @@ test('source setup stdio accepts exact owner-ref locators only and returns close
   assert.deepEqual(tools,[ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL],'the current worker owns setup discovery');
   const health=await executeAssistantRuntimeRequest({operation:'health_check'},dependencies);
   assert.equal(health.catalogRevision,assistantCatalogRevision(tools),'maintenance and discovery compare the SAME catalogue');
+  const blocked=await executeAssistantRuntimeRequest({operation:'health_check'},{...dependencies,
+    context:async action=>action({...client,readHealth:async()=>({code:'hook_review_required',revision:0,
+      latchedCodes:['hook_review_required'],compatibility:{minimumPluginVersion:'99.0.0',minimumRuntimeVersion:null}})},{}),
+  });
+  assert.equal(blocked.catalogRevision,assistantCatalogRevision(tools),'metadata refresh survives a blocked maintenance probe without clearing its latch');
+
   const discovered=await executeAssistantRuntimeRequest({operation:'call',name:'prepare_assistant_source_account',arguments:{companyId,sourceId:null}},dependencies);
   assert.deepEqual(discovered.structuredContent,{sources:[{sourceId,skillId:'telegram-mtproto',projectId:null,state:'active',revision:0,
     provisionLocalAccount:true,executionVerified:false,sourceLabel:`Telegram · ${sourceId.slice(-8)}`,

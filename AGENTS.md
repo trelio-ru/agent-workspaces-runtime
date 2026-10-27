@@ -105,6 +105,7 @@ publication tooling также остаются вне этого публичн
   и exact protected pass journal; без live task-pass registration даёт JSON deny
   с exit 0. Ключ до HTTP сохраняется в OS-backed runtime slot, не human state. Контракт –
   [assistant setup](docs/assistant-scheduler.md#dedicated-plugin-entry-and-setup).
+- Cached Desktop discovery retains two native intake definitions before pass activation; execution stays pass-narrowed, and both native/model catalogues keep the existing bound without truncation. See the scheduler intake contract.
 - Assistant stdio получает read schemas только из dedicated backend catalog;
   fixed host allowlist и общий bounded MCP transport не создают domain authority.
   Нет schema copy, human OAuth/PAT fallback или automatic tools/call retry.
@@ -880,7 +881,9 @@ publication tooling также остаются вне этого публичн
   incoming/original linked sender ID is separate from model command assessment.
   Keep per-event routes and original-event dedup across company redirects;
   native create alone does not earn ACK. Positive native cancellation plus an
-  explicit source generation is required before retrying an unfinished intake.
+  explicit source generation remains the normal retry. Schema17 permits only a
+  fresh native-confirmed unread/terminal owner attempt under a changed trusted
+  runtime/hook fingerprint, with preserved original history and bounded retries.
   Recovery also requires the original native terminal marker; domain cancellation
   cannot replace it. Closed ACL/transport failures defer, never recreate or ACK.
   Additional company bind uses immutable owner origin-source/revision admission

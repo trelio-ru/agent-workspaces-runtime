@@ -2870,7 +2870,7 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...new Set([
  * No domain schema, scope or permission is inferred/copied by this projection.
  */
 const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent','localContextRead']);
-export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS}={}) => {
+export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,compactDialect=false}={}) => {
   const schema=structuredClone(source);
   let visited=0;
   const projectRoot=(node,depth=0)=>{
@@ -2908,6 +2908,32 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
   };
   if(!object(schema))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   projectRoot(schema);
+  if(compactDialect&&schema.$schema==='http://json-schema.org/draft-07/schema#'){
+    // MCP inputs default to 2020-12. Elide a legacy dialect annotation ONLY
+    // after proving the whole document uses the shared, ref-free vocabulary.
+    // Tuple items, refs/IDs, dependencies, new-dialect and unknown keywords keep
+    // their declaration. Native validation always uses the ORIGINAL document.
+    // Property names and enum/default business values are not schema keywords.
+    const maps=new Set(['properties','patternProperties','definitions','$defs']);
+    const singles=new Set(['additionalProperties','items','contains','propertyNames','not','if','then','else']);
+    const lists=new Set(['allOf','anyOf','oneOf']);
+    const common=new Set(['$schema','$comment','type','required','enum','const','minimum','maximum','exclusiveMinimum','exclusiveMaximum',
+      'multipleOf','minLength','maxLength','pattern','format','minItems','maxItems','uniqueItems','minProperties','maxProperties',
+      'title','description','default','examples','readOnly','writeOnly',...maps,...singles,...lists]);
+    let count=0;
+    const equivalent=(node,depth=0)=>{
+      if(typeof node==='boolean')return true;
+      if(!object(node)||++count>512||depth>32)return false;
+      for(const [key,value]of Object.entries(node)){
+        if(!common.has(key)||key==='$schema'&&value!=='http://json-schema.org/draft-07/schema#')return false;
+        if(maps.has(key)&&(!object(value)||!Object.values(value).every(v=>equivalent(v,depth+1))))return false;
+        if(singles.has(key)&&!equivalent(value,depth+1))return false;
+        if(lists.has(key)&&(!Array.isArray(value)||!value.every(v=>equivalent(v,depth+1))))return false;
+      }
+      return true;
+    };
+    if(equivalent(schema))delete schema.$schema;
+  }
   return schema;
 };
 /** Privacy preflight over the CURRENT native input inventory, not a copied
@@ -2993,15 +3019,16 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   if (!['task','remote_mcp','skill_setup','company_context'].includes(presentationProfile)) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
-  const selectedTools=async()=>{
+  const intakeToolNames=Object.freeze(['get_assistant_intake_context','resolve_assistant_intake']);
+  const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return pass?.kind==='source_intake'?['get_assistant_intake_context','resolve_assistant_intake']:presentationProfile==='remote_mcp'
+    return !metadata&&pass?.kind==='source_intake'?intakeToolNames:presentationProfile==='remote_mcp'
       ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
       :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
       :presentationProfile==='company_context'?['get_assistant_status',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
       :ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name));
   };
-  const perform = async (action, signal, operationTimeoutMs = timeoutMs) => {
+  const perform = async (action, signal, operationTimeoutMs = timeoutMs, metadataProfile=null) => {
     const deadline = AbortSignal.timeout(operationTimeoutMs);
     const boundedSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     let protocol;
@@ -3015,7 +3042,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       const active=typeof readActivePass==='function'?await readActivePass():null;
       // This only narrows a single native MCP session's presentation. Every
       // handler retains its genuine pass/proof/ACL checks independently.
-      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: active?.kind==='source_intake'
+      const config = { endpoint: `${origin}/mcp/assistant`, protocolVersion: "2025-06-18", headers: metadataProfile!==null?metadataProfile==='task'?{}:{'x-trelio-assistant-capability-profile':metadataProfile}:active?.kind==='source_intake'
         ?{'x-trelio-assistant-capability-profile':'source_intake'}:["remote_mcp","skill_setup","company_context"].includes(presentationProfile)?{'x-trelio-assistant-capability-profile':presentationProfile}:{},
         authentication: { type: "assistant_device" } };
       const session = await protocol.createRemoteSession(config, credential, request, { signal: boundedSignal });
@@ -3041,22 +3068,43 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   };
   return {
     async listTools(signal) {
-      return perform(async ({ protocol, config, credential, session, request, signal }) => {
-        const tools = await protocol.listRemoteTools(config, credential, session, request, { signal });
-        const allowed=await selectedTools(),seen = new Set();
-        const selected = tools.filter(tool => allowed.includes(tool?.name)
-          && (!["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(tool.name) || typeof materializeAttachment === "function")).map(tool => {
-          if (seen.has(tool.name) || typeof tool.description !== "string" || tool.description.length > 4096
-            || !object(tool.inputSchema) || tool.inputSchema.type !== "object") fail("ASSISTANT_MCP_INVALID_RESPONSE");
+      // Desktop caches a chat's MCP catalogue before its first taskless pass.
+      // Keep these TWO native intake definitions visible before activation;
+      // changing a pass never grants execution of the other advertised tools.
+      // This is metadata from the SAME device/native endpoint, not a schema
+      // copy, a task grant, another connector or a second business executor.
+      const deadline=AbortSignal.timeout(timeoutMs),bounded=signal?AbortSignal.any([signal,deadline]):deadline;
+      const catalogue=(allowed,profile,optional=false)=>perform(async({protocol,config,credential,session,request,signal})=>{
+        const tools=await protocol.listRemoteTools(config,credential,session,request,{signal}),seen=new Set();
+        const selected=tools.filter(tool=>allowed.includes(tool?.name)
+          &&(!['download_attachment','download_registry_document','download_knowledge_base_attachment'].includes(tool.name)||typeof materializeAttachment==='function')).map(tool=>{
+          if(seen.has(tool.name)||typeof tool.description!=='string'||tool.description.length>4096||!object(tool.inputSchema)||tool.inputSchema.type!=='object')fail('ASSISTANT_MCP_INVALID_RESPONSE');
           seen.add(tool.name);
-          // Do not proxy remote App metadata, URLs or OAuth security schemes.
-          return { name: tool.name, description: tool.description, inputSchema: assistantModelInputSchema(tool.inputSchema),
-            annotations: { readOnlyHint: tool.name==='get_assistant_intake_context'||ASSISTANT_MCP_READ_TOOLS.includes(tool.name), destructiveHint: tool.annotations?.destructiveHint===true,
-              idempotentHint: tool.annotations?.idempotentHint===true, openWorldHint: false } };
+          return {name:tool.name,description:tool.description,inputSchema:assistantModelInputSchema(tool.inputSchema),
+            annotations:{readOnlyHint:tool.name==='get_assistant_intake_context'||ASSISTANT_MCP_READ_TOOLS.includes(tool.name),
+              destructiveHint:tool.annotations?.destructiveHint===true,idempotentHint:tool.annotations?.idempotentHint===true,openWorldHint:false}};
         });
-        if (!seen.has(allowed.includes("get_assistant_status")?"get_assistant_status":"get_assistant_intake_context") || JSON.stringify(selected).includes(credential) || Buffer.byteLength(JSON.stringify(selected)) > 65_536) fail("ASSISTANT_MCP_INVALID_RESPONSE");
+        // An older native catalogue may genuinely have neither intake method.
+        // Do not invent definitions. One missing half is malformed, not legacy.
+        if(optional&&seen.size===0&&tools.some(t=>t?.name==='get_assistant_status'))return [];
+        if(optional?seen.size!==intakeToolNames.length:!seen.has('get_assistant_status'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        if(JSON.stringify(selected).includes(credential)||Buffer.byteLength(JSON.stringify(selected))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return selected;
-      }, signal);
+      },bounded,timeoutMs,profile);
+      const normal=await catalogue(await selectedTools(true),presentationProfile);
+      const intake=await catalogue(intakeToolNames,'source_intake',true);
+      let result=[...normal,...intake];
+      if(Buffer.byteLength(JSON.stringify(result))>65_536){
+        // Lossless MCP defaults only: false readOnly/idempotent, true
+        // destructive, and write hints ignored on a read-only tool. Preserve
+        // every description, property, bound and non-default write hint.
+        result=result.map(tool=>{const a=tool.annotations;return {...tool,
+          inputSchema:assistantModelInputSchema(tool.inputSchema,{omittedRootFields:[],compactDialect:true}),
+          annotations:{...(a.readOnlyHint?{readOnlyHint:true}:{}),...(!a.readOnlyHint&&a.destructiveHint===false?{destructiveHint:false}:{}),
+            ...(!a.readOnlyHint&&a.idempotentHint===true?{idempotentHint:true}:{}),openWorldHint:false}};});
+      }
+      if(Buffer.byteLength(JSON.stringify(result))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      return result;
     },
     async callTool(name, args, signal) {
       if (![...ASSISTANT_MCP_TOOLS,"get_assistant_intake_context","resolve_assistant_intake"].includes(name) || ["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(name) && typeof materializeAttachment !== "function" || !object(args) || Buffer.byteLength(JSON.stringify(args)) > 65_536) fail("ASSISTANT_CAPABILITY_UNAVAILABLE");

@@ -1560,9 +1560,15 @@ export const executeAssistantRuntimeRequest = async (request,{context=production
         probe:async signal=>{
           const update=await host.readPluginUpdate?.();
           if(update?.failedVersion||update?.stage==='failed')fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
-          const proxy=await proxyFor();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');catalog=assistantWorkerToolCatalogue(await proxy.listTools(signal));
+          const proxy=await proxyFor();if(!proxy)fail('ASSISTANT_HOST_NOT_CONFIGURED');
+          catalog=assistantWorkerToolCatalogue(await proxy.listTools(signal));
         },
       });
+      // Discovery is read-only metadata, independent of idle-only maintenance.
+      // A retained pass may be precisely the reason a loaded Desktop catalogue
+      // needs the new signed worker's definitions. Never clear health, renew a
+      // pass or replay a tool here; the old facade only emits list_changed.
+      if(catalog===null){const proxy=await proxyFor();if(proxy)catalog=assistantWorkerToolCatalogue(await proxy.listTools());}
       return {...state,...(catalog===null?{}:{catalogRevision:assistantCatalogRevision(catalog)})};
     });
   }

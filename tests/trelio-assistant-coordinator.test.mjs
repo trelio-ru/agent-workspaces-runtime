@@ -1959,3 +1959,69 @@ test('an unfinished native intake also defers plugin restart even before a prote
   assert.equal(f.activePass(),null);
   assert.deepEqual(await f.coordinator.maintainPluginAtIdleBoundary(()=>assert.fail('native intake is not idle')),{state:'deferred'});
 });
+
+test('a terminal cancelled PRE-BODY owner intake recovers automatically under fresh hooks without task/Run or send replay',async t=>{
+ const f=fixture(t,{ownsDatabase:false});await f.coordinator.close();f.authority.state='done';
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerIdentityId=randomUUID(),key=`telegram-conversation/v1.${'f'.repeat(64)}`;
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
+  skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true,executionVerified:false};
+ let clock=Date.now(),poll=0,active=null,runs=0,provisions=0,sends=0,closed=0;
+ const intakes=new Map(),markers=new Map();
+ const client={...f.options.client,tasks:async()=>({bindings:[],nextCursor:null}),sourceAccounts:async()=>[source],sourceRoutes:async()=>[],
+  ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
+  beginSourceIntake:async input=>{assert.equal(input.senderExternalUserId,'123');assert.equal(input.ownerIdentityId,ownerIdentityId);
+   if(!intakes.has(input.intakeId))intakes.set(input.intakeId,{schemaVersion:1,id:input.intakeId,companyId:f.companyId,
+    sourceId,sourceRevision:0,eventId:input.eventId,threadId:input.threadId,state:'leased',readConfirmed:false,
+    taskId:null,receiptId:null,leaseExpiresAt:new Date(clock+1800000).toISOString(),execution:f.execution.configuration});
+   return structuredClone(intakes.get(input.intakeId));},
+  readSourceIntake:async input=>structuredClone(intakes.get(input.intakeId)),
+  cancelSourceIntake:async input=>{closed++;const current=intakes.get(input.intakeId);assert.equal(current.state,'leased');
+   Object.assign(current,{state:'cancelled',receiptId:randomUUID()});return structuredClone(current);},
+  confirmOwnerReply:async input=>{const current=intakes.get(input.intakePass.intakeId);assert.equal(current.receiptId,input.receiptId);
+   current.state='replied';return structuredClone(current);}};
+ const native={...f.options.native,readPrerequisites:async()=>({fingerprint:'c'.repeat(64)}),
+  readDelivery:async(_thread,id)=>markers.get(id)??{state:'uncertain'},
+  provision:async(input,options)=>{provisions++;options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
+   const result={state:'completed',threadId,turnId:randomUUID(),receipt:`codex:${threadId}:${randomUUID()}`};markers.set(input.deliveryId,result);return result;},
+  run:async(input,options)=>{runs++;options.startInvocation();const current=intakes.get(input.intakeContext.intakeId);
+   if(runs>1){assert.equal(current.readConfirmed,false);current.readConfirmed=true;current.state='reply_pending';current.receiptId=randomUUID();
+    const inbox=createAssistantInbox({database:f.database});inbox.startOwnerReply(current.id,current.receiptId);sends++;
+    inbox.confirmOwnerReply(current.id,{receiptId:current.receiptId,messageId:92});}
+   const result={state:'completed',turnId:randomUUID(),receipt:`codex:${input.threadId}:${randomUUID()}`};markers.set(input.deliveryId,result);return result;}};
+ const options={...f.options,client,native,now:()=>clock,passHost:{readActivePass:async()=>active,
+  activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},
+  workspaceForIntake:async()=>process.cwd(),readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
+   events:poll===1?[]:[{id:'message:123:9',revision:'b'.repeat(64),conversationKey:key,kind:'new',outgoing:false,attention:'direct',
+    forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
+ let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();f.database.close();});
+ await coordinator.pollOnce();clock+=300001;await coordinator.pollOnce();
+ await assert.rejects(coordinator.workOnce(),/INTAKE_REVIEW_REQUIRED/);assert.equal(runs,1);assert.ok(active);
+ const original={...f.database.prepare('SELECT * FROM assistant_owner_intakes').get()};
+ // A terminated but still leased turn never authorizes another native start.
+ await coordinator.workOnce();assert.equal(runs,1);assert.equal(closed,0);
+ clock+=1800001;await coordinator.workOnce();assert.equal(closed,1);assert.equal(active,null);
+ createAssistantInbox({database:f.database}); // Existing source-key backfill precedes the immutable recovery snapshot.
+ const cancelled={...f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)};
+ assert.equal(cancelled.outcome_state,'cancelled');assert.equal(cancelled.native_started,1);
+ await coordinator.close();coordinator=createAssistantCoordinator(options);
+ const nativeOriginal=intakes.get(original.id),terminal=markers.get(original.delivery_id);
+ for(const denied of ['read_body','native_running','source_paused','native_unknown','native_task']){
+  nativeOriginal.readConfirmed=denied==='read_body';nativeOriginal.state=denied==='native_unknown'?'leased':'cancelled';
+  nativeOriginal.taskId=denied==='native_task'?randomUUID():null;
+  source.state=denied==='source_paused'?'paused':'active';markers.set(original.delivery_id,denied==='native_running'?{state:'running'}:terminal);
+  clock+=300001;await coordinator.workOnce();assert.equal(runs,1,denied+' cannot authorize another native invocation');
+  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_owner_intakes').get().n,1);
+ }
+ nativeOriginal.readConfirmed=false;nativeOriginal.state='cancelled';nativeOriginal.taskId=null;source.state='active';markers.set(original.delivery_id,terminal);
+ clock+=300001;await coordinator.workOnce();assert.equal(runs,2);assert.equal(provisions,2,'fresh visible retry chat gets the current native catalogue');
+ assert.equal(sends,1);assert.equal(closed,1);assert.equal(active,null);
+ assert.deepEqual({...f.database.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id)},
+  {...cancelled,next_check_at:clock+300000},'the original start fence, native IDs and cancelled receipt remain intact');
+ const rows=f.database.prepare('SELECT id,original_event_id,thread_id,retry_of_id,retry_ordinal,outcome_state FROM assistant_owner_intakes ORDER BY retry_ordinal').all();
+ assert.equal(rows.length,2);assert.equal(rows[1].retry_of_id,original.id);assert.equal(rows[1].original_event_id,original.original_event_id);
+ assert.notEqual(rows[1].thread_id,rows[0].thread_id);assert.equal(rows[1].outcome_state,'replied');
+ await coordinator.close();coordinator=createAssistantCoordinator(options);clock+=300001;await coordinator.workOnce();
+ assert.equal(runs,2);assert.equal(sends,1);assert.equal(f.passes.size,0);
+ assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+ assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+});
