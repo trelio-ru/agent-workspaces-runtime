@@ -25,7 +25,7 @@ try {
   [System.IO.File]::WriteAllBytes($iconPath, $stream.ToArray())
 } finally { $writer.Dispose(); $stream.Dispose() }
 $resourceIcon = $iconPath.Replace('\', '\\')
-[System.IO.File]::WriteAllText($resourcePath, "#pragma code_page(65001)`n102 ICON `"$resourceIcon`"`nSTRINGTABLE`nBEGIN`n101 `"Цифровой ассистент`"`nEND`n", [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($resourcePath, "102 ICON `"$resourceIcon`"`n", [System.Text.UTF8Encoding]::new($false))
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
 $installation = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ($LASTEXITCODE -ne 0 -or !$installation) { throw "MSVC build tools unavailable" }

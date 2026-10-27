@@ -920,8 +920,9 @@ to set the assistant's taskbar identity, separately from Node:
 - `System.AppUserModel.ID` is `Trelio.DigitalAssistant.<assistant UUID>`, stable
   across runtime versions and restarts, separate for each assistant
 - `RelaunchIconResource` points to icon resource 102 of this signed native worker
-- `RelaunchDisplayNameResource` points to its string resource 101,
-  `Цифровой ассистент`
+- `RelaunchDisplayNameResource` uses the documented literal-name form,
+  `Цифровой ассистент`: the product has no MUI name catalogue, and resolving
+  text from a differently architected EXE is unnecessary
 - `RelaunchCommand` uses the absolute inbox `schtasks.exe /Run /TN` with the
   SAME pre-verified `Trelio-DigitalAssistant-<assistant UUID>` task. Setting it
   does not execute anything; a later explicit Shell launch still uses the
@@ -939,7 +940,7 @@ The icon uses the exact three bars/cursor geometry from the dedicated plugin's
 `assets/trelio-assistant-logo.svg` (SVG SHA-256
 `fbf526b22fb2324623e64aaa89fa5474d8d4cd6b4bb64c3255d22cdd1263131e`).
 The hosted builder wraps the SAME reviewed 64px PNG array in a disposable ICO
-and compiles it into the SAME x64/ia32/arm64 PE along with the fixed display name.
+and compiles it into the SAME x64/ia32/arm64 PE.
 Icon resource 102 avoids the legacy extractor's special `-1` icon-count index;
 native verification requires actual large and small HICONs, not just that count.
 There is no extra runtime package asset, local compilation or Node.exe edit;
@@ -957,7 +958,7 @@ Partial startup and normal EOF restore only values still owned by this attempt,
 leaving later independent changes intact. Branding failure stays cosmetic and
 never blocks or grants business readiness or changes work deadlines.
 Native Windows/ARM fixtures independently inspect the exact owned window's
-Shell properties, extract its PE icon and display name, verify restoration at
+Shell properties and fixed display name, extract its PE icon, verify restoration at
 EOF and unchanged foreground, and retain shared/hidden/ConPTY no-op checks.
 The classic-console fixture first proves its own HWND/class/visibility, then
 detaches before release; Shell inspection never adds a third console process.
