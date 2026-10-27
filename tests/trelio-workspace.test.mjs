@@ -3785,8 +3785,13 @@ test("future Runs reuse one persistent Workspace folder and sync accepted head b
   }
 });
 
+// The full transfer/recovery chain has NINE sequential CLI invocations. Each
+// retains its existing 10s deadline. The outer fixture also budgets Git and
+// credential setup/cleanup: the former 20s total could cancel valid Windows
+// work while no individual command had exceeded its own unchanged deadline.
+const draftResumeChildTimeoutMs = 10_000;
 test("blocker checkpoint transfers the exact draft and continuation state to another device", {
-  timeout: 20_000,
+  timeout: 9 * draftResumeChildTimeoutMs + 20_000,
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-draft-resume-"));
   const firstHomeDirectory = path.join(temporaryDirectory, "home-first");
@@ -4073,7 +4078,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: temporaryDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(firstHomeDirectory),
       },
     );
@@ -4098,7 +4103,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: firstWorkspaceDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(firstHomeDirectory),
       },
     );
@@ -4120,7 +4125,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
         {
           cwd: firstWorkspaceDirectory,
           encoding: "utf8",
-          timeout: 10_000,
+          timeout: draftResumeChildTimeoutMs,
           env: workspaceFixtureEnvironment(firstHomeDirectory),
         },
       ),
@@ -4147,7 +4152,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: firstWorkspaceDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(firstHomeDirectory),
       },
     );
@@ -4175,7 +4180,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: temporaryDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(secondHomeDirectory),
       },
     );
@@ -4244,7 +4249,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: secondWorkspaceDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(secondHomeDirectory),
       },
     );
@@ -4267,7 +4272,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: temporaryDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(firstHomeDirectory),
       },
     ).then(() => null, (error) => error);
@@ -4306,7 +4311,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       {
         cwd: temporaryDirectory,
         encoding: "utf8",
-        timeout: 10_000,
+        timeout: draftResumeChildTimeoutMs,
         env: workspaceFixtureEnvironment(firstHomeDirectory),
       },
     );
@@ -4328,7 +4333,7 @@ test("blocker checkpoint transfers the exact draft and continuation state to ano
       "the preserved source remains indexed for safe future retention checks");
     const reopened = await execFileAsync(process.execPath, [bridgePath, "open", "--origin", origin,
       "--workspace", writableWorkspaceId, "--run", runId], {
-      cwd: temporaryDirectory, encoding: "utf8", timeout: 10_000,
+      cwd: temporaryDirectory, encoding: "utf8", timeout: draftResumeChildTimeoutMs,
       env: workspaceFixtureEnvironment(firstHomeDirectory),
     });
     assert.ok(reopened.stdout.includes(path.join(recoveryDirectory, "workspace")),

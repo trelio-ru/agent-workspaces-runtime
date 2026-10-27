@@ -867,9 +867,9 @@ publication tooling также остаются вне этого публичн
   no human intent flags, new vault, account signup or existing-card adoption. Metadata operations
   return before the local executor: [contract](docs/assistant-scheduler.md#private-secret-browser-use).
 
-- Saving rate-limit fixtures budget all sequential CLI calls plus setup/cleanup
-  separately; each original process deadline and no-duplicate assertion remains
-  enforced. Diagnose timeout with closed stage/counters, never private output.
+- Rate-limit and draft-transfer fixtures budget all sequential CLI calls plus
+  setup/cleanup separately; each original process deadline and no-duplicate
+  assertion remains enforced. Diagnose timeout with closed stage/counters, never private output.
 
 
 - Verified owner source intake is taskless, uses the SAME observer/proof/native
