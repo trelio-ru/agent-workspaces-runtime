@@ -22,6 +22,23 @@ export const workspaceRecoveryDirectory = (sourceDirectory, workspaceId, runId) 
   return path.join(path.dirname(source), "r-" + createHash("sha256").update(identity).digest("base64url"));
 };
 
+/** Classify only the host's historical/compact recovery names. This is a
+ * retention policy hint, never permission to delete: callers must still prove
+ * registry ownership, exact native terminal state, clean Git and idle locks.
+ * A recovery checkout can be reused by a later Run, so an old suffix is not
+ * required to equal its current Run id. Arbitrary custom roots keep the normal
+ * persistent-root policy even when their name happens to contain "recovery".
+ */
+export const isWorkspaceRecoveryDirectory = (directory, workspaceId, runId) => {
+  if (!UUID_PATTERN.test(String(workspaceId || "")) || !UUID_PATTERN.test(String(runId || ""))) return false;
+  const name = path.basename(directory);
+  const workspacePrefix = String(workspaceId).toLowerCase() + "-recovery-";
+  return /^r-[A-Za-z0-9_-]{43}$/u.test(name)
+    || name.toLowerCase() === "recovery-" + String(runId).toLowerCase()
+    || (name.toLowerCase().startsWith(workspacePrefix)
+      && /^[0-9a-f]{8}(?:-recovery-[0-9a-f]{8})*$/iu.test(name.slice(workspacePrefix.length)));
+};
+
 export const WORKSPACE_DIRECTORY_REQUIRED = "TRELIO_WORKSPACE_DIRECTORY_REQUIRED";
 export const WORKSPACE_LOCAL_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED";
 export const WORKSPACE_DRAFT_RECOVERY_REQUIRED = "TRELIO_WORKSPACE_DRAFT_RECOVERY_REQUIRED";

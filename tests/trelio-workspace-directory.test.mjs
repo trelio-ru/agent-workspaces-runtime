@@ -34,6 +34,7 @@ import {
   parseWorkspaceLocalRecoveryRequiredError,
   parseWorkspaceRunReclaimRequiredError,
   workspaceRecoveryDirectory,
+  isWorkspaceRecoveryDirectory,
 } from "../host-runtime/scripts/trelio-workspace-directory.mjs";
 import {
   TRELIO_WORKSPACE_ACTION_TOOL,
@@ -42,6 +43,22 @@ import {
 } from "../host-runtime/scripts/trelio-local-context.mjs";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
+
+test("recovery retention recognizes exact historical and compact roots without adopting custom names", () => {
+  const runId = "22222222-2222-4222-8222-222222222222";
+  const parent = path.resolve(os.tmpdir(), "recovery-retention");
+  for (const name of [
+    workspaceId + "-recovery-22222222",
+    workspaceId + "-recovery-22222222-recovery-22222222",
+    "recovery-" + runId,
+    path.basename(workspaceRecoveryDirectory(path.join(parent, workspaceId), workspaceId, runId)),
+  ]) assert.equal(isWorkspaceRecoveryDirectory(path.join(parent, name), workspaceId, runId), true);
+  for (const name of [workspaceId, "my-recovery", workspaceId + "-recovery-unknown", "r-short",
+    runId + "-recovery-22222222", "recovery-" + workspaceId]) {
+    assert.equal(isWorkspaceRecoveryDirectory(path.join(parent, name), workspaceId, runId), false);
+  }
+  assert.equal(isWorkspaceRecoveryDirectory(parent, "unknown", runId), false);
+});
 
 test("repeated recovery keeps a full identity digest and does not accumulate Windows path suffixes", () => {
   const runId = "22222222-2222-4222-8222-222222222222";

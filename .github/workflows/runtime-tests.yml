@@ -543,6 +543,16 @@ jobs:
       - name: Run Windows Workspace directory selection regressions
         run: node tests/trelio-workspace-directory.test.mjs
 
+      # Recovery retention deletes real local checkouts. The directory suite
+      # alone covers locator parsing, but cannot prove native Windows deletion,
+      # retained-source discovery or reuse through the complete open pipeline.
+      - name: Run Windows Workspace recovery and cleanup regressions
+        if: needs.ci-plan.outputs.profile == 'full'
+        run: >-
+          node --test
+          --test-name-pattern="clean lists|future Runs|blocker checkpoint"
+          tests/trelio-workspace.test.mjs
+
       - name: Run Windows path comparison regressions
         run: node tests/trelio-local-path.test.mjs
 
