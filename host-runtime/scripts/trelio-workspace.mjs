@@ -835,7 +835,10 @@ const run = async (executable, args, options = {}) => {
   const { input, ...execFileOptions } = options;
   const commandOptions = {
     ...execFileOptions,
-    encoding: "utf8",
+    // Default text callers retain their existing ABI. The internal immutable
+    // Git-object inspector alone requests raw bytes: decoding a tree/blob as
+    // UTF-8 would silently destroy the evidence needed for its content hash.
+    encoding: execFileOptions.encoding === null ? null : "utf8",
     maxBuffer: 32 * 1024 * 1024,
     env: {
       ...process.env,
@@ -3056,9 +3059,10 @@ const inspectImmutableCodexPluginTree = async (
   // changed ONLY its real root .git index/reflog metadata. Git config, hooks,
   // refs, attributes, objects and every package file remain in the comparison: they
   // must not gain an exception that could select commands or replacement code.
-  // Never persist this as a
-  // replacement receipt or use it to validate a damaged retained snapshot.
+  // The separate repack digest below selects a stricter decoded-object check;
+  // neither ephemeral digest replaces a receipt or validates a damaged copy.
   const payloadHash = crypto.createHash("sha256");
+  const repackHash = crypto.createHash("sha256");
   let hasCheckoutMetadata = false;
   let fileCount = 0;
   let totalBytes = 0;
@@ -3113,6 +3117,18 @@ const inspectImmutableCodexPluginTree = async (
         payloadHash.update(`:${bytes.byteLength}:`);
         payloadHash.update(bytes);
       }
+      // A physical Git pack may be re-encoded without changing any object.
+      // This THIRD ephemeral comparison is insufficient by itself: its only
+      // caller also verifies every decoded object's identity/content below.
+      // Config, hooks, refs, loose objects, alternates and unknown files stay
+      // byte-strict; only SHA-1 native pack/idx/rev containers are candidates.
+      const objectPack = /^\.git\/objects\/pack\/pack-[a-f0-9]{40}\.(pack|idx|rev)$/u.test(relativePath);
+      if (!checkoutState && !objectPack) {
+        repackHash.update(`${Buffer.byteLength(relativePath, "utf8")}:`);
+        repackHash.update(relativePath, "utf8");
+        repackHash.update(`:${bytes.byteLength}:`);
+        repackHash.update(bytes);
+      }
     }
   };
 
@@ -3134,6 +3150,7 @@ const inspectImmutableCodexPluginTree = async (
     version: expectedVersion,
     treeSha256: treeHash.digest("hex"),
     payloadTreeSha256: payloadHash.digest("hex"),
+    repackTreeSha256: repackHash.digest("hex"),
     hasCheckoutMetadata,
     fileCount,
     totalBytes,
@@ -3222,18 +3239,112 @@ const assertRetainedCodexPluginEntry = async (entry) => {
   return inspection;
 };
 
+/** Read only the already bounded, regular Git object store. An ephemeral bare
+ * reader supplies ALL configuration/refs; the installed repository's config,
+ * hooks, replacements, shallow state and ambient Git variables are never used.
+ * The SAME verified Git executable decodes its pack format. No fetch, filters,
+ * checkout, GC, source writes or new executable/provider path is permitted.
+ * Raw object bytes remain local and bounded, and never enter a receipt/log.
+ */
+const readRetainedPluginGitObjects = async (pluginDirectory, signal) => {
+  let temporaryDirectory;
+  let bytes;
+  let stage = "object-store";
+  try {
+    const objectDirectory = path.join(pluginDirectory, ".git", "objects");
+    const metadata = await fs.lstat(objectDirectory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error();
+    for (const name of ["alternates", "http-alternates"]) {
+      try { await fs.lstat(path.join(objectDirectory, "info", name)); }
+      catch (error) { if (error.code === "ENOENT") continue; throw error; }
+      throw new Error(); // Never follow an external object pool, even if empty.
+    }
+    stage = "isolated-reader";
+    temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-plugin-object-reader-"));
+    const gitDirectory = path.join(temporaryDirectory, "reader.git");
+    await fs.mkdir(path.join(gitDirectory, "objects"), {recursive: true});
+    await fs.mkdir(path.join(gitDirectory, "refs"));
+    await fs.writeFile(path.join(gitDirectory, "config"), "[core]\nrepositoryformatversion = 0\nbare = true\n");
+    await fs.writeFile(path.join(gitDirectory, "HEAD"), "ref: refs/heads/unused\n");
+    // Removing every inherited Git key also handles Windows case aliases and
+    // prevents trace/config/alternate variables from exporting raw object data.
+    const environment = Object.fromEntries(Object.keys(process.env)
+      .filter(name => /^GIT_/iu.test(name)).map(name => [name, undefined]));
+    Object.assign(environment, {GIT_CONFIG_GLOBAL: GIT_DISABLED_GLOBAL_CONFIG_PATH,
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "0", GIT_CONFIG_PARAMETERS: "",
+      GIT_OBJECT_DIRECTORY: objectDirectory, GIT_ALTERNATE_OBJECT_DIRECTORIES: "",
+      GIT_NO_REPLACE_OBJECTS: "1", GIT_NO_LAZY_FETCH: "1", GIT_OPTIONAL_LOCKS: "0"});
+    stage = "native-read";
+    const result = await runGit(["--git-dir", gitDirectory, "-c", "protocol.allow=never",
+      "cat-file", "--batch-all-objects", "--batch"], {
+      cwd: temporaryDirectory, env: environment, encoding: null, signal,
+    });
+    bytes = result.stdout;
+    if (!Buffer.isBuffer(bytes) || result.stderr.length || bytes.length > CODEX_RETAINED_PLUGIN_MAX_BYTES)
+      throw new Error();
+    stage = "object-framing";
+    const digest = crypto.createHash("sha256");
+    let offset = 0, count = 0, previous = "";
+    while (offset < bytes.length) {
+      const newline = bytes.indexOf(10, offset);
+      if (newline < offset || newline - offset > 100) throw new Error();
+      const header = bytes.subarray(offset, newline).toString("latin1");
+      const match = /^([a-f0-9]{40}) (commit|tree|blob|tag) (0|[1-9][0-9]{0,8})$/u.exec(header);
+      if (!match || ++count > 8192 || match[1] <= previous) throw new Error();
+      const size = Number(match[3]), end = newline + 1 + size;
+      if (size > CODEX_RETAINED_PLUGIN_MAX_BYTES || end >= bytes.length || bytes[end] !== 10) throw new Error();
+      const body = bytes.subarray(newline + 1, end);
+      // Verify Git's reported object ID independently, then compare SHA-256
+      // content too. A SHA-1 collision/corrupt index cannot lend new bytes the
+      // retained object's identity; extra/unreachable objects remain visible.
+      if (crypto.createHash("sha1").update(`${match[2]} ${size}\0`).update(body).digest("hex") !== match[1])
+        throw new Error();
+      digest.update(header + "\n");
+      digest.update(crypto.createHash("sha256").update(body).digest("hex") + "\n");
+      previous = match[1]; offset = end + 1;
+    }
+    if (!count) throw new Error();
+    return digest.digest("hex");
+  } catch {
+    // Native stderr/stdout can contain object contents or local paths. Do not
+    // expose it through the updater's error chain or retry the failed action.
+    throw new Error(`Retained plugin Git objects could not be verified (${stage}).`);
+  } finally {
+    bytes?.fill(0);
+    if (temporaryDirectory) {
+      try { await fs.rm(temporaryDirectory, {recursive: true, force: true, maxRetries: 4, retryDelay: 25}); }
+      catch { throw new Error("Retained plugin Git reader cleanup failed."); }
+    }
+  }
+};
+
 const restoreOneRetainedCodexPlugin = async (entry) => {
   const retained = await assertRetainedCodexPluginEntry(entry);
   // Native Git may refresh index/reflog data after our snapshot but before the
-  // next maintenance cycle. Existing code must match every retained payload
-  // byte AND Git config/hooks/refs/objects; only index/reflog data may differ in
-  // place, never be restored or executed. Both trees were fully bounded/type-checked above, including .git;
+  // next maintenance cycle, or repack an unchanged complete object inventory.
+  // Payload/config/hooks/refs remain byte-exact; a changed pack additionally
+  // needs independent SHA-256 equality of EVERY decoded object. Nothing is
+  // restored/executed in place. Both trees were bounded/type-checked above;
   // a gitdir file, symlink, changed hook/manifest or corrupted copy cannot pass.
   // This also handles old schema-v1 copies without changing hashes, migrating
   // metadata, clearing an update latch or touching native hook approvals.
-  const matchesRetained = existing => existing.treeSha256 === entry.treeSha256
-    || existing.hasCheckoutMetadata && retained.hasCheckoutMetadata
-      && existing.payloadTreeSha256 === retained.payloadTreeSha256;
+  const matchesRetained = async existing => {
+    if (existing.treeSha256 === entry.treeSha256
+      || existing.hasCheckoutMetadata && retained.hasCheckoutMetadata
+        && existing.payloadTreeSha256 === retained.payloadTreeSha256) return true;
+    if (!existing.hasCheckoutMetadata || !retained.hasCheckoutMetadata
+      || existing.repackTreeSha256 !== retained.repackTreeSha256) return false;
+    const signal = AbortSignal.timeout(10_000); // ONE budget for both object stores.
+    const before = await readRetainedPluginGitObjects(entry.pluginDirectory, signal);
+    const after = await readRetainedPluginGitObjects(entry.installedPath, signal);
+    if (before !== after) return false;
+    // A reader cannot bless a concurrently changing pack/config/payload. The
+    // historical schema-v1 hash and the complete observed installed tree must
+    // STILL match after decoding. No source or metadata is rewritten.
+    const saved = await assertRetainedCodexPluginEntry(entry);
+    const current = await inspectImmutableCodexPluginTree(entry.installedPath, entry.version, {profile: entry.profile});
+    return saved.treeSha256 === retained.treeSha256 && current.treeSha256 === existing.treeSha256;
+  };
 
   try {
     const existing = await inspectImmutableCodexPluginTree(
@@ -3241,7 +3352,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
       entry.version,
       { profile: entry.profile },
     );
-    if (!matchesRetained(existing)) {
+    if (!await matchesRetained(existing)) {
       throw new Error(
         `Codex cache уже содержит другие bytes версии ${entry.version}.`,
       );
@@ -3328,7 +3439,7 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
         if (error.code === "EPERM") throw error;
         throw verificationError;
       }
-      if (!matchesRetained(concurrent)) throw error;
+      if (!await matchesRetained(concurrent)) throw error;
     }
   } finally {
     await fs.rm(temporaryPath, { recursive: true, force: true });

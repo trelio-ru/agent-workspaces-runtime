@@ -718,8 +718,11 @@ publication tooling также остаются вне этого публичн
   human plugin store, version discovery, trust/config change or task replay.
   Dedicated cache/native-manifest version is independent of the pinned common
   loader's TRELIO_PLUGIN_VERSION; exercise the actual differing versions.
-  Native root .git index/reflog changes may match only by complete remaining-byte
-  equality; retained schema-v1 copies keep their full historical digest. Never
+  Native root .git index/reflog changes require all remaining bytes to match.
+  Repacked pack/idx/rev additionally require the SAME isolated verified Git to
+  decode ALL objects, independently check their Git IDs and compare SHA-256
+  content, then fence both complete trees. Config/hooks/refs remain byte-strict;
+  retained schema-v1 copies keep their full historical digest. Never
   rewrite receipts, overwrite checkout metadata or relax changed-code/trust guards.
   Lifecycle работает и для signed runtime: независимый runtime не делает
   hook/skill paths независимыми от plugin cache. Нужен production MCP regression

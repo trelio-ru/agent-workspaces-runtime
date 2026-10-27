@@ -152,7 +152,7 @@ cache обрабатывается тем же живым MCP без restart.
 Git-backed native cache может менять `.git/index` и `.git/logs/**` после
 снимка. Уже существующая установка допускает только такие различия внутри
 настоящего root `.git` directory при полном совпадении всех остальных bytes.
-Git config/hooks/refs/objects остаются строгими bytes. Оба дерева проходят прежние
+Git config/hooks/refs и loose objects остаются строгими bytes. Оба дерева проходят прежние
 bounds/type/symlink проверки; gitdir file не получает
 исключение. Это in-place read-back: runtime не восстанавливает Git metadata и
 не читает её как команды. Полный digest сохранённого schema-v1 snapshot остаётся
@@ -161,6 +161,21 @@ digest не заменяет updater journal, native trust или проверк
 Changed hook/loader/manifest/instructions и повреждённый snapshot по-прежнему
 останавливают maintenance до marketplace mutation. Regression использует real
 Git clone для обоих profiles, проверяет index/reflog и сохранение старого receipt.
+
+Native Git также может перепаковать неизменённые objects: физические bytes
+`objects/pack/pack-<SHA1>.pack|idx|rev` тогда отличаются. Только этот контейнерный
+формат допускает отдельную semantic-проверку при полном совпадении остальных
+bytes. Тот же verified Git под одним 10-секундным budget читает ВСЕ объекты обоих
+деревьев, включая unreachable. Собственный temporary bare reader задаёт config/refs;
+исходный config, inherited Git variables, alternates, replacements, lazy fetch,
+hooks и сеть не используются. Bounded binary framing проверяется локально,
+каждый Git SHA-1 ID независимо пересчитывается, затем сравнивается SHA-256
+содержимого каждого объекта. Добавленный/изменённый/повреждённый объект запрещает
+восстановление. После чтения оба полных дерева проверяются повторно; raw object
+bytes не сохраняются и не выдаются в errors/logs. Это проверка существующего
+кода без repack/checkout/cache cleanup, перезаписи receipt или native trust.
+Real Git fixtures проверяют эквивалентный repack, добавленный unreachable pack
+и повреждение pack, сохраняя исходные config/ref/payload negative cases.
 
 Обязательная regression `tests/trelio-plugin-preservation.test.mjs` запускает
 production `runStdioHost`, удаляет старую shell внешним действием, создаёт новую,

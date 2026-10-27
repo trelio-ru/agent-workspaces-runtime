@@ -60,6 +60,10 @@ for (const profile of ["human", "assistant"]) {
       await git(source, "add", ".");
       await git(source, "-c", "user.name=Synthetic", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture");
       await git(f.root, "clone", "--no-hardlinks", source, f.plugin);
+      // Match native Git-backed packages, which are already packed before
+      // retention. Re-encoding that SAME object set must not become changed
+      // executable code; the legacy schema-v1 copy remains byte-exact.
+      await git(f.plugin, "-c", "repack.writeBitmaps=false", "repack", "-ad", "-n");
       const version = path.basename(f.plugin);
       const entry = await retainLoadedCodexPluginInstallation({
         profile, retentionDirectory: f.retentionDirectory, loadedPluginDirectory: f.plugin, loadedPluginVersion: version,
@@ -76,6 +80,41 @@ for (const profile of ["human", "assistant"]) {
       assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/index")), index);
       assert.deepEqual(await fs.readFile(path.join(f.plugin, ".git/config")), config);
       assert.deepEqual(await fs.readFile(metadataPath), metadata, "old immutable receipts are not rewritten");
+
+      const packDirectory=path.join(f.plugin,'.git','objects','pack');
+      const originalPacks=await fs.readdir(packDirectory);
+      await git(f.plugin,'-c','pack.compression=0','-c','repack.writeBitmaps=false','repack','-adf','-n','--window=0');
+      const repackedNames=await fs.readdir(packDirectory);
+      assert.notDeepEqual(repackedNames,originalPacks,'real Git must generate a different physical pack');
+      const repacked=await Promise.all(repackedNames.map(async name=>[name,await fs.readFile(path.join(packDirectory,name))]));
+      assert.equal(await restoreRetainedCodexPluginInstallations({profile,retentionDirectory:f.retentionDirectory}),1);
+      for(const [name,bytes] of repacked)assert.deepEqual(await fs.readFile(path.join(packDirectory,name)),bytes,'valid repack is left untouched');
+      assert.deepEqual(await fs.readFile(metadataPath),metadata,'a repack cannot rewrite the historical receipt');
+
+      // A new valid but unreachable packed object is NOT a mere repack.
+      // Keep refs/config/payload unchanged so only the complete object reader
+      // can reject it, rather than relying on a changed-ref shortcut.
+      const gitInput=(args,input)=>new Promise((resolve,reject)=>{
+        const child=execFile('git',['-c',`core.hooksPath=${hooks}`,...args],{cwd:f.plugin,env:{...process.env,GIT_CONFIG_GLOBAL:globalConfig,GIT_CONFIG_NOSYSTEM:'1'}},(error,stdout)=>error?reject(error):resolve(stdout.trim()));
+        child.stdin.end(input);
+      });
+      const extra=await gitInput(['hash-object','-w','--stdin'],'new packed object, never an admitted payload');
+      assert.match(extra,/^[a-f0-9]{40}$/u);
+      const extraPack=await gitInput(['pack-objects',path.join(packDirectory,'pack')],extra+'\n');
+      assert.match(extraPack,/^[a-f0-9]{40}$/u);
+      await fs.rm(path.join(f.plugin,'.git','objects',extra.slice(0,2),extra.slice(2)));
+      await assert.rejects(restoreRetainedCodexPluginInstallations({profile,retentionDirectory:f.retentionDirectory}));
+      for(const ext of ['pack','idx','rev'])await fs.rm(path.join(packDirectory,`pack-${extraPack}.${ext}`),{force:true});
+      const packedFile=repacked.find(([name])=>name.endsWith('.pack'));
+      const damaged=Buffer.from(packedFile[1]);damaged[20]^=0xff;
+      // Git makes pack files read-only. Change only this disposable fixture's
+      // mode to construct corruption; production readers never chmod objects.
+      const packMode=(await fs.stat(path.join(packDirectory,packedFile[0]))).mode & 0o777;
+      await fs.chmod(path.join(packDirectory,packedFile[0]),0o600);
+      await fs.writeFile(path.join(packDirectory,packedFile[0]),damaged);
+      await assert.rejects(restoreRetainedCodexPluginInstallations({profile,retentionDirectory:f.retentionDirectory}));
+      await fs.writeFile(path.join(packDirectory,packedFile[0]),packedFile[1]);
+      await fs.chmod(path.join(packDirectory,packedFile[0]),packMode);
 
       // Git control files can select commands and filters. They remain strict
       // code bytes, even though native index/reflog changes are permitted.
