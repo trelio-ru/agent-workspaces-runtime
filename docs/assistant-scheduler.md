@@ -2543,7 +2543,10 @@ Codex or replaying a call. No new endpoint, plugin ABI or executor.
 
 Stable encrypted source discovery/health/known-route/committed ACK uses the SAME
 native structural service and BOTH current memberships/project scopes. Monitor
-resolve/package carries only the exact source UUID/revision. Owner setup and
+resolve/package carries only the exact source UUID/revision. Encrypted taskless
+intake read and owner reply validate the SAME native-selected package URL with
+their own source UUID/revision; missing, extra or changed selectors refuse before
+download/provider launch. Owner setup and
 taskless intake retain their separate content adapters; no inherited permission.
 
 The existing signed resolver/package returns a native-selected connection config

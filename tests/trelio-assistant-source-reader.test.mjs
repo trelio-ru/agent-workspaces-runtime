@@ -359,7 +359,11 @@ const encryptedSetupFixture=async(t,encrypted)=>{
     if(url.pathname!==prefix+'/resolve'||!response.ok)return response;
     assert.equal(options.headers.get('x-trelio-assistant-source-encryption-fingerprint'),managed.fingerprint);
     const raw=await response.json(),query=new URL(raw.packageUrl,origin);
-    query.searchParams.set('sourceId',setupFixture.id);query.searchParams.set('sourceRevision',String(setupFixture.revision));
+    // Match native source-runtime.ts: encrypted intake read AND reply packages
+    // carry their selected source even when the resolve body uses sourceIntake.
+    const selected=setupFixture?{id:setupFixture.id,revision:setupFixture.revision}
+      :{id:intakeFixture.intent.sourceId,revision:intakeFixture.intent.expectedRevision};
+    query.searchParams.set('sourceId',selected.id);query.searchParams.set('sourceRevision',String(selected.revision));
     raw.packageUrl=query.pathname+query.search;raw.localIdentity.connectionId=connectionId;
     raw.companyConnection={id:connectionId,status:'configured',configured:true,
       config:buildCompanyEncryptedTextMarker(entityId,'config_json'),secretBindings:[]};
@@ -1716,7 +1720,8 @@ test('MAX native projection binds exact numeric chat, native identity and unchan
     {skillId:'max-web',chat,cursor:cursor(),nativeMax:true}),/INVALID_RESPONSE/);
 });
 
-test('owner intake rereads one exact signed original, rechecks native owner and never acknowledges or imports',async t=>{
+for(const encrypted of [false,true])test(`owner intake rereads one exact signed original, rechecks native owner and never acknowledges or imports (encrypted=${encrypted})`,async t=>{
+ const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;maxAccountFixture=false;});
  for(const [provider,accountWide] of [['telegram-mtproto',false],['max-web',false],['max-web',true]]){
   scope.skillId=provider;maxAccountFixture=accountWide;const max=provider==='max-web',sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),ownerIdentityId=randomUUID();
@@ -1725,11 +1730,13 @@ test('owner intake rereads one exact signed original, rechecks native owner and 
   const ref={eventId,id:'message:77:8',revision:'b'.repeat(64),conversationKey:`${max?'max':'telegram'}-conversation/v1.${'a'.repeat(64)}`};
   intakeFixture={intent:{intakeId,sourceId,expectedRevision:0},admission:{schemaVersion:1,intakeId,sourceId,sourceRevision:0,localAccountId:accountId,
     eventId,threadId,ownerIdentityId,ownerExternalUserId:'123456',...(max?{maxChatUrl:source.maxChatUrl,...(accountWide?{maxAccountDiscovery:true}:{})}:{})}};
-  const dir=path.join(directory,`intake-${provider}-${accountWide}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
+  const dir=path.join(directory,`intake-${provider}-${accountWide}-${encrypted}`);await fs.mkdir(dir);const output=path.join(dir,'output'),marker=path.join(dir,'calls');
   await fs.writeFile(path.join(dir,'main.mjs'),`import assert from 'node:assert/strict';import fs from 'node:fs';
     assert.deepEqual(process.argv.slice(2),${JSON.stringify(['read-reference','--chat',max?'https://web.max.ru/77':'77','--message-id','8','--expected-revision',ref.revision,'--expected-conversation-key',ref.conversationKey])});
     assert.equal(JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON).id,${JSON.stringify(accountId)});
-    assert.equal(process.env.CODEX_THREAD_ID,undefined);fs.appendFileSync(${JSON.stringify(marker)},'read;');process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
+    assert.equal(process.env.CODEX_THREAD_ID,undefined);
+    if(${encrypted})assert.equal(JSON.parse(process.env.TRELIO_SKILL_CONNECTION_CONFIG_JSON).setup,'ENCRYPTED_SETUP_CONFIG_CANARY');
+    fs.appendFileSync(${JSON.stringify(marker)},'read;');process.stdout.write(fs.readFileSync(${JSON.stringify(output)},'utf8'));`);
   artifactId=randomUUID();releaseId=randomUUID();packageBytes=await engine.buildAgentSkillPackage({skillId:provider,runtimeVersion:'2.99.42',sourceDirectory:dir,
     entrypointPath:'main.mjs',interpreter:'node',capabilities:['network','local-session','local-accounts-v1']});
   const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
@@ -1741,17 +1748,19 @@ test('owner intake rereads one exact signed original, rechecks native owner and 
     senderUserId:'123456',outgoing:false,forwarded:false,viaBot:false},message:{text:'Prepare the weekly plan',textTruncated:false,replyContext:null,replyText:'UNTRUSTED_QUOTE'},
     coverage:{textComplete:true,contextIncluded:false,attachmentsContentRead:false,nativeMessageVerified:true},readState:{mode:'history-only',marksRead:false,readReceiptsSent:false,viewsRegistered:false}};
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
-  const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
+  const input={identity,client,host:{...host,readActivePass:async()=>pass},store:selectedStore,pass,source,reference:ref};
   await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text:message.message.text,ownerIdentityId,ownerExternalUserId:'123456',privateOwnerConversation:false});
   for(const patch of [{senderUserId:'654321'},{outgoing:true},{forwarded:true},...(!max?[{viaBot:true}]:[])]){
     await fs.writeFile(output,JSON.stringify({...message,reference:{...message.reference,...patch}}));
     await assert.rejects(readAssistantOwnerIntakeMessage(input),/OWNER_UNVERIFIED/);
   }
+  if(encrypted){const before=await fs.readFile(marker,'utf8');for(const mode of ['selection','recipient','missing']){setMode(mode);await assert.rejects(readAssistantOwnerIntakeMessage(input));assert.equal(await fs.readFile(marker,'utf8'),before,'changed native source/recipient cannot launch a child');}setMode('valid');}
   assert.match(await fs.readFile(marker,'utf8'),/^read;+/);assert.equal((await catalogue.list()).accounts.length>=1,true);
  }
 });
 
-test('owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence',async t=>{
+for(const encrypted of [false,true])test(`owner-private reply uses signed source profile, SAME child stdin and one durable spawn fence (encrypted=${encrypted})`,async t=>{
+ const {selectedStore,setMode}=await encryptedSetupFixture(t,encrypted);
  const saved={...scope};t.after(()=>{Object.assign(scope,saved);intakeFixture=null;resolveOverride=null;});
  scope.skillId='telegram-mtproto';
  const sourceId=randomUUID(),accountId=randomUUID(),intakeId=randomUUID(),eventId=randomUUID(),threadId=randomUUID(),receiptId=randomUUID();
@@ -1762,7 +1771,7 @@ test('owner-private reply uses signed source profile, SAME child stdin and one d
    '--expected-conversation-key',reference.conversationKey,'--expected-owner-id','123456','--confirm'];
  intakeFixture={intent:{intakeId,sourceId,expectedRevision:0,replyReceiptId:receiptId},admission:{schemaVersion:1,kind:'reply_owner',
    intakeId,sourceId,sourceRevision:0,localAccountId:accountId,eventId,threadId,receiptId,ownerIdentityId:randomUUID(),ownerExternalUserId:'123456'}};
- const dir=path.join(directory,'owner-private-reply');await fs.mkdir(dir);const marker=path.join(dir,'calls');
+ const dir=path.join(directory,`owner-private-reply-${encrypted}`);await fs.mkdir(dir);const marker=path.join(dir,'calls');
  const replyText='Здравствуйте! Уже проверяю';
  const positive={schemaVersion:1,protocol:'telegram-owner-reply/v1',sent:true,automaticRetryAllowed:false,
    reference:{id:reference.id,revision:reference.revision,conversationKey:reference.conversationKey},replyToMessageId:8,messageId:91};
@@ -1782,9 +1791,10 @@ test('owner-private reply uses signed source profile, SAME child stdin and one d
  let attempt=false,confirmed=null,state='reply_pending';
  const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({state,receiptId,ownerPrivateRead:true,threadId,eventId,
    sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()})};
- const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference,receiptId,replyText,
+ const input={identity,client,host:{...host,readActivePass:async()=>pass},store:selectedStore,pass,source,reference,receiptId,replyText,
    beforeInvoke:async()=>{assert.equal(attempt,false,'a persisted attempt never dispatches twice');attempt=true;},
    onConfirmed:async value=>{confirmed=value;}};
+ if(encrypted){for(const mode of ['selection','recipient','missing']){setMode(mode);await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(attempt,false,'changed source/recipient refuses before send fence');}setMode('valid');}
  assert.deepEqual(await replyAssistantOwnerIntake(input),{receiptId,messageId:91});assert.deepEqual(confirmed,{receiptId,messageId:91});
  assert.equal(await fs.readFile(marker,'utf8'),'sent;');
  await assert.rejects(replyAssistantOwnerIntake(input));assert.equal(await fs.readFile(marker,'utf8'),'sent;');

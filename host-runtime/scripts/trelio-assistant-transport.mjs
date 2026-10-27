@@ -4344,7 +4344,11 @@ export const createAssistantSourceRuntimeProfile = async ({identity,host,store,s
       // The native encrypted setup adapter binds its exact registration as
       // well as the immutable owner account intent. Reuse the same selected
       // package path; no setup flag can borrow an unrelated source scope.
-      const packageSelection=sourceSelection??(encryptedCompany&&sourceAcknowledgement?{sourceId:sourceAcknowledgement.sourceId,expectedRevision:sourceAcknowledgement.sourceRevision}
+      // Native encrypted intake read/reply selects its source exactly like
+      // monitor/ACK. Keep those query coordinates in the strict URL equality
+      // check; rejecting them breaks intake, ignoring them would widen scope.
+      const packageSelection=sourceSelection??(encryptedCompany&&sourceIntake?{sourceId:sourceIntake.sourceId,expectedRevision:sourceIntake.expectedRevision}
+        :encryptedCompany&&sourceAcknowledgement?{sourceId:sourceAcknowledgement.sourceId,expectedRevision:sourceAcknowledgement.sourceRevision}
         :encryptedCompany&&accountSetup?{sourceId:accountSetup.sourceId,expectedRevision:accountSetup.expectedRevision}:null);
       const query={companyId:scope.companyId,...(scope.projectId?{projectId:scope.projectId}:{}),skillId:scope.skillId,
         expectedReleaseId:resolution.releaseId,artifactId:resolution.artifact.id,
