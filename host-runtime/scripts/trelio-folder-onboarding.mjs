@@ -24,6 +24,11 @@ const MAX_SLUG_LENGTH = 120;
 const MAX_INSTRUCTION_FILE_BYTES = 256 * 1024;
 const INSTRUCTION_FILES = new Set(["AGENTS.md", "AGENTS.override.md"]);
 const BINDING_CLIENTS = new Set(["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"]);
+// Share exact membership with the local action dispatcher so a reviewed plan
+// cannot be rejected by a second, stale client list before reaching the writer.
+// Keep the Set private: callers may check instruction-format support, never
+// mutate it or treat this predicate as OAuth/runtime-policy admission.
+export const isTrelioFolderOnboardingClient = (value) => BINDING_CLIENTS.has(value);
 const ROOT_ALLOWED_FILES = new Set([
   "AGENTS.md",
   "AGENTS.override.md",
@@ -871,7 +876,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
   // format. This never changes OAuth admission, hooks or company permissions.
   // Omission retains the old Codex/Claude bootstrap ABI and its exact plan.
   const clientKind = rawInput.instructionRefreshClientKind ?? rawInput.clientKind ?? "codex";
-  if (!BINDING_CLIENTS.has(clientKind)) {
+  if (!isTrelioFolderOnboardingClient(clientKind)) {
     throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Folder binding requires a supported exact client.");
   }
   const inspection = await inspectFolder({
@@ -921,7 +926,7 @@ const buildPlanState = async (rawInput, dependencies = {}) => {
     if (instructionSnapshot.exists && sha256(Buffer.from(instructionSnapshot.text, "utf8")) !== instructionSnapshot.sha256) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_UNSAFE_FILE", "Managed refresh requires a valid UTF-8 instruction file.");
     }
-    if (!BINDING_CLIENTS.has(rawInput.instructionRefreshClientKind)) {
+    if (!isTrelioFolderOnboardingClient(rawInput.instructionRefreshClientKind)) {
       throw new TrelioFolderOnboardingError("TRELIO_FOLDER_ONBOARDING_INVALID_INPUT", "Instruction refresh requires a supported exact client.");
     }
     const existing = readManagedBinding(instructionSnapshot.text);

@@ -1861,7 +1861,7 @@ exact область. Runtime не наблюдает и не гарантиру
 последний dispatch/evidence check остаётся клиенту. Повтор doctor его не заменяет.
 
 Local `diagnose_trelio_installation(intent=diagnostics)` принимает реальный
-`clientKind` (`codex|claude-code|cursor|antigravity`) и optional
+`clientKind` (`codex|claude-code|cursor|antigravity|deepseek-harness`) и optional
 `folderOnboarding={folderPath}` из client-selected постоянной папки.
 Tool остаётся read-only: host-owned component checks дополняются folder state,
 `readiness` и `liveVerification`. Отсутствующий root не выводится из cwd;
@@ -2548,7 +2548,14 @@ Credentials/key/grant не являются correlation state. Explicit полн
 proposal approval/ACL/CAS остаются отдельными человеческими решениями.
 
 `diagnose_trelio_installation(clientKind=deepseek-harness)` не проверяет foreign
-hooks; общий folder planner пишет AGENTS.md. Неизвестные компоненты остаются
+hooks; общий folder planner пишет AGENTS.md. Planner/file writer и local apply
+dispatcher используют один exact client predicate из `trelio-folder-onboarding.mjs`
+для setup и refresh. Returned `plan.apply.arguments` и `refresh.action.arguments`
+исполняются unchanged через `continue_trelio_workspace_action`, с прежними
+confirmation, scope/file CAS и read-back guards. Unknown client, alias, неверный
+регистр или тип отклоняются до file writer; legacy omission clientKind при setup
+сохраняется. Выбор instruction format не даёт OAuth/runtime-policy допуска.
+Неизвестные компоненты остаются
 not_checked. Actual native core fixture + shared proof/installer/OAuth tests
 запускаются в full hosted gate на Linux/macOS/Windows. Живой OAuth/E2EE save
 проверяется отдельно после signed artifact и backend rollout; offline gate не

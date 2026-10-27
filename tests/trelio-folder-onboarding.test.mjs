@@ -12,6 +12,8 @@ import {
   prepareTrelioFolderOnboarding,
   prepareTrelioFolderDiagnostic,
 } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
+import { handleTrelioWorkspaceActionOperation } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { handleToolCall } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 
 const execFileAsync = promisify(execFile);
 const temporaryRoots = new Set();
@@ -61,9 +63,18 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
     const personal = "# Personal\n\nKeep my formatting.\n";
     await fs.writeFile(path.join(root, "AGENTS.md"), personal);
     const native = ["cursor", "antigravity", "deepseek-harness"].includes(clientKind);
-    const prepared = await prepareTrelioFolderOnboarding({ folderPath: root, clientKind, ...binding });
+    const response = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
+      clientKind, intent: "folder_onboarding", folderOnboarding: { folderPath: root, ...binding },
+    });
+    const prepared = JSON.parse(response.content[0].text);
     assert.deepEqual(prepared.plan.changes.map((change) => change.path), native ? ["AGENTS.md"] : ["AGENTS.md", "CLAUDE.md"]);
-    const result = await applyTrelioFolderOnboarding(prepared.plan.apply.arguments.parameters);
+    // Execute the exact advertised action through the production dispatcher.
+    // Calling the file writer directly would miss a client rejected between
+    // a successful plan and its apply, including the native Harness adapter.
+    const actionOptions = { runBridge: async () => assert.fail("Folder binding must stay in the host") };
+    const result = await handleTrelioWorkspaceActionOperation(
+      "https://trelio.example", prepared.plan.apply.arguments, actionOptions,
+    );
     assert.equal(result.status, "applied");
     const current = await fs.readFile(path.join(root, "AGENTS.md"), "utf8");
     assert.ok(current.startsWith(personal));
@@ -75,7 +86,9 @@ for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deep
     assert.equal(healthy.scope.companySlug, binding.company.slug);
     await makeTemplateOutdated(root);
     const outdated = await prepareTrelioFolderDiagnostic({ folderPath: root }, clientKind);
-    await applyTrelioFolderOnboarding(outdated.refresh.action.arguments.parameters);
+    await handleTrelioWorkspaceActionOperation(
+      "https://trelio.example", outdated.refresh.action.arguments, actionOptions,
+    );
     assert.equal(await fs.readFile(path.join(root, "AGENTS.md"), "utf8"), current);
   });
 }

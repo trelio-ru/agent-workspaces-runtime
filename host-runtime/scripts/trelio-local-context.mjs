@@ -103,6 +103,7 @@ import {
 import {
   TRELIO_FOLDER_ONBOARDING_OPERATION,
   applyTrelioFolderOnboarding,
+  isTrelioFolderOnboardingClient,
 } from "./trelio-folder-onboarding.mjs";
 
 // Version 8 adds complete Workspace text chunks to backend-defined search
@@ -9490,7 +9491,7 @@ const buildFolderOnboardingActionInvocation = (parameters) => {
   }
   const refresh = parameters.userExplicitlyRequestedInstructionRefresh === true;
   const clientKind = refresh ? parameters.instructionRefreshClientKind : parameters.clientKind;
-  if (clientKind !== undefined && !["codex", "claude-code", "cursor", "antigravity"].includes(clientKind)) {
+  if (clientKind !== undefined && !isTrelioFolderOnboardingClient(clientKind)) {
     throw workspaceInputError("Folder binding requires a supported exact client.", "parameters.clientKind");
   }
   if (refresh && clientKind === undefined) {

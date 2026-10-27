@@ -469,7 +469,7 @@ test("command-only Workspace actions are outside the current ABI", () => {
 });
 
 test("native folder format and authorized refresh survive the exact local apply envelope", async () => {
-  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity"]) {
+  for (const clientKind of ["codex", "claude-code", "cursor", "antigravity", "deepseek-harness"]) {
     const parameters = { folderPath: actionWorkingDirectory, instructionTarget: "AGENTS.md",
       company: { name: "Компания", slug: "company" }, planHash: "a".repeat(64),
       userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind };
@@ -480,6 +480,25 @@ test("native folder format and authorized refresh survive the exact local apply 
       folderOnboardingApply: async (input) => { assert.deepEqual(input, parameters); return { status: "applied" }; },
     });
     assert.equal(result.status, "applied");
+  }
+});
+
+test("folder apply rejects unsupported exact clients before invoking the writer", async () => {
+  for (const clientKind of ["deepseek", "DeepSeek-Harness", "deepseek-harness ", "gigacode", "", null, 1, {}, []]) {
+    for (const refresh of [false, true]) {
+      const parameters = { folderPath: actionWorkingDirectory, instructionTarget: "AGENTS.md",
+        company: { name: "Компания", slug: "company" }, planHash: "a".repeat(64),
+        ...(refresh ? { userExplicitlyRequestedInstructionRefresh: true, instructionRefreshClientKind: clientKind }
+          : { userExplicitlyRequestedFolderSetup: true, clientKind }) };
+      await assert.rejects(handleTrelioWorkspaceActionOperation("https://trelio.example", {
+        schemaVersion: 1, operation: "folder_onboarding_apply", parameters,
+      }, {
+        runBridge: async () => assert.fail("Invalid client must fail before a child launch"),
+        folderOnboardingApply: async () => assert.fail("Invalid client must fail before the writer"),
+      }), (error) => error?.code === "TRELIO_WORKSPACE_ACTION_INVALID_INPUT"
+        && error.details?.failureCode === "TRELIO_WORKSPACE_INPUT_INVALID_VALUE"
+        && error.details?.field === "clientKind");
+    }
   }
 });
 

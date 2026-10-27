@@ -900,4 +900,6 @@ Pre-native reservation recovery: SAME delivery v12/bit0/lease and native history
 
 Native DeepSeek Harness preview принадлежит host runtime; его bootstrap,
 qualification и границы описаны в [runtime contract](docs/agent-workspace-runtime.md#native-deepseek-harness-preview).
+Folder planner и apply dispatcher используют общий exact client predicate;
+проверяй returned action целиком для setup и refresh, а не только file writer.
 Public plugin shell для этого клиента не меняется.
