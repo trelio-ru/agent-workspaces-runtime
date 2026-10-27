@@ -186,7 +186,7 @@ export const prepareAssistantHookComponentBootstrap = async ({context=production
     };
     if(state&&(['failed','rolling_back','installing','closing','starting','verifying','retargeting'].includes(state.stage)
       ||state.targetVersion!==inventory.version||state.targetTreeSha256!==inventory.treeSha256))fail('ASSISTANT_BACKGROUND_BUSY');
-    const options={requirement:inventory.hookComponent,execFileCommand,environment:env};
+    const options={requirement:inventory.hookComponent,execFileCommand,environment:env,signal};
     if(state?.stage==='hook_installing'){
       if(['pluginId','version','integritySha256'].some(key=>state.hookComponent?.[key]!==inventory.hookComponent[key])
         ||(await common.inspectAssistantHookComponent(options)).matches!==true)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
@@ -198,6 +198,7 @@ export const prepareAssistantHookComponentBootstrap = async ({context=production
         targetTreeSha256:inventory.treeSha256,desktopGeneration:null,restarts:0,failures:0,failedVersion:null}:{}),
         stage:'hook_installing',hookComponent:admission});
     }});
+    if(result.publicationPending)fail('ASSISTANT_PLUGIN_UPDATE_REQUIRED');
     if(state?.stage==='hook_installing')await save({stage:'installed'});
     return {state:result.unchanged?'current':'installed'};
   }),{signal,pluginMaintenance:true});
@@ -1204,10 +1205,10 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
       readState:()=>lockedHost.readPluginUpdate(),
       writeState:(expected,next)=>lockedHost.writePluginUpdate(expected,next),
       upgrade:(current,beforeInstall)=>common.updateCodexPluginMarketplace({profile:'assistant',onlyIfNewerThan:current,beforeInstall,
-        execFileCommand,environment:env,loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
+        execFileCommand,environment:env,signal,loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
       hooks:(operation,requirement,beforeInstall)=>operation==='inspect'
         ?common.inspectAssistantHookComponent({requirement,execFileCommand,environment:env})
-        :common.installAssistantHookComponent({requirement,beforeInstall,execFileCommand,environment:env}),
+        :common.installAssistantHookComponent({requirement,beforeInstall,execFileCommand,environment:env,signal}),
       rollback:(version,treeSha256)=>common.restoreAssistantCodexPluginVersion({version,treeSha256,execFileCommand,environment:env,
         loadedPluginDirectory,loadedPluginVersion:path.basename(loadedPluginDirectory)}),
       desktop:(operation,generation)=>runAssistantWindowsDesktop(operation,generation,{environment,signal,guard}),

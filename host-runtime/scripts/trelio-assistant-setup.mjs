@@ -887,7 +887,8 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
           targetVersion,targetTreeSha256:null,stage:'installing',desktopGeneration:null,restarts:0,failures:0,failedVersion:null,hookComponent:null});
       });
       optionalDiscovery=false;
-      if(result.unchanged&&!awaitingActivation)return {state:'current',version:current.version,...(state.failedVersion?{failedVersion:state.failedVersion}:{})};
+      if(result.unchanged&&!awaitingActivation)return {state:'current',version:current.version,
+        ...(result.publicationPending?{updateDeferred:true}:{}),...(state.failedVersion?{failedVersion:state.failedVersion}:{})};
       if(!result.unchanged)current=await inventory();
     }
     if(state.stage==='installing'){
@@ -913,6 +914,9 @@ export const maintainAssistantPlugin = async ({identity,readState,writeState,inv
       const result=await hooks('ensure',current.hookComponent,async admission=>{
         await save({stage:'hook_installing',hookComponent:admission});
       });
+      // No install intent or native add happened. Keep the same candidate and
+      // original failure counters while its separately published ref is absent.
+      if(result?.publicationPending===true)return {state:'deferred',blockBusiness:true};
       if(result?.matches!==true)fail('ASSISTANT_PLUGIN_UPDATE_FAILED');
       // An older signed worker may already have activated the main-only
       // package and stopped at missing hooks. Installing its NEW dependency

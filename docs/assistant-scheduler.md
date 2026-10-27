@@ -1656,6 +1656,18 @@ descriptor. A main-only update must preserve all native hook hashes; changing
 hook/loader bytes must still invalidate native trust. No mutable code/instructions
 are hidden in fingerprint exclusions, symlinks or indirect unverified launchers.
 
+Before either main or hook installation intent, a fixed public Git preflight
+checks the generated installable ref. Marketplace metadata may precede it:
+only a complete successful empty `ls-remote --refs` of the exact official
+`plugin-vX.Y.Z` or `hooks-vX.Y.Z` means pending publication. It defers without
+native add, failure counter changes or clearing an earlier failed-version
+latch. Network errors, stderr and ambiguous/partial output never establish
+absence or installation. The SAME verified Git engine uses no credentials or
+interactive prompt and keeps the original maintenance signal/deadline. Native
+installation, full byte verification and human hook review remain independent.
+An already failed candidate requires a genuinely newer release; polling never
+resets its latch.
+
 The SAME updater journal has an optional closed `hookComponent` receipt and a
 `hook_installing` phase. Persist it before ONE native add. On an interrupted or
 lost reply, only matching native inventory/full byte verification releases that

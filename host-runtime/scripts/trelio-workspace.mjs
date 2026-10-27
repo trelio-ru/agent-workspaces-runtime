@@ -3700,6 +3700,31 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
     treeSha256: tree.treeSha256,...(requirement?{hookComponent:requirement}:{}),...(integritySha256?{integritySha256}:{})};
 };
 
+/** A marketplace source commit can advertise a version BEFORE its generated
+ * immutable Git ref has been published. Check that exact public ref with the
+ * SAME verified Git engine before writing an installation intent. A successful
+ * empty read is pending publication; network/diagnostic/ambiguous reads throw
+ * and never mean absence. This is readiness only, not trust or install proof.
+ * Native Codex still installs/verifies the official source independently. */
+export const readAssistantPluginPublishedRef = async ({profile,version,signal,readGit=runGit}) => {
+  if(!['assistant','assistantHooks'].includes(profile)||!parseStableVersion(version))
+    throw new Error('Invalid assistant distribution selection.');
+  signal?.throwIfAborted();
+  const ref=`refs/tags/${profile==='assistantHooks'?'hooks':'plugin'}-v${version}`;
+  const result=await readGit(['-c','credential.helper=','-c','core.askPass=','ls-remote','--refs',
+    'https://github.com/trelio-ru/digital-assistants.git',ref],{signal,timeout:10_000,maxBuffer:16*1024,
+    env:{GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat',GIT_ASKPASS:'',SSH_ASKPASS:''}});
+  signal?.throwIfAborted();
+  if(typeof result?.stdout!=='string'||typeof result.stderr!=='string'||result.stderr.length
+    ||Buffer.byteLength(result.stdout)>1024)throw new Error('Assistant distribution read was not complete.');
+  const text=result.stdout.trim();
+  if(!text)return false;
+  const parts=text.split('\t');
+  if(parts.length!==2||!/^[a-f0-9]{40}$/u.test(parts[0])||parts[1]!==ref)
+    throw new Error('Assistant distribution read was ambiguous.');
+  return true;
+};
+
 export const validateAssistantHookComponentRequirement = value => {
   if(!value||Object.getPrototypeOf(value)!==Object.prototype
     ||Object.keys(value).sort().join(',')!=='integritySha256,pluginId,version'
@@ -3774,13 +3799,16 @@ export const inspectAssistantHookComponent = async ({requirement,...options}) =>
  * add. A lost reply must use inspectAssistantHookComponent, NEVER call this
  * installer again. Disabled, newer or same-version/tampered installations are
  * not silently enabled, downgraded or overwritten. This writes no trust. */
-export const installAssistantHookComponent = async ({requirement,beforeInstall,...options}) => {
+export const installAssistantHookComponent = async ({requirement,beforeInstall,
+  readPublishedRef=readAssistantPluginPublishedRef,signal,...options}) => {
   const expected=validateAssistantHookComponentRequirement(requirement);
   const before=await inspectAssistantHookComponent({...options,requirement:expected});
   if(before.matches)return {...before,unchanged:true};
   if(before.state==='disabled'||before.desiredVersion!==expected.version
     ||before.state==='installed'&&isStableVersionAtLeast(before.version,expected.version)
     ||typeof beforeInstall!=='function')throw new Error('Assistant hook component is unavailable.');
+  if(!await readPublishedRef({profile:'assistantHooks',version:expected.version,signal}))
+    return {...before,publicationPending:true,unchanged:true};
   if(before.state==='installed')await retainLoadedCodexPluginInstallation({profile:'assistantHooks',
     loadedPluginDirectory:before.installedPath,loadedPluginVersion:before.version});
   await beforeInstall({...expected,previousVersion:before.state==='installed'?before.version:null});
@@ -3880,7 +3908,7 @@ export const updateCodexPluginMarketplace = async ({
   preserveLoadedPlugin = true,
   loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = PLUGIN_VERSION,
-  retentionDirectory, profile = "human",
+  retentionDirectory, profile = "human",signal,readPublishedRef=readAssistantPluginPublishedRef,
 } = {}) => {
   const selected = codexRetentionProfile(profile);
   let lastError = null;
@@ -3920,6 +3948,10 @@ export const updateCodexPluginMarketplace = async ({
         if (inventory.state !== "installed") throw new Error("Plugin is disabled.");
         if (onlyIfNewerThan && isStableVersionAtLeast(onlyIfNewerThan, inventory.desiredVersion))
           return {...inventory, unchanged: true};
+        // Do not burn the one installation attempt or latch failedVersion for
+        // a source whose immutable package has not been published yet.
+        if(!await readPublishedRef({profile,version:inventory.desiredVersion,signal}))
+          return {...inventory,unchanged:true,publicationPending:true};
         // Durable host intent precedes the one native installation. If its
         // response is lost, maintenance reconciles native inventory, never
         // reruns this mutation from an error/retry branch.

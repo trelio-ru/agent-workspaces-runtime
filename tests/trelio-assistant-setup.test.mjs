@@ -1941,6 +1941,40 @@ test('re-pairing never adopts or destroys another device maintenance policy/jour
   assert.deepEqual([...files.entries()].filter(([name])=>name.endsWith('policy.json')),saved);
 });
 
+test('unpublished newer main defers without burning its intent or clearing the previous failed-version latch',async()=>{
+  const f=pluginUpdateFixture();Object.assign(f.current(),{desiredVersion:'0.1.3'});
+  await maintainAssistantPlugin(f.options);
+  await f.options.writeState(f.state(),{...f.state(),failedVersion:'0.1.4'});
+  Object.assign(f.current(),{desiredVersion:'0.1.5'});f.effects.length=0;
+  let published=false;const upgrade=f.options.upgrade;
+  f.options.upgrade=async(current,before)=>published?upgrade(current,before):{unchanged:true,publicationPending:true};
+  const saved=structuredClone(f.state());
+  for(let i=0;i<4;i++)assert.deepEqual(await maintainAssistantPlugin(f.options),
+    {state:'current',version:'0.1.3',updateDeferred:true,failedVersion:'0.1.4'});
+  assert.deepEqual(f.state(),saved);assert.equal(f.counts().installs,0);assert.deepEqual(f.effects,[]);
+  published=true;assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'updated',version:'0.1.5'});
+  assert.equal(f.counts().installs,1);assert.equal(f.state().failedVersion,null);
+});
+
+test('unpublished hook dependency retains the same installed candidate until one native add and human review',async()=>{
+  const f=pluginUpdateFixture(),requirement={pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.0',integritySha256:'c'.repeat(64)};
+  const upgrade=f.options.upgrade;f.options.upgrade=async(...args)=>{const result=await upgrade(...args);f.current().hookComponent=requirement;return result;};
+  let published=false,present=false,adds=0;
+  f.options.hooks=async(operation,_expected,before)=>{
+    if(operation==='inspect')return {matches:present};
+    if(present)return {matches:true,unchanged:true};
+    if(!published)return {matches:false,unchanged:true,publicationPending:true};
+    await before({...requirement,previousVersion:null});adds++;present=true;return {matches:true};
+  };
+  assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'deferred',blockBusiness:true});
+  const saved=structuredClone(f.state());assert.equal(saved.stage,'installed');assert.equal(saved.failures,0);assert.equal(adds,0);
+  for(let i=0;i<4;i++)assert.deepEqual(await maintainAssistantPlugin(f.options),{state:'deferred',blockBusiness:true});
+  assert.deepEqual(f.state(),saved);assert.deepEqual(f.effects,[]);assert.equal(f.counts().installs,1);
+  published=true;f.trust(false);
+  assert.equal((await maintainAssistantPlugin(f.options)).state,'hook_review');assert.equal(adds,1);
+  f.trust(true);assert.equal((await maintainAssistantPlugin(f.options)).state,'updated');assert.equal(adds,1);
+});
+
 test('stable hook install survives lost reply by read-back only, then native trust resumes the SAME update',async()=>{
   const f=pluginUpdateFixture(),requirement={pluginId:'trelio-digital-assistant-hooks@trelio-digital-assistants',version:'0.1.0',integritySha256:'c'.repeat(64)};
   const upgrade=f.options.upgrade;f.options.upgrade=async(...args)=>{const result=await upgrade(...args);f.current().hookComponent=requirement;return result;};

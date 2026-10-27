@@ -165,6 +165,7 @@ import {
   retainCurrentContextObjects,
   updateCodexPluginMarketplace,
   readCodexPluginUpdateInventory,
+  readAssistantPluginPublishedRef,
   inspectAssistantHookComponent,
   installAssistantHookComponent,
   unprotectWindowsBridgeSessionToken,
@@ -11788,11 +11789,19 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
     }
     return {stdout:JSON.stringify(value)};
   };
-  const options={profile:'assistant',environment:{CODEX_HOME:home},execFileCommand,preserveLoadedPlugin:false};
+  let published=false,publicationReads=0;
+  const options={profile:'assistant',environment:{CODEX_HOME:home},execFileCommand,preserveLoadedPlugin:false,
+    readPublishedRef:async selection=>{publicationReads++;assert.deepEqual(selection,{profile:'assistant',version:'0.1.4',signal:undefined});return published;}};
   const before=await readCodexPluginUpdateInventory(options);assert.equal(before.version,'0.1.3');assert.match(before.treeSha256,/^[a-f0-9]{64}$/);
+  const pending=await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.3',beforeInstall:()=>assert.fail('unpublished version must not acquire an install intent')});
+  assert.equal(pending.publicationPending,true);assert.equal(pending.unchanged,true);assert.equal(adds,0);assert.equal(prepared,null);assert.equal(version,'0.1.3');
+  await assert.rejects(updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.3',
+    readPublishedRef:async()=>{throw Error('synthetic incomplete Git read');},beforeInstall:()=>assert.fail('unknown publication must not install')}));
+  assert.equal(adds,0);assert.equal(prepared,null);published=true;
   await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.3',beforeInstall:async target=>{prepared=target;}});
   assert.equal(adds,1);const after=await readCodexPluginUpdateInventory(options);assert.equal(after.version,'0.1.4');assert.notEqual(after.treeSha256,before.treeSha256);
   await updateCodexPluginMarketplace({...options,onlyIfNewerThan:'0.1.4',beforeInstall:()=>assert.fail('unchanged must not install')});assert.equal(adds,1);
+  assert.equal(publicationReads,2,'the exact current version needs neither another network probe nor another add');
   enabled=false;assert.deepEqual(await readCodexPluginUpdateInventory(options),{state:'disabled'});
   source='https://github.com/other/foreign.git';await assert.rejects(readCodexPluginUpdateInventory(options));source='https://github.com/trelio-ru/digital-assistants.git';
   await writeMarket('main');await assert.rejects(readCodexPluginUpdateInventory(options));
@@ -11821,8 +11830,13 @@ test('stable assistant hook dependency uses the SAME official installer, exact b
       result={pluginId:requirement.pluginId,marketplaceName:marketplace,version:'0.1.0',installedPath:cache('0.1.0')};}
     return {stdout:JSON.stringify(result)};
   };
-  const options={requirement,environment:{CODEX_HOME:home},execFileCommand};
+  let published=false;
+  const options={requirement,environment:{CODEX_HOME:home},execFileCommand,
+    readPublishedRef:async selection=>{assert.deepEqual(selection,{profile:'assistantHooks',version:'0.1.0',signal:undefined});return published;}};
   assert.equal((await inspectAssistantHookComponent(options)).state,'absent');
+  const pending=await installAssistantHookComponent({...options,beforeInstall:()=>assert.fail('unpublished dependency must not record an attempt')});
+  assert.equal(pending.publicationPending,true);assert.equal(pending.matches,false);assert.equal(adds,0);assert.equal(intent,null);
+  published=true;
   const installed=await installAssistantHookComponent({...options,beforeInstall:async record=>{intent=record;}});
   assert.equal(installed.matches,true);assert.equal(adds,1);
   assert.equal((await installAssistantHookComponent({...options,beforeInstall:()=>assert.fail('unchanged executable component cannot require a new install intent')})).unchanged,true);
@@ -11830,4 +11844,35 @@ test('stable assistant hook dependency uses the SAME official installer, exact b
   source='https://github.com/foreign/plugin.git';await assert.rejects(inspectAssistantHookComponent(options));source='https://github.com/trelio-ru/digital-assistants.git';
   await fs.appendFile(path.join(cache('0.1.0'),'scripts/trelio-host-runtime-loader.mjs'),'\n// tampered');
   await assert.rejects(inspectAssistantHookComponent(options));assert.equal(adds,1,'changed installed bytes cannot be overwritten by replay');
+});
+
+test('assistant publication preflight reads only one exact official public ref and preserves unknown/aborted results',async()=>{
+  const ref='refs/tags/plugin-v0.1.6',signal=new AbortController().signal;
+  let reads=0,result={stdout:'',stderr:''};
+  const readGit=async(args,options)=>{reads++;
+    assert.deepEqual(args,['-c','credential.helper=','-c','core.askPass=','ls-remote','--refs',
+      'https://github.com/trelio-ru/digital-assistants.git',ref]);
+    assert.deepEqual(options,{signal,timeout:10000,maxBuffer:16*1024,
+      env:{GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat',GIT_ASKPASS:'',SSH_ASKPASS:''}});
+    return result;
+  };
+  const options={profile:'assistant',version:'0.1.6',signal,readGit};
+  assert.equal(await readAssistantPluginPublishedRef(options),false);
+  result={stdout:`${'a'.repeat(40)}\t${ref}\n`,stderr:''};assert.equal(await readAssistantPluginPublishedRef(options),true);
+  for(const value of [{stdout:result.stdout,stderr:'warning'},{stdout:'a'.repeat(1025),stderr:''},
+    {stdout:`${'a'.repeat(40)}\trefs/tags/plugin-v0.1.5\n`,stderr:''},
+    {stdout:result.stdout+result.stdout,stderr:''},{stdout:'',stderr:null},{stdout:null,stderr:''}]){
+    result=value;await assert.rejects(readAssistantPluginPublishedRef(options));
+  }
+  const count=reads;
+  for(const change of [{profile:'human'},{profile:'foreign'},{version:'../bad'},{version:'main'}])
+    await assert.rejects(readAssistantPluginPublishedRef({...options,...change}));
+  assert.equal(reads,count,'invalid selection refuses before Git');
+  await assert.rejects(readAssistantPluginPublishedRef({...options,readGit:async()=>{throw Error('synthetic network failure');}}),/network failure/);
+  const cancelled=new AbortController();cancelled.abort();
+  await assert.rejects(readAssistantPluginPublishedRef({...options,signal:cancelled.signal,readGit:()=>assert.fail('cancelled before Git')}),{name:'AbortError'});
+  const late=new AbortController();
+  await assert.rejects(readAssistantPluginPublishedRef({...options,signal:late.signal,readGit:async()=>{late.abort();return {stdout:`${'a'.repeat(40)}\t${ref}\n`,stderr:''};}}),{name:'AbortError'});
+  assert.equal(await readAssistantPluginPublishedRef({profile:'assistantHooks',version:'0.1.0',readGit:async args=>{
+    assert.equal(args.at(-1),'refs/tags/hooks-v0.1.0');return {stdout:`${'b'.repeat(40)}\trefs/tags/hooks-v0.1.0\n`,stderr:''};}}),true);
 });
