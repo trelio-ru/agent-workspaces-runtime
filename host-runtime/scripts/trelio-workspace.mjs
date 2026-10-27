@@ -3704,8 +3704,16 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   const source = entries?.length === 1 ? entries[0].source : null;
   const official = profile !== "human" ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE;
   const sourceVersion=typeof source?.ref==='string'?(profile==='assistantHooks'?/^hooks-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u:/^plugin-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u).exec(source.ref)?.[1]:null;
-  if (manifest.name !== selected.marketplace || source?.source !== "url" || source.url !== official
-    || !sourceVersion)
+  // The first component was a root Git-URL checkout. Native Codex includes
+  // that checkout's mutable index/reflog in its hook fingerprint. New releases
+  // use its supported fixed subdirectory projection so NO checkout metadata
+  // enters the installed hook bundle. Keep the immutable legacy source readable
+  // during migration; never reinterpret it or prune metadata after installation.
+  const projectedHooks = profile === 'assistantHooks' && sourceVersion !== '0.1.0';
+  const validHookSource = profile !== 'assistantHooks'
+    || Object.keys(source ?? {}).sort().join(',') === (projectedHooks ? 'path,ref,source,url' : 'ref,source,url');
+  if (manifest.name !== selected.marketplace || source?.source !== (projectedHooks ? 'git-subdir' : 'url')
+    || projectedHooks && source.path !== './plugin' || !validHookSource || source.url !== official || !sourceVersion)
     throw new Error("Invalid immutable plugin source.");
   const listing = await runCodexJsonCommand(["plugin", "list", "--marketplace", selected.marketplace, "--json"], {execFileCommand, environment});
   if (!Array.isArray(listing.installed)) throw new Error("Invalid plugin inventory.");
@@ -3778,11 +3786,13 @@ export const verifyAssistantHookComponentIntegrity = async (root,{version,integr
     if(!metadata.isDirectory()||metadata.isSymbolicLink())throw new Error('Unsafe hook component directory.');
     for(const name of await filesystem.readdir(directory)){
       const child=relative?`${relative}/${name}`:name;
-      // Native Codex clones a Git-URL source into its versioned cache. Its
-      // own .git directory is checkout metadata, not hook bundle bytes. Never
-      // traverse it or accept a gitdir file/junction/symlink; every executable
-      // and inventory byte below remains mandatory and unknown siblings fail.
+      // Only the historical 0.1.0 root Git-URL source has checkout metadata.
+      // Current native git-subdir installs must contain only the fixed payload;
+      // accepting .git there would reintroduce unstable native trust hashes.
+      // Do not remove it: refuse the unexpected materialization, preserving all
+      // bytes and the native user's trust decision for diagnosis.
       if(relative===''&&name==='.git'){
+        if(version!=='0.1.0')throw new Error('Unexpected hook checkout metadata.');
         const gitMetadata=await filesystem.lstat(path.join(directory,name));
         if(!gitMetadata.isDirectory()||gitMetadata.isSymbolicLink())throw new Error('Unsafe hook checkout metadata.');
         continue;

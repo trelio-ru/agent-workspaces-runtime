@@ -11809,15 +11809,16 @@ test("assistant plugin updater reuses official native CLI and rejects disabled/f
   assert.ok(argsSeen.every(args=>!args.includes('trelio-plugins')&&!args.includes('trelio-agent-workspaces@trelio-plugins')));
 });
 
-test('stable assistant hook dependency uses the SAME official installer, exact bytes and one durable attempt',async t=>{
+for (const componentVersion of ['0.1.0','0.1.1']) {
+test(`stable assistant hook ${componentVersion} uses the SAME official installer, exact bytes and one durable attempt`,async t=>{
   const fs=await import('node:fs/promises'),root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-hook-component-test-'));
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const home=path.join(root,'codex'),market=path.join(root,'market'),name='trelio-digital-assistant-hooks',marketplace='trelio-digital-assistants';
   const cache=v=>path.join(home,'plugins','cache',marketplace,name,v),digest=bytes=>createHash('sha256').update(bytes).digest('hex');
-  const files={'.gitattributes':'* -text\n','.codex-plugin/plugin.json':JSON.stringify({name,version:'0.1.0',hooks:'./hooks/hooks.json'}),'hooks/hooks.json':'{}'};
+  const files={'.gitattributes':'* -text\n','.codex-plugin/plugin.json':JSON.stringify({name,version:componentVersion,hooks:'./hooks/hooks.json'}),'hooks/hooks.json':'{}'};
   for(const file of ['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs','trelio-host-runtime-loader.mjs','trelio-host-runtime-shell.mjs','trelio-mcp-startup-budget.mjs'])files[`scripts/${file}`]='// synthetic immutable executable';
-  const inventory={schemaVersion:1,plugin:name,version:'0.1.0',sharedShell:{},files:Object.entries(files).map(([p,text])=>({path:p,mode:0o644,size:Buffer.byteLength(text),sha256:digest(text)}))};
-  const bytes=JSON.stringify(inventory)+'\n',requirement={pluginId:`${name}@${marketplace}`,version:'0.1.0',integritySha256:digest(bytes)};
+  const inventory={schemaVersion:1,plugin:name,version:componentVersion,sharedShell:{},files:Object.entries(files).map(([p,text])=>({path:p,mode:0o644,size:Buffer.byteLength(text),sha256:digest(text)}))};
+  const bytes=JSON.stringify(inventory)+'\n',requirement={pluginId:`${name}@${marketplace}`,version:componentVersion,integritySha256:digest(bytes)};
   const create=async()=>{
     // Match the actual native Git-URL cache, not a directory-copy fixture:
     // Codex leaves its real .git metadata alongside the immutable payload.
@@ -11827,43 +11828,63 @@ test('stable assistant hook dependency uses the SAME official installer, exact b
     }
     await runGit(sourceDirectory,['init','-q']);await runGit(sourceDirectory,['add','.']);
     await runGit(sourceDirectory,['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','-c','commit.gpgsign=false','commit','-qm','Immutable fixture']);
-    await runGit(root,['clone','--quiet','--no-hardlinks',sourceDirectory,cache('0.1.0')]);
+    if(componentVersion==='0.1.0')await runGit(root,['clone','--quiet','--no-hardlinks',sourceDirectory,cache(componentVersion)]);
+    else await fs.cp(sourceDirectory,cache(componentVersion),{recursive:true,filter:p=>path.basename(p)!=='.git'});
   };
   await fs.mkdir(path.join(market,'.agents/plugins'),{recursive:true});
-  await fs.writeFile(path.join(market,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:[{name,source:{source:'url',url:'https://github.com/trelio-ru/digital-assistants.git',ref:'hooks-v0.1.0'}}]}));
+  await fs.writeFile(path.join(market,'.agents/plugins/marketplace.json'),JSON.stringify({name:marketplace,plugins:[{name,source:{source:componentVersion==='0.1.0'?'url':'git-subdir',...(componentVersion==='0.1.0'?{}:{path:'./plugin'}),url:'https://github.com/trelio-ru/digital-assistants.git',ref:`hooks-v${componentVersion}`}}]}));
   let present=false,enabled=true,source='https://github.com/trelio-ru/digital-assistants.git',adds=0,intent=null;
   const execFileCommand=async(_c,args)=>{
     let result;
     if(args[1]==='marketplace'&&args[2]==='list')result={marketplaces:[{name:marketplace,root:market,marketplaceSource:{sourceType:'git',source}}]};
-    else if(args[1]==='list')result={installed:present?[{pluginId:requirement.pluginId,version:'0.1.0',installed:true,enabled}]:[]};
+    else if(args[1]==='list')result={installed:present?[{pluginId:requirement.pluginId,version:componentVersion,installed:true,enabled}]:[]};
     else {assert.deepEqual(args,['plugin','add',requirement.pluginId,'--json']);assert.deepEqual(intent,{...requirement,previousVersion:null});adds++;await create();present=true;
-      result={pluginId:requirement.pluginId,marketplaceName:marketplace,version:'0.1.0',installedPath:cache('0.1.0')};}
+      result={pluginId:requirement.pluginId,marketplaceName:marketplace,version:componentVersion,installedPath:cache(componentVersion)};}
     return {stdout:JSON.stringify(result)};
   };
   let published=false;
   const options={requirement,environment:{CODEX_HOME:home},execFileCommand,
-    readPublishedRef:async selection=>{assert.deepEqual(selection,{profile:'assistantHooks',version:'0.1.0',signal:undefined});return published;}};
+    readPublishedRef:async selection=>{assert.deepEqual(selection,{profile:'assistantHooks',version:componentVersion,signal:undefined});return published;}};
+  const marketFile=path.join(market,'.agents/plugins/marketplace.json');
+  const selectedMarket=JSON.parse(await fs.readFile(marketFile,'utf8'));
+  const validSource=selectedMarket.plugins[0].source;
+  for(const change of [{source:'local'},{path:'./other'},{ref:'main'},{sha:'a'.repeat(40)},
+    {source:componentVersion==='0.1.0'?'git-subdir':'url'}]){
+    selectedMarket.plugins[0].source={...validSource,...change};await fs.writeFile(marketFile,JSON.stringify(selectedMarket));
+    await assert.rejects(inspectAssistantHookComponent(options));assert.equal(adds,0);assert.equal(intent,null);
+  }
+  selectedMarket.plugins[0].source=validSource;await fs.writeFile(marketFile,JSON.stringify(selectedMarket));
   assert.equal((await inspectAssistantHookComponent(options)).state,'absent');
   const pending=await installAssistantHookComponent({...options,beforeInstall:()=>assert.fail('unpublished dependency must not record an attempt')});
   assert.equal(pending.publicationPending,true);assert.equal(pending.matches,false);assert.equal(adds,0);assert.equal(intent,null);
   published=true;
   const installed=await installAssistantHookComponent({...options,beforeInstall:async record=>{intent=record;}});
   assert.equal(installed.matches,true);assert.equal(adds,1);
-  assert.equal((await fs.lstat(path.join(cache('0.1.0'),'.git'))).isDirectory(),true);
-  const gitDirectory=path.join(cache('0.1.0'),'.git');
-  await assert.rejects(verifyAssistantHookComponentIntegrity(cache('0.1.0'),{...requirement,filesystem:{...fs,
-    lstat:async p=>p===gitDirectory?{isDirectory:()=>true,isSymbolicLink:()=>true}:fs.lstat(p)}}),/Unsafe hook checkout metadata/);
-  const savedMetadata=path.join(root,'saved-git');await fs.rename(gitDirectory,savedMetadata);
-  await fs.writeFile(gitDirectory,'gitdir: external\n');await assert.rejects(inspectAssistantHookComponent(options),/Unsafe hook checkout metadata/);
-  await fs.rm(gitDirectory);await fs.rename(savedMetadata,gitDirectory);
-  await fs.writeFile(path.join(cache('0.1.0'),'.git-extra'),'untrusted sibling');
-  await assert.rejects(inspectAssistantHookComponent(options),/Unexpected hook component file/);await fs.rm(path.join(cache('0.1.0'),'.git-extra'));
+  const gitDirectory=path.join(cache(componentVersion),'.git');
+  if(componentVersion==='0.1.0'){
+    assert.equal((await fs.lstat(gitDirectory)).isDirectory(),true);
+    await assert.rejects(verifyAssistantHookComponentIntegrity(cache(componentVersion),{...requirement,filesystem:{...fs,
+      lstat:async p=>p===gitDirectory?{isDirectory:()=>true,isSymbolicLink:()=>true}:fs.lstat(p)}}),/Unsafe hook checkout metadata/);
+    const savedMetadata=path.join(root,'saved-git');await fs.rename(gitDirectory,savedMetadata);
+    await fs.writeFile(gitDirectory,'gitdir: external\n');await assert.rejects(inspectAssistantHookComponent(options),/Unsafe hook checkout metadata/);
+    await fs.rm(gitDirectory);await fs.rename(savedMetadata,gitDirectory);
+  }else{
+    await assert.rejects(fs.lstat(gitDirectory),{code:'ENOENT'});
+    await fs.mkdir(gitDirectory);
+    await assert.rejects(inspectAssistantHookComponent(options),/Unexpected hook checkout metadata/);
+    assert.equal((await fs.lstat(gitDirectory)).isDirectory(),true,'verification must preserve unexpected metadata');
+    await fs.rm(gitDirectory,{recursive:true}); // owned synthetic fixture only
+  }
+  await fs.writeFile(path.join(cache(componentVersion),'.git-extra'),'untrusted sibling');
+  await assert.rejects(inspectAssistantHookComponent(options),/Unexpected hook component file/);await fs.rm(path.join(cache(componentVersion),'.git-extra'));
   assert.equal((await installAssistantHookComponent({...options,beforeInstall:()=>assert.fail('unchanged executable component cannot require a new install intent')})).unchanged,true);
   enabled=false;await assert.rejects(installAssistantHookComponent(options));assert.equal(adds,1,'a human-disabled component is never enabled');enabled=true;
   source='https://github.com/foreign/plugin.git';await assert.rejects(inspectAssistantHookComponent(options));source='https://github.com/trelio-ru/digital-assistants.git';
-  await fs.appendFile(path.join(cache('0.1.0'),'scripts/trelio-host-runtime-loader.mjs'),'\n// tampered');
+  await fs.appendFile(path.join(cache(componentVersion),'scripts/trelio-host-runtime-loader.mjs'),'\n// tampered');
   await assert.rejects(inspectAssistantHookComponent(options));assert.equal(adds,1,'changed installed bytes cannot be overwritten by replay');
 });
+
+}
 
 test('assistant publication preflight reads only one exact official public ref and preserves unknown/aborted results',async()=>{
   const ref='refs/tags/plugin-v0.1.6',signal=new AbortController().signal;

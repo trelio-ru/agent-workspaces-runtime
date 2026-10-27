@@ -1676,12 +1676,19 @@ roll back into a legacy combined bundle alongside a newly trusted companion.
 Unchanged dependencies are never reinstalled. Native preflight rejects mixed
 legacy+companion hooks and requires exact version/source path, full inventory/
 executable byte integrity and three genuinely trusted native definitions.
-Native Git-URL installation leaves an optional `.git` directory in the cache.
-It is checkout metadata, outside executable payload verification; native Codex
-fingerprint/trust checks remain independent. Accept only that exact root directory, never a gitdir file,
-junction or symlink; do not traverse/read its config. All declared payload
-files and hashes remain mandatory, and every other unknown sibling is refused.
-Regression uses a real Git clone, alongside altered-payload/metadata negatives.
+The legacy hook 0.1.0 Git-URL source leaves an optional real root `.git` directory.
+It remains readable during migration, never followed as a gitdir file/junction or
+symlink. Codex 0.164 also fingerprints its index/reflog: ordinary main Git
+operations can invalidate trust even when every hook payload byte is unchanged.
+Current hook components therefore use the supported native `git-subdir` source,
+exact official repository/ref and fixed `./plugin` path. Their generated transport
+tree wraps the complete payload; native installation materializes only that
+subdirectory into the SAME exact versioned cache root, with NO `.git`. Refuse
+unexpected metadata; never prune cache, exclude fingerprint bytes, change hashes
+or transfer trust. All inventory/executable bytes remain mandatory. Native Windows
+regression uses main URL refs and a fixed hook subdirectory from the SAME Git
+repository, tests hash preservation across main install/update, and still requires
+changed-hook/loader hash invalidation without ever approving a hook.
 
 Explicit INITIAL background install prepares this dependency through that SAME
 journal/installer even when future automatic updates are opted out. It retains
