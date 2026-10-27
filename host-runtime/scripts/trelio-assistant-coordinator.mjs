@@ -228,17 +228,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(!ids.length)return [];
     if(source.provider!=='telegram')fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
     const known=inbox.findEventRefsBySuffix(source,ids.map(id=>`:${id}`));
-    return ids.map(messageId=>{
+    return ids.flatMap(messageId=>{
       const matches=known.filter(({id})=>{
         const match=/^message:(-?[1-9]\d{0,18}):([1-9]\d{0,18})$/u.exec(id);
         // Marked channel IDs are <= -10^12. Their local numbering must never
         // satisfy an unqualified cloud deletion, even with the same suffix.
         return match&&match[2]===messageId&&BigInt(match[1])>-1000000000000n;
       });
+      // Ordinary group messages are deliberately absent from this journal.
+      // Their deletion is not a source-history gap and must not stop future
+      // mentions. Ambiguous known identities still refuse, never guess a peer.
+      if(!matches.length)return [];
       if(matches.length!==1)fail('ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED');
       const id=matches[0].id;
-      return {id,revision:createHash('sha256').update(JSON.stringify(['telegram-cloud-delete/v1',source,
-        id,result.nextCursor])).digest('hex')};
+      return [{id,revision:createHash('sha256').update(JSON.stringify(['telegram-cloud-delete/v1',source,
+        id,result.nextCursor])).digest('hex')}];
     });
   };
   // Report an ACK observation independently of passive reading. The SAME
@@ -347,8 +351,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const ownerAfter=ownerBefore?await client.ownerIdentities(signal):null;lease();
       if(ownerBefore&&ownerAfter.bindingRevision!==ownerBefore.bindingRevision)fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
       const owner=ownerAfter?.identities.find(item=>item.provider===externalProviders[row.skillId]);
+      // The provider, which knows the authenticated native account, supplies
+      // attention metadata. Never classify group text with a model merely to
+      // decide whether to wake that model. Missing metadata must retain the
+      // old cursor, rather than silently lose a direct request after upgrade.
+      const incoming=result.events.filter(event=>row.skillId==='email-imap-smtp'||event.kind!=='delete'&&event.outgoing===false);
+      if(row.skillId!=='email-imap-smtp'&&incoming.some(event=>!['direct','mention','reply','none'].includes(event.attention)))
+        fail('ASSISTANT_SOURCE_ATTENTION_REQUIRED');
+      // Ordinary group discussion remains in provider history, not in an
+      // ever-growing unprocessed inbox. Scheduled task passes use their OWN
+      // accepted conversation bookmarks; this scanner's cursor cannot consume
+      // another task's context. Filtering never marks an original read/handled.
+      const admitted=incoming.filter(event=>row.skillId==='email-imap-smtp'||event.attention!=='none');
       const page={...poll,nextCursor:result.nextCursor,hasMore:result.hasMore,
-        events:[...result.events,...deletions].map(({id,revision,conversationKey,kind,outgoing,forwarded,viaBot,senderNamespace,senderUserId})=>({id,revision,taskId:null,wake:false,
+        events:[...admitted,...result.events.filter(event=>event.kind==='delete'||event.outgoing===true),...deletions]
+          .map(({id,revision,conversationKey,kind,outgoing,forwarded,viaBot,senderNamespace,senderUserId})=>({id,revision,taskId:null,wake:false,
           ...(owner&&senderNamespace===(row.skillId==='max-web'?'max_user_id':'telegram_user_id')&&senderUserId===owner.externalUserId&&kind==='new'&&outgoing===false&&forwarded===false&&(row.skillId==='max-web'||viaBot===false)&&conversationKey
             ?{ownerIdentityId:owner.bindingId}:{}),
           ...(conversationKey?{conversationKey,providerWake:row.skillId==='email-imap-smtp'||kind!=='delete' && outgoing===false}:{})}))};
@@ -367,7 +384,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const code=error?.code;
       const reason=code==='ASSISTANT_COORDINATOR_SOURCE_CHANGED'?null:
         ['ACCOUNT_NOT_FOUND','ACCOUNT_NOT_BOUND','ASSISTANT_SOURCE_SETUP_REQUIRED','ASSISTANT_COORDINATOR_SOURCE_STREAM_REQUIRED',
-          'ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED'].includes(code)?'setup_required':
+          'ASSISTANT_SOURCE_HISTORY_CAPABILITY_REQUIRED','ASSISTANT_SOURCE_ATTENTION_REQUIRED'].includes(code)?'setup_required':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:SCOPE_CHANGED|UIDVALIDITY_CHANGED)$/u.test(code??'')?'scope_changed':
         /^(?:TELEGRAM|EMAIL|MAX)_MONITOR_(?:GAP|REFERENCE_UNAVAILABLE)$/u.test(code??'')||['ASSISTANT_COORDINATOR_SOURCE_CURSOR_LIMIT','ASSISTANT_COORDINATOR_SOURCE_REFERENCE_REQUIRED','ASSISTANT_INBOX_REFERENCE_AMBIGUOUS'].includes(code)?'history_gap':'read_failed';
       await report(reason);await observeAcknowledgementHealth(row,signal);throw error;
@@ -1125,6 +1142,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         failureStage='native_preflight';
         result=await native.run({threadId:plan.threadId,deliveryId:continuation?.reviewId??job.deliveryId,cwd,execution,
           taskContext:{assistantId:identity.assistantId,companyId:job.scope.companyId,taskId:job.taskId,
+            ...(inbox.readDelivery(job.deliveryId).scheduled?{scheduled:true}:{}),
             ...(admitted.workMode==='discussion'?{workMode:'discussion'}:{}),
             ...(job.events.some(event=>event.conversation_key)?{sourceReferences:job.events.filter(event=>event.conversation_key).map(event=>{
               const source=JSON.parse(event.event_scope_json);

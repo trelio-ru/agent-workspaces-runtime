@@ -1324,6 +1324,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=delivery(uuid(id));
       const source=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
       return {deliveryId:row.delivery_id,taskId:row.task_id,scope:scopeInputWithoutKey(source),state:row.state,
+        ...(row.scheduled?{scheduled:true}:{}),
         kind:row.kind,threadId:row.native_thread_id,nativeStarted:Boolean(row.native_started),receipt:row.external_receipt};
     },
     completeDelivery(id, receipt, completion = null) {

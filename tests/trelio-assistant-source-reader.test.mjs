@@ -654,6 +654,18 @@ test('structural projection rejects bad pages, scope swaps, receipts and gaps wi
   assert.throws(()=>projectAssistantMonitorPage({exitCode:1,stdout:JSON.stringify({code:'PRIVATE_ERROR',message:'PRIVATE'})},options),/SOURCE_PROVIDER_UNAVAILABLE/);
 });
 
+test('signed source attention projection keeps only closed native signals and never trusts provider prose',()=>{
+  const project=attention=>projectAssistantMonitorPage({exitCode:0,stdout:JSON.stringify({...page(),
+    events:[{...event,attention,body:'PRIVATE_BODY',mentionedUsername:'PRIVATE_NAME'}]})},
+    {skillId:'telegram-mtproto',cursor:previousCursor});
+  for(const attention of ['direct','mention','reply','none']){
+    const value=project(attention);assert.equal(value.events[0].attention,attention);
+    assert.doesNotMatch(JSON.stringify(value),/PRIVATE/);
+  }
+  for(const invalid of [null,true,{},'@assistant','unknown'])assert.throws(()=>project(invalid),/INVALID_RESPONSE/);
+  assert.equal(project(undefined).events[0].attention,undefined,'old signed output never fabricates wake metadata');
+});
+
 test('initial unread coverage is accepted only for the exact passive channel and never a silent baseline or final',()=>{
   const chat='-1000000000055',raw={...page(),stream:{kind:'channel',chatId:chat},channelsToSync:[],events:[],hasMore:true,
     coverage:{...page().coverage,historicalBackfill:true,initialUnreadOnly:true,snapshotAtomic:false}};

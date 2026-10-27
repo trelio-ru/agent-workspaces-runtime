@@ -305,7 +305,7 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   const sourceReferences=['telegram','email','max'].map((provider,eventOrdinal)=>({provider,eventOrdinal,
     sourceId:randomUUID(),sourceRevision:3,routeId:randomUUID(),accountId:randomUUID(),eventRevision:'b'.repeat(64),
     eventId:provider==='email'?'uid:17:11':'message:-123:4',conversationKey:`${provider}-conversation/v1.${'a'.repeat(64)}`}));
-  const repliedTaskContext={...taskContext,ownerQuestionIds:[randomUUID()],sourceReferences};
+  const repliedTaskContext={...taskContext,scheduled:true,ownerQuestionIds:[randomUUID()],sourceReferences};
   let starts=0,reads=0,launches=0,confirmed=0,input='';
   const options = { readHookReadiness:async()=>({fingerprint:"a".repeat(64)}),readExecutionAvailability:async()=>true,executable:process.execPath,environment:{ PATH:process.env.PATH,
     ComSpec:'C:\\Windows\\System32\\cmd.exe',PATHEXT:'.COM;.EXE;.BAT;.CMD',OPENAI_API_KEY:'private',SHOULD_NOT_PASS:'private' },
@@ -332,6 +332,10 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   const scopeLine=input.split('\n').find(line=>line.startsWith('TRELIO_ASSISTANT_SCOPE '));
   assert.deepEqual(JSON.parse(scopeLine.slice('TRELIO_ASSISTANT_SCOPE '.length)),assistantWorkStateContext(repliedTaskContext));
   assert.ok(input.includes('get_assistant_owner_question'));
+  assert.match(input,/This is a scheduled task pass/);
+  assert.match(input,/separate last successfully reviewed message position for each task\/account\/conversation\/topic/);
+  assert.match(input,/advance that position only together with successfully accepted task material/);
+  assert.match(input,/never use the background monitor cursor/);
   assert.ok(input.includes('never sensitive-action approval'));
   for(const invariant of ['request_assistant_action','original clientRequestId and fields','only approved','ownerDecisionId',
     'Denied, expired, stopped or changed data','server rechecks current access and target state']) {

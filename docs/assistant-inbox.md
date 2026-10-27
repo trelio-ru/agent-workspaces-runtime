@@ -48,6 +48,31 @@ values; the host must project SQLite/I/O failures through closed diagnostics.
 
 ## Poll, routing and read acknowledgements
 
+Before commit, the coordinator admits every new email INBOX reference. Telegram
+and MAX incoming messages require signed native `attention`:
+`direct|mention|reply|none`. Private incoming messages, actual mentions of the
+authenticated account and direct replies to its own message may enter intake;
+ordinary group history does not. A missing/unknown signal retains the cursor
+with `ASSISTANT_SOURCE_ATTENTION_REQUIRED`, rather than treating legacy output
+as an authoritative absence. Providers must roll out this additive signal first.
+Attention is transient provider metadata, never message content or owner proof.
+
+Ordinary group originals are omitted from SQLite while the scanner checkpoint
+advances atomically. They remain at the provider for scheduled task review; a
+busy group cannot fill the pending queue with context-only rows. Unjournaled
+cloud deletions are therefore ignored; ambiguous known account references still
+refuse without guessing. Filtering never earns processing or ACK.
+
+The durable delivery's existing scheduled bit selects `scheduled:true` in task
+stdin, including recovery. On that pass the worker reviews new history for the
+exact account/chat/topic links already recorded in accepted WORK.md. Each task
+owns its successful review position, committed with accepted task material;
+the poll cursor, unread flag or another task's position cannot replace it.
+Incomplete/gapped reads or failed acceptance retain the old bookmark and an
+explicit unresolved next step. Initial review is bounded with honest coverage.
+No linked conversation or no scheduled pass means no automatic history review.
+Ordinary skill history reads never fabricate original source processing slots.
+
 `register` is idempotent. `claimPoll` holds a two-minute lease for one exact source.
 `commitPage` checks that lease and cursor revision, then atomically inserts events
 and advances the cursor. A full inbox or conflicting duplicate rolls back the

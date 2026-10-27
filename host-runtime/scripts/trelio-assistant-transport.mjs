@@ -4424,6 +4424,15 @@ export const projectAssistantMonitorPage = (result,{skillId,cursor=null,chat=nul
         Object.assign(event,{senderUserId:null,senderNamespace:null});
       }
     }
+    // A closed provider-derived signal grants only wake eligibility. It is
+    // neither sender/owner proof nor routing, read or ACK authority. Legacy
+    // providers remain readable; the coordinator refuses incoming pages which
+    // cannot distinguish direct requests before advancing their cursor.
+    if(row.attention!==undefined){
+      if(!['direct','mention','reply','none'].includes(row.attention)||row.kind==='delete'
+        ||row.outgoing===true&&row.attention!=='none')invalid();
+      event.attention=row.attention;
+    }
     return event;
   });
   if(emailPrevious&&events.some(row=>row.uidValidity!==String(emailPrevious.uidValidity)

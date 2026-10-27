@@ -61,7 +61,7 @@ const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={})
     },
     run:async({threadId,deliveryId,taskContext,execution:choice},options)=>{
       assert.deepEqual(choice,execution.configuration);
-      const {ownerQuestionIds,...task}=taskContext; assert.deepEqual(task,{assistantId,companyId,taskId,
+      const {ownerQuestionIds,scheduled,...task}=taskContext; assert.deepEqual(task,{assistantId,companyId,taskId,
         ...(authority.workMode==='discussion'?{workMode:'discussion'}:{})});
       if(ownerQuestionIds) assert.ok(ownerQuestionIds.every(id=>/^[0-9a-f-]{36}$/u.test(id)));
       runs++;options.startInvocation();starts++;
@@ -540,7 +540,13 @@ const externalFixture=async (t,{sourceHealth=null,acknowledgeSource=null}={})=>{
     if(inventoryFailure)throw Object.assign(new Error('PRIVATE_SOURCE_ERROR'),{code:'ASSISTANT_SOURCE_UNAVAILABLE'});
     return structuredClone(rows);
   };
-  const options={...f.options,sourceHealth,acknowledgeSource,readSourceMonitor:async(source,signal)=>{reads++;return read(source,signal);}};
+  const options={...f.options,sourceHealth,acknowledgeSource,readSourceMonitor:async(source,signal)=>{
+    reads++;const page=await read(source,signal);
+    // Synthetic signed-reader boundary: old test cases describe private
+    // incoming messages unless they explicitly choose another native signal.
+    return {...page,events:page.events.map(event=>({kind:'new',outgoing:false,attention:'direct',
+      attention:event.outgoing===true?'none':'direct',...event}))};
+  }};
   let coordinator=createAssistantCoordinator(options);
   const inbox=createAssistantInbox({database:f.database,now:f.options.now});
   const scope=()=>({origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,
@@ -548,6 +554,63 @@ const externalFixture=async (t,{sourceHealth=null,acknowledgeSource=null}={})=>{
   return {...f,row,inbox,scope,get coordinator(){return coordinator;},read:value=>{read=value;},rows:value=>{rows=value;},
     failSources:value=>{inventoryFailure=value;},reads:()=>reads,position:()=>f.database.prepare('SELECT scope_json,cursor FROM assistant_inbox_sources').all().find(value=>JSON.parse(value.scope_json).bindingId===row.id)?.cursor,restart:async()=>{await coordinator.close();coordinator=createAssistantCoordinator(options);}};
 };
+
+for(const skillId of ['telegram-mtproto','max-web'])test(`${skillId} attention gates model intake before queueing, across restart`,async t=>{
+  const f=await externalFixture(t);f.row.skillId=skillId;
+  if(skillId==='max-web')f.row.maxChatUrl='https://web.max.ru/123';
+  const key=`${skillId==='max-web'?'max':'telegram'}-conversation/v1.${'e'.repeat(64)}`;
+  f.options.client.sourceRoutes=async()=>[];
+  f.options.client.beginSourceIntake=async()=>assert.fail('polling never starts the model');
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();f.advance(300000);
+    const events=['none','direct','mention','reply','none'].map((attention,index)=>({id:`message:123:${index+1}`,
+      revision:String(index+1).repeat(64),kind:'new',outgoing:false,attention,conversationKey:key,text:'PRIVATE_GROUP_BODY'}));
+    f.read(async()=>({events,nextCursor:'attention-page',hasMore:false}));await f.coordinator.pollOnce();
+    assert.equal(f.position(),'attention-page');
+    assert.deepEqual(f.database.prepare('SELECT event_id FROM assistant_inbox_events ORDER BY rowid').all().map(row=>row.event_id),
+      ['message:123:2','message:123:3','message:123:4']);
+    const intake=f.inbox.ownerIntake(f.inbox.ownerIntakes()[0].id);assert.equal(intake.eventIds.length,3,'all addressed originals share the existing bounded batch');
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+    await f.restart();f.advance(300000);await f.coordinator.pollOnce();
+    assert.equal(f.inbox.ownerIntakes().length,1);assert.equal(f.inbox.ownerIntake(f.inbox.ownerIntakes()[0].id).eventIds.length,3);
+    // A busy group cannot fill the pending journal while advancing its
+    // scanner checkpoint. Its history remains available to scheduled work.
+    f.advance(300000);f.read(async()=>({events:Array.from({length:100},(_,index)=>({...events[0],
+      id:`message:123:${index+100}`,revision:'a'.repeat(64)})),nextCursor:'ordinary-page',hasMore:false,
+      ...(skillId==='telegram-mtproto'?{unresolvedDeletionIds:['999']}: {})}));
+    await f.coordinator.pollOnce();assert.equal(f.position(),'ordinary-page');
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,3);
+    assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+    f.advance(300000);f.read(async()=>({events:[{...events[0],attention:undefined}],nextCursor:'missing-capability',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(f.position(),'ordinary-page','legacy metadata cannot consume an incoming page');
+    assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_SOURCE_ATTENTION_REQUIRED'));
+  }finally{await f.coordinator.close();}
+});
+
+test('email sends every new INBOX original to the existing batch without an attention heuristic',async t=>{
+  const f=await externalFixture(t);f.row.skillId='email-imap-smtp';
+  f.options.client.sourceRoutes=async()=>[];f.options.client.beginSourceIntake=async()=>assert.fail('poll cannot run a model');
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();f.advance(300000);
+    const key='email-conversation/v1.'+'e'.repeat(64);
+    f.read(async()=>({events:[1,2,3].map(uid=>({id:`uid:17:${uid}`,revision:String(uid).repeat(64),conversationKey:key})),
+      nextCursor:'all-inbox',hasMore:false}));
+    await f.coordinator.pollOnce();assert.equal(f.position(),'all-inbox');
+    assert.equal(f.inbox.ownerIntake(f.inbox.ownerIntakes()[0].id).eventIds.length,3);assert.equal(f.counts().runs,0);assert.equal(f.counts().acks,0);
+  }finally{await f.coordinator.close();}
+});
+
+test('scheduled review flag comes from the durable delivery and survives recovery without an incoming wake',async t=>{
+  const f=fixture(t),contexts=[],run=f.options.native.run;
+  f.options.native.run=async(input,options)=>{contexts.push(input.taskContext);return run(input,options);};
+  try{
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();
+    f.advance(1800000);await f.coordinator.workOnce();
+    assert.equal(contexts.length,1);assert.equal(contexts[0].scheduled,true);
+    const row=f.database.prepare("SELECT delivery_id FROM assistant_inbox_deliveries WHERE scheduled=1").get();
+    assert.equal(createAssistantInbox({database:f.database,now:f.options.now}).readDelivery(row.delivery_id).scheduled,true);
+  }finally{await f.coordinator.close();}
+});
 
 test('local connection remains outside the real SQLite inbox until native owner selection',async t=>{
   const f=await externalFixture(t);f.row.state='available';
@@ -700,8 +763,8 @@ test('changed owner registration after provider read rolls back page acceptance 
   }finally{await f.coordinator.close();}
 });
 
-test('invalid stream hints, unknown deletions and oversized cursor refuse advancement instead of losing provider events',async t=>{
-  for(const extra of [{channelsToSync:['not-a-native-channel']},{unresolvedDeletionIds:['5']},{nextCursor:'x'.repeat(2049)}]){
+test('invalid stream hints and oversized cursor refuse advancement instead of losing provider events',async t=>{
+  for(const extra of [{channelsToSync:['not-a-native-channel']},{unresolvedDeletionIds:['not-an-id']},{nextCursor:'x'.repeat(2049)}]){
     const f=await externalFixture(t);
     try{
       await f.coordinator.pollOnce();f.advance(300000);
@@ -781,8 +844,8 @@ test('native cloud deletions resolve only exact durable account references and s
   }finally{await f.coordinator.close();}
 });
 
-test('ambiguous, unjournaled, channel-numbered and mixed-overflow deletions retain the original account position',async t=>{
-  for(const kind of ['ambiguous','unknown','channel','oversized']){
+test('ambiguous and mixed-overflow deletions retain the original account position',async t=>{
+  for(const kind of ['ambiguous','oversized']){
     const f=await externalFixture(t);
     try{
       await f.coordinator.pollOnce();f.advance(300000);
@@ -871,7 +934,7 @@ for(const provider of ['telegram','email'])test(`${provider} conversation histor
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
     if(provider==='email')await f.coordinator.pollOnce();
     f.read(async()=>({baselineOnly:false,nextCursor:'different-subject',hasMore:false,events:[{
-      id:provider==='email'?'uid:17:11':'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+      id:provider==='email'?'uid:17:11':'message:123:1',revision:'c'.repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey:key}]}));
     f.advance(300000);await f.coordinator.pollOnce();
     assert.equal(await f.coordinator.workOnce(),null);
     assert.equal(f.counts().runs,0);assert.equal(f.counts().provisions,1);
@@ -904,7 +967,7 @@ test('route/source revocation immediately before native launch blocks delivery w
   f.options.client.sourceRoutes=async()=>[route];
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
-    f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}],
+    f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey:key}],
       nextCursor:'pending',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}));
     f.advance(300_000);await f.coordinator.pollOnce();routeAcceptedBatch(f,[route]);
     f.options.client.sourceRoutes=async()=>[];
@@ -923,7 +986,7 @@ test('routing outage cannot roll back a committed provider page or become author
   f.options.client.sourceRoutes=async()=>{throw Object.assign(new Error('PRIVATE_BODY'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});};
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
-    f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}],
+    f.read(async()=>({baselineOnly:false,events:[{id:'message:123:1',revision:'b'.repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey:key}],
       nextCursor:'retained',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[]}));
     f.advance(300_000);await f.coordinator.pollOnce();
     assert.equal(f.position(),'retained');assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_events').get().n,1);
@@ -976,7 +1039,7 @@ for(const scenario of ['telegram','email','email-history','max'])test(`${scenari
     const thread=f.coordinator.status()[0].threadId;
     f.read(async source=>({baselineOnly:false,nextCursor:history&&source.initialUnread?'history-end':'message',hasMore:false,
       ...(history&&source.initialUnread?{initialUnreadBackfill:true}:{}),channelsToSync:[],unresolvedDeletionIds:[],
-      events:history&&!source.initialUnread?[]:[{id:eventId,revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+      events:history&&!source.initialUnread?[]:[{id:eventId,revision:'b'.repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey:key}]}));
     f.advance(300000);await f.coordinator.pollOnce();assert.deepEqual(calls,[]);routeAcceptedBatch(f,[route]);
     await f.coordinator.workOnce();await f.coordinator.pollOnce();assert.deepEqual(calls,[],'body read with omitted processing is never ACK eligible');
     selected=true;f.advance(1800000);await f.coordinator.workOnce();await f.coordinator.pollOnce();
@@ -1031,7 +1094,7 @@ test('one positive conversation never completes a legacy mixed uncertain ACK tok
   try{
     await f.coordinator.pollOnce();await f.coordinator.workOnce();
     f.read(async()=>({baselineOnly:false,nextCursor:'mixed',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
-      events:keys.map((conversationKey,index)=>({id:`message:${123+index}:1`,revision:'b'.repeat(64),kind:'new',outgoing:false,conversationKey}))}));
+      events:keys.map((conversationKey,index)=>({id:`message:${123+index}:1`,revision:'b'.repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey}))}));
     f.advance(300000);await f.coordinator.pollOnce();routeAcceptedBatch(f,routes);await f.coordinator.workOnce();
     const first=f.inbox.claimAcknowledgements(f.scope());f.inbox.startExternalAcknowledgements(f.scope(),first.token);
     const second=f.inbox.claimAcknowledgements(f.scope());assert.equal(second.events.length,1);
@@ -1089,7 +1152,7 @@ test('owner command intake composes SAME SQLite/native provision, per-event task
   const options={database,client,native,passHost:{readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
     releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},workspaceForTask:async()=>process.cwd(),workspaceForIntake:async()=>process.cwd(),
     timeZone:'Europe/Moscow',now:()=>clock,readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
-      events:poll===1?[]:[{id:`message:123:${poll}`,revision:String(poll).repeat(64),conversationKey:key,kind:'new',outgoing:false,
+      events:poll===1?[]:[{id:`message:123:${poll}`,revision:String(poll).repeat(64),conversationKey:key,kind:'new',outgoing:false,attention:'direct',
         forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
   let coordinator=createAssistantCoordinator(options);t.after(async()=>{await coordinator.close();database.close();});
   await coordinator.pollOnce();clock+=300000;await coordinator.pollOnce();
@@ -1336,7 +1399,7 @@ for(const provider of ['telegram','email','max'])test(`${provider} first outgoin
     f.events.push({id:randomUUID(),revision:'first-outgoing',taskId:f.taskId,wake:true});f.advance(300000);
     await f.coordinator.pollOnce();await f.coordinator.workOnce();assert.equal(sends,1);assert.ok(bound);
     f.read(async()=>({schemaVersion:1,baselineOnly:false,nextCursor:'reply',hasMore:false,channelsToSync:[],unresolvedDeletionIds:[],
-      events:[{id:provider==='email'?'uid:17:11':'message:123:5',revision:'a'.repeat(64),kind:'new',outgoing:false,conversationKey:key}]}));
+      events:[{id:provider==='email'?'uid:17:11':'message:123:5',revision:'a'.repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey:key}]}));
     f.advance(300000);await f.coordinator.pollOnce();await f.coordinator.workOnce();
     assert.equal(replies,0);assert.equal(sends,1);assert.equal(f.counts().provisions,1);
     assert.equal(f.coordinator.status()[0].threadId,threadId);
@@ -1426,7 +1489,7 @@ test('complete native inventory chooses one local triage queue per physical acco
     sourceRoutes:async()=>[],beginSourceIntake:async()=>assert.fail('polling must not invoke a model/native intake')};
   const options={database,client,native:{ready:async()=>assert.fail('polling cannot start Codex')},workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,
     readSourceMonitor:async input=>({schemaVersion:1,baselineOnly:false,nextCursor:String(sequence),hasMore:false,
-      events:[{id:`message:123:${sequence}`,revision:String(sequence).repeat(64),kind:'new',outgoing:false,
+      events:[{id:`message:123:${sequence}`,revision:String(sequence).repeat(64),kind:'new',outgoing:false,attention:'direct',
         conversationKey:`telegram-conversation/v1.${(input.sourceId===rows[0].id?'a':'b').repeat(64)}`}]})};
   const coordinator=createAssistantCoordinator(options);
   try{
@@ -1499,7 +1562,7 @@ test('coexisting MAX account root and exact-chat sources select one triage queue
     sourceRoutes:async()=>[],beginSourceIntake:async()=>assert.fail('polling cannot start native intake')};
   const coordinator=createAssistantCoordinator({database,client,native:{ready:async()=>assert.fail('polling cannot start Codex')},workspaceForTask:async()=>process.cwd(),timeZone:'Europe/Moscow',now:()=>clock,
     readSourceMonitor:async input=>input.chat===undefined?{baselineOnly:true,events:[],nextCursor:'account-'+sequence,initialAccountCursor:'seed',conversationsToSync:['123'],hasMore:false}:
-      {baselineOnly:false,initialAccountBackfill:true,nextCursor:'child-'+sequence,hasMore:false,events:[{id:`message:123:${sequence}`,revision:String(sequence).repeat(64),kind:'new',outgoing:false,conversationKey:key}]}});
+      {baselineOnly:false,initialAccountBackfill:true,nextCursor:'child-'+sequence,hasMore:false,events:[{id:`message:123:${sequence}`,revision:String(sequence).repeat(64),kind:'new',outgoing:false,attention:'direct',conversationKey:key}]}});
   try{
     await coordinator.pollOnce();clock++;await coordinator.pollOnce();const inbox=createAssistantInbox({database,now:()=>clock});
     assert.equal(inbox.ownerIntakes().length,1);const row=inbox.ownerIntakes()[0];assert.equal(row.scope.bindingId,rows[0].id);

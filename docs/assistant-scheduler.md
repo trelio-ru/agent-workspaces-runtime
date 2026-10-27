@@ -2178,7 +2178,7 @@ source owner selection, accepted task binding, ordinary native ACL and CAS. A
 mapping is not a provider read, a new task command or a processing receipt. The
 fixed model-free source routing endpoint accepts opaque account HMACs only.
 
-The current coordinator classifies each inbound conversation batch into exact
+The current coordinator classifies each attention-eligible inbound conversation batch into exact
 original-UUID task groups, then projects per-original native routes into the SAME
 inbox and canonical Trelio task source. Conversation bindings are nonexclusive
 correlation history, never a shortcut for assigning a new reply to a task. It never calls scheduler rebind/provision for an

@@ -22,6 +22,10 @@ publication tooling также остаются вне этого публичн
 ## Общие правила
 
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
+  Source attention gates intake before models: email INBOX all new; Telegram/MAX
+  private incoming or native mention/direct reply. Ordinary group history stays
+  at provider; scheduled review uses accepted per-task WORK.md bookmarks, not
+  the poll cursor/unread flag. Missing native attention preserves the checkpoint.
   Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
   требует committed processing и отдельного native read proof.
   Exact body reads reuse the SAME signed executor and private inbox.
@@ -64,7 +68,8 @@ publication tooling также остаются вне этого публичн
   Native/business completion alone never processes an external body; dispatched
   unread refs stay pending without a repeat wake or ACK. See inbox schema v6.
   Cloud deletions resolve only from unique exact prior refs in the SAME account
-  journal; unknown/ambiguous peers retain the cursor without wake/ACK.
+  journal; ambiguous known peers retain the cursor without wake/ACK. Unjournaled
+  ordinary group deletions are ignored without inventing peer identity.
   Циклы принадлежат runtime, не native Codex automations: [контракт](docs/assistant-scheduler.md).
   Next-run и обработка inbox коммитятся вместе; marker read-back и one-use
   startInvocation обязательны, queue/exit code не являются завершением.

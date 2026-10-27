@@ -36,7 +36,8 @@ export const assistantExecutionConfiguration = value => {
  * same relative path in another task is isolated by its canonical Workspace. */
 export const assistantWorkStateContext = value => {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype
-    || Object.keys(value).some(key=>!['assistantId','companyId','taskId','ownerQuestionIds','sourceReferences','workMode'].includes(key))
+    || Object.keys(value).some(key=>!['assistantId','companyId','taskId','ownerQuestionIds','sourceReferences','workMode','scheduled'].includes(key))
+    || value.scheduled!==undefined && typeof value.scheduled!=='boolean'
     || value.workMode!==undefined && !['task','discussion'].includes(value.workMode)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   const assistantUserId = id(value.assistantId), companyId = id(value.companyId), taskId = id(value.taskId);
   let ownerQuestionIds;
@@ -70,9 +71,10 @@ export const assistantWorkStateContext = value => {
       fail('ASSISTANT_CODEX_INVALID_INPUT');
     Object.freeze(sourceReferences);
   }
-  if(value.workMode==='discussion' && sourceReferences)fail('ASSISTANT_CODEX_INVALID_INPUT');
+  if(value.workMode==='discussion' && (sourceReferences||value.scheduled===true))fail('ASSISTANT_CODEX_INVALID_INPUT');
   return Object.freeze({ schemaVersion: 1, assistantUserId, companyId, taskId,
     ...(ownerQuestionIds ? {ownerQuestionIds} : {}),...(sourceReferences?{sourceReferences}:{}),
+    ...(value.scheduled===true?{scheduled:true}:{}),
     ...(value.workMode==='discussion'?{workMode:'discussion'}:{workStatePath: `assistants/${assistantUserId}/WORK.md`}) });
 };
 /** Intake has real native source/event authority and deliberately NO task ID.
@@ -554,5 +556,11 @@ const assistantNativePrompt = (deliveryId,workStateContext,options) => {
       const scope = options.readinessProbe === true ? '' : `TRELIO_ASSISTANT_${workStateContext?.kind==='source_intake'?'INTAKE':'SCOPE'} ${JSON.stringify(workStateContext)}\n`;
       const recovery=options.continuationReview
         ? `This is ONE automatic recovery continuation after terminal turn ${options.continuationReview.priorTurnId}, with invocation marker ${options.continuationReview.reviewId}. The original task authorization remains in force. The original turn may have performed actions. Inspect the existing chat, exact native operation receipts and accepted task state first. Re-read current status even if an earlier message or pending technical question says host recovery is required; the earlier error is not a current result. A lost finish operation handle requires ordinary status without that handle and an exact native Run read. When acceptance is absent, recover the same own Run through its native prepare/open and returned local recovery actions; technical reopening needs no new owner approval. Preserve the source files and reconcile their selected delta before saving. Decide what remains to be done and continue the task. Do not repeat the previous command or an uncertain external action. Preserve original request IDs and reconcile their native results. Technical recovery does not approve sensitive actions or prove completion.\n`:'';
-  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${instruction}\n`;
+  // The durable delivery, not incoming prose or a timer guessed by the model,
+  // selects scheduled context review. History remains at the provider; each
+  // task's accepted WORK.md owns its independent conversation position. Never
+  // borrow the scanner/read flag or another task's bookmark as completeness.
+  const scheduled=options.readinessProbe!==true&&workStateContext?.scheduled===true
+    ? 'This is a scheduled task pass. Review new history in the Telegram/MAX conversations already linked to this task in its accepted WORK.md, including group messages without a mention or direct reply. Use the published skill and the exact stored account/chat/topic selectors, after fresh access checks. Maintain a separate last successfully reviewed message position for each task/account/conversation/topic in WORK.md; never use the background monitor cursor, provider unread flag or another task\'s position. Read only the new range with enough reply context, paginate to full coverage, and advance that position only together with successfully accepted task material. A gap, partial history or failed save keeps the old position and needs an explicit unresolved next step. Do not discover unrelated chats, infer a relation from a similar title, replay a send, or invent source processing/ACK slots for ordinary history reads. If no reviewed history position exists, establish an explicit bounded initial review from this task\'s known context and retain its coverage; do not claim the entire chat was reviewed.\n' : '';
+  return `${assistantDeliveryMarker(deliveryId)}\n${scope}${recovery}${instruction}\n${scheduled}`;
 };
