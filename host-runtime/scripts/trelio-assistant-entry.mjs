@@ -1159,6 +1159,24 @@ const waitForAssistantPoll = (milliseconds,signal) => new Promise(resolve=>{
   if(signal?.aborted)finish();
 });
 
+/** Resolve the NEW executable through the common strict loader reader. The
+ * old paths are only literal CAS comparators for the existing native scheduled
+ * action: Codex may already have pruned those versions. Requiring an old file
+ * to remain executable makes both forward activation and rollback deadlock.
+ * The caller supplies only its loader-selected root and protected journal;
+ * these paths are never discovered from cache, executed or model-selectable.
+ */
+export const resolveAssistantPluginHandoffLoaders = async ({installedPath,loadedPluginDirectory,journal,
+  environment=process.env,resolveLoader=resolveHostRuntimeLoader}) => {
+  if(!installedPath||!path.isAbsolute(installedPath)||!loadedPluginDirectory||!path.isAbsolute(loadedPluginDirectory))
+    fail('TRELIO_PLUGIN_RESTART_REQUIRED');
+  const nextLoader=await resolveLoader({environment:{...environment,TRELIO_PLUGIN_ROOT:installedPath}});
+  const previousLoaders=[...new Set([path.join(loadedPluginDirectory,'scripts','trelio-host-runtime-loader.mjs'),
+    ...[journal.previousVersion,journal.failedVersion].filter(Boolean)
+      .map(version=>path.join(path.dirname(installedPath),version,'scripts','trelio-host-runtime-loader.mjs'))])];
+  return {nextLoader,previousLoaders};
+};
+
 /** Only the supervisor's signed tick enters plugin maintenance. An idle
  * model-facing MCP health call never closes the user's Desktop/setup chat.
  * Keep the existing SQLite coordinator lease and protected setup identity;
@@ -1215,14 +1233,12 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
       activateHost:async installed=>{
         await guard();
         const restartRequested=bootstrapHost||path.resolve(installed.installedPath)!==path.resolve(loadedPluginDirectory);
-        const nextLoader=await resolveHostRuntimeLoader({environment:{...environment,TRELIO_PLUGIN_ROOT:installed.installedPath}});
-        const previousLoader=await resolveHostRuntimeLoader({environment});
         const journal=await lockedHost.readPluginUpdate();
         // These are only exact previously observed versions in the protected
         // journal. Old arguments are compared, never executed or adopted. This
         // also repairs the registration when rolling back an uncertain update.
-        const previousLoaders=[...new Set([previousLoader,...[journal.previousVersion,journal.failedVersion]
-          .filter(Boolean).map(version=>path.join(path.dirname(installed.installedPath),version,'scripts','trelio-host-runtime-loader.mjs'))])];
+        const {nextLoader,previousLoaders}=await resolveAssistantPluginHandoffLoaders({
+          installedPath:installed.installedPath,loadedPluginDirectory,journal,environment});
         const retarget=createAssistantWindowsBackground({environment,signal,previousLoaders,restartRequested,
           resolveLoader:async()=>nextLoader,readIdentity:()=>lockedHost.readIdentity(),
           verifyContact:async()=>{await guard();await lockedClient.heartbeat(signal);await guard();}});

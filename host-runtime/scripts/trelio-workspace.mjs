@@ -3412,6 +3412,21 @@ const restoreOneRetainedCodexPlugin = async (entry) => {
       );
     }
 
+    // Native Windows cache cleanup can leave the version directory itself
+    // behind after deleting every child. MoveFileEx cannot replace even that
+    // empty directory. Remove ONLY a positively observed empty regular root;
+    // nonrecursive rmdir refuses a concurrent new file, so no package bytes,
+    // checkout metadata or foreign installation are deleted or overwritten.
+    try {
+      const destination = await fs.lstat(entry.installedPath);
+      if (destination.isDirectory() && !destination.isSymbolicLink()
+        && (await fs.readdir(entry.installedPath)).length === 0) {
+        await fs.rmdir(entry.installedPath);
+      }
+    } catch (error) {
+      if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code)) throw error;
+    }
+
     try {
       await fs.rename(temporaryPath, entry.installedPath);
     } catch (error) {
@@ -3649,7 +3664,10 @@ export const startLoadedCodexPluginPreservation = ({
           if (!current.isDirectory() || current.isSymbolicLink()) {
             throw new Error("Loaded plugin path changed type.");
           }
-          return;
+          // A retained native version may be pruned in place: the directory
+          // remains regular but empty. Let the SAME verified restore below
+          // publish the original snapshot; never merge a nonempty directory.
+          if ((await fs.readdir(entry.installedPath)).length !== 0) return;
         } catch (error) {
           if (error.code !== "ENOENT") throw error;
         }

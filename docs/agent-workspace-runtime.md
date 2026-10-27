@@ -149,6 +149,14 @@ Codex layout и не создают retention store. Integrity/type/permission f
 сохраняет обычный fail-closed отказ, а не обход admission. Повторная очистка
 cache обрабатывается тем же живым MCP без restart.
 
+Windows cleanup может оставить regular version directory без единого child.
+Watcher распознаёт этот exact случай как in-place prune. После проверки полной
+retained-копии публикация удаляет только положительно пустой nonsymlink root
+через nonrecursive `rmdir`, затем выполняет прежний atomic rename. Конкурентно
+появившийся файл запрещает удаление; nonempty/changed tree не объединяется со
+snapshot, реальный permission failure остаётся terminal. Immutable receipt,
+native plugin inventory и hook trust не переписываются.
+
 Git-backed native cache может менять `.git/index` и `.git/logs/**` после
 снимка. Уже существующая установка допускает только такие различия внутри
 настоящего root `.git` directory при полном совпадении всех остальных bytes.

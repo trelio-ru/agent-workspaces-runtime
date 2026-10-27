@@ -10,7 +10,28 @@ import { createAssistantSetup, maintainAssistantPlugin, runAssistantWindowsDeskt
 import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
-  executeAssistantRuntimeRequest,readProductionAssistantDispatchStatus,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+  executeAssistantRuntimeRequest,readProductionAssistantDispatchStatus,resolveAssistantPluginHandoffLoaders,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+
+test('plugin handoff validates only the new loader while retaining literal pruned-old native comparators',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-pruned-handoff-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const oldRoot=path.join(root,'0.1.9'),installedPath=path.join(root,'0.1.10');
+  const nextLoader=path.join(installedPath,'scripts','trelio-host-runtime-loader.mjs');
+  await fs.mkdir(path.dirname(nextLoader),{recursive:true});await fs.writeFile(nextLoader,'// synthetic loader; never executed\n');
+  const journal={previousVersion:'0.1.9',failedVersion:'0.1.10'};
+  // No old directory exists. A loader locator is only the prior native action
+  // argument; obtaining it must not require recreating/executing that version.
+  const result=await resolveAssistantPluginHandoffLoaders({installedPath,loadedPluginDirectory:oldRoot,journal});
+  assert.equal(result.nextLoader,nextLoader);
+  assert.deepEqual(result.previousLoaders,[path.join(oldRoot,'scripts','trelio-host-runtime-loader.mjs'),nextLoader]);
+  await assert.rejects(fs.stat(oldRoot),{code:'ENOENT'});
+  // The new executable still uses the SAME real filesystem/access checks.
+  await fs.rm(nextLoader);
+  await assert.rejects(resolveAssistantPluginHandoffLoaders({installedPath,loadedPluginDirectory:oldRoot,journal}),
+    {code:'TRELIO_PLUGIN_RESTART_REQUIRED'});
+  await assert.rejects(resolveAssistantPluginHandoffLoaders({installedPath,loadedPluginDirectory:'relative',journal}),
+    {code:'TRELIO_PLUGIN_RESTART_REQUIRED'});
+});
 
 const memorySetupHost=(store,{afterWrite}={})=>{
   const files=new Map();let queued=Promise.resolve();

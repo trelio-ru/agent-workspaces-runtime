@@ -11,7 +11,7 @@ import { gunzipSync } from 'node:zlib';
 import { createAssistantWindowsBackground, runAssistantWindowsBackgroundNative, projectAssistantBackgroundResult,
   quoteAssistantWindowsArgument, ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, createAssistantWindowsBackgroundReplacement,
   validateAssistantBackgroundReplacementSnapshot,startAssistantWindowsConsoleIcon,runAssistantWindowsDesktop,ASSISTANT_WINDOWS_DESKTOP_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
-import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { callAssistantSetupTool, runAssistantEntry, ASSISTANT_SETUP_TOOLS, resolveAssistantPluginHandoffLoaders } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
 const identity = { origin: 'https://trelio.ru', assistantId: randomUUID(), deviceId: randomUUID() };
 const registered = () => ({ schemaVersion: 1, state: 'registered', installed: true,
@@ -646,8 +646,7 @@ test('native plugin handoff retargets only the exact scheduled action and preser
     assert.equal(enabled,true);assert.deepEqual(current,fixture);assert.deepEqual(proof,{ownTaskWriteVerified:true});writableOptIns++;
   }};
   const old=createAssistantWindowsBackground({...options,resolveLoader:async()=>oldLoader});
-  const next=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[oldLoader],restartRequested:true});
-  const steady=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[oldLoader],restartRequested:false});
+  let next,steady;
   const triggerCount=()=>runAssistantWindowsBackgroundNative({assistantId:fixture.assistantId},{script:String.raw`
 $PSModuleAutoLoadingPreference='None'
 Microsoft.PowerShell.Core\Import-Module -Name ([IO.Path]::Combine($PSHOME,'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
@@ -662,7 +661,7 @@ $ownWrite=@($sd.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -eq $s
   t.after(async()=>{
     await fs.writeFile(release,'');
     for(let attempt=0;attempt<20;attempt++){
-      for(const manage of [next,old]){
+      for(const manage of [next,old].filter(Boolean)){
         try{await manage('remove');await fs.rm(directory,{recursive:true,force:true});return;}
         catch(error){if(!['ASSISTANT_BACKGROUND_BUSY','ASSISTANT_BACKGROUND_CONFLICT'].includes(error.code))throw error;}
       }
@@ -674,6 +673,14 @@ $ownWrite=@($sd.DiscretionaryAcl|Where-Object{$_.SecurityIdentifier.Value -eq $s
   const read=async file=>{try{return await fs.readFile(file,'utf8');}catch(error){if(error.code==='ENOENT')return null;throw error;}};
   const until=async predicate=>{for(let i=0;i<80;i++){if(await predicate())return true;await new Promise(resolve=>setTimeout(resolve,250));}return false;};
   assert.equal(await until(async()=>await read(heartbeat)!==null),true);
+  // Reproduce native cache pruning AFTER the old Node process loaded its
+  // script. Handoff must compare its registered literal arguments without
+  // reopening that deleted executable; the replacement is still strictly read.
+  await fs.rm(oldLoader);
+  const loaders=await resolveAssistantPluginHandoffLoaders({installedPath:path.dirname(path.dirname(nextLoader)),
+    loadedPluginDirectory:path.dirname(path.dirname(oldLoader)),journal:{previousVersion:null,failedVersion:null}});
+  next=createAssistantWindowsBackground({...options,resolveLoader:async()=>loaders.nextLoader,previousLoaders:loaders.previousLoaders,restartRequested:true});
+  steady=createAssistantWindowsBackground({...options,resolveLoader:async()=>loaders.nextLoader,previousLoaders:loaders.previousLoaders,restartRequested:false});
   const wrong=createAssistantWindowsBackground({...options,resolveLoader:async()=>nextLoader,previousLoaders:[nextLoader],restartRequested:true});
   await assert.rejects(wrong('retarget'),{code:'ASSISTANT_BACKGROUND_CONFLICT'});
   assert.equal((await next('retarget')).installed,true);

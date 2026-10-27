@@ -716,6 +716,10 @@ publication tooling также остаются вне этого публичн
   a closed assistant profile and separate code-copy namespace. Supervisor waits
   for its snapshot after exact OS registration, before starting workers; no
   human plugin store, version discovery, trust/config change or task replay.
+  An in-place empty regular cache root uses only nonrecursive rmdir before
+  verified publication; concurrent bytes/permission errors stay protected.
+  Handoff validates the new loader; exact old journal paths are native CAS
+  comparators only and need not survive cache pruning.
   Dedicated cache/native-manifest version is independent of the pinned common
   loader's TRELIO_PLUGIN_VERSION; exercise the actual differing versions.
   Native root .git index/reflog changes require all remaining bytes to match.

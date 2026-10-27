@@ -1601,7 +1601,12 @@ A separate private structural journal records the previous verified tree,
 exact intended version and install/close/start/verify phases before side
 effects. Lost install replies reconcile the exact native inventory rather than
 repeat installation. Loaded old bytes remain preserved by the SAME retention
-watcher. Windows AppModel selects this user's exact Codex package; the fixed
+watcher. Handoff checks the newly verified loader through the common filesystem/access
+resolver, but derives old action arguments literally from the loader-selected
+root and protected previous/failed versions. Those old paths are native CAS
+comparators, never executables: native cache pruning must not block forward
+activation or rollback. Principal/marker/definition checks remain unchanged.
+Windows AppModel selects this user's exact Codex package; the fixed
 manifest GUI `App` is independent of its `CodexCoreCommandRunner` companion.
 The bounded public helper selects only this session's exact executable/window
 and process creation generation. Closing an Electron window may merely hide it

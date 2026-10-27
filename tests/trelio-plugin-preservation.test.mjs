@@ -39,6 +39,61 @@ const fixture = async (profile = "human") => {
 };
 
 for (const profile of ["human", "assistant"]) {
+  test(`${profile} live preservation restores an in-place empty native version root`, async () => {
+    const f = await fixture(profile);
+    const errors = [];
+    const preservation = startLoadedCodexPluginPreservation({environment: f.environment,
+      retentionDirectory: f.retentionDirectory, checkIntervalMs: 20, onError: error => errors.push(error)});
+    try {
+      const entry = await preservation.ready;
+      const metadataPath = path.join(entry.entryDirectory, "metadata.json");
+      const metadata = await fs.readFile(metadataPath);
+      const manifest = await fs.readFile(path.join(f.plugin, ".codex-plugin/plugin.json"));
+      // Model the observed Codex Windows prune exactly: remove children from
+      // OUR disposable fixture, leaving the regular version directory empty.
+      // Presence of the root alone must not suppress the same retained restore.
+      for (const name of await fs.readdir(f.plugin)) await fs.rm(path.join(f.plugin, name), {recursive: true});
+      await waitUntil(() => fs.readFile(path.join(f.plugin, "scripts/hook.mjs"), "utf8")
+        .then(value => value.includes("exact-old-hook"), () => false));
+      await preservation.close(); // Wait for full publication, not mere file visibility.
+      assert.deepEqual(errors, []);
+      assert.deepEqual(await fs.readFile(path.join(f.plugin, ".codex-plugin/plugin.json")), manifest);
+      assert.deepEqual(await fs.readFile(metadataPath), metadata, "neither immutable receipt nor native trust is rewritten");
+    } finally { await preservation.close(); await fs.rm(f.root, {recursive: true, force: true}); }
+  });
+
+  for (const race of ["none", "concurrent-file", "permission"]) {
+    test(`${profile} empty-root restore preserves concurrent bytes and real rmdir refusals (${race})`, async t => {
+      const f = await fixture(profile);
+      const originalRmdir = fs.rmdir;
+      try {
+        await retainLoadedCodexPluginInstallation({profile, retentionDirectory: f.retentionDirectory,
+          loadedPluginDirectory: f.plugin, loadedPluginVersion: path.basename(f.plugin)});
+        for (const name of await fs.readdir(f.plugin)) await fs.rm(path.join(f.plugin, name), {recursive: true});
+        let attempts = 0;
+        t.mock.method(fs, "rmdir", async (target, ...options) => {
+          if (target === f.plugin) {
+            attempts++;
+            assert.equal(options.length, 0, "the exact empty root is NEVER recursively deleted");
+            if (race === "concurrent-file") await fs.writeFile(path.join(f.plugin, "foreign-sentinel"), "preserve concurrent bytes");
+            if (race === "permission") throw Object.assign(new Error("synthetic native permission refusal"), {code: "EPERM"});
+          }
+          return originalRmdir.call(fs, target, ...options);
+        });
+        const restore = restoreRetainedCodexPluginInstallations({profile, retentionDirectory: f.retentionDirectory});
+        if (race === "none") {
+          assert.equal(await restore, 1);
+          assert.match(await fs.readFile(path.join(f.plugin, "scripts/hook.mjs"), "utf8"), /exact-old-hook/);
+        } else {
+          await assert.rejects(restore, race === "permission" ? {code: "EPERM"} : undefined);
+          if (race === "concurrent-file") assert.equal(await fs.readFile(path.join(f.plugin, "foreign-sentinel"), "utf8"), "preserve concurrent bytes");
+          else assert.deepEqual(await fs.readdir(f.plugin), [], "permission refusal never becomes an overwrite");
+        }
+        assert.equal(attempts, 1, "one observed empty-root publication, no blind retry");
+      } finally { t.mock.restoreAll(); await fs.rm(f.root, {recursive: true, force: true}); }
+    });
+  }
+
   test(`${profile} legacy retention accepts native Git metadata changes without overwriting them`, async () => {
     const f = await fixture(profile);
     try {
