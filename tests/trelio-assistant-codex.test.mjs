@@ -336,6 +336,9 @@ test('native execution uses the exact chat/cwd, stdin marker, one-use start and 
   assert.match(input,/separate last successfully reviewed message position for each task\/account\/conversation\/topic/);
   assert.match(input,/advance that position only together with successfully accepted task material/);
   assert.match(input,/never use the background monitor cursor/);
+  assert.match(input,/retain its exact provider\/account\/chat\/topic selectors in accepted WORK.md/);
+  assert.match(input,/even when no reply is pending/);
+  assert.match(input,/Reading one mentioned message does not prove that earlier or neighbouring history was reviewed/);
   assert.ok(input.includes('never sensitive-action approval'));
   for(const invariant of ['request_assistant_action','original clientRequestId and fields','only approved','ownerDecisionId',
     'Denied, expired, stopped or changed data','server rechecks current access and target state']) {

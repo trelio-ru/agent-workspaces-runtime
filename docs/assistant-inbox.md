@@ -72,6 +72,9 @@ Incomplete/gapped reads or failed acceptance retain the old bookmark and an
 explicit unresolved next step. Initial review is bounded with honest coverage.
 No linked conversation or no scheduled pass means no automatic history review.
 Ordinary skill history reads never fabricate original source processing slots.
+An actually read routed original or authorized conversation work records those
+exact links even without a pending reply. A single original receipt cannot
+advance the independent history bookmark over unreviewed neighbouring messages.
 
 `register` is idempotent. `claimPoll` holds a two-minute lease for one exact source.
 `commitPage` checks that lease and cursor revision, then atomically inserts events
