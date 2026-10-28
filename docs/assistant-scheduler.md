@@ -49,7 +49,7 @@ recovery JSON and the original native-start bit. Each marker has its own monoton
 start flag committed before spawn. No transcript, prompt, reply or claimed
 business result is journaled. Before launch the host repeats positive terminal
 read-back, protected identity/pass, fresh ACL/model/lease and full negative new
-marker coverage. Unknown/running/failed/ambiguous history and unknown new starts
+marker coverage. Unknown/running/generically failed/ambiguous history and unknown new starts
 never authorize replay. Schema14 preserves the whole legacy JSON unchanged and
 appends new structural intents to an indexed table in the SAME SQLite journal.
 Latest-intent and per-prerequisite count reads are bounded, without deleting
@@ -91,6 +91,43 @@ changed identity/journal refuses. Downloading preserves every pass/start/history
 bit and never clears business health; the next worker independently selects the
 verified package. No model invocation, Codex restart or owner question occurs.
 
+
+### Native model-capacity recovery
+
+Only an exact stored FAILED turn with native `codexErrorInfo=serverOverloaded`
+(or the exact legacy Desktop capacity message with absent/`other` error info)
+permits this recovery. Quota/auth/transport failures, generic HTTP 503, quoted
+messages, interrupted/running/unknown history and missing/duplicate markers do
+not. Native diagnostics stay in memory and project to `failure:model_capacity`.
+
+The SAME delivery retains a schema19 content-free episode: first observation,
+latest failed turn/marker, saturated delay step and due time. Pauses are 1, 5,
+15 and then 30 minutes after each failure, indefinitely; polling/restart cannot
+reset the clock. Each attempt is a NEW monotonic marker in the SAME permanent
+chat. Task work renews its SAME native pass through the ordinary continuation
+receipt, with fresh hook/model/ACL/lease and full negative child-marker coverage.
+Its prompt requires inspecting saved state and operation receipts first; no
+original command, send, mutation or provider ACK is replayed. Capacity entries
+append to the existing indexed ledger under a separate budget key, without
+spending or resetting the generic twenty-attempt hook-repair budget.
+
+A failed initial tool-free PREPARE/READY also preserves its one provision and
+persisted chat UUID. A new empty GUI-queued READY may follow exact failed native
+read-back and a new durable local start fence; no second thread/create/bootstrap,
+foreign writer resume, settings turn or business tools are permitted. A later
+unknown attempt immediately restores the ordinary dispatch uncertainty fence.
+
+Health protocol v3 adds only `codex_capacity_wait` and an independent server
+first-observation latch. The normal account notification engine warns once after
+15 minutes; attempts continue. Successful committed business/native recovery
+clears only the appropriate obligations and emits one recovery if a warning was
+sent. Short episodes remain silent. Metadata/READY, quotas or an unrelated
+login/hook success cannot clear the latch. V2/legacy health readers hide the new
+reason while retaining exact CAS; backend/migration must precede runtime rollout.
+The signed tick returns an optional closed `nextPollMs` (1s–5min) so current
+supervisors honour the first one-minute retry. An already-running old supervisor
+keeps its existing five-minute granularity until its normal lifecycle ends; its
+unknown-work reporter cannot turn the new paced wait into dispatch review.
 
 ## Cycles
 

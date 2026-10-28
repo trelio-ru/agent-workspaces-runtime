@@ -2040,3 +2040,119 @@ test('a terminal cancelled PRE-BODY owner intake recovers automatically under fr
  assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
  assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
 });
+
+test('capacity backoff survives SQLite restart, continues beyond twenty attempts and never replays an original turn',async t=>{
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-capacity-')),file=path.join(directory,'inbox.sqlite');
+  let database=new DatabaseSync(file),coordinator;
+  const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
+  const run=f.options.native.run,outcome=f.options.client.readBusinessOutcome;
+  const reviews=new Map(),markers=new Set();let attempts=0,confirmed=false,resumes=0;
+  f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  f.options.native.readDelivery=async(_thread,id,options)=>f.deliveries.get(id)
+    ??{state:'uncertain',...(options?.requireAbsentMarker?{markerEvidence:'absent'}:{})};
+  f.options.client.readBusinessOutcome=async input=>{
+    if(!confirmed)throw Object.assign(new Error('no business receipt'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+    return outcome(input);
+  };
+  f.options.native.run=async(input,options)=>{
+    assert.ok(!markers.has(input.deliveryId),'each attempted model turn has a NEW durable marker');markers.add(input.deliveryId);
+    if(options.continuationReview){
+      assert.equal(options.requireAbsentMarker,true);await options.beforeInvocation();
+      assert.equal(input.threadId,f.activePass().threadId);
+    }
+    const result=await run(input,options);attempts++;
+    result.turnId=result.receipt.split(':')[2];
+    if(attempts<=25){result.state='failed';result.failure='model_capacity';}
+    else confirmed=true;
+    return result;
+  };
+  f.options.passHost.continuePass=async(input,saved)=>{
+    const pass=f.passes.get(saved.deliveryId);
+    let row=reviews.get(input.clientRequestId);
+    if(!row){assert.equal(input.continuation,'review');row={id:randomUUID(),resumed:null};reviews.set(input.clientRequestId,row);}
+    if(input.continuation==='resume'&&!row.resumed){
+      assert.equal(pass.leaseRevision,input.expectedLeaseRevision);resumes++;
+      Object.assign(pass,{state:'leased',leaseRevision:pass.leaseRevision+1,
+        leaseExpiresAt:new Date(Date.parse(pass.leaseExpiresAt)+7200000).toISOString()});
+      row.resumed={leaseRevision:pass.leaseRevision,leaseExpiresAt:pass.leaseExpiresAt};
+    }
+    return {schemaVersion:2,state:row.resumed?'resumed':'approved',reviewId:row.id,invocationId:row.id,
+      terminalTurnId:input.terminalTurnId,expectedLeaseRevision:input.expectedLeaseRevision,questionPath:null,
+      resumed:row.resumed,pass:{...pass}};
+  };
+  const reopen=async()=>{await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});};
+  try{
+    await coordinator.pollOnce();await coordinator.workOnce();
+    f.events.push({id:randomUUID(),revision:'capacity-event',taskId:f.taskId,wake:true});f.advance(300001);await coordinator.pollOnce();
+    await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    const deliveryId=f.activePass().deliveryId;
+    let row=database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(deliveryId);
+    const first=JSON.parse(row.model_capacity_json),originalStart=row.native_started;
+    assert.equal(first.nextAt-first.firstAt,60_000);
+    for(let i=0;i<25;i++){
+      await reopen();
+      const waiting=JSON.parse(database.prepare('SELECT model_capacity_json FROM assistant_inbox_deliveries WHERE delivery_id=?').get(deliveryId).model_capacity_json);
+      assert.equal(waiting.firstAt,first.firstAt);
+      assert.equal((await coordinator.dispatchStatus()).failure.code,'ASSISTANT_CODEX_MODEL_CAPACITY');
+      const count=attempts;
+      assert.equal((await coordinator.workOnce()).state,'blocked');assert.equal(attempts,count,'poll does not defeat backoff');
+      f.advance([60_000,300_000,900_000,1_800_000][Math.min(i,3)]);
+      if(i<24)await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+      else await coordinator.workOnce();
+      assert.equal(attempts,count+1);
+    }
+    assert.equal(attempts,26);assert.equal(resumes,25);assert.equal(f.activePass(),null);
+    row=database.prepare('SELECT * FROM assistant_inbox_deliveries WHERE delivery_id=?').get(deliveryId);
+    assert.equal(row.native_started,originalStart);assert.equal(row.state,'complete');
+    assert.equal(database.prepare('SELECT count(*) n FROM assistant_pass_continuations WHERE delivery_id=?').get(deliveryId).n,25);
+    assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_revision=?').get('capacity-event').processed,1);
+    const before=attempts;await reopen();await coordinator.workOnce();assert.equal(attempts,before);
+  }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+for(const bootstrap of [false,true])test(`capacity during empty READY retains the original chat/claim and retries only a new READY marker (bootstrap=${bootstrap})`,async t=>{
+  const f=fixture(t);let attempts=0,threadId=null;const markers=new Set();
+  f.options.native.provision=async(input,options)=>{
+    attempts++;
+    assert.ok(!markers.has(input.deliveryId));markers.add(input.deliveryId);
+    if(attempts===1){options.startInvocation();threadId=randomUUID();options.onThreadStarted(threadId);}
+    else{
+      assert.equal(input.threadId,threadId);await options.beforeInvocation();options.startInvocation();
+      assert.notEqual(input.deliveryId,[...markers][0]);
+    }
+    const turnId=randomUUID(),result={state:attempts===1?'failed':'completed',turnId,threadId,
+      receipt:`codex:${threadId}:${turnId}`,...(attempts===1?{failure:'model_capacity'}:{})};
+    f.deliveries.set(input.deliveryId,result);
+    if(attempts===1&&bootstrap)throw Object.assign(new Error('closed native bootstrap'),{code:'ASSISTANT_CODEX_MODEL_CAPACITY'});
+    return result;
+  };
+  try{
+    await f.coordinator.pollOnce();await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    assert.equal((await f.coordinator.dispatchStatus()).failure.code,'ASSISTANT_CODEX_MODEL_CAPACITY');
+    assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(attempts,1);
+    f.advance(60_000);await f.coordinator.workOnce();assert.equal(attempts,2);
+    assert.equal(f.coordinator.status()[0].threadId,threadId);
+    assert.equal(f.database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,1);
+    assert.equal(f.database.prepare('SELECT native_started FROM assistant_inbox_deliveries').get().native_started,1);
+  }finally{await f.coordinator.close();}
+});
+
+test('an unknown next READY restores ordinary dispatch review, never a repeated capacity launch',async t=>{
+  const f=fixture(t);let attempts=0,threadId;
+  f.options.native.provision=async(input,options)=>{
+    attempts++;
+    if(attempts===1){options.startInvocation();threadId=randomUUID();options.onThreadStarted(threadId);
+      f.deliveries.set(input.deliveryId,{state:'failed',turnId:randomUUID(),failure:'model_capacity'});
+      throw Object.assign(new Error('closed'),{code:'ASSISTANT_CODEX_MODEL_CAPACITY'});
+    }
+    await options.beforeInvocation();options.startInvocation();
+    throw Object.assign(new Error('unknown GUI response'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+  };
+  try{
+    await f.coordinator.pollOnce();await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    assert.deepEqual((await f.coordinator.dispatchStatus()).reasons,['model_capacity']);
+    f.advance(60_000);await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    assert.deepEqual((await f.coordinator.dispatchStatus()).reasons,['delivery_uncertain']);
+    f.advance(86400_000);assert.equal((await f.coordinator.workOnce()).state,'blocked');assert.equal(attempts,2);
+  }finally{await f.coordinator.close();}
+});

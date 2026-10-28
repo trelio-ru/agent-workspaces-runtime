@@ -12,6 +12,14 @@ export class AssistantCodexError extends Error {
   constructor(code) { super(code); this.code = code; }
 }
 const fail = code => { throw new AssistantCodexError(code); };
+/** Only a native FAILED turn can establish capacity exhaustion. Never match a
+ * tool result, assistant prose, generic 503/network error or a quota refusal.
+ * Older Desktop versions used `other` with this exact public message. Project
+ * it immediately to a closed flag; neither raw diagnostics nor retry headers
+ * (which this public API does not expose) enter persistent state. */
+const capacityFailure = turn => turn?.status === 'failed' && (turn.error?.codexErrorInfo === 'serverOverloaded'
+  || (turn.error?.codexErrorInfo === undefined || turn.error?.codexErrorInfo === null || turn.error?.codexErrorInfo === 'other')
+    && turn.error?.message === 'Selected model is at capacity. Please try a different model.');
 const id = value => {
   if (typeof value !== 'string' || !UUID.test(value)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   return value.toLowerCase();
@@ -148,7 +156,8 @@ const readNative = async (threadId, project, options = {}) => {
           if(terminalWaiting&&message.method==='turn/completed'&&message.params?.threadId===terminalWaiting.threadId){
             const turn=message.params.turn;
             if(!UUID.test(turn?.id??'')||!['completed','failed','interrupted'].includes(turn.status))return abort();
-            const terminal=terminalWaiting;terminalWaiting=null;terminal.yes({turnId:turn.id,status:turn.status});
+            const terminal=terminalWaiting;terminalWaiting=null;terminal.yes({turnId:turn.id,status:turn.status,
+              ...(capacityFailure(turn)?{failure:'model_capacity'}:{})});
           }
           if (waiting && message.id === waiting.id) {
             const current = waiting; waiting = null;
@@ -176,7 +185,7 @@ const readNative = async (threadId, project, options = {}) => {
         // RPC errors, provider prose and unavailable history remain unknown;
         // none may become a request to sign in or expose native diagnostics.
         finish(error instanceof AssistantCodexError && ['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_HOOK_REVIEW_REQUIRED',
-          'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_DELIVERY_NOT_STARTED','ASSISTANT_MCP_RECONNECT_REQUIRED'].includes(error.code)
+          'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_MODEL_CAPACITY','ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_DELIVERY_NOT_STARTED','ASSISTANT_MCP_RECONNECT_REQUIRED'].includes(error.code)
           ? error.code : options.desktopOperation===true?'ASSISTANT_CODEX_DELIVERY_UNCERTAIN':'ASSISTANT_CODEX_READ_UNAVAILABLE');
       });
     } catch { abort(); }
@@ -442,13 +451,25 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
     }
     const response = await request('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc', itemsView: 'summary' });
     if (!Array.isArray(response?.data) || response.data.length > 20) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
-    const matches = response.data.filter(turn => Array.isArray(turn.items) && turn.items.some(item =>
+    let matches = response.data.filter(turn => Array.isArray(turn.items) && turn.items.some(item =>
       item.type === 'userMessage' && Array.isArray(item.content) && item.content.some(input =>
         input.type === 'text' && typeof input.text === 'string' && input.text.startsWith(`${marker}\n`))));
+    // Only a host-selected tool-free provision may observe its owned initial
+    // bootstrap. An ordinary task read never treats PREPARE as delivered work.
+    if(!matches.length&&options.provision===true){
+      matches=response.data.filter(turn=>Array.isArray(turn.items)&&turn.items.some(item=>
+        item.type==='userMessage'&&Array.isArray(item.content)&&item.content.some(input=>input.type==='text'
+          &&typeof input.text==='string'&&input.text.startsWith(`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}\n`))));
+      // A successful PREPARE is still NOT the GUI-queued READY receipt. This
+      // fallback admits only the failed-capacity recovery witness, never
+      // successful provisioning, task completion or ordinary failure replay.
+      if(matches.length!==1||!capacityFailure(matches[0]))return {state:'uncertain'};
+    }
     if (matches.length !== 1 || !UUID.test(matches[0].id ?? '')) return { state: 'uncertain' };
     const turn = matches[0];
     if (turn.status === 'completed') return { state: 'completed', turnId: turn.id, receipt: `codex:${id(threadId)}:${id(turn.id)}` };
-    if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}` };
+    if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}`,
+      ...(capacityFailure(turn) ? { failure: 'model_capacity' } : {}) };
     // This is a stored-history reader, not the GUI's owning event stream. The
     // current native client reconstructs an unfinished persisted turn as
     // interrupted even while that exact GUI turn is executing tools. It is
@@ -530,15 +551,25 @@ export const runAssistantCodexPass = async ({ threadId, deliveryId, cwd, taskCon
  * turns are tool-free readiness checks: they cannot consume task events.
  * Persist the created UUID synchronously before turn/start. A lost ID/response
  * leaves an uncertain lease, never permission to create a replacement chat. */
-export const provisionAssistantCodexChat = async ({ deliveryId, cwd, execution }, options = {}) => {
+export const provisionAssistantCodexChat = async ({ deliveryId, cwd, execution, threadId = null }, options = {}) => {
   deliveryId = id(deliveryId);
   execution = assistantExecutionConfiguration(execution);
   if(options.chatKind!==undefined&&!['task','owner_dialogue','source_triage'].includes(options.chatKind))fail('ASSISTANT_CODEX_INVALID_INPUT');
   if (typeof options.onThreadStarted !== 'function' || typeof cwd !== 'string' || !path.isAbsolute(cwd)) fail('ASSISTANT_CODEX_INVALID_INPUT');
   let actual; try { actual = await fs.realpath(cwd); } catch { fail('ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE'); }
-  const threadId = await executeNativePass({ threadId: null, deliveryId, cwd: actual, execution }, { ...options, readinessProbe: true });
+  if(threadId!==null){
+    threadId=id(threadId);
+    // Retry only a NEW journaled empty READY marker in this SAME visible chat.
+    // No thread/start, foreign writer resume, settings turn or task tools.
+    const absent=await (options.readDelivery??readAssistantCodexDelivery)(threadId,deliveryId,{...options,requireAbsentMarker:true});
+    if(absent.markerEvidence!=='absent')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+  }
+  threadId = await executeNativePass({ threadId, deliveryId, cwd: actual, execution }, { ...options, readinessProbe: true });
   const result = await (options.readDelivery ?? readAssistantCodexDelivery)(threadId, deliveryId, options);
-  if (result.state !== 'completed') fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+  if (result.state !== 'completed') {
+    if(result.state==='failed'&&result.failure==='model_capacity')return {...result,threadId};
+    fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
+  }
   await confirmFreshAuthentication(options);
   // Cosmetic naming follows verified GUI provisioning in a separate bounded
   // native reader. A refused/disconnected naming RPC must never invalidate the
@@ -641,7 +672,8 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     if(signal.aborted)fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     startNativeInvocation(options,threadId,deliveryId);
   };
-  if(options.readinessProbe===true){
+  const newProvision=options.readinessProbe===true&&threadId===null;
+  if(newProvision){
     // Zero-turn thread/settings alone is insufficient: Desktop restores the
     // last executed turn's pair. Execute ONLY this empty tool-free bootstrap
     // under the explicit owner-selected pair before handing the writer to GUI.
@@ -662,6 +694,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
         collaborationMode:{mode:'default',settings:{model:execution.modelId,reasoning_effort:execution.effortLevel,developer_instructions:null}},
         input:[{type:'text',text:`${marker}\nReply exactly READY. Do not use tools or access files, sites, accounts or integrations.`,text_elements:[]}]});
       const prepared=await terminal;
+      if(started?.turn?.id===prepared.turnId&&prepared.failure==='model_capacity')fail('ASSISTANT_CODEX_MODEL_CAPACITY');
       if(started?.turn?.id!==prepared.turnId||prepared.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
       const verified=await waitForNativeTurn(request,threadId,marker,signal);
       if(verified.turnId!==prepared.turnId||verified.status!=='completed')fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
@@ -679,7 +712,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     const pending=await request('thread/queue/list',{threadId});
     if(!Array.isArray(pending?.data)||pending.data.length||pending.nextCursor!==null)
       fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
-    if(options.readinessProbe!==true)await beforeStart();
+    if(!newProvision)await beforeStart();
     // One provision bit covers creation/bootstrap/GUI handoff as one chain;
     // task delivery crosses its bit immediately before its ONE queue write.
     const submitted=await request('thread/queue/add',{threadId,clientUserMessageId:deliveryId,

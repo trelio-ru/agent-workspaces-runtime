@@ -867,7 +867,7 @@ export const assistantCatalogRevision = tools => {
   if(Buffer.byteLength(text)>768*1024) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
   return createHash('sha256').update(text).digest('hex');
 };
-const reasons = new Set(['ready','not_checked','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','dispatch_review_required','connection_lost']);
+const reasons = new Set(['ready','not_checked','plugin_update_required','plugin_restart_required','mcp_reconnect_required','runtime_update_failed','codex_auth_required','hook_review_required','dispatch_review_required','codex_capacity_wait','connection_lost']);
 const assistantHealthCodes = Object.freeze({
   ASSISTANT_CODEX_UPDATE_FAILED:'runtime_update_failed',
   AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED:'plugin_update_required',
@@ -879,6 +879,7 @@ const assistantHealthCodes = Object.freeze({
   AGENT_WORKSPACE_HOST_RUNTIME_UPGRADE_REQUIRED:'runtime_update_failed',
   ASSISTANT_MCP_RECONNECT_REQUIRED:'mcp_reconnect_required',
   ASSISTANT_CODEX_AUTH_REQUIRED:'codex_auth_required',
+  ASSISTANT_CODEX_MODEL_CAPACITY:'codex_capacity_wait',
   ASSISTANT_HOOK_REVIEW_REQUIRED:'hook_review_required',
   ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN:'dispatch_review_required',
   ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED:'dispatch_review_required',
@@ -1434,7 +1435,9 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
   const startedAt=now();
   const host=await createHost();
   const reportDispatch=async(dispatch,error=null)=>{
-    const failure=dispatch?.reasons?.includes('delivery_uncertain')
+    const failure=dispatch?.failure?.code==='ASSISTANT_CODEX_MODEL_CAPACITY'
+      && (!error||['ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN','ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED'].includes(error.code))
+      ?{code:'ASSISTANT_CODEX_MODEL_CAPACITY'}:dispatch?.reasons?.includes('delivery_uncertain')
       ?{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'}:error;
     // The CURRENT signed worker reports even when its long-lived parent knows
     // only an older health enum. Failed reporting never hides the original
@@ -1494,11 +1497,19 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
     if(pollFailure)throw pollFailure; // Preserve a source outage after settling the one native pass.
     const dispatch=await host.coordinator.dispatchStatus(signal);
     await reportDispatch(dispatch);
-    return {schemaVersion:1,state:['blocked','unknown','queued'].includes(dispatch.state)?dispatch.state:result.value===null?'idle':'checked',dispatch};
+    const nextPollMs=host.coordinator.modelCapacityRetryDelay?.();
+    return {schemaVersion:1,state:['blocked','unknown','queued'].includes(dispatch.state)?dispatch.state:result.value===null?'idle':'checked',dispatch,
+      ...(nextPollMs?{nextPollMs}:{})};
   } catch(error) {
     let dispatch=null;
     try{dispatch=await host.coordinator.dispatchStatus?.(signal);}catch{}
     await reportDispatch(dispatch,error);
+    // A confirmed native capacity failure is a paced WAIT, not unknown work.
+    // Returning its closed projection also keeps an older long-lived parent
+    // from manufacturing a generic dispatch-review latch on every tick.
+    if(dispatch?.failure?.code==='ASSISTANT_CODEX_MODEL_CAPACITY'
+      &&['ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN','ASSISTANT_COORDINATOR_DELIVERY_REVIEW_REQUIRED'].includes(error.code))
+      return {schemaVersion:1,state:'blocked',dispatch,...(host.coordinator.modelCapacityRetryDelay?.()?{nextPollMs:host.coordinator.modelCapacityRetryDelay()}:{})};
     throw error;
   } finally {await host.close();}
 };
@@ -1515,7 +1526,7 @@ export const reportAssistantMaintenanceFailure = async (error, client = null) =>
     // The second read must preserve the current incident rather than rewrite
     // contact/CAS or cover a newer unrelated problem. Native generations still
     // independently deduplicate every concurrent report at commit.
-    if(code==='dispatch_review_required'&&(current.code===code||current.latchedCodes?.includes(code)))return current;
+    if(['dispatch_review_required','codex_capacity_wait'].includes(code)&&(current.code===code||current.latchedCodes?.includes(code)))return current;
     return connection.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),code});
   };
   return client?report(client):productionContext(report);
@@ -1527,10 +1538,16 @@ export const reportAssistantMaintenanceFailure = async (error, client = null) =>
  * roll back the committed work or replay the native/provider action. */
 export const reportAssistantDispatchRecovery = async client => {
   try {
-    const current=await client.readHealth();
-    if(current.code!=='dispatch_review_required')return;
-    return await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),
-      code:'ready',clearedReason:'dispatch_review_required'});
+    // Only this committed business/native boundary clears either obligation.
+    // Re-read between independent CAS reports; an auth/hook/other dispatch
+    // incident cannot be erased by successfully recovering a capacity episode.
+    for(const reason of ['dispatch_review_required','codex_capacity_wait']) {
+      const current=await client.readHealth();
+      if(!['dispatch_review_required','codex_capacity_wait'].includes(current.code))return;
+      if(current.code!==reason&&!current.latchedCodes?.includes(reason))continue;
+      await client.reportHealth({expectedRevision:current.revision,clientRequestId:randomUUID(),
+        code:'ready',clearedReason:reason});
+    }
   } catch { /* A future genuine completion may safely retry this diagnostic boundary. */ }
 };
 
@@ -1600,6 +1617,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
     // changes admission, native work, its deadline or a running window's focus.
     try{consoleIcon=await startConsoleIcon(initial.identity);}catch{}
     while(!effective.aborted) {
+      let nextPollMs=300_000;
       try {
         const current=await readHost();
         if(JSON.stringify(current?.identity)!==identity||fenced(current))break;
@@ -1608,6 +1626,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
         if(!effective.aborted){
           const cycle=await request({operation:'background_tick'},{signal:effective,timeoutMs:35*60_000,environment:workerEnvironment});
           if(cycle?.state==='quiescing')break;
+          if(Number.isSafeInteger(cycle?.nextPollMs)&&cycle.nextPollMs>=1000&&cycle.nextPollMs<=300_000)nextPollMs=cycle.nextPollMs;
           // A retained unknown operation can be returned by reconciliation
           // without throwing. Report only this closed, device-global fence;
           // missing model and waiting-owner remain their independent policies.
@@ -1623,7 +1642,7 @@ export const runAssistantBackground = async ({signal,request=requestCurrentAssis
         // Retained SQLite/native-start/pass receipts own recovery. This is the
         // next polling cycle, never a second invocation of a business tool.
       }
-      if(!effective.aborted)await wait(300_000,effective);
+      if(!effective.aborted)await wait(nextPollMs,effective);
     }
     return {schemaVersion:1,state:'stopped'};
   } finally {

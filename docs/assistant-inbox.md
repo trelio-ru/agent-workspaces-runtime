@@ -918,3 +918,17 @@ also narrow to read-back, never a blind write retry or new-source adoption.
 Group originals keep the no-range-ACK policy where skipped discussion would be
 marked read. Business processing and accepted goal completion retain their
 independent original-slot/material/retirement guards.
+
+## Schema v19: paced native model capacity
+
+An additive `model_capacity_json` column on the SAME delivery stores only the
+first observation, latest terminal/marker UUIDs, saturated backoff step/due time
+and whether the exact failed marker is waiting. Re-observing that turn cannot
+postpone its deadline; restart never resets it. The immutable first failure
+remains untouched. SELECT-only diagnostics project the separate CURRENT wait
+as a closed capacity code; a started/unknown next attempt loses that special
+projection. Capacity continuations reuse the indexed start ledger with a separate
+budget key and no attempt cap. Ordinary hook/completion-repair caps remain.
+An empty provision uses null passId only in that closed capacity profile and
+retains the original chat/claim. No native prose, new task, body, ACK, outcome,
+process-liveness claim or reset of any original start bit is introduced.

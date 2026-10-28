@@ -246,12 +246,12 @@ test('Windows parses the complete Desktop helper and executes its real read/refu
 const snapshot=()=>({revision:0,generation:0,code:'ready',latchedCodes:[],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:'4.9.0'}});
 const fixture=()=>{
   let state=snapshot();const reports=[];
-  return {reports,get state(){return state;},set state(value){state={...value,latchedCodes:[...new Set([...(value.latchedCodes??[]),...(['codex_auth_required','hook_review_required','dispatch_review_required'].includes(value.code)?[value.code]:[])])]};},
+  return {reports,get state(){return state;},set state(value){state={...value,latchedCodes:[...new Set([...(value.latchedCodes??[]),...(['codex_auth_required','hook_review_required','dispatch_review_required','codex_capacity_wait'].includes(value.code)?[value.code]:[])])]};},
     client:{readHealth:async()=>structuredClone(state),reportHealth:async input=>{
       assert.equal(input.expectedRevision,state.revision);assert.match(input.clientRequestId,/^[a-f0-9-]{36}$/u);
-      const latched=new Set(state.latchedCodes);if(['codex_auth_required','hook_review_required','dispatch_review_required'].includes(input.code))latched.add(input.code);
+      const latched=new Set(state.latchedCodes);if(['codex_auth_required','hook_review_required','dispatch_review_required','codex_capacity_wait'].includes(input.code))latched.add(input.code);
       if(input.clearedReason)latched.delete(input.clearedReason);
-      const code=input.code==='ready'?(latched.has('codex_auth_required')?'codex_auth_required':latched.has('hook_review_required')?'hook_review_required':latched.has('dispatch_review_required')?'dispatch_review_required':'ready'):input.code;
+      const code=input.code==='ready'?(latched.has('codex_auth_required')?'codex_auth_required':latched.has('hook_review_required')?'hook_review_required':latched.has('dispatch_review_required')?'dispatch_review_required':latched.has('codex_capacity_wait')?'codex_capacity_wait':'ready'):input.code;
       reports.push(input);state={...state,revision:state.revision+1,code,latchedCodes:[...latched]};return state;
     }},
   };
@@ -428,4 +428,19 @@ for(const permitted of [false,true])test(`health offers a retained pass only the
   });
   assert.deepEqual(result,{state:'checked'});assert.equal(boundaries,1);assert.equal(closed,1);assert.equal(checks,1);
   assert.equal(updates,permitted?1:0);
+});
+
+test('the signed tick returns a paced capacity wait without an old-parent generic dispatch failure',async()=>{
+  const reports=[];let closed=0;
+  const dispatch={state:'blocked',reasons:['model_capacity'],failure:{code:'ASSISTANT_CODEX_MODEL_CAPACITY',stage:'readback'}};
+  const result=await runAssistantBackgroundTick({pluginMaintenance:async()=>({state:'disabled'}),codexMaintenance:async()=>({state:'disabled'}),
+    createHost:async()=>({coordinator:{pollOnce:async()=>{},workOnce:async()=>{throw Object.assign(new Error('closed'),{code:'ASSISTANT_COORDINATOR_DELIVERY_UNCERTAIN'});},
+      dispatchStatus:async()=>dispatch,modelCapacityRetryDelay:()=>60_000},reportDispatchFailure:async error=>{reports.push(error.code);},close:async()=>{closed++;}})});
+  assert.equal(result.nextPollMs,60_000);assert.equal(result.state,'blocked');assert.equal(closed,1);
+  assert.deepEqual(reports,['ASSISTANT_CODEX_MODEL_CAPACITY']);assert.ok(!result.dispatch.reasons.includes('delivery_uncertain'));
+  const f=fixture();await reportAssistantMaintenanceFailure({code:'ASSISTANT_CODEX_MODEL_CAPACITY'},f.client);
+  await reportAssistantMaintenanceFailure({code:'ASSISTANT_CODEX_MODEL_CAPACITY'},f.client);assert.equal(f.reports.length,1);
+  await maintainAssistantHost({client:f.client,versions,update:async()=>{},probe:async()=>{}});
+  assert.equal(f.state.code,'codex_capacity_wait');
+  await reportAssistantDispatchRecovery(f.client);assert.equal(f.state.code,'ready');assert.equal(f.reports.at(-1).clearedReason,'codex_capacity_wait');
 });

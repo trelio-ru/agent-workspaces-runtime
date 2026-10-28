@@ -3594,7 +3594,7 @@ test('triage device transport preserves null-thread company decisions and refuse
 });
 
 
-test('health protocol v2 is fixed host metadata and independent dispatch/auth/hook latches stay closed',async()=>{
+test('health protocol v3 is fixed host metadata and independent dispatch/auth/hook latches stay closed',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   const credential=`tda_${'x'.repeat(43)}`;await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
   let revision=3,calls=0,body;
@@ -3602,7 +3602,7 @@ test('health protocol v2 is fixed host metadata and independent dispatch/auth/ho
     latchedCodes:['codex_auth_required','hook_review_required','dispatch_review_required'],
     compatibility:{minimumPluginVersion:'3.0.0',minimumRuntimeVersion:'3.8.11'}});
   const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
-    calls++;assert.equal(options.headers['x-trelio-assistant-health-protocol'],'2');
+    calls++;assert.equal(options.headers['x-trelio-assistant-health-protocol'],'3');
     assert.equal(options.headers.authorization,`Bearer ${credential}`);
     if(options.method==='POST'){body=JSON.parse(options.body);revision++;}
     return new Response(JSON.stringify(state()),{headers:{'content-type':'application/json'}});

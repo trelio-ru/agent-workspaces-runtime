@@ -88,7 +88,7 @@ const nativeRpc = handler => (_executable, args, options) => {
 // Real-shaped public App Server fixture: a bootstrap owns only its empty
 // READY; business messages are accepted solely by the already opened GUI queue.
 const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onQueue=()=>{},
-  onRequest=()=>{},nameFailure=false,pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[]}={}) => {
+  onRequest=()=>{},nameFailure=false,pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[],bootstrapError=null}={}) => {
   let input='',turnId=randomUUID(),phase='read',snapshot=0;
   const rpc=nativeRpc(request=>{
     onRequest(request);
@@ -99,7 +99,7 @@ const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},o
       assert.equal(request.params.model,execution.modelId);assert.equal(request.params.effort,execution.effortLevel);
       assert.equal(request.params.collaborationMode.settings.reasoning_effort,execution.effortLevel);
       input=request.params.input[0].text;phase='bootstrap';onInput(input,'bootstrap');return {result:{turn:{id:turnId}},
-        notifications:[{method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}}]};
+        notifications:[{method:'turn/completed',params:{threadId,turn:{id:turnId,status:bootstrapError?'failed':'completed',...(bootstrapError?{error:bootstrapError}:{})}}}]};
     }
     if(request.method==='thread/queue/list')return {result:{data:queued,nextCursor:null}};
     if(request.method==='thread/queue/add'){
@@ -664,4 +664,51 @@ test('a refused cosmetic name RPC preserves the exact verified GUI provision, wi
  const value=await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},options);
  assert.equal(value.state,'completed');assert.equal(value.threadId,threadId);
  assert.equal(creates,1);assert.equal(queues,1);assert.equal(starts,1);assert.equal(names,1);
+});
+
+// Public native failure metadata is authoritative only on the exact failed
+// turn. Provider/tool prose, quota errors and ambiguous reads stay closed.
+test('capacity projection recognises native overload and the exact older Desktop message without exposing diagnostics',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
+  const read=async(status,error,extra=[])=>readAssistantCodexDelivery(threadId,deliveryId,{
+    executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>request.method==='thread/read'?{result:{thread:{id:threadId,cwd:process.cwd()}}}:({result:{data:[{id:turnId,status,error,
+      items:[{type:'userMessage',content:[{type:'text',text:`TRELIO_ASSISTANT_DELIVERY ${deliveryId}\nwork`}]},...extra]}]}}))});
+  const message='Selected model is at capacity. Please try a different model.';
+  for(const error of [{codexErrorInfo:'serverOverloaded',message:'PRIVATE native details'},
+    {message},{codexErrorInfo:'other',message}]){
+    const result=await read('failed',error);assert.equal(result.failure,'model_capacity');
+    assert.doesNotMatch(JSON.stringify(result),/PRIVATE|Selected model/);
+  }
+  for(const error of [{codexErrorInfo:'usageLimitExceeded',message},
+    {codexErrorInfo:'rateLimitExceeded',message},{message:`${message} PRIVATE`},
+    {message:'server_is_overloaded'},{codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}}}])
+    assert.equal((await read('failed',error)).failure,undefined);
+  assert.equal((await read('completed',{codexErrorInfo:'serverOverloaded'})).failure,undefined);
+  assert.equal((await read('failed',null,[{type:'agentMessage',text:message}])).failure,undefined);
+});
+
+test('an overloaded owned bootstrap keeps its persisted UUID; a later READY retries through the GUI without thread creation',async()=>{
+  const threadId=randomUUID(),original=randomUUID(),retry=randomUUID();let creates=0,starts=0,queues=0,reads=0;
+  const common={executable:process.execPath,environment:{},readExecutionAvailability:async()=>true,openDesktop:async()=>{},
+    startInvocation:()=>{starts++;},onThreadStarted:id=>assert.equal(id,threadId)};
+  await assert.rejects(provisionAssistantCodexChat({deliveryId:original,cwd:process.cwd(),execution},{...common,
+    spawnProcess:desktopRpc({threadId,onCreate:()=>{creates++;},onQueue:()=>assert.fail('failed bootstrap cannot queue READY'),
+      bootstrapError:{codexErrorInfo:'serverOverloaded',message:'PRIVATE error'}})}),{code:'ASSISTANT_CODEX_MODEL_CAPACITY'});
+  const result=await provisionAssistantCodexChat({deliveryId:retry,threadId,cwd:process.cwd(),execution},{...common,
+    onThreadStarted:()=>assert.fail('retry may not create another chat'),
+    readDelivery:async()=>++reads===1?{state:'uncertain',markerEvidence:'absent'}:{state:'completed',turnId:randomUUID(),receipt:'ready'},
+    spawnProcess:desktopRpc({threadId,onCreate:()=>assert.fail('no thread/start on retry'),onQueue:()=>{queues++;}})});
+  assert.equal(result.state,'completed');assert.equal(result.threadId,threadId);assert.equal(creates,1);assert.equal(queues,1);assert.equal(starts,2);
+});
+
+test('a PREPARE witness is visible only for failed capacity, never a successful GUI provision or task delivery',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
+  const read=(status,provision,error)=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},provision,
+    spawnProcess:nativeRpc(request=>request.method==='thread/read'?{result:{thread:{id:threadId,cwd:process.cwd()}}}:
+      {result:{data:[{id:turnId,status,error,items:[{type:'userMessage',content:[{type:'text',
+        text:`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}\nREADY`}]}]}],nextCursor:null}})});
+  assert.equal((await read('completed',true,null)).state,'uncertain');
+  assert.equal((await read('failed',true,{codexErrorInfo:'other',message:'PRIVATE'})).state,'uncertain');
+  assert.equal((await read('failed',false,{codexErrorInfo:'serverOverloaded'})).state,'uncertain');
+  assert.equal((await read('failed',true,{codexErrorInfo:'serverOverloaded'})).failure,'model_capacity');
 });

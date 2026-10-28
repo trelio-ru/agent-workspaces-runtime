@@ -33,12 +33,19 @@ const integer = (value, min, max) => {
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const continuationIntent = value => {
   const fields=['passId','expectedLeaseRevision','clientRequestId','terminalTurnId','terminalMarkerId','reviewId','resumeAttempted','resumed','started'];
-  object(value,fields);
-  if(Object.keys(value).length!==fields.length||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
+  object(value,[...fields,'capacity']);
+  if(Object.keys(value).length!==fields.length+(value.capacity===true?1:0)||['resumeAttempted','resumed','started'].some(key=>typeof value[key]!=='boolean')
     ||value.resumed&&!value.resumeAttempted||value.started&&!value.resumed||value.resumeAttempted&&value.reviewId===null)inputError();
-  return {...Object.fromEntries(['passId','clientRequestId','terminalTurnId','terminalMarkerId'].map(key=>[key,uuid(value[key])])),
+  return {...Object.fromEntries(['passId','clientRequestId','terminalTurnId','terminalMarkerId'].map(key=>[key,key==='passId'&&value.capacity===true&&value[key]===null?null:uuid(value[key])])),
     expectedLeaseRevision:integer(value.expectedLeaseRevision,0,2_147_483_646),reviewId:value.reviewId===null?null:uuid(value.reviewId),
-    resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started};
+    resumeAttempted:value.resumeAttempted,resumed:value.resumed,started:value.started,...(value.capacity===true?{capacity:true}:{})};
+};
+const capacityState = value => {
+  object(value,['firstAt','nextAt','step','turnId','markerId','waiting']);
+  if(Object.keys(value).length!==6||typeof value.waiting!=='boolean')inputError();
+  return {firstAt:integer(value.firstAt,0,Number.MAX_SAFE_INTEGER-1_800_000),
+    nextAt:integer(value.nextAt,value.firstAt,Number.MAX_SAFE_INTEGER),step:integer(value.step,0,3),
+    turnId:uuid(value.turnId),markerId:uuid(value.markerId),waiting:value.waiting};
 };
 /** Provider-owned opaque routing hints, never sender or task authority. Email
  * uses a scoped hash of untrusted threading headers; Telegram uses its native
@@ -77,7 +84,7 @@ const MAX_EVENTS = 50_000;
 const MAX_STREAMS = 10_000;
 // Fixed implementation codes only. Never retain Error.message, stack, provider
 // prose or an arbitrary code prefix in this content-free diagnostic journal.
-const DELIVERY_FAILURE_CODES=new Set(['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_CODEX_DELIVERY_NOT_STARTED',
+const DELIVERY_FAILURE_CODES=new Set(['ASSISTANT_CODEX_AUTH_REQUIRED','ASSISTANT_CODEX_MODEL_CAPACITY','ASSISTANT_CODEX_DELIVERY_NOT_STARTED',
   'ASSISTANT_CODEX_DELIVERY_UNCERTAIN','ASSISTANT_CODEX_INVALID_EXECUTION','ASSISTANT_CODEX_INVALID_INPUT',
   'ASSISTANT_CODEX_MODEL_UNAVAILABLE','ASSISTANT_CODEX_READ_UNAVAILABLE','ASSISTANT_CODEX_UNAVAILABLE',
   'ASSISTANT_CODEX_WORKSPACE_MISMATCH','ASSISTANT_CODEX_WORKSPACE_UNAVAILABLE','ASSISTANT_ACCESS_DENIED',
@@ -127,7 +134,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -165,6 +172,15 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     const last=versions[0].version>=11?get(`SELECT failure_code,failure_stage FROM assistant_inbox_deliveries
       WHERE state IN ('started','uncertain') AND failure_code IS NOT NULL ORDER BY rowid DESC LIMIT 1`):null;
     result.failure=last?assistantDeliveryFailure(last.failure_code,last.failure_stage):null;
+    if(result.failure?.code==='ASSISTANT_CODEX_MODEL_CAPACITY')result.failure={code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN',stage:result.failure.stage};
+    // This CURRENT waiting flag is separate from the immutable first failure.
+    // A later uncertain invocation must immediately recover its ordinary
+    // no-replay diagnostic instead of hiding behind an old capacity incident.
+    if(versions[0].version>=19){
+      const row=get("SELECT model_capacity_json FROM assistant_inbox_deliveries WHERE state IN ('started','uncertain') AND model_capacity_json IS NOT NULL ORDER BY rowid DESC LIMIT 1");
+      if(result.uncertainDeliveries===1&&row&&capacityState(JSON.parse(row.model_capacity_json)).waiting)
+        result.failure={code:'ASSISTANT_CODEX_MODEL_CAPACITY',stage:'readback'};
+    }
     db.exec('COMMIT');return Object.freeze(result);
   } catch(error){db.exec('ROLLBACK');throw error;}
 };
@@ -203,7 +219,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -413,8 +429,11 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(versions[0]?.version>=18&&!modelReadColumns.includes(name))fail('ASSISTANT_INBOX_CONFLICT');
       if(!modelReadColumns.includes(name))db.exec(`ALTER TABLE assistant_inbox_events ADD COLUMN ${name} TEXT`);
     }
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=18');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (18)');
+    const deliveryColumns=all('PRAGMA table_info(assistant_inbox_deliveries)').map(column=>column.name);
+    if(versions[0]?.version>=19&&!deliveryColumns.includes('model_capacity_json'))fail('ASSISTANT_INBOX_CONFLICT');
+    if(!deliveryColumns.includes('model_capacity_json'))db.exec('ALTER TABLE assistant_inbox_deliveries ADD COLUMN model_capacity_json TEXT');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=19');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (19)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1362,11 +1381,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     /** Only structural history is appended. A native continuation permits a NEW
      * marker, never resetting the original native-start or replaying a turn.
      * The coordinator supplies positive terminal read-back before this call. */
-    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null}) {
+    preparePassContinuation(id,{passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,prerequisiteKey=null,capacity=false}) {
+      if(typeof capacity!=='boolean'||capacity&&prerequisiteKey===null)inputError();
       if(prerequisiteKey!==null&&(typeof prerequisiteKey!=='string'||!/^[0-9a-f]{64}$/u.test(prerequisiteKey)))inputError();
       return transaction(()=>{
         const row=delivery(uuid(id));
-        if(row.kind!=='task'||!row.native_started||!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        if(row.kind!=='task'&&!(row.kind==='provision'&&capacity&&passId===null)||!row.native_started||!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        if(row.kind==='task'&&passId===null)inputError();
         const history=row.pass_continuation_json?JSON.parse(row.pass_continuation_json):[];
         if(!Array.isArray(history)||history.length>20)inputError();history.forEach(continuationIntent);
         const latest=get('SELECT ordinal,intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
@@ -1381,14 +1402,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // newer journal. A ready inventory is never permission to replay the
         // original turn, release a pass, process an event or clear health.
         if(last&&!last.started||prerequisiteKey===null&&(latest||history.length>=20)
-          ||prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
+          ||!capacity&&prerequisiteKey!==null&&get('SELECT count(*) AS n FROM assistant_pass_continuations WHERE delivery_id=? AND prerequisite_key=?',id,prerequisiteKey).n>=20)
           fail('ASSISTANT_INBOX_CONFLICT');
         if(last&&terminalMarkerId!==last.reviewId||!last&&terminalMarkerId!==id)fail('ASSISTANT_INBOX_CONFLICT');
         const intent=continuationIntent({passId,expectedLeaseRevision,terminalTurnId,terminalMarkerId,clientRequestId:randomUUID(),reviewId:null,
-          resumeAttempted:false,resumed:false,started:false});
+          resumeAttempted:false,resumed:false,started:false,...(capacity?{capacity:true}:{})});
         if(prerequisiteKey!==null){
           const ordinal=integer((latest?.ordinal??0)+1,1,2_147_483_647);
-          run('INSERT INTO assistant_pass_continuations(delivery_id,ordinal,prerequisite_key,intent_json) VALUES(?,?,?,?)',id,ordinal,prerequisiteKey,JSON.stringify(intent));
+          // Capacity retries have no attempt cap and cannot spend/reset the
+          // separate broken-hook budget. The indexed append preserves every
+          // old start; reads and each worker invocation stay bounded.
+          run('INSERT INTO assistant_pass_continuations(delivery_id,ordinal,prerequisite_key,intent_json) VALUES(?,?,?,?)',id,ordinal,capacity?'model_capacity':prerequisiteKey,JSON.stringify(intent));
         }else{history.push(intent);run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);}
         return Object.freeze(intent);
       });
@@ -1400,7 +1424,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         const history=JSON.parse(row.pass_continuation_json??'[]');
         if(!Array.isArray(history)||!latest&&!history.length||history.length>20)inputError();history.forEach(continuationIntent);
         const last=latest?continuationIntent(JSON.parse(latest.intent_json)):history.at(-1);
-        if(row.kind!=='task'||!row.native_started||!['started','uncertain'].includes(row.state)
+        if(row.kind!=='task'&&!(row.kind==='provision'&&last.capacity&&last.passId===null)||!row.native_started||!['started','uncertain'].includes(row.state)
           ||last.clientRequestId!==uuid(clientRequestId))fail('ASSISTANT_INBOX_STALE_DELIVERY');
         const next=continuationIntent({...last,...change});
         if(last.reviewId!==null&&next.reviewId!==last.reviewId
@@ -1413,9 +1437,27 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           if(task?.state!=='accepted'||task.revision!==row.task_revision)fail('ASSISTANT_INBOX_STALE_DELIVERY');
           assertExternalDeliverySnapshot(row);
           run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?",time()+LEASE_MS,id);
+          if(row.model_capacity_json){const state=capacityState(JSON.parse(row.model_capacity_json));
+            run('UPDATE assistant_inbox_deliveries SET model_capacity_json=? WHERE delivery_id=?',JSON.stringify({...state,waiting:false}),id);}
         }
         if(latest)run('UPDATE assistant_pass_continuations SET intent_json=? WHERE delivery_id=? AND ordinal=?',JSON.stringify(next),id,latest.ordinal);
         else{history[history.length-1]=next;run('UPDATE assistant_inbox_deliveries SET pass_continuation_json=? WHERE delivery_id=?',JSON.stringify(history),id);}
+        return Object.freeze(next);
+      });
+    },
+    /** One content-free episode clock in the SAME delivery. Poll/restart of
+     * the same failed turn never moves its deadline. Backoff saturates, not
+     * the number of attempts; no model fallback or action replay is granted. */
+    observeModelCapacity(id,{turnId,markerId}) {
+      return transaction(()=>{
+        const row=delivery(uuid(id));turnId=uuid(turnId);markerId=uuid(markerId);
+        if(!row.native_started||!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        const previous=row.model_capacity_json?capacityState(JSON.parse(row.model_capacity_json)):null;
+        if(previous?.turnId===turnId){if(previous.markerId!==markerId)fail('ASSISTANT_INBOX_CONFLICT');return Object.freeze(previous);}
+        const step=previous?Math.min(3,previous.step+1):0;
+        const next=capacityState({firstAt:previous?.firstAt??time(),nextAt:time()+[60_000,300_000,900_000,1_800_000][step],
+          step,turnId,markerId,waiting:true});
+        run('UPDATE assistant_inbox_deliveries SET model_capacity_json=? WHERE delivery_id=?',JSON.stringify(next),id);
         return Object.freeze(next);
       });
     },
