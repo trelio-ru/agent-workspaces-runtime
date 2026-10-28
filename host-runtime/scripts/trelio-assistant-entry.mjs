@@ -1423,8 +1423,10 @@ export const runProductionAssistantCodexMaintenance = async (runtime,{context=pr
 /** One worker owns one native pass, retaining model-free polling and durable
  * recovery. Neither code maintenance nor a later worker replays that pass. */
 export const runAssistantBackgroundTick = async ({createHost=createAssistantRuntimeHost,signal,
-  pluginMaintenance=runProductionAssistantPluginMaintenance,codexMaintenance=runProductionAssistantCodexMaintenance,wait=waitForAssistantPoll}={}) => {
+  pluginMaintenance=runProductionAssistantPluginMaintenance,codexMaintenance=runProductionAssistantCodexMaintenance,wait=waitForAssistantPoll,
+  now=()=>performance.now()}={}) => {
   if(signal?.aborted)fail('ASSISTANT_COORDINATOR_STOPPED');
+  const startedAt=now();
   const host=await createHost();
   const reportDispatch=async(dispatch,error=null)=>{
     const failure=dispatch?.reasons?.includes('delivery_uncertain')
@@ -1453,6 +1455,13 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
       return {schemaVersion:1,state:'blocked',reason:codex.state};
     }
     if(codex?.failedVersion)await reportDispatch(null,{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+    // The parent grants one 35-minute request budget, including maintenance.
+    // A large MSIX must not consume a later task's native execution window and
+    // indirectly interrupt that task. Before any poll/claim, yield to the next
+    // ordinary worker when servicing exceeded the original plugin allowance.
+    // No pass exists yet, so this needs no replay, renewed task lease or change
+    // to an in-flight deadline. The parent's next request gets its own budget.
+    if(now()-startedAt>=150_000)return {schemaVersion:1,state:'idle'};
     let usage=null;
     try{usage=await host.codexUsage?.(signal);}catch{
       // An unavailable usage read cannot erase an already stored quota block.

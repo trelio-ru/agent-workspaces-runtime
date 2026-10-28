@@ -160,6 +160,15 @@ test('an unfinished Desktop journal excludes plugin servicing before the same ti
   assert.equal(tick.state,'blocked');assert.deepEqual(effects,['recover','release']);
 });
 
+test('a long Desktop update yields before task claim so the next worker keeps its full native deadline',async()=>{
+  let clock=0,closed=false;
+  const result=await runAssistantBackgroundTick({now:()=>clock,
+    pluginMaintenance:async()=>({state:'disabled'}),codexMaintenance:async()=>{clock=151_000;return {state:'updated',version:'26.101.0.0'};},
+    createHost:async()=>({coordinator:{pollOnce:()=>assert.fail('long servicing cannot spend a new task deadline'),
+      workOnce:()=>assert.fail('no new pass may start in the old worker budget')},close:async()=>{closed=true;}})});
+  assert.deepEqual(result,{schemaVersion:1,state:'idle'});assert.equal(closed,true);
+});
+
 test('a failed Desktop journal survives metadata health checks until its actual version/GUI/probe recovers',async()=>{
   const f=fixture();f.state={...snapshot(),code:'runtime_update_failed'};
   const output=await executeAssistantRuntimeRequest({operation:'health_check'},

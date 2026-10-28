@@ -1780,6 +1780,9 @@ hint may also skip a package no newer than the native installation; it never
 authorizes deployment. Desktop servicing alone has a 15-minute context budget
 and a five-minute signature/deployment subprocess bound, preserving earlier
 cancellation. All other setup, plugin and OS subprocess budgets stay unchanged.
+If servicing consumes the original 150-second plugin allowance, the tick exits
+before any source poll or task claim. The next ordinary signed worker has a fresh
+35-minute request budget; a large update cannot shorten or interrupt a new task.
 Network/discovery failure leaves the healthy existing Desktop usable.
 
 The SAME bounded OS-module pipe checks full SHA-256, trusted Authenticode,
