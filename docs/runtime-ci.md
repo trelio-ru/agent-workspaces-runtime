@@ -131,3 +131,9 @@ SemVer boundary tests используют те же includePrerelease options, 
 старые версии закрыты.
 API guards проверяются до private I/O. Fixture остаётся exact для воспроизводимости;
 он не ограничивает установку одной версией и не доказывает live OAuth/save.
+
+The outgoing-file browser fixture separates one chooser dispatch from the
+synthetic site's asynchronous upload acknowledgement. It waits for that site's
+explicit rendered-completion event under a bounded fixture wait and observes a
+new read-only frame; original byte, single-click, stale-frame and no-replay
+assertions remain mandatory. A chooser response is not a site-completion signal.

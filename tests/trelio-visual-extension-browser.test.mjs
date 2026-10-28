@@ -17,6 +17,7 @@ test('outgoing chooser uploads original image, document, archive and arbitrary f
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-upload-browser-')));
   const originals = path.join(directory, 'originals'); await fs.mkdir(originals, { mode: 0o700 });
   const received = [], clicks = [];
+  const rendered = Promise.withResolvers();
   let snapshot;
   const server = http.createServer(async (request, response) => {
     if (request.url === '/selected') {
@@ -25,6 +26,7 @@ test('outgoing chooser uploads original image, document, archive and arbitrary f
       response.end('ok'); return;
     }
     if (request.url === '/clicked') { clicks.push(true); response.end(); return; }
+    if (request.url === '/rendered') { rendered.resolve(); response.end(); return; }
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
     response.end(`<!doctype html><body style="margin:0;font:24px sans-serif">
       <button style="position:absolute;left:30px;top:40px;width:220px;height:60px" onclick="fetch('/clicked');document.getElementById('files').click()">Attach files</button>
@@ -40,6 +42,7 @@ test('outgoing chooser uploads original image, document, archive and arbitrary f
         }
         await fetch('/selected',{method:'POST',body:JSON.stringify(selected)});
         document.getElementById('result').textContent=selected.map(file=>file.name).join(', ');
+        await fetch('/rendered',{method:'POST'});
       };
       </script>`);
   });
@@ -70,10 +73,20 @@ test('outgoing chooser uploads original image, document, archive and arbitrary f
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], selected.map(([name, bytes]) => ({ name, bytes: [...bytes] })));
     assert.equal(clicks.length, 1);
-    assert.ok(frame.text.includes('договор.docx'));
     assert.equal((await browser.call('upload-files', { frameId: token, x: 100, y: 70, files })).reason, 'stale_frame');
     assert.equal(received.length, 1, 'consumed input cannot repeat an upload');
+    // A file chooser dispatch does not await the site's asynchronous change
+    // handler or its upload response. The previous assertion raced that
+    // response on ARM64: bytes had arrived, but the page had not rendered its
+    // acknowledgement yet. Observe this synthetic site's explicit completion
+    // once, then take a NEW read-only frame. Never repeat the chooser action,
+    // relax the bytes/click/stale-token assertions or extend the browser lease.
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Synthetic upload acknowledgement did not render.')), 5000);
+      rendered.promise.then(() => { clearTimeout(timer); resolve(); });
+    });
     frame = ready(await browser.call('read-text'));
+    assert.ok(frame.text.includes('договор.docx'));
     assert.equal((await browser.call('upload-files', { frameId: frame.frameId, x: 100, y: 70, files: [originals] })).reason, 'upload_file_invalid');
     assert.equal(clicks.length, 1, 'invalid sources fail before the website is clicked');
     frame = ready(await browser.call('read-text'));
