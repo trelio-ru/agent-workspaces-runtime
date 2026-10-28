@@ -1417,7 +1417,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         return Object.freeze(intent);
       });
     },
-    updatePassContinuation(id,clientRequestId,change) {
+    updatePassContinuation(id,clientRequestId,change,{allowTaskDone=false}={}) {
       object(change,['reviewId','resumeAttempted','resumed','started']);
       return transaction(()=>{
         const row=delivery(uuid(id)),latest=get('SELECT ordinal,intent_json FROM assistant_pass_continuations WHERE delivery_id=? ORDER BY ordinal DESC LIMIT 1',id);
@@ -1434,7 +1434,8 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           const scope=JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?',row.source_key).scope_json);
           activeSource(scope);
           const task=get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?',row.source_key,row.task_id);
-          if(task?.state!=='accepted'||task.revision!==row.task_revision)fail('ASSISTANT_INBOX_STALE_DELIVERY');
+          if(!(task?.state==='accepted'&&task.revision===row.task_revision
+            ||allowTaskDone&&task?.state==='done'&&task.revision>=row.task_revision))fail('ASSISTANT_INBOX_STALE_DELIVERY');
           assertExternalDeliverySnapshot(row);
           run("UPDATE assistant_inbox_deliveries SET state='started',expires_at=? WHERE delivery_id=?",time()+LEASE_MS,id);
           if(row.model_capacity_json){const state=capacityState(JSON.parse(row.model_capacity_json));
@@ -1463,13 +1464,16 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     },
     /** Renew only the exact still-authorized started attempt. An expired lease
      * is never revived: native read-back, rather than a second launch, resolves it. */
-    renewDelivery(id) {
+    renewDelivery(id,{allowTaskDone=false}={}) {
       return transaction(() => {
         const row = delivery(id);
         const scope = JSON.parse(get('SELECT scope_json FROM assistant_inbox_sources WHERE source_key=?', row.source_key).scope_json);
         activeSource(scope);
         const task = get('SELECT state,revision FROM assistant_inbox_tasks WHERE source_key=? AND task_id=?', row.source_key, row.task_id);
-        if (row.state !== 'started' || row.expires_at <= time() || task?.state !== 'accepted' || task.revision !== row.task_revision) fail('ASSISTANT_INBOX_STALE_DELIVERY');
+        if (row.state !== 'started' || row.expires_at <= time()
+          || !(task?.state === 'accepted' && task.revision === row.task_revision
+            || allowTaskDone && row.kind === 'task' && row.native_started && task?.state === 'done' && task.revision >= row.task_revision))
+          fail('ASSISTANT_INBOX_STALE_DELIVERY');
         assertExternalDeliverySnapshot(row);
         run('UPDATE assistant_inbox_deliveries SET expires_at=? WHERE delivery_id=?', time() + LEASE_MS, id);
       });

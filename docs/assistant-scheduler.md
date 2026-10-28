@@ -61,6 +61,22 @@ definition/runtime may therefore continue the retained pass automatically; a
 new model-supplied epoch, history reset or cap increase is not accepted.
 
 Before creating/renewing a terminal-continuation intent the production host reads
+the original native authority. A task that became `done` permits only settlement
+of this retained pass's existing own canonical task Workspace Run, created during
+that pass. Native task reads, observed registration/renewal and ordinary Run
+save/finish keep current device/model/ACL/recipient/lease/CAS checks. There is no
+new pass, Run, named/foreign/older Run, related scope, domain action, skill or
+Secret execution. The host retains the ORIGINAL protected binding generation,
+never adopts the scheduling generation advanced by `done`. Start/watchdog SQLite
+renewal accepts terminal state only for the already native-started task delivery;
+source snapshot checks, monotonic marker and current native pass remain required.
+Original source routes use the existing fixed lookup with exact `routeIds` and
+`settlementPassId` from that protected pass. Native lookup rechecks the current
+source/device and retained canonical Run, returning original structural receipts
+only, including before renewal of an expired retained lease. This grants no new
+body/read slot, processing or ACK. Invalid/reconfigured/revoked sources still stop.
+
+Before creating/renewing a terminal-continuation intent the production host reads
 native `hooks/list` for the exact task folder. It requires the three enabled,
 trusted dedicated-plugin hooks, no inventory errors/warnings and valid native
 definition hashes. Each real task/intake execution checks again before its

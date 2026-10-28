@@ -3069,7 +3069,7 @@ test('source routing uses fixed device HTTP and projects only exact requested op
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID();
   const store=memoryStore(),credential=`tda_${'r'.repeat(43)}`;await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
   const conversationKey=`telegram-conversation/v1.${'a'.repeat(64)}`;
-  const input={companyId,sourceId,sourceRevision:3,conversationKeys:[conversationKey]};
+  let input={companyId,sourceId,sourceRevision:3,conversationKeys:[conversationKey]};
   const route={id:randomUUID(),sourceId,sourceRevision:3,conversationKey,bindingId:randomUUID(),bindingRevision:2,taskId:randomUUID()};
   let output={schemaVersion:1,sourceId,sourceRevision:3,routes:[{...route,title:'PRIVATE_BODY'}]},calls=0;
   const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
@@ -3081,9 +3081,13 @@ test('source routing uses fixed device HTTP and projects only exact requested op
   }});
   const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
   assert.deepEqual(await client.sourceRoutes(input),[route]);
+  input={companyId,sourceId,sourceRevision:3,routeIds:[route.id],settlementPassId:randomUUID()};
+  assert.deepEqual(await client.sourceRoutes(input),[route],'retained pass UUID crosses only the existing exact routing reader');
+  input={companyId,sourceId,sourceRevision:3,conversationKeys:[conversationKey]};
   const before=calls;
   for(const extra of [{messageId:'message:123:4'},{conversationKeys:['PRIVATE']},{conversationKeys:[conversationKey,conversationKey]},
-    {conversationKeys:[]},{sourceRevision:-1},{companyId:'unknown'}])await assert.rejects(client.sourceRoutes({...input,...extra}),/INVALID_INPUT/);
+    {conversationKeys:[]},{sourceRevision:-1},{companyId:'unknown'},
+    {settlementPassId:randomUUID()},{routeIds:[route.id],conversationKeys:undefined,settlementPassId:'invalid'}])await assert.rejects(client.sourceRoutes({...input,...extra}),/INVALID_INPUT/);
   assert.equal(calls,before,'malformed routing never reaches credentials or HTTP');
   for(output of [{schemaVersion:2,sourceId,sourceRevision:3,routes:[route]},
     {schemaVersion:1,sourceId,sourceRevision:2,routes:[]},

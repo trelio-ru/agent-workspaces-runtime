@@ -1744,7 +1744,7 @@ test(`pre-native recovery refuses ${changed} changing while native renew is in f
 
 // Exercise the real coordinator + persisted SQLite journal. Native/domain
 // adapters here are controlled witnesses, not claims about a live Windows run.
-for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResume of [false,true])test(`automatic NEW turn preserves original delivery across SQLite restart (legacy=${legacyPending}, lost resume=${lostResume})`,async t=>{
+for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResume of [false,true])for(const terminalTask of [false,true])test(`automatic NEW turn preserves original delivery across SQLite restart (legacy=${legacyPending}, lost resume=${lostResume}, terminal=${terminalTask})`,async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-terminal-continuation-'));
   const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
   const f=fixture(t,{database,ownsDatabase:false});coordinator=f.coordinator;
@@ -1763,7 +1763,9 @@ for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResum
       assert.equal(input.deliveryId,reviewId);assert.notEqual(input.deliveryId,f.activePass().deliveryId);
       await options.beforeInvocation();confirmed=true;
     }
-    const result=await ordinaryRun(input,options);result.turnId=result.receipt.split(':')[2];return result;
+    const {sourceReferences,...taskContext}=input.taskContext;
+    if(sourceReferences)assert.equal(sourceReferences[0].eventId,'message:123:99');
+    const result=await ordinaryRun({...input,taskContext},options);result.turnId=result.receipt.split(':')[2];return result;
   };
   f.options.passHost.continuePass=async(input,expected)=>{
     assert.deepEqual(expected,f.activePass());const pass=f.passes.get(expected.deliveryId);
@@ -1781,9 +1783,30 @@ for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResum
   const reopen=async()=>{await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...f.options,database});};
   try{
     f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
-    await coordinator.pollOnce();await coordinator.workOnce();await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
+    await coordinator.pollOnce();await coordinator.workOnce();
+    if(terminalTask){
+      const row={id:randomUUID(),companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:randomUUID(),
+        projectId:null,skillId:'telegram-mtproto',state:'active',revision:0};
+      const source={...f.identity,companyId:f.companyId,provider:'telegram',accountId:row.localAccountId,bindingId:row.id};
+      delete source.deviceId;
+      const inbox=createAssistantInbox({database,now:f.options.now}),key=`telegram-conversation/v1.${'b'.repeat(64)}`;
+      inbox.register(source);
+      inbox.observeExternalSourceRevision(source,0);
+      inbox.commitPage(source,{...inbox.claimPoll(source),nextCursor:'original',hasMore:false,
+        events:[{id:'message:123:99',revision:'original',taskId:null,wake:false,providerWake:true,conversationKey:key}]});
+      const route={id:randomUUID(),sourceId:row.id,sourceRevision:0,conversationKey:key,taskId:f.taskId,bindingId:f.bindingId,bindingRevision:0};
+      f.options.client.sourceAccounts=async()=>[row];
+      f.options.client.sourceRoutes=async input=>{
+        if(f.authority.state==='done')assert.equal(input.settlementPassId,f.activePass().passId,'terminal lookup must select ORIGINAL protected pass');
+        else assert.equal(input.settlementPassId,undefined);
+        return [route];
+      };
+      routeAcceptedBatch({...f,inbox,row,scope:()=>source,coordinator},[route]);
+    }
+    await assert.rejects(coordinator.workOnce(),/UNCERTAIN/);
     const pass=[...f.passes.values()][0],original={...f.activePass()},oldHistory=JSON.stringify({passId:pass.passId,expectedLeaseRevision:0,clientRequestId:randomUUID()});
     database.prepare('UPDATE assistant_inbox_deliveries SET pass_recovery_json=? WHERE delivery_id=?').run(oldHistory,pass.deliveryId);
+    if(terminalTask){f.authority.state='done';f.authority.revision++;f.continuation.goalState='completed';}
     f.advance(21*60_000);pass.state='review_required';
     if(legacyPending){
       reviewId=randomUUID();
@@ -1801,10 +1824,29 @@ for(const legacyPending of [false,'waiting_owner','expired'])for(const lostResum
     assert.equal(row.state,'complete');assert.equal(row.native_started,1);assert.equal(row.pass_recovery_json,oldHistory);
     assert.equal(JSON.parse(row.pass_continuation_json).length,1);assert.equal(JSON.parse(row.pass_continuation_json)[0].started,true);
     assert.equal(database.prepare("SELECT count(*) n FROM assistant_inbox_deliveries WHERE kind='task'").get().n,1);
-    assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,1);
+    assert.equal(database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(f.events[0].id).processed,1);
+    if(terminalTask)assert.deepEqual({...database.prepare("SELECT processed,acked FROM assistant_inbox_events WHERE event_id='message:123:99'").get()},
+      {processed:0,acked:0},'settlement routing never manufactures source body evidence, processing or ACK');
     assert.equal(pass.passId,original.passId);assert.equal(pass.threadId,original.threadId);
     await reopen();await coordinator.workOnce();assert.equal(newRuns,1,'restart cannot replay the recovery invocation');
   }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
+test('done settlement still blocks a NEW recovery invocation under a changed model policy',async t=>{
+  const f=fixture(t);let reviews=0;
+  f.options.client.readBusinessOutcome=async()=>{throw new Error('no business receipt');};
+  f.options.passHost.continuePass=async()=>{reviews++;assert.fail('blocked model cannot renew a model invocation');};
+  f.options.native.readDelivery=async(_thread,id)=>{
+    const value=f.deliveries.get(id);return value?{...value,turnId:value.receipt.split(':')[2]}:{state:'uncertain'};
+  };
+  try{
+    f.events.push({id:randomUUID(),revision:'original',taskId:f.taskId,wake:true});
+    await f.coordinator.pollOnce();await f.coordinator.workOnce();await assert.rejects(f.coordinator.workOnce(),/UNCERTAIN/);
+    f.authority.state='done';f.authority.revision++;f.execution.state='policy_blocked';
+    await assert.rejects(f.coordinator.workOnce(),/TASK_STOPPED/);
+    assert.equal(reviews,0);assert.equal(f.counts().runs,1);assert.ok(f.activePass());
+    assert.ok(f.notifications.some(value=>value.code==='ASSISTANT_COORDINATOR_MODEL_POLICY_BLOCKED'));
+  }finally{await f.coordinator.close();}
 });
 
 for(const nativeState of ['uncertain','running','failed'])test(`terminal review cannot be created from ${nativeState} native evidence`,async t=>{

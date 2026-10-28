@@ -109,6 +109,12 @@ adapter still proves the content was actually read and checks the exact revision
 A merely queued or uncertain external delivery is never ACK-eligible. Merely
 fetching a page never marks it read.
 
+An already native-started retained task pass is distinct from new dispatch.
+After `done`, only its existing canonical Run settlement may continue under the
+SAME native pass/marker ledger. Host-only start/watchdog opt-ins retain the
+original binding generation and exact external source snapshot; they never
+activate done tasks, manufacture processing/read evidence or acknowledge events.
+
 Read acknowledgements have their own bounded lease/outbox. The provider must
 recheck access and exact message revision before marking read; a lost external
 ack response requires live read-back or a documented provider-idempotent method.

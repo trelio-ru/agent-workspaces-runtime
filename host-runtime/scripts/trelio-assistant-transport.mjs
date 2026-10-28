@@ -2470,13 +2470,15 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       // a model-authored conversation key still grants no task/body authority.
       const ids=input?.routeIds,keys=input?.conversationKeys;
       const key=value=>['telegram','email','max'].some(provider=>assistantConversationKeyMatches(provider,value));
-      if(!object(input)||Object.keys(input).sort().join(',')!==(ids?'companyId,routeIds,sourceId,sourceRevision':'companyId,conversationKeys,sourceId,sourceRevision')
+      if(!object(input)||Object.keys(input).filter(key=>key!=='settlementPassId').sort().join(',')!==(ids?'companyId,routeIds,sourceId,sourceRevision':'companyId,conversationKeys,sourceId,sourceRevision')
+        ||input.settlementPassId!==undefined&&(!ids||!UUID.test(input.settlementPassId))
         ||!Number.isSafeInteger(input.sourceRevision)||input.sourceRevision<0||input.sourceRevision>2_147_483_647
         ||(ids!==undefined)===(keys!==undefined)||!Array.isArray(ids??keys)||!(ids??keys).length||(ids??keys).length>100
         ||(ids??keys).some(value=>ids?!UUID.test(value??''):!key(value))||new Set(ids??keys).size!==(ids??keys).length)
         fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
       const body={companyId:id(input.companyId),sourceId:id(input.sourceId),sourceRevision:revision(input.sourceRevision),
-        ...(ids?{routeIds:ids.map(id)}:{conversationKeys:[...keys]})};
+        ...(ids?{routeIds:ids.map(id)}:{conversationKeys:[...keys]}),
+        ...(input.settlementPassId!==undefined?{settlementPassId:id(input.settlementPassId)}:{})};
       const value=await call('sourceRoutes',body,signal);
       if(value.schemaVersion!==1||value.sourceId!==body.sourceId||value.sourceRevision!==body.sourceRevision
         ||!Array.isArray(value.routes)||value.routes.length>(ids??keys).length)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');

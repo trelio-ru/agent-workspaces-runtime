@@ -1217,6 +1217,13 @@ test('schema13 preserves true v12 native-start/recovery history; reviewed start 
   assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{started:true}),/CONFLICT/);
   assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{started:false}),/CONFLICT/);
   assert.throws(()=>inbox.updatePassContinuation(job.deliveryId,intent.clientRequestId,{reviewId:randomUUID()}),/CONFLICT/);
+  let current=inbox.taskState(source,taskId);
+  inbox.applyTaskState(source,{taskId,state:'done',expectedRevision:current.revision});
+  assert.throws(()=>inbox.renewDelivery(job.deliveryId),/STALE_DELIVERY/,'ordinary renewal cannot revive done work');
+  inbox.renewDelivery(job.deliveryId,{allowTaskDone:true});
+  current=inbox.taskState(source,taskId);
+  inbox.applyTaskState(source,{taskId,state:'paused',expectedRevision:current.revision});
+  assert.throws(()=>inbox.renewDelivery(job.deliveryId,{allowTaskDone:true}),/STALE_DELIVERY/,'settlement is not pause/revoke authority');
   assert.equal(f.database.prepare('SELECT native_started FROM assistant_inbox_deliveries').get().native_started,1);
   assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events').get().processed,0);
   assert.deepEqual(inbox.readPassRecovery(job.deliveryId),recovery);

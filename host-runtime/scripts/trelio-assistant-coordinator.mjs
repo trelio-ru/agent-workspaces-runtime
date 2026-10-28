@@ -140,12 +140,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     const value=await client.task(scope.companyId,taskId,signal);
     lease(); apply(scope,value);
     if(value.hostState==='other_device') fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
-    if(job)await verifyExternalDelivery(job,value,signal);
+    if(job)await verifyExternalDelivery(job,value,signal,{allowTaskDone});
     if(captureBinding) captureBinding(value);
     // Only completion/recovery of an already started exact pass opts in. New
     // claims/launches still require accepted task authority and model policy.
-    if(value.state==='done' && allowTaskDone) return true;
-    if(value.state!=='accepted') return false;
+    if(value.state!=='accepted' && !(value.state==='done' && allowTaskDone)) return false;
     // A completed native/business receipt may still be reconciled while new
     // launches are blocked. This never performs another native invocation.
     if(!requireModel) return true;
@@ -422,10 +421,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(typeof client.beginSourceIntake==='function')inbox.queueExistingTaskIntakes(source,{sourceRevision:row.revision,
       eventKeys:pending.filter(event=>preferredFor(event)?.id===row.id).map(event=>event.event_key)});
   };
-  const verifyExternalDelivery=async(job,binding,signal)=>{
+  const verifyExternalDelivery=async(job,binding,signal,{allowTaskDone=false}={})=>{
     const external=job.events.filter(event=>JSON.parse(event.event_scope_json).provider!=='trelio');
     if(!external.length)return;
     if(typeof client.sourceRoutes!=='function')fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
+    const saved=allowTaskDone&&binding.state==='done'&&passHost
+      ?validateAssistantActivePass(await passHost.readActivePass(),identity):null;
+    // Only the protected ORIGINAL pass may inspect retained route receipts
+    // after terminal status. Native lookup independently checks its live
+    // canonical Run; this never authorizes new body reads or provider actions.
+    if(saved&&(saved.deliveryId!==job.deliveryId||saved.taskId!==job.taskId
+      ||saved.companyId!==job.scope.companyId||saved.bindingId!==binding.id))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     const rows=await client.sourceAccounts(job.scope.companyId,signal);lease();
     for(const sourceId of new Set(external.map(event=>JSON.parse(event.event_scope_json).bindingId))){
       const events=external.filter(event=>JSON.parse(event.event_scope_json).bindingId===sourceId),row=rows.find(value=>value.id===sourceId);
@@ -433,9 +439,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         ||events.some(event=>!sameSource(externalSourceFor(identity,row),JSON.parse(event.event_scope_json))
           ||event.route_source_revision!==row.revision||!event.conversation_key))fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
       const routes=await client.sourceRoutes({companyId:row.companyId,sourceId:row.id,sourceRevision:row.revision,
-        routeIds:[...new Set(events.map(event=>event.route_id))]},signal);lease();
+        routeIds:[...new Set(events.map(event=>event.route_id))],...(saved?{settlementPassId:saved.passId}:{})},signal);lease();
       if(events.some(event=>!routes.some(route=>route.id===event.route_id&&route.conversationKey===event.conversation_key
-        &&route.taskId===job.taskId&&route.bindingId===binding.id&&route.bindingRevision===binding.revision)))
+        &&route.taskId===job.taskId&&route.bindingId===binding.id&&route.bindingRevision===(saved?.bindingRevision??binding.revision))))
         fail('ASSISTANT_COORDINATOR_SOURCE_CHANGED');
     }
   };
@@ -982,7 +988,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(saved.deliveryId!==job.deliveryId||saved.taskId!==job.taskId||saved.companyId!==job.scope.companyId
         ||!same(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       let execution;
-      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{job,captureExecution:value=>{execution=value;}}))
+      if(!await authorize({scope:job.scope,taskId:job.taskId},signal,{job,allowTaskDone:true,captureExecution:value=>{execution=value;}}))
         fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       return assistantExecutionConfiguration(execution);
     };
@@ -1107,23 +1113,23 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         let watchedBinding;
         if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:job.kind!=='provision' && started,
           captureBinding:value=>{watchedBinding=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
-        if(started && watchedBinding.state==='accepted') inbox.renewDelivery(job.deliveryId);
+        if(started) inbox.renewDelivery(job.deliveryId,{allowTaskDone:Boolean(taskPass)});
         if(taskPass && inbox.readDelivery(job.deliveryId).nativeStarted) {
           const live=await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:taskPass.passId},combined);
           if(live.state==='closed') return;
           if(live.state!=='leased') fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-          if(watchedBinding.state==='accepted' && Date.parse(live.leaseExpiresAt)-now()<300_000) await client.renewTaskPass({companyId:job.scope.companyId,
+          if(Date.parse(live.leaseExpiresAt)-now()<300_000) await client.renewTaskPass({companyId:job.scope.companyId,
             taskId:job.taskId,passId:taskPass.passId,expectedLeaseRevision:live.leaseRevision,clientRequestId:randomUUID()},combined);
         }
       })().catch(()=>controller.abort()).finally(()=>{checking=false;});
     },watchIntervalMs);
     try {
       let execution;
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:Boolean(continuation),captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const cwd=await workspaceForTask(scopeFor(job.scope,job.taskId));
-      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
+      if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:Boolean(continuation),captureExecution:value=>{execution=value;}})) fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
       const options={signal:combined,startInvocation:()=>{lease();
-        if(continuation)inbox.updatePassContinuation(job.deliveryId,continuation.clientRequestId,{started:true});
+        if(continuation)inbox.updatePassContinuation(job.deliveryId,continuation.clientRequestId,{started:true},{allowTaskDone:true});
         else inbox.startDelivery(job.deliveryId);
         started=true;failureStage='native_started';}};
       let result;
@@ -1162,7 +1168,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const plan=findSchedule(job.scope,job.taskId);
         if(!plan) fail('ASSISTANT_COORDINATOR_THREAD_REQUIRED');
         if(!continuation){inbox.prepareTaskPass(job.deliveryId);started=true;}
-        const authority=inbox.taskState(job.scope,job.taskId).authority;
+        const taskState=inbox.taskState(job.scope,job.taskId);
+        const savedContinuation=continuation?validateAssistantActivePass(await passHost.readActivePass(),identity):null;
+        // A terminal status advances the scheduling binding. Recovery keeps
+        // the ORIGINAL protected pass generation; native continuation admission
+        // independently permits only its existing canonical Workspace Run.
+        if(savedContinuation && (savedContinuation.deliveryId!==job.deliveryId
+          || savedContinuation.taskId!==job.taskId || savedContinuation.companyId!==job.scope.companyId
+          || savedContinuation.bindingId!==taskState.authority.bindingId))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+        const authority=continuation&&taskState.state==='done'
+          ?{bindingId:savedContinuation.bindingId,revision:savedContinuation.bindingRevision}:taskState.authority;
         const admitted=continuation?await client.readTaskPass({companyId:job.scope.companyId,taskId:job.taskId,passId:continuation.passId},combined)
           :await client.beginTaskPass({companyId:job.scope.companyId,taskId:job.taskId,bindingId:authority.bindingId,
             bindingRevision:authority.revision,deliveryId:job.deliveryId,threadId:plan.threadId},combined);lease();
@@ -1197,7 +1212,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               ||live.bindingId!==expectedPass.bindingId||live.bindingRevision!==expectedPass.bindingRevision
               ||live.threadId!==expectedPass.threadId||live.deliveryId!==expectedPass.deliveryId
               ||JSON.stringify(live.execution)!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
-            if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,captureExecution:value=>{
+            if(!await authorize({scope:job.scope,taskId:job.taskId},combined,{job,allowTaskDone:true,captureExecution:value=>{
               if(JSON.stringify(assistantExecutionConfiguration(value))!==JSON.stringify(execution))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
             }}))fail('ASSISTANT_COORDINATOR_TASK_STOPPED');
             if(!samePass(await passHost.readActivePass()))fail('ASSISTANT_PASS_REVIEW_REQUIRED');lease();taskPass=expectedPass;
