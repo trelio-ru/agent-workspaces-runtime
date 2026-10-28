@@ -9,6 +9,8 @@ import { PassThrough, Readable } from 'node:stream';
 import { createAssistantSetup, maintainAssistantPlugin, runAssistantWindowsDesktop, ASSISTANT_WINDOWS_DESKTOP_SCRIPT } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { createAssistantDeviceClient,createAssistantMcpClient,AssistantTransportError } from '../host-runtime/scripts/trelio-assistant-transport.mjs';
 import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
+import {createForwardingAssistantMcp,createAssistantWorkspaceExecutor,executeAssistantCompanyContextRequest,
+  assistantProductionContextSignal} from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { runAssistantSetupMcp, runAssistantEntry,requestCurrentAssistantRuntime,withAssistantNewWorkAdmission,assistantCatalogRevision, createAssistantRuntimeHost, assistantCoordinatorReadiness, runAssistantBackgroundTick, runAssistantBackground,
   executeAssistantRuntimeRequest,withAssistantEncryptedWorkspaceArguments,readProductionAssistantDispatchStatus,resolveAssistantPluginHandoffLoaders,ASSISTANT_LOCAL_CONNECTION_TOOL,ASSISTANT_SOURCE_SETUP_TOOL,ASSISTANT_EMAIL_SETUP_TOOL,ASSISTANT_EMAIL_VERIFY_TOOL,ASSISTANT_TELEGRAM_SETUP_TOOL,ASSISTANT_MAX_SETUP_TOOL,ASSISTANT_MAX_VERIFY_TOOL,ASSISTANT_ENCRYPTION_SETUP_TOOL } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 
@@ -2238,6 +2240,148 @@ test('real stdio facade and current worker route both intake methods through SAM
  assert.deepEqual(wire,['get_assistant_intake_context','resolve_assistant_intake']);assert.deepEqual(managed,wire);
  assert.equal(bodyReads,1);assert.equal(replies,1);assert.ok(!raw.includes(credential));
  active={kind:'task'};await assert.rejects(executeAssistantRuntimeRequest({operation:'call',name:'resolve_assistant_intake',arguments:{decision:'reply_owner'}},dependencies),/CAPABILITY_UNAVAILABLE/);
+});
+
+test('company preparation reuses short-poll coordination without retaining queries, replaying admission or creating a Run',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-preparation-'));
+ t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ await fs.mkdir(path.join(root,'digital-assistants'));await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+ const descriptor={schemaVersion:1,nativeTool:'search',companyId:randomUUID(),companySlug:'synthetic',assistantUserId:randomUUID(),
+  deviceId:randomUUID(),requestOrigin:'https://e2ee.trelio.ru',intakePass:{companyId:randomUUID(),sourceId:randomUUID(),intakeId:randomUUID()}};
+ descriptor.intakePass.companyId=descriptor.companyId;
+ const binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ let finish,prepares=0,reads=0;const admitted=[];
+ const request=async input=>{
+  if(input.operation==='call'){
+   assert.equal(input.name,'search');assert.equal(input.prepareCompanySearch,true);admitted.push(input.arguments.runtimeSessionProof.nonce);
+   return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding}}};
+  }
+  if(input.operation==='company_context_prepare'){
+   prepares++;assert.deepEqual(Object.keys(input).sort(),['binding','descriptor','operation']);assert.deepEqual(input.binding,binding);
+   return new Promise(resolve=>{finish=()=>resolve({schemaVersion:1,prepared:true});});
+  }
+  assert.equal(input.operation,'company_context_read');reads++;assert.deepEqual(input.descriptor,descriptor);
+  assert.deepEqual(input.arguments,{queries:['PRIVATE_QUERY_CANARY'],companySlugs:['synthetic']});
+  return {content:[],structuredContent:{results:[{title:'SYNTHETIC_EXACT_RESULT'}]}};
+ };
+ const workspace=await createAssistantWorkspaceExecutor({configDirectory:root,companyPreparationOptions:{waitMs:2},
+  runPlan:()=>assert.fail('company preparation must not invoke a Workspace/Run action')});
+ t.after(()=>workspace.stop());
+ const client=await createForwardingAssistantMcp({configurationDirectory:root,request,createWorkspace:async()=>workspace});
+ const args={queries:['PRIVATE_QUERY_CANARY'],companySlugs:['synthetic'],intakePass:descriptor.intakePass,runtimeSessionProof:{nonce:1}};
+ const first=await client.callTool('search',args);
+ assert.equal(first.structuredContent.state,'preparing');assert.deepEqual(first.structuredContent.nextCall.arguments,
+  {queries:['PRIVATE_QUERY_CANARY'],companySlugs:['synthetic']});
+ assert.doesNotMatch(JSON.stringify(first),new RegExp(descriptor.intakePass.intakeId));
+ assert.equal(prepares,1);assert.equal(reads,0);
+ const second=await client.callTool('search',{...args,runtimeSessionProof:{nonce:2}});
+ assert.equal(second.structuredContent.state,'preparing');assert.equal(prepares,1,'repeated calls share ONE read-only preparation');
+ finish();await new Promise(resolve=>setImmediate(resolve));
+ const final=await client.callTool('search',{...args,runtimeSessionProof:{nonce:3}});
+ assert.equal(final.structuredContent.results[0].title,'SYNTHETIC_EXACT_RESULT');
+ assert.equal(prepares,1);assert.equal(reads,1);assert.deepEqual(admitted,[1,2,3],'every poll obtains its own native admission');
+ // Readiness is not a retained business answer: another query still executes
+ // the fresh native/local read instead of returning the previous result.
+ await client.callTool('search',{...args,runtimeSessionProof:{nonce:4}});assert.equal(reads,2);
+ binding.scopeEpoch=2;
+ assert.equal((await client.callTool('search',{...args,runtimeSessionProof:{nonce:5}})).structuredContent.state,'preparing');
+ assert.equal(prepares,2,'a changed native epoch cannot reuse the previous ready operation');
+ finish();await new Promise(resolve=>setImmediate(resolve));
+ await client.callTool('search',{...args,runtimeSessionProof:{nonce:6}});assert.equal(reads,3);
+});
+
+test('company preparation EOF aborts only its owned read child and waits for it to settle',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-abort-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};let started=0,aborted=0,settled=0;
+ const workspace=await createAssistantWorkspaceExecutor({configDirectory:root,companyPreparationOptions:{waitMs:2}});
+ const request=async(input,{signal})=>{
+  assert.equal(input.operation,'company_context_prepare');started++;
+  return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>{
+   aborted++;setImmediate(()=>{settled++;reject(Object.assign(Error(),{code:'ASSISTANT_READ_ABORTED'}));});
+  },{once:true}));
+ };
+ assert.equal(await workspace.prepareCompanySearch({schemaVersion:1,descriptor,binding},{request}),false);
+ assert.equal(started,1);await workspace.stop();assert.equal(aborted,1);assert.equal(settled,1);
+});
+
+test('company preparation crosses real serial MCP frames and isolated current-request child pipes',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-pipes-'));
+ t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ await fs.mkdir(path.join(root,'digital-assistants'));await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+ const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ const loader=path.join(root,'loader.mjs'),entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+ // The fixture replaces ONLY the private/native authority layer. Parsing,
+ // bounded stdin/stdout, worker dispatch, managed-operation selection and the
+ // facade's shared short-wait registry are real. The independent HPKE fixture
+ // exercises this operation with the actual managed profile and mirror.
+ await fs.writeFile(loader,`import {runAssistantEntry,executeAssistantRuntimeRequest} from ${JSON.stringify(entry)};
+  import fs from 'node:fs/promises';
+  const descriptor=${JSON.stringify(descriptor)},binding=${JSON.stringify(binding)};
+  await runAssistantEntry(['request'],{executeRequest:request=>{
+   if(request.operation==='call')return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding}}};
+   return executeAssistantRuntimeRequest(request,{companyContextOperation:async raw=>{
+    if(raw.operation==='company_context_prepare'){
+     await new Promise(resolve=>setTimeout(resolve,750));await fs.writeFile(${JSON.stringify(path.join(root,'prepared'))},'prepared');
+     return {schemaVersion:1,prepared:true};
+    }
+    return {content:[],structuredContent:{results:[{title:'REAL_CHILD_QUERY_RESULT'}]}};
+   }});
+  }});`);
+ const {spawn}=await import('node:child_process');const observed=[];
+ const env={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};delete env.NODE_TEST_CONTEXT;
+ const request=(raw,options)=>{
+  observed.push(structuredClone(raw));
+  return requestCurrentAssistantRuntime(raw,{...options,environment:env,resolveLoader:async()=>loader,
+   spawnProcess:(executable,args,config)=>{assert.equal(config.shell,false);assert.deepEqual(args.slice(1),['bridge','assistant','request']);return spawn(executable,args,config);}});
+ };
+ const input=new PassThrough(),output=new PassThrough(),responses=[];let pending='';
+ output.on('data',chunk=>{pending+=chunk;for(;;){const end=pending.indexOf('\n');if(end<0)break;responses.push(JSON.parse(pending.slice(0,end)));pending=pending.slice(end+1);}});
+ const running=runAssistantSetupMcp({input,output,preservePlugin:()=>null,scheduleMaintenance:()=>null,
+  createWorkspace:()=>createAssistantWorkspaceExecutor({configDirectory:root,companyPreparationOptions:{waitMs:2}}),
+  createMcp:options=>createForwardingAssistantMcp({...options,configurationDirectory:root,request})});
+ const send=async(id,method,params)=>{
+  input.write(JSON.stringify({jsonrpc:'2.0',id,method,...(params?{params}:{})})+'\n');
+  for(let n=0;n<1000;n++){const found=responses.find(row=>row.id===id);if(found)return found;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.fail('serial company MCP response deadline');
+ };
+ try{
+  await send(1,'initialize');
+  const args={queries:['PIPE_PRIVATE_QUERY_CANARY'],runtimeSessionProof:{nonce:1}};
+  const first=await send(2,'tools/call',{name:'search',arguments:args});
+  assert.equal(first.result.structuredContent.state,'preparing');
+  for(let n=0;n<200;n++){if(await fs.stat(path.join(root,'prepared')).catch(()=>null))break;await new Promise(resolve=>setTimeout(resolve,10));}
+  const final=await send(3,'tools/call',{name:'search',arguments:{...args,runtimeSessionProof:{nonce:2}}});
+  assert.equal(final.result.structuredContent.results[0].title,'REAL_CHILD_QUERY_RESULT');
+  assert.deepEqual(observed.map(row=>row.operation),['call','company_context_prepare','call','company_context_read']);
+  assert.deepEqual(observed[1],{operation:'company_context_prepare',descriptor,binding},'preparation child has no query/proof/body');
+  assert.deepEqual(observed[3].arguments,{queries:['PIPE_PRIVATE_QUERY_CANARY']},'fresh query does not reuse consumed admission');
+ }finally{input.end();await running;}
+});
+
+test('company preparation separates its bounded private lifetime from fresh query reads and rejects foreign operations before I/O',async()=>{
+ const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ const opened={runtime:{scope:{id:binding.scopeId,epoch:binding.scopeEpoch},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}};let assertions=0,prepares=0,reads=0;const modes=[];
+ const options={withProfile:async(action,mode)=>{modes.push(mode);return action({identity:{origin:'https://synthetic.test'},
+  prepareCompanyContextRead:async()=>{assertions++;return opened;}});},
+  loadContext:async()=>({prepareTrelioLocalCompanyContext:async(origin,slug)=>{assert.equal(origin,'https://synthetic.test');assert.equal(slug,'synthetic');prepares++;return{schemaVersion:1,prepared:true};}}),
+  loadTransport:async()=>({materializeAssistantEncryptedCompanyContext:async input=>{reads++;await input.assertCurrent();return{content:[],structuredContent:{fresh:true}};}})};
+ assert.deepEqual(await executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},options),{schemaVersion:1,prepared:true});
+ assert.equal(modes[0].companyReadPreparation,true);assert.equal(assertions,2);assert.equal(prepares,1);
+ assert.equal((await executeAssistantCompanyContextRequest({operation:'company_context_read',descriptor,binding,arguments:{queries:['synthetic']}},options)).structuredContent.fresh,true);
+ assert.equal(modes[1].companyReadPreparation,undefined);assert.equal(reads,1);
+ await assert.rejects(executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},
+  {withProfile:async()=>{throw Object.assign(Error(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});},
+   loadContext:()=>assert.fail('revoked/closed pass reached mirror preparation')}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+ for(const invalid of [{operation:'company_context_prepare',descriptor,arguments:{}},
+  {operation:'company_context_read',descriptor:{...descriptor,nativeTool:'create_task'},arguments:{}},
+  {operation:'call',name:'create_comment',arguments:{},prepareCompanySearch:true}]){
+  await assert.rejects(executeAssistantRuntimeRequest(invalid,{context:()=>assert.fail('invalid request touched private context'),
+   companyContextOperation:()=>assert.fail('invalid request dispatched a child')}),{code:'ASSISTANT_REQUEST_INVALID'});
+ }
+ const deadlines=[];const timeout=ms=>{deadlines.push(ms);return new AbortController().signal;};
+ assistantProductionContextSignal({companyReadPreparation:true},timeout);assert.deepEqual(deadlines,[600000]);
+ for(const mode of [{companyReadPreparation:true,pluginMaintenance:true},{companyReadPreparation:true,interactiveSourceSetup:true},
+  {companyReadPreparation:true,workspaceRun:{runId:randomUUID(),workspaceId:randomUUID()}}])assert.throws(()=>assistantProductionContextSignal(mode,timeout));
 });
 
 test('quota pause keeps model-free polling and resumes only after a fresh positive observation',async()=>{

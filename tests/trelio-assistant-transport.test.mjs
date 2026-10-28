@@ -1892,6 +1892,37 @@ test('production default factory protects initial search and fetch before native
  assert.doesNotMatch(wire.join(''),/MUST_STAY_LOCAL|DENIED_ORIGIN/);
 });
 
+test('production search preparation preserves native admission and returns only the exact current recipient descriptor',async()=>{
+ const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+ const identity={origin:'https://deferred-factory.test',assistantId:randomUUID(),deviceId:randomUUID()},store=memoryStore();
+ await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{...identity,credential:`tda_${'p'.repeat(43)}`,expiresAt:1});
+ const companyId=randomUUID(),locator={companyId,sourceId:randomUUID(),intakeId:randomUUID()};
+ const descriptor={schemaVersion:1,nativeTool:'search',companyId,companySlug:'synthetic',intakePass:locator,
+  assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+ const binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ let nativeCalls=0,opened=0;const wire=[];
+ const client=await createProductionAssistantMcp({prepareCompanySearch:true,
+  context:action=>action({identity},{readActivePass:async()=>({kind:'source_intake'})},store),
+  withProfile:async(action,options)=>{
+   if(options.encryptedCompanyContext)assert.deepEqual(options.encryptedCompanyContext,descriptor);
+   return action({identity,readCompanyContentMode:async()=>'encrypted',prepareCompanyContextRead:async()=>{
+    opened++;return {runtime:{scope:{id:binding.scopeId,epoch:1},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}};
+   }});
+  },httpRequest:async input=>{
+   const message=input.payload;wire.push(JSON.stringify(message));
+   const response=result=>({sessionId:'synthetic-prepare',message:{jsonrpc:'2.0',id:message?.id,result}});
+   if(input.method==='DELETE'||message.method==='notifications/initialized')return response({});
+   if(message.method==='initialize')return response({protocolVersion:'2025-06-18'});
+   if(message.method==='tools/list')return response({tools:[{name:'search',description:'Native search',inputSchema:{type:'object'}}]});
+   nativeCalls++;assert.deepEqual(message.params.arguments,{localContextRead:true,intakePass:locator,runtimeSessionProof:{nonce:1}});
+   return response({isError:true,content:[],structuredContent:{code:'ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',localRead:descriptor}});
+  }});
+ const result=await client.callTool('search',{queries:['DEFERRED_PRIVATE_QUERY_CANARY'],intakePass:locator,runtimeSessionProof:{nonce:1}});
+ assert.deepEqual(result,{content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding}}});
+ assert.equal(nativeCalls,1);assert.equal(opened,1);assert.doesNotMatch(wire.join(''),/DEFERRED_PRIVATE_QUERY_CANARY/);
+ await assert.rejects(createProductionAssistantMcp({prepareCompanySearch:'true'}),{code:'ASSISTANT_REQUEST_INVALID'});
+});
+
 test('company read negotiation hides only the closed host branch and keeps original query off MCP HTTP',async()=>{
   const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});
@@ -2074,7 +2105,30 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     });
   };
   try{
-    const result=await run();assert.match(JSON.stringify(result),new RegExp(canary));assert.ok(manifestReads>=2);
+    // Exercise the new worker operation against the REAL managed profile,
+    // HPKE envelope, common encrypted mirror and native fixed HTTP guards.
+    // The outer child has isolated OS/config roots; no human credentials or
+    // plaintext mirror substitute participates in this cold first sync.
+    const {executeAssistantCompanyContextRequest}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+    const binding={scopeId,scopeEpoch:1,deviceId:cryptoDeviceId,envelopeId:envelope.id};
+    const operationOptions={withProfile:async(action,options)=>{
+      assert.deepEqual(options.encryptedCompanyContext,descriptor);
+      const current=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
+        encryptedCompanyContext:descriptor,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,invoke)=>invoke()});
+      return common.withWorkspaceExecutionProfile(current,()=>action({identity:f.identity,prepareCompanyContextRead:current.prepareCompanyContextRead}));
+    }};
+    const prepared=await executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},operationOptions);
+    assert.deepEqual(prepared,{schemaVersion:1,prepared:true});
+    assert.doesNotMatch(JSON.stringify(prepared),new RegExp(canary),'preparation never returns company content');
+    const result=await executeAssistantCompanyContextRequest({operation:'company_context_read',descriptor,binding,arguments:{queries:[canary]}},operationOptions);
+    assert.match(JSON.stringify(result),new RegExp(canary));assert.ok(manifestReads>=2);
+    const beforeMismatch=manifestReads;
+    for(const changed of [{...binding,scopeEpoch:2},{...binding,scopeId:randomUUID()},
+      {...binding,deviceId:randomUUID()},{...binding,envelopeId:randomUUID()}]){
+      await assert.rejects(executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding:changed},operationOptions),
+        {code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+    }
+    assert.equal(manifestReads,beforeMismatch,'wrong recipient/epoch refuses before mirror content reads');
     const source=await read('get_task',{companySlug:'encrypted',projectSlug,taskNumber:1});
     assert.match(JSON.stringify(source),new RegExp(canary));assert.match(JSON.stringify(source),/Synthetic source rules/);
     const page=await read('list_projects',{offset:1,limit:1});

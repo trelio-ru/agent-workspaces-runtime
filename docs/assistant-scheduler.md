@@ -1382,6 +1382,23 @@ ordinary task `get_task` retains its task schema/adapter. A routing-only intake
 still refuses search before I/O. Search results are followed by exact fetch and
 needed current discussion; snippets or stale initial descriptions are not facts.
 
+Cold encrypted search preparation reuses the SAME complete company mirror and
+the common short-wait operation registry. Each `search` first consumes a fresh
+native schema/proof/read admission. The host-only descriptor pins that original
+pass plus the exact managed scope/epoch/device/envelope; it contains no query,
+source body or key. One existing signed request child prepares the complete
+mirror under the existing ten-minute first-sync budget. Short MCP polls keep
+their ordinary deadlines and return `state:preparing` plus a fresh `search`
+nextCall; this is neither an empty result nor a terminal unavailable reply.
+The model continues the same question without a task, Run or owner decision.
+Only readiness is retained in RAM. The actual query executes in a fresh managed
+invocation, without replaying the consumed MCP proof or a cached business answer.
+Recipient/pass/ACL/manifest and late native fences remain independent. EOF aborts
+only the host's preparation children and awaits cleanup; encrypted scratch may
+resume normally, but an incomplete mirror is never published or searched.
+Tests cover actual serial MCP/current-child pipes, native admission, real managed
+HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
+
 The combined catalogue retains the existing byte bound without truncation:
 identical scalar leaf schemas may share local definitions inside ONE tool.
 Whole descriptions, formats, regexes, defaults and bounds remain unchanged;

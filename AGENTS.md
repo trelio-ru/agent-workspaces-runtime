@@ -114,6 +114,9 @@ publication tooling также остаются вне этого публичн
   Fresh native input inventory checks closed fields/container types BEFORE managed staging;
   generic skill parameters reuse the SAME pure continuation parser, never a copied schema.
   V2 company reads use SAME native schemas/ACL/mirror/exact/files; genuine task or private-owner intake origin, never fake task/Run. Initial discovery includes native search/fetch/contract alongside task/intake tools, without a mid-turn catalogue dependency. Exact repeated scalar schemas may share tool-local definitions only when lossless and smaller; retain native validation and 65 536-byte bounds. See the company-context scheduler contract.
+  Cold search reuses the common short-wait registry and SAME signed read child;
+  preparing is not an empty/error result. Fresh native admission on every poll,
+  exact recipient binding and complete mirror publication remain mandatory.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
   Before pairing discovery не читает credential. Confirmed local device mismatch

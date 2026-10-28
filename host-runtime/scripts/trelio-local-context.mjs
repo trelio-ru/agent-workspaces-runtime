@@ -478,6 +478,7 @@ const acquireMirrorWriter = async (
   {
     allowReadableFallback = false,
     maximumWaitMs = MIRROR_FIRST_SYNC_WAIT_MS,
+    signal,
   } = {},
 ) => {
   await ensurePrivateDirectory(paths.root);
@@ -485,6 +486,9 @@ const acquireMirrorWriter = async (
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < maximumWaitMs) {
+    // A background preparation owns its writer only within the same managed
+    // pass/deadline. Waiting for another mirror must not outlive cancellation.
+    signal?.throwIfAborted();
     try {
       await fs.mkdir(paths.lock, { mode: 0o700 });
       await writePrivateJsonFile(path.join(paths.lock, "owner.json"), {
@@ -4025,6 +4029,7 @@ export const syncCompanyContextMirror = async ({
   });
   let previous = await readMirrorGeneration({ paths, companyEncryption });
   const writer = await acquireMirrorWriter(paths, {
+    signal,
     // Normal local reads may use a complete immutable generation while a
     // sibling publishes the next one. Once a task-section revision conflict
     // proves that generation stale, however, returning it again would make the
@@ -8262,6 +8267,17 @@ const getReadyMirror = async ({ origin, companySlug, forceSync = false, signal }
   localCompanyMirrorObservedMutation.set(sessionKey, mutationToken);
   cacheDecryptedMirror(sessionKey, synced.mirror);
   return { ...synced, token, companyEncryption, requestOrigin };
+};
+
+/** Host-only preparation uses the SAME complete, encrypted mirror writer and
+ * immutable publication as ordinary reads. It returns no company content or
+ * partial search result. The following actual read still obtains fresh native
+ * admission and checks the server generation; readiness is never authority. */
+export const prepareTrelioLocalCompanyContext = async (origin, companySlug, {signal}={}) => {
+  const ready=await getReadyMirror({origin,companySlug:normalizeCompanySlug(companySlug),signal});
+  if(ready.nativeProvider)throw new TrelioLocalContextError('LOCAL_CONTEXT_COMPANY_MISMATCH','Company encryption changed during preparation.');
+  signal?.throwIfAborted();
+  return {schemaVersion:1,prepared:true};
 };
 
 export const usesFreshExactTaskRead = (nativeTool, input) => {
