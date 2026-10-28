@@ -2412,14 +2412,33 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       return {schemaVersion:1,operation:'secret_generate',stdout:JSON.stringify(result),stderr:''};
     }
     let recovery=null;
-    const action={...plan.localAction,parameters:{...plan.localAction.parameters,
-      ...(plan.localAction.operation==='open'?{directory:root}:{}),
-      // The shared writer accepts an outcome only for a final handoff. A draft
-      // or blocker is continuity, not a task decision. Injecting even the safe
-      // no_status_change there rejects before its durable upload.
-      ...(plan.localAction.operation==='finish' || plan.localAction.operation==='checkpoint'
-        && plan.localAction.parameters.type==='handoff'?{taskOutcome:'no_status_change'}:{}),
-    }};
+    const action=await(async()=>{
+      const parameters={...plan.localAction.parameters,...(plan.localAction.operation==='open'?{directory:root}:{})};
+      const handoff=plan.localAction.operation==='finish' || plan.localAction.operation==='checkpoint'
+        && plan.localAction.parameters.type==='handoff';
+      if(handoff){
+        // A task pass can legitimately write an independently selected named
+        // Workspace. Its target scope, not the enclosing pass, determines the
+        // common handoff ABI: task Runs require no_status_change; named Runs
+        // must omit taskOutcome. Read the exact native target under the SAME
+        // own-Run/recipient profile rather than trusting a model/local hint.
+        const response=await common.request(encryption?.requestOrigin??identity.origin,token,
+          `/api/agent-workspaces/workspaces/${plan.runIdentity.workspaceId}`);
+        const overview=encryption?await common.currentWorkspaceExecutionProfile().readWorkspaceJsonResponse(response)
+          :JSON.parse((await common.readBoundedResponseBuffer(response,512*1024,'Assistant handoff Workspace')).toString('utf8'));
+        const target=overview.workspace;
+        if(target?.id!==plan.runIdentity.workspaceId || !(target.scopeType==='task'
+          ?target.scopeKey===`task:${plan.scope.taskId}`
+          :['project','company'].includes(target.scopeType)&&target.scopeKey===`workspace:${plan.runIdentity.workspaceId}`)
+          || overview.company?.id!==plan.scope.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+        delete parameters.taskOutcome;
+        if(target.scopeType==='task')parameters.taskOutcome='no_status_change';
+      }
+      // Ordinary draft/blocker continuity still carries no injected outcome.
+      // Native ACL, own-Run lease, handoff validation and acceptance CAS remain
+      // authoritative; this translation grants no task/status permission.
+      return {...plan.localAction,parameters};
+    })();
     let nativeReason,nativeHealthCause,nativeCommandPolicyCause;
     try {
       const result=await context.handleTrelioWorkspaceActionOperation(identity.origin,action,{

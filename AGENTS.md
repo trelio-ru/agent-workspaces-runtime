@@ -544,6 +544,7 @@ publication tooling также остаются вне этого публичн
   применяется только к их disposable cwd после native abort, не к provider work.
 
 - Assistant Workspace: generated policy, one-action profile, dedicated typed continuation/shared read/write engine, isolated inspection cache, no human auth fallback. [Contract](docs/assistant-scheduler.md#shared-workspace-http-profile).
+  Handoff outcomes follow the exact native target scope, never the enclosing task pass: named Workspaces omit taskOutcome; task targets use no_status_change.
   Positive common LOCAL/DRAFT recovery may reopen its exact owned sibling once;
   retain original files and return reconciliation evidence in the same chat.
   SAME registry/metadata resolve later actions and heartbeat after restart;

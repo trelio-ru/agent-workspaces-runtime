@@ -2223,7 +2223,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     const writerProfile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
       workspaceRun:runIdentity,lockDirectory:path.join(os.tmpdir(),'synthetic-writer-locks'),lock:(_file,action)=>action()});
     const readFetch=globalThis.fetch,uploads=new Map(),storedPayloads=[payload];
-    let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null;
+    let latestCheckpoint=null,acceptedPublications=0,acceptedRevisionBytes=null,draftTransport=null,handoffTargetMode='valid';
     globalThis.fetch=async(url,options)=>{
       const parsed=new URL(url),base='/api/digital-assistants/runtime/workspace';
       if(parsed.pathname===`${base}/files/${baseManifestId}/encrypted-content`){
@@ -2235,7 +2235,10 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       const json=value=>new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
       const scoped=context=>json({schemaVersion:1,context,encryptedPayloads:storedPayloads});
       if(parsed.pathname===`${base}/workspaces/${descriptor.workspaceId}`)
-        return scoped({workspace:snapshot.workspace,company,runs:[nativeRun],permissions:{canRead:true,canEdit:true,canApprove:true}});
+        return scoped({workspace:handoffTargetMode==='foreign-workspace'?{...snapshot.workspace,id:randomUUID()}
+          :handoffTargetMode==='wrong-scope'?{...snapshot.workspace,scopeKey:`task:${randomUUID()}`}:snapshot.workspace,
+          company:handoffTargetMode==='foreign-company'?{...company,id:randomUUID()}:company,
+          runs:[nativeRun],permissions:{canRead:true,canEdit:true,canApprove:true}});
       if(parsed.pathname===`${base}/workspaces/${descriptor.workspaceId}/runs/${runId}`)return scoped({run:nativeRun,latestCheckpoint});
       if(parsed.pathname===`${base}/runs/${runId}/claim`){
         const input=JSON.parse(options.body);assert.equal(input.expectedFencingToken,nativeRun.fencingToken);
@@ -2250,7 +2253,12 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       if(parsed.pathname===`${base}/runs/${runId}/codex-conversation`)return json(null);
       if(parsed.pathname===`${base}/runs/${runId}/checkpoints`){
         const input=JSON.parse(options.body);assert.equal(input.fencingToken,nativeRun.fencingToken);
-        assert.equal(input.taskOutcome,'no_status_change');assert.equal(input.summary.includes('SYNTHETIC_FINISH_PRIVATE_SUMMARY'),false);
+        // Match the real native service: named project/company Runs reject
+        // even no_status_change, whereas task Runs require that exact value.
+        // The old fixture incorrectly accepted a task outcome for both scopes.
+        if(named)assert.equal(Object.hasOwn(input,'taskOutcome'),false);
+        else assert.equal(input.taskOutcome,'no_status_change');
+        assert.equal(input.summary.includes('SYNTHETIC_FINISH_PRIVATE_SUMMARY'),false);
         latestCheckpoint={...input,id:randomUUID(),createdAt:new Date().toISOString()};return json(latestCheckpoint);
       }
       const storage=`${base}/runs/${runId}/encrypted-storage`;
@@ -2372,6 +2380,25 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     const finishPlan={...writerPlan,localAction:{schemaVersion:1,operation:'finish',runIdentity,
       parameters:{summary:'SYNTHETIC_FINISH_PRIVATE_SUMMARY result saved',evidence:['Verified exact committed files'],
         nextAction:'Continue only from the accepted material',taskOutcome:'no_status_change'}}};
+    // A target read is consistency evidence only. Changed/foreign native
+    // targets must stop before the handoff/payload publication; neither the
+    // model's supplied outcome nor local metadata may override that refusal.
+    const beforeHandoffPayloads=storedPayloads.length;
+    for(const invalidTarget of ['foreign-workspace','wrong-scope','foreign-company']){
+      handoffTargetMode=invalidTarget;
+      await assert.rejects(common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(finishPlan,{
+        withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})})),
+      {code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+      assert.equal(storedPayloads.length,beforeHandoffPayloads);
+      assert.equal(latestCheckpoint,null);assert.equal(acceptedPublications,0);
+    }
+    handoffTargetMode='valid';
+    const handoffPlan={...finishPlan,localAction:{...finishPlan.localAction,operation:'checkpoint',
+      parameters:{...finishPlan.localAction.parameters,type:'handoff'}}};
+    const handedOff=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(handoffPlan,{
+      withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
+    assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
+    assert.equal(Object.hasOwn(latestCheckpoint,'taskOutcome'),!named);
     let finished;
     try{finished=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(finishPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));}
