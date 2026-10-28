@@ -1,4 +1,4 @@
-import { validateAssistantCodexUsage } from './trelio-assistant-codex-usage.mjs';
+import { validateAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';

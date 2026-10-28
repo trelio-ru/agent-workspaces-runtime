@@ -628,7 +628,7 @@ test('model-free Codex usage reads exact native account and quotas without a mod
 });
 
 test('quota denial and recovery use native permission, never percent, timer or another model bucket',async()=>{
-  const {normalizeAssistantCodexUsage:project,validateAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex-usage.mjs');
+  const {normalizeAssistantCodexUsage:project,validateAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
   const bucket={primary:{usedPercent:100,windowDurationMins:300,resetsAt:1},credits:{hasCredits:false,unlimited:false}};
   const value={rateLimits:bucket,ordinaryUsageAllowed:false};
   assert.equal(project(value).state,'blocked');
@@ -643,7 +643,7 @@ test('quota denial and recovery use native permission, never percent, timer or a
 });
 
 test('usage observer retains confirmed block after native failure or unknown CAS and never retries POST',async()=>{
-  const {maintainAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex-usage.mjs');
+  const {maintainAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
   let writes=0;const current={revision:1,checkedAt:null,snapshot:null,blocked:true};
   const client={readCodexUsage:async()=>current,reportCodexUsage:async()=>{writes++;throw new Error('PRIVATE');}};
   assert.equal((await maintainAssistantCodexUsage({client,readUsage:async()=>{throw new Error('PRIVATE');}})).blocked,true);

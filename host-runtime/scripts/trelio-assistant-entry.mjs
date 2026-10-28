@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { maintainAssistantCodexUsage } from './trelio-assistant-codex-usage.mjs';
+import { maintainAssistantCodexUsage } from './trelio-assistant-codex.mjs';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-host-runtime-recovery.mjs';
