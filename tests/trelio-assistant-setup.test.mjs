@@ -2225,7 +2225,7 @@ test('real stdio facade and current worker route both intake methods through SAM
   {jsonrpc:'2.0',id:2,method:'tools/list'},
   {jsonrpc:'2.0',id:3,method:'tools/call',params:{name:'get_assistant_intake_context',arguments:{}}},
   {jsonrpc:'2.0',id:4,method:'tools/call',params:{name:'resolve_assistant_intake',arguments:{decision:'reply_owner',clientRequestId:randomUUID(),replyText:'SYNTHETIC_REPLY'}}},
-  {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'get_task',arguments:{}}}];
+  {jsonrpc:'2.0',id:5,method:'tools/call',params:{name:'update_task_status',arguments:{}}}];
  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
   createSetup:async()=>assert.fail('no enrollment/owner approval'),createMcp:async()=>({
    listTools:()=>executeAssistantRuntimeRequest({operation:'list'},dependencies),

@@ -72,7 +72,13 @@ export const createAssistantTaskHook=({identity,client,store,readActivePass,lock
         ? {hookSpecificOutput:{hookEventName:'SessionStart',additionalContext:TRELIO_COMPACTION_RECOVERY_CONTEXT}} : {};
       if(event.hook_event_name!=='PreToolUse' || !/^[a-z][a-z0-9_]{0,159}$/u.test(toolName??'')) fail('ASSISTANT_HOOK_INVALID_INPUT');
       if(!event.tool_input || Object.getPrototypeOf(event.tool_input)!==Object.prototype) fail('ASSISTANT_HOOK_INVALID_INPUT');
-      if(intake && !['get_assistant_intake_context','resolve_assistant_intake'].includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+      if(intake && !['get_assistant_intake_context','resolve_assistant_intake','get_assistant_status','get_trelio_tool_contract'].includes(toolName)){
+        // Reuse the shared native read vocabulary, never a copied provider or
+        // a readOnlyHint supplied by a model. Native proof/owner/private-body
+        // checks independently deny triage/group/unread and stale sources.
+        const {ASSISTANT_COMPANY_CONTEXT_READ_TOOLS}=await import('./trelio-assistant-transport.mjs');
+        if(pass.intakeKind==='route_existing'||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+      }
       if(!intake && ['get_assistant_intake_context','resolve_assistant_intake'].includes(toolName))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
       const supplied=structuredClone(event.tool_input);
       delete supplied.intakePass;delete supplied.taskPass;delete supplied.runtimeSessionProof;

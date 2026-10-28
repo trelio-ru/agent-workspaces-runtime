@@ -1095,13 +1095,20 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     (await import('./trelio-workspace-files.mjs')).validateWorkspaceFileLocator(sourceWorkspaceFile));
   const registryFile=sourceRegistryDocument===null?null:validateAssistantRegistryDocument(sourceRegistryDocument);
   if(registryFile&&registryFile.companyId!==pass.companyId)fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-  const locator={companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
+  const ownerReadOrigin=pass.kind==='source_intake';
+  const locator=ownerReadOrigin?{kind:'source_intake',companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId}
+    :{companyId:pass.companyId,taskId:pass.taskId,passId:pass.passId};
   // This descriptor comes only from the authenticated native MCP result. It
   // scopes ONE invocation of the shared reader, not a reusable company route.
   const encryptedRead=encryptedTaskRead===null?null:await validateAssistantEncryptedTaskRead({
     descriptor:encryptedTaskRead,identity,pass});
   const companyRead=encryptedCompanyContext===null?null:await validateAssistantEncryptedCompanyRead({
     descriptor:encryptedCompanyContext,identity,pass});
+  // An intake may compose only this shared READ cell (or privacy metadata
+  // preflight). It never inherits the task profile's skill/Secret/Run routes.
+  if(ownerReadOrigin && (pass.intakeKind==='route_existing' || [sourceReads,encryptedTaskRead,sourceAttachment,
+    sourceWorkspaceFile,sourceRegistryDocument,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,
+    secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup].some(Boolean)))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   // A native plan narrows this invocation to ONE prepared private grant.
   // Structural IDs alone do not authorize it: every HTTP request still repeats
   // the native grant/holder/pass/device/Run checks before value delivery.
@@ -1162,8 +1169,12 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
   };
   const assertLivePass=async signal=>{
     await assertIdentity();
-    const live=await client.readTaskPass(locator,signal);
-    if(live.state!=='leased' || ['passId','threadId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key])
+    const live=ownerReadOrigin?await client.readSourceIntake({companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},signal)
+      :await client.readTaskPass(locator,signal);
+    if(live.state!=='leased'||live.threadId!==pass.threadId
+      ||(ownerReadOrigin?live.kind==='route_existing'||live.eventId!==pass.eventId||live.sourceRevision!==pass.sourceRevision
+        ||companyRead&&(!live.ownerPrivateRead||!live.readConfirmed)
+        :['passId','deliveryId','bindingId','bindingRevision'].some(key=>live[key]!==pass[key]))
       || !Number.isFinite(Date.parse(live.leaseExpiresAt)) || Date.parse(live.leaseExpiresAt)<=now()) fail('ASSISTANT_PASS_REVIEW_REQUIRED');
     if(accountSetup)setupLeaseExpiresAt=setupLeaseExpiresAt?Math.min(setupLeaseExpiresAt,Date.parse(live.leaseExpiresAt)):Date.parse(live.leaseExpiresAt);
   };
@@ -1738,6 +1749,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       let url;try{url=new URL(pathname,requestOrigin);}catch{fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');}
       if(url.origin!==requestOrigin || url.hash || url.pathname!==pathname.split('?')[0]) fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       const method=String(options.method??'GET').toUpperCase();
+      if(ownerReadOrigin&&!companyRead)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       let rewritten,route,encryptionRuntime=false,bodyOverride;
       if((encryptedRead || companyRead || privateSkill || inspection || lifecycle || encryptedSkillCompany || attachmentSelection) && method==='GET'
         && (requestOrigin===identity.origin || companyRead && requestOrigin===companyRead.requestOrigin || inspection && requestOrigin===inspection.requestOrigin || lifecycle && requestOrigin===lifecycle.requestOrigin || attachmentSelection&&requestOrigin===attachmentSelection.requestOrigin)
@@ -2928,7 +2940,7 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
       node.anyOf=node.anyOf.filter(branch=>{
         if(!Object.hasOwn(branch?.properties??{},'localContextRead'))return true;
         if(branch.properties.localContextRead?.const!==true||branch.additionalProperties!==false
-          ||Object.keys(branch.properties).sort().join(',')!=='localContextRead,runtimeSessionProof,taskPass')
+          ||!['localContextRead,runtimeSessionProof,taskPass','intakePass,localContextRead,runtimeSessionProof','intakePass,localContextRead,runtimeSessionProof,taskPass'].includes(Object.keys(branch.properties).sort().join(',')))
           fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return false;
       });
@@ -3062,7 +3074,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   const intakeToolNames=ASSISTANT_INTAKE_MCP_TOOLS;
   const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
-    return !metadata&&pass?.kind==='source_intake'?intakeToolNames:presentationProfile==='remote_mcp'
+    return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:[...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
       ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
       :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
       :presentationProfile==='company_context'?['get_assistant_status',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
@@ -3152,6 +3164,16 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // Remote MCP transport. A mutable caller cannot replace reviewed args.
       const argumentsSnapshot = JSON.parse(JSON.stringify(args));
       if(Object.hasOwn(argumentsSnapshot,'localContextRead'))fail('ASSISTANT_MCP_INPUT_INVALID');
+      // Reject a task writer in an intake before initializing any native MCP
+      // session. Repeat after initialization too: the protected pass can change
+      // during I/O, and metadata is never execution authority.
+      if(!(await selectedTools()).includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
+      // Only the protected taskless owner origin needs to negotiate a second
+      // read catalogue. An ordinary task get_task keeps its task schema and
+      // task-only encrypted adapter; a read name alone cannot switch profiles.
+      const active=typeof readActivePass==='function'?await readActivePass():null;
+      const ownerCompanyRead=active?.kind==='source_intake'
+        &&(ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name)||name==='get_trelio_tool_contract');
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
         const allowed=await selectedTools();
         if(!allowed.includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
@@ -3247,7 +3269,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         // the refusal as complete authority. One current signed invocation
         // uses the SAME exact reader/hydrator within this original deadline.
         if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED'){
-          if(presentationProfile!=='company_context' || typeof materializeEncryptedCompanyContext!=='function'
+          if(typeof materializeEncryptedCompanyContext!=='function'
             || !ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           return materializeEncryptedCompanyContext({descriptor:value.structuredContent.localRead,name,
             arguments:argumentsSnapshot,signal});
@@ -3278,7 +3300,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
-      }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs);
+      }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs,
+        ownerCompanyRead?'company_context':null);
     },
   };
 };
@@ -3317,11 +3340,17 @@ export const validateAssistantEncryptedTaskRead = async ({descriptor,identity,pa
  * object, payload resolver or reusable permission. The original argument
  * object stays in RAM; only the native descriptor chooses the data origin. */
 export const validateAssistantEncryptedCompanyRead = async ({descriptor,identity,pass}) => {
-  if(!object(descriptor)||Object.keys(descriptor).sort().join(',')!==
-    'assistantUserId,companyId,companySlug,deviceId,nativeTool,passId,requestOrigin,schemaVersion,taskId'
+  const intake=pass.kind==='source_intake';
+  const expected=intake?'assistantUserId,companyId,companySlug,deviceId,intakePass,nativeTool,requestOrigin,schemaVersion'
+    :'assistantUserId,companyId,companySlug,deviceId,nativeTool,passId,requestOrigin,schemaVersion,taskId';
+  if(!object(descriptor)||Object.keys(descriptor).sort().join(',')!==expected
     ||descriptor.schemaVersion!==1||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(descriptor.nativeTool)
     ||descriptor.assistantUserId!==identity.assistantId||descriptor.deviceId!==identity.deviceId
-    ||['companyId','taskId','passId'].some(key=>!UUID.test(descriptor[key]??'')||descriptor[key]!==pass[key])
+    ||!UUID.test(descriptor.companyId??'')||descriptor.companyId!==pass.companyId
+    ||(intake?pass.intakeKind==='route_existing'||!object(descriptor.intakePass)
+      ||Object.keys(descriptor.intakePass).sort().join(',')!=='companyId,intakeId,sourceId'
+      ||descriptor.intakePass.companyId!==pass.companyId||descriptor.intakePass.sourceId!==pass.sourceId||descriptor.intakePass.intakeId!==pass.passId
+      :['taskId','passId'].some(key=>!UUID.test(descriptor[key]??'')||descriptor[key]!==pass[key]))
     ||!/^[A-Za-z0-9_-]{1,128}$/u.test(descriptor.companySlug??''))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   const common=await import('./trelio-workspace.mjs');
   try{if(common.resolveEncryptedDataPlaneOrigin(identity.origin,descriptor.requestOrigin)!==descriptor.requestOrigin)
@@ -3570,7 +3599,7 @@ export const materializeAssistantEncryptedCompanyContext = async ({origin,descri
   common??=await import('./trelio-workspace.mjs');
   context??=await import('./trelio-local-context.mjs');
   const slug=descriptor.companySlug;
-  const input=Object.fromEntries(Object.entries(raw).filter(([key])=>!['taskPass','runtimeSessionProof'].includes(key)));
+  const input=Object.fromEntries(Object.entries(raw).filter(([key])=>!['taskPass','intakePass','runtimeSessionProof'].includes(key)));
   if(input.companySlug!==undefined&&input.companySlug!==slug
     ||input.companySlugs!==undefined&&(!Array.isArray(input.companySlugs)||input.companySlugs.length!==1||input.companySlugs[0]!==slug)
     ||input.tasks!==undefined&&(!Array.isArray(input.tasks)||input.tasks.some(task=>task?.companySlug!==slug)))

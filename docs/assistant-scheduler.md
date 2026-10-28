@@ -1357,13 +1357,16 @@ native membership/project ACL, published-only authority and the assistant's own
 personal skill rules. Unsupported dedicated execution does not permit a human
 bridge, OAuth or provider fallback.
 
-### Owner-approved company-context read view
+### Genuine company-context read origins
 
 The v2 genuine device profile can select the existing session-fixed
-`company_context` presentation from an ordinary live task-work pass. V1 remains
-task-only: its renew/contact never widens scopes, and an owner-reviewed native
-upgrade plus fresh discovery is required. This is not a human MCP alias or a new
-worker/session authority. Discussion-only passes cannot enter company context.
+`company_context` presentation from an ordinary live task-work pass OR a full
+native-confirmed verified private-owner intake. The latter remains taskless:
+its original source/device/company/thread and one-use observed proof authorize
+only the SAME native reads, never a task writer, Secret or Workspace Run. Group,
+route_existing, unread/closed intake and discussion-only passes refuse. The
+standard v1→v2 contact upgrade retains its native grant/receipt rules; fresh
+presentation grants no scope, key or human identity.
 The view contains the SAME native search/fetch/inventory/exact-read handlers and
 deferred contracts, original task/KB attachment downloads and one exact published
 registry-file selector; task writers/owner setup/source intake are not appended.
@@ -2591,8 +2594,9 @@ be demonstrated separately; codec/fixture success alone is not readiness.
 
 Taskless source intake reuses the SAME Codex native provision/resume/model/effort,
 observed hook/session/proof, MCP transport and signed account/process engine. A
-private `kind:source_intake` journal admits only context/resolve native tools;
-normal task/Workspace/Secret tools cannot run under it. Native original-body
+private `kind:source_intake` journal admits context/resolve and the existing
+company_context READ catalogue for verified private-owner questions; normal
+task/Workspace/Secret tools cannot run under it. Native original-body
 confirmation is host-only and not a model tool. Genuine owner linked native IDs,
 current incoming/original message flags and source/project/company ACL are
 independent of natural command assessment. Clear owner commands need no second
@@ -2600,7 +2604,12 @@ approval; ambiguous context uses the SAME owner questions with Other+text.
 See the schema-v9 inbox contract for cancellation, restart and per-event routing.
 
 Simple verified-owner private Telegram questions use the SAME visible source
-intake chat and `reply_owner`; they never become tasks/Workspace Runs. Clear direct
+intake chat and `reply_owner`; they never become tasks/Workspace Runs. A question
+about company facts first selects the company read view, searches independent
+anchored formulations and reads the selected exact source. A failed, unavailable
+or incomplete read is a limitation, never an absence claim. Source rules remain
+context and the answer cites the verified native source in the original chat.
+Self-contained greetings/arithmetic need no company search. Clear direct
 work commands alone select `create_task`. The native one-attempt receipt, exact
 peer/revision/key and signed provider >=2.14.0 fence conversational sending.
 No model-selected recipient/account/file/schedule or human transport is accepted.

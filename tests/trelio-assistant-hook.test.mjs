@@ -179,6 +179,15 @@ test('taskless intake hook has genuine observed one-use proof and cannot borrow 
  const proof=output.runtimeSessionProof,[key]=[...f.records.keys()];
  assert.equal(crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',proof.runtimeSessionId,tool,proof.issuedAt,proof.nonce].join('\n')),
    crypto.createPublicKey({key:Buffer.from(key,'base64url'),format:'der',type:'spki'}),Buffer.from(proof.signature,'base64url')),true);
+ for(const read of ['search','search_tasks','get_task','get_task_sections']){
+  const current=(await f.hook(event,read)).hookSpecificOutput.updatedInput;
+  assert.deepEqual(current.intakePass,{companyId,sourceId:pass.sourceId,intakeId:passId});
+  assert.equal(current.taskPass,undefined,'a company read must never fabricate a task pass');
+  assert.notEqual(current.runtimeSessionProof.nonce,proof.nonce);
+  assert.equal(crypto.verify(null,Buffer.from(['trelio-runtime-proof-v1',current.runtimeSessionProof.runtimeSessionId,read,
+    current.runtimeSessionProof.issuedAt,current.runtimeSessionProof.nonce].join('\n')),
+    crypto.createPublicKey({key:Buffer.from(key,'base64url'),format:'der',type:'spki'}),Buffer.from(current.runtimeSessionProof.signature,'base64url')),true);
+ }
  for(const denied of ['get_assistant_task','create_task','apply_assistant_task_action','confirm_assistant_intake_read'])await assert.rejects(f.hook(event,denied),/CAPABILITY_UNAVAILABLE/);
  await assert.rejects(f.hook({...event,session_id:crypto.randomUUID()},tool),/TASK_MISMATCH/);
 });

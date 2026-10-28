@@ -1425,7 +1425,9 @@ const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=f
   await store.put({origin:identity.origin,kind:'runtime',id:pass.passId},runtime);
   let active=pass, currentIdentity=identity, live=true, contacts=0;
   const host={readIdentity:async()=>currentIdentity,readActivePass:async()=>active};
-  const client={readTaskPass:async()=>{contacts++;return {...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};}};
+  const client={readTaskPass:async()=>{contacts++;return {...pass,state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};},
+    readSourceIntake:async()=>{contacts++;return {...active,id:active.passId,readConfirmed:true,ownerPrivateRead:true,
+      state:live?'leased':'closed',leaseExpiresAt:new Date(Date.now()+300_000).toISOString()};}};
   const locator={companySlug:'encrypted',projectSlug:`e-${randomUUID()}`,taskNumber:30};
   const descriptor=encryptedTool?{schemaVersion:1,nativeTool:encryptedTool,arguments:encryptedTool==='get_task_sections'
     ? {...locator,sections:['comments']} : {...locator,
@@ -1786,6 +1788,74 @@ test('encrypted guidance keeps original query only in memory across the real MCP
   }finally{f.close();}
 });
 
+test('owner-private company question reaches the SAME native search and encrypted materializer without borrowing a task',async()=>{
+ const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+ const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+ const pass={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,
+  companyId:randomUUID(),sourceId:randomUUID(),sourceRevision:1,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};
+ const locator={companyId:pass.companyId,sourceId:pass.sourceId,intakeId:pass.passId},store=memoryStore();
+ const credential=`tda_${'i'.repeat(43)}`;
+ await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{...identity,credential,expiresAt:1});
+ const canonical={type:'object',properties:{queries:{type:'array',items:{type:'string'}},intakePass:{},taskPass:{},runtimeSessionProof:{}},required:['queries'],additionalProperties:false};
+ const local=key=>({type:'object',properties:{localContextRead:{type:'boolean',const:true},[key]:{},runtimeSessionProof:{}},
+  required:['localContextRead',key,'runtimeSessionProof'],additionalProperties:false});
+ const schema={type:'object',anyOf:[canonical,local('taskPass'),local('intakePass')],additionalProperties:true};
+ assert.equal(assistantModelInputSchema(schema).anyOf.length,1,'both opaque host branches remain hidden');
+ const args={queries:['OWNER_COMPANY_QUERY_CANARY'],intakePass:locator,runtimeSessionProof:{synthetic:true}};
+ const descriptor={schemaVersion:1,nativeTool:'search_tasks',companyId:pass.companyId,companySlug:'company',intakePass:locator,
+  assistantUserId:identity.assistantId,deviceId:identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+ let sends=0,materialized=0;const wire=[];
+ const client=createAssistantMcpClient({...identity,store,readActivePass:async()=>pass,
+  withWorkspaceArguments:(input,send)=>withAssistantCompanyContentArguments(input,send,{companyContextRead:true,
+   withProfile:action=>action({readCompanyContentMode:async()=>'encrypted'})}),
+  materializeEncryptedCompanyContext:async input=>{materialized++;assert.deepEqual(input.arguments,args);
+   assert.deepEqual(input.descriptor,descriptor);return {content:[],structuredContent:{tasks:[{title:'Verified plan',id:randomUUID()}]}};},
+  httpRequest:async input=>{
+   assert.equal(input.config.headers['x-trelio-assistant-capability-profile'],'company_context');
+   wire.push(JSON.stringify(input.payload??{}));
+   const reply=result=>({sessionId:'intake-company-read',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+   if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+   if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+   if(input.payload.method==='tools/list')return reply({tools:[{name:'search_tasks',description:'Native canonical task search',inputSchema:schema}]});
+   sends++;assert.deepEqual(input.payload.params.arguments,{localContextRead:true,intakePass:locator,runtimeSessionProof:args.runtimeSessionProof});
+   return reply({isError:true,content:[],structuredContent:{code:'ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',localRead:descriptor}});
+  }});
+ const result=await client.callTool('search_tasks',args);
+ assert.equal(result.structuredContent.tasks[0].title,'Verified plan');assert.equal(sends,1);assert.equal(materialized,1);
+ assert.doesNotMatch(wire.join(''),/OWNER_COMPANY_QUERY_CANARY/);
+ const {validateAssistantEncryptedCompanyRead}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ assert.deepEqual(await validateAssistantEncryptedCompanyRead({descriptor,identity,pass}),descriptor);
+ for(const changed of [{...descriptor,taskId:randomUUID()},{...descriptor,intakePass:{...locator,sourceId:randomUUID()}},
+   {...descriptor,intakePass:{...locator,intakeId:randomUUID()}}])
+  await assert.rejects(validateAssistantEncryptedCompanyRead({descriptor:changed,identity,pass}));
+ await assert.rejects(validateAssistantEncryptedCompanyRead({descriptor,identity,pass:{...pass,intakeKind:'route_existing'}}));
+ await assert.rejects(client.callTool('create_task',args),/CAPABILITY_UNAVAILABLE/);
+});
+
+test('ordinary task reads retain their native view while owner intake negotiates company reads',async()=>{
+ const identity={origin:'https://view-regression.test',assistantId:randomUUID(),deviceId:randomUUID()},store=memoryStore();
+ const credential=`tda_${'v'.repeat(43)}`;
+ await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{...identity,credential,expiresAt:1});
+ let active={kind:'task'},calls=0;const views=[];
+ const client=createAssistantMcpClient({...identity,store,readActivePass:async()=>active,httpRequest:async input=>{
+  const view=input.config.headers['x-trelio-assistant-capability-profile']??'task';
+  assert.equal(view,active.kind==='source_intake'?'company_context':'task');
+  const reply=result=>({sessionId:'native-view',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+  if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+  if(input.payload.method==='initialize'){views.push(view);return reply({protocolVersion:'2025-06-18'});}
+  if(input.payload.method==='tools/list')return reply({tools:[{name:'get_task',description:'Exact native read',inputSchema:{type:'object'}}]});
+  assert.equal(input.payload.method,'tools/call');calls++;return reply({content:[],structuredContent:{view}});
+ }});
+ assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task');
+ active={kind:'source_intake'};
+ assert.equal((await client.callTool('get_task',{})).structuredContent.view,'company_context');
+ active={kind:'source_intake',intakeKind:'route_existing'};
+ await assert.rejects(client.callTool('get_task',{}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
+ active={kind:'task'};
+ assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task');
+ assert.deepEqual(views,['task','company_context','task']);assert.equal(calls,3,'routing-only intake refuses before native I/O');
+});
+
 test('company read negotiation hides only the closed host branch and keeps original query off MCP HTTP',async()=>{
   const {withAssistantCompanyContentArguments}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});
@@ -1838,9 +1908,11 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
       TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_COMPANY_CONTEXT_FIXTURE:'1'};
     delete env.NODE_TEST_CONTEXT;
     try{
-      const child=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted company source search',fileURLToPath(import.meta.url)],
-        {env,timeout:30000,maxBuffer:1024*1024});
-      assert.match(child.stdout,/ASSISTANT_COMPANY_CONTEXT_SEARCH_VERIFIED/u);
+      for(const originKind of ['task','owner']){
+        const child=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted company source search',fileURLToPath(import.meta.url)],
+          {env:{...env,TRELIO_ASSISTANT_COMPANY_CONTEXT_ORIGIN:originKind},timeout:30000,maxBuffer:1024*1024});
+        assert.match(child.stdout,/ASSISTANT_COMPANY_CONTEXT_SEARCH_VERIFIED/u);
+      }
     }catch(error){
       const lines=String(error.stdout??'').split('\n').filter(line=>/^\s*(?:error: [^|]|code: |at |stack:|TestContext\.|async )/u.test(line));
       throw new Error(lines.slice(0,15).join('\n')||'Managed company source child failed');
@@ -1851,8 +1923,15 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
   const {materializeAssistantEncryptedCompanyContext}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});
   const managed=await f.profile.resolveCompanyEncryptionDevice({origin:f.identity.origin,companyId:f.pass.companyId});
-  const descriptor={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'encrypted',taskId:f.pass.taskId,
-    passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+  const ownerOrigin=process.env.TRELIO_ASSISTANT_COMPANY_CONTEXT_ORIGIN==='owner';
+  const active=ownerOrigin?{schemaVersion:1,kind:'source_intake',assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
+    companyId:f.pass.companyId,sourceId:randomUUID(),sourceRevision:1,passId:f.pass.passId,deliveryId:f.pass.deliveryId,
+    eventId:randomUUID(),threadId:f.pass.threadId}:f.pass;
+  if(ownerOrigin)f.changePass(active);
+  const origin=ownerOrigin?{intakePass:{companyId:active.companyId,sourceId:active.sourceId,intakeId:active.passId}}
+    :{taskId:f.pass.taskId,passId:f.pass.passId};
+  const descriptor={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'encrypted',...origin,
+    assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
   const profile=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
     encryptedCompanyContext:descriptor,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,action)=>action()});
   const scopeId=randomUUID(),cryptoDeviceId=randomUUID(),entityId=randomUUID(),projectId=randomUUID();
@@ -1907,6 +1986,11 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
       const found=url.searchParams.has('fingerprint'),selected={...envelope,...(mode==='recipient'?{id:randomUUID()}: {})};
       return json({state:'encrypted',suite:'trelio-e2ee-v1',company,viewer:{userId:f.identity.assistantId},accessState:found?'ready':'device_required',
         device:found?{id:cryptoDeviceId,fingerprint:managed.fingerprint}:null,scope:found?{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk}:null,envelope:found?selected:null});
+    }
+    if(ownerOrigin){
+      const sent=JSON.parse(options.headers.get('x-trelio-assistant-pass'));
+      assert.deepEqual(sent,{kind:'source_intake',...origin.intakePass});
+      assert.equal(Object.hasOwn(sent,'taskId'),false,'the real HTTP profile carries no invented task');
     }
     assert.equal(url.origin,descriptor.requestOrigin);
     assert.equal(options.headers.get('x-trelio-assistant-encryption-device'),cryptoDeviceId);
@@ -1968,7 +2052,7 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     assert.match(JSON.stringify(file),/Synthetic source rules/,'the source file carries its own read authority, never a new pass');
     assert.doesNotMatch(JSON.stringify(requests),new RegExp(canary));
     assert.doesNotMatch(JSON.stringify(requests),/SOURCE_PRIVATE_FILENAME_CANARY|ORIGINAL_PRIVATE_BYTES_CANARY/);
-    assert.deepEqual(await f.host.readActivePass(),f.pass,'source discovery never rebinds the task/pass');
+    assert.deepEqual(await f.host.readActivePass(),active,'source discovery never rebinds the original read origin');
     for(const failure of ['aad','missing','recipient']){mode=failure;await assert.rejects(run());}
     mode='valid';await assert.rejects(common.withWorkspaceExecutionProfile(profile,()=>materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,
       descriptor,name:'search',arguments:{queries:[canary],companySlugs:['foreign']},assertCurrent:profile.prepareCompanyContextRead})),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
@@ -3290,7 +3374,7 @@ test('stable native intake metadata survives cached task chats while execution k
  const expected=['get_assistant_status','get_task','get_assistant_intake_context','resolve_assistant_intake'];
  assert.deepEqual((await client.listTools()).map(tool=>tool.name),expected);
  assert.deepEqual([...new Set(views)],['task','source_intake']);
- await assert.rejects(client.callTool('get_task',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
+ await assert.rejects(client.callTool('create_task',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
  await client.callTool('resolve_assistant_intake',{});assert.equal(calls,1);
  active={kind:'task'};views.length=0;assert.deepEqual((await client.listTools()).map(tool=>tool.name),expected);
  assert.deepEqual([...new Set(views)],['task','source_intake']);await assert.rejects(client.callTool('resolve_assistant_intake',{}),/CAPABILITY_UNAVAILABLE/);

@@ -324,7 +324,7 @@ export const withProductionAssistantWorkspace = async (action, {signal,encrypted
     const identity=client.identity;
     const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
-    const sourceReads=encryptedCompanyContext||sourceAttachment||sourceWorkspaceFile||sourceRegistryDocument?null:await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
+    const sourceReads=encryptedCompanyContext||sourceAttachment||sourceWorkspaceFile||sourceRegistryDocument||(await host.readActivePass())?.kind==='source_intake'?null:await productionSourceReads({common,identity,client,host,signal:runtimeHookSignal()});
     const profile=await transport.createAssistantWorkspaceProfile({identity,client,store,host,sourceReads,encryptedTaskRead,encryptedCompanyContext,sourceAttachment,sourceWorkspaceFile,sourceRegistryDocument,encryptedInspection,encryptedSkillRead,workspaceRun,materialWorkspaceId,secretBrowserFill,secretGeneration,secretSkill,remoteMcp,skillAccountSetup,lockDirectory:path.join(directory,'runtime-locks')});
     return common.withWorkspaceExecutionProfile(profile,()=>action({identity,client,store,host,
       prepareWorkspaceRun:profile.prepareWorkspaceRun,
@@ -431,8 +431,14 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',c
   const identity=sourceClient.identity;
   const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
   return createAssistantMcpClient({ ...identity, store, presentationProfile,
-    withWorkspaceArguments:(request,send)=>withAssistantEncryptedWorkspaceArguments(request,send,{withProfile,withManagedContent,
-      companyContextRead:presentationProfile==='company_context'}),
+    withWorkspaceArguments:async(request,send)=>{
+      // Preserve ordinary task reads. Only the current protected intake can
+      // select company reads implicitly; model arguments never select origin.
+      const active=typeof host.readActivePass==='function'?await host.readActivePass():null;
+      return withAssistantEncryptedWorkspaceArguments(request,send,{withProfile,withManagedContent,
+        companyContextRead:presentationProfile==='company_context'
+          ||active?.kind==='source_intake'&&ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(request.name)});
+    },
     readActivePass:host.readActivePass,
     materializeSourceIntake:async({result,arguments:args,signal})=>{
       const [{validateAssistantActivePass},{buildRuntimeSessionProof,withRuntimeStateLock},{openAssistantDatabase}]=await Promise.all([
@@ -1970,11 +1976,11 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
     // These metadata reads use genuine device auth but no business proof.
     // An observed task hook may have added its managed fields; do not forward
     // ignored content/authority to a schema that deliberately accepts none.
-    const {taskPass:_pass,runtimeSessionProof:_proof,...metadata}=args;
+    const {taskPass:_pass,intakePass:_intake,runtimeSessionProof:_proof,...metadata}=args;
     // Contract lookup is metadata only when its locator is one of the native
     // names in this presentation. Reject arbitrary prose BEFORE HTTP even
     // though the backend's exact contract registry would also refuse it.
-    if(name==='get_trelio_tool_contract'&&(!companyContextRead
+    if(name==='get_trelio_tool_contract'&&(!companyContextRead&&!args.intakePass
       ||!ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(metadata.name)
       ||Object.keys(metadata).some(key=>key!=='name')))
       throw new AssistantTransportError('ASSISTANT_MCP_INPUT_INVALID');
@@ -2008,7 +2014,7 @@ export const withAssistantCompanyContentArguments = async ({name,args,signal},se
       // The original full native input was checked against fresh discovery.
       // Search text, filters, paths and URLs remain in this invocation's RAM;
       // a closed structural request obtains native routing BEFORE source I/O.
-      return send({localContextRead:true,taskPass:args.taskPass,runtimeSessionProof:args.runtimeSessionProof});
+      return send({localContextRead:true,...(args.intakePass?{intakePass:args.intakePass}:{taskPass:args.taskPass}),runtimeSessionProof:args.runtimeSessionProof});
     },{signal});
   }
 

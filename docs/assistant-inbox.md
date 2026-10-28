@@ -663,7 +663,8 @@ account/event/revision is initially considered once across configured companies.
 Intake provisions/reuses one restricted chat per source/owner binding through the
 SAME native Codex adapter and observed session/proof engine. Its taskless pass is
 an explicit discriminator, never fabricated task/binding metadata. Only native
-context/resolve tools are executable in that taskless pass. Their definitions
+context/resolve tools and the SAME read-only company context for confirmed
+private-owner questions are executable in that taskless pass. Their definitions
 remain available in cached Desktop task catalogues before activation; metadata
 does not authorize the other advertised tools. Private host reads the exact original through
 the SAME signed account/process engine, repeats source/pass/owner checks and
