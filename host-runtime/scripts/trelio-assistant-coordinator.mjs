@@ -577,6 +577,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           emit(errorCode(error));
         }
       }
+      // Upgrade/restart reconciliation reads the native exact-body witness,
+      // never a local reply/created flag. It does not re-read provider content,
+      // replay a reply or claim business processing. Fresh deliveries record
+      // the same witness at their complete model-materialization boundary.
+      if(acknowledgeSource&&typeof client.readSourceIntake==='function')for(const row of externalRegistrations.values()){
+        const source=externalSourceFor(identity,row);
+        if(inbox.status(source).state!=='active')continue;
+        for(const intake of inbox.modelReadReconciliationCandidates(source))try{
+          const live=await client.readSourceIntake(intakeLocator(intake),signal);lease();
+          if(live.id!==intake.id||live.sourceId!==row.id||live.sourceRevision!==intake.source_revision
+            ||live.eventId!==intake.original_event_id||live.threadId!==intake.thread_id||live.readConfirmed!==true
+            ||intake.kind==='route_existing'&&(live.kind!=='route_existing'||JSON.stringify(live.eventIds)!==JSON.stringify(intake.eventIds)))continue;
+          inbox.confirmIntakeModelRead(intake.id);
+        }catch(error){emit(errorCode(error));}
+      }
       const acknowledgementDue=acknowledgeSource?[...externalRegistrations.values()].flatMap(row=>{
         if(!['telegram-mtproto','email-imap-smtp','max-web'].includes(row.skillId))return [];
         const ordinal=inbox.externalAcknowledgementDue(externalSourceFor(identity,row));return ordinal===null?[]:[{row,ordinal}];
@@ -888,7 +903,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(row.state==='pending'){inbox.prepareOwnerIntake(row.id);row=inbox.ownerIntake(row.id);}
     if(row.state==='provisioning'){
       if(row.native_started)fail('ASSISTANT_COORDINATOR_HOST_REVIEW_REQUIRED');
-      const result=await native.provision({deliveryId:row.provision_id,cwd,execution},{signal,
+      const result=await native.provision({deliveryId:row.provision_id,cwd,execution},{signal,chatKind:row.kind==='route_existing'?'source_triage':'owner_dialogue',
         startInvocation:()=>{lease();inbox.startOwnerIntakeProvision(row.id);},onThreadStarted:threadId=>inbox.bindOwnerIntakeThread(row.id,threadId)});
       if(result.state!=='completed')fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
       inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);

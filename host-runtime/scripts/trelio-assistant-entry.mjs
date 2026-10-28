@@ -481,6 +481,11 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',c
       const value={...result.structuredContent,...(routing?{sourceMessages:messages.map(({eventId,text})=>({eventId,text}))}
         :{ownerMessage:{text:message.text,verifiedNativeOwner:true,privateConversation:message.privateOwnerConversation===true}})};
       delete value.sourceRead;
+      const readState=await openAssistantDatabase(path.join(directory,'runtime',identity.assistantId,identity.deviceId));
+      try{const {createAssistantInbox}=await import('./trelio-assistant-inbox.mjs');
+        createAssistantInbox({database:readState.database}).confirmIntakeModelRead(pass.passId,
+          messages.map(({eventId,originalSha256})=>({eventId,...(originalSha256?{originalSha256}:{})})));
+      }finally{await readState.close();}
       return {content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value};
     },
     materializeSourceReply:async({result,arguments:args,signal})=>{

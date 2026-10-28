@@ -1273,21 +1273,23 @@ test('native account-scoped conversation keys survive the private projection, wh
 });
 
 
-test('native committed ACK admission reuses signed account/child execution and fences once at final spawn',async t=>{
+for(const modelRead of [false,true])test(`native ${modelRead?'model-delivered':'committed'} ACK admission reuses signed account/child execution and fences once at final spawn`,async t=>{
   t.after(()=>{ackFixture=null;resolveOverride=null;setupFixture=null;});
   const accountId=randomUUID(),sourceId=randomUUID(),routeId=randomUUID(),receiptIds=[randomUUID(),randomUUID()].sort();
   const source={...scope,id:sourceId,deviceId,localAccountId:accountId,state:'active',revision:0};
   const references=receiptIds.map((receiptId,index)=>({eventKey:String(index+1).repeat(64),id:`message:123:${index+4}`,revision:(index?'b':'a').repeat(64),
-    conversationKey:'telegram-conversation/v1.'+'f'.repeat(64),routeId,eventOrdinal:0,receiptId,taskId:randomUUID()}));
-  ackFixture={intent:{sourceId,sourceRevision:0,receipts:receiptIds.map(receiptId=>({receiptId,eventOrdinals:[0]}))},admission:{schemaVersion:1,
-    sourceId,sourceRevision:0,localAccountId:accountId,slots:receiptIds.map(receiptId=>({receiptId,routeId,eventOrdinal:0}))}};
+    conversationKey:'telegram-conversation/v1.'+'f'.repeat(64),...(modelRead?{intakeId:receiptId,originalEventId:randomUUID()}:{routeId,eventOrdinal:0,receiptId,taskId:randomUUID()})}));
+  ackFixture={intent:{sourceId,sourceRevision:0,...(modelRead?{intakes:references.map(ref=>({intakeId:ref.intakeId,eventIds:[ref.originalEventId]}))}
+    :{receipts:receiptIds.map(receiptId=>({receiptId,eventOrdinals:[0]}))})},admission:{schemaVersion:modelRead?2:1,
+    sourceId,sourceRevision:0,localAccountId:accountId,slots:references.map(ref=>modelRead?{intakeId:ref.intakeId,eventId:ref.originalEventId}
+      :{receiptId:ref.receiptId,routeId,eventOrdinal:0})}};
   const profile=await createAssistantSourceRuntimeProfile({identity,host,store,scope});
   const root=await profile.resolveSkillCatalogueDirectory(engine.resolveWorkspaceBridgeConfigDirectory());profile.close();
   const catalogue=createAccountCatalogue({directory:root,scope:accountScope({origin,skillId:scope.skillId,companyId,memberId,connectionId:null}),io:{
     ensureDirectory:engine.ensurePrivateDirectory,read:engine.readPrivateJsonFile,write:engine.writePrivateJsonFile,
     checkDirectory:dir=>engine.assertPrivatePathKind(dir,'directory')}});
   await catalogue.change({operation:'create',id:accountId,name:'Synthetic ACK',expectedRevision:(await catalogue.list()).revision});
-  const sourceDir=path.join(directory,'ack-package'),fence=path.join(directory,'ack-fence'),marker=path.join(directory,'ack-child');
+  const sourceDir=path.join(directory,`ack-package-${modelRead}`),fence=path.join(directory,`ack-fence-${modelRead}`),marker=path.join(directory,`ack-child-${modelRead}`);
   await fs.mkdir(sourceDir);
   const build=async({failed=false,verifyOnly=false}={})=>{
     const output=failed?{ok:false,error:'PRIVATE_PROVIDER_ERROR',code:'TELEGRAM_ACK_RANGE_INCOMPLETE',
@@ -1331,7 +1333,7 @@ test('native committed ACK admission reuses signed account/child execution and f
     'complete bounded native stderr can prove no attempt without exposing error prose');
   const count=await fs.readFile(marker,'utf8'),fences=started;
   resolveOverride=()=>new Response(JSON.stringify({...resolution(),sourceAdmission:{...admission(),
-    acknowledgement:{...ackFixture.admission,slots:ackFixture.admission.slots.map(row=>({...row,routeId:randomUUID()}))}}}));
+    acknowledgement:{...ackFixture.admission,slots:ackFixture.admission.slots.map(row=>({...row,...(modelRead?{eventId:randomUUID()}:{routeId:randomUUID()})}))}}}));
   await assert.rejects(invoke(),/INVALID_RESPONSE/);assert.equal(started,fences);assert.equal(await fs.readFile(marker,'utf8'),count);
   resolveOverride=null;let resolves=0;
   resolveOverride=()=>++resolves===1?new Response(JSON.stringify(resolution())):new Response(JSON.stringify({code:'ASSISTANT_SOURCE_ACCESS_DENIED'}),{status:403});
@@ -2094,7 +2096,7 @@ test('existing-task triage reads exact signed Telegram/email/MAX bodies without 
   const live={kind:'route_existing',eventIds,state:'leased',threadId,eventId,sourceRevision:0,leaseExpiresAt:new Date(Date.now()+60000).toISOString()};
   const client={identity,sourceAccounts:async()=>[source],readSourceIntake:async()=>({...live})};
   const input={identity,client,host:{...host,readActivePass:async()=>pass},store,pass,source,reference:ref};
-  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text});
+  await fs.writeFile(output,JSON.stringify(message));assert.deepEqual(await readAssistantOwnerIntakeMessage(input),{text,...(skillId==='email-imap-smtp'?{originalSha256:message.originalSha256}:{})});
   assert.equal(await fs.readFile(marker,'utf8'),'r','SAME selected-account signed child, one exact read');
   intakeFixture.admission={...intakeFixture.admission,ownerIdentityId:randomUUID(),ownerExternalUserId:'654321'};
   await assert.rejects(readAssistantOwnerIntakeMessage(input),/INVALID_RESPONSE/);
