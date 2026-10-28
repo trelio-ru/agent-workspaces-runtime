@@ -9,7 +9,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
@@ -714,10 +714,7 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
             // Connection is the existing explicit setup-read section. Pending
             // native runtime consent independently still needs the small view;
             // neither choice approves setup or changes pass/provider authority.
-            const connectionRequested=Array.isArray(message.params.arguments.sections)
-              &&message.params.arguments.sections.includes('connection');
-            next=execution.runtimeConsent?.state==='owner_review_required'
-              ||connectionRequested&&Boolean(execution.accountSetup)?'skill_setup':'task';
+            next=assistantSkillReadNeedsSetup(execution,message.params.arguments.sections)?'skill_setup':'task';
           }
           if(message.params.name==='get_assistant_status' && !result?.isError)next=message.params.arguments.view==='company_context'
             &&result?.structuredContent?.companyContextRead===true&&result.structuredContent.presentationProfile==='company_context'?'company_context':'task';

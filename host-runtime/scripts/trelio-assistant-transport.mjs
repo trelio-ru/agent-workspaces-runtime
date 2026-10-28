@@ -2874,6 +2874,23 @@ export const ASSISTANT_MCP_TOOLS = Object.freeze([...new Set([
  * No domain schema, scope or permission is inferred/copied by this projection.
  */
 const ASSISTANT_MCP_ADMISSION_FIELDS=Object.freeze(['taskPass','intakePass','runtimeSessionProof','sourceProcessingProof','encryptedMaterialWitness','encryptedContent','localContextRead']);
+/** A login declaration is capability metadata, never evidence that an account
+ * needs login. One pure presentation decision is shared by fresh workers and
+ * the long-lived facade; it does not consume consent or authorize execution. */
+export const assistantSkillReadNeedsSetup=(execution,sections)=>execution?.runtimeConsent?.state==='owner_review_required'
+  ||Array.isArray(sections)&&sections.includes('connection')&&Boolean(execution?.accountSetup);
+const projectAssistantSkillReadPresentation=(result,sections)=>{
+  const before=result?.structuredContent,execution=before?.assistantExecution;
+  if(result?.isError===true||execution?.state!=='shared_runtime_setup'||assistantSkillReadNeedsSetup(execution,sections))return result;
+  const after={...before,assistantExecution:{...execution,state:'shared_runtime'}};
+  // Old loaded facades also key their presentation off this existing native
+  // state field. Project it in the CURRENT worker, before returning across the
+  // stable forwarding boundary, so ordinary reads need no Desktop restart.
+  // Replace only an exact known JSON duplicate; prose/unknown blocks stay intact.
+  const previousJson=JSON.stringify(before),nextJson=JSON.stringify(after);
+  return {...result,structuredContent:after,content:result.content.map(block=>block.type==='text'&&block.text===previousJson
+    ?{...block,text:nextJson}:block)};
+};
 export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,compactDialect=false}={}) => {
   const schema=structuredClone(source);
   let visited=0;
@@ -3236,11 +3253,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED'){
           if(name!=='get_agent_skill'||typeof materializeEncryptedSkill!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           const descriptor=validateAssistantEncryptedSkillRead(value.structuredContent.localRead);
-          return materializeEncryptedSkill({descriptor,signal});
+          return projectAssistantSkillReadPresentation(await materializeEncryptedSkill({descriptor,signal}),argumentsSnapshot.sections);
         }
-        return { content: value.content.map(({ type, text }) => ({ type, text })),
+        const result={ content: value.content.map(({ type, text }) => ({ type, text })),
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
+        return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
       }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs);
     },
   };

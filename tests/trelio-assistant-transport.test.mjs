@@ -1028,6 +1028,45 @@ test('fresh native input shape is checked before managed preparation and never r
   assert.equal(business,3,'lost mutation result is never replayed');assert.equal(catalogs,8);
 });
 
+test('fresh plain and encrypted skill workers preserve the task state understood by already loaded facades',async()=>{
+  const origin='https://skill-presentation.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'z'.repeat(43)}`,expiresAt:1});
+  let encrypted=false,pending=false,nativeFailure=false,calls=0,hydrations=0;
+  const nativePayload=()=>({assistantExecution:{state:'shared_runtime_setup',accountSetup:{state:'owner_review_required'},
+    ...(pending?{runtimeConsent:{state:'owner_review_required'}}:{})},runtimeExecution:{nativePlan:'unchanged'}});
+  const result=()=>{const structuredContent=nativePayload();return {content:[{type:'text',text:JSON.stringify(structuredContent)}],structuredContent};};
+  const proxy=createAssistantMcpClient({origin,assistantId,deviceId,store,
+    materializeEncryptedSkill:async({signal})=>{signal.throwIfAborted();hydrations++;return result();},
+    httpRequest:async input=>{
+      const reply=result=>({sessionId:'skill-presentation',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'get_agent_skill',description:'Native skill read',
+        inputSchema:{type:'object',properties:{skillId:{type:'string'},sections:{type:'array',items:{type:'string'}}},required:['skillId'],additionalProperties:false}}]});
+      assert.equal(input.payload.method,'tools/call');assert.equal(input.payload.params.name,'get_agent_skill');calls++;
+      if(nativeFailure)return reply({isError:true,content:[{type:'text',text:'ASSISTANT_SKILL_EXECUTION_UNAVAILABLE'}],structuredContent:{code:'ASSISTANT_SKILL_EXECUTION_UNAVAILABLE'}});
+      if(!encrypted)return reply(result());
+      return reply({isError:true,content:[{type:'text',text:'ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED'}],structuredContent:{
+        code:'ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED',localRead:{schemaVersion:1,nativeTool:'get_agent_skill',companyId:randomUUID(),
+          projectId:null,skillId:'synthetic-configured',releaseId:randomUUID(),arguments:{sections:input.payload.params.arguments.sections}}}});
+    }});
+  for(encrypted of [false,true]){
+    const ordinary=await proxy.callTool('get_agent_skill',{skillId:'synthetic-configured',sections:['instructions','execution']});
+    assert.equal(ordinary.structuredContent.assistantExecution.state,'shared_runtime',
+      'old facade sees no setup transition: current worker fixes presentation without restarting Desktop');
+    assert.equal(JSON.parse(ordinary.content[0].text).assistantExecution.state,'shared_runtime','known JSON duplicate agrees');
+    assert.deepEqual(ordinary.structuredContent.runtimeExecution,{nativePlan:'unchanged'});
+    assert.ok(ordinary.structuredContent.assistantExecution.accountSetup,'setup declaration remains available, not erased');
+    assert.equal((await proxy.callTool('get_agent_skill',{skillId:'synthetic-configured',sections:['connection']})).structuredContent.assistantExecution.state,'shared_runtime_setup');
+    pending=true;
+    assert.equal((await proxy.callTool('get_agent_skill',{skillId:'synthetic-configured',sections:['instructions','execution']})).structuredContent.assistantExecution.state,'shared_runtime_setup');
+    pending=false;nativeFailure=true;
+    const failed=await proxy.callTool('get_agent_skill',{skillId:'synthetic-configured',sections:['instructions','execution']});
+    assert.equal(failed.isError,true);assert.equal(failed.structuredContent.code,'ASSISTANT_SKILL_EXECUTION_UNAVAILABLE');nativeFailure=false;
+  }
+  assert.equal(calls,8,'one native read per explicit request; no hidden replay/setup/write');assert.equal(hydrations,3);
+});
+
 test('trusted local Workspace recovery errors keep their closed code across the real MCP wrapper',async()=>{
   const origin='https://local-recovery.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'r'.repeat(43)}`,expiresAt:1});

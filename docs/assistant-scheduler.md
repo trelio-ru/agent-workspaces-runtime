@@ -2747,7 +2747,11 @@ with account setup, or independent pending native runtime consent. Ordinary
 `instructions`/`execution` reads select task presentation even when the skill
 declares login, retaining `skill_run`, task context and Workspace lifecycle.
 The existing list-change notification restores a previous setup view without
-a new chat or replaying a call. Owner request/read-back and the returned
+a new chat or replaying a call. The fresh worker projects the same existing
+execution state for plain and hydrated encrypted results before forwarding;
+already loaded older facades therefore also retain task presentation without
+a Desktop restart. Native descriptors, consent and all command guards remain
+unchanged. Owner request/read-back and the returned
 `skill_account_setup` effect then use the advertised small setup view;
 `get_assistant_status` returns ordinary task tools. This changes presentation
 only: device consent, exact account-login approval, pass/proof, single-attempt
