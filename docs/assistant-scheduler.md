@@ -2740,10 +2740,14 @@ native deadline. The reader selects signed argv by commandId only. An ordinary
 task prefix cannot execute any declared human-input argv. Native exact owner,
 account, device, artifact, human-input grant and the common process/catalogue
 remain separate requirements; parsing a declaration never authorizes a launch.
-Plain-public skill guidance with account setup selects the SAME
-`shared_runtime_setup` presentation even when no unverified-runtime consent is
-pending. The unchanged stdio facade follows that native state through its
-existing list-change notification. Owner request/read-back and the returned
+Native `shared_runtime_setup` describes an available setup/consent path, not
+proof that the selected account requires login. The stdio facade selects the
+SAME small setup presentation only for an explicit `connection` section read
+with account setup, or independent pending native runtime consent. Ordinary
+`instructions`/`execution` reads select task presentation even when the skill
+declares login, retaining `skill_run`, task context and Workspace lifecycle.
+The existing list-change notification restores a previous setup view without
+a new chat or replaying a call. Owner request/read-back and the returned
 `skill_account_setup` effect then use the advertised small setup view;
 `get_assistant_status` returns ordinary task tools. This changes presentation
 only: device consent, exact account-login approval, pass/proof, single-attempt

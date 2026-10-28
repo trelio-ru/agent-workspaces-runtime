@@ -704,7 +704,21 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
             && result?.structuredContent?.assistantExecution?.state==='shared_remote_mcp'
             && result.structuredContent.remoteMcpExecution?.localMcpServer==='trelio-assistant') next='remote_mcp';
           if(message.params.name==='get_agent_skill' && !result?.isError
-            && result?.structuredContent?.assistantExecution?.state==='shared_runtime_setup')next='skill_setup';
+            && result?.structuredContent?.assistantExecution?.state==='shared_runtime_setup'){
+            const execution=result.structuredContent.assistantExecution;
+            // A signed login declaration describes an AVAILABLE setup path;
+            // it does not mean this task needs authentication. Ordinary skill
+            // instructions/execution reads must retain task/Run operations.
+            // Otherwise a configured messenger hides skill_run and finish,
+            // making their valid returned arguments fail against setup's enum.
+            // Connection is the existing explicit setup-read section. Pending
+            // native runtime consent independently still needs the small view;
+            // neither choice approves setup or changes pass/provider authority.
+            const connectionRequested=Array.isArray(message.params.arguments.sections)
+              &&message.params.arguments.sections.includes('connection');
+            next=execution.runtimeConsent?.state==='owner_review_required'
+              ||connectionRequested&&Boolean(execution.accountSetup)?'skill_setup':'task';
+          }
           if(message.params.name==='get_assistant_status' && !result?.isError)next=message.params.arguments.view==='company_context'
             &&result?.structuredContent?.companyContextRead===true&&result.structuredContent.presentationProfile==='company_context'?'company_context':'task';
           respond(result);

@@ -1419,7 +1419,54 @@ test('same task chat can wait for an exact remote owner decision, call once, and
   assert.equal(messages.filter(message=>message.id).length,9);
 });
 
-test('public signed account setup follows task skill discovery through owner approval and its advertised setup continuation',async()=>{
+test('ordinary signed skill reads retain task and Workspace operations instead of selecting optional login',async()=>{
+  const actions=[
+    ['get_agent_skill',{skillId:'synthetic-configured',sections:['instructions','execution']}],
+    ['continue_assistant_workspace_action',{schemaVersion:1,operation:'skill_run',parameters:{}}],
+    ['get_task_sections',{sections:['controls']}],
+    ['prepare_assistant_workspace_run',{clientRequestId:randomUUID()}],
+    ...['status','checkpoint','finish'].map(operation=>['continue_assistant_workspace_action',{schemaVersion:1,operation,parameters:{}}]),
+    // An explicit connection read enters the existing setup view. A later
+    // ordinary read restores task presentation without a new chat or replay.
+    ['get_agent_skill',{skillId:'synthetic-configured',sections:['connection']}],
+    ['get_agent_skill',{skillId:'synthetic-configured',sections:['instructions','execution']}],
+    ['continue_assistant_workspace_action',{schemaVersion:1,operation:'status',parameters:{}}],
+  ];
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},...actions.map(([name,args],index)=>({
+    jsonrpc:'2.0',id:index+2,method:'tools/call',params:{name,arguments:args}}))];
+  const output=new PassThrough();let raw='';output.on('data',chunk=>{raw+=chunk;});const views=[],effects=[];
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createMcp:async({presentationProfile})=>{views.push(presentationProfile);return {callTool:async(name,args)=>{
+      if(name==='get_agent_skill')return {content:[],structuredContent:{assistantExecution:{state:'shared_runtime_setup',
+        accountSetup:{state:'owner_review_required',operation:'setup_skill_account',continuation:'skill_account_setup'}}}};
+      // Exercise the real stdio profile selection with the same closed native
+      // distinction that stranded production calls: setup has no skill_run or
+      // Run lifecycle operation. A hidden-call fallback would fail this check.
+      assert.equal(presentationProfile,'task',`${name}/${args.operation??''} must use the advertised task inventory`);
+      effects.push(args.operation??name);return {content:[],structuredContent:{schemaVersion:1}};
+    }};}});
+  const messages=raw.trim().split('\n').map(line=>JSON.parse(line));
+  assert.equal(messages.filter(message=>message.id).length,frames.length);
+  assert.equal(messages.some(message=>message.error||message.result?.isError),false);
+  assert.deepEqual(effects,['skill_run','get_task_sections','prepare_assistant_workspace_run','status','checkpoint','finish','status']);
+  assert.deepEqual(views,['task','task','task','task','task','task','task','task','skill_setup','task']);
+  assert.equal(messages.filter(message=>message.method==='notifications/tools/list_changed').length,2);
+});
+
+test('native pending runtime consent still selects setup even for instructions-only reads',async()=>{
+  const frames=[{jsonrpc:'2.0',id:1,method:'initialize'},
+    {jsonrpc:'2.0',id:2,method:'tools/call',params:{name:'get_agent_skill',arguments:{skillId:'synthetic-review',sections:['instructions','execution']}}},
+    {jsonrpc:'2.0',id:3,method:'tools/list'}];
+  const output=new PassThrough();let raw='';output.on('data',chunk=>{raw+=chunk;});const views=[];
+  await runAssistantSetupMcp({input:Readable.from(frames.map(frame=>JSON.stringify(frame)+'\n')),output,
+    createMcp:async({presentationProfile})=>{views.push(presentationProfile);return {listTools:async()=>[],
+      callTool:async()=>({content:[],structuredContent:{assistantExecution:{state:'shared_runtime_setup',
+        runtimeConsent:{state:'owner_review_required'}}}})};}});
+  assert.deepEqual(views,['task','skill_setup']);
+  assert.equal(raw.trim().split('\n').map(line=>JSON.parse(line)).filter(message=>message.method==='notifications/tools/list_changed').length,1);
+});
+
+test('public signed account setup follows explicit connection discovery through owner approval and its advertised setup continuation',async()=>{
   const questionId=randomUUID(),clientRequestId=randomUUID(),accountId=randomUUID(),calls=[],views=[];
   const fields={skillId:'synthetic-public-login',projectId:null,releaseId:randomUUID(),accountId,commandId:'login'};
   const parameters={...fields,clientRequestId,ownerDecisionId:questionId,expectedTaskUpdatedAt:new Date().toISOString()};

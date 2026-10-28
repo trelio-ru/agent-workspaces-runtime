@@ -79,7 +79,9 @@ publication tooling также остаются вне этого публичн
 
 - Managed skill consent/setup and company Secret recipes reuse SAME owner/consent/grant engine, signed inspector, account catalogue and bounded protected input; no model argv/import/unattended login. Local setup/status resolve native company UUID/slug references; a sole company is selected in code, without browser/UUID questions. See the local-first scheduler contract.
   Public signed human-input setup also selects the bounded setup view without
-  pending device consent, including encrypted task instructions/execution reads.
+  pending device consent only on an explicit connection-section read; ordinary
+  instructions/execution reads retain task/Run tools. Native pending consent
+  still selects setup independently, including encrypted skill reads.
   Test task discovery → existing list change → exact
   owner decision → advertised setup → task view; never add a hidden-call alias.
 - Модель ассистента: один owner choice/company, fresh execution state перед
