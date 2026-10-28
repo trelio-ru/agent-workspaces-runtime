@@ -204,6 +204,11 @@ post-creation защитой. Сбой удаления блокирует да�
 процесс; crash не выдаётся за успешное сохранение. User browser process/PID из
 claim не убивается. SIGKILL/отключение ОС не позволяет выполнить finally: прежний
 durable auth snapshot сохраняется, unknown orphan state не удаляется вслепую.
+После подтверждённой остановки и сохранения snapshot только удаление собственного
+временного профиля допускает пять стандартных transient retries Node с линейной
+задержкой от 100 мс. Чтение auth/ACL, persist и browser input не
+повторяются; исчерпание cleanup сохраняет исходный отказ. Fixture дополнительно
+различает закрытые стадии snapshot/persist/cleanup, без исключений и путей.
 Synthetic macOS shutdown diagnostics distinguish only fixed AppKit quit states
 (`accepted|refused|not_found|helper_failed`) and a stop-timeout stage. They do not
 add retries, extend the deadline or turn an unconfirmed stop into a saved profile;

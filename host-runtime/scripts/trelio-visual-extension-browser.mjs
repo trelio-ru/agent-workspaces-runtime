@@ -429,10 +429,25 @@ export class ExtensionVisualBrowser {
     // last durable session with an incomplete/guest replacement.
     if (this.#terminal) throw fault(this.#terminal);
     if (!this.#authSnapshotReady) throw fault('storage_unavailable');
-    const snapshot = await snapshotVisualProfile(this.#profile);
-    snapshot.sessionCookies = this.#cookies.validate(this.#sessionCookies);
-    await this.store.write(snapshot); this.#saved = true;
-    await fs.rm(this.#directory, { recursive: true, force: true }); this.#directory = undefined; this.#profile = undefined;
+    let phase = 'snapshot';
+    try {
+      const snapshot = await snapshotVisualProfile(this.#profile);
+      snapshot.sessionCookies = this.#cookies.validate(this.#sessionCookies);
+      phase = 'persist'; await this.store.write(snapshot); this.#saved = true;
+      // Only disposal of this exact stopped, already persisted private profile
+      // may retry. Windows can release Chromium/AV file handles just after the
+      // owned process exits. Node retries only its closed transient removal
+      // errors with five linear 100ms backoffs; auth/ACL reads, writes and input
+      // above never replay. Exhaustion still preserves the original failure.
+      phase = 'cleanup';
+      await fs.rm(this.#directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      this.#directory = undefined; this.#profile = undefined;
+    } catch (error) {
+      // Fixture-only closed evidence distinguishes snapshot/persist/disposal.
+      // Never emit exception prose, profile paths or authentication data.
+      this.testDiagnostics?.({ stage: `stopped_profile_${phase}_failed` });
+      throw error;
+    }
   }
   #finishManual() {
     if (this.#finishing) return this.#finishing;

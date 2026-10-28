@@ -332,10 +332,13 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   // printing forms, credentials, private browser output, URLs or native logs.
   let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;const evidence=[];
   const record=value=>{if(['auth','window_inventory','window','close_queue','close_manual','close_browser','close_snapshot',
-    'browser_exit','browser_quit','browser_stop_timeout','extension_not_ready','extension_not_connected'].includes(value?.stage)){
+    'browser_exit','browser_quit','browser_stop_timeout','extension_not_ready','extension_not_connected',
+    'stopped_profile_snapshot_failed','stopped_profile_persist_failed','stopped_profile_cleanup_failed'].includes(value?.stage)){
     evidence.push(value.stage);if(evidence.length>8)evidence.shift();}};
   const diagnose=()=>{if(reported)return;reported=true;process.stderr.write(JSON.stringify({fixture:'synthetic_visual_auth',
     phase,variant,action,lastState,lastReason,failure:primaryFailure?.code==='ERR_ASSERTION'?'assertion':t.signal.aborted?'timeout':'operation',
+    code:['EBUSY','EPERM','EACCES','ENOENT','ENOTEMPTY','operation_failed','storage_unavailable','VISUAL_STORAGE_CORRUPT'].includes(primaryFailure?.code)?primaryFailure.code:'other',
+    syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
     passwordSubmits,codeSubmits,methodFollows,mailSubmits,evidence})+'\n');};
   const observe=value=>{
     lastState=['ready','error','manual_input_required','saved_unverified'].includes(value?.state)?value.state:'other';
@@ -496,12 +499,13 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     phase='final_close';
     // A failed body must preserve its original assertion, not wait behind the
     // same browser queue which just failed. Abort only this owned test browser;
-    // the separate listener is closed FIRST and also has its own abort path.
+    // cancel its failed producer before waiting for the separate HTTP listener.
+    // The listener also has its own independent abort path.
     let cleanupFailed=false;
+    if(primaryFailure||t.signal.aborted)try{browser.abort();}catch{cleanupFailed=true;}
     try { await ownedServer.stop(); } catch { cleanupFailed=true; }
     try {
-      if(primaryFailure||t.signal.aborted)browser.abort();
-      else await browser.close().catch(() => browser.abort());
+      if(!primaryFailure&&!t.signal.aborted)await browser.close().catch(() => browser.abort());
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     } catch { cleanupFailed=true; } finally {
       t.signal.removeEventListener('abort',diagnose);t.signal.removeEventListener('abort',abortOwned);

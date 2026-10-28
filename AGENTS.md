@@ -365,6 +365,8 @@ publication tooling также остаются вне этого публичн
   helper: abort its failed producer before HTTP-close waits, close listener/sockets
   before browser-queue cleanup, retain the original assertion, and emit only
   fixed phase/completion/state/reason/errno/syscall/stage counts before cleanup.
+  Stopped, already persisted profile disposal has bounded transient rm retries;
+  snapshot/auth/ACL/persist/input never replay. Native fixtures retain strict failure.
   Detached owner descriptor I/O/cleanup share the SAME PID/nonce private mutex
   as mirror readers; no age-based eviction of a live/paused holder. Its empty root
   stays outside the claim. Recheck complete original ownership/lease after
