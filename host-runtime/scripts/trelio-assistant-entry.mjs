@@ -2326,6 +2326,12 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
   // No Run, writable directory, new journal, provider or background model exists.
   const preparations=createWorkspaceFinishOperations({...companyPreparationOptions,toolName:'search'});
   const preparationControllers=new Set(),preparationRequests=new Set();
+  // A large first sync can exhaust its existing read-only child deadline after
+  // retaining encrypted, revision-bound scratch files. A later fresh search
+  // admission may resume it once; this never extends the stopped child's clock,
+  // replays its proof/query, retries a writer, or treats a transport/ACL refusal
+  // as a timeout. Keep the retry state in this same bounded host lifetime.
+  const preparationTimeouts=new Map();
   const heartbeat=createWorkspaceRunHeartbeatManager({...heartbeatOptions,resolveOpenedDirectory:async()=>fail('ASSISTANT_WORKSPACE_REVIEW_REQUIRED'),
     runBridge:async (_origin,args,options)=>{
       const plan=plans.get(path.resolve(options.cwd??''));
@@ -2342,7 +2348,15 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     const {descriptor,binding}=structuredClone(raw);
     const {canonicalJson}=await import('./trelio-company-encryption.mjs');
     const fingerprint=canonicalJson({descriptor,binding}),key=createHash('sha256').update(fingerprint).digest('hex');
-    const result=await preparations.start({key,scope:key,fingerprint,pollAction:{},signal,
+    for(const [oldKey,old] of preparationTimeouts){
+      if(Date.now()-old.endedAt>(companyPreparationOptions.retentionMs??30*60_000)&&!preparations.active(oldKey))
+        preparationTimeouts.delete(oldKey);
+    }
+    const exhausted=preparationTimeouts.get(key);
+    if(exhausted?.failures>1)throw exhausted.error;
+    if(!exhausted&&preparationTimeouts.size>=64)fail('ASSISTANT_WORKSPACE_CAPACITY');
+    let result;
+    try{result=await preparations.start({key,scope:key,fingerprint,pollAction:{},signal,
       execute:async()=>{
         const controller=new AbortController();preparationControllers.add(controller);
         // Normalize a synchronous launcher refusal too: the owned controller
@@ -2355,8 +2369,18 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
             fail('ASSISTANT_MCP_INVALID_RESPONSE');
           return {prepared:true};
         }finally{preparationRequests.delete(pending);preparationControllers.delete(controller);}
-      }});
-    if(result.state==='completed'&&result.prepared===true)return true;
+      }});}catch(error){
+      if(error?.code!=='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT')throw error;
+      const previous=preparationTimeouts.get(key);
+      // Concurrent polls can observe the SAME settled failure. Count that
+      // child once, not once per waiter. The common registry disposes a failed
+      // entry only on the next start, after a new native search admission.
+      const failures=previous?.error===error?previous.failures:(previous?.failures??0)+1;
+      preparationTimeouts.set(key,{error,failures,endedAt:Date.now()});
+      if(failures>1)throw error;
+      return false;
+    }
+    if(result.state==='completed'&&result.prepared===true){preparationTimeouts.delete(key);return true;}
     if(result.state!=='running')fail('ASSISTANT_MCP_INVALID_RESPONSE');
     return false;
   },async execute(raw,{signal}={}) {
@@ -2414,6 +2438,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     for(const directory of plans.keys())heartbeat.stop(directory);
     for(const controller of preparationControllers)controller.abort();
     await Promise.allSettled([...preparationRequests]);
+    preparationTimeouts.clear();
   }};
 };
 
@@ -2454,10 +2479,20 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     };
     await assertCurrent(signal);
     if(request.operation==='company_context_prepare'){
-      const context=await loadContext();
-      const result=await context.prepareTrelioLocalCompanyContext(current.identity.origin,request.descriptor.companySlug,{signal});
-      await assertCurrent(signal);
-      return result;
+      try{
+        const context=await loadContext();
+        const result=await context.prepareTrelioLocalCompanyContext(current.identity.origin,request.descriptor.companySlug,{signal});
+        await assertCurrent(signal);
+        return result;
+      }catch(error){
+        // Only the exact original signal reason proves this owned read child
+        // reached its deadline. A network timeout, private-worker failure,
+        // explicit cancellation, revoked recipient or unknown error retains its
+        // own refusal and cannot authorize another preparation attempt.
+        if(signal?.aborted&&error===signal.reason&&error?.name==='TimeoutError')
+          fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');
+        throw error;
+      }
     }
     const transport=await loadTransport();
     return transport.materializeAssistantEncryptedCompanyContext({origin:current.identity.origin,descriptor:request.descriptor,

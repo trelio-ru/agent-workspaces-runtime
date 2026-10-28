@@ -1396,6 +1396,15 @@ invocation, without replaying the consumed MCP proof or a cached business answer
 Recipient/pass/ACL/manifest and late native fences remain independent. EOF aborts
 only the host's preparation children and awaits cleanup; encrypted scratch may
 resume normally, but an incomplete mirror is never published or searched.
+If the exact owned preparation signal expires, preserve a dedicated closed timeout
+code instead of reporting an assistant-setup failure. The SAME short-wait registry
+may resume encrypted scratch in one new bounded readonly child, only after another
+fresh native search admission. Concurrent waiters count one stopped child; a second
+expired attempt is terminal and cannot launch a third child. Neither child's
+original deadline is extended, no query/proof/writer is replayed, and transport,
+provider timeout, cancellation, ACL/recipient or unknown failures never enter this
+recovery. Host-lifetime retry metadata follows the SAME bounded retention; it is
+not a second journal or a completed mirror/answer.
 Tests cover actual serial MCP/current-child pipes, native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
 
