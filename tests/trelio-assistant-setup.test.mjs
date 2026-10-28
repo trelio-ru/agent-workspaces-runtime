@@ -1121,7 +1121,7 @@ test('assistant Workspace preflight binds own protected pass and server Run befo
 });
 
 
-test('assistant draft and pause reach the shared writer without a handoff-only outcome',async t=>{
+test('assistant lifecycle uses the native target scope and keeps draft/pause outcome-free',async t=>{
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const {assistantTaskStorageDirectory}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {validateHandoffTaskOutcome}=await import('../host-runtime/scripts/trelio-workspace.mjs');
@@ -1137,9 +1137,16 @@ test('assistant draft and pause reach the shared writer without a handoff-only o
     workspaceId:p.workspaceId,runId:p.runId,workspaceDirectory:directory}),{mode:0o600});
   const active={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,
     companyId:scope.companyId,taskId:scope.taskId,passId:scope.passId,threadId:randomUUID(),deliveryId:randomUUID(),bindingId:randomUUID(),bindingRevision:0};
-  let calls=0;
+  let calls=0,targetReads=0,targetScope='task';
   const common={resolveWorkspaceBridgeConfigDirectory:()=>config,requireToken:async()=>({}),
-    request:async()=>({run:{id:p.runId,workspaceId:p.workspaceId}}),
+    request:async(_origin,_token,pathname)=>{
+      if(pathname===`/api/agent-workspaces/workspaces/${p.workspaceId}`){
+        targetReads++;
+        return {workspace:{id:p.workspaceId,scopeType:targetScope,
+          scopeKey:targetScope==='task'?`task:${scope.taskId}`:`workspace:${p.workspaceId}`},company:{id:scope.companyId}};
+      }
+      return {run:{id:p.runId,workspaceId:p.workspaceId}};
+    },
     readBoundedResponseBuffer:async value=>Buffer.from(JSON.stringify(value)),ensurePrivateDirectory:async()=>{},
     formatBridgeCommandError:error=>String(error.code??'UNKNOWN'),runWorkspaceCommand:async args=>{
       calls++;
@@ -1147,22 +1154,23 @@ test('assistant draft and pause reach the shared writer without a handoff-only o
       const checkpointType=args[0]==='finish'?'handoff':args[0]==='pause'?'blocker':option('type');
       // Exercise the production shared writer's validator, not another copy of
       // its outcome policy. The old adapter rejects draft/pause at this point.
-      validateHandoffTaskOutcome({scopeType:'task',checkpointType,taskOutcome:option('task-outcome'),openQuestions:[]});
-      assert.equal(option('task-outcome'),checkpointType==='handoff'?'no_status_change':'');
+      validateHandoffTaskOutcome({scopeType:targetScope,checkpointType,taskOutcome:option('task-outcome'),openQuestions:[]});
+      assert.equal(option('task-outcome'),checkpointType==='handoff'&&targetScope==='task'?'no_status_change':'');
       process.stdout.write('shared lifecycle validation passed');
     }};
   const withProfile=async action=>action({identity,host:{readActivePass:async()=>active},prepareWorkspaceRun:async()=>null});
-  for(const [operation,parameters] of [
+  for(const selectedScope of ['task','project','company'])for(const [operation,parameters] of [
     ['checkpoint',{type:'draft',summary:'Synthetic durable draft'}],
     ['pause',{summary:'Synthetic blocker draft',questions:['Synthetic decision'],nextAction:'Review synthetic decision'}],
     ['checkpoint',{type:'handoff',summary:'Synthetic completed material',evidence:['Synthetic check'],filePaths:['WORK.md'],nextAction:'Read result'}],
     ['finish',{summary:'Synthetic completed material',evidence:['Synthetic check'],filePaths:['WORK.md'],nextAction:'Read result',taskOutcome:'no_status_change'}],
   ]){
+    targetScope=selectedScope;
     const result=await executeAssistantWorkspacePlan({...plan,localAction:{schemaVersion:1,operation,runIdentity,parameters}},
       {withProfile,loadCommon:async()=>common});
     assert.equal(result.stdout,'shared lifecycle validation passed');
   }
-  assert.equal(calls,4);
+  assert.equal(calls,12);assert.equal(targetReads,6,'only handoffs read the native target type');
 });
 
 test('assistant reuses the shared local recovery and keeps heartbeat/status on its registered root after restart',async t=>{
