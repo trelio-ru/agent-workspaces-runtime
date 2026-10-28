@@ -6,18 +6,25 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 
 test('stopped browser joins native stdio closure after main exit without extending its stop deadline', { timeout: 5000 }, async () => {
-  // A real descendant inherits the launched child's stderr. Node reports the
-  // main exit first; profile I/O must still wait for that owned pipe to close.
-  // Synthetic children receive no runtime environment, account or credentials.
-  const child = spawn(process.execPath, ['-e', `const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},700)'],{stdio:['ignore','ignore',2],env:{}});process.exit(0);`], { stdio: ['ignore', 'ignore', 'pipe'], env: {} });
+  // Exercise the actual native pipe on every OS. Windows can deliver 'close'
+  // in the same event-loop batch as 'exit'; a POSIX descendant's delayed pipe
+  // inheritance is not a portable assertion about Windows process lifetime.
+  const child = spawn(process.execPath, ['-e', "process.stderr.write('SYNTHETIC_NATIVE_PIPE');"], { stdio: ['ignore', 'ignore', 'pipe'], env: {} });
+  child.stderr.resume();
   let closed = false;
   child.once('close', () => { closed = true; });
   try {
     const [code] = await once(child, 'exit'); assert.equal(code, 0);
-    assert.equal(closed, false, 'native exit alone is not a closed profile boundary');
     const deadline = Date.now() + 2500;
     await waitVisualBrowserStopped(child, () => closed, deadline);
     assert.equal(closed, true); assert.ok(Date.now() < deadline);
+    // Control only the close observation for the separate ordering invariant.
+    // Even an already-exited child must not permit profile I/O while that
+    // boundary is still pending. This does not weaken the real browser tests.
+    let observed = false, settled = false;
+    const pending = waitVisualBrowserStopped(child, () => observed, deadline).then(() => { settled = true; });
+    await Promise.resolve(); assert.equal(settled, false);
+    observed = true; await pending; assert.equal(settled, true);
     await assert.rejects(waitVisualBrowserStopped(child, () => false, Date.now()), { code: 'operation_failed' });
   } finally { child.stderr.destroy(); if (child.exitCode === null) child.kill(); }
 });
