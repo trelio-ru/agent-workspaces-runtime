@@ -169,6 +169,15 @@ test('a long Desktop update yields before task claim so the next worker keeps it
   assert.deepEqual(result,{schemaVersion:1,state:'idle'});assert.equal(closed,true);
 });
 
+test('Desktop servicing never bypasses the independent quota pause or stops model-free polling',async()=>{
+  const effects=[];
+  const result=await runAssistantBackgroundTick({
+    pluginMaintenance:async()=>({state:'disabled'}),codexMaintenance:async()=>{effects.push('update');return {state:'updated'};},
+    createHost:async()=>({codexUsage:async()=>{effects.push('quota');return {blocked:true};},
+      coordinator:{pollOnce:async()=>{effects.push('poll');},workOnce:()=>assert.fail('Desktop update cannot clear quota admission')},close:async()=>{effects.push('close');}})});
+  assert.equal(result.reason,'codex_usage_limited');assert.deepEqual(effects,['update','quota','poll','close']);
+});
+
 test('a failed Desktop journal survives metadata health checks until its actual version/GUI/probe recovers',async()=>{
   const f=fixture();f.state={...snapshot(),code:'runtime_update_failed'};
   const output=await executeAssistantRuntimeRequest({operation:'health_check'},

@@ -2236,7 +2236,7 @@ test('quota pause keeps model-free polling and resumes only after a fresh positi
   let polls=0,works=0,closed=0;let blocked=true;
   const createHost=async()=>({codexUsage:async()=>({blocked}),close:async()=>{closed++;},coordinator:{
     pollOnce:async()=>{polls++;},workOnce:async()=>{works++;return null;},dispatchStatus:async()=>({state:'idle',reasons:[]})}});
-  const options={createHost,pluginMaintenance:async()=>({state:'current'})};
+  const options={createHost,codexMaintenance:async()=>({state:'disabled'}),pluginMaintenance:async()=>({state:'current'})};
   assert.equal((await runAssistantBackgroundTick(options)).reason,'codex_usage_limited');
   assert.equal(polls,1);assert.equal(works,0);assert.equal(closed,1);
   blocked=false;await runAssistantBackgroundTick(options);assert.equal(works,1);assert.equal(closed,2);
