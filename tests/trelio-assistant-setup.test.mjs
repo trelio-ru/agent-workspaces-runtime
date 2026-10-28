@@ -2210,3 +2210,13 @@ test('real stdio facade and current worker route both intake methods through SAM
  assert.equal(bodyReads,1);assert.equal(replies,1);assert.ok(!raw.includes(credential));
  active={kind:'task'};await assert.rejects(executeAssistantRuntimeRequest({operation:'call',name:'resolve_assistant_intake',arguments:{decision:'reply_owner'}},dependencies),/CAPABILITY_UNAVAILABLE/);
 });
+
+test('quota pause keeps model-free polling and resumes only after a fresh positive observation',async()=>{
+  let polls=0,works=0,closed=0;let blocked=true;
+  const createHost=async()=>({codexUsage:async()=>({blocked}),close:async()=>{closed++;},coordinator:{
+    pollOnce:async()=>{polls++;},workOnce:async()=>{works++;return null;},dispatchStatus:async()=>({state:'idle',reasons:[]})}});
+  const options={createHost,pluginMaintenance:async()=>({state:'current'})};
+  assert.equal((await runAssistantBackgroundTick(options)).reason,'codex_usage_limited');
+  assert.equal(polls,1);assert.equal(works,0);assert.equal(closed,1);
+  blocked=false;await runAssistantBackgroundTick(options);assert.equal(works,1);assert.equal(closed,2);
+});

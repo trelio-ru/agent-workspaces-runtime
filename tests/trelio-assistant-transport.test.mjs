@@ -3649,3 +3649,20 @@ test('multi-task intake read-back preserves an exact original partition and reje
   }
   assert.equal(calls,7,'each malformed read has one attempt, no mutation or automatic retry');
 });
+
+test('Codex usage crosses only the fixed authenticated device route with a strict independent CAS',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  const credential=`tda_${'x'.repeat(43)}`;await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
+  let revision=0,calls=0,snapshot=null;
+  const http=createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;assert.equal(url,`${origin}/api/digital-assistants/runtime/codex-usage`);
+    assert.equal(options.headers.authorization,`Bearer ${credential}`);
+    if(options.method==='POST'){const body=JSON.parse(options.body);assert.equal(body.expectedRevision,revision);revision++;snapshot=body.snapshot;}
+    return new Response(JSON.stringify({revision,blocked:snapshot?.state==='blocked',snapshot,checkedAt:snapshot?new Date().toISOString():null}),{headers:{'content-type':'application/json'}});
+  }});
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http});
+  assert.equal((await client.readCodexUsage()).snapshot,null);
+  const input={clientRequestId:randomUUID(),expectedRevision:0,snapshot:{state:'blocked',windows:[]}};
+  assert.equal((await client.reportCodexUsage(input)).blocked,true);assert.equal(calls,2);
+  await assert.rejects(client.reportCodexUsage({...input,accountId:'PRIVATE'}));assert.equal(calls,2);
+});

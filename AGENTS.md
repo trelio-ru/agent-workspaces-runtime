@@ -944,3 +944,9 @@ Folder planner и apply dispatcher используют общий exact client 
 Public plugin shell для этого клиента не меняется.
 Потерянная MCP-сессия восстанавливается только по полному pre-dispatch отказу
 из этого же контракта: один handshake/retry, без OAuth и blind mutation replay.
+
+- Codex quotas use model-free native account/rate-limit reads and independent
+  device metering CAS. Below-10 notices default on per owner assistant setting;
+  hard blocks/recovery stay mandatory. Never infer recovery from reset clocks
+  or percentages, purchase credits/reset limits, or replay unknown work.
+  See [metering](docs/assistant-scheduler.md#codex-usage-monitoring).

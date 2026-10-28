@@ -610,3 +610,44 @@ test('owner reply recovery reads one completed exact native call, never invokes 
  }
  turns=[original,original];assert.equal(await readAssistantCodexOwnerReply(threadId,deliveryId,pass,options),null);
 });
+
+test('model-free Codex usage reads exact native account and quotas without a model or private fields',async()=>{
+  const {readAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex.mjs');
+  const calls=[];
+  const value=await readAssistantCodexUsage({executable:process.execPath,environment:{},spawnProcess:nativeRpc(request=>{
+    calls.push(request.method);
+    if(request.method==='account/read')return {result:{account:{type:'chatgpt',email:'PRIVATE'},requiresOpenaiAuth:true}};
+    assert.equal(request.method,'account/rateLimits/read');
+    return {result:{ordinaryUsageAllowed:true,accountId:'PRIVATE',rateLimits:{primary:{usedPercent:1}},rateLimitsByLimitId:{codex:{
+      primary:{usedPercent:91,windowDurationMins:10080,resetsAt:1800000000},secondary:{usedPercent:95,windowDurationMins:300,resetsAt:1799999999},
+      credits:{balance:'PRIVATE',hasCredits:false,unlimited:false},limitName:'PRIVATE'}}}};
+  })});
+  assert.deepEqual(calls,['account/read','account/rateLimits/read']);assert.equal(value.state,'available');
+  assert.deepEqual(value.windows.map(w=>[w.remainingPercent,w.windowDurationMins]),[[9,10080],[5,300]]);
+  assert.ok(!JSON.stringify(value).includes('PRIVATE'));
+});
+
+test('quota denial and recovery use native permission, never percent, timer or another model bucket',async()=>{
+  const {normalizeAssistantCodexUsage:project,validateAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex-usage.mjs');
+  const bucket={primary:{usedPercent:100,windowDurationMins:300,resetsAt:1},credits:{hasCredits:false,unlimited:false}};
+  const value={rateLimits:bucket,ordinaryUsageAllowed:false};
+  assert.equal(project(value).state,'blocked');
+  assert.equal(project({...value,ordinaryUsageAllowed:true}).state,'available');
+  assert.equal(project({...value,ordinaryUsageAllowed:null}).state,'unknown');
+  assert.equal(project({...value,rateLimits:{...bucket,credits:{hasCredits:true,unlimited:false}}}).state,'available');
+  assert.equal(project({...value,ordinaryUsageAllowed:true,rateLimits:{...bucket,spendControlReached:true}}).state,'blocked');
+  assert.equal(project({...value,rateLimitsByLimitId:{codex:{},other:{...bucket,spendControlReached:true}}}).state,'unknown');
+  assert.equal(project({...value,rateLimits:{...bucket,primary:{usedPercent:101}}}).windows[0].remainingPercent,0);
+  assert.throws(()=>project({...value,rateLimits:{...bucket,primary:{usedPercent:-1}}}));
+  assert.throws(()=>validateAssistantCodexUsage({state:'available',windows:[],accountId:'PRIVATE'}));
+});
+
+test('usage observer retains confirmed block after native failure or unknown CAS and never retries POST',async()=>{
+  const {maintainAssistantCodexUsage}=await import('../host-runtime/scripts/trelio-assistant-codex-usage.mjs');
+  let writes=0;const current={revision:1,checkedAt:null,snapshot:null,blocked:true};
+  const client={readCodexUsage:async()=>current,reportCodexUsage:async()=>{writes++;throw new Error('PRIVATE');}};
+  assert.equal((await maintainAssistantCodexUsage({client,readUsage:async()=>{throw new Error('PRIVATE');}})).blocked,true);
+  assert.equal(writes,0);
+  assert.equal((await maintainAssistantCodexUsage({client,readUsage:async()=>({state:'available',windows:[]})})).blocked,true);
+  assert.equal(writes,1);
+});

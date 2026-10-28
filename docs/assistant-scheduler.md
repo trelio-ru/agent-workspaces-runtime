@@ -2975,3 +2975,38 @@ locally inspected argv. The SAME account/package/process/secret-exec engine
 checks it again and consumes one native grant late; provider output is discarded.
 Changed recipe, consent, recipient, connection/binding/config, ACL or Run refuses
 before consume. Inspection is never login or business-processing evidence.
+
+<a id="codex-usage-monitoring"></a>
+
+## Codex usage monitoring
+
+The existing signed background tick calls fixed native `account/read` and
+`account/rateLimits/read` through the SAME bounded App Server adapter, before
+model work. API-key/Bedrock report unsupported; unavailable data is not zero.
+The pure projection prefers `rateLimitsByLimitId`, falls back to `rateLimits`,
+and retains every returned primary/secondary duration/reset/percentage. Either
+slot can be the 300-minute or 10080-minute window. Never export account/email,
+plan/limit labels, balances, reset credits, upsells or native errors.
+
+The SAME device client owns fixed GET/POST `/runtime/codex-usage`, strict snapshot
+validation and independent revision/request UUID. No MCP/model tool, secret,
+owner click, plugin/hook change or business pass is needed. Backend precedes
+this runtime in rollout. A failed POST is not retried; later polling first reads
+native state and the durable CAS. A native read failure preserves the previous
+observation, especially its confirmed block. An unavailable device read cannot
+guess that an old block disappeared. No local quota file or credential is added.
+
+Backend owns default-on per-assistant below-10 preferences, once-per-window
+receipts, mandatory block/recovery notices, owner ACL and messenger late guards.
+An ordinary quota bucket alone can pause the whole device; another model bucket
+must not block otherwise available models. Included usage denial plus explicit
+absence of credits confirms a pause; available paid credits are considered.
+Native spend-control/workspace-credit denials take priority. Percent/reset clocks
+never prove a block or recovery. Unknown/unsupported readings do not clear a
+confirmed pause, or any independent login/hook/dispatch latch.
+
+During a confirmed pause the tick continues model-free source polling, preserves
+all queue/pass/native-start/unknown-operation receipts and skips model work.
+After a fresh positive observation the ordinary coordinator resumes; this is
+never permission to replay an uncertain external action. Observation happens
+on the existing five-minute supervisor cycle and never wakes a model for itself.

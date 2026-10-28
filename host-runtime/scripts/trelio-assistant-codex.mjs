@@ -1,3 +1,4 @@
+import { normalizeAssistantCodexUsage } from './trelio-assistant-codex-usage.mjs';
 /** Native Codex adapter: exact IDs, stdio-only prompts, no transcript cache. */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -182,6 +183,17 @@ const readNative = async (threadId, project, options = {}) => {
     } catch { abort(); }
   });
 };
+
+// Fixed model-free native reads share the existing executable discovery, account,
+// deadline and bounded RPC pipes. No HTTP/token/rollout-file fallback is allowed.
+export const readAssistantCodexUsage = (options = {}) => readNative(null, async (_thread,request) => {
+  const account=await request('account/read',{refreshToken:false});
+  if(!account||!Object.hasOwn(account,'account'))fail('ASSISTANT_CODEX_USAGE_UNAVAILABLE');
+  if(account.account===null)return {state:'unknown',windows:[]};
+  if(['apiKey','amazonBedrock'].includes(account.account.type))return {state:'unsupported',windows:[]};
+  if(account.account.type!=='chatgpt')return {state:'unknown',windows:[]};
+  return normalizeAssistantCodexUsage(await request('account/rateLimits/read',{}));
+},options);
 
 export const readAssistantCodexMetadata = (threadId, options) => readNative(id(threadId), thread => ({ threadId: thread.id, cwd: thread.cwd,
   modelId:thread.model??null,effortLevel:thread.reasoningEffort??null }), options);

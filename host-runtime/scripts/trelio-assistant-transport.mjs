@@ -1,3 +1,4 @@
+import { validateAssistantCodexUsage } from './trelio-assistant-codex-usage.mjs';
 /** Fixed assistant-device transport. No human OAuth/cookie or arbitrary HTTP. */
 import path from 'node:path';
 import { getHostRuntimeVersion } from './trelio-component-versions.mjs';
@@ -273,6 +274,13 @@ const healthState = value => {
     || value.latchedCodes.some(code=>!['codex_auth_required','hook_review_required','dispatch_review_required'].includes(code))) fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   return {revision:revision(value.revision),code:value.code,generation:revision(value.generation),latchedCodes:[...value.latchedCodes]};
 };
+const codexUsageState=value=>{
+  if(!object(value)||Object.keys(value).sort().join(',')!=='blocked,checkedAt,revision,snapshot'||typeof value.blocked!=='boolean'
+    ||value.checkedAt!==null&&(typeof value.checkedAt!=='string'||!Number.isFinite(Date.parse(value.checkedAt)))
+    ||(value.snapshot===null)!==(value.checkedAt===null))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+  return {revision:revision(value.revision),snapshot:value.snapshot===null?null:validateAssistantCodexUsage(value.snapshot),checkedAt:value.checkedAt,blocked:value.blocked};
+};
+
 const sourceHealthCodes=Object.freeze(['ready','setup_required','authentication_required','scope_changed','history_gap','read_failed']);
 const sourceAcknowledgementHealthCodes=Object.freeze(['ready','acknowledgement_uncertain','acknowledgement_blocked']);
 const sourceHealthState=value=>{
@@ -297,6 +305,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
   if (typeof fetchImpl !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
   const routes = new Map([
     ['pair', ['POST','/pairings']], ['exchange',['POST','/pairings/exchange']],
+    ['usageRead',['GET','/runtime/codex-usage']], ['usageReport',['POST','/runtime/codex-usage']],
     ['healthRead',['GET','/runtime/health']], ['healthReport',['POST','/runtime/health']],
     ['heartbeat',['POST','/runtime/heartbeat']], ['companies',['GET','/runtime/companies']],
     ['ownerIdentities',['GET','/runtime/owner-identities']],
@@ -2504,6 +2513,16 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       if(result.revision!==body.expectedRevision+1||result.sourceRevision!==body.sourceRevision||result.code==='not_checked')
         fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return result;
+    },
+    async readCodexUsage(signal) {
+      return codexUsageState(await call('usageRead',undefined,signal));
+    },
+    async reportCodexUsage(input,signal) {
+      if(!object(input)||Object.keys(input).sort().join(',')!=='clientRequestId,expectedRevision,snapshot')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const body={clientRequestId:id(input.clientRequestId),expectedRevision:revision(input.expectedRevision),snapshot:validateAssistantCodexUsage(input.snapshot)};
+      const value=codexUsageState(await call('usageReport',body,signal));
+      if(value.revision!==body.expectedRevision+1)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return value;
     },
     async readHealth(signal) {
       const value=await call('healthRead',undefined,signal),current=healthState(value);

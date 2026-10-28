@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { maintainAssistantCodexUsage } from './trelio-assistant-codex-usage.mjs';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolveHostRuntimeLoader, prepareHostRuntimeUpgrade } from './trelio-host-runtime-recovery.mjs';
@@ -1208,6 +1209,10 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       ...(dependencies.now?{now:dependencies.now}:{}),...(dependencies.notify?{notify:dependencies.notify}:{}),
     });
     return {identity:stableIdentity,coordinator,
+      async codexUsage(signal){
+        return invoke(live=>maintainAssistantCodexUsage({client:live,signal,
+          readUsage:()=>nativeRuntime.readAssistantCodexUsage({signal})}));
+      },
       // Every immutable worker owns its diagnostic boundary. An already live
       // supervisor may still run an older module and cannot know a new cause.
       reportDispatchFailure:error=>invoke(live=>reportAssistantMaintenanceFailure(error,live)),async close(){
@@ -1375,7 +1380,15 @@ export const runAssistantBackgroundTick = async ({createHost=createAssistantRunt
       return {schemaVersion:1,state:'blocked',reason:update.state};
     }
     if(update?.failedVersion||update?.state==='rolled_back')await reportDispatch(null,{code:'ASSISTANT_PLUGIN_UPDATE_FAILED'});
+    let usage=null;
+    try{usage=await host.codexUsage?.(signal);}catch{
+      // An unavailable usage read cannot erase an already stored quota block.
+      // Polling remains safe, but a fresh worker must not guess it can start.
+      await host.coordinator.pollOnce(signal);
+      return {schemaVersion:1,state:'blocked',reason:'codex_usage_unavailable'};
+    }
     await host.coordinator.pollOnce(signal);
+    if(usage?.blocked)return {schemaVersion:1,state:'blocked',reason:'codex_usage_limited'};
     let done=false,pollFailure=null;
     const work=host.coordinator.workOnce(signal).then(value=>({value}),error=>({error})).finally(()=>{done=true;});
     while(!done && !signal?.aborted) {
