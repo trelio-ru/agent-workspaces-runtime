@@ -69,6 +69,10 @@ before the slower unrelated groups. Synthetic filesystem expectations use
 canonical Windows paths and bounded short fixture homes, not production path
 exceptions. Classic-console readiness shares its original startup deadline;
 cleanup of an owned terminated helper preserves the original assertion.
+The synthetic large PowerShell carrier uses the real scheduler's disabled module
+auto-discovery and fixed Utility manifest import. Its original 40s pipe deadline
+and one-launch/JSON assertions remain unchanged; failures expose fixed startup
+stages only, never raw stderr or input.
 The positive classic-console fixture explicitly launches inbox `conhost.exe`
 for its synthetic client, independently verifies its HWND/class and waits for
 that client's own exit code. This per-launch selection follows the

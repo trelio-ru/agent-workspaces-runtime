@@ -131,8 +131,37 @@ test('native helper uses constant code, JSON stdin, bounded closed output and no
 
 test('Windows executes the large constant-code carrier and still reads the original JSON stdin exactly once',
   {skip:process.platform!=='win32'},async()=>{
-    const script='# synthetic padding '+ 'x'.repeat(13_000)+`\n$p=[Console]::In.ReadToEnd()|ConvertFrom-Json\nif($p.operation -cne 'status'){exit 7}\n[Console]::Out.Write('${JSON.stringify(registered())}')`;
-    assert.deepEqual(await runAssistantWindowsBackgroundNative({operation:'status'},{script}),registered());
+    // Match the real scheduler's fixed Utility manifest import. Letting this
+    // synthetic carrier auto-discover ConvertFrom-Json scans the hosted user's
+    // module catalogue, a different startup path from production. The original
+    // 40s pipe deadline, single launch and exact JSON assertion stay unchanged.
+    const script='# synthetic padding '+ 'x'.repeat(13_000)+String.raw`
+[Console]::Error.WriteLine('TRELIO_CARRIER_STAGE script')
+$PSModuleAutoLoadingPreference='None'
+Microsoft.PowerShell.Core\Import-Module -Name ([System.IO.Path]::Combine($PSHOME,'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1')) -ErrorAction Stop
+[Console]::Error.WriteLine('TRELIO_CARRIER_STAGE input')
+$p=[Console]::In.ReadToEnd()|ConvertFrom-Json
+if($p.operation -cne 'status'){exit 7}
+[Console]::Error.WriteLine('TRELIO_CARRIER_STAGE parsed')
+[Console]::Out.Write('${JSON.stringify(registered())}')`;
+    let phase='spawn',elapsedMs=0,launches=0,buffer='';const started=performance.now();
+    const spawnProcess=(executable,args,options)=>{
+      launches++;
+      // Observe only fixed fixture stages, never raw stderr or command input.
+      // This reader belongs to the test; the production pipe still ignores it.
+      const child=spawn(executable,args,{...options,stdio:['pipe','pipe','pipe']});
+      child.stderr.setEncoding('utf8');child.stderr.on('data',chunk=>{
+        buffer=(buffer+chunk).slice(-1024);let at;
+        while((at=buffer.indexOf('\n'))>=0){const line=buffer.slice(0,at).trim();buffer=buffer.slice(at+1);
+          const match=/^TRELIO_CARRIER_STAGE (script|input|parsed)$/.exec(line);
+          if(match){phase=match[1];elapsedMs=Math.floor(performance.now()-started);}}
+      });
+      return child;
+    };
+    let result;
+    try{result=await runAssistantWindowsBackgroundNative({operation:'status'},{script,spawnProcess});}
+    catch(error){assert.fail(JSON.stringify({code:/^ASSISTANT_BACKGROUND_[A-Z_]+$/.test(error.code??'')?error.code:'FIXTURE_FAILED',phase,elapsedMs,launches}));}
+    assert.deepEqual(result,registered());assert.equal(launches,1);assert.equal(phase,'parsed');
   });
 
 test('Desktop close reaches the same bounded native pipe once, without PowerShell or a window-only fallback',async()=>{

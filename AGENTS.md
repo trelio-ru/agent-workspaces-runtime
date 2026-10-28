@@ -876,6 +876,8 @@ publication tooling также остаются вне этого публичн
   assertion remains enforced. Diagnose timeout with closed stage/counters, never private output.
   Saved-handoff fixture cleanup retries only its disposable cwd after every
   child has settled and its server closed; no bridge request or assertion retry.
+  Synthetic Windows carrier uses the scheduler's exact Utility manifest import,
+  not module auto-discovery; fixed phase diagnostics never extend its deadline.
 
 
 - Verified owner source intake is taskless, uses the SAME observer/proof/native
