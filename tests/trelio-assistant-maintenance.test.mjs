@@ -125,13 +125,28 @@ test('Desktop production composition requires its own consent and SAME coordinat
     readActivation:async()=>null,readActivePass:async()=>null,codexUpdatePackagePath:async()=>'C:\\private\\desktop.msix',
     withSetupLock:async action=>{setup++;inside=true;try{return await action();}finally{inside=false;}},writeCodexUpdate:async()=>{}};
   const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{idle++;return action(async()=>{});}}};
-  const options={platform:'win32',context:async action=>action({identity},local),
+  const options={platform:'win32',context:async action=>action({identity,readHealth:async()=>({code:'ready'})},local),
     nativeUpdate:async()=>{assert.equal(inside,true);reads++;throw Error('native unavailable');}};
   assert.equal((await runProductionAssistantCodexMaintenance(runtime,options)).state,'disabled');assert.equal(reads,0);assert.equal(idle,0);
   enabled=true;await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
   assert.equal(idle,1);assert.equal(setup,1);assert.equal(reads,1);
   local.readActivePass=async()=>({kind:'task'});reads=0;
   await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options));assert.equal(reads,0,'native operation must recheck current pass');
+});
+
+test('live device revocation during download blocks preparation and every GUI/install effect',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  let authorized=true,healthReads=0;const native=[];
+  const client={identity,readHealth:async()=>{healthReads++;if(!authorized)throw Object.assign(Error(),{code:'DIGITAL_ASSISTANT_DEVICE_REVOKED'});return {};}};
+  const host={readCodexUpdatesEnabled:async()=>true,readCodexUpdate:async()=>null,writeCodexUpdate:async()=>{},
+    readActivation:async()=>null,readActivePass:async()=>null,codexUpdatePackagePath:async()=>'C:\\private\\desktop.msix',withSetupLock:async action=>action()};
+  const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>action(async()=>{})}};
+  await assert.rejects(runProductionAssistantCodexMaintenance(runtime,{platform:'win32',context:async action=>action(client,host),
+    nativeUpdate:async operation=>{native.push(operation);return {version:'26.100.0.0',architecture:'x64'};},
+    download:async()=>{authorized=false;return {etag:'"new"',sha256:'a'.repeat(64)};},
+    desktop:async()=>assert.fail('revoked device cannot close or start Desktop'),probe:async()=>assert.fail('revocation is not readiness'),
+  }),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  assert.deepEqual(native,['inspect']);assert.ok(healthReads>=3,'native liveness is rechecked after the asynchronous preparation');
 });
 
 test('an unfinished Desktop journal excludes plugin servicing before the same tick resumes Desktop recovery',async()=>{

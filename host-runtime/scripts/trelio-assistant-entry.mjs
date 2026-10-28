@@ -1387,6 +1387,12 @@ export const runProductionAssistantCodexMaintenance = async (runtime,{context=pr
       if(['assistantId','deviceId','origin'].some(key=>client.identity[key]!==runtime.identity[key])
         ||['pending_owner','quiescing'].includes((await host.readActivation())?.stage)
         ||await host.readActivePass()!==null||await host.readCodexUpdatesEnabled()!==true)fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      // Desktop servicing has its own consent and can outlive a normal tick.
+      // A local opt-in/identity never proves that this device is still live:
+      // recheck the model-free native control plane before every effect, even
+      // when plugin maintenance was disabled or the download took minutes.
+      // Revocation, pause, owner removal and expiry must stop OS mutations.
+      await client.readHealth(signal);signal.throwIfAborted();
     };
     const packagePath=await host.codexUpdatePackagePath();
     const update=(operation,extra={})=>nativeUpdate(operation,{environment,signal,guard,packagePath,...extra});
