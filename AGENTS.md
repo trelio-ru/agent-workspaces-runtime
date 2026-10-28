@@ -364,6 +364,7 @@ publication tooling также остаются вне этого публичн
   process categories; messages/paths/owner data never enter fixture evidence.
   Owner-publication failures also retain an allowlisted filesystem syscall;
   authentication fixtures retain only closed reasons and synthetic effect counts.
+  Synthetic auth diagnostics distinguish finished POST responses from consumed attempt steps without raw values; the original success assertion and no-replay fence remain strict.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
   Native manual-close regression shares the auth fixture's owned HTTP abort
   helper: abort its failed producer before HTTP-close waits, close listener/sockets

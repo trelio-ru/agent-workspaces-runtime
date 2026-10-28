@@ -327,7 +327,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   // must fail normally rather than leave this test process alive indefinitely.
   const dependencies = await loadVisualDependencies({ root: fileURLToPath(new URL('../host-runtime/scripts/visual-browser-dependencies/', import.meta.url)), install: false });
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-auth-native-')));
-  let passwordSubmits = 0, codeSubmits = 0, methodFollows = 0, mailSubmits = 0;
+  let passwordSubmits = 0, codeSubmits = 0, codeResponses = 0, methodFollows = 0, mailSubmits = 0, currentFixtureStore = null;
   // Fixed synthetic phases/counters locate a hosted outer deadline without
   // printing forms, credentials, private browser output, URLs or native logs.
   let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;const evidence=[];
@@ -339,7 +339,9 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     phase,variant,action,lastState,lastReason,failure:primaryFailure?.code==='ERR_ASSERTION'?'assertion':t.signal.aborted?'timeout':'operation',
     code:['EBUSY','EPERM','EACCES','ENOENT','ENOTEMPTY','operation_failed','storage_unavailable','VISUAL_STORAGE_CORRUPT'].includes(primaryFailure?.code)?primaryFailure.code:'other',
     syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
-    passwordSubmits,codeSubmits,methodFollows,mailSubmits,evidence})+'\n');};
+    passwordSubmits,codeSubmits,codeResponses,methodFollows,mailSubmits,
+    consumedSteps:currentFixtureStore?.saved?.attempt?.steps?.length??null,
+    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',evidence})+'\n');};
   const observe=value=>{
     lastState=['ready','error','manual_input_required','saved_unverified'].includes(value?.state)?value.state:'other';
     lastReason=['none','bootstrap_failed','manual_control_active','operation_failed','lease_expired','storage_unavailable'].includes(value?.reason)?value.reason:'other';
@@ -368,6 +370,10 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       res.end(req.url.includes('segmented') ? '<!doctype html><form id="totp-form" method="post" action="/code" oninput="if([...this.elements].every(e=>e.value.length===1))this.requestSubmit()">' + Array.from({ length: 6 }, (_, i) => `<input id="d${i}" name="d${i}" maxlength="1" autocomplete="one-time-code">`).join('') + '</form>' : '<!doctype html><form id="totp-form" method="post" action="/code"><input id="totp" name="totp" autocomplete="one-time-code"><button id="submit-totp">Sign in</button></form>'); return;
     }
     if (req.url === '/code' && req.method === 'POST') {
+      // Distinguish a completed synthetic POST response from a later private
+      // browser observation/transport failure. Never print forms, auth values,
+      // URLs or raw browser errors, and never repeat the credential submission.
+      res.once('finish', () => { codeResponses++; });
       codeSubmits++; const code = form.get('totp') || Array.from({ length: 6 }, (_, i) => form.get(`d${i}`)).join('');
       assert.ok([Date.now() - 30000, Date.now(), Date.now() + 30000].some(now => code === deriveAgentSecretTotp(seed, now)));
       res.setHeader('Set-Cookie', 'auth_fixture=SYNTHETIC_AUTH; HttpOnly; Path=/; SameSite=Strict'); res.end('<!doctype html><h1 id="account">Synthetic account</h1>'); return;
@@ -393,9 +399,9 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
   const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
-  const make = () => new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
+  const make = () => { currentFixtureStore = activeStore; return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
     mailIdentity: { origin: 'https://trelio.ru', companyId, memberId, scope: 'd'.repeat(64) },
-    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' });
+    policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' }); };
   let browser = make();
   // A timed-out fixture must stop only its own live browser handle, rather
   // than leave it running into the next native test. The original timeout
@@ -426,9 +432,11 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     // effect counters locate a failed transition without printing credentials,
     // URLs, browser state or private provider output into the hosted log.
     assert.equal(followedAuthentication.state, 'saved_unverified', JSON.stringify({
-      reason: followedAuthentication.reason, passwordSubmits, methodFollows, codeSubmits,
+      reason: followedAuthentication.reason, passwordSubmits, methodFollows, codeSubmits, codeResponses,
+      consumedSteps:activeStore.saved.attempt?.steps?.length??null,
+      attemptState:['pending','complete'].includes(activeStore.saved.attempt?.state)?activeStore.saved.attempt.state:'none',
     }));
-    assert.equal(passwordSubmits, 3); assert.equal(methodFollows, 1); assert.equal(codeSubmits, 3);
+    assert.equal(passwordSubmits, 3); assert.equal(methodFollows, 1); assert.equal(codeSubmits, 3);assert.equal(codeResponses,3);
     await browser.close();
     phase='unsafe_transition_loop';for (const [selectedVariant,route] of [['foreign_origin','/follow-unsafe'],['wrong_path','/follow-path'],
       ['popup','/follow-popup'],['download','/follow-download'],['hidden','/follow-hidden'],['ambiguous','/follow-ambiguous'],
