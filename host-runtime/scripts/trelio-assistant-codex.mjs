@@ -540,6 +540,14 @@ export const provisionAssistantCodexChat = async ({ deliveryId, cwd, execution }
   const result = await (options.readDelivery ?? readAssistantCodexDelivery)(threadId, deliveryId, options);
   if (result.state !== 'completed') fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
   await confirmFreshAuthentication(options);
+  // Cosmetic naming follows verified GUI provisioning in a separate bounded
+  // native reader. A refused/disconnected naming RPC must never invalidate the
+  // original READY receipt or replay a queue/create. No model turn or history
+  // mutation is introduced, and continuations preserve human-edited titles.
+  const name=options.chatKind==='owner_dialogue'?'Переписка с владельцем'
+    :options.chatKind==='source_triage'?'Разбор входящих сообщений':'Работа по задаче Trelio';
+  try{await readNative(null,async(_thread,request)=>request('thread/name/set',{threadId,name}),
+    {...options,readTimeoutMs:5000});}catch{/* A title is never execution or recovery authority. */}
   return { ...result, threadId };
 };
 
@@ -679,16 +687,7 @@ const executeNativePass = async ({ threadId, deliveryId, cwd, workStateContext, 
     if(!UUID.test(submitted?.queuedSubmission?.id??'')||submitted.queuedSubmission.clientUserMessageId!==deliveryId)
       fail('ASSISTANT_CODEX_DELIVERY_UNCERTAIN');
     await waitForNativeTurn(request,threadId,assistantDeliveryMarker(deliveryId),signal);
-    if(options.readinessProbe===true){
-      // Set a human-facing name only AFTER the GUI's own READY, so native
-      // automatic naming cannot leave the bootstrap marker as the chat title.
-      // The public native RPC edits this exact provisioned thread, without a
-      // model turn, local DB edit, second chat or replay. Naming is cosmetic:
-      // its failure cannot invalidate a verified provision/business receipt.
-      const name=options.chatKind==='owner_dialogue'?'Переписка с владельцем'
-        :options.chatKind==='source_triage'?'Разбор входящих сообщений':'Работа по задаче Trelio';
-      try{await request('thread/name/set',{threadId,name});}catch{/* Preserve the positive READY; never replay a queue write for a title. */}
-    }
+
   });
   return threadId;
 };
