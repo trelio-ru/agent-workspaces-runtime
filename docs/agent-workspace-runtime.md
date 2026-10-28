@@ -677,12 +677,24 @@ JS повторно проверяет обе enum и exact shape; raw native te
 URLs и values не входят в диагностику, backend audit ABI не меняется.
 Такой timeout не разрешает fallback, consume, увеличение лимита или повтор fill.
 
-Только план с этим явным password locator расширяет discovery native клиента
-на работающий Google Chrome: macOS проверяет bundle `com.google.Chrome` и
+Любой native locator использует общий discovery клиента и работающего
+Google Chrome: macOS проверяет bundle `com.google.Chrome` и
 Apple team `EQHXZ8M8AV`, Windows – Authenticode `Google LLC` и product
 `Google Chrome`. Выбирается единственный exact документ среди разрешённых
 подписанных приложений, затем сохраняются окно/контейнер/объекты.
 Профиль, cookies и вкладка остаются прежними; приложения не активируются.
+Exact id и accessibleName не требуют добавлять password-role locator ради
+выбора Chrome. Совпавшие документы в разных разрешённых приложениях остаются
+неоднозначными. Field-only `embedded` – исходная native-вкладка, включая Chrome;
+финальная кнопка без id нажимается обычным browser tool только после fill.
+Ready содержит optional closed `application=client|chrome`; неизвестный класс
+отклоняется до consume, отсутствие поля у старого helper не угадывается.
+Локальная ошибка `SECRET_BROWSER_PREFLIGHT_FAILED` содержит только safe message,
+stage `preflight`, закрытый reasonCode, `secretRequested=false` и
+`grantConsumedByAttempt=false`. Маркер ставится общей границей подготовки:
+ошибки consume/fill и потерянные ответы не могут получить эти флаги.
+Он не подтверждает текущую пригодность grant и не разрешает replay.
+Unknown preparation exceptions заменяются safe adapter_error без исходного текста.
 Так SMTP-форма с публичным username и единственным id-less password input
 может получить только password после обычной подготовки публичных полей.
 

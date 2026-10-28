@@ -11,6 +11,7 @@ final class FixtureElement: NSObject {
     let role: String
     let id: String?
     var name: String?
+    var secure = false
     var url: String?
     var parent: FixtureElement?
     var nodes: [FixtureElement] = []
@@ -36,6 +37,7 @@ let kAXValueAttribute = "AXValue"
 enum FixtureResult { case success }
 func text(_ element: AXUIElement, _ name: String) -> String? {
     if name == kAXRoleAttribute { return element.role }
+    if name == kAXSubroleAttribute { return element.secure ? kAXSecureTextFieldSubrole : nil }
     if name == "AXDOMIdentifier" { return element.id }
     if name == kAXTitleAttribute { return element.name }
     if name == kAXDescriptionAttribute { return nil }
@@ -80,6 +82,16 @@ func AXUIElementPerformAction(_ element: AXUIElement, _ action: CFString) -> Fix
 }
 
 // PRODUCTION_CORE
+
+// The SAME production admission lists include signed Chrome for every native
+// locator, not only password-role plans. Unknown clients remain unsupported.
+for family in ["codex", "claude-code"] {
+    let identities = try Session.applicationIdentities(family)
+    precondition(identities.count == 2)
+    precondition(identities[1].0 == "com.google.Chrome" && identities[1].1 == "EQHXZ8M8AV")
+}
+do { _ = try Session.applicationIdentities("other"); preconditionFailure("Unknown client admitted") }
+catch Stop.unavailable("client_unsupported") {}
 
 // Discovery must inspect document metadata without walking unrelated page
 // contents. A normal Chrome window can expose a much larger web tree than the
@@ -140,6 +152,27 @@ func expect(_ reason: String, _ operation: () throws -> Void) {
     do { try operation(); preconditionFailure("Expected refusal") }
     catch Stop.failed(let actual) { precondition(actual == reason, "Unexpected closed reason") }
     catch { preconditionFailure("Unexpected error") }
+}
+
+// Synthetic family signup: a generated DOM id and a submit button without id.
+// Both exact-id and unique secure-role plans resolve the same native field,
+// without a native submit or a value read. Each newly opened form is prepared
+// independently; no expired grant or previously filled field is reused.
+for id in ["floatingLabelInput11", "floatingLabelInput14"] {
+    let signup = FixtureElement("AXWebArea")
+    let input = FixtureElement("AXTextField", id); input.secure = true
+    signup.append(input); signup.append(FixtureElement("AXButton"))
+    for field in [Field(fieldKey: "password", id: id, passwordInput: nil),
+                  Field(fieldKey: "password", id: nil, passwordInput: true)] {
+        let plan = Step(targetOrigin: step.targetOrigin, targetUrlSha256: step.targetUrlSha256,
+                        fields: [field], activationId: nil, submitId: nil)
+        let selected = try Session.controls(signup, plan)
+        precondition(selected.0.count == 1 && selected.0[0] === input && selected.1 == nil)
+        let duplicate = FixtureElement("AXTextField", id); duplicate.secure = true; duplicate.shown = false
+        signup.append(duplicate)
+        expect("field_ambiguous") { _ = try Session.controls(signup, plan) }
+        signup.nodes.removeLast()
+    }
 }
 
 // A visible child document is structural evidence only. Its URL/controls are

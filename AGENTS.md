@@ -273,7 +273,8 @@ publication tooling также остаются вне этого публичн
   AX/UIA-дерево проверяется не более трёх раз на той же поверхности. Activation,
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
-  Формы без id и signed native browser – [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
+  Signed Chrome discovery не зависит от locator; field-only сохраняет вкладку.
+  Preflight receipt не разрешает replay consume/fill: [контракт](docs/agent-workspace-runtime.md#protected-browser-fields).
   Вложенная форма требует explicit same-origin URL/hash path; native имена
   полей допустимы только с unique/object binding, без AX/UIA value reads.
   Старый host отказывается до checkout; такой план не меняет native surface.

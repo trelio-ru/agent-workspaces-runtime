@@ -185,6 +185,10 @@ internal static class Harness {
             Check(ready.WaitOne(25000), "fixture window timeout (stage=" + startupStage + ")");
             if (uiError != null) throw uiError;
             sessionType = typeof(Step).Assembly.GetType("Session");
+            Check(((string[])Call("ApplicationNames", "codex")).SequenceEqual(new[] { "Codex", "ChatGPT", "chrome" }), "Codex/Chrome admission");
+            Check(((string[])Call("ApplicationNames", "claude-code")).SequenceEqual(new[] { "Claude", "chrome" }), "Claude/Chrome admission");
+            try { Call("ApplicationNames", "other"); throw new Exception("Unknown client admitted"); }
+            catch (TargetInvocationException error) { Check(Reason(error) == "client_unsupported", "Unknown client refusal"); }
             root = AutomationElement.FromHandle(handle);
             // The production traversal must see the same Document/Value pattern
             // that Chromium exposes, and find only controls under that document.

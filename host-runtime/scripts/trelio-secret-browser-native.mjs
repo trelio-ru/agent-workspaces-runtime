@@ -26,6 +26,13 @@ const NATIVE_UNAVAILABLE = new Set([
 ]);
 const NATIVE_PREFLIGHT_CHROME_RETRY = new Set(["target_url_changed", "field_not_found"]);
 const NATIVE_PREFLIGHT_ATTEMPTS = 3;
+const nativeApplicationKind = (reply) => {
+  if (reply?.application === undefined) return undefined;
+  if (reply.status !== "ready" || !["client", "chrome"].includes(reply.application)) {
+    throw new SecretBrowserFillError("Некорректный тип native browser.");
+  }
+  return reply.application;
+};
 
 const NATIVE_TRAVERSAL_STAGES = new Set(["document_discovery", "frame_discovery", "field_resolution", "activation_resolution"]);
 const NATIVE_TRAVERSAL_LIMITS = new Set(["node_count", "deadline"]);
@@ -330,10 +337,11 @@ export const openNativeSecretBrowserChannel = ({ executable, platform = process.
     if (!pending || buffer.length) return fail();
     let reply;
     try { reply = JSON.parse(line); } catch { return fail(); }
-    // Only fixed status/reason and an optional closed traversal diagnostic.
+    // Only fixed status/reason, a ready-only application class and an optional
+    // closed traversal diagnostic.
     // No arbitrary child detail is reflected into a tool error or audit event.
-    if (!reply || Object.keys(reply).some((key) => !["status", "reasonCode", "diagnostic"].includes(key))) return fail();
-    try { nativeTraversalDiagnostic(reply); } catch { return fail(); }
+    if (!reply || Object.keys(reply).some((key) => !["status", "reasonCode", "diagnostic", "application"].includes(key))) return fail();
+    try { nativeTraversalDiagnostic(reply); nativeApplicationKind(reply); } catch { return fail(); }
     const { resolve, timer } = pending;
     pending = null;
     clearTimeout(timer);
@@ -351,7 +359,7 @@ export const openNativeSecretBrowserChannel = ({ executable, platform = process.
   };
 };
 
-export const prepareSecretBrowserSession = async ({
+const prepareSecretBrowserSessionInternal = async ({
   context, targetUrl, mode = "auto", directory, ensurePrivateDirectory,
   profileDirectory, platform = process.platform, buildHelper = buildNativeSecretBrowserHelper,
   openChannel = openNativeSecretBrowserChannel,
@@ -503,9 +511,14 @@ export const prepareSecretBrowserSession = async ({
           : "Проверка встроенной вкладки отклонена.";
       throw new SecretBrowserFillError(message, ready.reasonCode);
     }
+    // An additive helper field identifies only a closed application class,
+    // never a process id, bundle path, URL or arbitrary native text. Older
+    // signed helpers may omit it; do not invent an application for them.
+    const application = nativeApplicationKind(ready);
     let used = false;
     return {
       surface: "embedded", fallbackReason: null,
+      ...(application ? { application } : {}),
       fill: async ({ secretValues }) => {
         if (used) throw new SecretBrowserFillError("Повторная передача секрета запрещена.");
         used = true;
@@ -522,5 +535,20 @@ export const prepareSecretBrowserSession = async ({
     await channel?.close();
     if (!boundPlan && mode === "auto" && error instanceof EmbeddedBrowserUnavailable) return chrome(error.nativeReason);
     throw error;
+  }
+};
+
+// This boundary ends BEFORE the caller can invoke consume. Its closed receipt
+// describes only this attempt: the grant may have expired or been used elsewhere,
+// so a preflight refusal never grants permission to replay delivery. Errors from
+// fill/consume do not pass this wrapper and cannot claim secretRequested=false.
+export const prepareSecretBrowserSession = async (options) => {
+  try {
+    return await prepareSecretBrowserSessionInternal(options);
+  } catch (error) {
+    const safe = error instanceof SecretBrowserFillError ? error
+      : new SecretBrowserFillError("Предварительная проверка browser transport завершилась ошибкой.");
+    safe.preflight = true;
+    throw safe;
   }
 };

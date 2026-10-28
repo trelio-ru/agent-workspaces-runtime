@@ -311,6 +311,15 @@ internal sealed class Session {
         button = null;
         throw new Stop("field_not_found");
     }
+    // Keep browser identity independent from field syntax. Every candidate
+    // still passes publisher/product verification and exact-document uniqueness
+    // before any field is prepared or a secret can be requested.
+    internal static string[] ApplicationNames(string family) {
+        if (family == "codex") return new[] { "Codex", "ChatGPT", "chrome" };
+        if (family == "claude-code") return new[] { "Claude", "chrome" };
+        throw new Stop("client_unsupported", true);
+    }
+    internal string ApplicationKind { get { return process.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ? "chrome" : "client"; } }
     internal Session(Request request) {
         lease = new NativeLease();
         if (request.clientFamily != "codex" && request.clientFamily != "claude-code") throw new Stop("client_unsupported", true);
@@ -318,8 +327,7 @@ internal sealed class Session {
             || request.steps.Any(step => step.fields == null || step.fields.Length == 0 || step.fields.Length > 50))
             throw new Stop("adapter_error");
         steps = request.steps;
-        var names = (request.clientFamily == "codex" ? new[] { "Codex", "ChatGPT" } : new[] { "Claude" })
-            .Concat(steps.Any(step => step.fields.Any(field => field.passwordInput)) ? new[] { "chrome" } : new string[0]).ToArray();
+        var names = ApplicationNames(request.clientFamily);
         var applications = Process.GetProcesses().Where(candidate => names.Contains(candidate.ProcessName, StringComparer.OrdinalIgnoreCase)).ToArray();
         var candidates = new List<Tuple<Process, AutomationElement, AutomationElement>>();
         int exposed = 0, windowCount = 0;
@@ -332,7 +340,6 @@ internal sealed class Session {
             }, IntPtr.Zero);
             if (handles.Count == 0) continue; // Ignore Chromium background helpers.
             windowCount += handles.Count;
-            // Chrome participates only in an explicit unique-password plan.
             // The publisher AND product are verified; a same-named process
             // cannot receive a value merely because it exposes a matching URL.
             var family = application.ProcessName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ? "chrome" : request.clientFamily;
@@ -431,9 +438,10 @@ internal sealed class Session {
 }
 internal static class Program {
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 8 * 1024 * 1024 };
-    private static void Reply(string status, string reason = null) {
+    private static void Reply(string status, string reason = null, string application = null) {
         var reply = new Dictionary<string, string> { { "status", status } };
         if (reason != null) reply.Add("reasonCode", reason);
+        if (application != null) reply.Add("application", application);
         Console.WriteLine(Json.Serialize(reply));
         Console.Out.Flush();
     }
@@ -451,7 +459,7 @@ internal static class Program {
                     var request = Json.Deserialize<Request>(line);
                     if (request.command == "prepare" && session == null) {
                         session = new Session(request);
-                        Reply("ready");
+                        Reply("ready", application: session.ApplicationKind);
                     } else if (request.command == "fill" && session != null && request.values != null) {
                         session.Fill(request.values);
                         Reply("succeeded");

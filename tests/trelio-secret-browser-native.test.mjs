@@ -669,19 +669,23 @@ test("embedded-only forbids fallback; explicit Chrome does not inspect other app
   assert.equal(g.builds, 0);
 });
 
-test("a final button without an id uses one embedded field-only fill and no native submit", async () => {
-  const f = fixture();
+test("Chrome with a dynamic password id and id-less final button retains one original native fill", async () => {
+  const f = fixture({ status: "ready", application: "chrome" });
   // The caller identified a non-id login button on the empty page and retains
   // it for its ordinary browser click. It must not send that selector to AX/UIA
   // or let auto switch the value delivery to a different browser profile.
   delete f.args.context.browserSteps[0].submitSelector;
+  f.args.context.fieldKeys = ["password"];
+  f.args.context.browserSteps[0].fields = [{ fieldKey: "password", selector: "#floatingLabelInput14" }];
   const session = await prepareSecretBrowserSession({ ...f.args, mode: "embedded" });
   assert.equal(session.surface, "embedded");
-  assert.equal(f.requests[0].steps[0].fields.length, 2);
+  assert.equal(session.application, "chrome");
+  assert.deepEqual(f.requests[0].steps[0].fields, [{ fieldKey: "password", id: "floatingLabelInput14" }]);
   assert.equal(Object.hasOwn(f.requests[0].steps[0], "submitId"), false);
-  assert.deepEqual(await session.fill({ secretValues: values }), { outcome: "succeeded" });
+  const passwordOnly = { password: values.password };
+  assert.deepEqual(await session.fill({ secretValues: passwordOnly }), { outcome: "succeeded" });
   assert.equal(f.requests.length, 2);
-  assert.deepEqual(f.requests[1].values, values);
+  assert.deepEqual(f.requests[1].values, passwordOnly);
   assert.equal(f.chromeCalls, 0);
   await session.close();
 
@@ -690,6 +694,49 @@ test("a final button without an id uses one embedded field-only fill and no nati
   await assert.rejects(prepareSecretBrowserSession({ ...unavailable.args, mode: "embedded" }), EmbeddedBrowserUnavailable);
   assert.equal(unavailable.chromeCalls, 0);
   assert.equal(unavailable.requests.length, 1, "no value delivery when this same-tab plan cannot be prepared");
+});
+
+test("only preparation failures attest that this attempt did not request the secret", async () => {
+  for (const reasonCode of ["field_ambiguous", "field_not_found", "timeout"]) {
+    const f = fixture({ status: "failed", reasonCode });
+    await assert.rejects(prepareSecretBrowserSession({ ...f.args, mode: "embedded" }), error => {
+      assert.equal(error.preflight, true);
+      assert.equal(error.reasonCode, reasonCode);
+      return true;
+    });
+    assert.equal(f.requests.length, 1);
+    assert.equal(f.chromeCalls, 0);
+    assert.equal(f.closed, true);
+  }
+  const f = fixture({ status: "ready", application: "chrome" });
+  f.args.openChannel = () => ({
+    request: async request => {
+      if (request.command === "prepare") return { status: "ready", application: "chrome" };
+      throw new Error("Synthetic lost setter response");
+    }, close: async () => {},
+  });
+  const session = await prepareSecretBrowserSession({ ...f.args, mode: "embedded" });
+  await assert.rejects(session.fill({ secretValues: values }), error => {
+    assert.equal(error.preflight, undefined, "a lost setter response must never advertise a safe delivery retry");
+    return true;
+  });
+  await session.close();
+});
+
+test("preflight diagnostics reject unknown native app text and redact unexpected exceptions", async () => {
+  const f = fixture({ status: "ready", application: "PRIVATE_CANARY" });
+  await assert.rejects(prepareSecretBrowserSession(f.args), error => {
+    assert.equal(error.preflight, true);
+    assert.doesNotMatch(error.message, /PRIVATE_CANARY/u);
+    return true;
+  });
+  f.args.buildHelper = async () => { throw new Error("PRIVATE_CANARY"); };
+  await assert.rejects(prepareSecretBrowserSession(f.args), error => {
+    assert.equal(error.preflight, true);
+    assert.equal(error.reasonCode, "adapter_error");
+    assert.doesNotMatch(error.message, /PRIVATE_CANARY/u);
+    return true;
+  });
 });
 
 test("missing Run identity and invalid current selectors fail before delivery", async () => {
@@ -798,18 +845,25 @@ test("native pipe accepts only the closed traversal diagnostic emitted by produc
     const code = ["import Foundation", section("enum Stop: Error", "struct Request: Decodable"),
       section("func reply(", "func attribute("), `
 while let line = readLine() {
-  if line.contains("valid") { reply("failed", "timeout", WalkDiagnostic(stage: .documentDiscovery, limit: .nodeCount)) }
+  if line.contains("chrome") { reply("ready", application: "chrome") }
+  else if line.contains("client") { reply("ready", application: "client") }
+  else if line.contains("bad-app") { reply("ready", application: "CANARY-private-app") }
+  else if line.contains("failed-app") { reply("failed", "timeout", application: "chrome") }
+  else if line.contains("valid") { reply("failed", "timeout", WalkDiagnostic(stage: .documentDiscovery, limit: .nodeCount)) }
   else { let raw = #"{"status":"failed","reasonCode":"timeout","diagnostic":{"stage":"document_discovery","limit":"deadline","url":"CANARY-private-detail"}}"#; FileHandle.standardOutput.write(Data(raw.utf8)); FileHandle.standardOutput.write(Data([10])) }
 }
 `].join("\n");
     const main = path.join(directory, "main.swift"), executable = path.join(directory, "fixture");
     await fs.writeFile(main, code);
     await promisify(execFile)("/usr/bin/swiftc", [main, "-o", executable], { timeout: 20_000 });
-    for (const command of ["valid", "extra"]) {
+    for (const command of ["valid", "extra", "chrome", "client", "bad-app", "failed-app"]) {
       const channel = openNativeSecretBrowserChannel({ executable });
       try {
         if (command === "valid") assert.deepEqual(await channel.request({ command }), {
           status: "failed", reasonCode: "timeout", diagnostic: { stage: "document_discovery", limit: "node_count" },
+        });
+        else if (["chrome", "client"].includes(command)) assert.deepEqual(await channel.request({ command }), {
+          status: "ready", application: command,
         });
         else await assert.rejects(channel.request({ command }), error => {
           assert.equal(error.reasonCode, "adapter_error"); assert.doesNotMatch(error.message, /CANARY|detail/u); return true;

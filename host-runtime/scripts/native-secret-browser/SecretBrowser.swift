@@ -56,9 +56,10 @@ struct Request: Decodable {
     let steps: [Step]?
     let values: [String: String]?
 }
-func reply(_ status: String, _ reason: String? = nil, _ diagnostic: WalkDiagnostic? = nil) {
+func reply(_ status: String, _ reason: String? = nil, _ diagnostic: WalkDiagnostic? = nil, application: String? = nil) {
     var object: [String: Any] = ["status": status]
     if let reason = reason { object["reasonCode"] = reason }
+    if let application = application { object["application"] = application }
     if let diagnostic = diagnostic {
         object["diagnostic"] = ["stage": diagnostic.stage.rawValue, "limit": diagnostic.limit.rawValue]
     }
@@ -392,27 +393,24 @@ final class Session {
         }
         throw Stop.failed(missingReason)
     }
+    // Browser admission is independent of the field locator. Otherwise a
+    // perfectly exact #id silently excludes Chrome while a password-role
+    // locator admits it. Signature, unique document and pinned object checks
+    // below still apply to every candidate; no focus/profile fallback is used.
+    static func applicationIdentities(_ family: String?) throws -> [(String, String)] {
+        switch family {
+        case "codex": return [("com.openai.codex", "2DC432GLL2"), ("com.google.Chrome", "EQHXZ8M8AV")]
+        case "claude-code": return [("com.anthropic.claudefordesktop", "Q6L2SF6YDW"), ("com.google.Chrome", "EQHXZ8M8AV")]
+        default: throw Stop.unavailable("client_unsupported")
+        }
+    }
     init(_ request: Request) throws {
         lease = try NativeLease()
         guard AXIsProcessTrusted() else { throw Stop.unavailable("access_required") }
-        let bundle: String
-        let team: String
-        switch request.clientFamily {
-        case "codex": bundle = "com.openai.codex"; team = "2DC432GLL2"
-        case "claude-code": bundle = "com.anthropic.claudefordesktop"; team = "Q6L2SF6YDW"
-        default: throw Stop.unavailable("client_unsupported")
-        }
+        let identities = try Session.applicationIdentities(request.clientFamily)
         guard let steps = request.steps, !steps.isEmpty, steps.count <= 10,
               steps.allSatisfy({ !$0.fields.isEmpty && $0.fields.count <= 50 }) else { throw Stop.failed("adapter_error") }
         self.steps = steps
-        // Id-less password forms can already be authenticated in the user's
-        // Chrome. Select that existing signed application by exact top-level
-        // URL; never copy cookies, open another profile or guess a tab. Only
-        // this explicit secure-field locator opts into external Chrome.
-        var identities = [(bundle, team)]
-        if steps.contains(where: { $0.fields.contains(where: { $0.passwordInput == true }) }) {
-            identities.append(("com.google.Chrome", "EQHXZ8M8AV"))
-        }
         let applications = NSWorkspace.shared.runningApplications.filter { app in
             identities.contains(where: { $0.0 == app.bundleIdentifier })
         }
@@ -452,6 +450,7 @@ final class Session {
         (targets, button) = try Session.preparedControls(document, steps[0])
         try checkDocument(steps[0])
     }
+    var applicationKind: String { application.bundleIdentifier == "com.google.Chrome" ? "chrome" : "client" }
     func checkDocument(_ step: Step) throws {
         guard !application.isTerminated, Session.trust(application, requirement),
               belongs(container, to: window), belongs(rootDocument, to: container),
@@ -544,7 +543,7 @@ while let line = readLine(strippingNewline: true) {
         let request = try JSONDecoder().decode(Request.self, from: Data(line.utf8))
         if request.command == "prepare", session == nil {
             session = try Session(request)
-            reply("ready")
+            reply("ready", application: session?.applicationKind)
         } else if request.command == "fill", let current = session, let values = request.values {
             try current.fill(values)
             reply("succeeded")

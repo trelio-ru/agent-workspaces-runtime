@@ -1551,6 +1551,14 @@ export const formatBridgeCommandError = (error, command = "") => {
     // The reason code is deliberately content-free and already belongs to the
     // audit allowlist. Returning it here makes a pre-consume failure actionable
     // without exposing URL, selector, page text or credential values.
+    if (error.preflight === true) return JSON.stringify({
+      code: "SECRET_BROWSER_PREFLIGHT_FAILED",
+      message: error.message,
+      stage: "preflight",
+      reasonCode: error.reasonCode,
+      secretRequested: false,
+      grantConsumedByAttempt: false,
+    });
     return `${error.message} [reasonCode=${error.reasonCode}]`;
   }
   if (
@@ -18030,7 +18038,7 @@ const executeSecretBrowserFill = async (options, positional) => withRun(async ({
     // The automatic fallback is a separate browser profile. Surface metadata
     // must be visible to the agent so a successful fill is never mistaken for
     // authorization of the original hidden Codex tab.
-    process.stdout.write(`Автоматически подставляю Agent Secret на ${payload.targetOrigin}; browser=${browserSession.surface}${browserSession.background ? ", profile=background" : ""}${browserSession.fallbackReason ? ", fallback=" + browserSession.fallbackReason : ""}.\n`);
+    process.stdout.write(`Автоматически подставляю Agent Secret на ${payload.targetOrigin}; browser=${browserSession.surface}${browserSession.application ? ", application=" + browserSession.application : ""}${browserSession.background ? ", profile=background" : ""}${browserSession.fallbackReason ? ", fallback=" + browserSession.fallbackReason : ""}.\n`);
 
     let localResult = null;
     let outcomeReported = false;

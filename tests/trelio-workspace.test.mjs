@@ -877,6 +877,12 @@ test("storage billing blocker preserves the current Run and gives one exact reco
     ),
     "Browser preflight failed. [reasonCode=field_not_found]",
   );
+  const preflight = new SecretBrowserFillError("Browser preflight failed.", "field_not_found");
+  preflight.preflight = true;
+  assert.deepEqual(JSON.parse(formatBridgeCommandError(preflight, "secret")), {
+    code: "SECRET_BROWSER_PREFLIGHT_FAILED", message: "Browser preflight failed.",
+    stage: "preflight", reasonCode: "field_not_found", secretRequested: false, grantConsumedByAttempt: false,
+  });
 });
 
 test("bridge transport diagnostics preserve phase and safe cause code without leaking fetch details", async (t) => {
