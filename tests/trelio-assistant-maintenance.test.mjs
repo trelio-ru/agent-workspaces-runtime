@@ -5,7 +5,7 @@ import { PassThrough, Readable } from 'node:stream';
 import { executeAssistantRuntimeRequest, assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { maintainAssistantCodexDesktop, validateAssistantCodexUpdate, compareCodexDesktopVersions,
-  downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate } from '../host-runtime/scripts/trelio-assistant-codex-update.mjs';
+  downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate } from '../host-runtime/scripts/trelio-assistant-setup.mjs';
 import { runProductionAssistantCodexMaintenance, runProductionAssistantPluginMaintenance, runAssistantBackgroundTick } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
