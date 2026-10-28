@@ -28,8 +28,8 @@ publication tooling также остаются вне этого публичн
   the poll cursor/unread flag. Missing native attention preserves the checkpoint.
   Group originals suppress automatic range ACK (schema15); never mark skipped
   discussion read or erase an existing unknown-write reconciliation fence.
-  Trelio inventory/poll/ACK не обрабатывают чужие provider rows; external ACK
-  требует committed processing и отдельного native read proof.
+  Trelio inventory/poll/ACK не обрабатывают чужие provider rows; read ACK follows
+  complete native-confirmed model delivery, separately from business processing.
   Exact body reads reuse the SAME signed executor and private inbox; encrypted intake/read/reply retains exact native source/revision package selectors.
   Encrypted metadata/guidance use the SAME scoped task reader; queries stay local.
   Structural read-reference syntax shares one pure parser with pre-send privacy
@@ -43,8 +43,8 @@ publication tooling также остаются вне этого публичн
   Source READ/ACK diagnostics share the native health/owner notice engine;
   healthy polling cannot erase uncertainty. Aggregate the SAME durable ACK
   journal across conversations; an empty source is never recovery evidence.
-  Production Telegram/email ACK reuses the SAME signed/account/process path and native
-  committed receipt admission, with the original inbox fence at final spawn.
+  Production read ACK reuses the SAME signed/account/process path and native
+  model-read slots (legacy material receipts remain valid), with the original inbox fence at final spawn.
   Fresh tokens cover one conversation; legacy mixed tokens need ALL read-backs.
   Source resume grants only read-back of historical processed slots; schema v7
   seals that lease mode and records current positive verification in the SAME

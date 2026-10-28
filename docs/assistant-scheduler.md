@@ -3010,3 +3010,18 @@ all queue/pass/native-start/unknown-operation receipts and skips model work.
 After a fresh positive observation the ordinary coordinator resumes; this is
 never permission to replay an uncertain external action. Observation happens
 on the existing five-minute supervisor cycle and never wakes a model for itself.
+
+## Read state and visible chat names
+
+The exact source-intake body materialization boundary enables native read ACK
+independently of a reply, task or Workspace Run; see inbox schema v18. Reference
+polling is not a read. Business processing still requires its selected original
+slots and material outcome. The host keeps unknown provider attempts verify-only.
+
+After the second GUI READY, the SAME public App Server `thread/name/set` assigns
+a human-facing initial name to that exact new chat: «Работа по задаче Trelio»,
+«Переписка с владельцем» or «Разбор входящих сообщений». The internal bootstrap
+marker remains solely a delivery locator, not the user-facing title. This
+cosmetic RPC adds no model turn, second chat or queue replay; a naming failure
+cannot invalidate positive execution evidence. Existing human-renamed chats are
+not overwritten on continuation.

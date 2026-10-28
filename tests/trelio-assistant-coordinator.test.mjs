@@ -1212,6 +1212,19 @@ for(const loseConfirmation of [false,true,'provider_result'])test(`owner-private
  assert.equal(f.passes.size,0,'ordinary task pass creator is never called');
  await coordinator.close();coordinator=createAssistantCoordinator(options);await coordinator.workOnce();assert.equal(turns,1);
  assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0,'reply evidence is not a blanket read ACK');
+ let ackCalls=0;await coordinator.close();
+ coordinator=createAssistantCoordinator({...options,acknowledgeSource:async input=>{
+   ackCalls++;assert.equal(input.verifyOnly,false);assert.equal(input.references.length,1);
+   assert.equal(input.references[0].intakeId,intake.id);assert.equal(input.references[0].originalEventId,intake.eventId);
+   assert.equal(Object.hasOwn(input.references[0],'taskId'),false);
+   input.assertReferences();input.beforeInvoke();return {acknowledged:true,notAttempted:false};
+ }});
+ await coordinator.pollOnce();
+ assert.equal(ackCalls,1,'native model-read evidence reconciles an already-replied legacy DM after upgrade');
+ assert.equal(f.database.prepare('SELECT sum(processed) n FROM assistant_inbox_events').get().n,0);
+ assert.equal(f.database.prepare('SELECT sum(acked) n FROM assistant_inbox_events').get().n,1);
+ await coordinator.pollOnce();assert.equal(ackCalls,1,'a positive committed read ACK is not repeated');
+
 });
 
 for(const firstState of ['policy_blocked','waiting_owner','unknown_provision','unknown_provision_no_thread',

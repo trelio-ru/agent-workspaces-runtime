@@ -622,7 +622,7 @@ ID --expected-revision REV --expected-conversation-key KEY`. Full native text,
 original account/source generation/task route/revision, no unrelated messages or
 read-state changes and a fresh live pass are required before recording a read
 slot. Body text and sender identity never enter the private SQLite journal.
-Explicit original processing slots plus accepted material still precede ACK.
+Explicit original processing slots plus accepted material still precede business processing; complete native-confirmed model delivery independently enables read ACK (schema v18).
 
 The SAME native committed receipt admits `max-message-ack/v1` for those exact
 slots. The signed provider privately rechecks every covered ID/revision, freezes
@@ -779,7 +779,7 @@ remain unchanged. Provider body and decrypted config/rules never enter its rows.
 Task body read still uses a distinct genuine task pass/proof and shared signed
 executor/SourceReadObserver. Only successful complete native read plus current
 route can record a read slot. The independent native accepted encrypted material
-outcome must explicitly select the original slots before ACK. Restart preserves
+outcome must explicitly select the original business-processing slots. Read ACK independently follows native-confirmed complete model delivery (schema v18). Restart preserves
 the same slots and one-use unknown-write fence; no blind ACK retry or fallback
 into human OAuth/session/key storage is introduced. Encrypted owner setup and
 unknown-conversation intake remain separate capabilities.
@@ -853,13 +853,13 @@ same private journal validates the full partition before retaining the terminal
 receipt and installs each subset only after ALL target task/source/route checks
 and real permanent chat provisioning. Failed/partial settlement reads back the
 same immutable receipt, never reruns classification or delivers the whole batch
-to its first task. Ignored originals remain unprocessed/unACKed.
+to its first task. Ignored originals remain unprocessed; an exact body already delivered to the model may independently earn read ACK (schema v18).
 
 After actual exact reads, each task worker commits its own material and explicit
 original slots. Conversation binding is optional nonexclusive correlation, never
 a prerequisite for material completion or authority for a future reply. Later
 batches are classified together again. Processing and provider ACK retain their
-independent original read/material/receipt guards.
+independent native guards: read ACK uses complete model delivery, business processing uses selected original reads plus accepted material.
 
 Synthetic SQLite, hook, signed-child and coordinator tests cover this composition;
 they do not establish a live Windows/business messenger acceptance.
@@ -890,3 +890,31 @@ owner selection precedes their first SQLite registration; discovery filters them
 before `externalSourceFor` and `inbox.register`. Login/preparation/restart creates
 no source cursor, stream, body read, task wake or ACK. First native `active`
 generation follows the existing baseline/dedup/processing protocol unchanged.
+
+
+## Schema v18: read state at model delivery
+
+Read state is independent of answering, task creation and business completion.
+The existing signed reader materializes the COMPLETE frozen message batch;
+partial output, metadata-only polls and queued model turns never count. After
+native `confirm_assistant_intake_read` succeeds, that same host boundary records
+only the exact intake UUID on the original rows in the SAME private SQLite.
+Full email RFC822 hashes remain required; no body, sender or reply is persisted.
+
+Native source ACK v2 selects `{intakes:[{intakeId,eventIds}]}`. It rechecks the
+current device/source/account/both memberships/project/grant and native confirmed
+read, even while the intake is leased or waiting for an answer. No fabricated
+task, Workspace Run, material receipt or `processed=1` is required or created.
+Upgrade reconciliation reads those SAME native witnesses for retained replied,
+created/routed/waiting intakes; local outcome labels never prove reading. Missing
+email byte evidence cannot be reconstructed from a native boolean.
+
+The SAME signed/account/provider ACK engine still verifies exact revisions and
+contiguous coverage, and fences ONE invocation before launch. The journal latches
+its selected intake basis with the ACK lease; a later read cannot replace an
+unknown attempt. A started legacy material-based attempt retains its original
+receipt/slots and remains verify-only after restart. Source generation changes
+also narrow to read-back, never a blind write retry or new-source adoption.
+Group originals keep the no-range-ACK policy where skipped discussion would be
+marked read. Business processing and accepted goal completion retain their
+independent original-slot/material/retirement guards.

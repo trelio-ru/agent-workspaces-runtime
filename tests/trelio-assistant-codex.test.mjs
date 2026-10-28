@@ -92,6 +92,7 @@ const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},o
   let input='',turnId=randomUUID(),phase='read',snapshot=0;
   const rpc=nativeRpc(request=>{
     onRequest(request);
+    if(request.method==='thread/name/set'){assert.equal(request.params.threadId,threadId);assert.ok(['Работа по задаче Trelio','Переписка с владельцем','Разбор входящих сообщений'].includes(request.params.name));return {result:{}};}
     if(request.method==='thread/start'){onCreate(request);return {result:{thread:{id:threadId}}};}
     if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,model:pair.modelId,reasoningEffort:pair.effortLevel}}};
     if(request.method==='turn/start'){
@@ -498,13 +499,13 @@ test('Desktop handoff failure and mismatched native settings never submit task c
 });
 
 test('empty bootstrap is closed before GUI opens and only the second Desktop READY earns provision',async()=>{
-  const threadId=randomUUID(),deliveryId=randomUUID(),children=[];let starts=0,saved=false,opened=false,queues=0,bootstraps=0;
-  const options={executable:process.execPath,environment:{},readExecutionAvailability:async()=>true,
+  const threadId=randomUUID(),deliveryId=randomUUID(),children=[];let starts=0,saved=false,opened=false,queues=0,bootstraps=0,names=0;
+  const options={executable:process.execPath,environment:{},chatKind:'owner_dialogue',readExecutionAvailability:async()=>true,
     readHookReadiness:()=>assert.fail('empty READY never earns or needs business hook authority'),
     startInvocation:()=>{starts++;},onThreadStarted:value=>{assert.equal(value,threadId);saved=true;},
     openDesktop:async uri=>{assert.equal(uri,`codex://threads/${threadId}`);assert.ok(saved);assert.ok(children.every(c=>c.killed));opened=true;},
     readDelivery:async()=>{assert.equal(queues,1);return {state:'completed',turnId:randomUUID(),receipt:'exact:desktop:ready'};},
-    spawnProcess:desktopRpc({threadId,children,onCreate:request=>{
+    spawnProcess:desktopRpc({threadId,children,onRequest:request=>{if(request.method==='thread/name/set'){names++;assert.ok(opened);assert.equal(queues,1);assert.equal(request.params.name,'Переписка с владельцем');}},onCreate:request=>{
       assert.deepEqual(request.params,{cwd:process.cwd(),model:execution.modelId,ephemeral:false,allowProviderModelFallback:false});
     },onInput:(text,phase)=>{
       assert.ok(saved);assert.doesNotMatch(text,/TRELIO_ASSISTANT_SCOPE|WORK\.md/);
@@ -514,7 +515,7 @@ test('empty bootstrap is closed before GUI opens and only the second Desktop REA
     },onQueue:()=>{queues++;assert.ok(opened);}}),
   };
   assert.equal((await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},options)).threadId,threadId);
-  assert.equal(starts,1);assert.equal(bootstraps,1);assert.equal(queues,1);assert.equal(children.length,2);
+  assert.equal(starts,1);assert.equal(bootstraps,1);assert.equal(queues,1);assert.equal(children.length,2);assert.equal(names,1);
   assert.ok(children.every(c=>c.killed));
   // The same API bootstrap receipt cannot masquerade as a GUI receipt if the
   // owner has closed Desktop or its URI handler is unavailable.

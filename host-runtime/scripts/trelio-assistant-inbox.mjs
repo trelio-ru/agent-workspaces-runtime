@@ -127,7 +127,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -203,7 +203,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -404,8 +404,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
     }
     db.exec('CREATE UNIQUE INDEX IF NOT EXISTS assistant_intake_retry_parent ON assistant_owner_intakes(retry_of_id) WHERE retry_of_id IS NOT NULL');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=17');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (17)');
+    // Read state and business processing are independent. These UUIDs retain
+    // the SAME native exact-body intake witness and the ORIGINAL ACK attempt's
+    // selected basis. Migration never invents a read or rewrites an uncertain
+    // legacy task-material ACK into permission for a fresh provider write.
+    const modelReadColumns=all('PRAGMA table_info(assistant_inbox_events)').map(column=>column.name);
+    for(const name of ['model_read_intake_id','ack_model_read_intake_id']){
+      if(versions[0]?.version>=18&&!modelReadColumns.includes(name))fail('ASSISTANT_INBOX_CONFLICT');
+      if(!modelReadColumns.includes(name))db.exec(`ALTER TABLE assistant_inbox_events ADD COLUMN ${name} TEXT`);
+    }
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=18');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (18)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -1010,6 +1019,36 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       run('INSERT INTO assistant_source_intake_events(intake_id,original_event_id,event_key,account_key,native_event_id,native_revision,ordinal) VALUES(?,?,?,?,?,?,0)',next,row.original_event_id,eventKey,row.account_key,row.native_event_id,row.native_revision);
       return {id:next};
     });},
+    /** The host calls only after positive native exact-body confirmation for
+     * the COMPLETE frozen model response. No body, guessed task, processing
+     * bit or provider ACK is recorded here; native admission is repeated at
+     * ACK time. A retained unknown ACK keeps its original witness unchanged. */
+    confirmIntakeModelRead(id,references=[]){return transaction(()=>{
+      const row=this.ownerIntake(uuid(id));activeSource(scopeOf(row.scope));
+      if(!row.native_started||!row.thread_id||row.kind==='route_existing'&&!row.frozen)fail('ASSISTANT_INBOX_CONFLICT');
+      const originals=all('SELECT original_event_id,event_key FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',row.id);
+      if(!originals.length||originals.length!==row.eventIds.length)fail('ASSISTANT_INBOX_CONFLICT');
+      if(!Array.isArray(references)||references.length&&references.length!==originals.length)inputError();
+      for(const original of originals){
+        const ref=references.find(ref=>ref.eventId===original.original_event_id);
+        const previousSha256=get('SELECT read_original_sha256 FROM assistant_inbox_events WHERE event_key=?',original.event_key)?.read_original_sha256;
+        const originalSha256=ref?.originalSha256??previousSha256;
+        if(previousSha256&&ref?.originalSha256&&previousSha256!==ref.originalSha256)fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+        // Email Seen remains bound to the independently verified COMPLETE
+        // RFC822 hash, not the text projection. A historical native read alone
+        // cannot reconstruct missing original-byte evidence after an upgrade.
+        if(row.scope.provider==='email'&&!/^[0-9a-f]{64}$/u.test(originalSha256??''))fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+        run('UPDATE assistant_inbox_events SET model_read_intake_id=coalesce(model_read_intake_id,?),read_original_sha256=coalesce(read_original_sha256,?) WHERE event_key=?',
+          row.id,originalSha256??null,original.event_key);
+      }
+    });},
+    modelReadReconciliationCandidates(scopeInput){
+      const scope=scopeOf(scopeInput);activeSource(scope);
+      return all(`SELECT DISTINCT i.id FROM assistant_owner_intakes i JOIN assistant_source_intake_events b ON b.intake_id=i.id
+        JOIN assistant_inbox_events e ON e.event_key=b.event_key WHERE i.source_key=? AND i.native_started=1
+        AND e.acked=0 AND e.model_read_intake_id IS NULL AND i.outcome_state IN ('created','routed','replied','waiting_owner')
+        ORDER BY i.created_at LIMIT 100`,scope.key).map(row=>this.ownerIntake(row.id));
+    },
     settleOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='complete'||!row.outcome_receipt)fail('ASSISTANT_INBOX_CONFLICT');
       run('UPDATE assistant_owner_intakes SET settled=1 WHERE id=?',row.id);
@@ -1512,8 +1551,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope=scopeOf(scopeInput);if(scope.provider==='trelio')inputError();
       if(source(scope).state!=='active')return null;
       const row=get(`SELECT e.rowid AS ordinal FROM assistant_inbox_events e
-        JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
-        WHERE e.source_key=? AND e.acked=0 AND e.processed=1 AND t.state IN ('accepted','done')
+        LEFT JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
+        WHERE e.source_key=? AND e.acked=0 AND ((e.ack_started=0 AND e.model_read_intake_id IS NOT NULL)
+          OR (e.ack_started=1 AND e.ack_model_read_intake_id IS NOT NULL) OR (e.processed=1 AND t.state IN ('accepted','done')))
         AND (e.automatic_ack=1 OR e.ack_started=1)
         AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.rowid LIMIT 1`,scope.key,time(),time());
       return row?.ordinal??null;
@@ -1544,17 +1584,17 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope = scopeOf(scopeInput);
       return transaction(() => {
         const current = activeSource(scope);
-        // Unrouted events, owner-pending tasks and mere discovery are NOT read.
-        // Durably accepted task inbox entries may be acknowledged even while
-        // waiting for the next scheduled task pass; ordinary comments do not wake it.
-        // Messenger/email discovery contains references only. Require durable
-        // processing before even offering an external ACK. The provider adapter
-        // must still verify actual content-read evidence and exact revision;
-        // neither this SQL flag nor a generic completion boolean grants that.
-        let candidates = all(`SELECT e.event_key,e.event_id,e.event_revision,e.task_id,e.ack_started,e.ack_attempt_token,e.conversation_key,e.route_source_revision FROM assistant_inbox_events e
-          JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
-          WHERE e.source_key=? AND e.acked=0 AND (t.state='accepted' OR (?!='trelio' AND t.state='done'))
-          AND (?='trelio' OR e.processed=1)
+        // Read state and business processing have independent witnesses. A
+        // complete, native-confirmed intake body may be ACKed before routing,
+        // a reply or task work. Old material-based attempts keep their original
+        // witness, especially when an unknown write must be reconciled.
+        let candidates = all(`SELECT e.*,t.state AS task_state FROM assistant_inbox_events e
+          LEFT JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
+          WHERE e.source_key=? AND e.acked=0 AND (
+            (?='trelio' AND t.state='accepted') OR (?!='trelio' AND (
+              (e.ack_started=0 AND e.model_read_intake_id IS NOT NULL)
+              OR (e.ack_started=1 AND e.ack_model_read_intake_id IS NOT NULL)
+              OR (e.processed=1 AND t.state IN ('accepted','done')))))
           AND (e.automatic_ack=1 OR e.ack_started=1)
           AND e.ack_retry_at<=? AND (e.ack_token IS NULL OR e.ack_expires_at<=?) ORDER BY e.ack_retry_at,e.rowid LIMIT 100`, scope.key, scope.provider, scope.provider, time(), time());
         // Rotate previously deferred conversations behind never-attempted work
@@ -1570,7 +1610,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
             LEFT JOIN assistant_inbox_tasks t ON t.source_key=e.source_key AND t.task_id=e.task_id
             WHERE e.source_key=? AND e.acked=0 AND e.ack_started=1 AND e.ack_attempt_token IS ? ORDER BY e.rowid LIMIT 101`,scope.key,candidates[0].ack_attempt_token);
           if(candidates.length>100)fail('ASSISTANT_INBOX_STALE_ACK');
-          if(candidates.some(row=>row.processed!==1||!['accepted','done'].includes(row.task_state)
+          if(candidates.some(row=>!(row.ack_model_read_intake_id!==null||row.processed===1&&['accepted','done'].includes(row.task_state))
             ||row.ack_retry_at>time()||row.ack_token!==null&&row.ack_expires_at>time()))return null;
         }
         // Never mix a fresh provider attempt with recovery from an old one.
@@ -1579,8 +1619,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // not adopt that historical route for a new provider write. Its claim
         // mode is persisted separately from ack_started, which must continue
         // to describe only an actual prior invocation boundary.
+        const modelRead=row=>row.ack_started===1?row.ack_model_read_intake_id:row.model_read_intake_id;
+        const originalRevision=row=>modelRead(row)?get('SELECT source_revision FROM assistant_owner_intakes WHERE id=?',modelRead(row))?.source_revision:row.route_source_revision;
         const readBack=row=>row.ack_started===1||(current.configuration_revision!==null
-          &&row.route_source_revision!==current.configuration_revision);
+          &&originalRevision(row)!==current.configuration_revision);
         const reconcileOnly=scope.provider!=='trelio'&&readBack(candidates[0]);
         // ONE new range write belongs to ONE exact conversation. Old uncertain
         // attempts retain their original membership, even if an older host
@@ -1588,11 +1630,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // one chat's positive result complete another chat's write token.
         const events=candidates.filter(row=>scope.provider==='trelio'||readBack(row)===reconcileOnly
           &&row.ack_started===candidates[0].ack_started
+          && Boolean(modelRead(row))===Boolean(modelRead(candidates[0]))
           && (candidates[0].ack_started===1?row.ack_attempt_token===candidates[0].ack_attempt_token
             :scope.provider==='email'?row.event_key===candidates[0].event_key:row.conversation_key===candidates[0].conversation_key))
           .map(({event_key,event_id,event_revision,task_id})=>({event_key,event_id,event_revision,task_id}));
         const token = randomUUID();
-        for (const event of events) run('UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=?,ack_verify_only=? WHERE event_key=?', token, time() + LEASE_MS, Number(reconcileOnly), event.event_key);
+        for (const event of events) run(`UPDATE assistant_inbox_events SET ack_token=?,ack_expires_at=?,ack_verify_only=?,
+          ack_model_read_intake_id=CASE WHEN ack_started=1 THEN ack_model_read_intake_id ELSE model_read_intake_id END WHERE event_key=?`, token, time() + LEASE_MS, Number(reconcileOnly), event.event_key);
         return { token, events, ...(scope.provider==='trelio'?{}:{reconcileOnly}) };
       });
     },
@@ -1607,13 +1651,25 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       if(activeSource(scope).configuration_revision!==sourceRevision)fail('ASSISTANT_INBOX_CONFLICT');
       const rows=all(`SELECT e.*,de.event_ordinal,de.route_id AS original_route_id,
         de.route_source_revision AS original_source_revision,d.state AS delivery_state,d.external_receipt
-        FROM assistant_inbox_events e JOIN assistant_inbox_delivery_events de
+        FROM assistant_inbox_events e LEFT JOIN assistant_inbox_delivery_events de
           ON de.event_key=e.event_key AND de.delivery_id=e.read_delivery_id
-        JOIN assistant_inbox_deliveries d ON d.delivery_id=de.delivery_id
+        LEFT JOIN assistant_inbox_deliveries d ON d.delivery_id=de.delivery_id
         WHERE e.source_key=? AND e.ack_token=? AND e.acked=0 ORDER BY e.rowid`,scope.key,token);
       const expected=get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token).total;
-      if(!rows.length||rows.length!==expected||rows.length>100)fail('ASSISTANT_INBOX_STALE_ACK');
+      if(!rows.length||rows.length!==expected||rows.length>100||rows.some(row=>row.ack_model_read_intake_id===null&&!row.delivery_state))fail('ASSISTANT_INBOX_STALE_ACK');
       return rows.map(row=>{
+        if(row.ack_model_read_intake_id!==null){
+          const intake=get('SELECT source_key,source_revision FROM assistant_owner_intakes WHERE id=?',row.ack_model_read_intake_id);
+          const original=get('SELECT original_event_id FROM assistant_source_intake_events WHERE intake_id=? AND event_key=?',row.ack_model_read_intake_id,row.event_key);
+          if(!intake||!original||intake.source_key!==scope.key||row.ack_expires_at<=time()
+            ||!assistantConversationKeyMatches(scope.provider,row.conversation_key)
+            ||scope.provider==='email'&&!/^[0-9a-f]{64}$/u.test(row.read_original_sha256??'')
+            ||row.ack_verify_only!==Number(verifyOnly)||!verifyOnly&&(intake.source_revision!==sourceRevision||row.automatic_ack!==1)
+            ||verifyOnly&&intake.source_revision>sourceRevision)fail('ASSISTANT_INBOX_SOURCE_READ_REQUIRED');
+          return {eventKey:row.event_key,id:row.event_id,revision:row.event_revision,conversationKey:row.conversation_key,
+            intakeId:row.ack_model_read_intake_id,originalEventId:original.original_event_id,
+            ...(scope.provider==='email'?{originalSha256:row.read_original_sha256}:{})};
+        }
         const parts=typeof row.external_receipt==='string'?row.external_receipt.split(':'):[];
         if(row.processed!==1||row.ack_expires_at<=time()||row.delivery_state!=='complete'
           ||!assistantConversationKeyMatches(scope.provider,row.conversation_key)
@@ -1634,15 +1690,15 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       });
     },
     /** Host-only fence immediately BEFORE the one native provider invocation.
-     * Fresh domain ACL, exact read proof and committed processing are still
-     * required by that adapter. This SQLite bit is never sending authority. */
+     * Fresh domain ACL and the exact native read witness (or retained material
+     * receipt) are still required by that adapter. This SQLite bit is never sending authority. */
     startExternalAcknowledgements(scopeInput,token) {
       const scope=scopeOf(scopeInput);uuid(token);
       if(scope.provider==='trelio')inputError();
       return transaction(()=>{
         activeSource(scope);
-        const rows=all('SELECT automatic_ack,ack_started,ack_verify_only,processed,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
-        if(!rows.length || rows.some(row=>row.automatic_ack!==1||row.ack_started!==0 || row.ack_verify_only!==0 || row.processed!==1 || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
+        const rows=all('SELECT automatic_ack,ack_started,ack_verify_only,processed,ack_model_read_intake_id,ack_expires_at FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0',scope.key,token);
+        if(!rows.length || rows.some(row=>row.automatic_ack!==1||row.ack_started!==0 || row.ack_verify_only!==0 || row.processed!==1&&row.ack_model_read_intake_id===null || row.ack_expires_at<=time()))fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET ack_started=1,ack_attempt_token=? WHERE source_key=? AND ack_token=? AND acked=0',token,scope.key,token);
       });
     },
@@ -1673,7 +1729,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         // processed/unprocessed rows, without clearing its ambiguous outcome.
         // A current durable read-only lease may confirm a never-started old
         // slot without inventing a provider-write attempt in ack_started.
-        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND (processed=0 OR (ack_started=0 AND ack_verify_only=0))', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
+        if (scope.provider !== 'trelio' && get('SELECT count(*) AS total FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0 AND ((processed=0 AND ack_model_read_intake_id IS NULL) OR (ack_started=0 AND ack_verify_only=0))', scope.key, token).total) fail('ASSISTANT_INBOX_STALE_ACK');
         const pending = get('SELECT count(*) AS total,sum(CASE WHEN ack_expires_at>? THEN 0 ELSE 1 END) AS expired FROM assistant_inbox_events WHERE source_key=? AND ack_token=? AND acked=0', time(), scope.key, token);
         if (!pending.total||pending.expired>0) fail('ASSISTANT_INBOX_STALE_ACK');
         run('UPDATE assistant_inbox_events SET acked=1,ack_token=NULL,ack_expires_at=NULL WHERE source_key=? AND ack_token=?', scope.key, token);

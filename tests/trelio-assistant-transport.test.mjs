@@ -2062,7 +2062,7 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
   }
 });
 
-test('encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache',async()=>{
+for(const named of [false,true])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${named?'named':'task'})`,async()=>{
   // An actual isolated child is necessary: the common module captures its
   // private config root at import time. Never write synthetic authority/cache
   // into the developer's real HOME or share a human remembered-key profile.
@@ -2083,7 +2083,7 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'l'),GIT_TRACE2_EVENT:gitTrace,
       TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_INSPECTION_FIXTURE:'1'};
     delete childEnv.NODE_TEST_CONTEXT;
-    try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted Workspace inspect open finish',fileURLToPath(import.meta.url)],{
+    try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern',`encrypted Workspace inspect open finish.*\\(${named?'named':'task'}\\)$`,fileURLToPath(import.meta.url)],{
       env:childEnv,timeout:30000,maxBuffer:1024*1024});
       assert.match(result.stdout,/ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED/u);
     }catch(error){
@@ -2144,7 +2144,7 @@ test('encrypted Workspace inspect open finish composes real Git, managed HPKE, n
     payload:{values:{rules:'SELECTED_ASSISTANT_RULES',profile:'SELECTED_ASSISTANT_PROFILE'}}})};
   const rulesMarkdown='Synthetic global platform rules\n',rulesSha=digest(rulesMarkdown),rulesId=randomUUID();
   const company={id:f.pass.companyId,slug:'encrypted',name:'Synthetic'};
-  const snapshot={schemaVersion:1,workspace:{id:descriptor.workspaceId,scopeType:'task',scopeKey:`task:${f.pass.taskId}`,acceptedHead:head},company,
+  const snapshot={schemaVersion:1,workspace:{id:descriptor.workspaceId,scopeType:named?'project':'task',scopeKey:named?`workspace:${descriptor.workspaceId}`:`task:${f.pass.taskId}`,acceptedHead:head},company,
     encryption:{state:'encrypted'},agentInstructionsSnapshot:{schemaVersion:2,platform:{revisionId:rulesId,version:1,sha256:rulesSha,rulesMarkdown},
       company:null,project:null,compiledMarkdown:buildCompanyEncryptedTextMarker(entityId,'rules')},
     userProfileSnapshot:{schemaVersion:1,profile:{revisionId:randomUUID(),version:1},compiledMarkdown:buildCompanyEncryptedTextMarker(entityId,'profile')}};
