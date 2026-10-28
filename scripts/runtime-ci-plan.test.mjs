@@ -73,12 +73,16 @@ test('mixed entry permits only the uniquely anchored lifecycle forwarding block,
     after.replace(end, '    anotherStatement();\n' + end)]) assert.equal(choose(next).profile, 'full');
 });
 
-test('current production entry accepts a lifecycle-only field fix while retaining its complete authority and imports', () => {
+test('current production native-target handoff selection conservatively retains the full gate', () => {
   const before = fs.readFileSync(path.join(root, entryPath), 'utf8');
-  const after = before.replace("taskOutcome:'no_status_change'", "taskOutcome:'fixture_lifecycle_outcome'");
+  // Native target discovery is deliberately outside policy v1's closed
+  // single-object forwarding shape. Keep the planner unchanged/fail-closed;
+  // synthetic test above still verifies that original narrow positive case.
+  const after = before.replace("parameters.taskOutcome='no_status_change'", "parameters.taskOutcome='fixture_lifecycle_outcome'");
   assert.notEqual(before, after);
   const selected = plan([modified(entryPath)], revision => revision === baseSha ? before : after);
-  assert.equal(selected.profile, 'assistant-orchestration');
+  assert.equal(selected.profile, 'full');
+  assert.equal(selected.requiredJobs.length, 11);
   const outside = after.replace('const config=host.configurationDirectory', 'const config=otherConfigurationDirectory');
   assert.notEqual(outside, after);
   assert.equal(plan([modified(entryPath)], revision => revision === baseSha ? before : outside).profile, 'full');
