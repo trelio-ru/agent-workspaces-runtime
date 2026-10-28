@@ -245,7 +245,12 @@ test('manual window close and ready save once before unlocking images; crash pre
     return result;
   };
   const diagnose=()=>console.log(JSON.stringify({fixture:'visual-manual-failure',phase,completion,lastState,lastReason,writes,
-    failure:primaryFailure?.code==='ERR_ASSERTION'?'assertion':t.signal.aborted?'timeout':'operation'}));
+    failure:primaryFailure?.code==='ERR_ASSERTION'?'assertion':t.signal.aborted?'timeout':'operation',
+    // Report the original closed failure BEFORE async cleanup can block its
+    // TAP record. Native exception prose/paths and browser state stay private.
+    code:['EBUSY','EPERM','EACCES','ENOENT','ENOTEMPTY','operation_failed','storage_unavailable','browser_process_lost'].includes(primaryFailure?.code)?primaryFailure.code:'other',
+    syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
+    lifecycle:diagnostics.slice(-18).map(value=>value.stage),ownedBrowserRunning:Boolean(window?.running())}));
   t.signal.addEventListener('abort',diagnose,{once:true});
   try {
     for (completion of ['window_close', 'ready', 'logout_window_close']) {
@@ -277,14 +282,14 @@ test('manual window close and ready save once before unlocking images; crash pre
     assert.equal((await call('status')).reason, 'browser_process_lost');
     phase='crash_close';await browser.close(); assert.equal(writes, before); assert.deepEqual(snapshot, previous);
   } catch(error){primaryFailure=error;diagnose();throw error;} finally {
-    // SAME fixture-owned abort/HTTP cleanup as the native authentication test.
-    // A failure cannot wait behind the browser queue or leave a live listener;
-    // stop accepting before closing sockets and preserve the primary assertion.
+    // Cancel the exact owned producer BEFORE waiting for HTTP close: it may
+    // still be issuing the fixture's periodic requests after close() failed.
+    // Never wait behind that failed browser queue or replace its assertion.
     let cleanupFailed=false;
+    if(primaryFailure||t.signal.aborted)try{browser.abort();}catch{cleanupFailed=true;}
     try{await ownedServer.stop();}catch{cleanupFailed=true;}
     try{
-      if(primaryFailure||t.signal.aborted)browser.abort();
-      else await browser.close().catch(()=>browser.abort());
+      if(!primaryFailure&&!t.signal.aborted)await browser.close().catch(()=>browser.abort());
       await fs.rm(directory,{recursive:true,force:true,maxRetries:10,retryDelay:200});
     }catch{cleanupFailed=true;}finally{
       t.signal.removeEventListener('abort',abortOwned);t.signal.removeEventListener('abort',diagnose);

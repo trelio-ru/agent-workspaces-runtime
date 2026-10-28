@@ -594,8 +594,9 @@ request, pre-aborted и pending-bind cleanup. Диагностика допол�
 сохранены.
 Manual window-close/ready/logout/crash regression использует тот же общий
 fixture-owned HTTP helper, что authentication regression. Ошибка тела выводит
-только фиксированные phase/completion/state/reason и счётчик сохранений; listener
-и его sockets закрываются до ожидания browser queue. Abort отдельно останавливает
+только фиксированные phase/completion/state/reason, errno/syscall, lifecycle stages
+и счётчик сохранений до async cleanup. При исходной ошибке own browser отменяется
+до ожидания HTTP close; listener и его sockets закрываются до browser queue. Abort отдельно останавливает
 только owned test browser. Это сохраняет исходный assertion вместо зависшего
 finally; лимит 180 секунд, login/logout/snapshot/crash assertions и production
 browser lifecycle остаются прежними. Такой cleanup сам по себе не доказывает

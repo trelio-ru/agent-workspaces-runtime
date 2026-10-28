@@ -362,8 +362,9 @@ publication tooling также остаются вне этого публичн
   authentication fixtures retain only closed reasons and synthetic effect counts.
   Diagnostic evidence alone never fixes or permits replay of a failed action.
   Native manual-close regression shares the auth fixture's owned HTTP abort
-  helper: close listener/sockets before awaiting browser cleanup, retain the
-  original assertion, and emit only fixed phase/completion/state/reason counts.
+  helper: abort its failed producer before HTTP-close waits, close listener/sockets
+  before browser-queue cleanup, retain the original assertion, and emit only
+  fixed phase/completion/state/reason/errno/syscall/stage counts before cleanup.
   Detached owner descriptor I/O/cleanup share the SAME PID/nonce private mutex
   as mirror readers; no age-based eviction of a live/paused holder. Its empty root
   stays outside the claim. Recheck complete original ownership/lease after
