@@ -874,6 +874,8 @@ publication tooling также остаются вне этого публичн
 - Rate-limit and portable-Workspace fixtures budget all sequential CLI calls plus
   setup/cleanup separately; each original process deadline and no-duplicate
   assertion remains enforced. Diagnose timeout with closed stage/counters, never private output.
+  Saved-handoff fixture cleanup retries only its disposable cwd after every
+  child has settled and its server closed; no bridge request or assertion retry.
 
 
 - Verified owner source intake is taskless, uses the SAME observer/proof/native

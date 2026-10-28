@@ -4633,7 +4633,12 @@ for (const recovery of ["clean", "before_acceptance", "after_acceptance", "accep
     assert.ifError(serverError);
   } finally {
     await new Promise((resolve) => server.close(resolve));
-    await rm(temporaryDirectory, { recursive: true, force: true });
+    // Every CLI/Git child above has settled and the synthetic server is closed.
+    // Windows can still briefly retain a handle on that child's disposable cwd
+    // after process close (the native changed_input gate observed EBUSY here).
+    // Retry only deletion of this fixture-owned tree, bounded to 1.5 seconds;
+    // never retry a bridge request, change a process deadline or hide a failure.
+    await rm(temporaryDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 
