@@ -88,11 +88,11 @@ const nativeRpc = handler => (_executable, args, options) => {
 // Real-shaped public App Server fixture: a bootstrap owns only its empty
 // READY; business messages are accepted solely by the already opened GUI queue.
 const desktopRpc = ({threadId,cwd=process.cwd(),onInput=()=>{},onCreate=()=>{},onQueue=()=>{},
-  onRequest=()=>{},pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[]}={}) => {
+  onRequest=()=>{},nameFailure=false,pair=execution,queued=[],terminal=true,children=[],snapshotStatuses=[]}={}) => {
   let input='',turnId=randomUUID(),phase='read',snapshot=0;
   const rpc=nativeRpc(request=>{
     onRequest(request);
-    if(request.method==='thread/name/set'){assert.equal(request.params.threadId,threadId);assert.ok(['Работа по задаче Trelio','Переписка с владельцем','Разбор входящих сообщений'].includes(request.params.name));return {result:{}};}
+    if(request.method==='thread/name/set'){if(nameFailure)return {error:{code:-32601,message:'Synthetic unsupported name RPC'}};assert.equal(request.params.threadId,threadId);assert.ok(['Работа по задаче Trelio','Переписка с владельцем','Разбор входящих сообщений'].includes(request.params.name));return {result:{}};}
     if(request.method==='thread/start'){onCreate(request);return {result:{thread:{id:threadId}}};}
     if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,model:pair.modelId,reasoningEffort:pair.effortLevel}}};
     if(request.method==='turn/start'){
@@ -515,7 +515,7 @@ test('empty bootstrap is closed before GUI opens and only the second Desktop REA
     },onQueue:()=>{queues++;assert.ok(opened);}}),
   };
   assert.equal((await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},options)).threadId,threadId);
-  assert.equal(starts,1);assert.equal(bootstraps,1);assert.equal(queues,1);assert.equal(children.length,2);assert.equal(names,1);
+  assert.equal(starts,1);assert.equal(bootstraps,1);assert.equal(queues,1);assert.equal(children.length,3);assert.equal(names,1);
   assert.ok(children.every(c=>c.killed));
   // The same API bootstrap receipt cannot masquerade as a GUI receipt if the
   // owner has closed Desktop or its URI handler is unavailable.
@@ -651,4 +651,17 @@ test('usage observer retains confirmed block after native failure or unknown CAS
   assert.equal(writes,0);
   assert.equal((await maintainAssistantCodexUsage({client,readUsage:async()=>({state:'available',windows:[]})})).blocked,true);
   assert.equal(writes,1);
+});
+
+
+test('a refused cosmetic name RPC preserves the exact verified GUI provision, with no second queue/create',async()=>{
+ const threadId=randomUUID(),deliveryId=randomUUID();let creates=0,queues=0,starts=0,names=0;
+ const options={executable:process.execPath,environment:{},readExecutionAvailability:async()=>true,
+  startInvocation:()=>{starts++;},onThreadStarted:id=>assert.equal(id,threadId),openDesktop:async()=>{},
+  readDelivery:async()=>({state:'completed',turnId:randomUUID(),receipt:'synthetic:positive-gui-ready'}),
+  spawnProcess:desktopRpc({threadId,nameFailure:true,onCreate:()=>{creates++;},onQueue:()=>{queues++;},
+   onRequest:request=>{if(request.method==='thread/name/set')names++;}})};
+ const value=await provisionAssistantCodexChat({deliveryId,cwd:process.cwd(),execution},options);
+ assert.equal(value.state,'completed');assert.equal(value.threadId,threadId);
+ assert.equal(creates,1);assert.equal(queues,1);assert.equal(starts,1);assert.equal(names,1);
 });
