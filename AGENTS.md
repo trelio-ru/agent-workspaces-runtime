@@ -431,6 +431,8 @@ publication tooling также остаются вне этого публичн
   no-replay сохраняются; native fixtures проверяют разные типы и multi-file.
   Site acknowledgement is observed in a fresh frame after its own completion;
   chooser dispatch never proves asynchronous site completion or permits replay.
+  Native upload fixtures use unique fresh rendered-control coordinates, not
+  fixed pixels; missing controls fail before the one chooser click.
 - Signed provider может явно выбрать bounded text observation по
   [контракту](docs/visual-browser.md#текстовый-режим). Default image-only не
   расширяется автоматически. Fixed isolated reader не выдаёт HTML/JS, input

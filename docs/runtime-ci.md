@@ -137,3 +137,6 @@ synthetic site's asynchronous upload acknowledgement. It waits for that site's
 explicit rendered-completion event under a bounded fixture wait and observes a
 new read-only frame; original byte, single-click, stale-frame and no-replay
 assertions remain mandatory. A chooser response is not a site-completion signal.
+Before its sole chooser click it resolves the unique synthetic button from the
+fresh native rendered-controls frame, rather than assuming fixed screen pixels.
+Missing controls fail before input; no failed chooser is automatically retried.

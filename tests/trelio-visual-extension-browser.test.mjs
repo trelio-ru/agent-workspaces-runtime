@@ -61,19 +61,29 @@ test('outgoing chooser uploads original image, document, archive and arbitrary f
     ['unknown.bin', Buffer.from([0, 1, 2, 255])],
   ], files = [];
   for (const [name, bytes] of selected) { const file = path.join(originals, name); await fs.writeFile(file, bytes); files.push(file); }
-  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics })); return value; };
+  const ready = value => { assert.equal(value.state, 'ready', JSON.stringify({ state: value.state, reason: value.reason, diagnostics, clickCount: clicks.length, receivedCount: received.length })); return value; };
+  // The fixture uses the SAME rendered-control observation available to a
+  // text-mode agent. Fixed pixels assume a particular native viewport; use
+  // this fresh frame's unique, hit-tested button centre instead. A missing
+  // control fails before input, never by trying the upload a second time.
+  const control = (frame, label) => {
+    const matches = frame.controls.filter(value => value.role === 'button' && value.label === label);
+    assert.equal(matches.length, 1, 'the fresh frame contains one synthetic upload control');
+    return { frameId: frame.frameId, x: matches[0].x, y: matches[0].y };
+  };
   const focus = () => process.platform === 'darwin' && process.env.TRELIO_VISUAL_EXTENSION_HEADED === '1'
     ? execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf8' }).trim() : null;
   try {
     let frame = ready(await browser.call('navigate', { url: origin }));
     if (focus()) await new Promise(resolve => setTimeout(resolve, 1200));
-    const before = focus(), token = frame.frameId;
-    frame = ready(await browser.call('upload-files', { frameId: token, x: 100, y: 70, files }));
+    frame = ready(await browser.call('read-text'));
+    const before = focus(), attach = control(frame, 'Attach files');
+    frame = ready(await browser.call('upload-files', { ...attach, files }));
     if (before) assert.equal(focus(), before, 'native file selection never activates a dialog or another app');
     assert.equal(received.length, 1);
     assert.deepEqual(received[0], selected.map(([name, bytes]) => ({ name, bytes: [...bytes] })));
     assert.equal(clicks.length, 1);
-    assert.equal((await browser.call('upload-files', { frameId: token, x: 100, y: 70, files })).reason, 'stale_frame');
+    assert.equal((await browser.call('upload-files', { ...attach, files })).reason, 'stale_frame');
     assert.equal(received.length, 1, 'consumed input cannot repeat an upload');
     // A file chooser dispatch does not await the site's asynchronous change
     // handler or its upload response. The previous assertion raced that
@@ -87,13 +97,13 @@ test('outgoing chooser uploads original image, document, archive and arbitrary f
     });
     frame = ready(await browser.call('read-text'));
     assert.ok(frame.text.includes('договор.docx'));
-    assert.equal((await browser.call('upload-files', { frameId: frame.frameId, x: 100, y: 70, files: [originals] })).reason, 'upload_file_invalid');
+    assert.equal((await browser.call('upload-files', { ...control(frame, 'Attach files'), files: [originals] })).reason, 'upload_file_invalid');
     assert.equal(clicks.length, 1, 'invalid sources fail before the website is clicked');
     frame = ready(await browser.call('read-text'));
-    assert.equal((await browser.call('upload-files', { frameId: frame.frameId, x: 400, y: 70, files })).reason, 'upload_control_required');
+    assert.equal((await browser.call('upload-files', { ...control(frame, 'Single file'), files })).reason, 'upload_control_required');
     assert.equal(received.length, 1, 'multi-file selection never silently narrows to the first file');
     frame = ready(await browser.call('read-text'));
-    ready(await browser.call('upload-files', { frameId: frame.frameId, x: 400, y: 70, files: [files[1]] }));
+    ready(await browser.call('upload-files', { ...control(frame, 'Single file'), files: [files[1]] }));
     assert.deepEqual(received[1], [{ name: selected[1][0], bytes: [...selected[1][1]] }]);
     await browser.close();
     assert.deepEqual((await fs.readdir(directory)).sort(), ['originals'], 'owned staged copies disappear on normal close');
