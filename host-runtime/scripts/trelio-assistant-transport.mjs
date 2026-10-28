@@ -2887,9 +2887,14 @@ const ASSISTANT_TASK_MCP_TOOLS = Object.freeze([...ASSISTANT_TASK_MCP_READ_TOOLS
   "complete_checklist_item", "create_subtask", "create_task_relation", "delete_task_relation", "delete_checklist", "delete_attachment",
 ]);
 export const ASSISTANT_COMPANY_CONTEXT_READ_TOOLS = assistantCompanyContextReadTools();
+// Discovery must be callable in the FIRST model turn. Codex can acknowledge a
+// presentation change before its model tool inventory refreshes. These native
+// read names therefore accompany task/intake discovery from startup; execution
+// still uses the separate native company session and genuine current origin.
+export const ASSISTANT_COMPANY_DISCOVERY_TOOLS=Object.freeze(['search','fetch','get_trelio_tool_contract']);
 // Presentation views reuse ONE generated native names policy. This changes
 // neither schemas nor authority: v2 consent, task-work pass and source ACL are
-// checked natively. Default task discovery remains the exact prior tool set.
+// checked natively. Existing task writers remain available alongside discovery.
 export const ASSISTANT_MCP_READ_TOOLS = Object.freeze([...new Set([
   ...ASSISTANT_TASK_MCP_READ_TOOLS, ...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, 'download_registry_document', 'download_knowledge_base_attachment', 'get_trelio_tool_contract'])]);
 // The SAME two names must cross facade/worker dispatch before the active-pass
@@ -2922,7 +2927,7 @@ const projectAssistantSkillReadPresentation=(result,sections)=>{
   return {...result,structuredContent:after,content:result.content.map(block=>block.type==='text'&&block.text===previousJson
     ?{...block,text:nextJson}:block)};
 };
-export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,compactDialect=false}={}) => {
+export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MCP_ADMISSION_FIELDS,compactDialect=false,compactScalars=false}={}) => {
   const schema=structuredClone(source);
   let visited=0;
   const projectRoot=(node,depth=0)=>{
@@ -2960,7 +2965,7 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
   };
   if(!object(schema))fail('ASSISTANT_MCP_INVALID_RESPONSE');
   projectRoot(schema);
-  if(compactDialect&&schema.$schema==='http://json-schema.org/draft-07/schema#'){
+  if((compactDialect||compactScalars)&&[undefined,'http://json-schema.org/draft-07/schema#','https://json-schema.org/draft/2020-12/schema'].includes(schema.$schema)){
     // MCP inputs default to 2020-12. Elide a legacy dialect annotation ONLY
     // after proving the whole document uses the shared, ref-free vocabulary.
     // Tuple items, refs/IDs, dependencies, new-dialect and unknown keywords keep
@@ -2977,14 +2982,59 @@ export const assistantModelInputSchema = (source,{omittedRootFields=ASSISTANT_MC
       if(typeof node==='boolean')return true;
       if(!object(node)||++count>512||depth>32)return false;
       for(const [key,value]of Object.entries(node)){
-        if(!common.has(key)||key==='$schema'&&value!=='http://json-schema.org/draft-07/schema#')return false;
+        if(!common.has(key)||key==='$schema'&&depth!==0)return false;
         if(maps.has(key)&&(!object(value)||!Object.values(value).every(v=>equivalent(v,depth+1))))return false;
         if(singles.has(key)&&!equivalent(value,depth+1))return false;
         if(lists.has(key)&&(!Array.isArray(value)||!value.every(v=>equivalent(v,depth+1))))return false;
       }
       return true;
     };
-    if(equivalent(schema))delete schema.$schema;
+    if(equivalent(schema)){
+      if(compactDialect&&schema.$schema==='http://json-schema.org/draft-07/schema#')delete schema.$schema;
+      if(compactScalars){
+        // Exact repeated leaf schemas only, inside ONE tool document. Keep the
+        // complete original description, format, regex, limits and defaults in
+        // a local definition. Never share across tools or factor a document
+        // with refs/IDs/unknown vocabulary: their resolution scope could change.
+        // This is serialization, not native validation or managed-field pruning.
+        const visit=(node,action)=>{
+          if(typeof node==='boolean')return;
+          action(node);
+          for(const key of maps)for(const child of Object.values(node[key]??{}))visit(child,action);
+          for(const key of singles)if(node[key]!==undefined)visit(node[key],action);
+          for(const key of lists)for(const child of node[key]??[])visit(child,action);
+        };
+        const leaf=node=>['string','integer','number','boolean','null'].includes(node.type)
+          &&![...maps,...singles,...lists].some(key=>Object.hasOwn(node,key));
+        const counts=new Map();
+        visit(schema,node=>{if(leaf(node)){const key=JSON.stringify(node);counts.set(key,(counts.get(key)??0)+1);}});
+        const definitionsKey=schema.$schema==='http://json-schema.org/draft-07/schema#'?'definitions':'$defs';
+        const definitions={...schema[definitionsKey]},references=new Map();
+        for(const [key,count]of counts){
+          if(count<2)continue;
+          let index=references.size,name=`trelio_scalar_${index}`;
+          while(Object.hasOwn(definitions,name))name=`trelio_scalar_${++index}`;
+          const ref={$ref:`#/${definitionsKey}/${name}`};
+          // Include the definition key, separator and every reference; small
+          // repeated scalars must remain inline when sharing would cost more.
+          if(count*Buffer.byteLength(key)<=Buffer.byteLength(JSON.stringify({[name]:JSON.parse(key)}))
+            +count*Buffer.byteLength(JSON.stringify(ref))+32)continue;
+          definitions[name]=JSON.parse(key);references.set(key,ref);
+        }
+        const replace=node=>{
+          if(typeof node==='boolean')return node;
+          const ref=leaf(node)&&references.get(JSON.stringify(node));
+          if(ref)return {...ref};
+          for(const key of maps)if(node[key])for(const [name,child]of Object.entries(node[key]))node[key][name]=replace(child);
+          for(const key of singles)if(node[key]!==undefined)node[key]=replace(node[key]);
+          for(const key of lists)if(node[key])node[key]=node[key].map(replace);
+          return node;
+        };
+        const shared=structuredClone(schema);replace(shared);
+        if(references.size)shared[definitionsKey]=definitions;
+        if(Buffer.byteLength(JSON.stringify(shared))<Buffer.byteLength(JSON.stringify(schema)))return shared;
+      }
+    }
   }
   return schema;
 };
@@ -3078,7 +3128,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       ?['get_assistant_status','connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool','get_task','get_task_instruction_page','ask_assistant_owner','get_assistant_owner_question','request_assistant_action']
       :presentationProfile==='skill_setup'?['get_assistant_status','get_task','get_task_instruction_page','get_agent_skill','get_assistant_owner_question','ask_assistant_owner','request_assistant_action','continue_assistant_workspace_action']
       :presentationProfile==='company_context'?['get_assistant_status',...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'download_attachment','download_registry_document', 'download_knowledge_base_attachment','get_trelio_tool_contract']
-      :ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name));
+      :[...ASSISTANT_TASK_MCP_TOOLS.filter(name=>!['connect_remote_agent_skill','doctor_remote_agent_skill','call_remote_agent_skill_tool'].includes(name)),...ASSISTANT_COMPANY_DISCOVERY_TOOLS];
   };
   const perform = async (action, signal, operationTimeoutMs = timeoutMs, metadataProfile=null) => {
     const deadline = AbortSignal.timeout(operationTimeoutMs);
@@ -3139,19 +3189,23 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         // An older native catalogue may genuinely have neither intake method.
         // Do not invent definitions. One missing half is malformed, not legacy.
         if(optional&&seen.size===0&&tools.some(t=>t?.name==='get_assistant_status'))return [];
-        if(optional?seen.size!==intakeToolNames.length:!seen.has('get_assistant_status'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        if(optional?seen.size!==allowed.length:!seen.has('get_assistant_status'))fail('ASSISTANT_MCP_INVALID_RESPONSE');
         if(JSON.stringify(selected).includes(credential)||Buffer.byteLength(JSON.stringify(selected))>65_536)fail('ASSISTANT_MCP_INVALID_RESPONSE');
         return selected;
       },bounded,timeoutMs,profile);
       const normal=await catalogue(await selectedTools(true),presentationProfile);
       const intake=await catalogue(intakeToolNames,'source_intake',true);
-      let result=[...normal,...intake];
+      // Read native discovery definitions from their existing session-fixed
+      // view BEFORE the client starts a model turn, not after a status call.
+      // Older native catalogues may have none; partial sets fail closed.
+      const discovery=presentationProfile==='task'?await catalogue(ASSISTANT_COMPANY_DISCOVERY_TOOLS,'company_context',true):[];
+      let result=[...normal,...intake,...discovery.filter(tool=>!normal.some(existing=>existing.name===tool.name))];
       if(Buffer.byteLength(JSON.stringify(result))>65_536){
         // Lossless MCP defaults only: false readOnly/idempotent, true
         // destructive, and write hints ignored on a read-only tool. Preserve
         // every description, property, bound and non-default write hint.
         result=result.map(tool=>{const a=tool.annotations;return {...tool,
-          inputSchema:assistantModelInputSchema(tool.inputSchema,{omittedRootFields:[],compactDialect:true}),
+          inputSchema:assistantModelInputSchema(tool.inputSchema,{omittedRootFields:[],compactDialect:true,compactScalars:true}),
           annotations:{...(a.readOnlyHint?{readOnlyHint:true}:{}),...(!a.readOnlyHint&&a.destructiveHint===false?{destructiveHint:false}:{}),
             ...(!a.readOnlyHint&&a.idempotentHint===true?{idempotentHint:true}:{}),openWorldHint:false}};});
       }
@@ -3168,11 +3222,11 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // session. Repeat after initialization too: the protected pass can change
       // during I/O, and metadata is never execution authority.
       if(!(await selectedTools()).includes(name)&&name!=='get_assistant_status')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-      // Only the protected taskless owner origin needs to negotiate a second
-      // read catalogue. An ordinary task get_task keeps its task schema and
-      // task-only encrypted adapter; a read name alone cannot switch profiles.
+      // Initial discovery always uses the native company read session. Other
+      // implicit company reads require the protected taskless owner origin.
+      // Ordinary task get_task keeps its task schema and encrypted adapter.
       const active=typeof readActivePass==='function'?await readActivePass():null;
-      const ownerCompanyRead=active?.kind==='source_intake'
+      const companyReadSession=ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(name)||active?.kind==='source_intake'
         &&(ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name)||name==='get_trelio_tool_contract');
       return perform(async ({ protocol, config, credential, session, request, signal }) => {
         const allowed=await selectedTools();
@@ -3301,7 +3355,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           ...(value.isError === undefined ? {} : { isError: value.isError }) };
         return name==='get_agent_skill'?projectAssistantSkillReadPresentation(result,argumentsSnapshot.sections):result;
       }, signal, name==='connect_remote_agent_skill'?10*60*1000:timeoutMs,
-        ownerCompanyRead?'company_context':null);
+        companyReadSession?'company_context':null);
     },
   };
 };

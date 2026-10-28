@@ -7,6 +7,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { readCodexConversationTitle, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
@@ -14,6 +15,69 @@ import { synchronizeRunCodexTitle } from "../host-runtime/scripts/trelio-workspa
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
+
+test('actual Codex initial MCP inventory includes company discovery and accepts lossless local schema definitions without a model turn',
+ {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:60000},async t=>{
+ const executable=process.env.TRELIO_TEST_CODEX_CLI;
+ assert.ok(path.isAbsolute(executable));
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-initial-discovery-'));
+ t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:5,retryDelay:100}));
+ const server=path.join(root,'server.mjs');
+ const transport=pathToFileURL(path.resolve('host-runtime/scripts/trelio-assistant-transport.mjs')).href;
+ const entry=pathToFileURL(path.resolve('host-runtime/scripts/trelio-assistant-entry.mjs')).href;
+ // Actual facade -> actual bounded device proxy -> synthetic native metadata.
+ // No account/login/pass/HTTP/model/GUI work or installed user profile is used.
+ // The deliberate metadata pressure exercises real leaf sharing, not an
+ // already compact hand-authored $ref fixture or a second implementation.
+ await fs.writeFile(server,`import {createAssistantMcpClient} from ${JSON.stringify(transport)};
+import {runAssistantSetupMcp} from ${JSON.stringify(entry)};
+const origin='https://synthetic.test',assistantId='11111111-1111-4111-8111-111111111111',deviceId='22222222-2222-4222-8222-222222222222';
+const scalar={type:'string',format:'uuid',pattern:'^[a-f0-9-]{36}$',description:'Complete synthetic native UUID constraint. '.repeat(7)};
+const schema={type:'object',properties:Object.fromEntries(Array.from({length:20},(_,i)=>['field'+i,scalar])),additionalProperties:false};
+const definition=name=>({name,description:'Synthetic native tool',inputSchema:schema});
+const native=['get_assistant_status','get_task','create_comment','complete_assistant_pass','update_task_title','create_task','prepare_assistant_workspace_run','continue_assistant_workspace_action'].map(definition);
+const make=()=>createAssistantMcpClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential:'tda_'+'s'.repeat(43),expiresAt:1})},
+ httpRequest:async input=>{const reply=result=>({sessionId:'synthetic',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+ if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+ if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+ if(input.payload.method!=='tools/list')throw Error('NO_TOOL_CALL_OR_MODEL_ALLOWED');
+ const view=input.config.headers['x-trelio-assistant-capability-profile'];
+ return reply({tools:view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake'].map(definition)
+ :view==='company_context'?['get_assistant_status','search','fetch','get_trelio_tool_contract'].map(definition):native});}});
+await runAssistantSetupMcp({createMcp:async()=>make(),preservePlugin:()=>null});
+`);
+ const home=path.join(root,'codex');await fs.mkdir(home);
+ await fs.writeFile(path.join(home,'config.toml'),`[mcp_servers.synthetic_assistant]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${JSON.stringify(server)}]\nstartup_timeout_sec = 20\n`);
+ const environment=buildCodexEnvironment({...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:home,
+  APPDATA:path.join(root,'AppData'),LOCALAPPDATA:path.join(root,'Local')});
+ const observed=await new Promise((resolve,reject)=>{
+  const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,shell:false,windowsHide:true,stdio:['pipe','pipe','ignore']});
+  let pending='',bytes=0,sequence=0,waiting=null,done=false;
+  const finish=(reason,value)=>{if(done)return;done=true;clearTimeout(timer);
+   const cleanup=setTimeout(()=>child.kill(),2000);cleanup.unref();
+   child.once('close',()=>{clearTimeout(cleanup);reason?reject(new Error(reason)):resolve(value);});child.stdin.end();child.stdout.resume();};
+  const timer=setTimeout(()=>finish('closed initial MCP inventory timeout'),40000);
+  const request=(method,params)=>new Promise(yes=>{waiting={id:++sequence,yes};child.stdin.write(JSON.stringify({id:sequence,method,params})+'\n');});
+  child.once('error',()=>finish('closed initial MCP launch failure'));
+  child.stdin.on('error',()=>finish('closed initial MCP input failure'));
+  child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{if(done)return;bytes+=Buffer.byteLength(chunk);pending+=chunk;
+   if(bytes>8*1024*1024)return finish('closed initial MCP output bound');
+   let at;while(!done&&(at=pending.indexOf('\n'))>=0){let message;try{message=JSON.parse(pending.slice(0,at));}catch{return finish('closed initial MCP invalid JSON');}
+    pending=pending.slice(at+1);if(waiting&&message.id===waiting.id){const q=waiting;waiting=null;if(message.error)return finish('closed initial MCP RPC failure');q.yes(message.result);}}});
+  child.once('close',()=>{if(!done){done=true;clearTimeout(timer);reject(new Error('closed initial MCP early exit'));}});
+  void(async()=>{await request('initialize',{clientInfo:{name:'trelio_initial_inventory_fixture',version:'1.0.0'}});
+   child.stdin.write(JSON.stringify({method:'initialized'})+'\n');
+   const result=await request('mcpServerStatus/list',{serverName:'synthetic_assistant',detail:'toolsAndAuthOnly',limit:10});
+   const row=result?.data?.find(item=>item.name==='synthetic_assistant');
+   if(!row||row.toolsError)return finish('closed initial MCP catalogue failure '+(String(row?.toolsError??'').match(/ASSISTANT_[A-Z_]+/)?.[0]??'unclassified'));
+   finish(null,row.tools);
+  })().catch(()=>finish('closed initial MCP protocol failure'));
+ });
+ for(const name of ['search','fetch','get_trelio_tool_contract','get_task','create_comment','get_assistant_intake_context','resolve_assistant_intake'])
+  assert.ok(Object.hasOwn(observed,name),`${name} must exist in the INITIAL native client catalogue, without a status call`);
+ assert.ok(observed.search.inputSchema.$defs,'native client accepted the actual projected local definitions');
+ assert.ok(observed.search.inputSchema.properties.field0.$ref);
+});
 
 test('Windows Codex process environment retains only canonical public CMD discovery variables', () => {
   for (const [comspec, pathext] of [['ComSpec','PATHEXT'],['COMSPEC','PathExt'],['comspec','pathext']]) {

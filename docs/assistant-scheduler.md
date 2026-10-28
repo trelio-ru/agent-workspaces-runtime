@@ -1372,6 +1372,25 @@ deferred contracts, original task/KB attachment downloads and one exact publishe
 registry-file selector; task writers/owner setup/source intake are not appended.
 Raw and model catalogues each retain 65 536 bytes, transport retains 4 MiB.
 
+Initial task/intake discovery also includes the native `search`, `fetch` and
+`get_trelio_tool_contract` definitions from that SAME company session. They are
+present before a pass/model turn, not dependent on `get_assistant_status` or a
+late `tools/list_changed` refresh. Codex may finish a turn before refreshing its
+model inventory. Writers remain advertised, but metadata never grants their
+execution to an intake. Company discovery calls use the native company session;
+ordinary task `get_task` retains its task schema/adapter. A routing-only intake
+still refuses search before I/O. Search results are followed by exact fetch and
+needed current discussion; snippets or stale initial descriptions are not facts.
+
+The combined catalogue retains the existing byte bound without truncation:
+identical scalar leaf schemas may share local definitions inside ONE tool.
+Whole descriptions, formats, regexes, defaults and bounds remain unchanged;
+references expand to the same schema. Existing refs/IDs, unknown vocabulary or
+scope-changing dialects disable this optimization. Tiny contracts remain inline
+when definitions cost more. Native wire validators/pre-send shape checks always
+use the original fresh schema. Test the initial native Codex MCP inventory,
+owner/task/triage transitions and encrypted search/exact calls independently.
+
 Every source keeps its native company/project/object ACL and current effective
 scopes. Admin membership expands only ordinary results. Before any source
 content the native and local profiles bind the current company/pass/device;

@@ -10,7 +10,7 @@ export const ASSISTANT_MAINTAINER_QA_COMPOSITION_VERSION=1;
 import { requireTrelioComponentVersions } from './trelio-component-versions.mjs';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,
+import { ASSISTANT_MCP_TOOLS, ASSISTANT_MCP_READ_TOOLS, ASSISTANT_COMPANY_CONTEXT_READ_TOOLS, ASSISTANT_COMPANY_DISCOVERY_TOOLS, AssistantTransportError, assistantSetupRecovery, assistantTaskStorageDirectory, ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES, ASSISTANT_SOURCE_MONITOR_ERROR_CODES,assistantSkillReadNeedsSetup,
   validateAssistantEncryptedInspection, supportsAssistantManagedContent, parseAssistantSourceReadReference, isAssistantStructuralResultRetraction, assistantRegistryDocumentReadSelection, normalizeAssistantSkillConsentParameters,normalizeAssistantSkillAccountSetupFields,normalizeAssistantSkillAccountSetupParameters,normalizeAssistantSkillAccountSetupPlan, assistantNeutralPrivateMetadata, assistantNeutralPrivateInput, assistantNeutralCompanySecret,projectAssistantSetupCompanies } from './trelio-assistant-transport.mjs';
 import { StringDecoder } from 'node:string_decoder';
 import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
@@ -418,7 +418,7 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
 /** Schema discovery before enrollment needs no credential/private worker.
  * A present structural host journal switches to the ordinary protected path;
  * ACL/I/O/corruption errors are not treated as an unconfigured installation. */
-export const createProductionAssistantMcp = async ({presentationProfile='task',context=productionContext,withProfile=withProductionAssistantWorkspace,withManagedContent=withProductionAssistantManagedContent}={}) => {
+export const createProductionAssistantMcp = async ({presentationProfile='task',context=productionContext,withProfile=withProductionAssistantWorkspace,withManagedContent=withProductionAssistantManagedContent,httpRequest}={}) => {
   const common = await import('./trelio-workspace.mjs');
   // Preserve credential-free production discovery. A trusted maintainer context
   // owns its own private root; no tool, CLI envelope or environment selects it.
@@ -430,13 +430,14 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',c
   return context(async(sourceClient,host,store)=>{
   const identity=sourceClient.identity;
   const directory=path.join(host.configurationDirectory??common.resolveWorkspaceBridgeConfigDirectory(),'digital-assistants');
-  return createAssistantMcpClient({ ...identity, store, presentationProfile,
+  return createAssistantMcpClient({ ...identity, store, presentationProfile,httpRequest,
     withWorkspaceArguments:async(request,send)=>{
-      // Preserve ordinary task reads. Only the current protected intake can
-      // select company reads implicitly; model arguments never select origin.
+      // Discovery has its own native read session from startup. Ordinary task
+      // get_task retains its existing adapter; only the protected owner intake
+      // selects other company reads implicitly. Names never select authority.
       const active=typeof host.readActivePass==='function'?await host.readActivePass():null;
       return withAssistantEncryptedWorkspaceArguments(request,send,{withProfile,withManagedContent,
-        companyContextRead:presentationProfile==='company_context'
+        companyContextRead:ASSISTANT_COMPANY_DISCOVERY_TOOLS.includes(request.name)||presentationProfile==='company_context'
           ||active?.kind==='source_intake'&&ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(request.name)});
     },
     readActivePass:host.readActivePass,

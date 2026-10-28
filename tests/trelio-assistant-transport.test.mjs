@@ -1158,7 +1158,8 @@ test('assistant MCP reuses the bounded protocol with its real device profile and
   const resultPromise=client.callTool('get_task',args);args.runtimeSessionProof.signature='changed';
   const result=await resultPromise;assert.equal(receivedArgs.runtimeSessionProof.signature,'original');
   assert.equal(result.content[0].text,'native content');assert.ok(!('_meta' in result));
-  assert.deepEqual(calls,['initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/list','DELETE','initialize','notifications/initialized','tools/list','tools/call','DELETE']);
+  assert.deepEqual(calls,[...Array.from({length:3},()=>['initialize','notifications/initialized','tools/list','DELETE']).flat(),
+    'initialize','notifications/initialized','tools/list','tools/call','DELETE']);
   const count=calls.length;await assert.rejects(client.callTool('delete_workspace',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls.length,count);
   assert.equal(tools[2].annotations.readOnlyHint,false);
   assert.equal(tools.find(tool=>tool.name==='delete_checklist').annotations.destructiveHint,true);
@@ -1854,6 +1855,41 @@ test('ordinary task reads retain their native view while owner intake negotiates
  active={kind:'task'};
  assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task');
  assert.deepEqual(views,['task','company_context','task']);assert.equal(calls,3,'routing-only intake refuses before native I/O');
+});
+
+test('production default factory protects initial search and fetch before native MCP calls without a presentation switch',async()=>{
+ const {createProductionAssistantMcp}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+ const identity={origin:'https://factory-discovery.test',assistantId:randomUUID(),deviceId:randomUUID()},store=memoryStore();
+ await store.put({origin:identity.origin,kind:'device',id:identity.assistantId},{...identity,credential:`tda_${'f'.repeat(43)}`,expiresAt:1});
+ let active={kind:'task'},mode='encrypted';const calls=[],wire=[];
+ // Trusted constructor callback only, like context/withProfile. No model/CLI,
+ // configuration file or environment may replace the production HTTP path.
+ const client=await createProductionAssistantMcp({context:action=>action({identity},{readActivePass:async()=>active},store),
+  withProfile:action=>action({readCompanyContentMode:async()=>mode}),httpRequest:async input=>{
+   assert.equal(input.config.endpoint,identity.origin+'/mcp/assistant');
+   const message=input.payload;wire.push(JSON.stringify(message));
+   const response=result=>({sessionId:'synthetic-factory',message:{jsonrpc:'2.0',id:message?.id,result}});
+   if(input.method==='DELETE'||message.method==='notifications/initialized')return response({});
+   if(message.method==='initialize')return response({protocolVersion:'2025-06-18'});
+   if(message.method==='tools/list')return response({tools:['search','fetch'].map(name=>({name,description:'Synthetic native discovery',inputSchema:{type:'object'}}))});
+   assert.equal(message.method,'tools/call');
+   assert.equal(input.config.headers['x-trelio-assistant-capability-profile'],'company_context');
+   calls.push(message.params);return response({content:[],structuredContent:{nativeRead:true}});
+  }});
+ const admission={taskPass:{companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},runtimeSessionProof:{synthetic:true}};
+ for(const [name,business]of [['search',{queries:['PRIVATE_FIRST_TURN_QUERY']}],['fetch',{id:'PRIVATE_SELECTED_SOURCE'}]]){
+  await client.callTool(name,{...business,...admission});
+  assert.deepEqual(calls.at(-1).arguments,{localContextRead:true,...admission});
+ }
+ assert.doesNotMatch(wire.join(''),/PRIVATE_FIRST_TURN_QUERY|PRIVATE_SELECTED_SOURCE/);
+ const count=calls.length;mode='encrypting';
+ await assert.rejects(client.callTool('search',{queries:['MUST_STAY_LOCAL'],...admission}),/ASSISTANT_ENCRYPTED_CONTENT_REQUIRED/);
+ assert.equal(calls.length,count);
+ mode='plain';await client.callTool('search',{queries:['PLAIN_QUERY'],...admission});
+ assert.deepEqual(calls.at(-1).arguments,{queries:['PLAIN_QUERY'],...admission});
+ active={kind:'source_intake',intakeKind:'route_existing'};
+ await assert.rejects(client.callTool('search',{queries:['DENIED_ORIGIN']}),/CAPABILITY_UNAVAILABLE/);
+ assert.doesNotMatch(wire.join(''),/MUST_STAY_LOCAL|DENIED_ORIGIN/);
 });
 
 test('company read negotiation hides only the closed host branch and keeps original query off MCP HTTP',async()=>{
@@ -3373,11 +3409,11 @@ test('stable native intake metadata survives cached task chats while execution k
  }});
  const expected=['get_assistant_status','get_task','get_assistant_intake_context','resolve_assistant_intake'];
  assert.deepEqual((await client.listTools()).map(tool=>tool.name),expected);
- assert.deepEqual([...new Set(views)],['task','source_intake']);
+ assert.deepEqual([...new Set(views)],['task','source_intake','company_context']);
  await assert.rejects(client.callTool('create_task',{}),/CAPABILITY_UNAVAILABLE/);assert.equal(calls,0);
  await client.callTool('resolve_assistant_intake',{});assert.equal(calls,1);
  active={kind:'task'};views.length=0;assert.deepEqual((await client.listTools()).map(tool=>tool.name),expected);
- assert.deepEqual([...new Set(views)],['task','source_intake']);await assert.rejects(client.callTool('resolve_assistant_intake',{}),/CAPABILITY_UNAVAILABLE/);
+ assert.deepEqual([...new Set(views)],['task','source_intake','company_context']);await assert.rejects(client.callTool('resolve_assistant_intake',{}),/CAPABILITY_UNAVAILABLE/);
 });
 
 
@@ -3413,8 +3449,71 @@ test('stable task plus native intake catalogue stays within the unchanged 64KiB 
  for(const tool of model){const original=[...normal,...intake].find(t=>t.name===tool.name);
   assert.equal(tool.description,original.description);assert.deepEqual(tool.inputSchema.properties,original.inputSchema.properties);
   assert.deepEqual(tool.inputSchema.required,['title']);assert.equal(tool.inputSchema.additionalProperties,false);}
- assert.equal(calls,2);malformed=true;
+ assert.equal(calls,3);malformed=true;
  await assert.rejects(client.listTools(),/ASSISTANT_MCP_INVALID_RESPONSE/,'one missing intake definition is never a legacy fallback');
+});
+
+test('initial cached task catalogue exposes unified company discovery before any status call or active intake',async()=>{
+ const origin='https://initial-discovery.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+ await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
+ let active=null,malformed=false;const calls=[];
+ const definition=name=>({name,description:`Native ${name}`,inputSchema:{type:'object',properties:{
+  ...(name==='search'?{queries:{type:'array',items:{type:'string'},minItems:1}}:{}),
+  ...(name==='fetch'?{id:{type:'string'}}:{}),intakePass:{},taskPass:{},runtimeSessionProof:{}},additionalProperties:false}});
+ const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>active,httpRequest:async input=>{
+  const view=input.config.headers['x-trelio-assistant-capability-profile']??'task';
+  const response=result=>({sessionId:'initial',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+  if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return response({});
+  if(input.payload.method==='initialize')return response({protocolVersion:'2025-06-18'});
+  if(input.payload.method==='tools/list')return response({tools:(view==='company_context'
+   ?['get_assistant_status','search','fetch',...(malformed?[]:['get_trelio_tool_contract'])]
+   :view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']
+   :['get_assistant_status','get_task','update_task_title']).map(definition)});
+  calls.push({view,name:input.payload.params.name});return response({content:[],structuredContent:{view}});
+ }});
+ const tools=await client.listTools();
+ for(const name of ['search','fetch','get_trelio_tool_contract','get_task','update_task_title','get_assistant_intake_context','resolve_assistant_intake'])
+  assert.ok(tools.some(tool=>tool.name===name),`${name} is discoverable before the first pass/model turn`);
+ assert.deepEqual(calls,[],'metadata never creates an intake, task, Run or model call');
+ assert.equal(JSON.stringify(tools).includes('intakePass'),false);
+ active={kind:'source_intake',intakeKind:'owner_command'};
+ assert.equal((await client.callTool('search',{queries:['trip']})).structuredContent.view,'company_context');
+ assert.equal((await client.callTool('fetch',{id:'selected-native-id'})).structuredContent.view,'company_context');
+ await assert.rejects(client.callTool('update_task_title',{title:'not permitted'}),/CAPABILITY_UNAVAILABLE/);
+ active={kind:'source_intake',intakeKind:'route_existing'};
+ await assert.rejects(client.callTool('search',{queries:['not an owner']}),/CAPABILITY_UNAVAILABLE/);
+ active={kind:'task'};
+ assert.equal((await client.callTool('search',{queries:['native task read']})).structuredContent.view,'company_context');
+ assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task','ordinary task read retains its original native adapter');
+ assert.deepEqual(calls.map(call=>call.name),['search','fetch','search','get_task'],'no hidden status/view-switch call or writer');
+ malformed=true;await assert.rejects(client.listTools(),/ASSISTANT_MCP_INVALID_RESPONSE/,'partial discovery is not an empty legacy catalogue');
+});
+
+test('catalogue scalar sharing is lossless, tool-local and preserves all native bounds and business annotations',()=>{
+ const leaf={type:'string',format:'uuid',pattern:'^[a-f0-9-]{36}$',minLength:36,maxLength:36,
+  description:'A complete native UUID constraint and description '.repeat(5)};
+ const source={$schema:'http://json-schema.org/draft-07/schema#',type:'object',properties:{
+  first:leaf,second:structuredClone(leaf),nested:{type:'object',properties:{runtimeSessionProof:structuredClone(leaf)},additionalProperties:false},
+  values:{type:'array',items:structuredClone(leaf),minItems:2,maxItems:4}},required:['first','second'],additionalProperties:false};
+ const before=structuredClone(source),shared=assistantModelInputSchema(source,{compactScalars:true});
+ assert.deepEqual(source,before,'native wire schema is never mutated');
+ assert.ok(Buffer.byteLength(JSON.stringify(shared))<Buffer.byteLength(JSON.stringify(source)));
+ assert.ok(shared.definitions);assert.match(shared.properties.first.$ref,/^#\/definitions\/trelio_scalar_/);
+ const expand=node=>{
+  if(Array.isArray(node))return node.map(expand);
+  if(!node||typeof node!=='object')return node;
+  if(node.$ref){const [,group,key]=node.$ref.split('/');return expand(shared[group][key]);}
+  return Object.fromEntries(Object.entries(node).filter(([key])=>key!=='definitions').map(([key,value])=>[key,expand(value)]));
+ };
+ assert.deepEqual(expand(shared),source,'complete schema including nested business proof fields expands byte-for-byte structurally');
+ for(const extra of [{$id:'https://scope.test/schema'},{$ref:'#/definitions/other'},{$anchor:'changed-scope'},
+  {dependentSchemas:{other:{type:'object'}}},{unknownNativeKeyword:true}]){
+  const original={...source,...extra};
+  if(extra.$ref)assert.throws(()=>assistantModelInputSchema(original,{compactScalars:true}),/ASSISTANT_MCP_INVALID_RESPONSE/);
+  else assert.deepEqual(assistantModelInputSchema(original,{compactScalars:true}),original,'unknown/reference resolution semantics stay inline');
+ }
+ const tiny={type:'object',properties:{one:{type:'string'},two:{type:'string'}}};
+ assert.deepEqual(assistantModelInputSchema(tiny,{compactScalars:true}),tiny,'reference overhead never expands a small contract');
 });
 
 test('managed Remote MCP reuses credential paths and exact native attempt fence without human namespace access',async()=>{
