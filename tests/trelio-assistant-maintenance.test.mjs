@@ -142,7 +142,7 @@ test('live device revocation during download blocks preparation and every GUI/in
     readActivation:async()=>null,readActivePass:async()=>null,codexUpdatePackagePath:async()=>'C:\\private\\desktop.msix',withSetupLock:async action=>action()};
   const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>action(async()=>{})}};
   await assert.rejects(runProductionAssistantCodexMaintenance(runtime,{platform:'win32',context:async action=>action(client,host),
-    nativeUpdate:async operation=>{native.push(operation);return {version:'26.100.0.0',architecture:'x64'};},
+    nativeUpdate:async(operation,options)=>{await options.guard();native.push(operation);return {version:'26.100.0.0',architecture:'x64'};},
     download:async()=>{authorized=false;return {etag:'"new"',sha256:'a'.repeat(64)};},
     desktop:async()=>assert.fail('revoked device cannot close or start Desktop'),probe:async()=>assert.fail('revocation is not readiness'),
   }),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
@@ -203,6 +203,9 @@ test('native Desktop servicing uses fixed OS modules and defers in-use registrat
   assert.match(ASSISTANT_CODEX_UPDATE_SCRIPT,/DtdProcessing.*Prohibit/);
   let invoked=0;
   await assert.rejects(runAssistantWindowsCodexUpdate('evil',{runNative:()=>{invoked++;}}));assert.equal(invoked,0);
+  await assert.rejects(runAssistantWindowsCodexUpdate('inspect',{guard:async()=>{throw Object.assign(Error(),{code:'DIGITAL_ASSISTANT_DEVICE_REVOKED'});},
+    runNative:()=>{invoked++;}}),{code:'DIGITAL_ASSISTANT_DEVICE_REVOKED'});
+  assert.equal(invoked,0,'the real native adapter checks liveness before spawning the OS helper');
   const result=await runAssistantWindowsCodexUpdate('inspect',{runNative:async(_input,options)=>options.project({schemaVersion:1,version:'26.100.0.0',architecture:'arm64'})});
   assert.equal(result.architecture,'arm64');
   await assert.rejects(runAssistantWindowsCodexUpdate('inspect',{runNative:async(_input,options)=>options.project({schemaVersion:1,version:'26.100.0.0',architecture:'x64',private:'never'})}));
