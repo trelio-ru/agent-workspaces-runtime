@@ -27,6 +27,17 @@ const PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKPrbp7ylW5XVUNt
 const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY, 'base64')).digest('hex').slice(0, 32)].map(c => String.fromCharCode(97 + parseInt(c, 16))).join('');
 const fault = code => Object.assign(new Error(code), { code });
 
+/** ChildProcess 'exit' precedes closure of its inherited stdio handles. Keep
+ * the original stop budget across both boundaries: a Chromium helper can still
+ * hold those handles after the main process exited. Neither snapshot nor
+ * disposal may race that remaining native lifetime. This observes only the
+ * child created by this session; it never discovers or terminates another PID.
+ */
+export async function waitVisualBrowserStopped(child, closed, deadlineAt) {
+  while (((child.exitCode === null && child.signalCode === null) || !closed()) && Date.now() < deadlineAt) await sleep(Math.min(100, Math.max(1, deadlineAt - Date.now())));
+  if ((child.exitCode === null && child.signalCode === null) || !closed() || Date.now() > deadlineAt) throw fault('operation_failed');
+}
+
 // Loopback belongs to the private transport, never the navigation/content
 // policy. Explicit permission also covers Chrome Local Network Access checks;
 // CSP restricts connections to the one random-port authenticated host server.
@@ -197,7 +208,7 @@ export async function freezeVisualUploads({ directory, files, deadlineAt, signal
  * There is no listening DevTools endpoint, arbitrary CDP/evaluate command,
  * arbitrary page projection, user-profile import or per-action app activation. */
 export class ExtensionVisualBrowser {
-  #child; #server; #wss; #socket; #directory; #profile; #pending = new Map();
+  #child; #childClosed = false; #server; #wss; #socket; #directory; #profile; #pending = new Map();
   #state = 'not_configured'; #manual = false; #saved = false; #closed = false;
   #tail = Promise.resolve(); #deadline; #heartbeat; #terminal; #starting; #finishing;
   #launchAbort = new AbortController(); #extensionReady = false;
@@ -331,6 +342,8 @@ export class ExtensionVisualBrowser {
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
     this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testNativeLogging ? 'pipe' : 'ignore'], windowsHide: true });
+    this.#childClosed = false;
+    this.#child.once('close', () => { this.#childClosed = true; });
     // Fixture-only classification deliberately discards raw stderr. Even CI
     // must never print a worker resource, private path or loopback credential.
     let diagnosticTail = '', sandboxUnavailable = false, displayUnavailable = false, extensionUnavailable = false;
@@ -412,10 +425,10 @@ export class ExtensionVisualBrowser {
       this.testDiagnostics?.({ stage: 'browser_quit', state: quitState });
     }
     const until = Date.now() + 10_000;
-    while (child.exitCode === null && child.signalCode === null && Date.now() < until) await sleep(100);
-    if (child.exitCode === null && child.signalCode === null) {
+    try { await waitVisualBrowserStopped(child, () => this.#childClosed, until); }
+    catch (error) {
       this.testDiagnostics?.({ stage: 'browser_stop_timeout' });
-      throw fault('operation_failed');
+      throw error;
     }
     await this.#nativeDiagnostics();
     if (child.exitCode !== 0 || child.signalCode) { this.#terminal = 'browser_process_lost'; this.#state = 'error'; }
@@ -445,7 +458,16 @@ export class ExtensionVisualBrowser {
     } catch (error) {
       // Fixture-only closed evidence distinguishes snapshot/persist/disposal.
       // Never emit exception prose, profile paths or authentication data.
-      this.testDiagnostics?.({ stage: `stopped_profile_${phase}_failed` });
+      const relative = typeof error.path === 'string' ? path.relative(this.#directory, error.path).split(path.sep).join('/') : '';
+      // Reduce only our own failed path to a closed category. This distinguishes
+      // a logging handle from an auth-store lock without exposing any path or
+      // browser-selected filename, even in a synthetic native CI failure.
+      const target = relative === 'native.log' ? 'native_log'
+        : /^profile\/(?:Default\/(?:Network\/)?Cookies(?:-(?:wal|shm|journal))?)$/u.test(relative) ? 'cookie_store'
+        : relative.startsWith('profile/Crashpad/') ? 'crashpad'
+        : relative.startsWith('profile/') ? 'profile_other'
+        : relative.startsWith('extension/') ? 'extension' : 'other';
+      this.testDiagnostics?.({ stage: `stopped_profile_${phase}_failed`, target });
       throw error;
     }
   }

@@ -506,7 +506,10 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     try { await ownedServer.stop(); } catch { cleanupFailed=true; }
     try {
       if(!primaryFailure&&!t.signal.aborted)await browser.close().catch(() => browser.abort());
-      await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      // A failed sharing-boundary profile is retained, not recursively retried
+      // inside finally. Native failure must reach TAP under its original
+      // deadline; only a successful scenario asserts full profile disposal.
+      if(!primaryFailure&&!t.signal.aborted)await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
     } catch { cleanupFailed=true; } finally {
       t.signal.removeEventListener('abort',diagnose);t.signal.removeEventListener('abort',abortOwned);
     }

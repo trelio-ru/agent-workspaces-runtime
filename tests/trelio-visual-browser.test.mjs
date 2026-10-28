@@ -1,7 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence, waitVisualBrowserStopped } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+
+test('stopped browser joins native stdio closure after main exit without extending its stop deadline', { timeout: 5000 }, async () => {
+  // A real descendant inherits the launched child's stderr. Node reports the
+  // main exit first; profile I/O must still wait for that owned pipe to close.
+  // Synthetic children receive no runtime environment, account or credentials.
+  const child = spawn(process.execPath, ['-e', `const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},700)'],{stdio:['ignore','ignore',2],env:{}});process.exit(0);`], { stdio: ['ignore', 'ignore', 'pipe'], env: {} });
+  let closed = false;
+  child.once('close', () => { closed = true; });
+  try {
+    const [code] = await once(child, 'exit'); assert.equal(code, 0);
+    assert.equal(closed, false, 'native exit alone is not a closed profile boundary');
+    const deadline = Date.now() + 2500;
+    await waitVisualBrowserStopped(child, () => closed, deadline);
+    assert.equal(closed, true); assert.ok(Date.now() < deadline);
+    await assert.rejects(waitVisualBrowserStopped(child, () => false, Date.now()), { code: 'operation_failed' });
+  } finally { child.stderr.destroy(); if (child.exitCode === null) child.kill(); }
+});
 
 test('extension transport has an exact loopback CSP without expanding page navigation or content injection', () => {
   const matches = ['https://example.test/*'], manifest = visualExtensionManifest(matches, 23145);

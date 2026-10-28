@@ -209,6 +209,15 @@ durable auth snapshot сохраняется, unknown orphan state не удал
 задержкой от 100 мс. Чтение auth/ACL, persist и browser input не
 повторяются; исчерпание cleanup сохраняет исходный отказ. Fixture дополнительно
 различает закрытые стадии snapshot/persist/cleanup, без исключений и путей.
+Остановка дополнительно ждёт native `ChildProcess.close`: `exit` основного
+процесса ещё не означает закрытия унаследованных stdio handles. Обе границы
+разделяют прежние десять секунд остановки; snapshot/удаление не начинаются
+раньше `close`. Это не завершает чужие процессы и не повторяет browser input.
+При sharing violation fixture сохраняет исходный отказ и профиль, не входит
+из `finally` в повторное рекурсивное удаление того же занятого дерева. Успешный
+сценарий по-прежнему обязан полностью очиститься. Закрытая категория failed
+target различает diagnostic log, cookie store, Crashpad и остальные owned
+entries без выдачи путей; сама категория не доказывает снятие native lock.
 Synthetic macOS shutdown diagnostics distinguish only fixed AppKit quit states
 (`accepted|refused|not_found|helper_failed`) and a stop-timeout stage. They do not
 add retries, extend the deadline or turn an unconfirmed stop into a saved profile;

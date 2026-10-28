@@ -367,6 +367,9 @@ publication tooling также остаются вне этого публичн
   fixed phase/completion/state/reason/errno/syscall/stage counts before cleanup.
   Stopped, already persisted profile disposal has bounded transient rm retries;
   snapshot/auth/ACL/persist/input never replay. Native fixtures retain strict failure.
+  Browser stop joins native stdio close as well as main exit under the SAME
+  stop budget; failed fixtures retain their profile without recursive rm retries.
+  Cleanup diagnostics expose only closed owned-file categories, never paths.
   Detached owner descriptor I/O/cleanup share the SAME PID/nonce private mutex
   as mirror readers; no age-based eviction of a live/paused holder. Its empty root
   stays outside the claim. Recheck complete original ownership/lease after

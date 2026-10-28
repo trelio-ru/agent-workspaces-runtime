@@ -250,7 +250,7 @@ test('manual window close and ready save once before unlocking images; crash pre
     // TAP record. Native exception prose/paths and browser state stay private.
     code:['EBUSY','EPERM','EACCES','ENOENT','ENOTEMPTY','operation_failed','storage_unavailable','browser_process_lost'].includes(primaryFailure?.code)?primaryFailure.code:'other',
     syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
-    lifecycle:diagnostics.slice(-18).map(value=>value.stage),ownedBrowserRunning:Boolean(window?.running())}));
+    lifecycle:diagnostics.slice(-18).map(value=>value.stage),failedTarget:diagnostics.findLast(value=>value.target)?.target??null,ownedBrowserRunning:Boolean(window?.running())}));
   t.signal.addEventListener('abort',diagnose,{once:true});
   try {
     for (completion of ['window_close', 'ready', 'logout_window_close']) {
@@ -290,7 +290,11 @@ test('manual window close and ready save once before unlocking images; crash pre
     try{await ownedServer.stop();}catch{cleanupFailed=true;}
     try{
       if(!primaryFailure&&!t.signal.aborted)await browser.close().catch(()=>browser.abort());
-      await fs.rm(directory,{recursive:true,force:true,maxRetries:10,retryDelay:200});
+      // Preserve a failed native profile instead of entering recursive removal
+      // retries on the very sharing violation being diagnosed. The listener
+      // and exact producer are already stopped independently above. Successful
+      // scenarios still prove complete cleanup; a failure keeps its assertion.
+      if(!primaryFailure&&!t.signal.aborted)await fs.rm(directory,{recursive:true,force:true,maxRetries:10,retryDelay:200});
     }catch{cleanupFailed=true;}finally{
       t.signal.removeEventListener('abort',abortOwned);t.signal.removeEventListener('abort',diagnose);
       console.log(JSON.stringify({fixture:'visual-manual',diagnostics}));
