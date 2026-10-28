@@ -1748,8 +1748,76 @@ an updater failure nor rollback retries a business/provider operation.
 The implementation must pass native Windows manifest/process/CLI tests and a
 real dedicated Desktop update before unattended activation is called verified.
 Other operating systems leave this Windows policy inactive. Windows login is
-still required after reboot; SYSTEM/autologin and automatic Desktop application
-updates remain outside this feature.
+still required after reboot; SYSTEM/autologin remain outside this feature. Desktop application updates use
+the independent policy below.
+
+### Automatic Codex Desktop updates (Windows)
+
+`install_assistant_background({autoUpdateCodex:true})` independently opts the
+paired machine into Desktop servicing. `--auto-update-codex=on|off` crosses both
+signed entry boundaries; it may accompany the existing plugin flag. Omission
+preserves policy and an absent policy is disabled. Existing plugin consent never
+becomes Desktop consent. Setup records it after native background registration;
+it does not update or restart the app during pairing. The status read exposes
+`pluginMaintenance.codexUpdates` with only enabled/stage/version metadata.
+
+The current signed background tick first completes plugin maintenance, then
+uses the SAME coordinator idle lease and setup mutex for Desktop. Active passes,
+leased/started/uncertain deliveries, owner intakes and interactive setup defer
+all effects. Recheck identity, lifecycle, pass, policy and lease immediately
+before each native operation. Pending tasks, permanent chats, Workspace files,
+SQLite inbox/schedules, credentials and hook approval have no mutation path here.
+A retained unresolved pass is never dismissed to make an update possible.
+
+Every six hours at an eligible boundary, read the installed current-user exact
+`OpenAI.Codex_2p2nqsd0c76g0` package and the architecture-specific MSIX URL from
+[OpenAI's deployment documentation](https://learn.chatgpt.com/docs/enterprise/windows-deployment).
+Use only the fixed `persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix`
+or `ChatGPT-arm64.msix`; reject redirects, unexpected encoding, changed ETag,
+partial data and packages over 1 GiB. One owner-private complete code artifact
+replaces the prior artifact atomically. A matching ETag skips download. The official blob version/identity/architecture
+hint may also skip a package no newer than the native installation; it never
+authorizes deployment. Desktop servicing alone has a 15-minute context budget
+and a five-minute signature/deployment subprocess bound, preserving earlier
+cancellation. All other setup, plugin and OS subprocess budgets stay unchanged.
+Network/discovery failure leaves the healthy existing Desktop usable.
+
+The SAME bounded OS-module pipe checks full SHA-256, trusted Authenticode,
+manifest name, the registered publisher, architecture and numeric package
+version before closing Desktop. Harden XML against DTD/external entities and
+hold a read-only/no-write/no-delete artifact handle across validation and
+installation. Windows validates the package again through `Add-AppxPackage
+-DeferRegistrationWhenPackagesAreInUse`: no force shutdown, unsigned package,
+downgrade, elevation, system provisioning, trust/config edit or CLI installer.
+This app-update policy never installs or updates a standalone CLI.
+
+The identity-bound private CAS journal persists prepared/closing/installing/
+starting/verifying before each effect. Close only ONE observed GUI generation
+through the SAME signed Restart Manager helper. A refusal, lost close response
+or different process generation never authorizes a second close or a kill.
+An unknown installation permits native version observation only, never another
+Add-AppxPackage. Resume Desktop through its registered application and observe
+its new process; lost activation is observed without another start. After ten
+minutes without activation, retain the journal and notify the owner through the
+existing runtime-update health reason. A manual native recovery may still finish
+that SAME pending verification; no timer resets the install intent.
+
+Check the installed version and fresh hook/MCP/device readiness before marking
+updated. Changed hooks/login still require their existing human decisions.
+The update itself clears no login/trust/dispatch latch. Failed deployment may
+resume the prior healthy Desktop after its fresh probe; its failed version stays
+latched and is reported without repeated installation. Only a newer signed
+candidate may be attempted. A later exact native version/fresh GUI/probe may
+also verify an already deferred registration without another installation. Health metadata cannot clear that retained failure.
+Disabling consent during an unresolved installation preserves its journal and
+reports the existing closed incident, without making pending work falsely idle.
+
+The tests cover orchestration, download bounds, policy/CAS and interrupted
+installation/activation. Native Windows CI parses the actual helper and executes
+its current-user read/refusal boundary. A real dedicated Desktop upgrade remains
+a separate acceptance step before claiming unattended activation verified.
+The app's own updater, Microsoft Store and device-management updates are
+independent; this mechanism never claims control over their scheduling.
 
 The production host reports a structurally confirmed native missing-login error
 before the coordinator replaces a post-admission failure with its durable

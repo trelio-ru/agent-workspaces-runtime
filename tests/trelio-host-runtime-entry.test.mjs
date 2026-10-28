@@ -117,6 +117,20 @@ test("assistant installer policy crosses the signed runtime entry and the manage
   }
 });
 
+test('Desktop opt-in crosses BOTH entry boundaries separately and rejects duplicate/foreign flags',async()=>{
+  const {runAssistantEntry}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
+  for(const flags of [['--auto-update-codex=on'],['--auto-update-codex=off'],['--auto-update-plugin=on','--auto-update-codex=on']]){
+    const route=resolveHostRuntimeInvocation(['bridge','assistant','background-install',...flags]);let actual;
+    await runAssistantEntry(route.arguments,{createBackground:async()=>async(operation,options)=>{actual={operation,options};return {};},output:{write:()=>{}}});
+    assert.equal(actual.operation,'install');assert.equal(actual.options.autoUpdateCodex,flags[0].endsWith('=off')?false:true);
+    assert.equal(actual.options.autoUpdatePlugin,flags.length===2?true:undefined);
+  }
+  for(const flags of [['--auto-update-codex=true'],['--auto-update-codex=on','--auto-update-codex=off'],['--auto-update-codex=on','extra']]){
+    assert.throws(()=>resolveHostRuntimeInvocation(['bridge','assistant','background-install',...flags]),/COMMAND_UNSUPPORTED/);
+    await assert.rejects(runAssistantEntry(['background-install',...flags]),/COMMAND_UNSUPPORTED/);
+  }
+});
+
 test("actual runtime assistant MCP discovers setup and broken hooks deny without human auth", async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "trelio-assistant-entry-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

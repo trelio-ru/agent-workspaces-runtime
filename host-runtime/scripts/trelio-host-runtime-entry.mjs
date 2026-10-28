@@ -45,9 +45,10 @@ export const resolveHostRuntimeInvocation = (rawArguments) => {
     // The optional setup policy is closed at BOTH entry boundaries. Forward
     // only the exact installer flag; other commands, values or extra arguments
     // must still refuse before importing/spawning the assistant implementation.
-    const pluginPolicy = argumentsAfterMode.length === 3
-      && argumentsAfterMode[1] === "background-install"
-      && ["--auto-update-plugin=on", "--auto-update-plugin=off"].includes(argumentsAfterMode[2]);
+    const flags=argumentsAfterMode.slice(2);
+    const pluginPolicy = argumentsAfterMode[1] === "background-install" && flags.length>0 && flags.length<=2
+      && flags.every(flag=>/^--auto-update-(plugin|codex)=(on|off)$/u.test(flag))
+      && new Set(flags.map(flag=>flag.split('=')[0])).size===flags.length;
     if ((!pluginPolicy && argumentsAfterMode.length !== 2) || !["mcp", "hook", "request", "background", "workspace",
       "background-install", "background-status", "background-start", "background-remove"].includes(argumentsAfterMode[1])) {
       throw new Error("ASSISTANT_COMMAND_UNSUPPORTED");

@@ -7,6 +7,7 @@ import { gzipSync } from 'node:zlib';
 import { resolveHostRuntimeLoader } from './trelio-host-runtime-recovery.mjs';
 import { createAssistantPairingClient, createAssistantDeviceClient } from './trelio-assistant-transport.mjs';
 import { validateAssistantActivationAuthorization } from './trelio-assistant-hook.mjs';
+import { ASSISTANT_CODEX_UPDATE_SCRIPT } from './trelio-assistant-codex-update.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export class AssistantSetupError extends Error {
@@ -484,15 +485,16 @@ try {
  * this with its completed protected pairing journal and current loaded shell.
  * Runtime-to-runtime injection is internal test composition, not a tool ABI.
  */
-export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,readMaintenanceStatus=null,setPluginUpdates=null,
+export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, readDispatchStatus=null,readMaintenanceStatus=null,setPluginUpdates=null,setCodexUpdates=null,
   prepareDependencies=null,
   platform = process.platform, environment = process.env, executable = process.execPath,
   resolveLoader = resolveHostRuntimeLoader, runNative = runAssistantWindowsBackgroundNative, signal, expectedOrigin='https://trelio.ru', loaderArguments=[], previousLoaders=null,restartRequested=false } = {}) => {
   if (typeof readIdentity !== 'function' || typeof verifyContact !== 'function' || readDispatchStatus!==null&&typeof readDispatchStatus!=='function'
     || !Array.isArray(loaderArguments) || loaderArguments.length>4 || loaderArguments.some(value=>typeof value!=='string'||value.length>4096||/[\x00-\x1f\x7f]/u.test(value))) fail('ASSISTANT_BACKGROUND_UNAVAILABLE');
   return async (operation,options={}) => {
-    if(!options||Object.keys(options).some(key=>key!=='autoUpdatePlugin')
-      ||Object.hasOwn(options,'autoUpdatePlugin')&&(operation!=='install'||typeof options.autoUpdatePlugin!=='boolean'||typeof setPluginUpdates!=='function'))
+    if(!options||Object.keys(options).some(key=>!['autoUpdatePlugin','autoUpdateCodex'].includes(key))
+      ||Object.hasOwn(options,'autoUpdatePlugin')&&(operation!=='install'||typeof options.autoUpdatePlugin!=='boolean'||typeof setPluginUpdates!=='function')
+      ||Object.hasOwn(options,'autoUpdateCodex')&&(operation!=='install'||typeof options.autoUpdateCodex!=='boolean'||typeof setCodexUpdates!=='function'))
       fail('ASSISTANT_BACKGROUND_INVALID_INPUT');
     const started = performance.now();
     const remaining = () => {
@@ -533,6 +535,9 @@ export const createAssistantWindowsBackground = ({ readIdentity, verifyContact, 
     const projected=projectAssistantBackgroundResult(result);
     if(operation==='install'&&Object.hasOwn(options,'autoUpdatePlugin')){
       await setPluginUpdates(options.autoUpdatePlugin,identity,{ownTaskWriteVerified:options.autoUpdatePlugin===true});remaining();
+    }
+    if(operation==='install'&&Object.hasOwn(options,'autoUpdateCodex')){
+      await setCodexUpdates(options.autoUpdateCodex,identity);remaining();
     }
     if(operation!=='status'||!readDispatchStatus&&!readMaintenanceStatus)return projected;
     // Network diagnostics cannot consume a new 45-second OS-status budget.
@@ -639,7 +644,12 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
   spawnProcess = spawn, timeoutMs = 40_000, signal,
   script = ASSISTANT_WINDOWS_BACKGROUND_SCRIPT, project = null, nativeCommand = null } = {}) => new Promise((resolve, reject) => {
   const root = environment.SystemRoot ?? environment.SYSTEMROOT;
-  if (!windowsPath(root) || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > 40_000) {
+  // A large official Desktop MSIX may need minutes for full signature/hash and
+  // package registration. Only this exact signed constant helper receives that
+  // bound; Task Scheduler, Desktop close and arbitrary scripts keep their 40s
+  // ABI. The outer coordinator/setup cancellation still ends the invocation.
+  const maximum=script===ASSISTANT_CODEX_UPDATE_SCRIPT?5*60_000:40_000;
+  if (!windowsPath(root) || !Number.isInteger(timeoutMs) || timeoutMs < 10 || timeoutMs > maximum) {
     reject(Object.assign(new Error(), { code: 'ASSISTANT_BACKGROUND_UNAVAILABLE' })); return;
   }
   let child, done = false, output = '', bytes = 0;
@@ -666,7 +676,11 @@ export const runAssistantWindowsBackgroundNative = (plan, { environment = proces
       encoded=Buffer.from(bootstrap,'utf16le').toString('base64');
     }
     if(encoded.length>24_000)throw new Error();
-    child = spawnProcess(nativeCommand?.executable??path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    // Appx is a native 64-bit OS module. On a 32-bit Node host, Sysnative avoids
+    // WOW64 redirection specifically for Desktop servicing; no PATH search or
+    // new interpreter fallback changes the other native operations.
+    child = spawnProcess(nativeCommand?.executable??path.win32.join(root,
+      script===ASSISTANT_CODEX_UPDATE_SCRIPT&&process.arch==='ia32'?'Sysnative':'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       nativeCommand?.args??['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
       { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'],
         env: Object.fromEntries(['SystemRoot', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'USERPROFILE', 'LOCALAPPDATA', 'APPDATA']

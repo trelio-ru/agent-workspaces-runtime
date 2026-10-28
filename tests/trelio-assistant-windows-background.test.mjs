@@ -83,7 +83,7 @@ test('setup tools and exact CLI commands expose no arbitrary principal, identity
   const setup = { background: async operation => ({ operation }) };
   for (const [name, operation] of [['install_assistant_background', 'install'], ['get_assistant_background_status', 'status'], ['start_assistant_background', 'start']]) {
     const tool = ASSISTANT_SETUP_TOOLS.find(value => value.name === name);
-    assert.deepEqual(tool.inputSchema, { type: 'object', properties: name==='install_assistant_background'?{autoUpdatePlugin:{type:'boolean'}}:{}, required: [], additionalProperties: false });
+    assert.deepEqual(tool.inputSchema, { type: 'object', properties: name==='install_assistant_background'?{autoUpdatePlugin:{type:'boolean'},autoUpdateCodex:{type:'boolean'}}:{}, required: [], additionalProperties: false });
     assert.deepEqual(await callAssistantSetupTool(setup, name, {}), { operation });
     for (const args of [null, { user: 'SYSTEM' }, { executable: 'cmd.exe' }, { assistantId: identity.assistantId }]) {
       await assert.rejects(callAssistantSetupTool(setup, name, args), error => error.code === 'ASSISTANT_SETUP_INVALID_INPUT');
@@ -759,6 +759,20 @@ test('plugin maintenance is a one-time explicit setup policy, recorded only afte
       assert.equal(plan.requireOwnTaskWrite,true);throw Object.assign(Error(),{code:'ASSISTANT_BACKGROUND_ACCESS_DENIED'});
     },setPluginUpdates:()=>assert.fail('read-only native registration cannot enable or recover maintenance')});
   await assert.rejects(refused('install',{autoUpdatePlugin:true}),{code:'ASSISTANT_BACKGROUND_ACCESS_DENIED'});
+});
+
+test('Desktop opt-in is saved after native registration and cannot leak into start/status or plugin policy',async()=>{
+  const effects=[];
+  const manage=createAssistantWindowsBackground({platform:'win32',executable:'C:\\node.exe',readIdentity:async()=>identity,
+    verifyContact:async()=>{},resolveLoader:async()=>'C:\\plugin\\loader.mjs',runNative:async()=>{effects.push('register');return registered();},
+    setCodexUpdates:async(enabled,current)=>{assert.deepEqual(current,identity);effects.push(enabled);},
+    setPluginUpdates:async()=>assert.fail('Desktop consent cannot authorize plugin updates')});
+  await manage('install',{autoUpdateCodex:true});assert.deepEqual(effects,['register',true]);
+  await manage('install');assert.deepEqual(effects,['register',true,'register']);
+  await assert.rejects(manage('start',{autoUpdateCodex:true}),/INVALID_INPUT/);
+  const setup={background:async(operation,options)=>({operation,options})};
+  assert.deepEqual(await callAssistantSetupTool(setup,'install_assistant_background',{autoUpdateCodex:false}),{operation:'install',options:{autoUpdateCodex:false}});
+  for(const value of ['true',1,null])await assert.rejects(callAssistantSetupTool(setup,'install_assistant_background',{autoUpdateCodex:value}),{code:'ASSISTANT_SETUP_INVALID_INPUT'});
 });
 
 test('initial hook dependency installation belongs only to explicit background install and retains the pairing fence',async()=>{

@@ -4,8 +4,209 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Readable } from 'node:stream';
 import { executeAssistantRuntimeRequest, assistantHealthCompatibility, assistantHealthFailure, assistantHealthyBoundary, maintainAssistantHost, requestCurrentAssistantRuntime, reportAssistantMaintenanceFailure, reportAssistantDispatchRecovery } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
 import { runAssistantEntry } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { maintainAssistantCodexDesktop, validateAssistantCodexUpdate, compareCodexDesktopVersions,
+  downloadCodexDesktop, CODEX_UPDATE_INTERVAL, ASSISTANT_CODEX_UPDATE_SCRIPT, runAssistantWindowsCodexUpdate } from '../host-runtime/scripts/trelio-assistant-codex-update.mjs';
+import { runProductionAssistantCodexMaintenance, runProductionAssistantPluginMaintenance, runAssistantBackgroundTick } from '../host-runtime/scripts/trelio-assistant-entry.mjs';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
+
+const desktopUpdateFixture=()=>{
+  let state=null,version='26.100.0.0',generation='100:1',clock=CODEX_UPDATE_INTERVAL*2;
+  const effects=[],snapshots=[],identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  const options={identity,now:()=>clock,guard:async()=>{},
+    readState:async()=>structuredClone(state),writeState:async(expected,next)=>{
+      assert.deepEqual(expected,state);validateAssistantCodexUpdate(next);snapshots.push(structuredClone(next));state=structuredClone(next);
+    },inspect:async()=>({version,architecture:'x64'}),download:async()=>({etag:'"package-v2"',sha256:'a'.repeat(64)}),
+    prepare:async()=>({version:'26.101.0.0',architecture:'x64'}),install:async()=>{
+      assert.equal(state.phase,'installing');effects.push('install');version='26.101.0.0';
+    },desktop:async(operation,previous)=>{
+      if(operation==='close'){assert.equal(state.phase,'closing');assert.equal(previous,generation);effects.push('close');generation=null;}
+      if(operation==='start'){assert.equal(state.phase,'verifying');effects.push('start');generation='101:2';}
+      return {state:generation?'running':'stopped',generation};
+    },probe:async()=>{effects.push('probe');},
+  };
+  return {options,effects,snapshots,get state(){return state;},advance:()=>{clock+=CODEX_UPDATE_INTERVAL;},setVersion:v=>{version=v;},setGeneration:v=>{generation=v;}};
+};
+
+test('Desktop updates journal every effect, verify a new native generation and never touch task work',async()=>{
+  const f=desktopUpdateFixture();assert.deepEqual(await maintainAssistantCodexDesktop(f.options),{state:'updated',version:'26.101.0.0'});
+  assert.deepEqual(f.effects,['close','install','start','probe']);assert.equal(f.state.phase,'ready');
+  assert.deepEqual(f.snapshots.map(value=>value.phase),['ready','prepared','closing','installing','starting','verifying','ready']);
+  f.effects.length=0;assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');assert.deepEqual(f.effects,[]);
+  assert.equal(compareCodexDesktopVersions('26.100.0.0','26.99.0.0'),1);
+  assert.equal(compareCodexDesktopVersions('26.100.0.0','26.100.0.0'),0);
+  for(const value of ['latest','26.100','26.100.0.0-beta','PRIVATE'])assert.throws(()=>compareCodexDesktopVersions(value,'26.100.0.0'));
+});
+
+test('lost install reply reconciles only native version and reopens the SAME Desktop, never installs again',async()=>{
+  for(const committed of [false,true]){
+    const f=desktopUpdateFixture();let installs=0;
+    f.options.install=async()=>{installs++;if(committed)f.setVersion('26.101.0.0');throw new Error('PRIVATE native output');};
+    await assert.rejects(maintainAssistantCodexDesktop(f.options));assert.equal(f.state.phase,'installing');
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,committed?'updated':'failed');
+    assert.equal(installs,1);f.advance();
+    f.options.download=async()=>({unchanged:true,etag:'"package-v2"'});
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');assert.equal(installs,1);
+    if(!committed)assert.equal(f.state.failedVersion,'26.101.0.0');
+  }
+});
+
+test('an interrupted or refused normal close never closes another generation or loops activation',async()=>{
+  const f=desktopUpdateFixture();let closes=0,starts=0;
+  f.options.desktop=async operation=>{
+    if(operation==='close'){closes++;throw new Error('refused');}
+    if(operation==='start')starts++;
+    return {state:'running',generation:closes?'200:2':'100:1'};
+  };
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal(closes,1);assert.equal(starts,0);assert.ok(!f.effects.includes('install'));
+  f.advance();await assert.rejects(maintainAssistantCodexDesktop(f.options),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  assert.equal(closes,1);
+});
+
+test('lost asynchronous activation is observed without a second start or installation',async()=>{
+  const f=desktopUpdateFixture();let starts=0,visible=false;
+  const original=f.options.desktop;
+  f.options.desktop=async(operation,generation)=>{
+    if(operation==='start'){starts++;return {state:'starting',generation:null};}
+    if(starts)return {state:visible?'running':'stopped',generation:visible?'101:2':null};
+    return original(operation,generation);
+  };
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'activating');assert.equal(starts,1);
+  visible=true;assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'updated');
+  assert.equal(starts,1);assert.equal(f.effects.filter(value=>value==='install').length,1);
+});
+
+test('a deferred Windows registration can recover a failed receipt only from exact version and a fresh native probe',async()=>{
+  const f=desktopUpdateFixture();let installs=0;
+  f.options.install=async()=>{installs++;throw Error('unknown');};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options));
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'failed');
+  f.setVersion('26.101.0.0');f.setGeneration('102:3');
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'updated');
+  assert.equal(installs,1);assert.equal(f.state.failedVersion,null);
+});
+
+test('feed/signature failures, same versions and downgrades preserve the working Desktop',async()=>{
+  for(const mode of ['network','signature','same','older']){
+    const f=desktopUpdateFixture();
+    if(mode==='network')f.options.download=async()=>{throw Error('PRIVATE');};
+    else f.options.prepare=async()=>{if(mode==='signature')throw Error('PRIVATE');return {version:mode==='same'?'26.100.0.0':'26.99.0.0',architecture:'x64'};};
+    assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'current');assert.deepEqual(f.effects,[]);
+  }
+});
+
+test('hook review and post-install readiness cannot be inferred or clear native latches',async()=>{
+  const f=desktopUpdateFixture();f.options.probe=async()=>{throw Object.assign(Error(),{code:'ASSISTANT_HOOK_REVIEW_REQUIRED'});};
+  assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'hook_review');assert.equal(f.state.phase,'verifying');
+  assert.equal(f.effects.filter(value=>value==='install').length,1);
+  f.options.probe=async()=>{};assert.equal((await maintainAssistantCodexDesktop(f.options)).state,'updated');
+  assert.equal(f.effects.filter(value=>value==='close').length,1);
+});
+
+test('the final idle fence prevents every update effect when work or setup raced preparation',async()=>{
+  const f=desktopUpdateFixture();let changed=false;
+  f.options.guard=async()=>{if(changed)throw Object.assign(Error(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});};
+  f.options.prepare=async()=>{changed=true;return {version:'26.101.0.0',architecture:'x64'};};
+  await assert.rejects(maintainAssistantCodexDesktop(f.options),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  assert.deepEqual(f.effects,[]);assert.equal(f.state.phase,'ready');
+});
+
+test('Desktop production composition requires its own consent and SAME coordinator/setup idle boundary',async()=>{
+  const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
+  let enabled=false,reads=0,idle=0,setup=0,inside=false;
+  const local={readCodexUpdatesEnabled:async()=>enabled,readCodexUpdate:async()=>null,
+    readActivation:async()=>null,readActivePass:async()=>null,codexUpdatePackagePath:async()=>'C:\\private\\desktop.msix',
+    withSetupLock:async action=>{setup++;inside=true;try{return await action();}finally{inside=false;}},writeCodexUpdate:async()=>{}};
+  const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{idle++;return action(async()=>{});}}};
+  const options={platform:'win32',context:async action=>action({identity},local),
+    nativeUpdate:async()=>{assert.equal(inside,true);reads++;throw Error('native unavailable');}};
+  assert.equal((await runProductionAssistantCodexMaintenance(runtime,options)).state,'disabled');assert.equal(reads,0);assert.equal(idle,0);
+  enabled=true;await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  assert.equal(idle,1);assert.equal(setup,1);assert.equal(reads,1);
+  local.readActivePass=async()=>({kind:'task'});reads=0;
+  await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options));assert.equal(reads,0,'native operation must recheck current pass');
+});
+
+test('an unfinished Desktop journal excludes plugin servicing before the same tick resumes Desktop recovery',async()=>{
+  const result=await runProductionAssistantPluginMaintenance({coordinator:{maintainPluginAtIdleBoundary:()=>assert.fail('plugin side effects raced Desktop recovery')}},
+    {platform:'win32',context:async action=>action({}, {readPluginUpdatesEnabled:async()=>true,readCodexUpdate:async()=>({phase:'installing'})})});
+  assert.equal(result.state,'codex_pending');
+  const effects=[];
+  const tick=await runAssistantBackgroundTick({pluginMaintenance:async()=>result,
+    codexMaintenance:async()=>{effects.push('recover');return {state:'activating',blockBusiness:true};},
+    createHost:async()=>({coordinator:{pollOnce:()=>assert.fail('pending update cannot dispatch tasks')},close:async()=>{effects.push('release');}})});
+  assert.equal(tick.state,'blocked');assert.deepEqual(effects,['recover','release']);
+});
+
+test('a failed Desktop journal survives metadata health checks until its actual version/GUI/probe recovers',async()=>{
+  const f=fixture();f.state={...snapshot(),code:'runtime_update_failed'};
+  const output=await executeAssistantRuntimeRequest({operation:'health_check'},
+    {context:async action=>action(f.client,{readPluginUpdate:async()=>null,readCodexUpdate:async()=>({phase:'failed',failedVersion:'26.101.0.0'})}),
+      versions:()=>versions,proxyFor:async()=>({listTools:async()=>[]})});
+  assert.equal(output.code,'runtime_update_failed');assert.ok(!f.reports.some(value=>value.code==='ready'));
+});
+
+test('Desktop download freezes official code bytes and rejects redirects, truncation and quota excess',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'codex-update-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const packagePath=path.join(root,'desktop.msix'),bytes=Buffer.alloc(1024,42),requests=[];
+  const fetcher=async(url,options)=>{
+    requests.push(options.method);assert.equal(url,'https://persistent.oaistatic.com/codex-app-prod/ChatGPT-x64.msix');
+    assert.equal(options.redirect,'error');assert.equal(options.credentials,'omit');
+    return new Response(options.method==='HEAD'?null:bytes,{headers:{etag:'"same"','content-length':String(bytes.length)}});
+  };
+  const result=await downloadCodexDesktop({architecture:'x64',packagePath,fetcher});assert.match(result.sha256,/^[a-f0-9]{64}$/u);
+  assert.deepEqual(await fs.readFile(packagePath),bytes);
+  assert.deepEqual(await downloadCodexDesktop({architecture:'x64',packagePath,fetcher,etag:'"same"'}),{unchanged:true,etag:'"same"'});
+  assert.deepEqual(requests,['HEAD','GET','HEAD']);
+  let headOnly=0;
+  const metadata=await downloadCodexDesktop({architecture:'x64',packagePath,installedVersion:'26.101.0.0',fetcher:async(_url,options)=>{
+    assert.equal(options.method,'HEAD');headOnly++;
+    return new Response(null,{headers:{etag:'"new-blob"','x-ms-meta-package_identity':'OpenAI.Codex',
+      'x-ms-meta-package_version':'26.101.0.0','x-ms-meta-architecture':'x64'}});
+  }});
+  assert.deepEqual(metadata,{unchanged:true,etag:'"new-blob"'});assert.equal(headOnly,1);
+  for(const mode of ['quota','truncated','encoding','changed']){
+    await assert.rejects(downloadCodexDesktop({architecture:'x64',packagePath,fetcher:async(_url,options)=>new Response(options.method==='HEAD'?null:bytes,
+      {headers:{etag:mode==='changed'&&options.method==='GET'?'"other"':'"same"','content-length':mode==='quota'?String(2**31):'2048',
+        ...(mode==='encoding'?{'content-encoding':'gzip'}:{})}})}));
+    assert.deepEqual(await fs.readFile(packagePath),bytes,'failed download cannot replace the inspected artifact');
+  }
+});
+
+test('native Desktop servicing uses fixed OS modules and defers in-use registration without force',async()=>{
+  assert.match(ASSISTANT_CODEX_UPDATE_SCRIPT,/Add-AppxPackage -Path.*-DeferRegistrationWhenPackagesAreInUse/);
+  assert.doesNotMatch(ASSISTANT_CODEX_UPDATE_SCRIPT,/ForceApplicationShutdown|ForceTargetApplicationShutdown|ForceUpdateFromAnyVersion|AllowUnsigned|RunAs|ExecutionPolicy/);
+  assert.match(ASSISTANT_CODEX_UPDATE_SCRIPT,/Get-AuthenticodeSignature/);assert.match(ASSISTANT_CODEX_UPDATE_SCRIPT,/\[IO.FileShare\]::Read/);
+  assert.match(ASSISTANT_CODEX_UPDATE_SCRIPT,/identity.Publisher -cne \$installed.Publisher/);
+  assert.match(ASSISTANT_CODEX_UPDATE_SCRIPT,/DtdProcessing.*Prohibit/);
+  let invoked=0;
+  await assert.rejects(runAssistantWindowsCodexUpdate('evil',{runNative:()=>{invoked++;}}));assert.equal(invoked,0);
+  const result=await runAssistantWindowsCodexUpdate('inspect',{runNative:async(_input,options)=>options.project({schemaVersion:1,version:'26.100.0.0',architecture:'arm64'})});
+  assert.equal(result.architecture,'arm64');
+  await assert.rejects(runAssistantWindowsCodexUpdate('inspect',{runNative:async(_input,options)=>options.project({schemaVersion:1,version:'26.100.0.0',architecture:'x64',private:'never'})}));
+});
+
+test('Windows parses the complete Desktop helper and executes its real read/refusal boundary without installing',
+  {skip:process.platform!=='win32'},async()=>{
+    const {runAssistantWindowsBackgroundNative}=await import('../host-runtime/scripts/trelio-assistant-setup.mjs');
+    const source=Buffer.from(ASSISTANT_CODEX_UPDATE_SCRIPT,'utf8').toString('base64');
+    const script=`[void][Console]::In.ReadToEnd();$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${source}'));$tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors);if($errors.Count){exit 1};[Console]::Out.Write('{"schemaVersion":1,"version":"26.100.0.0","architecture":"x64"}')`;
+    const parsed=await runAssistantWindowsBackgroundNative({operation:'inspect'},{script,project:value=>value});
+    assert.equal(parsed.version,'26.100.0.0');
+    const observed=await runAssistantWindowsCodexUpdate('inspect');
+    assert.ok(observed.state==='not_installed'||/^\d+\.\d+\.\d+\.\d+$/u.test(observed.version));
+    // Invalid digest is rejected before opening any candidate/deployment. This
+    // test uses the production script, not a mock deployment or a trusted cert.
+    await assert.rejects(runAssistantWindowsBackgroundNative({operation:'install',sha256:'invalid',packagePath:'C:\\invalid.msix'},
+      {script:ASSISTANT_CODEX_UPDATE_SCRIPT,project:()=>assert.fail('invalid install cannot succeed')}));
+  });
 const snapshot=()=>({revision:0,generation:0,code:'ready',latchedCodes:[],compatibility:{minimumPluginVersion:'3.2.3',minimumRuntimeVersion:'4.9.0'}});
 const fixture=()=>{
   let state=snapshot();const reports=[];

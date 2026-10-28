@@ -3,6 +3,7 @@
  * accepts model/effort/pass identity from the model's tool arguments. */
 import crypto from 'node:crypto';
 import path from 'node:path';
+import { validateAssistantCodexUpdate } from './trelio-assistant-codex-update.mjs';
 import { ensurePrivateDirectory, assertPrivatePathKind, readPrivateJsonFile, writePrivateJsonFile } from './trelio-workspace.mjs';
 import { detectAgentRuntimeAttestation } from './trelio-runtime-attestation.mjs';
 import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime-session.mjs';
@@ -235,6 +236,44 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
   return {
     readIdentity,
     readActivation,
+    // This separate per-device opt-in must never inherit plugin-update consent.
+    // Missing policy means disabled, including every existing installation.
+    async readCodexUpdatesEnabled(){
+      const target=await maintenanceFile('codex-policy');
+      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return false;throw error;}
+      const value=await ops.readPrivateJsonFile(target,{maximumBytes:4096}),current=await readIdentity();
+      if(!value||Object.keys(value).sort().join(',')!=='assistantId,autoUpdateCodex,deviceId,schemaVersion'
+        ||value.schemaVersion!==1||typeof value.autoUpdateCodex!=='boolean'||!current
+        ||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId)fail('ASSISTANT_CODEX_UPDATE_FAILED');
+      return value.autoUpdateCodex;
+    },
+    async setCodexUpdatesEnabled(enabled,expectedIdentity){
+      const current=await readIdentity();
+      if(typeof enabled!=='boolean'||!current||['origin','assistantId','deviceId'].some(key=>current[key]!==expectedIdentity[key]))
+        fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      if(enabled&&await this.readActivePass()!==null)fail('ASSISTANT_LOCAL_SETUP_TASK_ACTIVE');
+      await ops.writePrivateJsonFile(await maintenanceFile('codex-policy'),{schemaVersion:1,assistantId:current.assistantId,deviceId:current.deviceId,autoUpdateCodex:enabled});
+      if(await this.readCodexUpdatesEnabled()!==enabled)fail('ASSISTANT_CODEX_UPDATE_FAILED');
+    },
+    async codexUpdatePackagePath(){
+      const target=await maintenanceFile('codex-update');
+      const directory=path.join(path.dirname(target),'desktop-code');
+      await ops.ensurePrivateDirectory(directory);return path.join(directory,'desktop.msix');
+    },
+    async readCodexUpdate(){
+      const target=await maintenanceFile('codex-update');
+      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return null;throw error;}
+      const value=validateAssistantCodexUpdate(await ops.readPrivateJsonFile(target,{maximumBytes:4096})),current=await readIdentity();
+      if(!current||value.assistantId!==current.assistantId||value.deviceId!==current.deviceId)fail('ASSISTANT_HOST_REBIND_REQUIRED');
+      return value;
+    },
+    async writeCodexUpdate(expected,value){
+      const next=validateAssistantCodexUpdate(value),current=await readIdentity();
+      if(!current||next.assistantId!==current.assistantId||next.deviceId!==current.deviceId
+        ||JSON.stringify(await this.readCodexUpdate())!==JSON.stringify(expected))fail('ASSISTANT_CODEX_UPDATE_FAILED');
+      await ops.writePrivateJsonFile(await maintenanceFile('codex-update'),next);
+      if(JSON.stringify(await this.readCodexUpdate())!==JSON.stringify(next))fail('ASSISTANT_CODEX_UPDATE_FAILED');
+    },
     async readPluginUpdatesEnabled(){
       const pluginPolicyFile=await maintenanceFile('policy');
       try{await ops.assertPrivatePathKind(pluginPolicyFile,'file');}catch(error){if(error.code==='ENOENT')return false;throw error;}

@@ -742,7 +742,7 @@ test('production native health reports survive the delivery fence; only fresh co
 test('one background worker keeps model-free polling alive during a single native pass and closes after settlement',async()=>{
   let resolveWork,workCalls=0,pollCalls=0,waits=0,closed=0;
   const work=new Promise(resolve=>{resolveWork=resolve;});
-  const result=await runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{
+  const result=await runAssistantBackgroundTick({codexMaintenance:async()=>({state:"disabled"}),pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{
     pollOnce:async()=>{pollCalls++;},workOnce:()=>{workCalls++;return work;},dispatchStatus:async()=>({state:'idle'}),
   },close:async()=>{closed++;}}),wait:async(milliseconds)=>{
     assert.equal(milliseconds,30_000);if(++waits===2)resolveWork({state:'completed'});
@@ -753,7 +753,7 @@ test('one background worker keeps model-free polling alive during a single nativ
 
 test('background tick projects a company model block instead of reporting a false idle',async()=>{
   const dispatch={schemaVersion:1,state:'blocked',reasons:['model_selection_required'],pendingEvents:1};let closed=0;
-  const result=await runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{pollOnce:async()=>{},
+  const result=await runAssistantBackgroundTick({codexMaintenance:async()=>({state:"disabled"}),pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{pollOnce:async()=>{},
     workOnce:async()=>null,dispatchStatus:async()=>dispatch},close:async()=>{closed++;}})});
   assert.deepEqual(result,{schemaVersion:1,state:'blocked',dispatch});assert.equal(closed,1);
 });
@@ -854,7 +854,7 @@ test('a source failure during native work is retained after settlement without r
   let finishWork,polls=0,works=0,closes=0,waits=0;
   const work=new Promise(resolve=>{finishWork=resolve;});
   const failure=Object.assign(new Error('private source detail'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
-  await assert.rejects(runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{
+  await assert.rejects(runAssistantBackgroundTick({codexMaintenance:async()=>({state:"disabled"}),pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{
     pollOnce:async()=>{if(++polls>1)throw failure;},workOnce:()=>{works++;return work;},
   },close:async()=>{closes++;}}),wait:async()=>{if(++waits===2)finishWork({state:'completed'});}}),error=>error===failure);
   assert.equal(works,1);assert.equal(closes,1);
@@ -1622,6 +1622,10 @@ test('Workspace lifetime does not inherit a setup timer or extend an enclosing h
   assert.deepEqual(calls,[45_000,660_000],'the bridge reuses the human private-session lifetime, not another enlarged timer');
   const maintenance=assistantProductionContextSignal({pluginMaintenance:true,signal:caller.signal},timer);
   assert.deepEqual(calls,[45_000,660_000,150_000],'only the closed technical maintenance profile owns its bounded update budget');
+  assert.ok(assistantProductionContextSignal({codexMaintenance:true,signal:caller.signal},timer));
+  assert.equal(calls.at(-1),900_000,'large signed MSIX servicing has its own bounded profile');
+  assert.throws(()=>assistantProductionContextSignal({codexMaintenance:true,pluginMaintenance:true},timer),/INVALID/);
+  assert.throws(()=>assistantProductionContextSignal({codexMaintenance:true,workspaceRun:run},timer),/PROFILE_DENIED/);
   assert.throws(()=>assistantProductionContextSignal({pluginMaintenance:true,interactiveSourceSetup:true},timer),/INVALID/);
   assert.throws(()=>assistantProductionContextSignal({pluginMaintenance:true,workspaceRun:run},timer),/PROFILE_DENIED/);
   for(const bad of [false,{},[],{...run,extra:true},{...run,runId:'invalid'}])
@@ -1680,7 +1684,7 @@ test('fresh tick worker reports retained/throwing uncertainty under an unchanged
     const reports=[];let work=0,closes=0;
     const failure=Object.assign(new Error('PRIVATE original native read failure'),{code:'ASSISTANT_CODEX_READ_UNAVAILABLE'});
     const dispatch={state:'blocked',reasons:[scenario==='model_blocked'?'model_selection_required':'delivery_uncertain']};
-    const tick=()=>runAssistantBackgroundTick({pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{pollOnce:async()=>{},
+    const tick=()=>runAssistantBackgroundTick({codexMaintenance:async()=>({state:"disabled"}),pluginMaintenance:async()=>({state:"current"}),createHost:async()=>({coordinator:{pollOnce:async()=>{},
       workOnce:async()=>{work++;if(['thrown','report_failed'].includes(scenario))throw failure;return null;},
       dispatchStatus:async()=>dispatch},reportDispatchFailure:async error=>{
         reports.push(error);if(scenario==='report_failed')throw new Error('PRIVATE diagnostic CAS/transport refusal');
@@ -1836,7 +1840,7 @@ test('a positively busy setup/coordinator defers maintenance without reporting a
   const {runProductionAssistantPluginMaintenance}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   for(const code of ['TRELIO_RUNTIME_LOCK_TIMEOUT','ASSISTANT_COORDINATOR_BUSY']){
     const runtime={coordinator:{maintainPluginAtIdleBoundary:async()=>{throw Object.assign(new Error(),{code});}}};
-    assert.deepEqual(await runProductionAssistantPluginMaintenance(runtime,{platform:'win32',context:async()=>true}),
+    assert.deepEqual(await runProductionAssistantPluginMaintenance(runtime,{platform:'win32',context:async action=>action({}, {readPluginUpdatesEnabled:async()=>true,readCodexUpdate:async()=>null})}),
       {state:'deferred',blockBusiness:true});
   }
 });
@@ -2045,6 +2049,23 @@ test('old devices remain opted out and an explicit policy remains bound to the c
   host.readActivePass=async()=>({kind:'task'});
   await assert.rejects(host.setPluginUpdatesEnabled(true,identity),{code:'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'});
   assert.equal(await host.readPluginUpdatesEnabled(),false);
+});
+
+test('Desktop consent and state are private identity-bound CAS, independent from plugin consent',async()=>{
+  const {host}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  await host.saveIdentity(identity);assert.equal(await host.readCodexUpdatesEnabled(),false);
+  await host.setPluginUpdatesEnabled(true,identity);assert.equal(await host.readCodexUpdatesEnabled(),false);
+  await host.setCodexUpdatesEnabled(true,identity);assert.equal(await host.readCodexUpdatesEnabled(),true);
+  await assert.rejects(host.setCodexUpdatesEnabled(true,{...identity,deviceId:randomUUID()}),/REBIND_REQUIRED/);
+  const state={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,phase:'ready',checkedAt:1,etag:null,
+    previousVersion:'26.100.0.0',targetVersion:'26.100.0.0',sha256:null,desktopGeneration:null,failedVersion:null};
+  await host.writeCodexUpdate(null,state);assert.deepEqual(await host.readCodexUpdate(),state);
+  await assert.rejects(host.writeCodexUpdate(null,state),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  await assert.rejects(host.writeCodexUpdate(state,{...state,command:'forbidden'}),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  host.readActivePass=async()=>({kind:'task'});
+  await host.setCodexUpdatesEnabled(false,identity);
+  await assert.rejects(host.setCodexUpdatesEnabled(true,identity),{code:'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'});
+  assert.equal(await host.readCodexUpdatesEnabled(),false);assert.equal(await host.readPluginUpdatesEnabled(),true);
 });
 
 test('explicit native-writable setup resumes only an untouched bootstrap, never a failed plugin or hook decision',async()=>{
