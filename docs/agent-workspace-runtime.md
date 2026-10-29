@@ -433,8 +433,8 @@ backend rollback после capability не разрешает fallback. Backend
 22 секунды, SessionStart 8 секунд, SessionEnd 2 секунды, без продления после
 ACL или credential load. HTTP сохраняет отдельный 11-секундный registration
 budget внутри общего срока. Windows hook и отдельная bridge-команда запускают один подписанный native Win32 helper
-на anonymous stdin/stdout для ACL и DPAPI: каждая операция по-прежнему применяет и проверяет
-current-user-only DACL/owner, без cache результата. Exact package path и ACL paths
+на anonymous stdin/stdout для ACL и DPAPI: каждая операция заново читает и проверяет
+current-user-only DACL/owner по тому же handle, без cache результата. Exact package path и ACL paths
 передаются в extended absolute Windows form для длинных профилей/cache;
 короткая копия executable вне проверенного package не создаётся. Worker закрывается при
 выходе. Startup ограничен 20 секундами; после readiness операция получает
@@ -445,6 +445,13 @@ Native helper собирается hosted MSVC для x64/ia32/arm64 и дост
 проверяемого package; на устройстве нет компиляции или fallback на shell.
 ACL читается и записывается по handle, конечный reparse point отклоняется,
 owner SID и ровно одна protected full-control ACE проверяются до успеха.
+Только точное совпадение свежего descriptor с этой политикой позволяет не делать
+SetSecurityInfo: повторная запись inheritable directory DACL обходит детей и
+превращает последовательную запись растущего кэша в квадратичную работу. SID,
+тип/размер/flags/mask ACE, protection и file/directory kind сохраняют прежние
+строгие проверки. Любое отличие проходит прежний repair и новый read-back; ошибка
+чтения не является private success. Проверка родителя не подтверждает права детей:
+каждый последующий file read/write проверяет свой exact объект заново.
 Секретные bytes проходят только через anonymous pipes, buffers очищаются,
 ошибки не содержат child output. Результаты ACL и credentials не кешируются. Внутренний отказ сохраняет JSON deny и освобождает registration lock
 до клиентского timeout; pending observation и прежние credentials сохраняются

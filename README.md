@@ -351,9 +351,12 @@ legacy PowerShell проверяет совместимость DPAPI bytes вн
 подтверждается до передачи первого запроса. DPAPI CurrentUser получает
 origin-bound entropy и bytes только через anonymous pipes; buffers очищаются,
 результат не попадает в stderr/error/argv/env. Старый ciphertext совместим,
-protect по-прежнему проверяется обратным unprotect перед сохранением. Каждый exact путь заново получает и
-проверяет owner-only descriptor,
-результат не кешируется. Transport закрывается при завершении invocation и не
+protect по-прежнему проверяется обратным unprotect перед сохранением. Каждый exact путь заново
+проверяет owner-only descriptor по тому же no-reparse handle. Если свежий owner/DACL
+уже точно соответствует current-user protected single full-control ACE и нужным
+file/directory flags, helper не перезаписывает его: Windows иначе повторно обходит
+детей растущего каталога. При отличии остаётся обычное исправление с новым read-back.
+Результат проверки не кешируется. Transport закрывается при завершении invocation и не
 переиспользуется между hooks/командами. Однократный startup ограничен 20 секундами;
 после readiness каждый ACL/DPAPI запрос имеет отдельный лимит 10 секунд. DPAPI
 вызывает CryptProtectData/CryptUnprotectData с UI_FORBIDDEN и без LOCAL_MACHINE. ACL, credentials и сеть дополнительно разделяют непродлеваемый
@@ -602,6 +605,10 @@ Bounds, private Run binding и E2EE – в
 исполняются на соответствующих hosted runners, обычная Windows учётная запись
 отдельно проверяет права и DPAPI. Проверяются legacy ciphertext в обоих направлениях,
 reparse points, malformed/oversized input и отсутствие plaintext в ошибках.
+Отдельная native регрессия меняет ACL между вызовами одного worker и проверяет
+repair для чужой/deny ACE, partial mask, inheritance и unprotected DACL. Настоящий
+encrypted search cache записывает и заново читает 8192 записей под фиксированным
+двухминутным бюджетом; составная owner-company цепочка остаётся отдельным gate.
 
 Tag workflow загружает native artifact только из успешного PR gate exact SHA.
 Package builder требует metadata с SHA исходника, размером/SHA и PE machine

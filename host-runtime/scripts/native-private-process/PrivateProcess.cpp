@@ -94,6 +94,32 @@ void decode(std::string_view input, Bytes& output, size_t limit = MaxValue) {
   require(canonical.value == input);
 }
 
+// Apply one predicate to both the fresh descriptor and the post-write readback.
+// This is deliberately not an ACL-result cache: every request opens the exact
+// object, obtains the current token SID and reads owner + DACL from that handle.
+// A failed descriptor read/control query is an operation failure, not evidence
+// that a path is private. A valid but different policy takes the ordinary repair
+// path below, including its independent fresh verification.
+bool privateDescriptorMatches(PSECURITY_DESCRIPTOR descriptor, PSID owner,
+    PACL acl, PSID sid, DWORD inheritance) {
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  require(GetSecurityDescriptorControl(descriptor, &control, &revision) != FALSE);
+  if (!owner || !IsValidSid(owner) || !EqualSid(owner, sid) || !acl ||
+      !IsValidAcl(acl) || acl->AceCount != 1 || !(control & SE_DACL_PROTECTED)) return false;
+  void* rawAce = nullptr;
+  require(GetAce(acl, 0, &rawAce) != FALSE);
+  const auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(rawAce);
+  // Check type/size before treating the ACE body as an ordinary allowed SID.
+  // Inherited/deny/object ACEs, extra principals, partial masks and the wrong
+  // file/directory inheritance flags must never qualify for the no-write path.
+  if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE ||
+      ace->Header.AceSize != sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(sid) ||
+      ace->Header.AceFlags != inheritance || ace->Mask != FILE_ALL_ACCESS) return false;
+  PSID aceSid = const_cast<DWORD*>(&ace->SidStart);
+  return IsValidSid(aceSid) && EqualSid(aceSid, sid);
+}
+
 void harden(std::string_view id, std::string_view kind, std::string_view encodedPath) {
   phase(id, "path_decode");
   Bytes pathBytes;
@@ -134,10 +160,20 @@ void harden(std::string_view id, std::string_view kind, std::string_view encoded
 
   phase(id, "owner_read");
   PSID owner = nullptr;
+  PACL currentAcl = nullptr;
   Local ownerDescriptor;
-  require(GetSecurityInfo(target.value, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
-    &owner, nullptr, nullptr, nullptr, &ownerDescriptor.value) == ERROR_SUCCESS);
+  require(GetSecurityInfo(target.value, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+    &owner, nullptr, &currentAcl, nullptr, &ownerDescriptor.value) == ERROR_SUCCESS);
   require(owner && IsValidSid(owner));
+  DWORD inheritance = kind == "directory" ? CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE : 0;
+  if (privateDescriptorMatches(ownerDescriptor.value, owner, currentAcl, sid, inheritance)) {
+    // Reapplying an unchanged inheritable DACL makes Windows walk an expanding
+    // cache's children on EVERY file write. Freshly verifying the same strict
+    // policy avoids that quadratic work without trusting a prior request or
+    // granting authority over any child; each child still has its own check.
+    phase(id, "dacl_verify");
+    return;
+  }
   if (!EqualSid(owner, sid)) {
     phase(id, "owner_write");
     Handle ownerTarget(CreateFileW(path.c_str(), WRITE_OWNER | READ_CONTROL,
@@ -157,7 +193,6 @@ void harden(std::string_view id, std::string_view kind, std::string_view encoded
   Bytes aclBuffer(aclSize);
   auto* acl = reinterpret_cast<PACL>(aclBuffer.value.data());
   require(InitializeAcl(acl, aclSize, ACL_REVISION) != FALSE);
-  DWORD inheritance = kind == "directory" ? CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE : 0;
   require(AddAccessAllowedAceEx(acl, ACL_REVISION, inheritance, FILE_ALL_ACCESS, sid) != FALSE);
   require(SetSecurityInfo(target.value, SE_FILE_OBJECT,
     DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
@@ -168,18 +203,7 @@ void harden(std::string_view id, std::string_view kind, std::string_view encoded
   PACL actualAcl = nullptr;
   require(GetSecurityInfo(target.value, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
     &owner, nullptr, &actualAcl, nullptr, &verified.value) == ERROR_SUCCESS);
-  require(owner && EqualSid(owner, sid) && actualAcl && IsValidAcl(actualAcl) && actualAcl->AceCount == 1);
-  SECURITY_DESCRIPTOR_CONTROL control = 0;
-  DWORD revision = 0;
-  require(GetSecurityDescriptorControl(verified.value, &control, &revision) != FALSE);
-  require((control & SE_DACL_PROTECTED) != 0);
-  void* rawAce = nullptr;
-  require(GetAce(actualAcl, 0, &rawAce) != FALSE);
-  const auto* ace = static_cast<ACCESS_ALLOWED_ACE*>(rawAce);
-  require(ace->Header.AceSize == sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(sid));
-  require(ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE &&
-    ace->Header.AceFlags == inheritance && ace->Mask == FILE_ALL_ACCESS &&
-    EqualSid(const_cast<DWORD*>(&ace->SidStart), sid));
+  require(privateDescriptorMatches(verified.value, owner, actualAcl, sid, inheritance));
 }
 
 void dpapi(std::string_view id, std::string_view kind, std::string_view entropyText, std::string_view inputText) {

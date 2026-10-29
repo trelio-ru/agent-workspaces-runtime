@@ -252,6 +252,13 @@ publication tooling также остаются вне этого публичн
 - Windows ACL сравнивает SID напрямую, без PowerShell `Access`/NTAccount
   resolution. Ошибки чтения private state не означают отсутствие state:
   ACL/I/O/deadline сохраняют исходный отказ, не запускают новую регистрацию.
+  Every request freshly reads owner + DACL from the SAME no-reparse handle.
+  Skip SetSecurityInfo only for the exact current-user protected single full-control
+  ACE with the required file/directory flags; never cache an earlier success.
+  A changed descriptor follows ordinary repair + fresh readback. Rewriting an
+  already exact directory DACL traverses its children and makes a growing cache
+  quadratic. Native tests must cover mutation between same-worker checks and
+  the actual 8,192-entry encrypted write/reopen/read flow within its fixed budget.
   Timeout diagnostics используют только закрытые stage/operation/timeout;
   worker progress не продлевает deadline и не раскрывает paths/identities.
 - Для private runtime state и поиска transcript используй один resolver текущего

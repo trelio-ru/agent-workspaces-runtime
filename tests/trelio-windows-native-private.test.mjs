@@ -7,11 +7,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import crypto from 'node:crypto';
 import { createPrivateAclWorker, windowsPrivateWorkerOptions, scopedPrivateAclWorker,
-  withRuntimeHookPrivateSession } from '../host-runtime/scripts/trelio-hook-private-session.mjs';
+  withRuntimeHookPrivateSession, withPrivateProcessSession } from '../host-runtime/scripts/trelio-hook-private-session.mjs';
 import { hardenWindowsPrivatePath, protectWindowsBridgeSessionToken, unprotectWindowsBridgeSessionToken,
   buildWindowsBridgeDpapiInvocation, resolveWindowsPowerShellExecutable } from '../host-runtime/scripts/trelio-workspace.mjs';
 import { validateWindowsPrivateWorker } from '../scripts/validate-windows-private-worker.mjs';
 import { createAssistantPrivateStore, resolveAssistantCompanyEncryptionDevice } from '../host-runtime/scripts/trelio-assistant-private.mjs';
+import { createEncryptedSearchFileCache } from '../host-runtime/scripts/trelio-local-context.mjs';
 
 const windows = {skip: process.platform !== 'win32'};
 test('managed company identity survives real CurrentUser DPAPI restart without plaintext key files', windows, async () => {
@@ -204,6 +205,101 @@ test('native helper rejects reparse points and wrong path kinds without touching
     assert.equal(await readFile(file,'utf8'),'synthetic');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
+
+// Offline fixture mutations use .NET solely as an independent descriptor
+// writer. Production still uses only the signed native handle-based worker.
+// Paths are synthetic; the helper output/descriptor/SID are never printed.
+const changeSyntheticAcl = async (target, variant) => {
+  assert.ok(['foreign', 'partial', 'unprotected', 'flags', 'deny'].includes(variant));
+  const script=`$ErrorActionPreference='Stop';$PSModuleAutoLoadingPreference='None';
+$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:TRELIO_TEST_PATH));
+$directory=([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::Directory) -ne 0;
+$item=if($directory){[IO.DirectoryInfo]::new($p)}else{[IO.FileInfo]::new($p)};$acl=$item.GetAccessControl();
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
+$world=[Security.Principal.SecurityIdentifier]::new('S-1-1-0');
+$acl.SetAccessRuleProtection($true,$false);
+foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){[void]$acl.RemoveAccessRuleSpecific($rule)}
+$rights=if($env:TRELIO_TEST_VARIANT -eq 'partial'){'ReadAndExecute'}else{'FullControl'};
+$inherit=if($directory -and $env:TRELIO_TEST_VARIANT -ne 'flags'){'ContainerInherit, ObjectInherit'}else{'None'};
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,$rights,$inherit,'None','Allow'));
+if($env:TRELIO_TEST_VARIANT -eq 'foreign'){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($world,'ReadAndExecute','None','None','Allow'))}
+if($env:TRELIO_TEST_VARIANT -eq 'deny'){$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($world,'Read','None','None','Deny'))}
+if($env:TRELIO_TEST_VARIANT -eq 'unprotected'){$acl.SetAccessRuleProtection($false,$false)}
+$item.SetAccessControl($acl)`;
+  const result=await run(resolveWindowsPowerShellExecutable(),['-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],'',
+    {...process.env,TRELIO_TEST_PATH:Buffer.from(target).toString('base64'),TRELIO_TEST_VARIANT:variant});
+  assert.equal(result.code,0,'synthetic ACL mutation completed');
+  assert.equal(result.stdout,'');
+};
+
+// x64 also exercises the shipped ia32 worker. ARM64 runs this exact fixture in
+// its existing native gate; no VM compilation or source/binary mismatch.
+for (const arch of process.arch === 'x64' ? ['x64','ia32'] : [process.arch]) {
+  test(`native ${arch} freshly verifies an exact ACL without rewriting, then repairs later changes`,windows,async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),'trelio-native-fresh-acl-'));
+    const directory=path.join(root,'synthetic-directory'),file=path.join(directory,'synthetic-file');
+    const phases=[];
+    const options=windowsPrivateWorkerOptions(arch);
+    const worker=createPrivateAclWorker({...options,spawnProcess:(program,args,settings)=>{
+      const child=spawn(program,args,settings);let pending='';
+      child.stdout.on('data',part=>{
+        pending+=part;
+        for(;;){const end=pending.indexOf('\n');if(end<0)break;
+          const line=pending.slice(0,end);pending=pending.slice(end+1);
+          // Select only the existing fixed phase vocabulary, not paths/values.
+          const frame=JSON.parse(line);if(typeof frame.phase==='string')phases.push(frame.phase);
+        }
+      });return child;
+    }});
+    const check=async(target,kind,writes)=>{
+      const start=phases.length;await worker.harden(target,kind);
+      const actual=phases.slice(start);
+      assert.ok(actual.includes('owner_read')&&actual.includes('dacl_verify'));
+      assert.equal(actual.filter(phase=>phase==='dacl_write').length,writes,
+        'only a freshly observed non-exact descriptor is rewritten');
+    };
+    try{
+      await mkdir(directory);await writeFile(file,'SYNTHETIC_ONLY');
+      for(const [target,kind] of [[directory,'directory'],[file,'file']]){
+        // Force a known non-exact initial state regardless of runner defaults.
+        await changeSyntheticAcl(target,'foreign');await check(target,kind,1);
+        await check(target,kind,0);await check(target,kind,0);
+        // Reuse the SAME process: a cached path success would miss each change.
+        for(const variant of ['foreign','partial','unprotected',...(kind==='directory'?['flags']:[]),'deny']){
+          await changeSyntheticAcl(target,variant);await check(target,kind,1);
+          await check(target,kind,0);
+        }
+      }
+      // Parent verification neither walks nor certifies descendants. A later
+      // explicit child check must still repair that child's changed descriptor.
+      await changeSyntheticAcl(file,'foreign');await check(directory,'directory',0);
+      await check(file,'file',1);await check(file,'file',0);
+    }finally{await worker.close();await rm(root,{recursive:true,force:true});}
+  });
+}
+
+test('native Windows encrypted search cache writes and reopens 8192 growing entries within the original probe budget',
+  {...windows,timeout:150000},async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),'trelio-native-growing-cache-'));
+    try{await withPrivateProcessSession(async()=>{
+      const keys=await crypto.webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+      const companyEncryption={runtime:{company:{id:crypto.randomUUID()},device:{id:crypto.randomUUID()},scope:{id:crypto.randomUUID(),epoch:1,
+        publicEncryptionJwk:await crypto.webcrypto.subtle.exportKey('jwk',keys.publicKey)}},
+        scopePrivateEncryptionKey:{privateKey:keys.privateKey,privateJwk:await crypto.webcrypto.subtle.exportKey('jwk',keys.privateKey)}};
+      const options={paths:{root},origin:'https://synthetic.invalid',companyEncryption};
+      const workspace={workspaceId:crypto.randomUUID(),acceptedHead:'a'.repeat(40)};
+      const files=Array.from({length:8192},(_,n)=>({id:crypto.randomUUID(),path:`synthetic-${n}.md`,sizeBytes:1024,contentType:'text/plain'}));
+      const text='SYNTHETIC_ONLY_'.repeat(64),cache=await createEncryptedSearchFileCache(options);
+      let started=performance.now();for(const file of files)await cache.write(workspace,file,text);
+      const writeMs=Math.round(performance.now()-started);
+      // Reopen the actual encrypted cache, not an in-memory result; every read
+      // repeats file ACL, exact head/AAD and authenticated crypto verification.
+      started=performance.now();const reopened=await createEncryptedSearchFileCache(options);
+      for(const file of files)assert.equal(await reopened.read(workspace,file)===text,true,'synthetic encrypted cache round-trip');
+      console.log(JSON.stringify({fixture:'native-growing-encrypted-cache',entries:files.length,writeMs,readMs:Math.round(performance.now()-started),providerCalls:0}));
+    },AbortSignal.timeout(120000));}
+    finally{await rm(root,{recursive:true,force:true});}
+  });
 
 test('native selector and ACL support installed paths beyond Win32 MAX_PATH', windows, async () => {
   const root=await mkdtemp(path.join(os.tmpdir(),'trelio-native-long-'));
