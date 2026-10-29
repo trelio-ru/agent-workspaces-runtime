@@ -1093,11 +1093,13 @@ test('trusted local Workspace recovery errors keep their closed code across the 
 test('all trusted materializers preserve local refusal provenance without claiming native MCP auth or retrying',async()=>{
   const f=await workspaceProfileFixture({encryptedTool:'get_task'});
   const {RemoteMcpHostError}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const {TrelioApiError}=await import('../host-runtime/scripts/trelio-workspace.mjs');
   const company={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'synthetic',
     taskId:f.pass.taskId,passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
   const skill={schemaVersion:1,nativeTool:'get_agent_skill',companyId:f.pass.companyId,projectId:null,skillId:'synthetic',releaseId:randomUUID(),arguments:{sections:['instructions']}};
   const refusal=(code,localRead)=>({isError:true,content:[],structuredContent:{code,localRead}});
   const cases=[
+    ['workspace_arguments','get_task','withWorkspaceArguments',{}, {content:[]}],
     ['source_read','get_assistant_intake_context','materializeSourceIntake',{}, {content:[]}],
     ['source_reply','resolve_assistant_intake','materializeSourceReply',{decision:'reply_owner'}, {content:[]}],
     ['company_read','search','materializeEncryptedCompanyContext',{},refusal('ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',company)],
@@ -1122,6 +1124,9 @@ test('all trusted materializers preserve local refusal provenance without claimi
       [Object.assign(Error('PRIVATE_LOCAL_PATH_CANARY'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED',reason:'expired',payload:{secret:'PRIVATE'}}),'ASSISTANT_PASS_REVIEW_REQUIRED'],
       [new RemoteMcpHostError('REMOTE_MCP_AUTH_REJECTED','PRIVATE_PROVIDER_AUTH_CANARY'),'REMOTE_MCP_AUTH_REJECTED'],
       [Error('PRIVATE_LOCAL_PATH_CANARY'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+      [new TrelioApiError(403,'PRIVATE_NATIVE_HTTP_CANARY',null,'ACCESS_DENIED',{private:'PRIVATE'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_ACCESS_DENIED`],
+      [new TrelioApiError(403,'PRIVATE_NATIVE_HTTP_CANARY',null,'PRIVATE_CODE_CANARY'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_TRELIO_BACKEND_HTTP_403`],
+      [Object.assign(Error('PRIVATE_FORGED_HTTP_CANARY'),{statusCode:403,code:'ACCESS_DENIED'}),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
     ]){
       error=failure;
       await assert.rejects(proxy.callTool(name,args),caught=>{
@@ -1130,7 +1135,7 @@ test('all trusted materializers preserve local refusal provenance without claimi
         assert.doesNotMatch(JSON.stringify(caught),/PRIVATE|payload|reason/);return true;
       });
     }
-    assert.equal(requests,3);assert.equal(materializations,3,'each explicit invocation materializes once; no retry/fallback');
+    assert.equal(requests,stage==='workspace_arguments'?0:6);assert.equal(materializations,6,'each explicit invocation materializes once; no retry/fallback');
   }
 });
 
@@ -1483,7 +1488,7 @@ import { ASSISTANT_MCP_READ_TOOLS, createAssistantWorkspaceProfile, assistantTas
 import { withWorkspaceExecutionProfile, currentWorkspaceExecutionProfile,
   ensureCompanyEncryptionContext } from '../host-runtime/scripts/trelio-workspace.mjs';
 
-const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null}={}) => {
+const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=false,workspaceRun=false,encryptedAttachment=false,secretBrowserFill=null,secretGeneration=null,secretSkill=null,remoteMcp=null,lock=(_file,action)=>action()}={}) => {
   const identity={schemaVersion:1,origin:encryptedTool||encryptedInspection||workspaceRun||encryptedAttachment?'https://trelio.ru':'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
   const pass={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:randomUUID(),taskId:randomUUID(),
     passId:randomUUID(),deliveryId:randomUUID(),threadId:randomUUID(),bindingId:randomUUID(),bindingRevision:1};
@@ -1512,10 +1517,33 @@ const workspaceProfileFixture = async ({encryptedTool=null,encryptedInspection=f
   const profile=await createAssistantWorkspaceProfile({identity,store,host,client,workspaceRun:runIdentity,encryptedTaskRead:descriptor,encryptedInspection:inspectionDescriptor,secretBrowserFill,secretGeneration,
     secretSkill:typeof secretSkill==='function'?secretSkill({pass,runtime}):secretSkill,
     remoteMcp:typeof remoteMcp==='function'?remoteMcp({pass,runtime}):remoteMcp,
-    lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock:(_file,action)=>action()});
+    lockDirectory:path.join(os.tmpdir(),'synthetic-assistant-workspace-locks'),lock});
   return {identity,pass,keys,store,credential,runtime,profile,descriptor,inspectionDescriptor,runIdentity,host,client,contacts:()=>contacts,
     changeIdentity:value=>{currentIdentity=value;},changePass:value=>{active=value;},close:()=>{live=false;}};
 };
+
+test('Workspace proof lock covers only its coherent runtime snapshot, with native/private late fences outside',async()=>{
+  let locked=false,runtimeReads=0,replaceIdentity=false;
+  const f=await workspaceProfileFixture({lock:async(_file,action)=>{
+    assert.equal(locked,false);locked=true;try{return await action();}finally{locked=false;}
+  }});
+  const read=f.store.get,identity=f.host.readIdentity,live=f.client.readTaskPass;
+  f.store.get=async input=>{
+    if(input.kind==='runtime'){assert.equal(locked,true);runtimeReads++;}
+    else assert.equal(locked,false,'device credential I/O cannot starve another read behind the proof lock');
+    if(replaceIdentity&&input.kind==='device')f.changeIdentity({...f.identity,deviceId:randomUUID()});
+    return read(input);
+  };
+  f.host.readIdentity=async()=>{assert.equal(locked,false,'host/private identity I/O stays outside the proof snapshot');return identity();};
+  f.client.readTaskPass=async input=>{assert.equal(locked,false,'native HTTP must not occupy the proof critical section');return live(input);};
+  const token=await f.profile.requireToken(f.identity.origin);
+  const prepare=()=>f.profile.prepareRequest({origin:f.identity.origin,token,pathname:'/api/agent-workspaces/bridge-compatibility',
+    options:{},buildHeaders:(_token,headers)=>new Headers(headers)});
+  const first=await prepare();assert.ok(JSON.parse(first.headers.get('x-trelio-assistant-proof')).signature);assert.equal(runtimeReads,1);
+  replaceIdentity=true;
+  await assert.rejects(prepare(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'},'late identity replacement refuses before any request leaves');
+  assert.equal(locked,false);f.close();
+});
 
 test('every supported source exact-body command requires the common native read observer',async()=>{
   const f=await workspaceProfileFixture();

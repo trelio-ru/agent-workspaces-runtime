@@ -2026,51 +2026,58 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           }
         }else if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       }
-      return lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
-        await assertLivePass(options.signal);
+      // Parallel file reads and fresh MCP polls share this SAME observed
+      // runtime snapshot. Keep only its coherent read/signature under the
+      // registration lock: native HTTP plus unrelated credential/identity I/O
+      // inside it let a busy mirror starve fresh readers until the unchanged
+      // lock deadline. Registration/end still serialize with this snapshot;
+      // native admission stays BEFORE the private snapshot and local identity
+      // is checked again AFTER credential I/O, before dispatch, as previously.
+      await assertLivePass(options.signal);
+      const proof=await lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
         const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
         const state=record?.state;
         if(record?.schemaVersion!==1 || record.ended || record.passId!==pass.passId || record.threadId!==pass.threadId
           || !uuid.test(state?.runtimeSessionId??'') || !Number.isFinite(Date.parse(state.expiresAt)) || Date.parse(state.expiresAt)<=now()
           || typeof state.privateKeyPkcs8!=='string' || state.privateKeyPkcs8.length>256) fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
-        let proof;try{proof=buildRuntimeSessionProof({state,toolName:route.proofTool,now:new Date(now())});}
+        try{return buildRuntimeSessionProof({state,toolName:route.proofTool,now:new Date(now())});}
         catch{fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');}
-        // Keys use the ordinary observed-hook serializer; no model-authored
-        // proof/session or human vault lookup is accepted. Scope/proof headers
-        // overwrite any untrusted values from an initial header collection.
-        const headers=buildHeaders(null,options.headers??{});
-        headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
-        headers.delete('x-trelio-assistant-secret-checkout');
-        headers.delete(ASSISTANT_WORKSPACE_RECIPIENT_HEADER);
-        if(attachmentEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,attachmentEncryption.runtime.device.id);
-        if(companyReadEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,companyReadEncryption.runtime.device.id);
-        headers.delete('x-trelio-assistant-workspace-run');
-        if(inspection && route.routePattern?.includes('/workspaces/'))
-          headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,inspectionEncryption.runtime.device.id);
-        if(lifecycleEncryption && route.routePattern && !encryptionRuntime){
-          headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,lifecycleEncryption.runtime.device.id);
-          headers.set('x-trelio-assistant-workspace-run',ownRun.runId);
-        }
-        headers.delete('x-trelio-assistant-source-encryption-fingerprint');
-        headers.delete('x-trelio-assistant-skill-guidance');
-        if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')||route.proofTool.startsWith('assistant_secret_browser_')||route.proofTool.startsWith('assistant_secret_generate_')){
-          const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
-          if(stored?.assistantId===identity.assistantId&&stored.deviceId===identity.deviceId&&stored.companyId===pass.companyId
-            &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){
-            skillFingerprint=stored.record.fingerprint;headers.set('x-trelio-assistant-source-encryption-fingerprint',skillFingerprint);
-          }
-          if(skillRead && ['assistant-skill:resolve','assistant-skill:remote-resolve'].includes(route.proofTool))headers.set('x-trelio-assistant-skill-guidance','1');
-        }
-        if(privateSkill && route.proofTool.startsWith('assistant-skill:'))headers.set('x-trelio-assistant-secret-checkout',
-          JSON.stringify({grantId:privateSkill.grantId,runId:privateSkill.runId}));
-        headers.set('x-trelio-assistant-pass',JSON.stringify(locator));
-        headers.set('x-trelio-assistant-proof',JSON.stringify(proof));
-        if(encryptionRuntime)headers.set('x-trelio-assistant-encryption-protocol','1');
-        await withCredential(credential=>{headers.set('authorization',`Bearer ${credential}`);});
-        await assertIdentity();
-        url.pathname=rewritten;
-        return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store',...(bodyOverride?{body:bodyOverride}:{})}};
       });
+      // Keys use the ordinary observed-hook serializer; no model-authored
+      // proof/session or human vault lookup is accepted. Scope/proof headers
+      // overwrite any untrusted values from an initial header collection.
+      const headers=buildHeaders(null,options.headers??{});
+      headers.delete('cookie');headers.delete('cookie2');headers.delete('proxy-authorization');
+      headers.delete('x-trelio-assistant-secret-checkout');
+      headers.delete(ASSISTANT_WORKSPACE_RECIPIENT_HEADER);
+      if(attachmentEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,attachmentEncryption.runtime.device.id);
+      if(companyReadEncryption&&!encryptionRuntime)headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,companyReadEncryption.runtime.device.id);
+      headers.delete('x-trelio-assistant-workspace-run');
+      if(inspection && route.routePattern?.includes('/workspaces/'))
+        headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,inspectionEncryption.runtime.device.id);
+      if(lifecycleEncryption && route.routePattern && !encryptionRuntime){
+        headers.set(ASSISTANT_WORKSPACE_RECIPIENT_HEADER,lifecycleEncryption.runtime.device.id);
+        headers.set('x-trelio-assistant-workspace-run',ownRun.runId);
+      }
+      headers.delete('x-trelio-assistant-source-encryption-fingerprint');
+      headers.delete('x-trelio-assistant-skill-guidance');
+      if(route.proofTool.startsWith('assistant-skill:')||route.proofTool.startsWith('assistant_secret_skill_')||route.proofTool.startsWith('assistant_secret_browser_')||route.proofTool.startsWith('assistant_secret_generate_')){
+        const stored=await store.get({origin:identity.origin,kind:'company_encryption',id:pass.companyId,deviceId:identity.deviceId});
+        if(stored?.assistantId===identity.assistantId&&stored.deviceId===identity.deviceId&&stored.companyId===pass.companyId
+          &&typeof stored.record?.fingerprint==='string'&&/^[A-Za-z0-9_-]{40,128}$/u.test(stored.record.fingerprint)){
+          skillFingerprint=stored.record.fingerprint;headers.set('x-trelio-assistant-source-encryption-fingerprint',skillFingerprint);
+        }
+        if(skillRead && ['assistant-skill:resolve','assistant-skill:remote-resolve'].includes(route.proofTool))headers.set('x-trelio-assistant-skill-guidance','1');
+      }
+      if(privateSkill && route.proofTool.startsWith('assistant-skill:'))headers.set('x-trelio-assistant-secret-checkout',
+        JSON.stringify({grantId:privateSkill.grantId,runId:privateSkill.runId}));
+      headers.set('x-trelio-assistant-pass',JSON.stringify(locator));
+      headers.set('x-trelio-assistant-proof',JSON.stringify(proof));
+      if(encryptionRuntime)headers.set('x-trelio-assistant-encryption-protocol','1');
+      await withCredential(credential=>{headers.set('authorization',`Bearer ${credential}`);});
+      await assertIdentity();
+      url.pathname=rewritten;
+      return {url,headers,options:{redirect:'error',credentials:'omit',cache:'no-store',...(bodyOverride?{body:bodyOverride}:{})}};
     },
   });
 };
@@ -3176,6 +3183,14 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
       // callback (including a provider's RemoteMcpHostError) must not inherit
       // assistant-device setup recovery just because its code looks similar.
       if(error instanceof AssistantTransportError||nativeSendErrors?.has(error))throw error;
+      const {TrelioApiError}=await import('./trelio-workspace.mjs');
+      if(error instanceof TrelioApiError){
+        // Genuine shared HTTP failures retain the SAME closed diagnostic
+        // vocabulary. A provider's status-shaped Error is not native evidence;
+        // prose/payload, raw status objects and auth recovery never cross.
+        const {bridgeHttpDiagnosticCode}=await import('./trelio-bridge-http-diagnostics.mjs');
+        throw new AssistantTransportError(`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_${bridgeHttpDiagnosticCode(error.statusCode,error.code)}`);
+      }
       const code=/^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_|REMOTE_MCP_)[A-Z_]{1,100}$/u.test(error?.code??'')
         ?error.code:localFailureCodes[stage];
       throw Object.assign(new AssistantTransportError(code),

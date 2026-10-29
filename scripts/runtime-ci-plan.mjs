@@ -49,6 +49,7 @@ const imports = source => source.match(/\bimport\s*(?:\([^)]*\)|[^;]*;)/gu) ?? [
 
 export const ASSISTANT_CI_TESTS = Object.freeze([
   'tests/context-budget.test.mjs', ...ASSISTANT_TESTS,
+  'tests/trelio-assistant-company-context-e2e.test.mjs',
   ...['codex-conversation', 'host-runtime-entry', 'host-runtime-recovery',
     'hook-signed-chain', 'hook-tool-identity', 'hook-private-session',
     'runtime-policy', 'runtime-proof-preparation', 'local-context', 'local-path',

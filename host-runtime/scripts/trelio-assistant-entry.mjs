@@ -17,7 +17,8 @@ import { PROCESS_DIAGNOSTIC_CODES } from './trelio-process-diagnostics.mjs';
 import { isDirectModuleInvocation, sameLocalPath } from './trelio-local-path.mjs';
 import { createAssistantSetup, createAssistantWindowsBackground } from './trelio-assistant-setup.mjs';
 import { maintainAssistantCodexDesktop, downloadCodexDesktop, runAssistantWindowsCodexUpdate } from './trelio-assistant-setup.mjs';
-import { startLoadedCodexPluginPreservation } from './trelio-workspace.mjs';
+import { startLoadedCodexPluginPreservation, TrelioApiError } from './trelio-workspace.mjs';
+import { bridgeHttpDiagnosticCode } from './trelio-bridge-http-diagnostics.mjs';
 import { workspaceRecoveryDirectory } from './trelio-workspace-directory.mjs';
 
 const UUID = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$';
@@ -102,6 +103,9 @@ const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
 const assistantFailureCode = code => typeof code==='string' && (assistantHealthFailure({code})
   || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(code) || PROCESS_DIAGNOSTIC_CODES.includes(code)
   || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(code)
+  // Numeric tails are limited to the SAME reviewed HTTP buckets, never an
+  // arbitrary server/provider code containing digits or a serialized status.
+  || /^ASSISTANT_(?:COMPANY_CONTEXT|MCP_LOCAL_(?:WORKSPACE_ARGUMENTS|SOURCE_READ|SOURCE_REPLY|COMPANY_READ|TASK_READ|SKILL_READ|COMPANY_FILE|ATTACHMENT_READ))_TRELIO_BACKEND_HTTP_(?:400|401|403|404|409|429|5XX|OTHER)$/u.test(code)
   || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(code));
 const safeError = error => assistantFailureCode(error?.code) ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
@@ -2544,6 +2548,14 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     // this SAME closed set, never parse or copy native stderr/prose.
     const readCode=error?.code??error?.message;
     if(readCodes.has(readCode))fail('ASSISTANT_COMPANY_CONTEXT_'+readCode);
+    // The SAME common request engine can refuse a ciphertext read with a
+    // native HTTP status/domain code. Do not collapse that real ACL refusal
+    // into setup unavailability at the request pipe. Reuse the existing closed
+    // HTTP projection; neither backend prose nor status-shaped foreign errors
+    // enter the frame. This local read failure carries no device-auth recovery
+    // provenance and never authorizes a preparation/request replay.
+    if(error instanceof TrelioApiError)
+      fail('ASSISTANT_COMPANY_CONTEXT_'+bridgeHttpDiagnosticCode(error.statusCode,error.code));
     throw error;
   }
 };

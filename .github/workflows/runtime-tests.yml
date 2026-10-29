@@ -313,6 +313,7 @@ jobs:
           node tests/trelio-assistant-codex.test.mjs
           node tests/trelio-assistant-private.test.mjs
           node tests/trelio-assistant-transport.test.mjs
+          node tests/trelio-assistant-company-context-e2e.test.mjs
           node tests/trelio-assistant-source-reader.test.mjs
           node tests/trelio-assistant-setup.test.mjs
           node tests/trelio-assistant-windows-background.test.mjs
@@ -417,6 +418,9 @@ jobs:
 
       - name: Run Windows assistant transport and accepted inspection regressions
         run: node tests/trelio-assistant-transport.test.mjs
+
+      - name: Run Windows composed owner company context regressions
+        run: node tests/trelio-assistant-company-context-e2e.test.mjs
 
       - name: Run Windows encrypted mirror retention regressions
         if: needs.ci-plan.outputs.profile == 'full'

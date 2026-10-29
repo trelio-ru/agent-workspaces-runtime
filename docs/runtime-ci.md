@@ -53,6 +53,18 @@ files, instruction delivery and plugin preservation. The exact list is exported
 as `ASSISTANT_CI_TESTS`; each file runs in its own Node process. The existing
 first-protected-call regression runs separately with its ordinary name filter.
 
+The owner-company composition suite is mandatory on macOS and Windows. Its
+serial stdio host launches actual request workers with the production factories,
+native Keychain/DPAPI store, private sessions and managed HPKE/mirror. Only remote
+server data is synthetic and loopback-owned. The cold case reads 3,000 genuine
+encrypted containers (~150 MiB), then searches and reads an exact task/current
+discussion and a warm second question without a Task/Run. Separate native child
+cases retain one original-timeout resume, a hard second timeout, native access
+refusal and unknown HTTP bucket privacy. A disposable macOS Keychain never reads
+the operator's login Keychain; Linux explicitly skips this native private-store
+suite and retains the common crypto/mirror tests. It is not evidence of a model
+answer or a live Telegram send: that remains a separate original-peer acceptance.
+
 Windows keeps all eleven assistant suites, the shared Workspace process/finish/
 directory/files boundaries, local context/policy/proof, signed hook chain,
 hash-pinned real Codex CLI → synthetic CMD MCP startup, runtime entry and plugin

@@ -128,6 +128,19 @@ publication tooling также остаются вне этого публичн
   stages only, no output or retry grant. Test actual entry-to-entry refusal frames.
   Owned preparation deadline errors use the SAME private-session Error/Signal
   identity, never public code/elapsed-clock inference; foreign lookalikes stay hard.
+  Company-read acceptance composes serial MCP, actual request processes, native
+  private storage and managed HPKE/mirror in ONE fixture; component stubs are not
+  composed coverage. Keep the synthetic 3,000-file/~150-MiB cold case, exact current
+  discussion, warm second question, one own-timeout resume, hard second timeout,
+  native ACL refusal and no Task/Run. Original Telegram/model acceptance remains
+  separate live evidence, never claimed from the deterministic fixture.
+  Genuine common HTTP errors reuse the closed bridge diagnostic vocabulary,
+  without backend prose or device-auth recovery. Status-shaped foreign errors
+  remain local failures; numeric request-frame tails admit only fixed HTTP buckets.
+  Workspace HTTP proof locks cover only the coherent observed-runtime read/sign;
+  native admission and credential/identity I/O remain outside, with original
+  admission-before-key and final identity fences. Cold pool/poll contention must
+  pass without extending lock, private-session or native request deadlines.
   Native selected ciphertext follows weak snapshot/projection identity through common mirror batches; no cumulative company map or general resolver. Per-response 4096/32-MiB and current-recipient guards remain. Failures expose fixed stages only; no content, counts, paths or automatic retry.
   All local MCP materializers retain closed refusal codes or a fixed local stage,
   never a false endpoint outage. Only the exact native send error retains native
