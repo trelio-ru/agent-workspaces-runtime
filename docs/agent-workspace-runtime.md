@@ -2162,7 +2162,12 @@ Scratchpad файлов сохраняет свой отдельный лими�
 повторно проверяются nonce/PID, directory identity и heartbeat inode/mtime,
 затем прежний exact claim переносится в unique stale directory. Конкурирующий
 recoverer не удаляет successor. Прежний heartbeat/age protocol совместим;
-startup sweep не восстанавливает занятые writer claims. Cold managed read без
+startup sweep не восстанавливает занятые writer claims. Если native inspection
+writer owner вернула отказ после освобождения/замены наблюдённого каталога,
+fresh отсутствие либо изменённые inode/birthtime разрешают только новый захват
+под исходным deadline с полной проверкой прав. Неизменный или недоступный каталог
+сохраняет исходный отказ; network work/publication не повторяются.
+Cold managed read без
 complete pointer ждёт под исходным first-sync bound; 30-секундный refresh wait
 относится только к уже существующей stale generation. Сигнал managed pass и
 первоначальный deadline не продлеваются, incomplete generation не публикуется.

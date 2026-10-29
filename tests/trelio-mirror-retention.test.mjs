@@ -12,6 +12,7 @@ import {
   MIRROR_READER_GRACE_MS, MIRROR_HISTORY_MAX_BYTES,
 } from '../host-runtime/scripts/trelio-mirror-retention.mjs';
 import { ensurePrivateDirectory, writePrivateJsonFile, resolveWorkspaceBridgeConfigDirectory } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { ProcessDiagnosticError } from '../host-runtime/scripts/trelio-process-diagnostics.mjs';
 import { resolveMirrorPaths, syncCompanyContextMirror } from '../host-runtime/scripts/trelio-local-context.mjs';
 const exec = promisify(execFile);
 const origin = 'a'.repeat(32);
@@ -60,7 +61,7 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
       }); } catch (error) {
         // Keep the original failing assertion/exit. Project only fixed stages
         // from this isolated synthetic child, never its raw stdout or paths.
-        const stages = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_STAGE:(?:root|pid|first|live|malformed|unexpected|concurrent|entered|owner|waiting|released|settled|verified)\b/gu);
+        const stages = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_STAGE:(?:root|pid|first|live|malformed|unexpected|concurrent|entered|owner|waiting|released|settled|race_absent|race_replaced|race_unchanged|verified)\b/gu);
         const failures = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_ERROR:(?:ENOENT|EACCES|EPERM|EEXIST|ERR_ASSERTION|TRELIO_WINDOWS_PRIVATE_ACL_FAILED|other):(?:lstat|stat|open|read|mkdir|rename|rmdir|unlink|other):(?:path_decode|identity|owner_read|owner_write|dacl_write|dacl_verify|other)\b/gu);
         t.diagnostic(JSON.stringify({ fixture: 'dead_mirror_writer',
           stage: stages?.at(-1)?.split(':')[1] ?? null,
@@ -165,6 +166,51 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   console.log('MIRROR_DEAD_WRITER_STAGE:settled');
   assert.equal(reads, 3);
   assert.equal(await fs.stat(paths.pointer).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
+  // Deterministically reproduce the native inspection/release interleaving,
+  // independently of Windows scheduler luck. Only this fixture's synthetic
+  // sync.lock is changed. The native refusal remains the original Error object;
+  // metadata proves release/replacement, never a permission/retry exemption.
+  const originalLstat = fs.lstat;
+  for (const mode of ['absent', 'replaced', 'unchanged']) {
+    console.log(`MIRROR_DEAD_WRITER_STAGE:race_${mode}`);
+    await seed(process.pid);
+    const cancellation = new AbortController();
+    const signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(5_000)]);
+    let abortTimer;
+    const privateRefusal = new ProcessDiagnosticError('TRELIO_WINDOWS_PRIVATE_ACL_FAILED',
+      'Synthetic late private inspection refusal.', { operation: 'windows_acl.owner_read' });
+    let injected = false;
+    fs.lstat = async (...args) => {
+      if (!injected && args[0] === path.join(paths.lock, 'owner.json')) {
+        injected = true;
+        if (mode !== 'unchanged') {
+          await fs.rm(paths.lock, { recursive: true });
+          if (mode === 'replaced') {
+            await seed(process.pid);
+            // Begin the short cancellation wait only once this synthetic
+            // successor exists; native setup does not consume that wait.
+            abortTimer = setTimeout(() => cancellation.abort(new Error('synthetic waiter cancelled')), 250);
+          }
+        }
+        throw privateRefusal;
+      }
+      return originalLstat(...args);
+    };
+    try {
+      await assert.rejects(sync(signal), error => mode === 'absent' ? error.cause === refusal
+        : mode === 'replaced' ? error === signal.reason : error === privateRefusal);
+      assert.equal(injected, true);
+      assert.equal(reads, 4, 'only a positively released claim permits the next manifest read');
+      if (mode !== 'absent') {
+        const owner = JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json')));
+        assert.equal(owner.pid, process.pid, 'live/unchanged owner is never removed');
+      }
+    } finally {
+      clearTimeout(abortTimer);
+      fs.lstat = originalLstat;
+      await fs.rm(paths.lock, { recursive: true, force: true });
+    }
+  }
   console.log('MIRROR_DEAD_WRITER_STAGE:verified');
   console.log('DEAD_MIRROR_WRITER_VERIFIED');
 });

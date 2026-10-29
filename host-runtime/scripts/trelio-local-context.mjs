@@ -459,11 +459,15 @@ const invalidateLocalCompanyMirrorSession = async ({
   }
 };
 
-const inspectLockOwner = async (lockDirectory) => {
+const inspectLockOwner = async (lockDirectory, observeDirectory = () => {}) => {
   const directory = await fs.lstat(lockDirectory);
   if (!directory.isDirectory() || directory.isSymbolicLink()) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_MIRROR_INVALID", "The local mirror writer claim is invalid.");
   }
+  // Retain only structural identity before the asynchronous native private
+  // inspection. Its owner may release this exact directory while the Windows
+  // worker is still reading ACLs; a late refusal alone is not an absent lock.
+  observeDirectory(directory);
   const owner = await readPrivateJsonFile(path.join(lockDirectory, "owner.json"));
   let metadata;
   try {
@@ -553,13 +557,23 @@ const acquireMirrorWriter = async (
       };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      let current, recoverable;
+      let current, recoverable, observedDirectory;
       try {
-        current = await inspectLockOwner(paths.lock);
+        current = await inspectLockOwner(paths.lock, directory => { observedDirectory = directory; });
         recoverable = Date.now() - current.metadata.mtimeMs > MIRROR_LOCK_STALE_MS
           || await hasExitedMirrorWriter(paths.lock, current);
       } catch (inspectionError) {
         if (inspectionError.code === "ENOENT") continue;
+        // The SAME private-file/native checks are mandatory on the next claim.
+        // Retry only acquisition after fresh metadata positively proves release
+        // or replacement of the directory observed before the failed read. An
+        // unchanged/unreadable lock retains the original ACL/permission error;
+        // no network operation, hardening or publication is replayed here.
+        const fresh = observedDirectory
+          ? await fs.lstat(paths.lock).catch(error => error.code === "ENOENT" ? null : undefined)
+          : undefined;
+        if (observedDirectory && (fresh === null || fresh
+          && (fresh.ino !== observedDirectory.ino || fresh.birthtimeMs !== observedDirectory.birthtimeMs))) continue;
         throw inspectionError;
       }
       if (recoverable) {

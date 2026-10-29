@@ -528,6 +528,8 @@ publication tooling также остаются вне этого публичн
   filesystem/native categories, never raw child output or paths.
   Fresh sync claims recover only from a protected valid nonce/PID with native
   ESRCH, rechecked under the SAME metadata mutex; live/unknown owners stay intact.
+  Late private inspection retries only writer acquisition after positive fresh
+  directory absence/replacement; unchanged or unknown claims retain refusal.
   Cold managed reads keep the original first-sync join bound, not stale-read 30s.
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
