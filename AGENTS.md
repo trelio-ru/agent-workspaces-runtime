@@ -124,6 +124,9 @@ publication tooling также остаются вне этого публичн
   none authorizes replay or exposes child output. Reject damaged UTF-8 before
   JSON, never replacement characters in an answer. Test the real native pipes.
   Native selected ciphertext follows weak snapshot/projection identity through common mirror batches; no cumulative company map or general resolver. Per-response 4096/32-MiB and current-recipient guards remain. Failures expose fixed stages only; no content, counts, paths or automatic retry.
+  All local MCP materializers retain closed refusal codes or a fixed local stage,
+  never a false endpoint outage. Only the exact native send error retains native
+  MCP auth provenance through an arguments adapter; provider errors do not.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
   Before pairing discovery не читает credential. Confirmed local device mismatch

@@ -1442,6 +1442,20 @@ UTF-8 decoding is fatal for damaged or truncated sequences: native bytes cannot
 silently become replacement characters inside an otherwise valid JSON answer.
 Split multibyte chunks remain supported; BOM-prefixed JSON remains rejected.
 
+Every trusted MCP materializer shares one closed local-error projection: source
+read/reply, company/task/skill read, accepted company file, original attachment
+and Workspace arguments. Preserve the reviewed local recovery-code grammar;
+unknown failures expose only `ASSISTANT_MCP_LOCAL_<STAGE>_FAILED`, never exception
+text, paths, causes, provider output or an automatic retry. A callback refusal
+must not become an unavailable MCP endpoint. Stages are fixed host constants.
+The arguments adapter may invoke the SAME native send; an invocation-local
+WeakSet retains only its exact thrown object. That object keeps native endpoint
+authentication/scope provenance. A copied error or a provider Remote MCP error
+from a local materializer never borrows assistant-device setup recovery. Native
+admission, one-use proof, unchanged deadlines and no-replay remain independent.
+Tests exercise every callback through the real MCP wrapper, exact native send
+versus copied auth errors, privacy and one native call per explicit invocation.
+
 Native selected ciphertext has the lifetime of its exact decoded response. The
 managed profile holds only weak root/projection associations, not a cumulative
 company-wide entity map. Common mirror field-only metadata projections explicitly

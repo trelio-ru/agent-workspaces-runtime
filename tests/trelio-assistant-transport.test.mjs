@@ -1086,8 +1086,77 @@ test('trusted local Workspace recovery errors keep their closed code across the 
       &&(code!=='TRELIO_RUNTIME_HOOK_REQUIRED'||error.reason==='expired'));
   }
   code='PRIVATE_UNREVIEWED_CODE';
-  await assert.rejects(client.callTool('get_task',{}),{code:'ASSISTANT_MCP_UNAVAILABLE'});
+  await assert.rejects(client.callTool('get_task',{}),{code:'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_FAILED'});
   assert.equal(preparations,4);assert.equal(business,0);
+});
+
+test('all trusted materializers preserve local refusal provenance without claiming native MCP auth or retrying',async()=>{
+  const f=await workspaceProfileFixture({encryptedTool:'get_task'});
+  const {RemoteMcpHostError}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  const company={schemaVersion:1,nativeTool:'search',companyId:f.pass.companyId,companySlug:'synthetic',
+    taskId:f.pass.taskId,passId:f.pass.passId,assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+  const skill={schemaVersion:1,nativeTool:'get_agent_skill',companyId:f.pass.companyId,projectId:null,skillId:'synthetic',releaseId:randomUUID(),arguments:{sections:['instructions']}};
+  const refusal=(code,localRead)=>({isError:true,content:[],structuredContent:{code,localRead}});
+  const cases=[
+    ['source_read','get_assistant_intake_context','materializeSourceIntake',{}, {content:[]}],
+    ['source_reply','resolve_assistant_intake','materializeSourceReply',{decision:'reply_owner'}, {content:[]}],
+    ['company_read','search','materializeEncryptedCompanyContext',{},refusal('ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED',company)],
+    ['task_read','get_task','materializeEncryptedTask',{},refusal('ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED',f.descriptor)],
+    ['skill_read','get_agent_skill','materializeEncryptedSkill',{},refusal('ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED',skill)],
+    ['company_file','get_agent_workspace_file','materializeCompanyFile',{}, {content:[],structuredContent:{delivery:'local-file'}}],
+    ['attachment_read','download_attachment','materializeAttachment',{}, {content:[]}],
+  ];
+  for(const [stage,name,callback,args,value] of cases){
+    let error,requests=0,materializations=0;
+    const proxy=createAssistantMcpClient({...f.identity,store:f.store,presentationProfile:name==='get_agent_skill'?'task':'company_context',
+      readActivePass:async()=>name.includes('intake')?{kind:'source_intake'}:null,
+      [callback]:async()=>{materializations++;throw error;},
+      httpRequest:async input=>{
+        const reply=result=>({sessionId:'synthetic-local-failure',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+        if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+        if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+        if(input.payload.method==='tools/list')return reply({tools:[{name,description:'Native synthetic schema',inputSchema:{type:'object'}}]});
+        assert.equal(input.payload.method,'tools/call');requests++;return reply(value);
+      }});
+    for(const [failure,expected] of [
+      [Object.assign(Error('PRIVATE_LOCAL_PATH_CANARY'),{code:'ASSISTANT_PASS_REVIEW_REQUIRED',reason:'expired',payload:{secret:'PRIVATE'}}),'ASSISTANT_PASS_REVIEW_REQUIRED'],
+      [new RemoteMcpHostError('REMOTE_MCP_AUTH_REJECTED','PRIVATE_PROVIDER_AUTH_CANARY'),'REMOTE_MCP_AUTH_REJECTED'],
+      [Error('PRIVATE_LOCAL_PATH_CANARY'),`ASSISTANT_MCP_LOCAL_${stage.toUpperCase()}_FAILED`],
+    ]){
+      error=failure;
+      await assert.rejects(proxy.callTool(name,args),caught=>{
+        assert.ok(caught instanceof AssistantTransportError);assert.equal(caught.code,expected,stage);assert.equal(caught.message,expected);
+        assert.equal(caught.setupRecovery,undefined,'a trusted local callback is not the native MCP authentication boundary');
+        assert.doesNotMatch(JSON.stringify(caught),/PRIVATE|payload|reason/);return true;
+      });
+    }
+    assert.equal(requests,3);assert.equal(materializations,3,'each explicit invocation materializes once; no retry/fallback');
+  }
+});
+
+test('only the exact native send error crosses an arguments callback with MCP authentication provenance',async()=>{
+  const origin='https://native-auth-provenance.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'n'.repeat(43)}`,expiresAt:1});
+  const {RemoteMcpHostError}=await import('../host-runtime/scripts/trelio-remote-mcp.mjs');
+  let copied=false,calls=0;
+  const proxy=createAssistantMcpClient({origin,assistantId,deviceId,store,
+    withWorkspaceArguments:async({args},send)=>{
+      try{return await send(args);}catch(error){
+        if(copied)throw new RemoteMcpHostError(error.code,'PRIVATE_CALLBACK_REPLACEMENT');
+        throw error;
+      }
+    },httpRequest:async input=>{
+      const reply=result=>({sessionId:'native-auth',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
+      if(input.method==='DELETE'||input.payload.method==='notifications/initialized')return reply({});
+      if(input.payload.method==='initialize')return reply({protocolVersion:'2025-06-18'});
+      if(input.payload.method==='tools/list')return reply({tools:[{name:'get_task',description:'Native schema',inputSchema:{type:'object'}}]});
+      calls++;throw new RemoteMcpHostError('REMOTE_MCP_AUTH_REJECTED','PRIVATE_NATIVE_RESPONSE');
+    }});
+  for(copied of [false,true])await assert.rejects(proxy.callTool('get_task',{}),error=>{
+    assert.equal(error.code,'REMOTE_MCP_AUTH_REJECTED');assert.equal(error.setupRecovery,copied?undefined:'assistant_mcp_catalog_rejected');
+    assert.equal(error.status,copied?null:401);assert.doesNotMatch(JSON.stringify(error),/PRIVATE/);return true;
+  });
+  assert.equal(calls,2,'no retry of the native call and no borrowed provenance for a replacement error');
 });
 
 test('generic owner action fields reuse their current native operation inventory before staging',async()=>{

@@ -3159,6 +3159,30 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
   origin = originOf(origin); assistantId = id(assistantId); deviceId = id(deviceId);
   if (!store || typeof store.get !== "function" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60_000) fail("ASSISTANT_TRANSPORT_INVALID_INPUT");
   const intakeToolNames=ASSISTANT_INTAKE_MCP_TOOLS;
+  // These are INTERNAL callback boundaries, never provider/model-selected
+  // stages. A local filesystem/materialization refusal is not an unavailable
+  // native MCP endpoint. Preserve only the same reviewed recovery-code grammar
+  // used by Workspace arguments; unknown local failures retain a fixed stage,
+  // never their message, path, cause, response or retry authority.
+  const localFailureCodes=Object.freeze({workspace_arguments:'ASSISTANT_MCP_LOCAL_WORKSPACE_ARGUMENTS_FAILED',
+    source_read:'ASSISTANT_MCP_LOCAL_SOURCE_READ_FAILED',source_reply:'ASSISTANT_MCP_LOCAL_SOURCE_REPLY_FAILED',
+    company_read:'ASSISTANT_MCP_LOCAL_COMPANY_READ_FAILED',task_read:'ASSISTANT_MCP_LOCAL_TASK_READ_FAILED',
+    skill_read:'ASSISTANT_MCP_LOCAL_SKILL_READ_FAILED',company_file:'ASSISTANT_MCP_LOCAL_COMPANY_FILE_FAILED',
+    attachment_read:'ASSISTANT_MCP_LOCAL_ATTACHMENT_READ_FAILED'});
+  const localOperation=async(stage,action,nativeSendErrors)=>{
+    try{return await action();}catch(error){
+      // The arguments adapter invokes the SAME native send. Only that exact
+      // caught object may retain native endpoint auth/scope provenance. A local
+      // callback (including a provider's RemoteMcpHostError) must not inherit
+      // assistant-device setup recovery just because its code looks similar.
+      if(error instanceof AssistantTransportError||nativeSendErrors?.has(error))throw error;
+      const code=/^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_|REMOTE_MCP_)[A-Z_]{1,100}$/u.test(error?.code??'')
+        ?error.code:localFailureCodes[stage];
+      throw Object.assign(new AssistantTransportError(code),
+        code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid','expired','replayed'].includes(error.reason)
+          ?{reason:error.reason}:{});
+    }
+  };
   const selectedTools=async(metadata=false)=>{
     const pass=typeof readActivePass==='function'?await readActivePass():null;
     return !metadata&&pass?.kind==='source_intake'?[...intakeToolNames,'get_assistant_status',...(pass.intakeKind==='route_existing'?[]:[...ASSISTANT_COMPANY_CONTEXT_READ_TOOLS,'get_trelio_tool_contract'])]:presentationProfile==='remote_mcp'
@@ -3301,35 +3325,25 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             omittedRootFields:[...ASSISTANT_MCP_ADMISSION_FIELDS,'clientRequestId','expectedTaskUpdatedAt','ownerDecisionId'],ignoredRootFields:[]});
         }
 
+        const nativeSendErrors=new WeakSet();
         const send=async wireArguments=>{
           // The public input bound was checked before protection. Ciphertext
           // adds only the standard bounded envelope/base64 overhead; this is
           // not a larger model input or a caller-controlled wire override.
           if(Buffer.byteLength(JSON.stringify(wireArguments))>96*1024)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-          const response=await request({config,credential,sessionId:session.sessionId,payload:{
-            jsonrpc:"2.0",id:session.nextRequestId(),method:"tools/call",params:{name,arguments:wireArguments},
-          }},{signal});
-          return protocol.assertJsonRpcResult(response,"tools/call");
-        };
-        let value;
-        try{
-          value=typeof withWorkspaceArguments==='function'
-            ? await withWorkspaceArguments({name,args:argumentsSnapshot,signal},send) : await send(argumentsSnapshot);
-        }catch(error){
-          // The trusted local Workspace adapter also uses the shared entry's
-          // ordinary Error+code contract. It is not necessarily an instance of
-          // this module's AssistantTransportError. Preserve only its closed
-          // recovery code, never message/stack/payload or an upstream JSON-RPC
-          // error: otherwise a stale Run/lease falsely becomes a network outage
-          // and the worker cannot choose the existing exact recovery path.
-          if(!(error instanceof AssistantTransportError)
-            && /^(?:ASSISTANT_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code??'')){
-            throw Object.assign(new AssistantTransportError(error.code),
-              error.code==='TRELIO_RUNTIME_HOOK_REQUIRED'&&['missing','invalid','expired','replayed'].includes(error.reason)
-                ?{reason:error.reason}:{});
+          try{
+            const response=await request({config,credential,sessionId:session.sessionId,payload:{
+              jsonrpc:"2.0",id:session.nextRequestId(),method:"tools/call",params:{name,arguments:wireArguments},
+            }},{signal});
+            return protocol.assertJsonRpcResult(response,"tools/call");
+          }catch(error){
+            if(error!==null&&(typeof error==='object'||typeof error==='function'))nativeSendErrors.add(error);
+            throw error;
           }
-          throw error;
-        }
+        };
+        const value=typeof withWorkspaceArguments==='function'
+          ?await localOperation('workspace_arguments',()=>withWorkspaceArguments({name,args:argumentsSnapshot,signal},send),nativeSendErrors)
+          :await send(argumentsSnapshot);
 
         if (!object(value) || !Array.isArray(value.content) || value.content.length > 20
           || value.content.some(item => !object(item) || item.type !== "text" || typeof item.text !== "string")
@@ -3338,22 +3352,22 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > 512 * 1024) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         if(name==='get_assistant_intake_context'&&value.isError!==true){
           if(typeof materializeSourceIntake!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-          return materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal});
+          return localOperation('source_read',()=>materializeSourceIntake({result:value,arguments:argumentsSnapshot,signal}));
         }
         if(name==='resolve_assistant_intake'&&argumentsSnapshot.decision==='reply_owner'&&value.isError!==true){
           if(typeof materializeSourceReply!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-          return materializeSourceReply({result:value,arguments:argumentsSnapshot,signal});
+          return localOperation('source_reply',()=>materializeSourceReply({result:value,arguments:argumentsSnapshot,signal}));
         }
         // Binary plans never enter model context. The trusted production
         // callback composes the common device/pass HTTP profile and private
         // local-file primitive under this same non-renewable MCP deadline.
-        if (["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(name) && value.isError !== true) return materializeAttachment({
+        if (["download_attachment","download_registry_document","download_knowledge_base_attachment"].includes(name) && value.isError !== true) return localOperation('attachment_read',()=>materializeAttachment({
           result: value, attachmentId: argumentsSnapshot.attachmentId,
-          ...(name==='download_registry_document'?{registryDocument:argumentsSnapshot}:name==='download_knowledge_base_attachment'?{knowledgeAttachment:argumentsSnapshot}:{}),signal });
+          ...(name==='download_registry_document'?{registryDocument:argumentsSnapshot}:name==='download_knowledge_base_attachment'?{knowledgeAttachment:argumentsSnapshot}:{}),signal }));
         if(presentationProfile==='company_context'&&name==='get_agent_workspace_file'&&value.isError!==true
           &&value.structuredContent?.delivery==='local-file'){
           if(typeof materializeCompanyFile!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-          return materializeCompanyFile({result:value,arguments:argumentsSnapshot,signal});
+          return localOperation('company_file',()=>materializeCompanyFile({result:value,arguments:argumentsSnapshot,signal}));
         }
         // A native refusal selects the encrypted transport BEFORE reading any
         // content. Do not give the model markers/an executable plan or treat
@@ -3362,8 +3376,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_COMPANY_READ_REQUIRED'){
           if(typeof materializeEncryptedCompanyContext!=='function'
             || !ASSISTANT_COMPANY_CONTEXT_READ_TOOLS.includes(name))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
-          return materializeEncryptedCompanyContext({descriptor:value.structuredContent.localRead,name,
-            arguments:argumentsSnapshot,signal});
+          return localOperation('company_read',()=>materializeEncryptedCompanyContext({descriptor:value.structuredContent.localRead,name,
+            arguments:argumentsSnapshot,signal}));
         }
         if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_TASK_READ_REQUIRED'){
           if(typeof materializeEncryptedTask!=='function' || value.structuredContent.localRead?.nativeTool!==name)fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
@@ -3380,12 +3394,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             descriptor.arguments.query=argumentsSnapshot.query;
             if(argumentsSnapshot.hints!==undefined)descriptor.arguments.hints=argumentsSnapshot.hints;
           }
-          return materializeEncryptedTask({descriptor,name,signal});
+          return localOperation('task_read',()=>materializeEncryptedTask({descriptor,name,signal}));
         }
         if(value.isError===true && value.structuredContent?.code==='ASSISTANT_ENCRYPTED_SKILL_READ_REQUIRED'){
           if(name!=='get_agent_skill'||typeof materializeEncryptedSkill!=='function')fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           const descriptor=validateAssistantEncryptedSkillRead(value.structuredContent.localRead);
-          return projectAssistantSkillReadPresentation(await materializeEncryptedSkill({descriptor,signal}),argumentsSnapshot.sections);
+          return projectAssistantSkillReadPresentation(await localOperation('skill_read',()=>materializeEncryptedSkill({descriptor,signal})),argumentsSnapshot.sections);
         }
         const result={ content: value.content.map(({ type, text }) => ({ type, text })),
           ...(value.structuredContent === undefined ? {} : { structuredContent: value.structuredContent }),
