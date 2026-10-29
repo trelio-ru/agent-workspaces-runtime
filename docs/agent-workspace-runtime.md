@@ -780,6 +780,73 @@ synthetic `npm-cli.js` в каталоге с пробелами: проверя
 Generic исправление совместимо с прежним browser-session ABI и не требует
 новой версии provider либо plugin; доставка происходит signed runtime release.
 
+<a id="caller-browser-controller"></a>
+
+## Продолжение caller-owned браузера между ходами
+
+Host >=3.24.0 добавляет `browser-controller` в SAME admitted `skill_run`, без
+изменения stable plugin/MCP envelope. Opt-in – exact файл
+`trelio-browser-controller.json` с `{"schemaVersion":1}` в verified inventory,
+browser/local-session capabilities и signed browserSession. Без marker/lease
+либо в assistant profile команда закрыта до account/provider I/O. Account
+selector и admission/signature/materialisation повторяют обычный путь навыка.
+
+Admitted provider `client` вызывает общий
+`trelio-browser-session.mjs.prepareBrowserController()`. Inherited поля
+удаляются; binding берётся из host-only origin/company/member/project/skill/
+release/account/companyBinding/runtimeSession. Hook-bound session принадлежит
+текущему чату; hook-free native client сохраняет null без borrowed chat.
+Публичный descriptor содержит apiVersion/sessionId/ownerFile/deadlineAt/moduleUrl,
+без bearer/port/auth state. Caller импортирует exact moduleUrl и один раз
+вызывает `openBrowserController(descriptor,{handle,onClose})`. Source исполняется
+в обычном caller, не в host/MCP; visual API не получает JS/DOM/evaluate. Это не
+sandbox. Navigation/credential guards остаются у provider, смысл/полномочия
+сайтовых действий – у агента/caller.
+
+Общие argv в прежнем runtimeExecution.localAction:
+
+- `browser-controller status SESSION_UUID [--after-sequence N]` – deadline/события
+- `browser-controller submit SESSION_UUID REQUEST_UUID --input-file ABSOLUTE_JSON`
+- `browser-controller poll SESSION_UUID REQUEST_UUID`
+- `browser-controller close SESSION_UUID`
+
+Каждый вызов сверяет полную binding. Model не выбирает endpoint/token/executable.
+Owner record под workspace-bridge/browser-controllers хранит только binding,
+random bearer, deadline и после one-shot CAS claim PID/port. Используются SAME
+native private-file/DACL/reparse guards и PID-owned owner mutex; live lock не
+вытесняется по возрасту. Команды, results, auth callbacks и site data – только RAM.
+HTTP – exact 127.0.0.1/Host/path/POST/content-type/bearer, без Origin/CORS,
+redirect/retry. JSON input – regular owner-only файл вне Git/Workspace без
+symlink/reparse, до 64 КиБ с transport overhead, без credentials/auth URLs.
+
+Handler сериализован; request UUID/payload digest резервируются ДО enqueue.
+Тот же ID никогда не исполняется повторно, другой payload даёт request_conflict.
+Poll различает queued/running/completed/outcome_unknown/unknown_request.
+Потерянный ответ требует poll прежнего ID и фактического read-back сайта, не
+нового submit. Error handler-а возвращает только outcome_unknown без raw message.
+RAM bounds: 128 attempts без eviction/replay, result до 8 КиБ; 64 события
+по 4 КиБ, суммарно до 256 КиБ. Event overflow явный, не отменяет/повторяет auth.
+Status возвращает bounded страницу ленты с nextSequence, без потребляющего ACK.
+Продолжение – status --after-sequence nextSequence до sequence. Result и каждая
+страница измеряются SAME final skill_run stdout/text MCP builder с escaping:
+нет усечения внутри JSON; oversized result остаётся outcome_unknown. Private
+errors имеют закрытые BROWSER_CONTROLLER codes, не доказывают отказ сайта.
+
+Исходные wall deadline и monotonic remaining budget проверяются до dispatch;
+новый ход/cwd/poll не продлевает lease. Таймер прекращает input и вызывает
+onClose даже при ожидающем async handler. Callback ограничен пятью секундами:
+closed подтверждает его завершение, cleanup_unconfirmed сохраняет пробел.
+Удаляется только exact собственный record; чужие профили/PID не завершаются.
+Это cooperative lifecycle, не новый OS watchdog против синхронного JS hang;
+native credential guardian сохраняет независимый deadline. Verified callback
+не меняется из-за caller/download/cleanup error. Terminal EOF не управляет
+сессией, старый denied terminal не мигрируется.
+
+Регрессии проходят реальные child pipes с закрытым stdin, fresh process/новым
+cwd, exact IDs/no replay, foreign binding/Host/Origin/bearer, private storage,
+lease/cleanup/bounds. Full hosted Linux/macOS/Windows/ARM64/browser gate и
+самостоятельные provider auth/native tests обязательны.
+
 ## Выбор scope
 
 Локальный Trelio-блок `AGENTS.md` задаёт company/control-plane binding и место

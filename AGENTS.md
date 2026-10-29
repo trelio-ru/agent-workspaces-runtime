@@ -340,6 +340,11 @@ publication tooling также остаются вне этого публичн
   lifecycle и profile lock. Provider-specific navigation, selectors, read
   guards и mutation authority в generic host не переносятся; профили разных
   навыков не объединяются.
+- Caller-owned Playwright использует общий [controller](docs/agent-workspace-runtime.md#caller-browser-controller),
+  signed opt-in и SAME admitted skill/account path. Terminal stdin не является
+  межходовым протоколом; новый канал не подключается к старому denied terminal.
+  Unknown result читается по прежнему request ID без replay; host не исполняет
+  caller source и не меняет provider auth/mutation authority.
 - Локальные формы и private skills используют общий [renderer](docs/local-forms.md):
   декларативные поля/QR/status, без собственной HTML/CSS-копии и secret prefill.
   Protected input новых company/private Secret использует тот же loopback и writer;

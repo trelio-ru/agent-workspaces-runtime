@@ -17,6 +17,11 @@ import { randomUUID, createHash, randomBytes } from "node:crypto";
 import { isDirectModuleInvocation } from "./trelio-local-path.mjs";
 export { createDocumentHttpObserver, safeHttpFailure } from "./trelio-browser-http.mjs";
 
+// Lazy loading keeps the standalone browser bootstrap independent of the
+// private host/owner store until a signed caller explicitly requests it.
+export const prepareBrowserController = async options =>
+  (await import('./trelio-browser-controller.mjs')).prepareBrowserController(options);
+
 export const BROWSER_SESSION_API_VERSION = 1;
 export const PLAYWRIGHT_VERSION = "1.60.0";
 export const DEFAULT_LEASE_MS = 30 * 60 * 1000;

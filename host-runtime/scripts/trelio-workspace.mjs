@@ -25,6 +25,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 };
 
 import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
+import { browserControllerEnabled, parseBrowserControllerArguments } from './trelio-browser-controller-policy.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -2690,7 +2691,7 @@ const assertPrivateFileIfPresent = async (filePath) => {
 
 export const readPrivateJsonFile = async (
   filePath,
-  { maximumBytes = Number.POSITIVE_INFINITY } = {},
+  { maximumBytes = Number.POSITIVE_INFINITY, fatalUtf8 = false } = {},
 ) => {
   assertRuntimeHookBudget();
   const exists = await assertPrivateFileIfPresent(filePath);
@@ -2728,7 +2729,12 @@ export const readPrivateJsonFile = async (
         throw new Error(`Небезопасные права ${filePath}; требуются 0600.`);
       }
     }
-    const source = await handle.readFile("utf8");
+    // Caller command files may contain user-approved text. Decode their SAME
+    // verified fd strictly instead of silently replacing damaged UTF-8 bytes.
+    // Existing metadata readers retain their compatible default behaviour.
+    const source = fatalUtf8
+      ? new TextDecoder('utf-8', { fatal: true }).decode(await handle.readFile())
+      : await handle.readFile("utf8");
     assertRuntimeHookBudget();
     return JSON.parse(source);
   } finally {
@@ -8818,6 +8824,9 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_SKILL_MEMBER_ID: _staleMemberId,
     TRELIO_SKILL_CONNECTION_ID: _staleConnectionId,
     TRELIO_SKILL_CONNECTION_CONFIG_JSON: _staleConnectionConfig,
+    TRELIO_SKILL_RUNTIME_SESSION_ID: _staleSkillSession,
+    TRELIO_BROWSER_CONTROLLER_ENABLED: _staleBrowserController,
+    TRELIO_BROWSER_CONTROLLER_ORIGIN: _staleBrowserControllerOrigin,
     TRELIO_BROWSER_SESSION_MODULE_URL: _staleBrowserSessionModuleUrl,
     TRELIO_BROWSER_SESSION_POLICY_JSON: _staleBrowserSessionPolicy,
     TRELIO_BROWSER_SESSION_STARTED_AT: _staleBrowserSessionStartedAt,
@@ -8883,6 +8892,8 @@ export const buildAgentSkillRuntimeEnvironment = ({
         "TRELIO_LOCAL_FORM_MODULE_URL",
         "TRELIO_LOCAL_FORM_NODE_EXECUTABLE",
         "TRELIO_BROWSER_MAIL_MODULE_URL",
+        "TRELIO_BROWSER_CONTROLLER_ENABLED",
+        "TRELIO_BROWSER_CONTROLLER_ORIGIN",
       ].includes(key)
     );
     if (
@@ -8909,6 +8920,11 @@ export const buildAgentSkillRuntimeEnvironment = ({
     TRELIO_SKILL_RUNTIME_VERSION: artifact.runtimeVersion,
     TRELIO_SKILL_RUNTIME_ROOT: runtimeDirectory,
     TRELIO_SKILL_RELEASE_ID: executionContext.releaseId,
+    ...(executionContext.runtimeSessionId
+      ? { TRELIO_SKILL_RUNTIME_SESSION_ID: executionContext.runtimeSessionId } : {}),
+    ...(browserControllerEnabled(artifact.parsedPackage)
+      ? { TRELIO_BROWSER_CONTROLLER_ENABLED: '1',
+          TRELIO_BROWSER_CONTROLLER_ORIGIN: executionContext.origin || DEFAULT_ORIGIN } : {}),
     TRELIO_SKILL_COMPANY_ID: executionContext.companyId,
     ...(executionContext.projectId
       ? { TRELIO_SKILL_PROJECT_ID: executionContext.projectId }
@@ -9684,6 +9700,15 @@ const skillCommand = async (
   }
 
   const setupCommand = readSkillSecretSetupCommand(artifactForCache.parsedPackage, positional.slice(1));
+  // Use the SAME host account selector; a selected account must stay bound on
+  // every continuation, including when --local-account precedes the command.
+  const controllerCommand = parseBrowserControllerArguments(
+    artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
+      ? splitAccountArguments(positional.slice(1)).providerArguments : positional.slice(1));
+  if (controllerCommand && (assistant || !browserControllerEnabled(artifactForCache.parsedPackage)
+    || Object.keys(grantedEnvironment).length || grantedStdin !== null)) {
+    throw Object.assign(new Error('BROWSER_CONTROLLER_COMMAND_DENIED'), { code: 'BROWSER_CONTROLLER_COMMAND_DENIED' });
+  }
   const humanInputCommand = humanInputSetup === null ? null : readSkillHumanInputSetupCommand(artifactForCache.parsedPackage, humanInputSetup.commandId);
   if(humanInputSetup !== null && (!assistant || privateSecretSetup || !humanInputCommand
     || !artifactForCache.parsedPackage.capabilities.includes(ACCOUNT_CAPABILITY)
@@ -9713,7 +9738,7 @@ const skillCommand = async (
     await saveRuntimeSkillAdmission(admissionKey, token, admissionResolution, admissionCheckedAt);
   }
   const executionContext = {
-    companyId, projectId, releaseId,
+    origin, companyId, projectId, releaseId,
     // Resolve the requesting chat on every call, including cached admission.
     // A persistent MCP can serve several chats and its inherited environment is
     // neither current nor authoritative. The private hook binding carries only
@@ -9734,6 +9759,13 @@ const skillCommand = async (
     if (accountResult.handled) return;
     executionContext.account = accountResult.account;
     runtimeArguments = accountResult.runtimeArguments;
+  }
+  if (controllerCommand) {
+    const { runBrowserControllerCommand } = await import('./trelio-browser-controller.mjs');
+    const result = await runBrowserControllerCommand({ command: controllerCommand,
+      environment: buildAgentSkillRuntimeEnvironment({ artifact: artifactForCache, runtimeDirectory, executionContext }) });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
   }
   if (assistant) {
     // Materialization/account discovery may cross I/O. Repeat only the native

@@ -200,6 +200,9 @@ jobs:
           architecture: arm64
       - name: Verify native ARM64 ACL and DPAPI
         run: node tests/trelio-windows-native-private.test.mjs
+      - name: Verify native ARM64 caller browser continuation
+        if: needs.ci-plan.outputs.profile == 'full'
+        run: node tests/trelio-browser-controller.test.mjs
       - name: Preserve ARM64 open Codex sessions during plugin updates
         run: node tests/trelio-plugin-preservation.test.mjs
       - name: Verify native ARM64 assistant autostart
@@ -281,6 +284,7 @@ jobs:
           node tests/context-budget.test.mjs
           node tests/trelio-browser-open.test.mjs
           node tests/trelio-browser-session.test.mjs
+          node tests/trelio-browser-controller.test.mjs
           node tests/trelio-browser-http.test.mjs
           node tests/trelio-visual-store.test.mjs
           node tests/trelio-visual-auth.test.mjs
@@ -509,6 +513,10 @@ jobs:
       - name: Run Windows browser bootstrap and npm discovery regressions
         if: needs.ci-plan.outputs.profile == 'full'
         run: node tests/trelio-browser-session.test.mjs
+
+      - name: Run Windows caller browser continuation regressions
+        if: needs.ci-plan.outputs.profile == 'full'
+        run: node tests/trelio-browser-controller.test.mjs
 
       # Реальный зарегистрированный URI handler принимает synthetic query целиком.
       # Это проверяет ShellExecute, а не только mock argv или успешный spawn.
