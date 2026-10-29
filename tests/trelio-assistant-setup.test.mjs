@@ -2432,6 +2432,57 @@ test('company preparation never retries other failures and caps repeated owned d
  }
 });
 
+test('company preparation retains child failures that settle BETWEEN serial MCP polls',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-preparation-gap-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+ const {spawn}=await import('node:child_process');
+ const environment={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};
+ delete environment.NODE_TEST_CONTEXT;
+ const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ for(const code of ['ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT','ASSISTANT_PASS_REVIEW_REQUIRED','ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID']){
+  const directory=path.join(root,code);await fs.mkdir(path.join(directory,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(directory,'digital-assistants','identity.json'),'{}');
+  const loader=path.join(directory,'loader.mjs');
+  await fs.writeFile(loader,`import fs from 'node:fs/promises';import {runAssistantEntry} from ${JSON.stringify(entry)};
+   const descriptor=${JSON.stringify(descriptor)},binding=${JSON.stringify(binding)};
+   await runAssistantEntry(['request'],{executeRequest:async raw=>{
+    if(raw.operation==='call')return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding}}};
+    if(raw.operation!=='company_context_prepare')throw Error('UNEXPECTED_QUERY');
+    const until=Date.now()+10000;while(!await fs.stat(process.env.SYNTHETIC_RELEASE).catch(()=>null)){
+     if(Date.now()>=until)throw Error('FIXTURE_RELEASE_REQUIRED');await new Promise(r=>setTimeout(r,5));
+    }
+    if(${JSON.stringify(code)}==='ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID')return {schemaVersion:1,prepared:false};
+    throw Object.assign(Error('PRIVATE_PREPARATION_CANARY'),{code:${JSON.stringify(code)}});
+   }});`);
+  let launches=0;const settlements=[];
+  const request=(raw,options)=>{
+   const slot=raw.operation==='company_context_prepare'?++launches:0;
+   const pending=requestCurrentAssistantRuntime(raw,{...options,environment:{...environment,SYNTHETIC_RELEASE:path.join(directory,`release-${slot}`)},
+    resolveLoader:async()=>loader,spawnProcess:(executable,args,config)=>spawn(executable,args,config)});
+   if(slot)settlements.push(pending.then(()=>{},()=>{}));
+   return pending;
+  };
+  const workspace=await createAssistantWorkspaceExecutor({configDirectory:directory,companyPreparationOptions:{waitMs:2}});
+  const client=await createForwardingAssistantMcp({configurationDirectory:directory,request,createWorkspace:async()=>workspace});
+  try{
+   const call=nonce=>client.callTool('search',{queries:['SYNTHETIC_GAP_QUERY'],runtimeSessionProof:{nonce}});
+   assert.equal((await call(1)).structuredContent.state,'preparing');
+   // No MCP request is waiting when this REAL native child fails. Record the
+   // outcome at owned-child settlement, not only if a short poll catches it.
+   await fs.writeFile(path.join(directory,'release-1'),'release');await settlements[0];
+   await new Promise(resolve=>setImmediate(resolve));
+   if(code==='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'){
+    assert.equal((await call(2)).structuredContent.state,'preparing');assert.equal(launches,2);
+    await fs.writeFile(path.join(directory,'release-2'),'release');await settlements[1];
+    await new Promise(resolve=>setImmediate(resolve));
+   }
+   await assert.rejects(call(3),error=>{assert.equal(error.code,code);assert.doesNotMatch(JSON.stringify(error),/PRIVATE_PREPARATION_CANARY/);return true;});
+   await assert.rejects(call(4),{code});
+   assert.equal(launches,code==='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'?2:1,'failed children cannot be forgotten between polls');
+  }finally{await workspace.stop();}
+ }
+});
+
 test('company preparation preserves exact owned timeout separately from cancellation and provider refusals',async()=>{
  const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
  const opened={runtime:{scope:{id:binding.scopeId,epoch:binding.scopeEpoch},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}};

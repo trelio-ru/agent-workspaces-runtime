@@ -14114,37 +14114,45 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
       searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } }));
   const byId = new Map(files.map((file) => [file.id, file]));
   const textDocuments = documents.filter((file) => file.contentType.startsWith("text/plain"));
-  // Process one file at a time with stream backpressure. Binary names need no
-  // download; the complete generation is published only after every text file.
-  let next = 0;
-  let failed = false;
-  // Wait for every started worker before returning a conflict or cancellation.
-  // Otherwise abandoned workers could keep downloading/writing after the mirror
-  // lock is released and race the next sync. Completed files remain encrypted
-  // in the scratchpad; no partial document list is returned to the caller.
-  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(1, textDocuments.length) }, async () => {
-    try {
-      while (!failed && next < textDocuments.length) {
-        input.signal?.throwIfAborted();
-        const document = textDocuments[next++];
-        const file = byId.get(document.sourceFileId);
-        const cached = await input.searchCache?.read(input, file);
-        const indexed = cached == null ? await readEncryptedWorkspaceSearchChunks(requestInput, file) : JSON.parse(cached);
-        document.chunks = indexed.chunks;
-        document.searchCoverage = indexed.searchCoverage;
-        // Scratchpad entries stay encrypted and exact-head bound. The existing
-        // per-entry size guard limits caching only, never search completeness.
-        if (cached == null) await input.searchCache?.write(input, file, JSON.stringify(indexed));
+  // Amortize per-file HTTP latency only for small, manifest-bounded inputs:
+  // at most four files of <=1 MiB (plus fixed container framing) are active.
+  // Large/unbounded text files retain the original ONE streaming worker and
+  // never overlap that pool. Backpressure, per-file ACL/AAD/digest/head checks
+  // and serialized encrypted scratch publication remain unchanged. Binary
+  // names need no download; no partial generation is returned or published.
+  const small = textDocuments.filter(file => file.sizeBytes <= 1024 * 1024);
+  const large = textDocuments.filter(file => file.sizeBytes > 1024 * 1024);
+  for (const [pending, concurrency] of [[small, 4], [large, 1]]) {
+    let next = 0;
+    let failed = false;
+    // Wait for every started worker before returning a conflict or cancellation.
+    // Otherwise abandoned workers could keep downloading/writing after the mirror
+    // lock is released and race the next sync. Completed files remain encrypted
+    // in the scratchpad; no partial document list is returned to the caller.
+    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(concurrency, pending.length) }, async () => {
+      try {
+        while (!failed && next < pending.length) {
+          input.signal?.throwIfAborted();
+          const document = pending[next++];
+          const file = byId.get(document.sourceFileId);
+          const cached = await input.searchCache?.read(input, file);
+          const indexed = cached == null ? await readEncryptedWorkspaceSearchChunks(requestInput, file) : JSON.parse(cached);
+          document.chunks = indexed.chunks;
+          document.searchCoverage = indexed.searchCoverage;
+          // Scratchpad entries stay encrypted and exact-head bound. The existing
+          // per-entry size guard limits caching only, never search completeness.
+          if (cached == null) await input.searchCache?.write(input, file, JSON.stringify(indexed));
+        }
+      } catch (error) {
+        failed = true;
+        throw error;
       }
-    } catch (error) {
-      failed = true;
-      throw error;
-    }
-  }));
-  const failures = outcomes.filter((outcome) => outcome.status === "rejected");
-  // A concurrent denial/crypto failure must not be hidden by a sibling head conflict.
-  const failure = failures.find((outcome) => outcome.reason?.code !== "WORKSPACE_OUTDATED") ?? failures[0];
-  if (failure) throw failure.reason;
+    }));
+    const failures = outcomes.filter((outcome) => outcome.status === "rejected");
+    // A concurrent denial/crypto failure must not be hidden by a sibling head conflict.
+    const failure = failures.find((outcome) => outcome.reason?.code !== "WORKSPACE_OUTDATED") ?? failures[0];
+    if (failure) throw failure.reason;
+  }
   input.signal?.throwIfAborted();
   return documents;
 };

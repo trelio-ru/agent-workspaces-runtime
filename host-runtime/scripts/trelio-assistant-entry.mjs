@@ -2343,7 +2343,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
   // admission may resume it once; this never extends the stopped child's clock,
   // replays its proof/query, retries a writer, or treats a transport/ACL refusal
   // as a timeout. Keep the retry state in this same bounded host lifetime.
-  const preparationTimeouts=new Map();
+  const preparationFailures=new Map();
   const heartbeat=createWorkspaceRunHeartbeatManager({...heartbeatOptions,resolveOpenedDirectory:async()=>fail('ASSISTANT_WORKSPACE_REVIEW_REQUIRED'),
     runBridge:async (_origin,args,options)=>{
       const plan=plans.get(path.resolve(options.cwd??''));
@@ -2360,13 +2360,13 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     const {descriptor,binding}=structuredClone(raw);
     const {canonicalJson}=await import('./trelio-company-encryption.mjs');
     const fingerprint=canonicalJson({descriptor,binding}),key=createHash('sha256').update(fingerprint).digest('hex');
-    for(const [oldKey,old] of preparationTimeouts){
+    for(const [oldKey,old] of preparationFailures){
       if(Date.now()-old.endedAt>(companyPreparationOptions.retentionMs??30*60_000)&&!preparations.active(oldKey))
-        preparationTimeouts.delete(oldKey);
+        preparationFailures.delete(oldKey);
     }
-    const exhausted=preparationTimeouts.get(key);
-    if(exhausted?.failures>1)throw exhausted.error;
-    if(!exhausted&&preparationTimeouts.size>=64)fail('ASSISTANT_WORKSPACE_CAPACITY');
+    const exhausted=preparationFailures.get(key);
+    if(exhausted&&(exhausted.error?.code!=='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'||exhausted.failures>1))throw exhausted.error;
+    if(!exhausted&&preparationFailures.size>=64)fail('ASSISTANT_WORKSPACE_CAPACITY');
     let result;
     try{result=await preparations.start({key,scope:key,fingerprint,pollAction:{},signal,
       execute:async()=>{
@@ -2380,19 +2380,24 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
           if(value?.schemaVersion!==1||value.prepared!==true||Object.keys(value).sort().join(',')!=='prepared,schemaVersion')
             fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID');
           return {prepared:true};
+        }catch(error){
+          // Record ONCE when this owned child settles, independently of short
+          // poll timing. The shared finish registry intentionally discards a
+          // failed entry on the next start. If accounting lived only in the
+          // caller's catch, a failure BETWEEN polls vanished and admitted an
+          // unbounded sequence of new children. Neither a missed response nor
+          // another waiter may reset the counter or retry an ordinary refusal.
+          const previous=preparationFailures.get(key);
+          preparationFailures.set(key,{error,failures:(previous?.failures??0)+1,endedAt:Date.now()});
+          throw error;
         }finally{preparationRequests.delete(pending);preparationControllers.delete(controller);}
       }});}catch(error){
       if(error?.code!=='ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT')throw error;
-      const previous=preparationTimeouts.get(key);
-      // Concurrent polls can observe the SAME settled failure. Count that
-      // child once, not once per waiter. The common registry disposes a failed
-      // entry only on the next start, after a new native search admission.
-      const failures=previous?.error===error?previous.failures:(previous?.failures??0)+1;
-      preparationTimeouts.set(key,{error,failures,endedAt:Date.now()});
-      if(failures>1)throw error;
+      const settled=preparationFailures.get(key);
+      if(settled?.error!==error||settled.failures!==1)throw error;
       return false;
     }
-    if(result.state==='completed'&&result.prepared===true){preparationTimeouts.delete(key);return true;}
+    if(result.state==='completed'&&result.prepared===true){preparationFailures.delete(key);return true;}
     if(result.state!=='running')fail('ASSISTANT_MCP_INVALID_RESPONSE');
     return false;
   },async execute(raw,{signal}={}) {
@@ -2450,7 +2455,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
     for(const directory of plans.keys())heartbeat.stop(directory);
     for(const controller of preparationControllers)controller.abort();
     await Promise.allSettled([...preparationRequests]);
-    preparationTimeouts.clear();
+    preparationFailures.clear();
   }};
 };
 

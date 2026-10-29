@@ -1416,6 +1416,11 @@ original deadline is extended, no query/proof/writer is replayed, and transport,
 provider timeout, cancellation, ACL/recipient or unknown failures never enter this
 recovery. Host-lifetime retry metadata follows the SAME bounded retention; it is
 not a second journal or a completed mirror/answer.
+Failure accounting commits when the owned child settles, even BETWEEN short
+polls. It must not depend on a waiter observing that rejection: the common
+finish registry may discard its failed entry on the next start. The bounded
+preparation cell retains ordinary refusals and the second owned timeout before
+another start, preserving the one-resume cap and fresh native admission.
 Tests cover actual serial MCP/current-child pipes and a real aborted Git blob,
 native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.

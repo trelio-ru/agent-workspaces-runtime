@@ -117,6 +117,8 @@ publication tooling также остаются вне этого публичн
   Cold search reuses the common short-wait registry and SAME signed read child;
   preparing is not an empty/error result. Fresh native admission on every poll,
   exact recipient binding and complete mirror publication remain mandatory. An owned first-sync timeout (direct reason or native AbortError with that exact cause) permits one resumed readonly child only after fresh admission; other failures never retry. Common read errors retain fixed closed codes, never paths/prose.
+  Record preparation failures at owned-child settlement, even between polls;
+  the common registry's discarded failed entry never resets refusal/retry state.
   The signed request pipe distinguishes its own timeout, caller cancellation,
   process/input failure, nonzero exit, empty/invalid response and output bound;
   none authorizes replay or exposes child output. Reject damaged UTF-8 before
@@ -512,6 +514,8 @@ publication tooling также остаются вне этого публичн
 - Файловый поиск использует generated `trelio-workspace-text-chunks.mjs` из backend
   pure module. Проверяй native/local parity, большие файлы, границы UTF-8/слов,
   crypto binding и очистку staging по [контракту](docs/agent-workspace-runtime.md).
+  Modern projection reads use at most four <=1-MiB files; large streams remain
+  exclusive/serial, and all started workers settle before mirror lock release.
   Chunk/batch bounds не являются лимитом полного индексируемого текста.
   Отсутствующая обязательная browser projection допускает только проверенный
   encrypted accepted bundle с ephemeral private Git по тому же контракту;

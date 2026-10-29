@@ -2121,7 +2121,11 @@ Local mirror schema 8 читает accepted browser manifest и весь safe UT
 частями до 64 KiB плюс overlap 2048 символа; прежних лимитов 1 MiB/16 MiB у индекса
 нет. Pure chunker/matcher генерируется из backend `shared/workspace-text-chunks.ts`;
 проверка – `scripts/build-workspace-text-chunks.mjs --runtime-root <checkout> --check`.
-Один файл обрабатывается за раз с backpressure; ciphertext временно лежит в
+Файлы до 1 MiB читаются фиксированным пулом не более четырёх, чтобы не складывать
+HTTP latency тысяч маленьких документов последовательно. Крупные файлы идут
+строго по одному после завершения этого пула; unbounded streams не параллелятся.
+Каждый файл сохраняет прежние backpressure/ACL/AAD/digest/head guards, все начатые
+workers завершаются до возврата ошибки и освобождения writer. Ciphertext временно лежит в
 owner-private staging, plaintext на диск не записывается. После проверки exact
 AAD binding, размера и digest staging удаляется, включая ошибку/отмену. Полное
 поколение содержит `searchCoverage` каждого файла и chunks; бинарные/NUL/невалидные

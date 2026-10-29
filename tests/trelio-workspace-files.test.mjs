@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash, webcrypto } from "node:crypto";
+import { createHash, randomUUID, webcrypto } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -112,6 +112,70 @@ test("unified search reads cutover bundles without browser projections and keeps
     server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("small encrypted search files use four bounded workers; large files stay exclusive and failures drain staging", async () => {
+  const root=await mkdtemp(path.join(os.tmpdir(),'trelio-small-file-pool-'));
+  const workspaceId=randomUUID(),companyId=randomUUID(),scopeId=randomUUID(),deviceId=randomUUID(),manifestId=randomUUID(),projectionId=randomUUID();
+  const head='a'.repeat(40),scope=await webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
+  const device=await createAgentEncryptionDevice(),publicJwk=await webcrypto.subtle.exportKey('jwk',scope.publicKey);
+  const companyEncryption={runtime:{company:{id:companyId},scope:{id:scopeId,epoch:1,publicEncryptionJwk:publicJwk},device:{id:deviceId}},
+    scopePrivateEncryptionKey:{privateKey:scope.privateKey,privateJwk:await webcrypto.subtle.exportKey('jwk',scope.privateKey)}};
+  const files=Array.from({length:10},(_,n)=>({id:randomUUID(),path:`synthetic-${n}.md`,sizeBytes:n<7?1024:n===7?1024*1024:1024*1024+1,contentType:'text/plain'}));
+  const largeIds=new Set(files.slice(8).map(file=>file.id)),ciphertexts=new Map();
+  for(const [id,bytes,kind] of [[manifestId,Buffer.from(JSON.stringify({schemaVersion:1,kind:'agent-workspace-browser-manifest',projectionId,workspaceId,workspaceHead:head,files})),'manifest'],
+    ...files.map(file=>[file.id,Buffer.alloc(file.sizeBytes,65),'file'])]){
+    const sourcePath=path.join(root,id+'.source'),destinationPath=path.join(root,id+'.container');
+    await writeFile(sourcePath,bytes,{mode:0o600});
+    await encryptFileToCompanyContainer({sourcePath,destinationPath,scopePublicEncryptionJwk:publicJwk,
+      aad:{companyId,scopeId,scopeEpoch:1,entityType:`agent_workspace_browser_${kind}`,entityId:id,entityRevision:1},
+      originalName:'synthetic',mimeType:'application/octet-stream',writerDeviceId:deviceId,signingPrivateKey:device.privateKeys.signingPrivateKey});
+    ciphertexts.set(id,await readFile(destinationPath));
+  }
+  let mode='ready',smallActive=0,maxSmall=0,largeActive=0,maxLarge=0,largeRequests=0,smallResponses=0,overlap=false;
+  let held=[],controller;
+  const server=createServer((request,response)=>{
+    if(request.url===`/api/agent-workspaces/workspaces/${workspaceId}`){response.setHeader('content-type','application/json');
+      response.end(JSON.stringify({company:{id:companyId},workspace:{acceptedHead:head},encryption:{browserProjection:{id:projectionId,workspaceHead:head,manifestFileId:manifestId,fileCount:files.length}}}));return;}
+    const id=/\/files\/([^/]+)\/encrypted-content$/u.exec(request.url)?.[1],bytes=ciphertexts.get(id);
+    if(!bytes){response.statusCode=404;response.end();return;}
+    response.setHeader('x-trelio-workspace-id',workspaceId);response.setHeader('x-trelio-workspace-head',head);
+    response.setHeader('x-trelio-ciphertext-sha256',createHash('sha256').update(bytes).digest('hex'));
+    if(id===manifestId){response.end(bytes);return;}
+    const large=largeIds.has(id);
+    if(large){largeRequests++;largeActive++;maxLarge=Math.max(maxLarge,largeActive);overlap||=smallActive>0||smallResponses!==8;}
+    else{smallActive++;maxSmall=Math.max(maxSmall,smallActive);overlap||=largeActive>0;}
+    const finish=()=>{if(large)largeActive--;else{smallActive--;smallResponses++;}};
+    response.once('finish',finish);
+    const send=()=>{
+      // Concurrent head conflict must not hide a sibling's native ACL denial.
+      if(mode==='denied'&&id===files[0].id)response.setHeader('x-trelio-workspace-head','b'.repeat(40));
+      if(mode==='denied'&&id===files[1].id){response.statusCode=403;response.setHeader('content-type','application/json');response.end(JSON.stringify({code:'ACCESS_DENIED'}));return;}
+      response.end(mode==='corrupt'&&id===files[0].id?Buffer.alloc(bytes.length):bytes);
+    };
+    if(!large&&mode!=='corrupt'){
+      // A genuine HTTP barrier proves concurrency without a throughput/timing
+      // assertion. The original serial reader cannot admit four requests.
+      held.push(send);if(held.length===4){if(mode==='cancel')controller.abort();const batch=held;held=[];for(const end of batch)end();}
+    }else send();
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const input={origin:`http://127.0.0.1:${server.address().port}`,token:'synthetic-token',companyEncryption,workspaceId,workspaceHead:head,acceptedHead:head};
+  const staging=path.join(resolveWorkspaceBridgeConfigDirectory(),'search-staging');await mkdir(staging,{recursive:true,mode:0o700});const before=await readdir(staging);
+  try{
+    for(mode of ['ready','corrupt','denied','cancel']){
+      smallActive=0;maxSmall=0;largeActive=0;maxLarge=0;largeRequests=0;smallResponses=0;overlap=false;held=[];
+      controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);
+      try{
+        const reading=readEncryptedWorkspaceSearchDocuments({...input,signal:controller.signal});
+        if(mode==='ready'){
+          const documents=await reading;assert.equal(documents.length,files.length);assert.equal(maxSmall,4);assert.equal(maxLarge,1);assert.equal(overlap,false);
+          assert.ok(documents.every(file=>file.searchCoverage.status==='complete'&&file.searchCoverage.indexedBytes===file.sizeBytes));
+        }else{await assert.rejects(reading,mode==='denied'?{code:'ACCESS_DENIED'}:undefined);assert.equal(largeRequests,0,'a failed small pool cannot start a large stream');}
+        assert.deepEqual(await readdir(staging),before,'all started workers settle and remove private staging before return');
+      }finally{clearTimeout(timer);}
+    }
+  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});}
 });
 
 test("encrypted discovery reads names and bounded text; delivery decrypts only the selected original", async () => {
