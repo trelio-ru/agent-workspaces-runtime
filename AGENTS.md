@@ -823,6 +823,9 @@ publication tooling также остаются вне этого публичн
   settings handler и верхний hook proof, сохраняя history/editing и native
   envelope. Этот exact переход не допускает context mutations или guessed
   operation; [контракт](docs/agent-workspace-runtime.md#выбор-scope).
+- Encrypted exact Workspace UUID reads use only their scoped MVCC/authority
+  snapshot and final live ACL/revision fence after pinned files, never a company
+  mirror or stale fallback; see [contract](docs/agent-workspace-runtime.md#поиск-и-отдельный-файл).
 - Имена полей action и native preparation tools не становятся executable
   aliases. Unsupported operation возвращает безопасный recovery к exact
   `action.arguments` до registry/process access; произвольный вход не отражается.

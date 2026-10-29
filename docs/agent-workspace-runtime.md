@@ -2096,6 +2096,20 @@ capabilities и без чтения данных компании. Эти усл
 
 ## Поиск и отдельный файл
 
+Точный `get_workspace` и `fetch` с `workspace:<UUID>` не запускают company sync.
+Backend exact GET `/company-context/:companySlug/workspaces/:workspaceId`
+проверяет paired read bridge/source OAuth scopes, company MCP policy и canonical
+relation-union ACL, возвращая один read-only MVCC snapshot: видимые metadata/
+связи, accepted head и governing rules/profile. Hidden owner project не становится
+источником правил. Snapshot не является search generation и не публикуется в mirror.
+Host гидратирует только его и читает файлы выбранного head прежним encrypted
+file engine. Финальный GET с `expectedRevision` повторяет ACL и сравнивает
+target metadata/head/authority; conflict, revocation, crypto/transport failure
+не возвращают частичные файлы и не включают mirror/stale-cache fallback.
+Unrelated company changes не участвуют в target fence. Новый backend route
+доставляется до активации runtime; старые hosts сохраняют прежний путь без
+изменения plugin shell/minimum. Managed exact-read adapters остаются отдельными.
+
 `context-search-v2` задаёт одинаковые matching patterns и ranking для native и
 local provider: регистр, ё/е, границы слов, полное покрытие и явные семейства
 русских окончаний. Filename/path/hash сохраняют пунктуацию. Сначала сравниваются

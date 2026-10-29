@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 
 import {
   usesFreshExactTaskRead, readFreshExactTaskContext, localReadActionNeedsMirror,
+  exactWorkspaceReadId, readFreshExactWorkspaceContext,
   buildStableCompanyMirror,
   createEncryptedSearchFileCache,
   assertLocalAgentInstructionPublicationWithinLimit,
@@ -4773,6 +4774,65 @@ test("fresh task core and instruction pages never depend on a company search gen
   } while (pageIndex !== null);
   assert.ok(requests > 1);
   await assert.rejects(read("get_task", { ...target, companySlug: "other" }), { code: "LOCAL_CONTEXT_COMPANY_MISMATCH" });
+});
+
+test("fresh Workspace reads open only the selected head and repeat the exact target fence", async () => {
+  const workspaceId = mirror.workspaceEntries[0].id;
+  const fixture = { schemaVersion: 1, revisionToken: "d".repeat(64), company: mirror.company,
+    viewer: mirror.viewer, projects: mirror.projects, instructions: { company: { compiledMarkdown: "Company rules" },
+      projects: [], userProfile: { compiledMarkdown: "Own profile" } },
+    workspaceEntries: structuredClone(mirror.workspaceEntries), workspaces: [{ id: workspaceId, acceptedHead: "c".repeat(40) }] };
+  const requests = [], opened = [];
+  const unfiledQueue = { companySlug: "acme", count: 0 };
+  const options = { origin: "https://trelio.example", companySlug: "acme", workspaceId, input: { workspaceId },
+    provider: { companyEncryption: { runtime: { company: fixture.company } } }, unfiledQueue,
+    requestJson: async pathname => { requests.push(pathname); return structuredClone(fixture); },
+    hydrate: async value => value,
+    readDocuments: async workspace => { opened.push(workspace); return [{ path: "note.md", text: "Selected material" }]; },
+  };
+  assert.equal(exactWorkspaceReadId("get_workspace", { workspaceId }), workspaceId);
+  assert.equal(exactWorkspaceReadId("fetch", { id: `workspace:${workspaceId}` }), workspaceId);
+  assert.equal(exactWorkspaceReadId("search", {}), null);
+  assert.throws(() => exactWorkspaceReadId("get_workspace", { workspaceId: "bad-id" }));
+  const result = await readFreshExactWorkspaceContext(options);
+  assert.deepEqual(requests, [
+    `/api/agent-workspaces/company-context/acme/workspaces/${workspaceId}`,
+    `/api/agent-workspaces/company-context/acme/workspaces/${workspaceId}?expectedRevision=${fixture.revisionToken}`,
+  ]);
+  assert.deepEqual(opened, fixture.workspaces);
+  assert.equal(result.acceptedWorkspace.files[0].text, "Selected material");
+  assert.equal(result.effectiveInstructions.status, "loaded");
+  assert.deepEqual(result.unfiledQueue, unfiledQueue);
+  assert.equal(result.materialize.workspaceId, workspaceId);
+  assert.equal(result.generation, undefined, "An exact read does not publish or depend on a company generation.");
+
+  for (const code of ["ACCESS_DENIED", "WORKSPACE_OUTDATED", "LOCAL_CONTEXT_PROVIDER_NOT_ACTIVE", "ETIMEDOUT"]) {
+    let reads = 0;
+    const failure = Object.assign(new Error("synthetic read refusal"), { code });
+    await assert.rejects(readFreshExactWorkspaceContext({ ...options,
+      requestJson: async () => { if (++reads === 2) throw failure; return structuredClone(fixture); },
+    }), error => error === failure);
+    assert.equal(reads, 2, "A final refusal must not retry or return opened files.");
+  }
+  await assert.rejects(readFreshExactWorkspaceContext({ ...options,
+    readDocuments: async () => { throw Object.assign(new Error("stale pinned head"), { code: "WORKSPACE_OUTDATED" }); },
+  }), { code: "WORKSPACE_OUTDATED" });
+  let reads = 0;
+  await assert.rejects(readFreshExactWorkspaceContext({ ...options, requestJson: async () => ({ ...fixture,
+    revisionToken: (++reads === 2 ? "e" : "d").repeat(64) }),
+  }), { code: "WORKSPACE_OUTDATED" });
+  await assert.rejects(readFreshExactWorkspaceContext({ ...options, requestJson: async () => ({ ...fixture,
+    company: { ...fixture.company, id: crypto.randomUUID() } }),
+  }), { code: "LOCAL_CONTEXT_COMPANY_MISMATCH" });
+  await assert.rejects(readFreshExactWorkspaceContext({ ...options, requestJson: async () => ({ ...fixture,
+    workspaces: [...fixture.workspaces, { id: crypto.randomUUID(), acceptedHead: "c".repeat(40) }] }),
+  }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+  const deleted = await readFreshExactWorkspaceContext({ ...options,
+    requestJson: async () => ({ ...fixture, workspaceEntries: [{ ...fixture.workspaceEntries[0], state: "deleted" }], workspaces: [] }),
+    readDocuments: async () => assert.fail("A tombstone has no readable files"),
+  });
+  assert.equal(deleted.acceptedWorkspace, null);
+  assert.equal(deleted.materialize, undefined);
 });
 
 test("fresh action reads bypass the company mirror only for known structural routing", () => {

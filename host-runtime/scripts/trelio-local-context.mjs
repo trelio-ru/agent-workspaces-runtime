@@ -8330,6 +8330,64 @@ export const usesFreshExactTaskRead = (nativeTool, input) => {
       && Number.isSafeInteger(Number(locator?.taskNumber)) && Number(locator.taskNumber) > 0);
 };
 
+/** Only exact UUID targets bypass discovery; arbitrary fetch/search inputs
+ * retain their existing routes. Validate before target HTTP/file reads. */
+export const exactWorkspaceReadId = (nativeTool, input) => {
+  if (nativeTool === "get_workspace") return normalizeUuid(input?.workspaceId, "workspaceId");
+  if (nativeTool === "fetch" && typeof input?.id === "string" && input.id.startsWith("workspace:")) {
+    return normalizeUuid(decodeMirrorDocumentIdPart(input.id.slice("workspace:".length)), "workspaceId");
+  }
+  return null;
+};
+
+/**
+ * Read one target without starting, joining or publishing a company mirror.
+ * The backend selects canonical ACL/redacted scope and authority in MVCC;
+ * existing file readers independently check ACL, ciphertext/AAD and the pinned
+ * accepted head. A final fresh target read fences metadata/rules/head changes
+ * and revocation during local hydration. Failures never fall back to cached
+ * company data or return partially opened files.
+ */
+export const readFreshExactWorkspaceContext = async ({
+  origin, companySlug, workspaceId, input, provider, signal, unfiledQueue,
+  requestJson = async pathname => readJson(await request(provider.requestOrigin, provider.token, pathname, { signal })),
+  hydrate = value => hydrateAgentCompanyEncryptedJson({ value, origin: provider.requestOrigin,
+    token: provider.token, companyEncryption: provider.companyEncryption, signal }),
+  readDocuments = workspace => readEncryptedWorkspaceSearchDocuments({ origin: provider.requestOrigin,
+    token: provider.token, companyEncryption: provider.companyEncryption, workspaceId,
+    acceptedHead: workspace.acceptedHead, signal }),
+}) => {
+  workspaceId = normalizeUuid(workspaceId, "workspaceId");
+  const pathname = `/api/agent-workspaces/company-context/${encodeURIComponent(companySlug)}/workspaces/${workspaceId}`;
+  const validate = raw => {
+    if (raw?.company?.id !== provider.companyEncryption.runtime.company.id || raw.company.slug !== companySlug) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Exact Workspace context belongs to another company.");
+    }
+    if (raw.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(raw.revisionToken)
+      || !Array.isArray(raw.workspaceEntries) || raw.workspaceEntries.length !== 1
+      || raw.workspaceEntries[0]?.id !== workspaceId || !Array.isArray(raw.workspaces)
+      || (raw.workspaceEntries[0]?.state === "deleted" && raw.workspaces.length !== 0)
+      || raw.workspaces.length > 1 || raw.workspaces.some(workspace => workspace.id !== workspaceId
+        || !GIT_OBJECT_PATTERN.test(workspace.acceptedHead))) {
+      throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Invalid exact Workspace snapshot.");
+    }
+    return raw;
+  };
+  const raw = validate(await requestJson(pathname));
+  const scoped = await hydrate(raw);
+  const workspaces = [];
+  for (const workspace of scoped.workspaces) {
+    workspaces.push({ ...workspace, documents: await readDocuments(workspace) });
+  }
+  signal?.throwIfAborted();
+  const final = validate(await requestJson(`${pathname}?expectedRevision=${raw.revisionToken}`));
+  if (final.revisionToken !== raw.revisionToken) {
+    throw new TrelioLocalContextError("WORKSPACE_OUTDATED", "Workspace changed during the exact read.");
+  }
+  const result = fetchMirrorResult({ ...scoped, workspaces }, `workspace:${workspaceId}`, input?.knownInstructionLayerKeys);
+  return unfiledQueue ? { ...result, unfiledQueue } : result;
+};
+
 /** A scoped, ephemeral projection is intentionally never published as a search
  * generation. Live task ACL and instruction revisions are checked on every
  * page; another task's comments cannot invalidate this task's authority. */
@@ -8384,6 +8442,14 @@ export const handleTrelioLocalContextOperation = async (
       if (ready?.nativeProvider) throw new TrelioLocalContextError("LOCAL_CONTEXT_COMPANY_MISMATCH", "Company encryption changed.");
       const selected = ready ? canonicalizeLocalActionProjectSlugs(input, ready.mirror) : input;
       return profile.readCompanyContextExact({ nativeTool, input: selected, signal });
+    }
+    const workspaceId = exactWorkspaceReadId(nativeTool, input);
+    if (workspaceId) {
+      const unfiledQueue = MCP_UNFILED_CONTEXT_RESPONSE_TOOLS.has(nativeTool)
+        ? await readUnfiledResponseContext(origin, companySlug,
+          { signal, ...(readUnfiledQueue ? { readQueue: readUnfiledQueue } : {}) }) : undefined;
+      return readFreshExactWorkspaceContext({ origin, companySlug, workspaceId,
+        input, provider, signal, unfiledQueue });
     }
     if (usesFreshExactTaskRead(nativeTool, input)) {
       if (input?.companySlug && input.companySlug !== companySlug) {
