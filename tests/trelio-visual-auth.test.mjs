@@ -330,8 +330,21 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   let passwordSubmits = 0, codeSubmits = 0, codeResponses = 0, methodFollows = 0, mailSubmits = 0, currentFixtureStore = null;
   // Fixed synthetic phases/counters locate a hosted outer deadline without
   // printing forms, credentials, private browser output, URLs or native logs.
-  let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;const evidence=[];
-  const record=value=>{if(['auth','window_inventory','window','close_queue','close_manual','close_browser','close_snapshot',
+  let phase='fixture_server',reported=false,variant='none',action='none',lastState='none',lastReason='none',primaryFailure=null;
+  let nativeExit=null,nativeLog=null;const evidence=[];
+  const record=value=>{
+    // The browser already reports these fixture-only closed fields. Retain
+    // them for the current browser generation instead of losing its real exit
+    // behind a later extension_not_connected/assertion. Never copy native log
+    // text, paths, URLs, form values or the bearer-bearing owner descriptor.
+    if(value?.stage==='browser_exit')nativeExit={
+      code:Number.isInteger(value.exitCode)&&value.exitCode>=-0x80000000&&value.exitCode<=0xffffffff?value.exitCode:null,
+      signal:['SIGTERM','SIGKILL','SIGABRT','SIGSEGV'].includes(value.signal)?value.signal:null,
+      sandboxUnavailable:value.sandboxUnavailable===true,displayUnavailable:value.displayUnavailable===true,
+      extensionUnavailable:value.extensionUnavailable===true};
+    if(value?.stage==='native_log')nativeLog=Object.fromEntries(['osCryptErrors','cookieErrors','sqliteErrors','networkSandboxErrors']
+      .map(key=>[key,Number.isSafeInteger(value[key])&&value[key]>=0?value[key]:null]));
+    if(['auth','window_inventory','window','close_queue','close_manual','close_browser','close_snapshot',
     'browser_exit','browser_quit','browser_stop_timeout','extension_not_ready','extension_not_connected',
     'stopped_profile_snapshot_failed','stopped_profile_persist_failed','stopped_profile_cleanup_failed'].includes(value?.stage)){
     evidence.push(value.stage);if(evidence.length>8)evidence.shift();}};
@@ -341,7 +354,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
     syscall:['open','unlink','rmdir','scandir','lstat','rename'].includes(primaryFailure?.syscall)?primaryFailure.syscall:null,
     passwordSubmits,codeSubmits,codeResponses,methodFollows,mailSubmits,
     consumedSteps:currentFixtureStore?.saved?.attempt?.steps?.length??null,
-    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',evidence})+'\n');};
+    attemptState:['pending','complete'].includes(currentFixtureStore?.saved?.attempt?.state)?currentFixtureStore.saved.attempt.state:'none',nativeExit,nativeLog,evidence})+'\n');};
   const observe=value=>{
     lastState=['ready','error','manual_input_required','saved_unverified'].includes(value?.state)?value.state:'other';
     lastReason=['none','bootstrap_failed','manual_control_active','operation_failed','lease_expired','storage_unavailable'].includes(value?.reason)?value.reason:'other';
@@ -399,7 +412,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
   const origin = `http://127.0.0.1:${server.address().port}`, def = definition(origin), store = memoryStore(def); store.directory = directory;
   let activeStore = store, activeDef = def;
   const companyId = randomUUID(), memberId = randomUUID(), mailAccountId = randomUUID();
-  const make = () => { currentFixtureStore = activeStore; return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
+  const make = () => { currentFixtureStore = activeStore;nativeExit=null;nativeLog=null;return new ExtensionVisualBrowser({ dependencies, store: activeStore, authentication: activeDef, testDiagnostics:record,
     mailIdentity: { origin: 'https://trelio.ru', companyId, memberId, scope: 'd'.repeat(64) },
     policy: createVisualOriginPolicy({ origins: [origin], allowLoopback: true }), origins: [origin], lease: { deadlineAt: Date.now() + 150000 }, testHeadless: process.env.TRELIO_VISUAL_EXTENSION_HEADED !== '1' }); };
   let browser = make();
