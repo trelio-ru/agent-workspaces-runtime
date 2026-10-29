@@ -1415,6 +1415,20 @@ Tests cover actual serial MCP/current-child pipes and a real aborted Git blob,
 native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
 
+The outer signed-request boundary preserves only fixed local transport codes:
+`ASSISTANT_RUNTIME_REQUEST_TIMED_OUT`, `_CANCELLED`, `_PROCESS_FAILED`,
+`_INPUT_FAILED`, `_OUTPUT_FAILED`, `_EXITED`, `_EMPTY_RESPONSE`, `_INVALID_RESPONSE` and
+`_OUTPUT_TOO_LARGE` (each suffix uses the same `ASSISTANT_RUNTIME_REQUEST`
+prefix). These identify the boundary, never the cause of a native crash or an
+unknown business outcome. Native exception/stderr/stdout, paths and exit prose
+are not projected. The same existing process/pipe deadlines and byte bounds
+apply, and no category grants an automatic retry. A generic unavailable result
+from an older loaded facade is insufficient to infer which boundary failed.
+Real-process fixtures cover success, native refusal, cancellation, timeout,
+startup/exit and empty/malformed/oversized pipes without an account or model.
+Native stdout-pipe errors settle this one request through the same closed frame
+instead of becoming an unhandled event on the long-lived MCP process.
+
 Native selected ciphertext has the lifetime of its exact decoded response. The
 managed profile holds only weak root/projection associations, not a cumulative
 company-wide entity map. Common mirror field-only metadata projections explicitly

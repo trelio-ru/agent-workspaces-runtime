@@ -117,6 +117,9 @@ publication tooling также остаются вне этого публичн
   Cold search reuses the common short-wait registry and SAME signed read child;
   preparing is not an empty/error result. Fresh native admission on every poll,
   exact recipient binding and complete mirror publication remain mandatory. An owned first-sync timeout (direct reason or native AbortError with that exact cause) permits one resumed readonly child only after fresh admission; other failures never retry. Common read errors retain fixed closed codes, never paths/prose.
+  The signed request pipe distinguishes its own timeout, caller cancellation,
+  process/input failure, nonzero exit, empty/invalid response and output bound;
+  none authorizes replay or exposes child output. Test the real native pipes.
   Native selected ciphertext follows weak snapshot/projection identity through common mirror batches; no cumulative company map or general resolver. Per-response 4096/32-MiB and current-recipient guards remain. Failures expose fixed stages only; no content, counts, paths or automatic retry.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.

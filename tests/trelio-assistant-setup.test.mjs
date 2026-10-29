@@ -380,7 +380,84 @@ test('fixed assistant MCP auth/scope rejection survives the signed child frame a
   for(const frame of [{failure:'REMOTE_MCP_AUTH_REJECTED'},
     {failure:'REMOTE_MCP_AUTH_REJECTED',setupRecovery:'local_device_credential_mismatch'},
     {failure:'ASSISTANT_TRANSPORT_UNAVAILABLE',setupRecovery:'device_authorization_required',status:403}])
-    await assert.rejects(decode(JSON.stringify(frame)),{code:'ASSISTANT_RUNTIME_REQUEST_UNAVAILABLE'});
+    await assert.rejects(decode(JSON.stringify(frame)),{code:'ASSISTANT_RUNTIME_REQUEST_INVALID_RESPONSE'});
+});
+
+test('request transport preserves closed failure boundaries through real native pipes without output or retry',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-request-boundary-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const {spawn}=await import('node:child_process');
+  const loader=path.join(root,'loader.mjs');
+  // This is an isolated synthetic signed-loader stand-in. The request parser,
+  // native process/stdin/stdout lifetime, bounds and error projection are real;
+  // no OS credential, Trelio account, network or model turn is involved.
+  const invoke=async(source,{timeoutMs=5000,signal,spawnProcess}={})=>{
+    await fs.writeFile(loader,source);let launches=0,closed=null;
+    try{return await requestCurrentAssistantRuntime({operation:'list'},
+      {resolveLoader:async()=>loader,timeoutMs,signal,spawnProcess:(executable,args,options)=>{
+        launches++;assert.equal(options.shell,false);assert.equal(options.windowsHide,true);
+        assert.deepEqual(options.stdio,['pipe','pipe','ignore']);
+        const child=(spawnProcess??spawn)(executable,args,options);
+        closed=new Promise(resolve=>child.once('close',resolve));return child;
+      }});
+    }finally{
+      assert.equal(launches,signal?.aborted&&launches===0?0:1,'no request replay');
+      // Cancellation rejects before native pipe closure. Join that owned child
+      // before replacing/deleting its synthetic loader, particularly on Windows;
+      // this fixture cleanup never retries or extends a production request.
+      if(closed){let timer;try{await Promise.race([closed,new Promise((_,reject)=>{
+        timer=setTimeout(()=>reject(Error('Synthetic child did not close')),5000);
+      })]);}finally{clearTimeout(timer);}}
+    }
+  };
+  const refuses=async(source,code,options)=>assert.rejects(invoke(source,options),error=>{
+    assert.equal(error.code,'ASSISTANT_RUNTIME_REQUEST_'+code);
+    assert.deepEqual(Object.keys(error),['code']);
+    assert.ok(!JSON.stringify(error).includes('PRIVATE_PIPE_CANARY'));
+    return true;
+  });
+  await t.test('successful UTF-8 result and exact native failure retain the existing frame',async()=>{
+    assert.deepEqual(await invoke(`process.stdout.write(JSON.stringify({value:{text:'Тест 🧭'}}));`),{text:'Тест 🧭'});
+    await assert.rejects(invoke(`process.stdout.write(JSON.stringify({failure:'ASSISTANT_PASS_REVIEW_REQUIRED'}));`),
+      {code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+  });
+  await t.test('owned timer and explicit cancellation stay distinct and grant no retry',async()=>{
+    await refuses(`setInterval(()=>{},1000);`,'TIMED_OUT',{timeoutMs:100});
+    const controller=new AbortController();
+    await refuses(`setInterval(()=>{},1000);`,'CANCELLED',{signal:controller.signal,
+      spawnProcess:(...args)=>{const child=spawn(...args);child.stdin.once('finish',()=>controller.abort());return child;}});
+    const already=AbortSignal.abort();
+    await refuses(`throw Error('PRIVATE_PIPE_CANARY');`,'CANCELLED',{signal:already});
+  });
+  await t.test('native startup refusal and nonzero exit do not expose child stderr',async()=>{
+    await refuses(``, 'PROCESS_FAILED',{spawnProcess:(_executable,args,options)=>spawn(path.join(root,'absent-native-executable'),args,options)});
+    await refuses(`throw Error('PRIVATE_PIPE_CANARY');`,'EXITED');
+    await refuses(``, 'PROCESS_FAILED',{spawnProcess:()=>{throw Error('PRIVATE_PIPE_CANARY');}});
+  });
+  await t.test('empty, malformed, extra and unsupported frames remain separate from process failure',async()=>{
+    await refuses(``, 'EMPTY_RESPONSE');
+    for(const value of ['PRIVATE_PIPE_CANARY','null','[]','{"value":1,"extra":"PRIVATE_PIPE_CANARY"}',
+      '{"failure":"PRIVATE_PIPE_CANARY"}','{"value":1}\n{"value":2}'])
+      await refuses(`process.stdout.write(${JSON.stringify(value)});`,'INVALID_RESPONSE');
+  });
+  await t.test('original output bound stops the producer without reflecting its bytes',async()=>{
+    await refuses(`process.stdout.write(Buffer.alloc(768*1024+1,65));setInterval(()=>{},1000);`,'OUTPUT_TOO_LARGE');
+  });
+  await t.test('failed input and output pipes settle once instead of crashing the host',async()=>{
+    const {EventEmitter}=await import('node:events');let disposed=0;
+    for(const [stream,code]of [['stdin','INPUT_FAILED'],['stdout','OUTPUT_FAILED']]){
+      await refuses(``,code,{spawnProcess:()=>{
+        const child=new EventEmitter();child.stdin=new PassThrough();child.stdout=new PassThrough();
+        child.kill=()=>{disposed++;child.emit('close',1);};child.stdin.once('finish',()=>{
+          child[stream].emit('error',Error('PRIVATE_PIPE_CANARY'));
+          // A second native event cannot replace the original stage or dispose
+          // the same request twice. No error text is reflected in the result.
+          child.emit('close',1);
+        });return child;
+      }});
+    }
+    assert.equal(disposed,2);
+  });
 });
 
 test('pending-owner fence serializes a concurrent new pass before its HTTP boundary and blocks fresh legacy workers',async()=>{

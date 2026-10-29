@@ -1004,19 +1004,27 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   return new Promise((resolve,reject)=>{
     let child,done=false,bytes=0,output='';const decoder=new StringDecoder('utf8');
     const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);child?.kill?.();error?reject(error):resolve(value);};
-    const abort=()=>finish(Object.assign(new Error(),{code:'ASSISTANT_RUNTIME_REQUEST_UNAVAILABLE'}));
-    const timer=setTimeout(abort,timeoutMs);
+    // Keep the exact local transport boundary, not native exception text. A
+    // process timeout, caller cancellation, failed spawn and malformed/empty
+    // pipe have different recovery implications. None proves that the child
+    // did no work, extends its clock, or grants a retry of the request.
+    const refuse=stage=>finish(Object.assign(new Error(),{code:'ASSISTANT_RUNTIME_REQUEST_'+stage}));
+    const abort=()=>refuse('CANCELLED');
+    const timer=setTimeout(()=>refuse('TIMED_OUT'),timeoutMs);
     if(signal?.aborted)return abort();signal?.addEventListener('abort',abort,{once:true});
     try {
       child=spawnProcess(process.execPath,[loader,'bridge','assistant','request'],{
         env:environment,shell:false,windowsHide:true,stdio:['pipe','pipe','ignore'],
       });
-      child.on('error',abort);child.stdin.on('error',abort);
+      child.on('error',()=>refuse('PROCESS_FAILED'));child.stdin.on('error',()=>refuse('INPUT_FAILED'));
+      // A native read-pipe error must settle this request, not become an
+      // unhandled EventEmitter error that tears down the long-lived MCP host.
+      child.stdout.on('error',()=>refuse('OUTPUT_FAILED'));
       child.stdout.on('data',chunk=>{
-        bytes+=chunk.length;if(bytes>768*1024)return abort();output+=decoder.write(chunk);
+        bytes+=chunk.length;if(bytes>768*1024)return refuse('OUTPUT_TOO_LARGE');output+=decoder.write(chunk);
       });
       child.once('close',code=>{
-        if(code!==0)return abort();
+        if(code!==0)return refuse('EXITED');
         try {
           const value=JSON.parse(output+decoder.end());
           if(value?.failure && (/^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(value.failure)
@@ -1026,16 +1034,16 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
               || ['failure,setupRecovery','failure,setupRecovery,status'].includes(Object.keys(value).sort().join(','))
                 &&assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status})
                 &&(value.setupRecovery!=='local_device_credential_mismatch')===Object.hasOwn(value,'status');
-            if(!allowed)return abort();
+            if(!allowed)return refuse('INVALID_RESPONSE');
             return finish(Object.assign(new Error(value.failure),{code:value.failure,
               ...(value.setupRecovery?{setupRecovery:value.setupRecovery}:{}) ,...(value.status?{status:value.status}:{})}));
           }
-          if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return abort();
+          if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return refuse('INVALID_RESPONSE');
           finish(null,value.value);
-        } catch { abort(); }
+        } catch { refuse(output.length===0?'EMPTY_RESPONSE':'INVALID_RESPONSE'); }
       });
       child.stdin.end(input);
-    } catch { abort(); }
+    } catch { refuse('PROCESS_FAILED'); }
   });
 };
 
