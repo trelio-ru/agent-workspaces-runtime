@@ -95,10 +95,15 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
 ]);
 const backgroundTools = { install_assistant_background: 'install', get_assistant_background_status: 'status', start_assistant_background: 'start' };
 const codes = new Set(ASSISTANT_SETUP_TOOLS.map(tool => tool.name));
-const safeError = error => assistantHealthFailure(error) || assistantSetupRecovery(error) || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(error?.code)
-  || PROCESS_DIAGNOSTIC_CODES.includes(error?.code)
-  || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(error?.code) || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(error?.code ?? '')
-  ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
+// One closed vocabulary for BOTH producer and consumer of the private request
+// frame. A producer-approved TRELIO/Workspace/lease/provider refusal is still a
+// refusal after the native pipe, not malformed JSON or a new recovery grant.
+// Auth provenance is validated separately; a bare auth code never supplies it.
+const assistantFailureCode = code => typeof code==='string' && (assistantHealthFailure({code})
+  || ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES.includes(code) || PROCESS_DIAGNOSTIC_CODES.includes(code)
+  || ASSISTANT_SOURCE_MONITOR_ERROR_CODES.includes(code)
+  || /^(?:REMOTE_MCP_|ASSISTANT_|DIGITAL_ASSISTANTS_|TRELIO_|LOCAL_WORKSPACE_|RUN_|LEASE_|STALE_)[A-Z_]{1,100}$/u.test(code));
+const safeError = error => assistantFailureCode(error?.code) ? error.code : 'ASSISTANT_SETUP_UNAVAILABLE';
 
 export const callAssistantSetupTool = async (setup, name, args) => {
   if (!codes.has(name)) throw Object.assign(new Error(), { code: 'ASSISTANT_CAPABILITY_UNAVAILABLE' });
@@ -1025,26 +1030,25 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
       child.stdout.on('error',()=>refuse('OUTPUT_FAILED'));
       child.stdout.on('data',chunk=>{
         bytes+=chunk.length;if(bytes>768*1024)return refuse('OUTPUT_TOO_LARGE');
-        try{output+=decoder.decode(chunk,{stream:true});}catch{return refuse('INVALID_RESPONSE');}
+        try{output+=decoder.decode(chunk,{stream:true});}catch{return refuse('INVALID_UTF8');}
       });
       child.once('close',code=>{
         if(code!==0)return refuse('EXITED');
-        try {
-          const value=JSON.parse(output+decoder.decode());
-          if(value?.failure && (/^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(value.failure)
-            ||PROCESS_DIAGNOSTIC_CODES.includes(value.failure)||value.failure==='TRELIO_SKILL_PYTHON_REQUIRED'
-            ||assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status}))) {
-            const allowed=Object.keys(value).sort().join(',') === 'failure'
-              || ['failure,setupRecovery','failure,setupRecovery,status'].includes(Object.keys(value).sort().join(','))
-                &&assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status})
-                &&(value.setupRecovery!=='local_device_credential_mismatch')===Object.hasOwn(value,'status');
-            if(!allowed)return refuse('INVALID_RESPONSE');
-            return finish(Object.assign(new Error(value.failure),{code:value.failure,
-              ...(value.setupRecovery?{setupRecovery:value.setupRecovery}:{}) ,...(value.status?{status:value.status}:{})}));
-          }
-          if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return refuse('INVALID_RESPONSE');
-          finish(null,value.value);
-        } catch { refuse(bytes===0?'EMPTY_RESPONSE':'INVALID_RESPONSE'); }
+        let value;
+        try{output+=decoder.decode();}catch{return refuse('INVALID_UTF8');}
+        try{value=JSON.parse(output);}catch{return refuse(bytes===0?'EMPTY_RESPONSE':'INVALID_JSON');}
+        if(value && Object.getPrototypeOf(value)===Object.prototype && Object.hasOwn(value,'failure')){
+          if(!assistantFailureCode(value.failure))return refuse('INVALID_FAILURE_FRAME');
+          const allowed=Object.keys(value).sort().join(',') === 'failure'
+            || ['failure,setupRecovery','failure,setupRecovery,status'].includes(Object.keys(value).sort().join(','))
+              &&assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status})
+              &&(value.setupRecovery!=='local_device_credential_mismatch')===Object.hasOwn(value,'status');
+          if(!allowed)return refuse('INVALID_FAILURE_FRAME');
+          return finish(Object.assign(new Error(value.failure),{code:value.failure,
+            ...(value.setupRecovery?{setupRecovery:value.setupRecovery}:{}) ,...(value.status?{status:value.status}:{})}));
+        }
+        if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return refuse('INVALID_VALUE_FRAME');
+        finish(null,value.value);
       });
       child.stdin.end(input);
     } catch { refuse('PROCESS_FAILED'); }

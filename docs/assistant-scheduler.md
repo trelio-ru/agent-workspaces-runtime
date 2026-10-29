@@ -1427,13 +1427,21 @@ HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
 
 The outer signed-request boundary preserves only fixed local transport codes:
 `ASSISTANT_RUNTIME_REQUEST_TIMED_OUT`, `_CANCELLED`, `_PROCESS_FAILED`,
-`_INPUT_FAILED`, `_OUTPUT_FAILED`, `_EXITED`, `_EMPTY_RESPONSE`, `_INVALID_RESPONSE` and
+`_INPUT_FAILED`, `_OUTPUT_FAILED`, `_EXITED`, `_EMPTY_RESPONSE`, `_INVALID_UTF8`,
+`_INVALID_JSON`, `_INVALID_FAILURE_FRAME`, `_INVALID_VALUE_FRAME` and
 `_OUTPUT_TOO_LARGE` (each suffix uses the same `ASSISTANT_RUNTIME_REQUEST`
 prefix). These identify the boundary, never the cause of a native crash or an
 unknown business outcome. Native exception/stderr/stdout, paths and exit prose
 are not projected. The same existing process/pipe deadlines and byte bounds
 apply, and no category grants an automatic retry. A generic unavailable result
 from an older loaded facade is insufficient to infer which boundary failed.
+Older facades may report only `_INVALID_RESPONSE`; it does not identify which
+validation failed. Fixed categories contain no output, paths or error prose.
+The request producer and consumer share ONE closed refusal-code predicate,
+including current source/account/process enums and Workspace/lease/provider
+codes. A valid local refusal never becomes an invalid response at the pipe.
+Bare auth codes remain hard refusals without device setup provenance; only
+the independently validated exact native recovery fields grant that recovery.
 Real-process fixtures cover success, native refusal, cancellation, timeout,
 startup/exit and empty/malformed/oversized pipes without an account or model.
 Native stdout-pipe errors settle this one request through the same closed frame

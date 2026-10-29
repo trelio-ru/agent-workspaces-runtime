@@ -377,10 +377,39 @@ test('fixed assistant MCP auth/scope rejection survives the signed child frame a
     assert.equal(messages[3].result.structuredContent.code,code);assert.equal(messages[3].result.isError,true);
     assert.equal(requests,1);assert.ok(!raw.includes('PRIVATE'));assert.deepEqual(await f.host.readIdentity(),previous);
   }
-  for(const frame of [{failure:'REMOTE_MCP_AUTH_REJECTED'},
-    {failure:'REMOTE_MCP_AUTH_REJECTED',setupRecovery:'local_device_credential_mismatch'},
+  for(const frame of [{failure:'REMOTE_MCP_AUTH_REJECTED',setupRecovery:'local_device_credential_mismatch'},
     {failure:'ASSISTANT_TRANSPORT_UNAVAILABLE',setupRecovery:'device_authorization_required',status:403}])
-    await assert.rejects(decode(JSON.stringify(frame)),{code:'ASSISTANT_RUNTIME_REQUEST_INVALID_RESPONSE'});
+    await assert.rejects(decode(JSON.stringify(frame)),{code:'ASSISTANT_RUNTIME_REQUEST_INVALID_FAILURE_FRAME'});
+});
+
+test('request worker and parent share closed refusal codes without borrowing setup provenance',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-request-refusals-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const loader=path.join(root,'loader.mjs'),entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+  const {spawn}=await import('node:child_process');
+  const {ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES,ASSISTANT_SOURCE_MONITOR_ERROR_CODES}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+  const {PROCESS_DIAGNOSTIC_CODES}=await import('../host-runtime/scripts/trelio-process-diagnostics.mjs');
+  // Both ends are the actual entry implementation. Only business execution is
+  // synthetic: a producer-approved local refusal must survive the native pipe
+  // as a refusal, without paths/details or native endpoint auth provenance.
+  const codes=[...new Set(['ASSISTANT_PASS_REVIEW_REQUIRED','TRELIO_RUNTIME_HOOK_REQUIRED',
+    'LOCAL_WORKSPACE_OUTDATED','RUN_NOT_ACTIVE','LEASE_EXPIRED','STALE_REVISION',
+    'REMOTE_MCP_AUTH_REJECTED','REMOTE_MCP_INSUFFICIENT_SCOPE',...ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES,
+    ...ASSISTANT_SOURCE_MONITOR_ERROR_CODES,...PROCESS_DIAGNOSTIC_CODES])];
+  for(const [code,expected] of [...codes.map(code=>[code,code]),
+    ['PRIVATE_FRAME_CANARY','ASSISTANT_SETUP_UNAVAILABLE'],[23,'ASSISTANT_SETUP_UNAVAILABLE'],[null,'ASSISTANT_SETUP_UNAVAILABLE']]){
+    await fs.writeFile(loader,`import {runAssistantEntry} from ${JSON.stringify(entry)};
+      await runAssistantEntry(['request'],{executeRequest:()=>{throw Object.assign(Error('PRIVATE_FRAME_CANARY'),
+        {code:${JSON.stringify(code)},status:401,privatePath:'PRIVATE_FRAME_CANARY'});}});`);
+    let launches=0,closed;
+    try{
+      await assert.rejects(requestCurrentAssistantRuntime({operation:'list'},{resolveLoader:async()=>loader,timeoutMs:5000,
+        spawnProcess:(...args)=>{launches++;const child=spawn(...args);closed=new Promise(r=>child.once('close',r));return child;}}),error=>{
+        assert.equal(error.code,expected);assert.equal(error.status,undefined);assert.equal(error.setupRecovery,undefined);
+        assert.deepEqual(Object.keys(error),['code']);assert.ok(!JSON.stringify(error).includes('PRIVATE_FRAME_CANARY'));return true;
+      });
+    }finally{if(closed)await closed;assert.equal(launches,1,'a refusal never replays the request');}
+  }
 });
 
 test('request transport preserves closed failure boundaries through real native pipes without output or retry',async t=>{
@@ -441,16 +470,19 @@ test('request transport preserves closed failure boundaries through real native 
   });
   await t.test('empty, malformed, extra and unsupported frames remain separate from process failure',async()=>{
     await refuses(``, 'EMPTY_RESPONSE');
-    for(const value of ['PRIVATE_PIPE_CANARY','null','[]','{"value":1,"extra":"PRIVATE_PIPE_CANARY"}',
-      '{"failure":"PRIVATE_PIPE_CANARY"}','{"value":1}\n{"value":2}'])
-      await refuses(`process.stdout.write(${JSON.stringify(value)});`,'INVALID_RESPONSE');
+    for(const [value,code] of [['PRIVATE_PIPE_CANARY','INVALID_JSON'],['null','INVALID_VALUE_FRAME'],
+      ['[]','INVALID_VALUE_FRAME'],['{}','INVALID_VALUE_FRAME'],['{"value":1,"extra":"PRIVATE_PIPE_CANARY"}','INVALID_VALUE_FRAME'],
+      ['{"failure":"PRIVATE_PIPE_CANARY"}','INVALID_FAILURE_FRAME'],['{"failure":23}','INVALID_FAILURE_FRAME'],
+      ['{"failure":null}','INVALID_FAILURE_FRAME'],['{"failure":"RUN_CLOSED","value":1}','INVALID_FAILURE_FRAME'],
+      ['{"value":1}\n{"value":2}','INVALID_JSON']])
+      await refuses(`process.stdout.write(${JSON.stringify(value)});`,code);
     // A damaged byte INSIDE a JSON string used to become U+FFFD and pass as
     // a successful answer. Test native bytes, including an incomplete final
     // sequence, rather than a JavaScript string already normalized by Node.
-    for(const bytes of [[123,34,118,97,108,117,101,34,58,34,195,34,125],
-      [123,34,118,97,108,117,101,34,58,34,195],
-      [239,187,191,123,34,118,97,108,117,101,34,58,49,125]])
-      await refuses(`process.stdout.write(Buffer.from(${JSON.stringify(bytes)}));`,'INVALID_RESPONSE');
+    for(const [bytes,code] of [[[123,34,118,97,108,117,101,34,58,34,195,34,125],'INVALID_UTF8'],
+      [[123,34,118,97,108,117,101,34,58,34,195],'INVALID_UTF8'],
+      [[239,187,191,123,34,118,97,108,117,101,34,58,49,125],'INVALID_JSON']])
+      await refuses(`process.stdout.write(Buffer.from(${JSON.stringify(bytes)}));`,code);
   });
   await t.test('original output bound stops the producer without reflecting its bytes',async()=>{
     await refuses(`process.stdout.write(Buffer.alloc(768*1024+1,65));setInterval(()=>{},1000);`,'OUTPUT_TOO_LARGE');
