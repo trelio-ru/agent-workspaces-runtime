@@ -22,7 +22,14 @@ for(const scenario of [
   skip:!['win32','darwin'].includes(process.platform),
 },async t=>{
   if(process.env.TRELIO_COMPANY_E2E_CHILD!=='1'){
-    const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-owner-company-e2e-')));
+    // Keep the synthetic HOME comparable to the real production LOCALAPPDATA.
+    // Nesting the managed UUID namespace below the runner's long profile TEMP
+    // adds an artificial Win32 mkdtemp limit (CreateDirectory reserves space
+    // below MAX_PATH). Reuse the runner-owned short root, as the real managed
+    // inspection fixture does; this changes no production path/ACL operation.
+    const temporaryBase=process.platform==='win32'&&path.isAbsolute(process.env.RUNNER_TEMP??'')
+      ?await fs.realpath(process.env.RUNNER_TEMP):os.tmpdir();
+    const root=await fs.realpath(await fs.mkdtemp(path.join(temporaryBase,'oc-')));
     const keychain=path.join(root,'fixture.keychain-db');
     const env={...process.env,HOME:root,USERPROFILE:root,APPDATA:root,LOCALAPPDATA:root,CODEX_HOME:path.join(root,'.codex'),
       TRELIO_COMPANY_E2E_CHILD:'1',TRELIO_HOST_RUNTIME_VERSION:'0.0.0',TRELIO_PLUGIN_VERSION:'0.0.0',

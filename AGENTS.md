@@ -134,6 +134,8 @@ publication tooling также остаются вне этого публичн
   discussion, warm second question, one own-timeout resume, hard second timeout,
   native ACL refusal and no Task/Run. Original Telegram/model acceptance remains
   separate live evidence, never claimed from the deterministic fixture.
+  The isolated native fixture uses the runner-owned short Windows HOME, not a
+  long profile-TEMP nesting; filesystem diagnostics expose closed errno/syscall only.
   Genuine common HTTP errors reuse the closed bridge diagnostic vocabulary,
   without backend prose or device-auth recovery. Status-shaped foreign errors
   remain local failures; numeric request-frame tails admit only fixed HTTP buckets.

@@ -64,6 +64,10 @@ refusal and unknown HTTP bucket privacy. A disposable macOS Keychain never reads
 the operator's login Keychain; Linux explicitly skips this native private-store
 suite and retains the common crypto/mirror tests. It is not evidence of a model
 answer or a live Telegram send: that remains a separate original-peer acceptance.
+Its disposable Windows HOME uses the short runner-owned temp root, avoiding an
+artificial MAX_PATH failure from nesting below the runner's full profile TEMP.
+Synthetic filesystem failures retain only closed errno/syscall categories;
+production path validation, private ACLs and request assertions are unchanged.
 
 Windows keeps all eleven assistant suites, the shared Workspace process/finish/
 directory/files boundaries, local context/policy/proof, signed hook chain,

@@ -76,7 +76,12 @@ export const openNativeCompanyScenario=async configuration=>{
         // error categories. Do not serialize messages, values or OS paths.
         await fs.appendFile(path.join(root,'fixture-diagnostics.jsonl'),JSON.stringify({operation:request.operation,
           name:['Error','TypeError','RangeError','AssertionError','AssistantTransportError'].includes(error.name)?error.name:'Error',
-          code:/^(?:ASSISTANT_|TRELIO_)[A-Z_]+$/u.test(error.code??'')?error.code:null,frames:String(error.stack??'').split('\n').slice(1,5)
+          code:/^(?:ASSISTANT_|TRELIO_)[A-Z_]+$/u.test(error.code??'')?error.code:null,
+          // Native filesystem categories are diagnostic only. Never emit the
+          // Error message/path or use these categories to retry an operation.
+          errno:['ENOENT','ENAMETOOLONG','EACCES','EPERM','EBUSY'].includes(error.code)?error.code:null,
+          syscall:['mkdir','mkdtemp','open','rename','unlink','rmdir'].includes(error.syscall)?error.syscall:null,
+          frames:String(error.stack??'').split('\n').slice(1,5)
             .map(line=>line.match(/([a-zA-Z0-9_-]+\.mjs:\d+:\d+)/u)?.[1]??'native')})+'\n');
         throw error;
       }
