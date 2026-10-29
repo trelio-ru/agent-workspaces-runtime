@@ -9,9 +9,106 @@ import { promisify } from "node:util";
 import { runStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/scripts/trelio-assistant-entry.mjs";
 import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation,
-  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion } from "../host-runtime/scripts/trelio-workspace.mjs";
+  readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion,
+  validateCodexHookComponentRequirement, verifyAssistantHookComponentIntegrity,
+  inspectHumanCodexHookComponent, inspectBundledPlugin, startHumanCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { createHash } from "node:crypto";
+import { buildTrelioInstallationDiagnostic } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 
 const execute = promisify(execFile);
+const humanHookFixture = async t => {
+  const f = await fixture();
+  t.after(() => fs.rm(f.root, {recursive:true,force:true}));
+  const component = path.join(f.environment.CODEX_HOME, "plugins/cache/trelio-plugins/trelio-agent-workspaces-hooks/0.1.0");
+  const files = new Map([
+    [".gitattributes", "* -text\n"],
+    [".codex-plugin/plugin.json", JSON.stringify({name:"trelio-agent-workspaces-hooks",version:"0.1.0",hooks:"./hooks/hooks.json"})],
+    ["hooks/hooks.json", '{"hooks":{"PreToolUse":[]}}'],
+    ...["launch-trelio-node","launch-trelio-node.cmd","resolve-node.ps1","trelio-host-runtime-download.mjs",
+      "trelio-host-runtime-loader.mjs","trelio-host-runtime-shell.mjs","trelio-mcp-startup-budget.mjs"].map(name=>[`scripts/${name}`,"fixed synthetic shell\n"]),
+  ]);
+  for(const [name,bytes] of files){await fs.mkdir(path.dirname(path.join(component,name)),{recursive:true});await fs.writeFile(path.join(component,name),bytes);}
+  const digest = bytes=>createHash("sha256").update(bytes).digest("hex");
+  const inventory=JSON.stringify({schemaVersion:1,plugin:"trelio-agent-workspaces-hooks",version:"0.1.0",sharedShell:{},
+    files:[...files].map(([name,bytes])=>({path:name,mode:0o644,size:Buffer.byteLength(bytes),sha256:digest(bytes)}))});
+  await fs.writeFile(path.join(component,"package-integrity.json"),inventory);
+  const requirement={pluginId:"trelio-agent-workspaces-hooks@trelio-plugins",version:"0.1.0",integritySha256:digest(inventory)};
+  await fs.writeFile(path.join(f.plugin,"codex-hook-component.json"),JSON.stringify(requirement));
+  return {...f,component,requirement};
+};
+
+test("human hook inventory shares the strict verifier without assistant identity or legacy .git exceptions", async t=>{
+  const f=await humanHookFixture(t);
+  const verify=()=>verifyAssistantHookComponentIntegrity(f.component,{profile:"humanHooks",version:"0.1.0",integritySha256:f.requirement.integritySha256});
+  assert.equal(await verify(),f.requirement.integritySha256);
+  assert.deepEqual(validateCodexHookComponentRequirement(f.requirement,"humanHooks"),f.requirement);
+  assert.throws(()=>validateCodexHookComponentRequirement(f.requirement,"assistantHooks"));
+  await fs.mkdir(path.join(f.component,".git"));
+  await assert.rejects(verify(),/Unexpected hook checkout/);
+  await fs.rm(path.join(f.component,".git"),{recursive:true});
+  await fs.appendFile(path.join(f.component,"scripts/trelio-host-runtime-loader.mjs"),"changed");
+  await assert.rejects(verify(),/Unsafe hook component|bytes changed/);
+});
+
+test("human hook diagnosis distinguishes missing, disabled, unreadable and changed components without native writes",async t=>{
+  const f=await humanHookFixture(t);
+  let installed=[],failRead=false;
+  const options={pluginDirectory:f.plugin,environment:f.environment,execFileCommand:async(_exe,args)=>{
+    assert.deepEqual(args,["plugin","list","--marketplace","trelio-plugins","--json"]);
+    if(failRead)throw Error("private diagnostic canary");return {stdout:JSON.stringify({installed})};
+  }};
+  const inspect=()=>inspectHumanCodexHookComponent(options);
+  assert.equal((await inspect()).status,"missing");
+  installed=[{pluginId:f.requirement.pluginId,version:"0.1.0",installed:true,enabled:false}];
+  assert.equal((await inspect()).status,"disabled");
+  installed[0].enabled=true;assert.equal((await inspect()).status,"ready");
+  installed[0].version="0.2.0";assert.equal((await inspect()).status,"version_mismatch");
+  installed[0].version="0.1.0";failRead=true;assert.equal((await inspect()).status,"not_checked");failRead=false;
+  await fs.appendFile(path.join(f.component,"scripts/trelio-host-runtime-loader.mjs"),"changed");
+  assert.equal((await inspect()).status,"invalid_component");
+  await fs.writeFile(path.join(f.plugin,"codex-hook-component.json"),"{}");
+  assert.equal((await inspect()).status,"invalid_requirement");
+  // Codex's explicit empty hooks must never report the conventional Claude file
+  // as ready while the separately installed native source is absent.
+  await fs.writeFile(path.join(f.plugin,".codex-plugin/plugin.json"),JSON.stringify({name:"trelio-agent-workspaces",version:"3.2.3",hooks:{hooks:{}}}));
+  await fs.mkdir(path.join(f.plugin,".claude-plugin"));
+  await fs.writeFile(path.join(f.plugin,".claude-plugin/plugin.json"),JSON.stringify({version:"3.2.3"}));
+  const report=await inspectBundledPlugin({pluginDirectory:f.plugin,loadedPluginVersion:"3.2.3",clientKind:"codex",
+    inspectHumanHooks:async()=>({status:"missing",pluginId:f.requirement.pluginId,version:"0.1.0"})});
+  assert.deepEqual(report.issues,["CODEX_HOOK_COMPONENT_REQUIRED"]);
+  assert.equal(report.hooks.status,"action_required");
+  assert.equal(report.hooks.approvalStatus,"client_managed_unknown");
+});
+
+test("one human MCP lifetime preserves exact main and independent hook paths across native cache pruning",async t=>{
+  const f=await humanHookFixture(t),errors=[];
+  const preservation=startHumanCodexPluginPreservation({environment:f.environment,
+    retentionDirectory:f.retentionDirectory,hookRetentionDirectory:path.join(f.root,"private/hook-retention"),
+    checkIntervalMs:20,onError:error=>errors.push(error),
+    inspectHookComponent:async()=>({status:"ready",installedPath:f.component})});
+  try{
+    await preservation.ready;
+    const hook=await fs.readFile(path.join(f.component,"hooks/hooks.json"));
+    await fs.rm(f.plugin,{recursive:true});await fs.rm(f.component,{recursive:true});
+    await waitUntil(()=>fs.readFile(path.join(f.component,"hooks/hooks.json")).then(bytes=>bytes.equals(hook),()=>false));
+    await waitUntil(()=>fs.readFile(path.join(f.plugin,"skills/example/SKILL.md")).then(()=>true,()=>false));
+    await preservation.close();
+    assert.deepEqual(errors,[]);
+    assert.deepEqual(await fs.readFile(path.join(f.component,"hooks/hooks.json")),hook);
+  }finally{await preservation.close();}
+});
+
+test("missing human hooks produce their own first-review action without reinstalling main or restarting Codex",()=>{
+  const result=buildTrelioInstallationDiagnostic({clientKind:"codex",intent:"diagnostics",codexRouting:{status:"ready"},
+    local:{platform:process.platform,node:{status:"ready"},git:{status:"ready"},connection:{status:"ready"},
+      runtimeSessions:{status:"ready"},plugin:{status:"action_required",issues:["CODEX_HOOK_COMPONENT_REQUIRED"],
+        hooks:{status:"action_required",component:{status:"missing",pluginId:"trelio-agent-workspaces-hooks@trelio-plugins",version:"0.1.0"}}}},
+    workingFolder:{status:"ready"}});
+  assert.deepEqual(result.requiredActions.map(action=>action.code),["REVIEW_CODEX_HOOK_COMPONENT"]);
+  assert.equal(result.requiredActions[0].restartRequired,false);
+  assert.match(result.requiredActions[0].nextStep,/codex plugin add trelio-agent-workspaces-hooks@trelio-plugins/);
+  assert.equal(result.local.plugin.hooks.component.status,"missing");
+});
 const waitUntil = async (predicate) => {
   const deadline = Date.now() + 5_000;
   while (!await predicate()) {

@@ -77,7 +77,7 @@ import {
   openBrowser,
   parseAndValidateAgentSkillPackage,
   readPrivateJsonFile,
-  startLoadedCodexPluginPreservation,
+  startHumanCodexPluginPreservation,
   request,
   requireToken,
   resolveWorkspaceBridgeConfigDirectory,
@@ -6658,7 +6658,7 @@ export const runStdioHost = async ({
   statFile = fs.lstat,
   diagnosticReporter = createAgentDiagnosticReporter({ origin, environment }),
   startupTrace = createMcpStartupTrace({ environment }),
-  preservePlugin = startLoadedCodexPluginPreservation,
+  preservePlugin = startHumanCodexPluginPreservation,
 } = {}) => {
   startupTrace("stdio_start");
   // Antigravity's exact native shell selects text delivery. No client/model

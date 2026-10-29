@@ -106,6 +106,38 @@ retained reason/title; обычное удаление сохраняет обя
 Backend/native descriptions определяют исключения над generic bootstrap.
 Backend/runtime source выпускается независимо от plugin release/minimum/trust.
 
+<a id="human-codex-hook-component"></a>
+
+## Независимые human Codex hooks
+
+Human main может явно подавлять conventional hooks в native Codex manifest и
+объявлять `codex-hook-component.json`: exact pluginId, version и SHA-256 inventory
+отдельного `trelio-agent-workspaces-hooks@trelio-plugins`. Claude сохраняет прежний
+hook file. Новый `humanHooks` – закрытый профиль того же verifier/retention engine,
+с official human repository; assistant identity и его историческое разрешение
+root `.git` для 0.1.0 сюда не переносятся. Human component всегда устанавливается
+native `git-subdir ./plugin`, без Git metadata в hook-owning bundle.
+
+Diagnostic Codex main с пустой native definition проверяет отдельный компонент,
+а не conventional файл Claude. Native installed/enabled metadata выбирает один
+exact versioned cache path; полный inventory проверяет все executable bytes.
+Missing, disabled, invalid requirement/component, version mismatch и unreadable
+native inventory различаются; отсутствие чтения не считается отсутствием пакета.
+`REVIEW_CODEX_HOOK_COMPONENT` сохраняет эти состояния, направляет к штатному
+менеджеру и первому human review, не требует перезапуска по одному факту миграции.
+Это read-only диагностика: нет native add, auto-enable, trust/hash copying,
+обхода approval или изменения OAuth/pairing. Ready metadata не доказывает proof.
+
+После initialize human MCP сохраняет main и verified component прежним
+retention engine до EOF, в раздельных namespaces. Restore касается только ранее
+проверенных exact путей и bytes. Изменённый/выключенный/отсутствующий компонент
+не перезаписывается и не подменяется похожей версией. Main distribution version,
+hook component version и pinned common shell version независимы; native
+fingerprint компонента не содержит меняющиеся инструкции или версию main.
+Первый переход требует native human approval нового источника. Main-only update
+сохраняет это одобрение; настоящее изменение hooks/loader требует нового review.
+Security minimum и отказ клиента reload не обходятся обещанием seamless update.
+
 <a id="codex-plugin-preservation"></a>
 
 ## Сохранение открытых Codex-сессий при обновлении плагина

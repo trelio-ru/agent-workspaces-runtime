@@ -758,6 +758,11 @@ publication tooling также остаются вне этого публичн
 
 ## Граница plugin/runtime
 
+- Human Codex main и его immutable hook-компонент используют тот же verifier и
+  retention по [контракту](docs/agent-workspace-runtime.md#human-codex-hook-component).
+  Descriptor не разрешает установку/trust: missing, disabled и повреждение
+  остаются отдельными состояниями. Main-only update не меняет hook identity.
+
 - Долгие цели: host передаёт только проверенные UUID/path locators собственного
   `assistants/<assistantUserId>/WORK.md` по stdin; формат/continuation – task-worker
   нового плагина и [контракт](docs/assistant-scheduler.md#durable-human-goal).

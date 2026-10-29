@@ -330,6 +330,7 @@ const buildLocalSummary = (local, clientKind) => ({
       preToolUseScope: local.plugin?.hooks?.preToolUseScope ?? null,
       toolRouting: local.plugin?.hooks?.toolRouting ?? { status: "unknown" },
       approvalStatus: local.plugin?.hooks?.approvalStatus ?? "client_managed_unknown",
+      ...(local.plugin?.hooks?.component ? { component: local.plugin.hooks.component } : {}),
     },
     issues: Array.isArray(local.plugin?.issues) ? local.plugin.issues : [],
   },
@@ -373,7 +374,21 @@ const buildLocalRequiredActions = (local) => {
   });
   if (local.node?.status !== "ready") actions.push(buildNodeAction(local));
   if (local.git?.status !== "ready") actions.push(buildGitAction(local));
-  if (local.plugin?.status !== "ready") actions.push(buildPluginAction(local));
+  const component = local.plugin?.hooks?.component;
+  if (component && component.status !== "ready") actions.push({
+    code: "REVIEW_CODEX_HOOK_COMPONENT",
+    authority: "plugin_manager_and_native_human_review",
+    pluginId: component.pluginId,
+    status: component.status,
+    restartRequired: false,
+    nextStep: component.status === "missing"
+      ? "Установите отдельный компонент командой codex plugin add trelio-agent-workspaces-hooks@trelio-plugins --json и один раз просмотрите его hooks в Codex. Старое одобрение не переносится. Вернитесь в этот же чат и повторите защищённое чтение. Обновления основного плагина не меняют этот компонент."
+      : component.status === "disabled"
+        ? "Компонент Trelio Agent Workspaces Hooks отключён. Сохраните решение пользователя; включение и одобрение выполняются им в настройках Codex. Не переустанавливайте основной плагин и не переносите trust."
+        : "Не подтверждены exact версия или файлы Trelio Agent Workspaces Hooks. Сохраните status и проверьте компонент штатным менеджером Codex; не копируйте trust, не перезаписывайте изменённые файлы и не повторяйте установку вслепую.",
+  });
+  if (local.plugin?.status !== "ready"
+    && (!component || local.plugin.issues?.some(code => code !== "CODEX_HOOK_COMPONENT_REQUIRED"))) actions.push(buildPluginAction(local));
   return actions;
 };
 

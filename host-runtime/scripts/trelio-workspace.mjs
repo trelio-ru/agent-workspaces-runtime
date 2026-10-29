@@ -958,6 +958,8 @@ export const inspectBundledPlugin = async ({
   pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
   loadedPluginVersion = process.env.TRELIO_PLUGIN_VERSION,
   clientKind = null,
+  environment = process.env,
+  inspectHumanHooks = inspectHumanCodexHookComponent,
 } = {}) => {
   if (clientKind === "antigravity") {
     // Antigravity auto-discovers root manifests. Its schema has no version;
@@ -998,11 +1000,24 @@ export const inspectBundledPlugin = async ({
       manifests: { cursorVersion }, hooks: { status: "not_applicable" }, issues,
     };
   }
-  const [codexManifest, claudeManifest, hooksManifest] = await Promise.all([
+  const [codexManifest, claudeManifest, legacyHooksManifest] = await Promise.all([
     readDiagnosticJsonFile(path.join(pluginDirectory, ".codex-plugin", "plugin.json")),
     readDiagnosticJsonFile(path.join(pluginDirectory, ".claude-plugin", "plugin.json")),
     readDiagnosticJsonFile(path.join(pluginDirectory, "hooks", "hooks.json")),
   ]);
+  // An explicit empty native declaration suppresses conventional Claude hooks.
+  // Codex must inspect the independently installed component instead; otherwise
+  // doctor would falsely report ready from a file Codex intentionally ignores.
+  const separateCodexHooks = clientKind === "codex"
+    && JSON.stringify(codexManifest.value?.hooks) === '{"hooks":{}}';
+  let component = null;
+  let hooksManifest = legacyHooksManifest;
+  if (separateCodexHooks) {
+    component = await inspectHumanHooks({ pluginDirectory, environment });
+    hooksManifest = component.status === "ready"
+      ? await readDiagnosticJsonFile(path.join(component.installedPath, "hooks/hooks.json"))
+      : { raw: null, value: null };
+  }
   const issues = [];
   const codexVersion = typeof codexManifest.value?.version === "string"
     ? codexManifest.value.version
@@ -1040,7 +1055,9 @@ export const inspectBundledPlugin = async ({
       JSON.stringify(observedEvents[eventName]) === JSON.stringify(expected)
     ),
   );
-  if (!hooksReady) {
+  if (component && component.status !== "ready") {
+    issues.push("CODEX_HOOK_COMPONENT_REQUIRED");
+  } else if (!hooksReady) {
     issues.push("RUNTIME_HOOK_CONTRACT_MISMATCH");
   }
 
@@ -1059,6 +1076,8 @@ export const inspectBundledPlugin = async ({
       preToolUseScope: "trelio_mcp",
       toolRouting: inspectTrelioHookToolRouting(observedEvents.PreToolUse?.matcher),
       approvalStatus: "client_managed_unknown",
+      ...(component ? { component: { status: component.status, pluginId: component.pluginId,
+        version: component.version ?? null } } : {}),
       events: Object.fromEntries(
         Object.entries(observedEvents).map(([eventName, observed]) => [
           eventName,
@@ -3009,17 +3028,24 @@ export const isStableVersionAtLeast = (rawVersion, rawMinimumVersion) => {
 // keep an assistant lifecycle from restoring the human plugin (or vice versa).
 const codexRetentionProfiles = Object.freeze({
   human: Object.freeze({ name: "trelio-agent-workspaces", marketplace: CODEX_MARKETPLACE_NAME,
-    pluginId: CODEX_PLUGIN_ID, directory: CODEX_PLUGIN_RETENTION_DIRECTORY }),
+    pluginId: CODEX_PLUGIN_ID, directory: CODEX_PLUGIN_RETENTION_DIRECTORY,
+    repository: CODEX_OFFICIAL_MARKETPLACE_SOURCE }),
+  humanHooks: Object.freeze({ name: "trelio-agent-workspaces-hooks", marketplace: CODEX_MARKETPLACE_NAME,
+    pluginId: "trelio-agent-workspaces-hooks@trelio-plugins",
+    directory: path.join(CONFIG_DIRECTORY, "codex-human-hook-plugin-retention"),
+    repository: CODEX_OFFICIAL_MARKETPLACE_SOURCE }),
   assistant: Object.freeze({ name: "trelio-digital-assistant", marketplace: "trelio-digital-assistants",
     pluginId: "trelio-digital-assistant@trelio-digital-assistants",
-    directory: path.join(CONFIG_DIRECTORY, "codex-assistant-plugin-retention") }),
+    directory: path.join(CONFIG_DIRECTORY, "codex-assistant-plugin-retention"),
+    repository: "https://github.com/trelio-ru/digital-assistants.git" }),
   // Native Codex pins ALL files in a hook-owning bundle. This separately
   // installed, immutable executable component has no MCP/skills or mutable
   // main-version metadata. Reuse the same verifier/retention engine; do not
   // migrate trust, rewrite hashes or smuggle changing files into exclusions.
   assistantHooks: Object.freeze({ name: "trelio-digital-assistant-hooks", marketplace: "trelio-digital-assistants",
     pluginId: "trelio-digital-assistant-hooks@trelio-digital-assistants",
-    directory: path.join(CONFIG_DIRECTORY, "codex-assistant-hook-plugin-retention") }),
+    directory: path.join(CONFIG_DIRECTORY, "codex-assistant-hook-plugin-retention"),
+    repository: "https://github.com/trelio-ru/digital-assistants.git" }),
 });
 const codexRetentionProfile = profile => {
   if (!Object.hasOwn(codexRetentionProfiles, profile)) throw new Error("Unknown plugin retention profile.");
@@ -3851,8 +3877,7 @@ const assertOfficialCodexMarketplace = async ({
 
   if (
     marketplace?.marketplaceSource?.sourceType !== "git"
-    || marketplace.marketplaceSource.source !== (profile !== "human"
-      ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE)
+    || marketplace.marketplaceSource.source !== selected.repository
   ) {
     throw new Error(
       "Тихое обновление разрешено только для официального Git marketplace Trelio.",
@@ -3880,15 +3905,16 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   const manifest = JSON.parse(await filesystem.readFile(manifestPath, "utf8"));
   const entries = manifest.plugins?.filter(row => row.name === selected.name);
   const source = entries?.length === 1 ? entries[0].source : null;
-  const official = profile !== "human" ? "https://github.com/trelio-ru/digital-assistants.git" : CODEX_OFFICIAL_MARKETPLACE_SOURCE;
-  const sourceVersion=typeof source?.ref==='string'?(profile==='assistantHooks'?/^hooks-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u:/^plugin-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u).exec(source.ref)?.[1]:null;
+  const official = selected.repository;
+  const hookProfile = profile === "humanHooks" || profile === "assistantHooks";
+  const sourceVersion=typeof source?.ref==='string'?(hookProfile?/^hooks-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u:/^plugin-v([0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9})$/u).exec(source.ref)?.[1]:null;
   // The first component was a root Git-URL checkout. Native Codex includes
   // that checkout's mutable index/reflog in its hook fingerprint. New releases
   // use its supported fixed subdirectory projection so NO checkout metadata
   // enters the installed hook bundle. Keep the immutable legacy source readable
   // during migration; never reinterpret it or prune metadata after installation.
-  const projectedHooks = profile === 'assistantHooks' && sourceVersion !== '0.1.0';
-  const validHookSource = profile !== 'assistantHooks'
+  const projectedHooks = profile === "humanHooks" || profile === 'assistantHooks' && sourceVersion !== '0.1.0';
+  const validHookSource = !hookProfile
     || Object.keys(source ?? {}).sort().join(',') === (projectedHooks ? 'path,ref,source,url' : 'ref,source,url');
   if (manifest.name !== selected.marketplace || source?.source !== (projectedHooks ? 'git-subdir' : 'url')
     || projectedHooks && source.path !== './plugin' || !validHookSource || source.url !== official || !sourceVersion)
@@ -3896,7 +3922,7 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   const listing = await runCodexJsonCommand(["plugin", "list", "--marketplace", selected.marketplace, "--json"], {execFileCommand, environment});
   if (!Array.isArray(listing.installed)) throw new Error("Invalid plugin inventory.");
   const installed = listing.installed.filter(row => row.pluginId === selected.pluginId);
-  if(profile==='assistantHooks'&&installed.length===0)return {state:'absent',desiredVersion:sourceVersion};
+  if(hookProfile&&installed.length===0)return {state:'absent',desiredVersion:sourceVersion};
   if (installed.length !== 1 || installed[0].installed !== true || installed[0].enabled !== true)
     return {state: "disabled"};
   const version = installed[0].version;
@@ -3928,8 +3954,8 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
   }
   const requirement=profile==='assistant'?await readAssistantHookComponentRequirement(installedPath):null;
   let integritySha256=null;
-  if(profile==='assistantHooks'){
-    integritySha256=await verifyAssistantHookComponentIntegrity(installedPath,{version,filesystem});
+  if(hookProfile){
+    integritySha256=await verifyAssistantHookComponentIntegrity(installedPath,{version,filesystem,profile});
   }
   return {state: "installed", version, desiredVersion: sourceVersion, installedPath,
     treeSha256: receiptTreeSha256,...(receiptTreeSha256 !== tree.treeSha256 ? {observedTreeSha256:tree.treeSha256} : {}),
@@ -3961,19 +3987,22 @@ export const readAssistantPluginPublishedRef = async ({profile,version,signal,re
   return true;
 };
 
-export const validateAssistantHookComponentRequirement = value => {
+export const validateCodexHookComponentRequirement = (value, profile) => {
+  if (!["humanHooks", "assistantHooks"].includes(profile)) throw new Error("Invalid Codex hook profile.");
   if(!value||Object.getPrototypeOf(value)!==Object.prototype
     ||Object.keys(value).sort().join(',')!=='integritySha256,pluginId,version'
-    ||value.pluginId!=='trelio-digital-assistant-hooks@trelio-digital-assistants'
+    ||value.pluginId!==codexRetentionProfile(profile).pluginId
     ||!parseStableVersion(value.version)||!/^[a-f0-9]{64}$/u.test(value.integritySha256??''))
     throw new Error('Invalid assistant hook component requirement.');
   return {...value};
 };
+export const validateAssistantHookComponentRequirement = value => validateCodexHookComponentRequirement(value, "assistantHooks");
 
 /** Validate the whole executable dependency, not merely a version or its
  * inventory text. The native trust decision remains separate and mandatory.
  * No mutable main instructions, credentials or new executor belong here. */
-export const verifyAssistantHookComponentIntegrity = async (root,{version,integritySha256=null,filesystem=fs}={}) => {
+export const verifyAssistantHookComponentIntegrity = async (root,{version,integritySha256=null,filesystem=fs,profile="assistantHooks"}={}) => {
+  if (!["humanHooks", "assistantHooks"].includes(profile)) throw new Error("Invalid Codex hook profile.");
   if(!path.isAbsolute(root)||!parseStableVersion(version))throw new Error('Invalid hook component root.');
   const names=['.gitattributes','.codex-plugin/plugin.json','hooks/hooks.json',
     ...['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs',
@@ -3990,7 +4019,7 @@ export const verifyAssistantHookComponentIntegrity = async (root,{version,integr
       // Do not remove it: refuse the unexpected materialization, preserving all
       // bytes and the native user's trust decision for diagnosis.
       if(relative===''&&name==='.git'){
-        if(version!=='0.1.0')throw new Error('Unexpected hook checkout metadata.');
+        if(profile!=="assistantHooks"||version!=='0.1.0')throw new Error('Unexpected hook checkout metadata.');
         const gitMetadata=await filesystem.lstat(path.join(directory,name));
         if(!gitMetadata.isDirectory()||gitMetadata.isSymbolicLink())throw new Error('Unsafe hook checkout metadata.');
         continue;
@@ -4004,7 +4033,7 @@ export const verifyAssistantHookComponentIntegrity = async (root,{version,integr
   const bytes=await filesystem.readFile(file),hash=crypto.createHash('sha256').update(bytes).digest('hex');
   if(integritySha256!==null&&hash!==integritySha256)throw new Error('Hook component integrity differs from required bytes.');
   const inventory=JSON.parse(bytes);
-  if(!inventory||inventory.schemaVersion!==1||inventory.plugin!=='trelio-digital-assistant-hooks'||inventory.version!==version
+  if(!inventory||inventory.schemaVersion!==1||inventory.plugin!==codexRetentionProfile(profile).name||inventory.version!==version
     ||Object.keys(inventory).sort().join(',')!=='files,plugin,schemaVersion,sharedShell,version'
     ||!Array.isArray(inventory.files)||inventory.files.length!==names.length)throw new Error('Invalid hook component inventory.');
   for(const entry of inventory.files){
@@ -4032,6 +4061,83 @@ export const readAssistantHookComponentRequirement = async root => {
   if(!Object.hasOwn(inventory,'hookComponent'))return null;
   if(inventory.schemaVersion!==1||inventory.plugin!=='trelio-digital-assistant')throw new Error('Invalid assistant plugin inventory.');
   return validateAssistantHookComponentRequirement(inventory.hookComponent);
+};
+
+/** Read one requirement from the exact loader-selected main package. Missing
+ * metadata is legacy only for a combined main; the new empty native declaration
+ * is checked by diagnostics and must never be interpreted as hook-free access. */
+export const readHumanCodexHookComponentRequirement = async root => {
+  if (typeof root !== "string" || !path.isAbsolute(root)) throw new Error("Invalid human plugin root.");
+  const file = path.join(root, "codex-hook-component.json");
+  let metadata;
+  try { metadata = await fs.lstat(file); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 4096) throw new Error("Unsafe human hook requirement.");
+  return validateCodexHookComponentRequirement(JSON.parse(await fs.readFile(file, "utf8")), "humanHooks");
+};
+
+/** Native installed/enabled metadata selects ONE exact cache path. The SAME
+ * full-file verifier used for assistant hooks checks every executable byte.
+ * No directory scan, installation, trust/config write or approval migration is
+ * part of this read. Keep disabled and unreadable states separate from absence. */
+export const inspectHumanCodexHookComponent = async ({ pluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
+  environment = process.env, execFileCommand = execFileAsync } = {}) => {
+  const selected = codexRetentionProfile("humanHooks");
+  let expected;
+  try { expected = await readHumanCodexHookComponentRequirement(pluginDirectory); }
+  catch { return { status: "invalid_requirement", pluginId: selected.pluginId, version: null }; }
+  if (!expected) return { status: "missing_requirement", pluginId: selected.pluginId, version: null };
+  const result = { pluginId: selected.pluginId, version: expected.version };
+  let listing;
+  try {
+    listing = await runCodexJsonCommand(["plugin", "list", "--marketplace", selected.marketplace, "--json"], { environment, execFileCommand });
+  } catch { return { ...result, status: "not_checked" }; }
+  if (!Array.isArray(listing?.installed)) return { ...result, status: "not_checked" };
+  const matches = listing.installed.filter(row => row.pluginId === selected.pluginId);
+  if (matches.length === 0) return { ...result, status: "missing" };
+  if (matches.length !== 1 || matches[0].installed !== true) return { ...result, status: "not_checked" };
+  if (matches[0].enabled !== true) return { ...result, status: "disabled" };
+  if (matches[0].version !== expected.version) return { ...result, status: "version_mismatch" };
+  const codeHome = path.resolve(environment.CODEX_HOME || path.join(os.homedir(), ".codex"));
+  const installedPath = path.join(codeHome, "plugins/cache", selected.marketplace, selected.name, expected.version);
+  try {
+    await verifyAssistantHookComponentIntegrity(installedPath, { profile: "humanHooks", version: expected.version,
+      integritySha256: expected.integritySha256 });
+  } catch { return { ...result, status: "invalid_component" }; }
+  return { ...result, status: "ready", installedPath };
+};
+
+/** The existing MCP keeps both exact code trees alive after initialize. Native
+ * plugin updates can prune versioned cache paths while this client still owns
+ * their command/skill references. Preserve only the verified installed hook
+ * component alongside main, with the SAME retention engine and EOF lifetime.
+ * Missing/disabled/changed hooks are never installed, enabled or overwritten. */
+export const startHumanCodexPluginPreservation = (options = {}) => {
+  const main = startLoadedCodexPluginPreservation(options);
+  let hooks = null;
+  let closed = false;
+  const environment = options.environment ?? process.env;
+  const inspectHookComponent = options.inspectHookComponent ?? inspectHumanCodexHookComponent;
+  const ready = main.ready.then(async entry => {
+    if (closed || entry?.profile !== "human") return entry;
+    const requirement = await readHumanCodexHookComponentRequirement(entry.installedPath);
+    if (!requirement || closed) return entry;
+    const component = await inspectHookComponent({ pluginDirectory: entry.installedPath, environment });
+    if (component.status !== "ready" || closed) return entry;
+    hooks = startLoadedCodexPluginPreservation({ ...options,
+      // Component version and pinned common shell version are independent. The
+      // retention selector verifies its native manifest against the cache leaf.
+      retentionDirectory: options.hookRetentionDirectory,
+      environment: { ...environment, TRELIO_PLUGIN_ROOT: component.installedPath } });
+    await hooks.ready;
+    return entry;
+  });
+  ready.catch(() => {}); // Main preservation already owns structural diagnostics.
+  return { ready, close: async () => {
+    closed = true;
+    await ready.catch(() => {});
+    await Promise.all([main.close(), hooks?.close()]);
+  } };
 };
 
 export const inspectAssistantHookComponent = async ({requirement,...options}) => {
