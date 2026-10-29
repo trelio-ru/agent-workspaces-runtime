@@ -460,6 +460,10 @@ const invalidateLocalCompanyMirrorSession = async ({
 };
 
 const inspectLockOwner = async (lockDirectory) => {
+  const directory = await fs.lstat(lockDirectory);
+  if (!directory.isDirectory() || directory.isSymbolicLink()) {
+    throw new TrelioLocalContextError("LOCAL_CONTEXT_MIRROR_INVALID", "The local mirror writer claim is invalid.");
+  }
   const owner = await readPrivateJsonFile(path.join(lockDirectory, "owner.json"));
   let metadata;
   try {
@@ -471,7 +475,26 @@ const inspectLockOwner = async (lockDirectory) => {
     // malformed lock.
     metadata = await fs.stat(lockDirectory);
   }
-  return { owner, metadata };
+  return { owner, metadata, directory };
+};
+
+const hasExitedMirrorWriter = async (lockDirectory, { owner }) => {
+  if (owner.schemaVersion !== 1 || !UUID_PATTERN.test(String(owner.lockId || ""))
+    || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return false;
+  // A stopped first-sync child can leave a perfectly fresh heartbeat because
+  // its private I/O deadline also bounds finally cleanup. Age cannot distinguish
+  // that abandoned claim from a live writer. Only ESRCH is positive evidence;
+  // EPERM, a reused/live PID and every unknown process error keep the claim.
+  try { process.kill(owner.pid, 0); return false; }
+  catch (error) { if (error.code !== "ESRCH") return false; }
+  const names = await fs.readdir(lockDirectory);
+  const heartbeat = `${owner.lockId}.heartbeat.json`;
+  if (!names.includes("owner.json") || names.some(name => !["owner.json", heartbeat].includes(name))) return false;
+  if (names.includes(heartbeat)) {
+    const stat = await fs.lstat(path.join(lockDirectory, heartbeat));
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) return false;
+  }
+  return true;
 };
 
 const acquireMirrorWriter = async (
@@ -530,21 +553,35 @@ const acquireMirrorWriter = async (
       };
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
-      let current;
+      let current, recoverable;
       try {
         current = await inspectLockOwner(paths.lock);
+        recoverable = Date.now() - current.metadata.mtimeMs > MIRROR_LOCK_STALE_MS
+          || await hasExitedMirrorWriter(paths.lock, current);
       } catch (inspectionError) {
         if (inspectionError.code === "ENOENT") continue;
         throw inspectionError;
       }
-      if (Date.now() - current.metadata.mtimeMs > MIRROR_LOCK_STALE_MS) {
-        const stalePath = `${paths.lock}.stale-${crypto.randomUUID()}`;
+      if (recoverable) {
         try {
-          // Rename wins against only the exact observed lock entry. A live
-          // writer that refreshed/replaced it causes ENOENT and the loop
-          // simply rereads current state.
-          await fs.rename(paths.lock, stalePath);
-          await fs.rm(stalePath, { recursive: true, force: true });
+          // Use the SAME short metadata mutex as mirror readers/retention so
+          // simultaneous recoverers cannot rename a successor's live claim.
+          // Re-read its protected owner and heartbeat inside that mutex; a
+          // changed nonce/PID/heartbeat or a live PID never earns fast recovery.
+          // Network hydration remains outside the critical section.
+          await withMirrorRetentionLock(paths.root, async () => {
+            const fresh = await inspectLockOwner(paths.lock);
+            if (fresh.owner.lockId !== current.owner.lockId || fresh.owner.pid !== current.owner.pid
+              || fresh.directory.ino !== current.directory.ino
+              || fresh.directory.birthtimeMs !== current.directory.birthtimeMs
+              || fresh.metadata.ino !== current.metadata.ino
+              || fresh.metadata.mtimeMs !== current.metadata.mtimeMs) return;
+            if (Date.now() - fresh.metadata.mtimeMs <= MIRROR_LOCK_STALE_MS
+              && !await hasExitedMirrorWriter(paths.lock, fresh)) return;
+            const stalePath = `${paths.lock}.stale-${crypto.randomUUID()}`;
+            await fs.rename(paths.lock, stalePath);
+            await fs.rm(stalePath, { recursive: true, force: true });
+          });
         } catch (takeoverError) {
           if (takeoverError.code !== "ENOENT") throw takeoverError;
         }
@@ -4037,7 +4074,10 @@ export const syncCompanyContextMirror = async ({
     // proves that generation stale, however, returning it again would make the
     // same deterministic 409 loop forever in this MCP process.
     allowReadableFallback: Boolean(previous) && !requireFresh,
-    maximumWaitMs: requireFresh
+    // Freshness of an existing stale generation has a short refresh wait. A
+    // cold mirror has no readable fallback at all: retain the original bounded
+    // first-sync join budget, including for a managed assistant invocation.
+    maximumWaitMs: requireFresh && previous
       ? MIRROR_STALE_READ_REFRESH_WAIT_MS
       : MIRROR_FIRST_SYNC_WAIT_MS,
   });

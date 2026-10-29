@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import {
@@ -11,6 +12,7 @@ import {
   MIRROR_READER_GRACE_MS, MIRROR_HISTORY_MAX_BYTES,
 } from '../host-runtime/scripts/trelio-mirror-retention.mjs';
 import { ensurePrivateDirectory, writePrivateJsonFile, resolveWorkspaceBridgeConfigDirectory } from '../host-runtime/scripts/trelio-workspace.mjs';
+import { resolveMirrorPaths, syncCompanyContextMirror } from '../host-runtime/scripts/trelio-local-context.mjs';
 const exec = promisify(execFile);
 const origin = 'a'.repeat(32);
 const company = '11111111-1111-4111-8111-111111111111';
@@ -38,6 +40,95 @@ const fixture = async t => {
   return { base, directory, companyRoot, schema };
 };
 const generations = root => fs.readdir(path.join(root, 'generations'));
+
+test('mirror writer recovers a confirmed dead owner without waiting for heartbeat age', async t => {
+  if (process.env.TRELIO_MIRROR_DEAD_WRITER_FIXTURE !== '1') {
+    // All private metadata belongs to this disposable OS/config root. Execute
+    // the real common writer and native Windows private-file checks; never
+    // recover a developer's mirror or substitute a made-up dead process ID.
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-dead-writer-'));
+    try {
+      const environment = { ...process.env, HOME: home, USERPROFILE: home,
+        LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+        TRELIO_WORKSPACE_DISABLE_KEYCHAIN: '1', TRELIO_MIRROR_DEAD_WRITER_FIXTURE: '1' };
+      delete environment.NODE_TEST_CONTEXT;
+      const child = await exec(process.execPath, ['--test', '--test-name-pattern',
+        'mirror writer recovers a confirmed dead owner', fileURLToPath(import.meta.url)], {
+        env: environment,
+        timeout: 60_000, maxBuffer: 1024 * 1024,
+      });
+      assert.match(child.stdout, /DEAD_MIRROR_WRITER_VERIFIED/u);
+    } finally { await fs.rm(home, { recursive: true, force: true }); }
+    return;
+  }
+  const origin = 'https://mirror.example', companyId = '11111111-1111-4111-8111-111111111111';
+  const paths = resolveMirrorPaths({ origin, companyId });
+  await ensurePrivateDirectory(paths.root);
+  const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
+  await new Promise((resolve, reject) => { exited.once('error', reject); exited.once('close', resolve); });
+  assert.throws(() => process.kill(exited.pid, 0), { code: 'ESRCH' });
+  const seed = async (pid, extra = {}) => {
+    await ensurePrivateDirectory(paths.lock);
+    const owner = { schemaVersion: 1, lockId: randomUUID(), pid,
+      createdAt: new Date().toISOString(), ...extra };
+    await writePrivateJsonFile(path.join(paths.lock, 'owner.json'), owner);
+    await writePrivateJsonFile(path.join(paths.lock, `${owner.lockId}.heartbeat.json`),
+      { schemaVersion: 1, lockId: owner.lockId });
+    return owner;
+  };
+  const encryption = { runtime: { company: { id: companyId, slug: 'synthetic' },
+    scope: { id: randomUUID(), epoch: 1 }, device: { id: randomUUID() } } };
+  const previousFetch = globalThis.fetch;
+  let reads = 0, held, entered;
+  const refusal = new Error('SYNTHETIC_MIRROR_STOP');
+  globalThis.fetch = async url => {
+    assert.equal(new URL(url).pathname, '/api/agent-workspaces/company-context/synthetic/manifest');
+    reads++; if (reads === 2) entered?.(); if (held) await held;
+    // Reaching the original native reader is enough to prove acquisition.
+    // Its explicit refusal must survive; no partial mirror is published.
+    throw refusal;
+  };
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const sync = signal => syncCompanyContextMirror({ origin, token: 'synthetic-token',
+    companyEncryption: encryption, requireFresh: true, signal });
+  await seed(exited.pid);
+  await assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  assert.equal(reads, 1, 'a fresh dead-owner heartbeat does not consume another sync budget');
+  assert.equal(await fs.stat(paths.lock).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
+
+  // A live or malformed owner is never declared dead by elapsed clocks, a
+  // partial read or a failed PID probe. Cancelling the waiter changes nothing.
+  for (const seedClaim of [() => seed(process.pid), () => seed(exited.pid, { schemaVersion: 99 }), async () => {
+    await seed(exited.pid); await fs.writeFile(path.join(paths.lock, 'unexpected'), 'synthetic');
+  }]) {
+    await seedClaim();
+    const before = await fs.readFile(path.join(paths.lock, 'owner.json'));
+    const signal = AbortSignal.timeout(250);
+    await assert.rejects(sync(signal), error => error === signal.reason);
+    assert.deepEqual(await fs.readFile(path.join(paths.lock, 'owner.json')), before);
+    assert.equal(reads, 1, 'a blocked waiter never reaches the manifest');
+    await fs.rm(paths.lock, { recursive: true });
+  }
+
+  // Two fresh contenders may recover the same dead owner, but only one may
+  // reach network work at a time. The loser must preserve the successor's lock.
+  await seed(exited.pid);
+  let release; held = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const entering = new Promise(resolve => { entered = resolve; });
+  const first = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  await Promise.race([entering, first.then(() => { throw new Error('WRITER_DID_NOT_REACH_READER'); })]);
+  const successor = JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json')));
+  assert.equal(successor.pid, process.pid);
+  const second = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(reads, 2);
+  assert.equal(JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json'))).lockId, successor.lockId);
+  release(); await Promise.all([first, second]);
+  assert.equal(reads, 3);
+  assert.equal(await fs.stat(paths.pointer).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
+  console.log('DEAD_MIRROR_WRITER_VERIFIED');
+});
 
 test('startup sweep prunes historical schemas including v1 without changing current pointers', async t => {
   const f = await fixture(t);

@@ -1396,6 +1396,11 @@ invocation, without replaying the consumed MCP proof or a cached business answer
 Recipient/pass/ACL/manifest and late native fences remain independent. EOF aborts
 only the host's preparation children and awaits cleanup; encrypted scratch may
 resume normally, but an incomplete mirror is never published or searched.
+The common mirror writer recovers an exact fresh dead-owner claim through its
+existing metadata mutex, native ESRCH and protected identity rechecks. Live or
+unknown owners are never declared dead from elapsed clocks. A cold mirror keeps
+its original first-sync join bound; the short stale-generation refresh wait
+does not turn a healthy first sync into `LOCAL_CONTEXT_SYNC_BUSY` after 30s.
 If the exact owned preparation signal expires, preserve a dedicated closed timeout
 code instead of reporting an assistant-setup failure. Native Git/ChildProcess
 aborts wrap that exact signal reason in `AbortError.cause`; accept only the

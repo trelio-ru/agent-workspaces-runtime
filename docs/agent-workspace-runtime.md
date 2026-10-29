@@ -2052,6 +2052,17 @@ writes, повреждённые pointers и missing current сохраняют�
 keys, credentials и Workspace files не читаются; server state и ACL не меняются.
 Summary хранит только счётчики и время локально в `retention-state.json`.
 Scratchpad файлов сохраняет свой отдельный лимит 512 MiB/семь дней.
+Свежий `sync.lock` после остановки writer восстанавливается без ожидания возраста
+только при valid protected owner schema/UUID/PID и native `ESRCH`. Живой или
+повторно использованный PID, `EPERM`, неизвестные entries, unsafe heartbeat и
+неполная identity не дают такого разрешения. Под тем же `retention.lock`
+повторно проверяются nonce/PID, directory identity и heartbeat inode/mtime,
+затем прежний exact claim переносится в unique stale directory. Конкурирующий
+recoverer не удаляет successor. Прежний heartbeat/age protocol совместим;
+startup sweep не восстанавливает занятые writer claims. Cold managed read без
+complete pointer ждёт под исходным first-sync bound; 30-секундный refresh wait
+относится только к уже существующей stale generation. Сигнал managed pass и
+первоначальный deadline не продлеваются, incomplete generation не публикуется.
 Проверки: `tests/trelio-mirror-retention.test.mjs`, включая Windows gate.
 
 ## Учёт контекста агента

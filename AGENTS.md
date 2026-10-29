@@ -491,6 +491,9 @@ publication tooling также остаются вне этого публичн
   предыдущий и короткий compatibility grace. Startup cleanup охватывает старые
   schema roots без чтения content/keys; sync/read locks, current pointers и
   unsafe paths и смена lock до первого lstat защищены по [контракту](docs/agent-workspace-runtime.md#mirror-retention).
+  Fresh sync claims recover only from a protected valid nonce/PID with native
+  ESRCH, rechecked under the SAME metadata mutex; live/unknown owners stay intact.
+  Cold managed reads keep the original first-sync join bound, not stale-read 30s.
 - Незавершённый encrypted mirror не публикуется. Resume-кэш файлов остаётся
   зашифрованным и привязанным к exact head; свежие manifest/ACL и bounded
   обработка read-conflicts всех этапов чтения обязательны по

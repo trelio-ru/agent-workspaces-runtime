@@ -2146,6 +2146,20 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
         encryptedCompanyContext:descriptor,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,invoke)=>invoke()});
       return common.withWorkspaceExecutionProfile(current,()=>action({identity:f.identity,prepareCompanyContextRead:current.prepareCompanyContextRead}));
     }};
+    // A previous bounded sync can leave fresh metadata after its child exits.
+    // Seed that exact common protocol with a REAL exited PID, then continue
+    // through the genuine task/owner HPKE reader below, never a human fallback.
+    const {spawn}=await import('node:child_process');
+    const exited=spawn(process.execPath,['-e',''],{stdio:'ignore',windowsHide:true});
+    await new Promise((resolve,reject)=>{exited.once('error',reject);exited.once('close',resolve);});
+    assert.throws(()=>process.kill(exited.pid,0),{code:'ESRCH'});
+    await operationOptions.withProfile(async()=>{
+      const {resolveMirrorPaths}=await import('../host-runtime/scripts/trelio-local-context.mjs');
+      const paths=resolveMirrorPaths({origin:f.identity.origin,companyId:f.pass.companyId}),lockId=randomUUID();
+      await common.ensurePrivateDirectory(paths.lock);
+      await common.writePrivateJsonFile(path.join(paths.lock,'owner.json'),{schemaVersion:1,lockId,pid:exited.pid,createdAt:new Date().toISOString()});
+      await common.writePrivateJsonFile(path.join(paths.lock,`${lockId}.heartbeat.json`),{schemaVersion:1,lockId});
+    },{encryptedCompanyContext:descriptor});
     const prepared=await executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},operationOptions);
     assert.deepEqual(prepared,{schemaVersion:1,prepared:true});
     assert.doesNotMatch(JSON.stringify(prepared),new RegExp(canary),'preparation never returns company content');
