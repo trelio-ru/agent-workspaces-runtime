@@ -236,12 +236,17 @@ export class ExtensionVisualBrowser {
   #authenticationTask; #mailAttempt;
   #uploadBytes = 0; #uploadFiles = 0;
   #nativeStartup = visualNativeStartupEvidence('');
-  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
+  constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = false }) {
     if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
     if (lease.deadlineAt <= Date.now()) throw fault('lease_expired');
     Object.assign(this, { dependencies, store, policy, origins, domains, lease, testHeadless, testWindowController, testDiagnostics, observationMode, attachmentDownloads, fileUploads, mailIdentity });
     this.authentication = normalizeVisualAuthentication(authentication, { origins, fixtureOnly: policy.fixtureOnly });
+    // Merely observing fixture stages must not enable Chromium file logging.
+    // The diagnostic native.log may remain locked after browser exit on Windows
+    // and fail disposal on a file an ordinary production launch never creates.
+    // Explicit diagnostic repros may still opt in; the native gate
+    // keeps production's flags, strict cleanup and original stop deadline.
     this.testNativeLogging = Boolean(testDiagnostics) && testNativeLogging;
     this.sessionId = crypto.randomUUID();
     this.#deadline = setTimeout(() => { void this.close().catch(() => this.abort()); }, lease.deadlineAt - Date.now());

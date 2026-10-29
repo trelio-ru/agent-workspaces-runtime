@@ -394,8 +394,9 @@ publication tooling также остаются вне этого публичн
   Existing Preferences не перезаписываются; policy ставится до provider URL,
   readiness подтверждается отдельным hello. Fixture diagnostics возвращают
   только закрытый stage/exit и категории sandbox/display, никогда raw stderr.
-  Native fixture logging keeps production's ignored stdio; read only its bounded
-  private log. An inherited diagnostic pipe must not alter browser stop lifetime.
+  Native fixtures keep production's ignored stdio and default logging flags.
+  Stage diagnostics never enable Chromium file logging; explicit diagnostic
+  repros alone may read a bounded private log. A pipe/log must not alter stop lifetime.
   Loopback transport permission отделён от origins/content matches; CSP connect
   ограничен exact private портом. Fixture log tails дают только закрытые счётчики;
   detached fixture сохраняет те же bounded stages в частный diagnostic-файл.

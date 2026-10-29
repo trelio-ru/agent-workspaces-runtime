@@ -5,6 +5,13 @@ import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidenc
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 
+test('fixture stage diagnostics retain production browser flags without implicitly creating native.log',async()=>{
+  const origins=['http://127.0.0.1:12345'];
+  const browser=new ExtensionVisualBrowser({origins,policy:createVisualOriginPolicy({origins,allowLoopback:true}),dependencies:{},
+    store:{close(){}},lease:{deadlineAt:Date.now()+5000},testDiagnostics:()=>{}});
+  try{assert.equal(browser.testNativeLogging,false);}finally{await browser.close();}
+});
+
 test('native diagnostic logging cannot add a descendant-held pipe to browser shutdown', { timeout: 5000 }, async () => {
   // Chromium helpers may inherit stderr after the main browser has exited.
   // Exercise the same launch boundary with a real native descendant, rather
