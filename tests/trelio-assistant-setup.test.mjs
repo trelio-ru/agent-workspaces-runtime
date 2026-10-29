@@ -2607,6 +2607,50 @@ test('company preparation crosses real serial MCP frames and isolated current-re
  }finally{input.end();await running;}
 });
 
+test('owned preparation deadline survives the real private session and native error frame without accepting lookalikes',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-private-deadline-'));
+ t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const loader=path.join(root,'loader.mjs'),entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+ const session=new URL('../host-runtime/scripts/trelio-hook-private-session.mjs',import.meta.url).href;
+ const diagnostics=new URL('../host-runtime/scripts/trelio-process-diagnostics.mjs',import.meta.url).href;
+ const binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ const request={operation:'company_context_prepare',descriptor:{nativeTool:'search',companySlug:'synthetic'},binding};
+ const environment={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};delete environment.NODE_TEST_CONTEXT;
+ const {spawn}=await import('node:child_process');
+ for(const [mode,expected] of [['owned','ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'],
+   ['foreign','TRELIO_RUNTIME_HOOK_FAILED'],['forged','TRELIO_RUNTIME_HOOK_FAILED'],
+   ['cancelled','TRELIO_RUNTIME_HOOK_FAILED'],['unrelated','ASSISTANT_INTAKE_CHANGED']]){
+  // Actual ALS/private deadline error + actual entry producer/consumer. The
+  // fixture replaces only native company admission/data, never the clock/error
+  // classifier. No account, worker credential, HTTP or model is involved.
+  await fs.writeFile(loader,`import {runAssistantEntry,executeAssistantCompanyContextRequest} from ${JSON.stringify(entry)};
+   import {withPrivateProcessSession,assertRuntimeHookBudget} from ${JSON.stringify(session)};
+   import {ProcessDiagnosticError} from ${JSON.stringify(diagnostics)};
+   const mode=${JSON.stringify(mode)},binding=${JSON.stringify(binding)},controller=new AbortController();let foreign;
+   const other=new AbortController();
+   await withPrivateProcessSession(async()=>{other.abort(new DOMException('PRIVATE_DEADLINE_CANARY','TimeoutError'));
+    try{assertRuntimeHookBudget();}catch(error){foreign=error;}},other.signal);
+   await runAssistantEntry(['request'],{executeRequest:raw=>withPrivateProcessSession(()=>
+    executeAssistantCompanyContextRequest(raw,{signal:controller.signal,
+     withProfile:async action=>action({identity:{origin:'https://synthetic.test'},prepareCompanyContextRead:async()=>({runtime:{
+      scope:{id:binding.scopeId,epoch:binding.scopeEpoch},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}})}),
+     loadContext:async()=>({prepareTrelioLocalCompanyContext:async()=>{
+      controller.abort(new DOMException('PRIVATE_DEADLINE_CANARY',mode==='cancelled'?'AbortError':'TimeoutError'));
+      if(mode==='foreign')throw foreign;
+      if(mode==='forged')throw new ProcessDiagnosticError('TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED','PRIVATE_DEADLINE_CANARY');
+      if(mode==='unrelated')throw Object.assign(Error('PRIVATE_DEADLINE_CANARY'),{code:'ASSISTANT_INTAKE_CHANGED'});
+      assertRuntimeHookBudget();
+     }})}),controller.signal)});`);
+  let launches=0,closed;
+  try{await assert.rejects(requestCurrentAssistantRuntime(request,{environment,resolveLoader:async()=>loader,timeoutMs:5000,
+   spawnProcess:(...args)=>{launches++;const child=spawn(...args);closed=new Promise(r=>child.once('close',r));return child;}}),error=>{
+    assert.equal(error.code,expected,mode);assert.deepEqual(Object.keys(error),['code']);
+    assert.ok(!JSON.stringify(error).includes('PRIVATE_DEADLINE_CANARY'));return true;
+   });
+  }finally{if(closed)await closed;assert.equal(launches,1,'the classifier itself never launches a resume');}
+ }
+});
+
 test('owned preparation timeout resumes through actual serial MCP, native error frames and fresh child pipes',async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-pipes-'));
  t.after(()=>fs.rm(root,{recursive:true,force:true}));

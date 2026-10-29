@@ -1405,6 +1405,11 @@ If the exact owned preparation signal expires, preserve a dedicated closed timeo
 code instead of reporting an assistant-setup failure. Native Git/ChildProcess
 aborts wrap that exact signal reason in `AbortError.cause`; accept only the
 reviewed `AbortError`/`ABORT_ERR` shape with identical cause, or the direct reason.
+The common private session also retains exact deadline Error -> original Signal
+identity in an internal WeakMap, never in a frame or model-selected field. Its
+own closed budget error may follow this same recovery only for that exact
+expired preparation signal with a TimeoutError reason. Foreign/forged budget
+errors, ordinary cancellation and unrelated refusals after expiry stay hard.
 An error name, elapsed clock, unrelated cause or ordinary cancellation is not
 deadline evidence. An explicit closed set of common mirror/accepted-file read
 errors crosses the same worker frame as `ASSISTANT_COMPANY_CONTEXT_*`, without

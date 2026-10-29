@@ -11,6 +11,10 @@ import { ProcessDiagnosticError, processDiagnosticCauseCode } from "./trelio-pro
 
 const hookScope = new AsyncLocalStorage();
 const stageScope = new AsyncLocalStorage();
+// Invocation-local origin only, never a serialized field or model assertion.
+// A trusted reader can distinguish its OWN expired private session from an
+// unrelated error with the same public code, without inspecting prose/clocks.
+const deadlineOrigins = new WeakMap();
 export const PRIVATE_PROCESS_TIMEOUT_MILLISECONDS = 10_000;
 // Startup is bounded once, independently of each operation. Production uses
 // the signed native helper, with no shell/CLR initialization. The enclosing
@@ -50,10 +54,16 @@ const budgetFailure = ({ stage = currentStage(), phase, kind, timeout = "hook" }
   const diagnosticCode = timeoutKind === "hook" ? "TRELIO_RUNTIME_HOOK_DEADLINE_EXCEEDED"
     : phase === "worker_startup" ? "TRELIO_WINDOWS_PRIVATE_PROCESS_START_TIMEOUT"
     : "TRELIO_WINDOWS_PRIVATE_PROCESS_REQUEST_TIMEOUT";
-  return new ProcessDiagnosticError(diagnosticCode,
+  const error = new ProcessDiagnosticError(diagnosticCode,
     `истёк внутренний срок hook (stage=${hookStage}; operation=${operation}; timeout=${timeoutKind})`,
     { hookStage, operation, timeoutKind });
+  const signal=hookScope.getStore()?.signal;
+  if(timeoutKind==='hook'&&signal?.aborted)deadlineOrigins.set(error,signal);
+  return error;
 };
+
+export const isRuntimeHookDeadlineError = (error,signal) =>
+  Boolean(signal?.aborted && deadlineOrigins.get(error)===signal);
 
 export const withRuntimeHookStage = (stage, operation) => {
   if (!HOOK_STAGES.has(stage)) throw new Error("Unknown runtime hook stage.");

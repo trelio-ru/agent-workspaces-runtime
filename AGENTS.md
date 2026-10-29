@@ -126,6 +126,8 @@ publication tooling также остаются вне этого публичн
   Producer/consumer share one closed failure-code predicate; bare auth codes
   never acquire setup provenance. Invalid pipes expose fixed UTF-8/JSON/frame
   stages only, no output or retry grant. Test actual entry-to-entry refusal frames.
+  Owned preparation deadline errors use the SAME private-session Error/Signal
+  identity, never public code/elapsed-clock inference; foreign lookalikes stay hard.
   Native selected ciphertext follows weak snapshot/projection identity through common mirror batches; no cumulative company map or general resolver. Per-response 4096/32-MiB and current-recipient guards remain. Failures expose fixed stages only; no content, counts, paths or automatic retry.
   All local MCP materializers retain closed refusal codes or a fixed local stage,
   never a false endpoint outage. Only the exact native send error retains native

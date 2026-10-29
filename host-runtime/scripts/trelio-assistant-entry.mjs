@@ -2517,9 +2517,15 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     // clock. An unrelated error after expiry must never gain retry authority.
     // Keep this boundary outside the managed profile as well: a late native
     // read/refusal is still part of this same invocation, not setup failure.
-    if(request.operation==='company_context_prepare'&&signal?.aborted&&signal.reason?.name==='TimeoutError'
-      &&(error===signal.reason||error?.name==='AbortError'&&error?.code==='ABORT_ERR'&&error.cause===signal.reason))
-      fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');
+    if(request.operation==='company_context_prepare'&&signal?.aborted&&signal.reason?.name==='TimeoutError'){
+      const {isRuntimeHookDeadlineError}=await import('./trelio-hook-private-session.mjs');
+      // Native ACL/private reads project their original deadline as a closed
+      // ProcessDiagnosticError. Its public code alone is NOT origin evidence.
+      // The shared private session keeps only exact Error -> original Signal
+      // identity in RAM, preserving the same one-owned-timeout recovery rule.
+      if(error===signal.reason||error?.name==='AbortError'&&error?.code==='ABORT_ERR'&&error.cause===signal.reason
+        ||isRuntimeHookDeadlineError(error,signal))fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');
+    }
     // These are closed errors from the SAME common read engines. Do not pass
     // an arbitrary exception, filesystem path, crypto message or backend body
     // through the setup worker. Retaining a fixed read failure neither opens
