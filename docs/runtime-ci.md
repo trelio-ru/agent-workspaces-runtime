@@ -115,7 +115,9 @@ repeat recovery opens. Path-parser tests alone do not cover native deletion.
 Cross-repository shell checks accept either the historical remote startup-timeout
 omission or the current exact `startup_timeout_sec: 60`; routing/OAuth fields stay
 strict. The isolated dead-mirror-writer fixture reports only a closed stage and
-numeric child exit on failure, preserving the original assertion and deadlines.
+numeric child exit plus closed filesystem/native failure categories on failure.
+Concurrent acquisition reports fixed subphases; raw errors, paths and child output
+remain private. The original assertion and deadlines are preserved.
 
 Planning uploads `runtime-ci-plan/ci-plan.json`, binding schema/policy version,
 base/head, complete diff digest, changed paths, selected profile/required jobs

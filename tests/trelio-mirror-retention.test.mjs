@@ -60,10 +60,12 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
       }); } catch (error) {
         // Keep the original failing assertion/exit. Project only fixed stages
         // from this isolated synthetic child, never its raw stdout or paths.
-        const stages = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_STAGE:(?:root|pid|first|live|malformed|unexpected|concurrent|verified)\b/gu);
+        const stages = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_STAGE:(?:root|pid|first|live|malformed|unexpected|concurrent|entered|owner|waiting|released|settled|verified)\b/gu);
+        const failures = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_ERROR:(?:ENOENT|EACCES|EPERM|EEXIST|ERR_ASSERTION|TRELIO_WINDOWS_PRIVATE_ACL_FAILED|other):(?:lstat|stat|open|read|mkdir|rename|rmdir|unlink|other):(?:path_decode|identity|owner_read|owner_write|dacl_write|dacl_verify|other)\b/gu);
         t.diagnostic(JSON.stringify({ fixture: 'dead_mirror_writer',
           stage: stages?.at(-1)?.split(':')[1] ?? null,
-          exitCode: Number.isInteger(error.code) ? error.code : null }));
+          exitCode: Number.isInteger(error.code) ? error.code : null,
+          failures: failures ?? [] }));
         throw error;
       }
       assert.match(child.stdout, /DEAD_MIRROR_WRITER_VERIFIED/u);
@@ -100,8 +102,25 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
     throw refusal;
   };
   t.after(() => { globalThis.fetch = previousFetch; });
-  const sync = signal => syncCompanyContextMirror({ origin, token: 'synthetic-token',
-    companyEncryption: encryption, requireFresh: true, signal });
+  // Preserve the actual rejection for assertions, projecting only a closed
+  // filesystem/native category through the isolated child. In particular an
+  // ACL refusal must not disappear inside assert.rejects' predicate failure.
+  const observed = async promise => {
+    try { return await promise; } catch (error) {
+      const originalCode = error.diagnosticCode ?? error.code;
+      const code = ['ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'ERR_ASSERTION',
+        'TRELIO_WINDOWS_PRIVATE_ACL_FAILED'].includes(originalCode) ? originalCode : 'other';
+      const syscall = ['lstat', 'stat', 'open', 'read', 'mkdir', 'rename', 'rmdir', 'unlink']
+        .includes(error.syscall) ? error.syscall : 'other';
+      const phase = String(error.operation ?? '').split('.').at(-1);
+      const native = ['path_decode', 'identity', 'owner_read', 'owner_write', 'dacl_write', 'dacl_verify']
+        .includes(phase) ? phase : 'other';
+      console.log(`MIRROR_DEAD_WRITER_ERROR:${code}:${syscall}:${native}`);
+      throw error;
+    }
+  };
+  const sync = signal => observed(syncCompanyContextMirror({ origin, token: 'synthetic-token',
+    companyEncryption: encryption, requireFresh: true, signal }));
   await seed(exited.pid);
   console.log('MIRROR_DEAD_WRITER_STAGE:first');
   await assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
@@ -132,13 +151,18 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   const entering = new Promise(resolve => { entered = resolve; });
   const first = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
   await Promise.race([entering, first.then(() => { throw new Error('WRITER_DID_NOT_REACH_READER'); })]);
-  const successor = JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json')));
+  console.log('MIRROR_DEAD_WRITER_STAGE:entered');
+  const successor = JSON.parse(await observed(fs.readFile(path.join(paths.lock, 'owner.json'))));
+  console.log('MIRROR_DEAD_WRITER_STAGE:owner');
   assert.equal(successor.pid, process.pid);
   const second = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  console.log('MIRROR_DEAD_WRITER_STAGE:waiting');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(reads, 2);
   assert.equal(JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json'))).lockId, successor.lockId);
-  release(); await Promise.all([first, second]);
+  release(); console.log('MIRROR_DEAD_WRITER_STAGE:released');
+  await Promise.all([first, second]);
+  console.log('MIRROR_DEAD_WRITER_STAGE:settled');
   assert.equal(reads, 3);
   assert.equal(await fs.stat(paths.pointer).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
   console.log('MIRROR_DEAD_WRITER_STAGE:verified');
