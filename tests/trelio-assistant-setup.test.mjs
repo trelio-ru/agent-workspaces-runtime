@@ -418,6 +418,8 @@ test('request transport preserves closed failure boundaries through real native 
   });
   await t.test('successful UTF-8 result and exact native failure retain the existing frame',async()=>{
     assert.deepEqual(await invoke(`process.stdout.write(JSON.stringify({value:{text:'Тест 🧭'}}));`),{text:'Тест 🧭'});
+    assert.equal(await invoke(`const b=Buffer.from(JSON.stringify({value:'Тест 🧭'}));
+      for(const byte of b){process.stdout.write(Buffer.from([byte]));await new Promise(r=>setImmediate(r));}`),'Тест 🧭');
     await assert.rejects(invoke(`process.stdout.write(JSON.stringify({failure:'ASSISTANT_PASS_REVIEW_REQUIRED'}));`),
       {code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
   });
@@ -439,6 +441,13 @@ test('request transport preserves closed failure boundaries through real native 
     for(const value of ['PRIVATE_PIPE_CANARY','null','[]','{"value":1,"extra":"PRIVATE_PIPE_CANARY"}',
       '{"failure":"PRIVATE_PIPE_CANARY"}','{"value":1}\n{"value":2}'])
       await refuses(`process.stdout.write(${JSON.stringify(value)});`,'INVALID_RESPONSE');
+    // A damaged byte INSIDE a JSON string used to become U+FFFD and pass as
+    // a successful answer. Test native bytes, including an incomplete final
+    // sequence, rather than a JavaScript string already normalized by Node.
+    for(const bytes of [[123,34,118,97,108,117,101,34,58,34,195,34,125],
+      [123,34,118,97,108,117,101,34,58,34,195],
+      [239,187,191,123,34,118,97,108,117,101,34,58,49,125]])
+      await refuses(`process.stdout.write(Buffer.from(${JSON.stringify(bytes)}));`,'INVALID_RESPONSE');
   });
   await t.test('original output bound stops the producer without reflecting its bytes',async()=>{
     await refuses(`process.stdout.write(Buffer.alloc(768*1024+1,65));setInterval(()=>{},1000);`,'OUTPUT_TOO_LARGE');

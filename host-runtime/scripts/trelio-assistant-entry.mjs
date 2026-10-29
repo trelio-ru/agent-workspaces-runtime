@@ -1002,7 +1002,10 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
   if(Buffer.byteLength(input)>131072) fail('ASSISTANT_MCP_FRAME_TOO_LARGE');
   const loader=await resolveLoader({environment});
   return new Promise((resolve,reject)=>{
-    let child,done=false,bytes=0,output='';const decoder=new StringDecoder('utf8');
+    // Reject damaged/truncated UTF-8 instead of silently replacing bytes in a
+    // content-bearing JSON string. Preserve a BOM so JSON's existing strict
+    // grammar still rejects it; ordinary split multibyte chunks remain valid.
+    let child,done=false,bytes=0,output='';const decoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});
     const finish=(error,value)=>{if(done)return;done=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);child?.kill?.();error?reject(error):resolve(value);};
     // Keep the exact local transport boundary, not native exception text. A
     // process timeout, caller cancellation, failed spawn and malformed/empty
@@ -1021,12 +1024,13 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
       // unhandled EventEmitter error that tears down the long-lived MCP host.
       child.stdout.on('error',()=>refuse('OUTPUT_FAILED'));
       child.stdout.on('data',chunk=>{
-        bytes+=chunk.length;if(bytes>768*1024)return refuse('OUTPUT_TOO_LARGE');output+=decoder.write(chunk);
+        bytes+=chunk.length;if(bytes>768*1024)return refuse('OUTPUT_TOO_LARGE');
+        try{output+=decoder.decode(chunk,{stream:true});}catch{return refuse('INVALID_RESPONSE');}
       });
       child.once('close',code=>{
         if(code!==0)return refuse('EXITED');
         try {
-          const value=JSON.parse(output+decoder.end());
+          const value=JSON.parse(output+decoder.decode());
           if(value?.failure && (/^(?:ASSISTANT_|DIGITAL_ASSISTANTS_)[A-Z_]{1,100}$/u.test(value.failure)
             ||PROCESS_DIAGNOSTIC_CODES.includes(value.failure)||value.failure==='TRELIO_SKILL_PYTHON_REQUIRED'
             ||assistantSetupRecovery({code:value.failure,setupRecovery:value.setupRecovery,status:value.status}))) {
@@ -1040,7 +1044,7 @@ export const requestCurrentAssistantRuntime = async (request, {environment=proce
           }
           if(!value || Object.getPrototypeOf(value)!==Object.prototype || Object.keys(value).join(',')!=='value')return refuse('INVALID_RESPONSE');
           finish(null,value.value);
-        } catch { refuse(output.length===0?'EMPTY_RESPONSE':'INVALID_RESPONSE'); }
+        } catch { refuse(bytes===0?'EMPTY_RESPONSE':'INVALID_RESPONSE'); }
       });
       child.stdin.end(input);
     } catch { refuse('PROCESS_FAILED'); }

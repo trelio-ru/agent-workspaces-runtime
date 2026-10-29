@@ -1428,6 +1428,9 @@ Real-process fixtures cover success, native refusal, cancellation, timeout,
 startup/exit and empty/malformed/oversized pipes without an account or model.
 Native stdout-pipe errors settle this one request through the same closed frame
 instead of becoming an unhandled event on the long-lived MCP process.
+UTF-8 decoding is fatal for damaged or truncated sequences: native bytes cannot
+silently become replacement characters inside an otherwise valid JSON answer.
+Split multibyte chunks remain supported; BOM-prefixed JSON remains rejected.
 
 Native selected ciphertext has the lifetime of its exact decoded response. The
 managed profile holds only weak root/projection associations, not a cumulative
