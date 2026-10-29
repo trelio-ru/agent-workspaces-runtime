@@ -87,7 +87,7 @@ export const ASSISTANT_SETUP_TOOLS = Object.freeze([
     inputSchema: schema({ enrollmentId: enrollment }) },
   { name: 'get_assistant_setup_status', description: 'Read local setup state and, for a paired device, verify live server contact. Does not imply task execution or background service readiness.',
     inputSchema: schema({ enrollmentId: enrollment }), annotations: { readOnlyHint: true, idempotentHint: true } },
-  { name: 'install_assistant_background', description: 'Register the paired assistant supervisor for this Windows user at sign-in. Requires an explicit setup request. No automatic logon, saved password, elevation or readiness assertion. autoUpdatePlugin opts into model-free plugin maintenance and a graceful idle Desktop restart; set it only when the human explicitly requests that setup policy. autoUpdateCodex separately opts this machine into official signed Windows Desktop updates at the same idle boundary; never infer it from autoUpdatePlugin. Standalone CLI updates are excluded. Changed hooks remain human-reviewed. Does not start it now.',
+  { name: 'install_assistant_background', description: 'Register the paired assistant supervisor for this Windows user at sign-in. Requires an explicit setup request. No automatic logon, saved password, elevation or readiness assertion. autoUpdatePlugin opts into model-free plugin maintenance and a graceful idle Desktop restart; set it only when the human explicitly requests that setup policy. Official signed Windows Desktop updates are enabled by default for new and existing paired assistants, only at the same safe idle boundary. autoUpdateCodex optionally overrides that device policy; omission preserves an explicit owner opt-out and requires no enabling step. Standalone CLI updates are excluded. Changed hooks remain human-reviewed. Does not start it now.',
     inputSchema: {type:'object',properties:{autoUpdatePlugin:{type:'boolean'},autoUpdateCodex:{type:'boolean'}},required:[],additionalProperties:false}, annotations: { idempotentHint: true } },
   { name: 'get_assistant_background_status', description: 'Read back this paired Windows user\'s exact Task Scheduler registration and OS running state, plus a content-free dispatch diagnostic. Missing company model or reasoning is a configuration block, even with no queued events. Unknown is not idle. Does not prove delivery or business readiness.',
     inputSchema: schema({}), annotations: { readOnlyHint: true, idempotentHint: true } },
@@ -1445,8 +1445,8 @@ export const runProductionAssistantPluginMaintenance = async (runtime,{context=p
   });
 };
 
-/** Desktop servicing is available only to the background worker, with separate
- * per-device consent. It reuses the strict coordinator and setup locks rather
+/** Desktop servicing defaults on for paired assistants, with an identity-bound
+ * owner opt-out. It reuses the strict coordinator and setup locks rather
  * than interpreting a quiet UI or an expired delivery as an idle computer. */
 export const runProductionAssistantCodexMaintenance = async (runtime,{context=productionContext,environment=process.env,
   platform=process.platform,signal,nativeUpdate=runAssistantWindowsCodexUpdate,download=downloadCodexDesktop,desktop,probe}={}) => {
@@ -1465,8 +1465,8 @@ export const runProductionAssistantCodexMaintenance = async (runtime,{context=pr
       if(['assistantId','deviceId','origin'].some(key=>client.identity[key]!==runtime.identity[key])
         ||['pending_owner','quiescing'].includes((await host.readActivation())?.stage)
         ||await host.readActivePass()!==null||await host.readCodexUpdatesEnabled()!==true)fail('ASSISTANT_HOST_REBIND_REQUIRED');
-      // Desktop servicing has its own consent and can outlive a normal tick.
-      // A local opt-in/identity never proves that this device is still live:
+      // Desktop servicing has its own policy and can outlive a normal tick.
+      // A local default/identity never proves that this device is still live:
       // recheck the model-free native control plane before every effect, even
       // when plugin maintenance was disabled or the download took minutes.
       // Revocation, pause, owner removal and expiry must stop OS mutations.

@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { createAssistantHostState } from '../host-runtime/scripts/trelio-assistant-hook.mjs';
 
 const versions={pluginVersion:'3.2.3',hostRuntimeVersion:'5.0.0'};
 
@@ -118,20 +119,28 @@ test('the final idle fence prevents every update effect when work or setup raced
   assert.deepEqual(f.effects,[]);assert.equal(f.state.phase,'ready');
 });
 
-test('Desktop production composition requires its own consent and SAME coordinator/setup idle boundary',async()=>{
+test('Desktop production composition services an existing default-on device through SAME coordinator/setup idle boundary',async()=>{
   const identity={assistantId:randomUUID(),deviceId:randomUUID(),origin:'https://trelio.ru'};
-  let enabled=false,reads=0,idle=0,setup=0,inside=false;
-  const local={readCodexUpdatesEnabled:async()=>enabled,readCodexUpdate:async()=>null,
+  const files=new Map();
+  const policy=createAssistantHostState({directory:path.join(os.tmpdir(),'synthetic-desktop-policy-'+randomUUID()),store:{get:async()=>null},primitives:{
+    ensurePrivateDirectory:async()=>{},assertPrivatePathKind:async file=>{if(!files.has(file))throw Object.assign(Error(),{code:'ENOENT'});},
+    readPrivateJsonFile:async file=>structuredClone(files.get(file)),writePrivateJsonFile:async(file,value)=>files.set(file,structuredClone(value)),
+  }});
+  await policy.saveIdentity(identity);
+  let reads=0,idle=0,setup=0,inside=false;
+  const local={readCodexUpdatesEnabled:()=>policy.readCodexUpdatesEnabled(),readCodexUpdate:async()=>null,
     readActivation:async()=>null,readActivePass:async()=>null,codexUpdatePackagePath:async()=>'C:\\private\\desktop.msix',
     withSetupLock:async action=>{setup++;inside=true;try{return await action();}finally{inside=false;}},writeCodexUpdate:async()=>{}};
   const runtime={identity,coordinator:{maintainPluginAtIdleBoundary:async action=>{idle++;return action(async()=>{});}}};
   const options={platform:'win32',context:async action=>action({identity,readHealth:async()=>({code:'ready'})},local),
     nativeUpdate:async()=>{assert.equal(inside,true);reads++;throw Error('native unavailable');}};
-  assert.equal((await runProductionAssistantCodexMaintenance(runtime,options)).state,'disabled');assert.equal(reads,0);assert.equal(idle,0);
-  enabled=true;await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
   assert.equal(idle,1);assert.equal(setup,1);assert.equal(reads,1);
+  assert.equal([...files.keys()].some(file=>path.basename(file)==='codex-policy.json'),false,'no enabling/setup write is required');
   local.readActivePass=async()=>({kind:'task'});reads=0;
   await assert.rejects(runProductionAssistantCodexMaintenance(runtime,options));assert.equal(reads,0,'native operation must recheck current pass');
+  await policy.setCodexUpdatesEnabled(false,identity);idle=0;
+  assert.equal((await runProductionAssistantCodexMaintenance(runtime,options)).state,'disabled');assert.equal(reads,0);assert.equal(idle,0);
 });
 
 test('live device revocation during download blocks preparation and every GUI/install effect',async()=>{

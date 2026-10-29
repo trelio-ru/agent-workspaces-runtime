@@ -117,7 +117,7 @@ test("assistant installer policy crosses the signed runtime entry and the manage
   }
 });
 
-test('Desktop opt-in crosses BOTH entry boundaries separately and rejects duplicate/foreign flags',async()=>{
+test('Desktop policy override crosses BOTH entry boundaries separately and rejects duplicate/foreign flags',async()=>{
   const {runAssistantEntry}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   for(const flags of [['--auto-update-codex=on'],['--auto-update-codex=off'],['--auto-update-plugin=on','--auto-update-codex=on']]){
     const route=resolveHostRuntimeInvocation(['bridge','assistant','background-install',...flags]);let actual;

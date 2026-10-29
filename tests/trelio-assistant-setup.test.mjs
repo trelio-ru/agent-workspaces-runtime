@@ -2184,10 +2184,20 @@ test('old devices remain opted out and an explicit policy remains bound to the c
   assert.equal(await host.readPluginUpdatesEnabled(),false);
 });
 
-test('Desktop consent and state are private identity-bound CAS, independent from plugin consent',async()=>{
-  const {host}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
-  await host.saveIdentity(identity);assert.equal(await host.readCodexUpdatesEnabled(),false);
-  await host.setPluginUpdatesEnabled(true,identity);assert.equal(await host.readCodexUpdatesEnabled(),false);
+test('Desktop updates default on for existing paired devices without setup or policy writes, preserving an owner opt-out',async()=>{
+  const {host,files}=memorySetupHost({get:async()=>null});const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  await assert.rejects(host.readCodexUpdatesEnabled(),{code:'ASSISTANT_HOST_NOT_CONFIGURED'});
+  await host.saveIdentity(identity);const originalFiles=structuredClone(files);
+  assert.equal(await host.readCodexUpdatesEnabled(),true);
+  assert.deepEqual(files,originalFiles,'an existing device needs no migration write or enabling call');
+  assert.equal(await host.readPluginUpdatesEnabled(),false,'Desktop default does not opt into plugin changes');
+  host.readActivePass=async()=>({kind:'task'});
+  assert.equal(await host.readCodexUpdatesEnabled(),true,'the default is readable while work remains protected by the coordinator');
+  assert.deepEqual(files,originalFiles,'reading the default does not clear or recreate any state');
+  host.readActivePass=async()=>null;
+  await host.setPluginUpdatesEnabled(true,identity);assert.equal(await host.readCodexUpdatesEnabled(),true);
+  await host.setCodexUpdatesEnabled(false,identity);assert.equal(await host.readCodexUpdatesEnabled(),false);
+  assert.equal(await host.readPluginUpdatesEnabled(),true,'an explicit Desktop opt-out remains independent');
   await host.setCodexUpdatesEnabled(true,identity);assert.equal(await host.readCodexUpdatesEnabled(),true);
   await assert.rejects(host.setCodexUpdatesEnabled(true,{...identity,deviceId:randomUUID()}),/REBIND_REQUIRED/);
   const state={schemaVersion:1,assistantId:identity.assistantId,deviceId:identity.deviceId,phase:'ready',checkedAt:1,etag:null,
@@ -2199,6 +2209,25 @@ test('Desktop consent and state are private identity-bound CAS, independent from
   await host.setCodexUpdatesEnabled(false,identity);
   await assert.rejects(host.setCodexUpdatesEnabled(true,identity),{code:'ASSISTANT_LOCAL_SETUP_TASK_ACTIVE'});
   assert.equal(await host.readCodexUpdatesEnabled(),false);assert.equal(await host.readPluginUpdatesEnabled(),true);
+  const policyPath=[...files.keys()].find(file=>path.basename(file)==='codex-policy.json');
+  const policy=files.get(policyPath);
+  for(const change of [{autoUpdateCodex:'false'},{deviceId:randomUUID()},{assistantId:randomUUID()},{unknown:true}]){
+    files.set(policyPath,{...policy,...change});
+    await assert.rejects(host.readCodexUpdatesEnabled(),{code:'ASSISTANT_CODEX_UPDATE_FAILED'});
+  }
+  files.set(policyPath,policy);
+  assert.equal(await host.readCodexUpdatesEnabled(),false,'the original explicit opt-out remains intact');
+});
+
+test('Desktop default never converts a denied policy read into permission',async()=>{
+  const identity={origin:'https://trelio.ru',assistantId:randomUUID(),deviceId:randomUUID()};
+  const host=createAssistantHostState({directory:path.join(os.tmpdir(),'synthetic-desktop-policy'),store:{get:async()=>null},primitives:{
+    ensurePrivateDirectory:async()=>{},
+    assertPrivatePathKind:async file=>{if(path.basename(file)==='codex-policy.json')throw Object.assign(Error(),{code:'EACCES'});},
+    readPrivateJsonFile:async()=>({schemaVersion:1,...identity}),
+    writePrivateJsonFile:async()=>assert.fail('a policy read must not write'),
+  }});
+  await assert.rejects(host.readCodexUpdatesEnabled(),{code:'EACCES'});
 });
 
 test('explicit native-writable setup resumes only an untouched bootstrap, never a failed plugin or hook decision',async()=>{

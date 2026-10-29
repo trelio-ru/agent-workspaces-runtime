@@ -241,11 +241,15 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
   return {
     readIdentity,
     readActivation,
-    // This separate per-device opt-in must never inherit plugin-update consent.
-    // Missing policy means disabled, including every existing installation.
+    // Desktop servicing is the default for every paired assistant, including
+    // devices connected before this policy existed. Resolve the default at
+    // read time: no setup rerun, migration write or active-pass reset is needed.
+    // Only a genuinely absent policy uses the default. An explicit owner opt-out
+    // remains identity-bound; denied, malformed or foreign policy reads still
+    // fail closed. The background coordinator independently admits every effect.
     async readCodexUpdatesEnabled(){
       const target=await maintenanceFile('codex-policy');
-      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return false;throw error;}
+      try{await ops.assertPrivatePathKind(target,'file');}catch(error){if(error.code==='ENOENT')return true;throw error;}
       const value=await ops.readPrivateJsonFile(target,{maximumBytes:4096}),current=await readIdentity();
       if(!value||Object.keys(value).sort().join(',')!=='assistantId,autoUpdateCodex,deviceId,schemaVersion'
         ||value.schemaVersion!==1||typeof value.autoUpdateCodex!=='boolean'||!current

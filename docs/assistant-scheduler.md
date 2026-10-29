@@ -1939,12 +1939,19 @@ the independent policy below.
 
 ### Automatic Codex Desktop updates (Windows)
 
-`install_assistant_background({autoUpdateCodex:true})` independently opts the
-paired machine into Desktop servicing. `--auto-update-codex=on|off` crosses both
-signed entry boundaries; it may accompany the existing plugin flag. Omission
-preserves policy and an absent policy is disabled. Existing plugin consent never
-becomes Desktop consent. Setup records it after native background registration;
-it does not update or restart the app during pairing. The status read exposes
+Official signed Codex Desktop updates are enabled by default for every paired
+assistant, including devices connected before Desktop servicing existed. No
+separate opt-in, setup rerun or per-device migration is required: an absent
+identity-bound private policy reads as enabled, without writing state or changing
+an active pass. Only a genuinely absent file uses this default; unreadable,
+malformed or foreign state still refuses. An explicit owner opt-out remains off.
+
+The optional `autoUpdateCodex` setup override and host-only
+`--auto-update-codex=on|off` remain compatible across both signed entry boundaries.
+Omission preserves an explicit override and otherwise uses the default. Plugin
+maintenance keeps its independent explicit opt-in; neither policy changes the
+other. Setup overrides are recorded after native background registration and do
+not update or restart the app during pairing. Status exposes
 `pluginMaintenance.codexUpdates` with only enabled/stage/version metadata.
 
 The current signed background tick first completes plugin maintenance, then
@@ -1998,7 +2005,7 @@ resume the prior healthy Desktop after its fresh probe; its failed version stays
 latched and is reported without repeated installation. Only a newer signed
 candidate may be attempted. A later exact native version/fresh GUI/probe may
 also verify an already deferred registration without another installation. Health metadata cannot clear that retained failure.
-Disabling consent during an unresolved installation preserves its journal and
+Disabling Desktop updates during an unresolved installation preserves its journal and
 reports the existing closed incident, without making pending work falsely idle.
 
 The tests cover orchestration, download bounds, policy/CAS and interrupted
