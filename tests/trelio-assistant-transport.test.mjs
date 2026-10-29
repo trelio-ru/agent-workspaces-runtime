@@ -2464,7 +2464,7 @@ test('encrypted task reads compose the SAME managed keys, HPKE, native exact pro
   }
 });
 
-for(const named of [false,true])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${named?'named':'task'})`,async()=>{
+for(const named of [false,true])test(`encrypted Workspace inspect open finish composes real Git, managed HPKE, native ciphertext and the SAME readonly cache (${named?'named':'task'})`,{timeout:150000},async()=>{
   // An actual isolated child is necessary: the common module captures its
   // private config root at import time. Never write synthetic authority/cache
   // into the developer's real HOME or share a human remembered-key profile.
@@ -2485,8 +2485,15 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     const childEnv={...process.env,HOME:root,USERPROFILE:root,LOCALAPPDATA:path.join(root,'l'),GIT_TRACE2_EVENT:gitTrace,
       TRELIO_WORKSPACE_DISABLE_KEYCHAIN:'1',TRELIO_ASSISTANT_INSPECTION_FIXTURE:'1'};
     delete childEnv.NODE_TEST_CONTEXT;
+    // This child composes FOUR sequential workflows: accepted inspect and
+    // refusal checks; writable open/portable recovery; handoff/finish; fresh
+    // accepted material read-back. A single 30s aggregate ceiling silently
+    // charged every native Git launch/setup to the first workflow's budget.
+    // Give the complete synthetic child four bounded 30s phase allowances,
+    // plus 30s for this outer fixture's setup/cleanup. No production request,
+    // native command, proof/session lease or operation deadline is changed.
     try{const result=await promisify(execFile)(process.execPath,['--test','--test-name-pattern',`encrypted Workspace inspect open finish.*\\(${named?'named':'task'}\\)$`,fileURLToPath(import.meta.url)],{
-      env:childEnv,timeout:30000,maxBuffer:1024*1024});
+      env:childEnv,timeout:4*30000,maxBuffer:1024*1024});
       assert.match(result.stdout,/ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED/u);
     }catch(error){
       // Keep synthetic-child failure evidence bounded to its error/stack, not
@@ -2494,10 +2501,11 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
       const lines=String(error.stdout??'').split('\n').filter(line=>/^\s*(?:error: [^|]|code: |at |stack:|TestContext\.|async )/u.test(line));
       // Only synthetic local Git runs enter this disposable trace. Preserve the
       // guard failure and expose closed categories, never paths/argv/raw stderr.
-      const categories=new Set();
+      const categories=new Set();let gitStarts=0;
       try{if((await fs.stat(gitTrace)).size<=1024*1024){
         for(const line of (await fs.readFile(gitTrace,'utf8')).split('\n')){
           let event;try{event=JSON.parse(line);}catch{continue;}
+          if(event.event==='start')gitStarts++;
           if(event.event!=='error'||typeof event.msg!=='string')continue;
           const message=event.msg;
           categories.add(/crlf|line endings|LF will/iu.test(message)?'line_endings'
@@ -2507,7 +2515,14 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
             :/permission|denied|could not open|cannot open|unable to access/iu.test(message)?'inaccessible_path':'other');
         }
       }}catch{}
+      // Retain only this actual child boundary and allowlisted synthetic
+      // progress. Duration alone never identifies the native failure inside.
+      const stages=[...String(error.stdout??'').matchAll(/ASSISTANT_ENCRYPTED_INSPECTION_STAGE:(setup|inspect|open|recover|handoff|finish|material|done)\b/gu)];
+      const boundary={stage:stages.at(-1)?.[1]??'not_observed',killed:error.killed===true,
+        signal:['SIGTERM','SIGKILL'].includes(error.signal)?error.signal:null,
+        exitCode:Number.isSafeInteger(error.code)?error.code:null,gitStarts};
       throw new Error((lines.slice(0,12).join('\n')||'Encrypted Workspace child failed')
+        +'\nSynthetic child boundary: '+JSON.stringify(boundary)
         +'\nSynthetic Git diagnostic categories: '+([...categories].sort().join(',')||'none'));
 
     }finally{
@@ -2517,6 +2532,8 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     }
     return;
   }
+  const stage=name=>console.log('ASSISTANT_ENCRYPTED_INSPECTION_STAGE:'+name);
+  stage('setup');
   const common=await import('../host-runtime/scripts/trelio-workspace.mjs');
   const {executeAssistantWorkspacePlan}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
   const f=await workspaceProfileFixture({encryptedInspection:true}),descriptor=f.inspectionDescriptor;
@@ -2584,6 +2601,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     encryptedInspection:descriptor,localAction:{schemaVersion:1,operation:'inspect',parameters:{workspaceId:descriptor.workspaceId}}};
   const run=()=>common.withWorkspaceExecutionProfile(f.profile,()=>executeAssistantWorkspacePlan(plan,{withProfile:action=>action(f)}));
   try{
+    stage('inspect');
     const result=await run(),directory=result.stdout.trim(),context=path.join(path.dirname(directory),'context');
     assert.equal(await fs.readFile(path.join(directory,'result.md'),'utf8'),'SELECTED_ACCEPTED_FILE');
     assert.equal(await fs.readFile(path.join(context,'agent-instructions.md'),'utf8'),'SELECTED_ASSISTANT_RULES');
@@ -2715,6 +2733,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     };
     const writerPlan={prepared:true,scope:plan.scope,encryptedLifecycle:descriptor,localAction:{schemaVersion:1,operation:'open',
       parameters:{...runIdentity,runtimeSessionId:f.runtime.state.runtimeSessionId}}};
+    stage('open');
     const opened=await common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
     let writable=path.join(assistantTaskStorageDirectory(common.resolveWorkspaceBridgeConfigDirectory(),{
@@ -2754,6 +2773,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     await common.runGit(['add','local-only.md'],{cwd:writable});await common.runGit(['commit','-m','Retained local delta'],{cwd:writable});
     const sourceDirectory=writable,sourceHead=(await common.runGit(['rev-parse','HEAD'],{cwd:writable})).stdout.trim();
     nativeRun={...nativeRun,status:'expired',draftHead};
+    stage('recover');
     const reopened=await common.withWorkspaceExecutionProfile(writerProfile,()=>executeAssistantWorkspacePlan(writerPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
     const recovery=JSON.parse(reopened.stdout.trim().split('\n').at(-1)).assistantLocalRecovery;
@@ -2797,11 +2817,12 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     handoffTargetMode='valid';
     const handoffPlan={...finishPlan,localAction:{...finishPlan.localAction,operation:'checkpoint',
       parameters:{...finishPlan.localAction.parameters,type:'handoff'}}};
+    stage('handoff');
     const handedOff=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(handoffPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));
     assert.equal(handedOff.operation,'checkpoint');assert.equal(latestCheckpoint.checkpointType,'handoff');
     assert.equal(Object.hasOwn(latestCheckpoint,'taskOutcome'),!named);
-    let finished;
+    stage('finish');let finished;
     try{finished=await common.withWorkspaceExecutionProfile(observedWriterProfile,()=>executeAssistantWorkspacePlan(finishPlan,{
       withProfile:action=>action({...f,prepareWorkspaceRun:writerProfile.prepareWorkspaceRun})}));}
     catch(error){throw new Error((deniedFixtureRoute??'fixture-native')+' '+error.code);}
@@ -2846,6 +2867,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     const chainLength=Buffer.alloc(4);chainLength.writeUInt32BE(chainHeader.length);
     selectedCipher=Buffer.concat([Buffer.from('TRELIOH1'),chainLength,chainHeader,bytes,acceptedRevisionBytes]);
     snapshot.workspace.acceptedHead=selectedHead;
+    stage('material');
     const materialProfile=await createAssistantWorkspaceProfile({identity:f.identity,host:f.host,client:f.client,store:f.store,
       materialWorkspaceId:descriptor.workspaceId,lockDirectory:path.join(os.tmpdir(),'synthetic-material-locks'),lock:(_file,action)=>action()});
     const {withAssistantEncryptedMaterial}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
@@ -2877,7 +2899,7 @@ for(const named of [false,true])test(`encrypted Workspace inspect open finish co
     mode='late-close';
     const file=path.join(directory,'result.md');if(process.platform!=='win32')await fs.chmod(file,0o600);
     await fs.writeFile(file,'tampered');await assert.rejects(run());
-    console.log('ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED');
+    stage('done');console.log('ASSISTANT_ENCRYPTED_INSPECTION_VERIFIED');
   }finally{globalThis.fetch=savedFetch;}
 });
 

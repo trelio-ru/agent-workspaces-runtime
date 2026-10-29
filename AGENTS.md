@@ -931,6 +931,9 @@ publication tooling также остаются вне этого публичн
 - Rate-limit and portable-Workspace fixtures budget all sequential CLI calls plus
   setup/cleanup separately; each original process deadline and no-duplicate
   assertion remains enforced. Diagnose timeout with closed stage/counters, never private output.
+  Isolated encrypted inspection/open/recovery/finish/material fixtures likewise
+  have one bounded aggregate budget, with actual child exit/signal and closed
+  phase evidence; never infer their internal failure from elapsed time alone.
   Saved-handoff fixture cleanup retries only its disposable cwd after every
   child has settled and its server closed; no bridge request or assertion retry.
   Synthetic Windows carrier uses the scheduler's exact Utility manifest import,
