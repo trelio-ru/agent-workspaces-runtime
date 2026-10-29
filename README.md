@@ -607,8 +607,9 @@ Bounds, private Run binding и E2EE – в
 reparse points, malformed/oversized input и отсутствие plaintext в ошибках.
 Отдельная native регрессия меняет ACL между вызовами одного worker и проверяет
 repair для чужой/deny ACE, partial mask, inheritance и unprotected DACL. Настоящий
-encrypted search cache записывает и заново читает 8192 записей под фиксированным
-двухминутным бюджетом; составная owner-company цепочка остаётся отдельным gate.
+encrypted search cache записывает и заново читает 8192 записей под прежним
+десятиминутным бюджетом первой синхронизации, с закрытыми стадиями/счётчиками;
+составная owner-company цепочка остаётся отдельным gate.
 
 Tag workflow загружает native artifact только из успешного PR gate exact SHA.
 Package builder требует metadata с SHA исходника, размером/SHA и PE machine

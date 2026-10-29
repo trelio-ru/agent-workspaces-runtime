@@ -63,22 +63,28 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
         // from this isolated synthetic child, never its raw stdout or paths.
         const stages = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_STAGE:(?:root|pid|first|live|malformed|unexpected|concurrent|entered|owner|waiting|released|settled|race_absent|race_replaced|race_unchanged|verified)\b/gu);
         const failures = String(error.stdout ?? '').match(/MIRROR_DEAD_WRITER_ERROR:(?:ENOENT|EACCES|EPERM|EEXIST|ERR_ASSERTION|TRELIO_WINDOWS_PRIVATE_ACL_FAILED|other):(?:lstat|stat|open|read|mkdir|rename|rmdir|unlink|other):(?:path_decode|identity|owner_read|owner_write|dacl_write|dacl_verify|other)\b/gu);
+        const line=String(error.stdout??'').match(/MIRROR_DEAD_WRITER_DIAGNOSTIC (\{[^\r\n]*\})/u)?.[1];
+        const diagnostic=line?JSON.parse(line):null;
         t.diagnostic(JSON.stringify({ fixture: 'dead_mirror_writer',
           stage: stages?.at(-1)?.split(':')[1] ?? null,
           exitCode: Number.isInteger(error.code) ? error.code : null,
-          failures: failures ?? [] }));
+          signal:/^SIG[A-Z]+$/u.test(error.signal??'')?error.signal:null,
+          failures: failures ?? [],diagnostic }));
         throw error;
       }
       assert.match(child.stdout, /DEAD_MIRROR_WRITER_VERIFIED/u);
     } finally { await fs.rm(home, { recursive: true, force: true }); }
     return;
   }
+  let stage='paths';
+  try {
   const origin = 'https://mirror.example', companyId = '11111111-1111-4111-8111-111111111111';
   console.log('MIRROR_DEAD_WRITER_STAGE:root');
   const paths = resolveMirrorPaths({ origin, companyId });
   await ensurePrivateDirectory(paths.root);
   const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true });
   await new Promise((resolve, reject) => { exited.once('error', reject); exited.once('close', resolve); });
+  stage='exited_pid';
   assert.throws(() => process.kill(exited.pid, 0), { code: 'ESRCH' });
   console.log('MIRROR_DEAD_WRITER_STAGE:pid');
   const seed = async (pid, extra = {}) => {
@@ -122,17 +128,19 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   };
   const sync = signal => observed(syncCompanyContextMirror({ origin, token: 'synthetic-token',
     companyEncryption: encryption, requireFresh: true, signal }));
-  await seed(exited.pid);
+  stage='dead_owner_seed';await seed(exited.pid);
   console.log('MIRROR_DEAD_WRITER_STAGE:first');
+  stage='dead_owner_recover';
   await assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
   assert.equal(reads, 1, 'a fresh dead-owner heartbeat does not consume another sync budget');
   assert.equal(await fs.stat(paths.lock).catch(e => e.code === 'ENOENT' ? null : Promise.reject(e)), null);
 
   // A live or malformed owner is never declared dead by elapsed clocks, a
   // partial read or a failed PID probe. Cancelling the waiter changes nothing.
-  for (const [stage, seedClaim] of [['live', () => seed(process.pid)], ['malformed', () => seed(exited.pid, { schemaVersion: 99 })], ['unexpected', async () => {
+  for (const [variant, seedClaim] of [['live', () => seed(process.pid)], ['malformed', () => seed(exited.pid, { schemaVersion: 99 })], ['unexpected', async () => {
     await seed(exited.pid); await fs.writeFile(path.join(paths.lock, 'unexpected'), 'synthetic');
   }]]) {
+    stage=variant;
     console.log(`MIRROR_DEAD_WRITER_STAGE:${stage}`);
     await seedClaim();
     const before = await fs.readFile(path.join(paths.lock, 'owner.json'));
@@ -145,23 +153,23 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
 
   // Two fresh contenders may recover the same dead owner, but only one may
   // reach network work at a time. The loser must preserve the successor's lock.
-  await seed(exited.pid);
+  stage='concurrent_seed';await seed(exited.pid);
   console.log('MIRROR_DEAD_WRITER_STAGE:concurrent');
   let release; held = new Promise(resolve => { release = resolve; });
   t.after(() => release());
   const entering = new Promise(resolve => { entered = resolve; });
-  const first = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  stage='concurrent_first';const first = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
   await Promise.race([entering, first.then(() => { throw new Error('WRITER_DID_NOT_REACH_READER'); })]);
   console.log('MIRROR_DEAD_WRITER_STAGE:entered');
   const successor = JSON.parse(await observed(fs.readFile(path.join(paths.lock, 'owner.json'))));
   console.log('MIRROR_DEAD_WRITER_STAGE:owner');
   assert.equal(successor.pid, process.pid);
-  const second = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
+  stage='concurrent_second';const second = assert.rejects(sync(AbortSignal.timeout(5_000)), error => error.cause === refusal);
   console.log('MIRROR_DEAD_WRITER_STAGE:waiting');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(reads, 2);
   assert.equal(JSON.parse(await fs.readFile(path.join(paths.lock, 'owner.json'))).lockId, successor.lockId);
-  release(); console.log('MIRROR_DEAD_WRITER_STAGE:released');
+  stage='concurrent_release';release(); console.log('MIRROR_DEAD_WRITER_STAGE:released');
   await Promise.all([first, second]);
   console.log('MIRROR_DEAD_WRITER_STAGE:settled');
   assert.equal(reads, 3);
@@ -172,6 +180,7 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   // metadata proves release/replacement, never a permission/retry exemption.
   const originalLstat = fs.lstat;
   for (const mode of ['absent', 'replaced', 'unchanged']) {
+    stage='race_'+mode;
     console.log(`MIRROR_DEAD_WRITER_STAGE:race_${mode}`);
     await seed(process.pid);
     const cancellation = new AbortController();
@@ -213,6 +222,15 @@ test('mirror writer recovers a confirmed dead owner without waiting for heartbea
   }
   console.log('MIRROR_DEAD_WRITER_STAGE:verified');
   console.log('DEAD_MIRROR_WRITER_VERIFIED');
+  } catch(error) {
+    const failures=[error,error.cause,error.actual,error.actual?.cause].filter(Boolean);
+    const codes=[...new Set(failures.map(value=>value.diagnosticCode??value.code)
+      .filter(value=>typeof value==='string'&&/^(?:ERR_|TRELIO_|LOCAL_CONTEXT_|E[A-Z]{2,}$)[A-Z0-9_]*$/u.test(value)))];
+    const operation=failures.map(value=>value.operation).find(value=>
+      /^windows_acl\.(?:path_decode|identity|owner_read|owner_write|dacl_write|dacl_verify)$/u.test(value??''))??null;
+    console.log('MIRROR_DEAD_WRITER_DIAGNOSTIC '+JSON.stringify({stage,codes,operation}));
+    throw error; // Original assertion and all recovery deadlines remain strict.
+  }
 });
 
 test('startup sweep prunes historical schemas including v1 without changing current pointers', async t => {

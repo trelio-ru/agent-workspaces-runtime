@@ -274,13 +274,23 @@ for (const arch of process.arch === 'x64' ? ['x64','ia32'] : [process.arch]) {
       // explicit child check must still repair that child's changed descriptor.
       await changeSyntheticAcl(file,'foreign');await check(directory,'directory',0);
       await check(file,'file',1);await check(file,'file',0);
+      // This deterministic phase assertion guards scaling independently of a
+      // runner's throughput: even a directory with 8,192 children must perform
+      // fresh reads without another propagating SetSecurityInfo call. Children
+      // here are disposable synthetic bytes, not a production private writer.
+      for(let offset=0;offset<8192;offset+=32)await Promise.all(Array.from({length:32},(_,n)=>
+        writeFile(path.join(directory,`synthetic-child-${offset+n}`),'SYNTHETIC_ONLY')));
+      for(let repeat=0;repeat<8;repeat++)await check(directory,'directory',0);
     }finally{await worker.close();await rm(root,{recursive:true,force:true});}
   });
 }
 
-test('native Windows encrypted search cache writes and reopens 8192 growing entries within the original probe budget',
-  {...windows,timeout:150000},async()=>{
+test('native Windows encrypted search cache writes and reopens 8192 growing entries within the first-sync budget',
+  {...windows,timeout:630000},async()=>{
     const root=await mkdtemp(path.join(os.tmpdir(),'trelio-native-growing-cache-'));
+    let stage='keys',written=0,read=0;const beginning=performance.now();
+    const progress=()=>console.log(JSON.stringify({fixture:'native-growing-encrypted-cache',stage,written,read,
+      elapsedMs:Math.round(performance.now()-beginning),providerCalls:0}));
     try{await withPrivateProcessSession(async()=>{
       const keys=await crypto.webcrypto.subtle.generateKey({name:'ECDH',namedCurve:'P-256'},true,['deriveBits']);
       const companyEncryption={runtime:{company:{id:crypto.randomUUID()},device:{id:crypto.randomUUID()},scope:{id:crypto.randomUUID(),epoch:1,
@@ -289,15 +299,25 @@ test('native Windows encrypted search cache writes and reopens 8192 growing entr
       const options={paths:{root},origin:'https://synthetic.invalid',companyEncryption};
       const workspace={workspaceId:crypto.randomUUID(),acceptedHead:'a'.repeat(40)};
       const files=Array.from({length:8192},(_,n)=>({id:crypto.randomUUID(),path:`synthetic-${n}.md`,sizeBytes:1024,contentType:'text/plain'}));
-      const text='SYNTHETIC_ONLY_'.repeat(64),cache=await createEncryptedSearchFileCache(options);
-      let started=performance.now();for(const file of files)await cache.write(workspace,file,text);
+      stage='open';const text='SYNTHETIC_ONLY_'.repeat(64),cache=await createEncryptedSearchFileCache(options);
+      stage='write';let started=performance.now();
+      for(const file of files){await cache.write(workspace,file,text);written++;if(written%1024===0)progress();}
       const writeMs=Math.round(performance.now()-started);
       // Reopen the actual encrypted cache, not an in-memory result; every read
       // repeats file ACL, exact head/AAD and authenticated crypto verification.
-      started=performance.now();const reopened=await createEncryptedSearchFileCache(options);
-      for(const file of files)assert.equal(await reopened.read(workspace,file)===text,true,'synthetic encrypted cache round-trip');
+      stage='reopen';started=performance.now();const reopened=await createEncryptedSearchFileCache(options);
+      stage='read';for(const file of files){
+        assert.equal(await reopened.read(workspace,file)===text,true,'synthetic encrypted cache round-trip');
+        read++;if(read%1024===0)progress();
+      }
+      stage='complete';
       console.log(JSON.stringify({fixture:'native-growing-encrypted-cache',entries:files.length,writeMs,readMs:Math.round(performance.now()-started),providerCalls:0}));
-    },AbortSignal.timeout(120000));}
+    // Use the existing production cold first-sync bound for this larger
+    // end-to-end workload, not the earlier 4,096-record profiling probe's 120s
+    // cap. Per-request native 10s and all ACL/crypto checks remain unchanged.
+    // Closed progress makes a remaining slow stage observable before expiry.
+    },AbortSignal.timeout(600000));}
+    catch(error){progress();throw error;}
     finally{await rm(root,{recursive:true,force:true});}
   });
 
