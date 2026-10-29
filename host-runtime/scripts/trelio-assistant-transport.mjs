@@ -1162,7 +1162,13 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
   let managedEncryptionDevice=null,inspectionEncryption=null,inspectionPayloads=null,encryptedSkillCompany=null,skillFingerprint=null;
   let lifecycle=null,lifecycleEncryption=null,attachmentSelection=null,attachmentEncryption=null;
-  let companyReadEncryption=null,companyReadPayloads=null;
+  let companyReadEncryption=null;
+  // Ciphertext belongs to ONE validated native response, not to the lifetime
+  // of a company sync. A complete mirror can visit more than 4096 entities
+  // across many individually bounded responses. Weak keys let a consumed raw
+  // snapshot and its selected ciphertext die together, without a company-wide
+  // ID resolver/cache or a second copy of the full company in RAM.
+  const companyReadSnapshots=new WeakMap();
   const assertIdentity=async()=>{
     const current=await host.readIdentity();
     if(!same(current,expectedIdentity) || !same(validateAssistantActivePass(await host.readActivePass(),identity),pass)) fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
@@ -1195,7 +1201,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
     if(companyReadEncryption && (opened.runtime.envelope?.id!==companyReadEncryption.runtime.envelope?.id
       || opened.runtime.device.id!==companyReadEncryption.runtime.device.id || opened.runtime.scope.id!==companyReadEncryption.runtime.scope.id
       || opened.runtime.scope.epoch!==companyReadEncryption.runtime.scope.epoch))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-    companyReadEncryption=opened;companyReadPayloads??=new Map();
+    companyReadEncryption=opened;
     await assertLivePass(signal);return opened;
   };
   const assertPlainSourceFileRead=async(company,signal)=>{
@@ -1234,6 +1240,16 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       return path.join(configDirectory,'digital-assistants','runtime',identity.assistantId,identity.deviceId,'company-context-mirrors');
     },
     prepareCompanyContextRead,
+    inheritCompanyEncryptedSnapshot(source,projection){
+      if(!companyRead)return;
+      const payloads=companyReadSnapshots.get(source);
+      if(!payloads || !object(projection) || companyReadSnapshots.has(projection))
+        fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      // The common mirror makes a few field-only projections before hydration.
+      // Only host code holding the actual decoded response can bind them to
+      // that SAME selected bundle; serialization/cloning never transfers it.
+      companyReadSnapshots.set(projection,payloads);
+    },
     assertCompanyContextCurrent:companyRead?prepareCompanyContextRead:plainSourceFile||registryFile||sourceAttachmentSelection?.schemaVersion===1?signal=>assertPlainSourceFileRead(null,signal):undefined,
     assertPlainSourceFileRead:plainSourceFile?assertPlainSourceFileRead:undefined,
     canReadCompanyContextExact(name){
@@ -1513,12 +1529,7 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
         const common=await import('./trelio-workspace.mjs');
         if([...common.collectAgentEncryptedReferences(opened.context).keys()].some(id=>!opened.payloads.has(id)))
           fail('ASSISTANT_ENCRYPTED_SNAPSHOT_REFERENCES_MISSING');
-        for(const [id,payload] of opened.payloads){
-          const previous=companyReadPayloads.get(id);
-          if(previous&&JSON.stringify(previous)!==JSON.stringify(payload))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
-          companyReadPayloads.set(id,payload);
-        }
-        if(companyReadPayloads.size>4096)fail('ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT');
+        companyReadSnapshots.set(opened.context,opened.payloads);
         return opened.context;
       }
       const snapshot=opened.context;
@@ -1607,15 +1618,41 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
       if(!inspection)return response.json();
       return readAssistantEncryptedSnapshotResponse(response,await import('./trelio-workspace.mjs'));
     },
-    async resolveCompanyEncryptedPayloads({entityIds:ids,companyId,scopeId,scopeEpoch}){
+    async resolveCompanyEncryptedPayloads({entityIds:ids,companyId,scopeId,scopeEpoch,value}){
       await assertLivePass();
       const opened=companyReadEncryption??inspectionEncryption??lifecycleEncryption;
-      const payloads=companyRead?companyReadPayloads:inspectionPayloads;
-      if(!opened || !payloads || !Array.isArray(ids) || ids.length>250
+      if(!opened || !Array.isArray(ids) || ids.length>250
         || companyId!==pass.companyId || scopeId!==opened.runtime.scope.id
-        || scopeEpoch!==opened.runtime.scope.epoch
-        || ids.some(id=>!payloads.has(id)))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
-      return {payloads:ids.map(id=>payloads.get(id))};
+        || scopeEpoch!==opened.runtime.scope.epoch)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      if(!companyRead){
+        if(!inspectionPayloads || ids.some(id=>!inspectionPayloads.has(id)))fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        return {payloads:ids.map(id=>inspectionPayloads.get(id))};
+      }
+      // The shared hydrator combines already selected records in bounded
+      // arrays. Accept only those exact native roots/host projections, never
+      // an unregistered clone or an arbitrary object containing a known UUID.
+      // Do not merge their maps: each keeps the native 4096/32-MiB bound, and
+      // no cumulative lifetime limit can reject a later valid response.
+      const selections=new Set();
+      const select=current=>{
+        const selected=current&&typeof current==='object'?companyReadSnapshots.get(current):null;
+        if(selected){selections.add(selected);return;}
+        if(Array.isArray(current)){current.forEach(select);return;}
+        fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+      };
+      select(value);
+      return {payloads:ids.map(id=>{
+        let selected;
+        for(const payloads of selections){
+          const candidate=payloads.get(id);
+          if(candidate){
+            if(selected&&JSON.stringify(selected)!==JSON.stringify(candidate))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
+            selected=candidate;
+          }
+        }
+        if(!selected)fail('ASSISTANT_WORKSPACE_PROFILE_DENIED');
+        return selected;
+      })};
     },
     async assertWorkspaceInspectionCurrent(){
       if(!inspection)return;
@@ -3575,8 +3612,8 @@ export const openAssistantWorkspaceArguments = async ({binding:rawBinding,sealed
 // only the selected snapshot's references can be opened by the common codec.
 // Each refusal carries a fixed validation stage, never IDs, payload counts,
 // field values, paths or native exceptions. This distinguishes a malformed
-// native snapshot from missing reference coverage or the separate company RAM
-// bound without weakening validation or allowing another HTTP attempt.
+// native snapshot from missing reference coverage without weakening validation
+// or allowing another HTTP attempt.
 const readAssistantEncryptedSnapshotResponse=async(response,common)=>{
   // Apply the existing native snapshot bound while reading, BEFORE JSON
   // allocation. The same decoder serves task and accepted-Workspace snapshots;

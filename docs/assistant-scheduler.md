@@ -1408,6 +1408,20 @@ not a second journal or a completed mirror/answer.
 Tests cover actual serial MCP/current-child pipes, native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
 
+Native selected ciphertext has the lifetime of its exact decoded response. The
+managed profile holds only weak root/projection associations, not a cumulative
+company-wide entity map. Common mirror field-only metadata projections explicitly
+inherit their native root; bounded record arrays combine those exact selections.
+The SAME hydrator requests only 250 selected IDs at a time, refuses an unknown
+clone/missing reference and conflicting versions within one batch, and repeats
+live pass/scope admission. Every native response retains its 4096-payload/32-MiB
+bounds and reference coverage. A complete mirror may legitimately exceed 4096
+entities across responses; consumed snapshots do not retain their ciphertext.
+No JSON capability, general resolver, eager/double decryption, new index, key
+source or HTTP endpoint is introduced. Regression coverage decrypts a full
+4096-entity cold snapshot, mirror metadata/search projections and another exact
+source in both genuine task and private-owner profiles before publication.
+
 The combined catalogue retains the existing byte bound without truncation:
 identical scalar leaf schemas may share local definitions inside ONE tool.
 Whole descriptions, formats, regexes, defaults and bounds remain unchanged;
@@ -2654,7 +2668,7 @@ about company facts first selects the company read view, searches independent
 anchored formulations and reads the selected exact source. A failed, unavailable
 or incomplete read is a limitation, never an absence claim. Encrypted snapshot
 refusals distinguish fixed JSON, envelope format, payload binding, reference
-coverage and company RAM-bound stages. These codes expose no field values,
+coverage stages. These codes expose no field values,
 identifiers, counts, paths or native exceptions, and never permit a read retry. Source rules remain
 context and the answer cites the verified native source in the original chat.
 Self-contained greetings/arithmetic need no company search. Clear direct

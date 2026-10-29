@@ -62,6 +62,7 @@ import {
   ensurePrivateDirectory,
   currentWorkspaceExecutionProfile,
   hydrateAgentCompanyEncryptedJson,
+  inheritAgentCompanyEncryptedSnapshot,
   materializeRuntimeControlFiles,
   normalizeOrigin,
   parseWorkspaceObjectPointer,
@@ -3841,7 +3842,8 @@ const buildMirror = async ({
   // Their unchanged ciphertext markers can reuse the previous encrypted
   // generation without another decrypt/resolve cycle.
   const manifest = await hydrateAgentCompanyEncryptedJson({
-    value: { ...rawManifest, contextDocuments: [], searchDocuments: [] },
+    value: inheritAgentCompanyEncryptedSnapshot(rawManifest,
+      { ...rawManifest, contextDocuments: [], searchDocuments: [] }),
     origin: requestOrigin,
     token,
     companyEncryption,
@@ -3927,14 +3929,14 @@ const buildMirror = async ({
     const cached = previousContextDocuments.get(document.id);
     return cached?.revisionToken === document.revisionToken
       ? { cached }
-      : { source: usesBackendSearchProjections ? {
+      : { source: inheritAgentCompanyEncryptedSnapshot(rawManifest, usesBackendSearchProjections ? {
           id: document.id,
           type: document.type,
           title: document.title,
           revisionToken: document.revisionToken,
           projectId: document.projectId ?? null,
           projectSlug: document.projectSlug ?? null,
-        } : document };
+        } : document) };
   });
   const contextDocuments = await hydrateChangedCompanyMirrorRecords({
     records: contextDocumentRecords,
@@ -3956,7 +3958,7 @@ const buildMirror = async ({
       const cached = previousSearchDocuments.get(document.cacheKey ?? document.id);
       return cached?.revisionToken === document.revisionToken
         ? { cached }
-        : { source: document };
+        : { source: inheritAgentCompanyEncryptedSnapshot(rawManifest, document) };
     });
     searchDocuments = await hydrateChangedCompanyMirrorRecords({
       records: searchDocumentRecords,

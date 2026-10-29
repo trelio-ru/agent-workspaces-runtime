@@ -117,7 +117,7 @@ publication tooling также остаются вне этого публичн
   Cold search reuses the common short-wait registry and SAME signed read child;
   preparing is not an empty/error result. Fresh native admission on every poll,
   exact recipient binding and complete mirror publication remain mandatory. An owned first-sync timeout permits one resumed readonly child only after fresh search admission; transport/ACL/cancellation errors never retry.
-  Encrypted snapshot failures expose only fixed JSON/format/payload/reference/RAM-bound stages; no content, counts, paths or automatic retry.
+  Native selected ciphertext follows weak snapshot/projection identity through common mirror batches; no cumulative company map or general resolver. Per-response 4096/32-MiB and current-recipient guards remain. Failures expose fixed stages only; no content, counts, paths or automatic retry.
   Original attachment E2EE uses native-pinned AAD/range/digest, current managed
   recipient and SAME TRELIOE1/private local-file engine; no plaintext descriptor.
   Before pairing discovery не читает credential. Confirmed local device mismatch

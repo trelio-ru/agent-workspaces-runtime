@@ -1977,7 +1977,10 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     try{
       for(const originKind of ['task','owner']){
         const child=await promisify(execFile)(process.execPath,['--test','--test-name-pattern','encrypted company source search',fileURLToPath(import.meta.url)],
-          {env:{...env,TRELIO_ASSISTANT_COMPANY_CONTEXT_ORIGIN:originKind},timeout:30000,maxBuffer:1024*1024});
+          // This fixture now decrypts a full 4096-entity native snapshot, not
+          // a one-field mock. Only its isolated crypto/child cleanup budget
+          // grows; production preparation/MCP deadlines stay unchanged.
+          {env:{...env,TRELIO_ASSISTANT_COMPANY_CONTEXT_ORIGIN:originKind},timeout:90000,maxBuffer:1024*1024});
         assert.match(child.stdout,/ASSISTANT_COMPANY_CONTEXT_SEARCH_VERIFIED/u);
       }
     }catch(error){
@@ -2020,6 +2023,32 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     searchDocuments:[{id:`project:encrypted/${projectSlug}`,type:'project',title:marker('title'),stableKey:`encrypted/${projectSlug}/project`,
       referenceValues:[projectId,projectSlug],fields:[{source:'project',text:marker('title')}],metadata:{projectId,projectSlug},revisionToken:'f'.repeat(64)}],
     instructions:{company:{compiledMarkdown:marker('rules')},projects:[],userProfile:null},agentSkills:{company:[],projects:[]},agentProcedures:[]};
+  // Native snapshot bounds are per response. A real cold mirror must finish
+  // hydration of 4096 selected AEAD fields, then accept another independent
+  // exact-source response in the SAME profile. The old lifetime-wide map
+  // failed here although neither native response exceeded its own bound.
+  const manifestPayloads=[payload];
+  for(let offset=0;offset<4095;offset+=128){
+    const batch=await Promise.all(Array.from({length:Math.min(128,4095-offset)},async(_,index)=>{
+      const id=randomUUID(),aad={...header,entityId:id};
+      return {...aad,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad,
+        payload:{values:{title:`Synthetic bulk field ${offset+index}`}}})};
+    }));
+    manifestPayloads.push(...batch);
+  }
+  for(let offset=1;offset<manifestPayloads.length;offset+=16){
+    const selected=manifestPayloads.slice(offset,offset+16),id=randomUUID();
+    manifest.searchDocuments.push({id:`project:encrypted/${id}`,type:'project',title:'Synthetic bulk projection',
+      stableKey:`encrypted/${id}/project`,referenceValues:[id],
+      fields:selected.map(row=>({source:'project',text:buildCompanyEncryptedTextMarker(row.entityId,'title')})),
+      metadata:{projectId:id,projectSlug:`e-${id}`},revisionToken:'f'.repeat(64)});
+  }
+  // Cover the common mirror's primitive-only metadata projection as well as
+  // its shallow manifest and record-array hydration boundaries.
+  manifest.contextDocuments.push({id:randomUUID(),type:'registry',title:marker('title'),revisionToken:'f'.repeat(64),projectId,projectSlug});
+  const extraEntity=randomUUID(),extraAad={...header,entityId:extraEntity};
+  const extraPayload={...extraAad,...await encryptCompanyPayload({scopePublicEncryptionJwk:publicJwk,aad:extraAad,
+    payload:{values:{rules:'Synthetic exact source rules'}}})};
   const rulesMarkdown='Synthetic current platform rules\n',rulesSha=createHash('sha256').update(rulesMarkdown).digest('hex'),rulesId=randomUUID();
   const sourceTaskId=randomUUID(),workspaceId=randomUUID(),workspaceHead='a'.repeat(40),projectionId=randomUUID(),manifestFileId=randomUUID(),fileId=randomUUID();
   const originalName='SOURCE_PRIVATE_FILENAME_CANARY.pdf',filePath=`originals/${originalName}`,original=Buffer.from('ORIGINAL_PRIVATE_BYTES_CANARY\0');
@@ -2075,7 +2104,7 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
       workspace:{id:workspaceId,acceptedHead:workspaceHead},encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount:1}}}});
     if(url.pathname.endsWith('/reads/get_task_activity')){
       activityReads++;assert.deepEqual(JSON.parse(options.body).arguments,{companySlug:'encrypted',projectSlug,taskNumber:1,offset:1,limit:1});
-      return json({schemaVersion:1,encryptedPayloads:[payload],context:{comments:[{id:randomUUID(),bodyText:marker('rules')}],
+      return json({schemaVersion:1,encryptedPayloads:[extraPayload],context:{comments:[{id:randomUUID(),bodyText:buildCompanyEncryptedTextMarker(extraEntity,'rules')}],
         pagination:{offset:1,limit:1,hasMore:true,nextOffset:2}}});
     }
     if(url.pathname.endsWith('/tasks/read')){
@@ -2085,7 +2114,7 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     assert.ok(url.pathname.endsWith('/company-context/encrypted/manifest'));manifestReads++;
     const selected=structuredClone(payload);if(mode==='aad')selected.aad.companyId=randomUUID();
     if(mode==='closed')f.close();
-    return json({schemaVersion:1,context:manifest,encryptedPayloads:mode==='missing'?[]:[selected]});
+    return json({schemaVersion:1,context:manifest,encryptedPayloads:mode==='missing'?[]:[selected,...manifestPayloads.slice(1)]});
   };
   const run=()=>common.withWorkspaceExecutionProfile(profile,async()=>{
     await profile.prepareCompanyContextRead();
@@ -2135,7 +2164,7 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     assert.equal(page.structuredContent.items.length,1);assert.equal(page.structuredContent.offset,1);
     assert.doesNotMatch(JSON.stringify(source),/proposalProvider|codexThreadTitleReminder/);
     const activity=await read('get_task_activity',{projectSlug,taskNumber:1,offset:1,limit:1});
-    assert.match(JSON.stringify(activity),/Synthetic source rules/);assert.equal(activity.structuredContent.pagination.nextOffset,2);
+    assert.match(JSON.stringify(activity),/Synthetic exact source rules/);assert.equal(activity.structuredContent.pagination.nextOffset,2);
     assert.equal(activityReads,1);
     const file=await read('get_agent_workspace_file',{workspaceId,workspaceHead,filePath,delivery:'local-file'});
     assert.deepEqual(await fs.readFile(file.structuredContent.localFilePath),original);assert.equal(fileReads,2);
@@ -2165,12 +2194,29 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
       [snapshot({},[{...payload,aad:{...payload.aad,companyId:randomUUID()}}]),'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID'],
       [snapshot({title:marker('title')},[]),'ASSISTANT_ENCRYPTED_SNAPSHOT_REFERENCES_MISSING'],
     ])await checkSnapshots(decode=>assert.rejects(decode(invalid),{code}));
+    let foreignSnapshot;
+    await checkSnapshots(async decode=>{foreignSnapshot=await decode(snapshot({title:marker('title')}));});
     await checkSnapshots(async decode=>{
-      // A native envelope limit and the total company map limit are different
-      // guards. Exercise the latter across two individually valid responses.
-      const batch=Array.from({length:4096},()=>{const id=randomUUID();return {...payload,entityId:id,aad:{...payload.aad,entityId:id}};});
-      await decode(snapshot({},batch));
-      await assert.rejects(decode(snapshot({},[payload])),{code:'ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT'});
+      const opened=await decode(snapshot({title:marker('title')},manifestPayloads));
+      const second=await decode(snapshot({rules:buildCompanyEncryptedTextMarker(extraEntity,'rules')},[extraPayload]));
+      const encryption=await common.ensureCompanyEncryptionContext({origin:f.identity.origin,
+        token:await common.requireToken(f.identity.origin),company,collectEncryptionKey:async()=>assert.fail('no human key')});
+      const hydrate=value=>common.hydrateAgentCompanyEncryptedJson({value,origin:f.identity.origin,companyEncryption:encryption});
+      const projected=common.inheritAgentCompanyEncryptedSnapshot(opened,{title:opened.title});
+      assert.deepEqual(await hydrate([projected,second]),[{title:canary},{rules:'Synthetic exact source rules'}]);
+      // Arbitrary copies/IDs and other profiles cannot borrow selected data.
+      await assert.rejects(hydrate(structuredClone(opened)),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+      await assert.rejects(hydrate([projected,structuredClone(second)]),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+      assert.throws(()=>common.inheritAgentCompanyEncryptedSnapshot(structuredClone(opened),{}),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+      await assert.rejects(hydrate(foreignSnapshot),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+      const unselected=common.inheritAgentCompanyEncryptedSnapshot(second,{title:opened.title});
+      await assert.rejects(hydrate(unselected),{code:'ASSISTANT_WORKSPACE_PROFILE_DENIED'});
+      assert.deepEqual(Object.keys(projected),['title'],'snapshot provenance never enters JSON/DTOs');
+      // Only a hydration batch combining conflicting native snapshots fails;
+      // independent snapshots retain their exact version, not a stale union.
+      const changed=await decode(snapshot({title:marker('title')},[{...payload,entityRevision:2,aad:{...payload.aad,entityRevision:2}}]));
+      await assert.rejects(hydrate([opened,changed]),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+      await assert.rejects(decode(snapshot({},[...manifestPayloads,extraPayload])),{code:'ASSISTANT_ENCRYPTED_SNAPSHOT_FORMAT_INVALID'});
     });
     for(const failure of ['aad','missing','recipient']){mode=failure;await assert.rejects(run());}
     mode='valid';await assert.rejects(common.withWorkspaceExecutionProfile(profile,()=>materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,

@@ -6877,6 +6877,15 @@ const collectAgentRoutingAliasEntityIds = (value, result = new Set()) => {
   return result;
 };
 
+/** Preserve native-selected ciphertext across the common mirror's field-only
+ * projections. This is process-local provenance, never a DTO field or a generic
+ * payload grant. Human readers need no association; managed readers refuse an
+ * unknown source. The returned value is otherwise unchanged. */
+export const inheritAgentCompanyEncryptedSnapshot = (source, projection) => {
+  currentWorkspaceExecutionProfile()?.inheritCompanyEncryptedSnapshot?.(source, projection);
+  return projection;
+};
+
 export const hydrateAgentCompanyEncryptedJson = async ({
   value,
   origin,
@@ -6900,7 +6909,7 @@ export const hydrateAgentCompanyEncryptedJson = async ({
   // repeats its current native binding for every requested batch.
   const profile=currentWorkspaceExecutionProfile();
   const selectedResolver=resolvePayloads ?? (profile?.resolveCompanyEncryptedPayloads
-    ? ids=>profile.resolveCompanyEncryptedPayloads({entityIds:ids,
+    ? ids=>profile.resolveCompanyEncryptedPayloads({entityIds:ids,value,
       companyId:companyEncryption.runtime.company.id,scopeId:companyEncryption.runtime.scope.id,
       scopeEpoch:companyEncryption.runtime.scope.epoch}) : null);
   const decryptedByEntity = new Map();
