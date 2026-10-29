@@ -2327,7 +2327,9 @@ test('company preparation never retries other failures and caps repeated owned d
  for(const code of ['ASSISTANT_PASS_REVIEW_REQUIRED','ASSISTANT_WORKSPACE_BINDING_CHANGED','ASSISTANT_RUNTIME_REQUEST_UNAVAILABLE','ASSISTANT_SETUP_UNAVAILABLE',
   'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT','ASSISTANT_ENCRYPTED_SNAPSHOT_FORMAT_INVALID',
   'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID','ASSISTANT_ENCRYPTED_SNAPSHOT_REFERENCES_MISSING',
-  'ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT','ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID']){
+  'ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT','ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID',
+  'ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_GENERATION_CHANGED','ASSISTANT_COMPANY_CONTEXT_LOCAL_CONTEXT_CACHE_INVALID',
+  'ASSISTANT_COMPANY_CONTEXT_WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID']){
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-refusal-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
   let prepares=0;const request=async()=>{prepares++;throw Object.assign(Error(),{code});};
@@ -2344,18 +2346,22 @@ test('company preparation never retries other failures and caps repeated owned d
 test('company preparation preserves exact owned timeout separately from cancellation and provider refusals',async()=>{
  const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
  const opened={runtime:{scope:{id:binding.scopeId,epoch:binding.scopeEpoch},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}};
- for(const mode of ['deadline','cancelled','provider_timeout','foreign_error']){
-  const controller=new AbortController();const own=mode==='cancelled'?new DOMException('Cancelled','AbortError'):new DOMException('Deadline','TimeoutError');
+ for(const mode of ['deadline','native_deadline','cancelled','native_cancelled','provider_timeout','foreign_error','unrelated_abort','unrelated_cause']){
+  const controller=new AbortController();const own=mode.includes('cancelled')?new DOMException('Cancelled','AbortError'):new DOMException('Deadline','TimeoutError');
   const refusal=mode==='provider_timeout'?new DOMException('Provider','TimeoutError'):Object.assign(Error(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
+  const thrown=mode.startsWith('native_')?Object.assign(new Error('PRIVATE_NATIVE_MESSAGE',{cause:own}),{name:'AbortError',code:'ABORT_ERR'})
+   :mode==='unrelated_abort'?Object.assign(new Error('PRIVATE_NATIVE_MESSAGE',{cause:new DOMException('Other','TimeoutError')}),{name:'AbortError',code:'ABORT_ERR'})
+   :mode==='unrelated_cause'?new Error('PRIVATE_NATIVE_MESSAGE',{cause:own})
+   :['deadline','cancelled'].includes(mode)?own:refusal;
   const options={signal:controller.signal,withProfile:async action=>action({identity:{origin:'https://synthetic.test'},prepareCompanyContextRead:async()=>opened}),
    loadContext:async()=>({prepareTrelioLocalCompanyContext:async()=>{
     if(mode!=='provider_timeout')controller.abort(own);
-    throw ['deadline','cancelled'].includes(mode)?own:refusal;
+    throw thrown;
    }})};
-  if(mode==='deadline')await assert.rejects(executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},options),
+  if(['deadline','native_deadline'].includes(mode))await assert.rejects(executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},options),
    {code:'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT'});
   else await assert.rejects(executeAssistantCompanyContextRequest({operation:'company_context_prepare',descriptor,binding},options),
-   error=>error===(mode==='cancelled'?own:refusal));
+   error=>error===thrown);
  }
 });
 
@@ -2433,12 +2439,16 @@ test('owned preparation timeout resumes through actual serial MCP, native error 
  await fs.mkdir(path.join(root,'digital-assistants'));await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
  const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
  const loader=path.join(root,'loader.mjs'),entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+ const commonUrl=new URL('../host-runtime/scripts/trelio-workspace.mjs',import.meta.url).href;
+ const {runGit}=await import(commonUrl),repository=path.join(root,'repository');await fs.mkdir(repository);
+ await runGit(['init','--quiet'],{cwd:repository});await fs.writeFile(path.join(repository,'synthetic-blob'),Buffer.alloc(4*1024*1024,65));
+ const blob=(await runGit(['hash-object','-w','synthetic-blob'],{cwd:repository})).stdout.trim();
  // The fixture replaces ONLY the private/native authority layer. Parsing,
  // bounded stdin/stdout, worker dispatch, managed-operation selection and the
  // facade's shared short-wait registry are real. The independent HPKE fixture
  // exercises this operation with the actual managed profile and mirror.
  await fs.writeFile(loader,`import {runAssistantEntry,executeAssistantRuntimeRequest,executeAssistantCompanyContextRequest} from ${JSON.stringify(entry)};
-  import fs from 'node:fs/promises';
+  import fs from 'node:fs/promises';import {readAcceptedWorkspaceBlob} from ${JSON.stringify(commonUrl)};
   const descriptor=${JSON.stringify(descriptor)},binding=${JSON.stringify(binding)};
   await runAssistantEntry(['request'],{executeRequest:request=>{
    if(request.operation==='call')return {content:[],_meta:{'trelio/assistant-company-read':{schemaVersion:1,descriptor,binding}}};
@@ -2447,14 +2457,16 @@ test('owned preparation timeout resumes through actual serial MCP, native error 
      if(!await fs.stat(${JSON.stringify(path.join(root,'expired'))}).catch(()=>null)){
       await fs.writeFile(${JSON.stringify(path.join(root,'expired'))},'expired');
       const controller=new AbortController();
-      const timer=setTimeout(()=>controller.abort(new DOMException('Synthetic read deadline','TimeoutError')),5);
-      try{return await executeAssistantCompanyContextRequest(raw,{signal:controller.signal,
+      return executeAssistantCompanyContextRequest(raw,{signal:controller.signal,
        withProfile:async action=>action({identity:{origin:'https://synthetic.test'},prepareCompanyContextRead:async()=>({runtime:{
         scope:{id:binding.scopeId,epoch:binding.scopeEpoch},device:{id:binding.deviceId},envelope:{id:binding.envelopeId}}})}),
-       loadContext:async()=>({prepareTrelioLocalCompanyContext:async()=>new Promise((resolve,reject)=>{
-        if(controller.signal.aborted)reject(controller.signal.reason);
-        else controller.signal.addEventListener('abort',()=>reject(controller.signal.reason),{once:true});
-       })})});}finally{clearTimeout(timer);}
+       // A real Git child has an open stdout pipe. Its native AbortError wraps
+       // this exact deadline in cause; the old equality-only boundary lost it
+       // and returned ASSISTANT_SETUP_UNAVAILABLE instead of resuming scratch.
+       loadContext:async()=>({prepareTrelioLocalCompanyContext:async()=>readAcceptedWorkspaceBlob({
+        workspaceDirectory:${JSON.stringify(repository)},blobId:${JSON.stringify(blob)},signal:controller.signal},async()=>{
+         controller.abort(new DOMException('Synthetic read deadline','TimeoutError'));return null;
+        })})});
      }
      await new Promise(resolve=>setTimeout(resolve,750));await fs.writeFile(${JSON.stringify(path.join(root,'prepared'))},'prepared');
      return {schemaVersion:1,prepared:true};
@@ -2504,6 +2516,37 @@ test('owned preparation timeout resumes through actual serial MCP, native error 
   assert.deepEqual(admissions,Array.from({length:nonce-1},(_,n)=>n+1),'every poll has a fresh native admission');
   assert.deepEqual(reads[0].arguments,{queries:['PIPE_PRIVATE_QUERY_CANARY']},'fresh query does not reuse consumed admission');
  }finally{input.end();await running;}
+});
+
+test('company common read failures survive actual child frames without private error text or retry authority',async t=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-read-errors-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+ const entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
+ const context=new URL('../host-runtime/scripts/trelio-local-context.mjs',import.meta.url).href;
+ const commonUrl=new URL('../host-runtime/scripts/trelio-workspace.mjs',import.meta.url).href;
+ const {runGit}=await import(commonUrl);await runGit(['init','--quiet'],{cwd:root});
+ const loader=path.join(root,'loader.mjs'),descriptor={nativeTool:'search',companySlug:'synthetic'};
+ const binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
+ const {spawn}=await import('node:child_process');
+ const env={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};delete env.NODE_TEST_CONTEXT;
+ for(const code of ['LOCAL_CONTEXT_GENERATION_CHANGED','LOCAL_CONTEXT_CACHE_INVALID','WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID','WORKSPACE_FILE_GIT_READ_FAILED','UNREVIEWED_PRIVATE_CODE']){
+  await fs.writeFile(loader,`import {runAssistantEntry,executeAssistantCompanyContextRequest} from ${JSON.stringify(entry)};
+   import {TrelioLocalContextError} from ${JSON.stringify(context)};
+   import {readAcceptedWorkspaceBlob} from ${JSON.stringify(commonUrl)};
+   await runAssistantEntry(['request'],{executeRequest:raw=>executeAssistantCompanyContextRequest(raw,{
+    withProfile:async action=>action({identity:{origin:'https://synthetic.test'},prepareCompanyContextRead:async()=>({runtime:{
+     scope:{id:raw.binding.scopeId,epoch:raw.binding.scopeEpoch},device:{id:raw.binding.deviceId},envelope:{id:raw.binding.envelopeId}}})}),
+    loadContext:async()=>({prepareTrelioLocalCompanyContext:async()=>{
+     if(${JSON.stringify(code)}==='WORKSPACE_FILE_GIT_READ_FAILED')return readAcceptedWorkspaceBlob({
+      workspaceDirectory:${JSON.stringify(root)},blobId:'0'.repeat(40)},async()=>null);
+     throw new TrelioLocalContextError(${JSON.stringify(code)},'PRIVATE_PATH_TEXT_CANARY',{body:'PRIVATE_BODY_CANARY'});
+    }})
+   })});`);
+  await assert.rejects(requestCurrentAssistantRuntime({operation:'company_context_prepare',descriptor,binding},{environment:env,
+   resolveLoader:async()=>loader,spawnProcess:(executable,args,options)=>spawn(executable,args,options)}),error=>{
+    assert.equal(error.code,code==='UNREVIEWED_PRIVATE_CODE'?'ASSISTANT_SETUP_UNAVAILABLE':'ASSISTANT_COMPANY_CONTEXT_'+code);
+    assert.doesNotMatch(JSON.stringify(error),/PRIVATE_PATH_TEXT_CANARY|PRIVATE_BODY_CANARY|UNREVIEWED_PRIVATE_CODE/);return true;
+   });
+ }
 });
 
 test('company preparation separates its bounded private lifetime from fresh query reads and rejects foreign operations before I/O',async()=>{

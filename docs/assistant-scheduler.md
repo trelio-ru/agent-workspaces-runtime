@@ -1397,7 +1397,13 @@ Recipient/pass/ACL/manifest and late native fences remain independent. EOF abort
 only the host's preparation children and awaits cleanup; encrypted scratch may
 resume normally, but an incomplete mirror is never published or searched.
 If the exact owned preparation signal expires, preserve a dedicated closed timeout
-code instead of reporting an assistant-setup failure. The SAME short-wait registry
+code instead of reporting an assistant-setup failure. Native Git/ChildProcess
+aborts wrap that exact signal reason in `AbortError.cause`; accept only the
+reviewed `AbortError`/`ABORT_ERR` shape with identical cause, or the direct reason.
+An error name, elapsed clock, unrelated cause or ordinary cancellation is not
+deadline evidence. An explicit closed set of common mirror/accepted-file read
+errors crosses the same worker frame as `ASSISTANT_COMPANY_CONTEXT_*`, without
+exception text, details, private paths or any retry grant. The SAME short-wait registry
 may resume encrypted scratch in one new bounded readonly child, only after another
 fresh native search admission. Concurrent waiters count one stopped child; a second
 expired attempt is terminal and cannot launch a third child. Neither child's
@@ -1405,7 +1411,8 @@ original deadline is extended, no query/proof/writer is replayed, and transport,
 provider timeout, cancellation, ACL/recipient or unknown failures never enter this
 recovery. Host-lifetime retry metadata follows the SAME bounded retention; it is
 not a second journal or a completed mirror/answer.
-Tests cover actual serial MCP/current-child pipes, native admission, real managed
+Tests cover actual serial MCP/current-child pipes and a real aborted Git blob,
+native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.
 
 Native selected ciphertext has the lifetime of its exact decoded response. The

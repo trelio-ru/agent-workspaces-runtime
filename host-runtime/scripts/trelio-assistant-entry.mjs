@@ -2465,7 +2465,7 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
   loadContext=()=>import('./trelio-local-context.mjs'),loadTransport=()=>import('./trelio-assistant-transport.mjs'),signal}={})=>{
   const request=validateAssistantRuntimeRequest(raw);
   if(!['company_context_prepare','company_context_read'].includes(request.operation))fail('ASSISTANT_REQUEST_INVALID');
-  return withProfile(async current=>{
+  try{return await withProfile(async current=>{
     // Propagate the profile's ORIGINAL bounded private-session deadline, not
     // merely an optional outer poll signal, through mirror lock/network work.
     const {runtimeHookSignal}=await import('./trelio-hook-private-session.mjs');
@@ -2479,26 +2479,46 @@ export const executeAssistantCompanyContextRequest = async(raw,{withProfile=with
     };
     await assertCurrent(signal);
     if(request.operation==='company_context_prepare'){
-      try{
-        const context=await loadContext();
-        const result=await context.prepareTrelioLocalCompanyContext(current.identity.origin,request.descriptor.companySlug,{signal});
-        await assertCurrent(signal);
-        return result;
-      }catch(error){
-        // Only the exact original signal reason proves this owned read child
-        // reached its deadline. A network timeout, private-worker failure,
-        // explicit cancellation, revoked recipient or unknown error retains its
-        // own refusal and cannot authorize another preparation attempt.
-        if(signal?.aborted&&error===signal.reason&&error?.name==='TimeoutError')
-          fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');
-        throw error;
-      }
+      const context=await loadContext();
+      const result=await context.prepareTrelioLocalCompanyContext(current.identity.origin,request.descriptor.companySlug,{signal});
+      await assertCurrent(signal);
+      return result;
     }
     const transport=await loadTransport();
     return transport.materializeAssistantEncryptedCompanyContext({origin:current.identity.origin,descriptor:request.descriptor,
       name:'search',arguments:request.arguments,signal,assertCurrent});
   },{signal,encryptedCompanyContext:request.descriptor,
     ...(request.operation==='company_context_prepare'?{companyReadPreparation:true}:{})});
+  }catch(error){
+    // Native ChildProcess aborts wrap the ORIGINAL signal reason in `cause`;
+    // fetch/throwIfAborted may throw that reason directly. Compare object
+    // identity in both reviewed shapes, not just the error name or an expired
+    // clock. An unrelated error after expiry must never gain retry authority.
+    // Keep this boundary outside the managed profile as well: a late native
+    // read/refusal is still part of this same invocation, not setup failure.
+    if(request.operation==='company_context_prepare'&&signal?.aborted&&signal.reason?.name==='TimeoutError'
+      &&(error===signal.reason||error?.name==='AbortError'&&error?.code==='ABORT_ERR'&&error.cause===signal.reason))
+      fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT');
+    // These are closed errors from the SAME common read engines. Do not pass
+    // an arbitrary exception, filesystem path, crypto message or backend body
+    // through the setup worker. Retaining a fixed read failure neither opens
+    // another route nor permits a preparation/query replay.
+    const readCodes=new Set(['LOCAL_CONTEXT_BROWSER_PROJECTION_INVALID','LOCAL_CONTEXT_BROWSER_PROJECTION_MISSING',
+      'LOCAL_CONTEXT_CACHE_INVALID','LOCAL_CONTEXT_COMPANY_MISMATCH','LOCAL_CONTEXT_GENERATION_CHANGED',
+      'LOCAL_CONTEXT_INVALID_HYDRATION','LOCAL_CONTEXT_INVALID_MANIFEST','LOCAL_CONTEXT_MIRROR_INVALID',
+      'LOCAL_CONTEXT_RESULT_NOT_FOUND','LOCAL_CONTEXT_RESULT_TOO_LARGE','LOCAL_CONTEXT_STALE_INSTRUCTION_PAGE',
+      'LOCAL_CONTEXT_SYNC_BUSY','LOCAL_CONTEXT_TASK_NOT_FOUND','LOCAL_CONTEXT_TOO_LARGE',
+      'LOCAL_CONTEXT_WORKSPACE_FILE_NOT_FOUND','LOCAL_CONTEXT_WORKSPACE_OUTDATED','WORKSPACE_OUTDATED',
+      'WORKSPACE_BROWSER_PROJECTION_UNAVAILABLE','WORKSPACE_FILE_INVALID_LOCATOR','WORKSPACE_FILE_MANIFEST_INVALID',
+      'WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID','WORKSPACE_FILE_SIZE_MISMATCH','WORKSPACE_FILE_TOO_LARGE',
+      'WORKSPACE_FILE_GIT_READ_FAILED']);
+    // The accepted-Git reader predates typed code properties and throws one
+    // literal constant as its entire message. Admit only exact members of
+    // this SAME closed set, never parse or copy native stderr/prose.
+    const readCode=error?.code??error?.message;
+    if(readCodes.has(readCode))fail('ASSISTANT_COMPANY_CONTEXT_'+readCode);
+    throw error;
+  }
 };
 
 /** This runner selects the installed verifier, not an arbitrary source path or
