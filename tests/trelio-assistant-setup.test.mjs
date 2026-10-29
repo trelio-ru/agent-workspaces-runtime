@@ -427,7 +427,10 @@ test('request transport preserves closed failure boundaries through real native 
     await refuses(`setInterval(()=>{},1000);`,'TIMED_OUT',{timeoutMs:100});
     const controller=new AbortController();
     await refuses(`setInterval(()=>{},1000);`,'CANCELLED',{signal:controller.signal,
-      spawnProcess:(...args)=>{const child=spawn(...args);child.stdin.once('finish',()=>controller.abort());return child;}});
+      // The synthetic stalled child deliberately never reads stdin. Windows
+      // may therefore keep its pipe's `finish` pending; caller cancellation
+      // must be triggered by native spawn, independently of input consumption.
+      spawnProcess:(...args)=>{const child=spawn(...args);child.once('spawn',()=>controller.abort());return child;}});
     const already=AbortSignal.abort();
     await refuses(`throw Error('PRIVATE_PIPE_CANARY');`,'CANCELLED',{signal:already});
   });
