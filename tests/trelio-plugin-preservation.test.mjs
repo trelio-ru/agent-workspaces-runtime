@@ -83,11 +83,13 @@ test("human hook diagnosis distinguishes missing, disabled, unreadable and chang
 test("one human MCP lifetime preserves exact main and independent hook paths across native cache pruning",async t=>{
   const f=await humanHookFixture(t),errors=[];
   const preservation=startHumanCodexPluginPreservation({environment:f.environment,
-    retentionDirectory:f.retentionDirectory,hookRetentionDirectory:path.join(f.root,"private/hook-retention"),
+    retentionDirectory:f.retentionDirectory,
     checkIntervalMs:20,onError:error=>errors.push(error),
     inspectHookComponent:async()=>({status:"ready",installedPath:f.component})});
   try{
     await preservation.ready;
+    assert.equal((await fs.stat(`${f.retentionDirectory}-human-hooks`)).isDirectory(),true,
+      "an alternate root isolates both snapshots from the real user store");
     const hook=await fs.readFile(path.join(f.component,"hooks/hooks.json"));
     await fs.rm(f.plugin,{recursive:true});await fs.rm(f.component,{recursive:true});
     await waitUntil(()=>fs.readFile(path.join(f.component,"hooks/hooks.json")).then(bytes=>bytes.equals(hook),()=>false));

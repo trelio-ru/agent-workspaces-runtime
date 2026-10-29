@@ -4127,12 +4127,22 @@ export const startHumanCodexPluginPreservation = (options = {}) => {
     hooks = startLoadedCodexPluginPreservation({ ...options,
       // Component version and pinned common shell version are independent. The
       // retention selector verifies its native manifest against the cache leaf.
-      retentionDirectory: options.hookRetentionDirectory,
+      // An explicit alternate retention root must isolate BOTH components.
+      // Never silently send its hook snapshot back into the user's default
+      // store (including when the caller is an isolated test/diagnostic host).
+      retentionDirectory: options.hookRetentionDirectory
+        ?? (options.retentionDirectory ? `${options.retentionDirectory}-human-hooks` : undefined),
       environment: { ...environment, TRELIO_PLUGIN_ROOT: component.installedPath } });
     await hooks.ready;
     return entry;
   });
-  ready.catch(() => {}); // Main preservation already owns structural diagnostics.
+  ready.catch(error => {
+    // This promise also owns descriptor/companion failures which the main
+    // watcher never observes. Report one structural failure, without private
+    // paths or a speculative repair, rather than hiding a failed snapshot.
+    if (options.onError) options.onError(error);
+    else process.stderr.write("Trelio: exact hook component preservation failed; automatic repair stopped.\n");
+  });
   return { ready, close: async () => {
     closed = true;
     await ready.catch(() => {});
