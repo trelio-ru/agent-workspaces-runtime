@@ -1426,6 +1426,16 @@ polls. It must not depend on a waiter observing that rejection: the common
 finish registry may discard its failed entry on the next start. The bounded
 preparation cell retains ordinary refusals and the second owned timeout before
 another start, preserving the one-resume cap and fresh native admission.
+Company-context GET requests read/sign one fresh coherent native private-store
+value without taking the exclusive registration/end mutex. Keychain item updates
+and ACL-checked atomic DPAPI envelopes provide the snapshot boundary; there is
+no retained key or observation cache. Pending/ended/expired or mismatched records
+refuse. Registration/end writers and other routes retain the original lock;
+native pre-read admission and final session/model/pass/recipient checks remain.
+An end/rotation racing a signed read is checked by that same native endpoint,
+as for any request already in flight after releasing a mutex. No lock deadline,
+private-session budget, proof lifetime or replay policy is extended. The real
+Windows cold composition must include concurrent file reads and MCP polls.
 Tests cover actual serial MCP/current-child pipes and a real aborted Git blob,
 native admission, real managed
 HPKE/mirror search/exact source/file reads, rotation refusal and cancellation.

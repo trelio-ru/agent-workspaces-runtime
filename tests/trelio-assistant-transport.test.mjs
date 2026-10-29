@@ -1545,6 +1545,48 @@ test('Workspace proof lock covers only its coherent runtime snapshot, with nativ
   assert.equal(locked,false);f.close();
 });
 
+test('company readonly proofs use fresh atomic private snapshots without competing with registration, and fail closed on transitions',async()=>{
+  const f=await workspaceProfileFixture({encryptedTool:'get_task'});
+  const active={schemaVersion:1,kind:'source_intake',assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
+    companyId:f.pass.companyId,sourceId:randomUUID(),sourceRevision:1,passId:f.pass.passId,deliveryId:f.pass.deliveryId,
+    eventId:randomUUID(),threadId:f.pass.threadId};
+  f.changePass(active);
+  const descriptor={schemaVersion:1,nativeTool:'search',companyId:active.companyId,companySlug:'encrypted',
+    intakePass:{companyId:active.companyId,sourceId:active.sourceId,intakeId:active.passId},
+    assistantUserId:f.identity.assistantId,deviceId:f.identity.deviceId,requestOrigin:'https://e2ee.trelio.ru'};
+  let locks=0,reads=0,replaceIdentity=false;
+  const read=f.store.get;
+  f.store.get=async input=>{
+    if(input.kind==='runtime')reads++;
+    if(replaceIdentity&&input.kind==='device')f.changeIdentity({...f.identity,deviceId:randomUUID()});
+    return read(input);
+  };
+  const profile=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
+    encryptedCompanyContext:descriptor,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),
+    lock:async()=>{locks++;throw Error('SYNTHETIC_EXCLUSIVE_REGISTRATION_BUSY');}});
+  const token=await profile.requireToken(f.identity.origin);
+  const prepare=()=>profile.prepareRequest({origin:f.identity.origin,token,pathname:'/api/agent-workspaces/bridge-compatibility',
+    options:{},buildHeaders:(_token,headers)=>new Headers(headers)});
+  try{
+    const results=await Promise.all(Array.from({length:4},()=>prepare()));
+    assert.equal(locks,0);assert.equal(reads,4,'each request still reads the protected observed session; no key/snapshot cache');
+    const proofs=results.map(result=>JSON.parse(result.headers.get('x-trelio-assistant-proof')));
+    assert.equal(new Set(proofs.map(proof=>proof.nonce)).size,4);
+    for(const proof of proofs)assert.equal(proof.runtimeSessionId,f.runtime.state.runtimeSessionId);
+    const slot={origin:f.identity.origin,kind:'runtime',id:active.passId};
+    for(const changed of [{...f.runtime,ended:true},{...f.runtime,pending:{observation:f.runtime.state.observation}},
+      {...f.runtime,state:{...f.runtime.state,expiresAt:new Date(0).toISOString()}},
+      {...f.runtime,threadId:randomUUID()}]){
+      await f.store.put(slot,changed);
+      await assert.rejects(prepare(),{code:'ASSISTANT_WORKSPACE_SESSION_REQUIRED'});
+    }
+    await f.store.put(slot,f.runtime);replaceIdentity=true;
+    await assert.rejects(prepare(),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'},'late identity replacement still refuses');
+    f.changeIdentity(f.identity);replaceIdentity=false;f.close();
+    await assert.rejects(prepare(),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'},'native closed intake remains authoritative');
+  }finally{f.close();}
+});
+
 test('every supported source exact-body command requires the common native read observer',async()=>{
   const f=await workspaceProfileFixture();
   try{

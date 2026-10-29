@@ -139,10 +139,11 @@ publication tooling также остаются вне этого публичн
   Genuine common HTTP errors reuse the closed bridge diagnostic vocabulary,
   without backend prose or device-auth recovery. Status-shaped foreign errors
   remain local failures; numeric request-frame tails admit only fixed HTTP buckets.
-  Workspace HTTP proof locks cover only the coherent observed-runtime read/sign;
-  native admission and credential/identity I/O remain outside, with original
-  admission-before-key and final identity fences. Cold pool/poll contention must
-  pass without extending lock, private-session or native request deadlines.
+  Company GET proofs read one fresh atomic Keychain/DPAPI runtime value without
+  the exclusive registration lock; pending/ended observations refuse. Registration,
+  end and other routes retain their original lock. Native admission-before-key,
+  final identity/session/model/recipient fences and all deadlines stay unchanged;
+  no snapshot/key cache or retry. Cold pool/poll contention must pass on Windows.
   Native selected ciphertext follows weak snapshot/projection identity through common mirror batches; no cumulative company map or general resolver. Per-response 4096/32-MiB and current-recipient guards remain. Failures expose fixed stages only; no content, counts, paths or automatic retry.
   All local MCP materializers retain closed refusal codes or a fixed local stage,
   never a false endpoint outage. Only the exact native send error retains native

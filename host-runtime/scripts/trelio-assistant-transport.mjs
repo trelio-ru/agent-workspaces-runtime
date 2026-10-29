@@ -2026,23 +2026,32 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           }
         }else if(requestOrigin!==identity.origin)fail('ASSISTANT_WORKSPACE_ORIGIN_DENIED');
       }
-      // Parallel file reads and fresh MCP polls share this SAME observed
-      // runtime snapshot. Keep only its coherent read/signature under the
-      // registration lock: native HTTP plus unrelated credential/identity I/O
-      // inside it let a busy mirror starve fresh readers until the unchanged
-      // lock deadline. Registration/end still serialize with this snapshot;
-      // native admission stays BEFORE the private snapshot and local identity
-      // is checked again AFTER credential I/O, before dispatch, as previously.
+      // Native admission precedes every fresh private snapshot; no cached key
+      // or earlier successful read becomes authority for the next HTTP request.
       await assertLivePass(options.signal);
-      const proof=await lock(path.join(lockDirectory,`${pass.passId}.json`),async()=>{
+      const readonlyCompanyProof=companyRead!==null&&method==='GET'&&route.proofTool==='assistant_workspace_data_plane_read';
+      const readAndSign=async()=>{
+        // A private-store get is one coherent value: Keychain replaces one
+        // item atomically; Windows reads one ACL-checked, atomically renamed
+        // DPAPI envelope through its opened fd. Company GET readers therefore
+        // need no exclusive REGISTRATION lock. Even this single OS-backed read
+        // can queue behind other native ACL operations on Windows; putting it
+        // under that lock lets four cold-file readers starve a fresh MCP hook.
+        // Registration/end writers retain their original lock. Pending or
+        // ended observations refuse here, while the native endpoint checks the
+        // exact signed session/model/pass/recipient again at HTTP dispatch.
+        // A racing end/rotation after this snapshot is an ordinary in-flight
+        // proof race already possible after unlocking, never a local grant.
         const record=await store.get({origin:identity.origin,kind:'runtime',id:pass.passId});
         const state=record?.state;
-        if(record?.schemaVersion!==1 || record.ended || record.passId!==pass.passId || record.threadId!==pass.threadId
+        if(record?.schemaVersion!==1 || record.ended || readonlyCompanyProof&&record.pending!==undefined
+          || record.passId!==pass.passId || record.threadId!==pass.threadId
           || !uuid.test(state?.runtimeSessionId??'') || !Number.isFinite(Date.parse(state.expiresAt)) || Date.parse(state.expiresAt)<=now()
           || typeof state.privateKeyPkcs8!=='string' || state.privateKeyPkcs8.length>256) fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');
         try{return buildRuntimeSessionProof({state,toolName:route.proofTool,now:new Date(now())});}
         catch{fail('ASSISTANT_WORKSPACE_SESSION_REQUIRED');}
-      });
+      };
+      const proof=readonlyCompanyProof?await readAndSign():await lock(path.join(lockDirectory,`${pass.passId}.json`),readAndSign);
       // Keys use the ordinary observed-hook serializer; no model-authored
       // proof/session or human vault lookup is accepted. Scope/proof headers
       // overwrite any untrusted values from an initial header collection.
