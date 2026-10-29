@@ -209,3 +209,22 @@ test('source triage hook seals the exact frozen role/batch with ordinary observe
  live={...live,eventIds:[crypto.randomUUID()]};await assert.rejects(f.hook(event,'resolve_assistant_intake'),/PASS_REVIEW_REQUIRED/);
  live={...live,eventIds,kind:'owner_command'};await assert.rejects(f.hook(event,'get_assistant_intake_context'),/PASS_REVIEW_REQUIRED/);
 });
+
+
+test('protected taskless pass releases only an exact negative native receipt, never task/triage or missing owner proof',async()=>{
+ const f=fixture(),disk=new Map();
+ const host=createAssistantHostState({directory:path.join(os.tmpdir(),'assistant-negative-receipt'),store:f.store,primitives:{
+  ensurePrivateDirectory:async()=>{},assertPrivatePathKind:async file=>{if(!disk.has(file))throw Object.assign(Error(),{code:'ENOENT'});},
+  readPrivateJsonFile:async file=>disk.get(file),writePrivateJsonFile:async(file,value)=>disk.set(file,value)}});
+ await host.saveIdentity(f.identity);
+ const pass={schemaVersion:1,kind:'source_intake',assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,
+  companyId:crypto.randomUUID(),passId:crypto.randomUUID(),deliveryId:crypto.randomUUID(),threadId:crypto.randomUUID(),
+  sourceId:crypto.randomUUID(),sourceRevision:4,eventId:crypto.randomUUID()};
+ await host.activatePass(pass);
+ const receipt={schemaVersion:1,state:'reply_abandoned',companyId:pass.companyId,id:pass.passId,sourceId:pass.sourceId,sourceRevision:pass.sourceRevision,
+  eventId:pass.eventId,threadId:pass.threadId,receiptId:crypto.randomUUID(),ownerPrivateRead:true,readConfirmed:true,taskId:null};
+ for(const patch of [{companyId:crypto.randomUUID()},{sourceRevision:5},{threadId:crypto.randomUUID()},{ownerPrivateRead:false},{readConfirmed:false},{taskId:crypto.randomUUID()}])
+  await assert.rejects(host.releasePass({...receipt,...patch}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+ assert.deepEqual(await host.readActivePass(),pass);
+ await host.releasePass(receipt);assert.equal(await host.readActivePass(),null);
+});

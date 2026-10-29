@@ -677,8 +677,34 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     return selected;
   };
   const intakeLocator=row=>({companyId:row.scope.companyId,sourceId:row.scope.bindingId,intakeId:row.id});
-  const reconcileIntakeReply=async(row,outcome,signal)=>{
+  const reconcileIntakeReply=async(row,outcome,signal,terminal=null)=>{
     if(outcome.state!=='reply_pending')return outcome;
+    if(row.reply_receipt_id===null&&row.reply_message_id===null){
+      // A native intent is committed before provider preflight. Distinguish
+      // the durable ABSENCE of its final spawn fence from an unknown send.
+      // Require the exact stopped original marker and expired native lease;
+      // absence of a Telegram answer or model completion alone grants nothing.
+      const pass=await passHost.readActivePass();lease();
+      if(row.kind!=='owner_command'||!['started','uncertain'].includes(row.state)||row.native_started!==1
+        ||!['completed','failed'].includes(terminal?.state)||!uuid.test(terminal?.turnId??'')
+        ||outcome.id!==row.id||outcome.sourceId!==row.scope.bindingId||outcome.sourceRevision!==row.source_revision
+        ||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id||outcome.taskId!==null
+        ||outcome.ownerPrivateRead!==true||outcome.readConfirmed!==true||!uuid.test(outcome.receiptId??'')
+        ||!Number.isFinite(Date.parse(outcome.leaseExpiresAt))||Date.parse(outcome.leaseExpiresAt)>now()
+        ||pass?.kind!=='source_intake'||pass.intakeKind==='route_existing'||pass.assistantId!==identity.assistantId||pass.deviceId!==identity.deviceId
+        ||pass.passId!==row.id||pass.deliveryId!==row.delivery_id||pass.sourceId!==row.scope.bindingId
+        ||pass.sourceRevision!==row.source_revision||pass.eventId!==row.original_event_id
+        ||pass.threadId!==row.thread_id||pass.companyId!==row.scope.companyId
+        ||row.reply_abandon_receipt_id!==null||typeof client.abandonUnattemptedOwnerReply!=='function')
+        fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
+      // One SQLite transaction freezes STARTED -> UNCERTAIN and writes this
+      // technical attempt before HTTP. A racing old beforeInvoke either saved
+      // its send fence first (and this fails), or can no longer start a send.
+      // Lost HTTP results permit only exact native read-back on later ticks.
+      inbox.startOwnerReplyAbandonment(row.id,outcome.receiptId);
+      const closed=await client.abandonUnattemptedOwnerReply({intakePass:intakeLocator(row),receiptId:outcome.receiptId},signal);
+      lease();return closed;
+    }
     if(outcome.receiptId!==row.reply_receipt_id)fail('ASSISTANT_OWNER_REPLY_UNCERTAIN');
     if(row.reply_message_id===null&&verifyOwnerReply&&typeof native.readOwnerReply==='function'){
       // Reconcile only after the exact original model turn is terminal. The
@@ -712,7 +738,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // health; another retained task/intake still prevents false recovery.
       await businessConfirmed();return;
     }
-    if(['waiting_owner','ignored','cancelled'].includes(outcome.state))return;
+    if(['waiting_owner','ignored','cancelled','reply_abandoned'].includes(outcome.state))return;
     if(outcome.state==='redirected'){
       const target=outcome.redirect;
       if(!target||target.sourceId===row.scope.bindingId)fail('ASSISTANT_INTAKE_CHANGED');
@@ -869,8 +895,12 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     }
     if(['started','uncertain'].includes(row.state)){
       let outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
-      outcome=await reconcileIntakeReply(row,outcome,signal);
       const nativeResult=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+      // Existing native cancellation may fence an expired LEASED intake even
+      // while its original turn is still running; release still waits for the
+      // marker below. Only reply reconciliation itself needs terminal proof.
+      if(outcome.state==='reply_pending'&&!['completed','failed'].includes(nativeResult.state))return blockedIntake();
+      outcome=await reconcileIntakeReply(row,outcome,signal,nativeResult);
       if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
         await settleIntake(row,outcome,signal);return deferredIntake(row);
       }
@@ -1398,7 +1428,26 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         const saved=passHost?await passHost.readActivePass():null;
         if(!saved)return false;
         const pass=validateAssistantActivePass(saved,identity);
-        if(pass.kind==='source_intake')return false;
+        if(pass.kind==='source_intake'){
+          const row=inbox.ownerIntake(pass.passId);
+          if(!['started','uncertain'].includes(row.state)||row.native_started!==1
+            ||row.id!==pass.passId||row.delivery_id!==pass.deliveryId||row.thread_id!==pass.threadId
+            ||row.scope.companyId!==pass.companyId||row.scope.bindingId!==pass.sourceId||row.source_revision!==pass.sourceRevision
+            ||row.original_event_id!==pass.eventId||row.scope.origin!==identity.origin||row.scope.assistantId!==identity.assistantId
+            ||(row.kind==='route_existing')!==(pass.intakeKind==='route_existing'))return false;
+          const terminal=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+          if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??''))return false;
+          // The SAME signed code-maintenance boundary must also be reachable
+          // when a taskless turn ended before its receipt settled. No model,
+          // send, receipt reset or pass release occurs here. A changed local
+          // source/marker/pass while downloading refuses before activation.
+          const unchanged=async()=>{
+            lease();signal.throwIfAborted();
+            if(JSON.stringify(await passHost.readActivePass())!==JSON.stringify(saved)
+              ||JSON.stringify(inbox.ownerIntake(row.id))!==JSON.stringify(row))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+          };
+          await unchanged();await update();await unchanged();return true;
+        }
         const row=inbox.readDelivery(pass.deliveryId);
         const plan=findSchedule(row.scope,pass.taskId);
         if(!plan||plan.threadId!==pass.threadId||row.kind!=='task'||!row.nativeStarted||row.taskId!==pass.taskId

@@ -103,7 +103,11 @@ A retained pass does not block its own repair update indefinitely. Health may
 load the signed update only after the SAME private coordinator lease fences work
 and the exact currently journaled native marker has positive completed/turn-ID
 evidence. A pending renewed/unknown start, running/failed/ambiguous history or
-changed identity/journal refuses. Downloading preserves every pass/start/history
+changed identity/journal refuses. For a taskless intake, the exact ORIGINAL
+completed/failed marker with a real turn UUID also permits only this code update,
+under the SAME lease and unchanged protected pass/source/journal snapshot. A
+running or ambiguous intake still refuses; this never settles its outcome.
+Downloading preserves every pass/start/history
 bit and never clears business health; the next worker independently selects the
 verified package. No model invocation, Codex restart or owner question occurs.
 
@@ -2755,6 +2759,11 @@ peer/revision/key and signed provider >=2.14.0 fence conversational sending.
 No model-selected recipient/account/file/schedule or human transport is accepted.
 Native positive settlement is a fixed device endpoint over the original receipt,
 not a new business action/approval; current device/source/owner ACL remains live.
+An expired intent whose send fence is independently absent may finish only as
+native `reply_abandoned`: exact terminal turn UUID, original protected pass and
+atomic SQLite no-send fence precede the fixed device request. Unknown/attempted
+sends retain verify-only recovery; negative settlement never clears business
+health or replays a question. See inbox schema20 for the durable boundary.
 See [reply receipts](assistant-inbox.md#verified-owner-intake-schema-v9-reply-receipts-v16).
 
 For signed Telegram >=2.14.0 the model-free poll explicitly opts into native

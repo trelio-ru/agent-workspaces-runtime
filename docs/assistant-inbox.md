@@ -939,3 +939,27 @@ budget key and no attempt cap. Ordinary hook/completion-repair caps remain.
 An empty provision uses null passId only in that closed capacity profile and
 retains the original chat/claim. No native prose, new task, body, ACK, outcome,
 process-liveness claim or reset of any original start bit is introduced.
+
+
+## Schema v20: expired owner reply without a send attempt
+
+A native `reply_pending` intent is not proof that the provider started. The SAME
+protected SQLite row adds nullable `reply_abandon_receipt_id`, preserving every
+old attempt, positive ID, cursor, native marker, model-read and processing bit.
+Under the SAME exclusive coordinator lease, only a completed/failed EXACT original
+native turn with a real turn UUID, the original protected source/pass/thread and
+an expired native lease permits negative technical settlement. Both provider
+attempt receipt and positive message ID must still be NULL.
+
+`startOwnerReplyAbandonment` atomically freezes STARTED to UNCERTAIN and persists
+the original native intent receipt before HTTP. It serializes with the existing
+final provider-spawn fence: either the send started first and negative settlement
+refuses, or a stale callback can no longer start it. One fixed device request
+admits no new model/provider call. A lost response permits only exact native
+read-back; a still-pending unknown result never repeats the POST. Native
+`reply_abandoned` must retain the SAME receipt and original fields. Only then may
+the SAME journal settle and release its protected pass. It never means replied,
+processed, ACKed, healthy business work or permission to replay the original.
+Attempted, running, missing-marker, changed-source and unknown cases stay fenced.
+Backend migration/endpoint must be deployed before host support. Unknown older
+readers fail closed on schema20 instead of clearing or reinterpreting the row.

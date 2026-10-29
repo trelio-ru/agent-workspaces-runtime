@@ -4184,3 +4184,27 @@ test('Codex usage crosses only the fixed authenticated device route with a stric
   assert.equal((await client.reportCodexUsage(input)).blocked,true);assert.equal(calls,2);
   await assert.rejects(client.reportCodexUsage({...input,accountId:'PRIVATE'}));assert.equal(calls,2);
 });
+
+
+test('negative reply settlement uses only its fixed device HTTP route and exact closed receipt',async()=>{
+ const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),companyId=randomUUID(),sourceId=randomUUID(),intakeId=randomUUID();
+ const receiptId=randomUUID(),locator={companyId,sourceId,intakeId},credential=`tda_${'x'.repeat(43)}`;
+ const original={schemaVersion:1,id:intakeId,companyId,sourceId,sourceRevision:4,eventId:randomUUID(),threadId:randomUUID(),
+  state:'reply_abandoned',taskId:null,receiptId,readConfirmed:true,ownerPrivateRead:true,
+  execution:{modelId:'gpt-6.1-sol',effortLevel:'high',revision:1},leaseExpiresAt:new Date(Date.now()-60000).toISOString()};
+ let value=original,calls=0;
+ const client=createAssistantDeviceClient({origin,assistantId,deviceId,store:{get:async()=>({assistantId,deviceId,credential,expiresAt:1})},
+  http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+   calls++;assert.equal(url,origin+'/api/digital-assistants/runtime/source-skills/intake/reply-not-attempted');
+   assert.equal(options.method,'POST');assert.equal(options.headers.authorization,`Bearer ${credential}`);
+   assert.deepEqual(JSON.parse(options.body),{intakePass:locator,receiptId});
+   return new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
+  }})});
+ const input={intakePass:locator,receiptId};assert.equal((await client.abandonUnattemptedOwnerReply(input)).state,'reply_abandoned');
+ for(const patch of [{state:'replied'},{receiptId:randomUUID()},{ownerPrivateRead:false},{readConfirmed:false},{taskId:randomUUID()},{companyId:randomUUID()}]){
+  value={...original,...patch};const before=calls;
+  await assert.rejects(client.abandonUnattemptedOwnerReply(input),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  assert.equal(calls,before+1,'malformed outcome never retries the request');
+ }
+ const before=calls;await assert.rejects(client.abandonUnattemptedOwnerReply({...input,replyAttempted:false}));assert.equal(calls,before);
+});

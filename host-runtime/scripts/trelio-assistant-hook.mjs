@@ -445,11 +445,13 @@ export const createAssistantHostState=({directory,store,primitives={}})=>{
       const old=await store.get(slot);if(!old)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       const pass=validateAssistantActivePass(old,identity);
       const intake=pass.kind==='source_intake';
-      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','routed','waiting_owner','redirected','cancelled','replied'].includes(outcome.state):outcome.state!=='confirmed')
+      if(outcome?.schemaVersion!==1 || (intake?!['ignored','created','routed','waiting_owner','redirected','cancelled','replied','reply_abandoned'].includes(outcome.state):outcome.state!=='confirmed')
         || !uuid.test(outcome.receiptId??'') || (intake?outcome.id!==pass.passId || outcome.sourceId!==pass.sourceId || outcome.eventId!==pass.eventId||outcome.threadId!==pass.threadId||outcome.sourceRevision!==pass.sourceRevision
           ||pass.intakeKind==='route_existing'&&(outcome.kind!=='route_existing'||JSON.stringify(outcome.eventIds)!==JSON.stringify(pass.eventIds))
           :['assistantId','deviceId','companyId','taskId','bindingId','bindingRevision','deliveryId','threadId'].some(key=>outcome[key]!==pass[key])))
         fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      if(intake&&outcome.state==='reply_abandoned'&&(pass.intakeKind==='route_existing'||outcome.companyId!==pass.companyId||outcome.ownerPrivateRead!==true
+        ||outcome.readConfirmed!==true||outcome.taskId!==null))fail('ASSISTANT_PASS_REVIEW_REQUIRED');
       // The backend already ended these signing sessions. Remove their local
       // private key before freeing the active journal; a crash between removals
       // leaves a recoverable closed pass rather than a retained signing key.

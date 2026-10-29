@@ -320,7 +320,7 @@ export const createAssistantHttp = ({ origin, fetchImpl = globalThis.fetch, time
     ['passBegin',['POST','/runtime/task-pass/begin']], ['passRead',['POST','/runtime/task-pass/read']],
     ['passRenew',['POST','/runtime/task-pass/renew']], ['passOutcome',['POST','/runtime/task-pass/outcome']], ['registerRuntime',['POST','/runtime/session/register']],
     ['endRuntime',['POST','/runtime/session/end']],
-    ...['begin','read','session/register','session/end','read-confirm','cancel','reply-confirm'].map((suffix,index)=>[['intakeBegin','intakeRead','intakeRegister','intakeEnd','intakeReadConfirm','intakeCancel','intakeReplyConfirm'][index],['POST',`/runtime/source-skills/intake/${suffix}`]]),
+    ...['begin','read','session/register','session/end','read-confirm','cancel','reply-confirm','reply-not-attempted'].map((suffix,index)=>[['intakeBegin','intakeRead','intakeRegister','intakeEnd','intakeReadConfirm','intakeCancel','intakeReplyConfirm','intakeReplyAbandon'][index],['POST',`/runtime/source-skills/intake/${suffix}`]]),
   ]);
   return async (operation, body, credential = null, signal = null) => {
     const route = routes.get(operation);
@@ -2446,12 +2446,14 @@ const sourceRouteEventIds=value=>{
 };
 const intakeProjection=(value,expected)=>{
   if(!object(value)||value.schemaVersion!==1||value.id!==expected.intakeId||value.sourceId!==expected.sourceId||value.companyId!==expected.companyId
-    ||!['leased','ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied'].includes(value.state)||typeof value.readConfirmed!=='boolean'
+    ||!['leased','ignored','created','routed','waiting_owner','redirected','cancelled','reply_pending','replied','reply_abandoned'].includes(value.state)||typeof value.readConfirmed!=='boolean'
     ||value.ownerPrivateRead!==undefined&&typeof value.ownerPrivateRead!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.eventId!==undefined&&value.eventId!==expected.eventId||expected.sourceRevision!==undefined&&value.sourceRevision!==expected.sourceRevision
     ||expected.threadId!==undefined&&expected.threadId!==null&&value.threadId!==expected.threadId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(value.kind!==undefined&&!['owner_command','route_existing'].includes(value.kind))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   const routing=value.kind==='route_existing';
+  if(value.state==='reply_abandoned'&&(routing||value.readConfirmed!==true||value.ownerPrivateRead!==true
+    ||value.taskId!==null||!UUID.test(value.receiptId??'')))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(expected.kind==='route_existing'&&(!routing||JSON.stringify(value.eventIds)!==JSON.stringify(expected.eventIds)))fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
   if(routing&&(!Array.isArray(value.eventIds)||!value.eventIds.length||value.eventIds.length>100||value.eventIds[0]!==value.eventId
     ||new Set(value.eventIds).size!==value.eventIds.length||value.eventIds.some(eventId=>!UUID.test(eventId??'')))
@@ -2764,6 +2766,13 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
       const locator=intakeLocator(input.intakePass),receiptId=id(input.receiptId);
       const value=intakeProjection(await call('intakeReplyConfirm',{intakePass:locator,receiptId},signal),locator);
       if(value.state!=='replied'||value.receiptId!==receiptId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return value;
+    },
+    async abandonUnattemptedOwnerReply(input,signal){
+      if(!object(input)||Object.keys(input).sort().join(',')!=='intakePass,receiptId')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      const locator=intakeLocator(input.intakePass),receiptId=id(input.receiptId);
+      const value=intakeProjection(await call('intakeReplyAbandon',{intakePass:locator,receiptId},signal),locator);
+      if(value.state!=='reply_abandoned'||value.receiptId!==receiptId)fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
       return value;
     },
     async endRuntime(input,signal) {

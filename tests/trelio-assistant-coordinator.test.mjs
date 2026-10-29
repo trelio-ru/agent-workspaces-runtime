@@ -1227,6 +1227,95 @@ for(const loseConfirmation of [false,true,'provider_result'])test(`owner-private
 
 });
 
+for(const scenario of ['completed','failed','active','missing_turn','attempted','lost_settlement','unknown_not_committed'])test(`expired owner reply intent preserves no-replay across SQLite reopen: ${scenario}`,async t=>{
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-no-send-'));
+ const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
+ const f=fixture(t,{database,ownsDatabase:false});await f.coordinator.close();
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerIdentityId=randomUUID(),key=`telegram-conversation/v1.${'e'.repeat(64)}`;
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
+  skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ let clock=Date.now(),poll=0,active=null,intake=null,turns=0,settlements=0,business=0;
+ const client={...f.options.client,tasks:async()=>({bindings:[],nextCursor:null}),sourceAccounts:async()=>[source],sourceRoutes:async()=>[],
+  ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
+  beginSourceIntake:async input=>{intake??={schemaVersion:1,id:input.intakeId,companyId:f.companyId,sourceId,sourceRevision:0,
+   eventId:input.eventId,threadId:input.threadId,state:'leased',leaseExpiresAt:new Date(clock+1800000).toISOString(),
+   taskId:null,receiptId:null,execution:f.execution.configuration,readConfirmed:false};return structuredClone(intake);},
+  readSourceIntake:async()=>structuredClone(intake),
+  confirmOwnerReply:async()=>assert.fail('an unobserved reply is never positive delivery'),
+  abandonUnattemptedOwnerReply:async input=>{
+   settlements++;assert.deepEqual(input,{intakePass:{companyId:f.companyId,sourceId,intakeId:intake.id},receiptId:intake.receiptId});
+   const row=createAssistantInbox({database}).ownerIntake(intake.id);
+   assert.equal(row.state,'uncertain');assert.equal(row.reply_receipt_id,null);assert.equal(row.reply_message_id,null);
+   assert.equal(row.reply_abandon_receipt_id,intake.receiptId,'durable fence precedes the native request');
+   assert.throws(()=>createAssistantInbox({database}).startOwnerReply(intake.id,intake.receiptId),{code:'ASSISTANT_INBOX_CONFLICT'},
+    'a late stale provider callback cannot cross the local send fence');
+   if(scenario==='unknown_not_committed')throw Object.assign(Error('synthetic unknown HTTP outcome'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+   intake.state='reply_abandoned';
+   if(scenario==='lost_settlement')throw Object.assign(Error('synthetic lost HTTP result'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+   return structuredClone(intake);
+  }};
+ const native={...f.options.native,run:async(input,options)=>{
+  turns++;options.startInvocation();Object.assign(intake,{state:'reply_pending',receiptId:randomUUID(),ownerPrivateRead:true,readConfirmed:true});
+  if(scenario==='attempted')createAssistantInbox({database}).startOwnerReply(intake.id,intake.receiptId);
+  const result={state:'completed',turnId:randomUUID(),receipt:`codex:${input.threadId}:${randomUUID()}`};
+  f.deliveries.set(input.deliveryId,result);return result;
+ }};
+ const options={...f.options,client,native,now:()=>clock,onBusinessConfirmed:()=>{business++;},passHost:{readActivePass:async()=>active,
+  activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async outcome=>{
+   assert.equal(outcome.state,'reply_abandoned');assert.equal(outcome.id,active.passId);assert.equal(outcome.receiptId,intake.receiptId);active=null;
+  }},workspaceForIntake:async()=>directory,readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
+   events:poll===1?[]:[{id:'message:123:8',revision:'b'.repeat(64),conversationKey:key,kind:'new',outgoing:false,attention:'direct',
+    forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
+ coordinator=createAssistantCoordinator({...options,database});
+ try{
+  await coordinator.pollOnce();clock+=300001;await coordinator.pollOnce();
+  await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});
+  assert.equal(turns,1);assert.ok(active);assert.equal(settlements,0,'terminal work alone cannot shorten the native lease');
+  createAssistantInbox({database}); // Complete the existing conversation-key backfill before the reopen comparison.
+  const before={...database.prepare('SELECT * FROM assistant_owner_intakes').get()},pass=structuredClone(active);
+  clock+=31*60000;
+  const marker=f.deliveries.get(before.delivery_id);
+  if(scenario==='active')marker.state='running';
+  if(scenario==='failed')marker.state='failed';
+  if(scenario==='missing_turn')delete marker.turnId;
+  await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...options,database});
+  let updates=0;
+  assert.equal(await coordinator.updateRuntimeAtBoundary(async()=>{updates++;assert.equal(await coordinator.workOnce(),null);}),!['active','missing_turn'].includes(scenario));
+  assert.equal(updates,!['active','missing_turn'].includes(scenario)?1:0);
+  assert.deepEqual({...database.prepare('SELECT * FROM assistant_owner_intakes').get()},before,'code maintenance cannot settle or reset the intake');
+  assert.deepEqual(active,pass);
+  if(scenario==='completed'){
+   await assert.rejects(coordinator.updateRuntimeAtBoundary(async()=>{active={...active,deliveryId:randomUUID()};}),{code:'ASSISTANT_PASS_REVIEW_REQUIRED'});
+   active=structuredClone(pass); // Restore only this synthetic in-memory host fixture after checking the immutable guard.
+  }
+  if(['active','missing_turn','attempted'].includes(scenario)){
+   await coordinator.workOnce().catch(error=>assert.equal(error.code,'ASSISTANT_OWNER_REPLY_UNCERTAIN'));
+   assert.equal(settlements,0);assert.deepEqual(active,pass);
+   assert.deepEqual({...database.prepare('SELECT * FROM assistant_owner_intakes').get()},before);
+  }else if(scenario==='unknown_not_committed'){
+   await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+   await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...options,database});
+   await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_OWNER_REPLY_UNCERTAIN'});
+   assert.equal(settlements,1,'unknown negative settlement is read back, never automatically attempted again');
+   assert.deepEqual(active,pass);assert.equal(intake.state,'reply_pending');
+   const row=database.prepare('SELECT state,reply_abandon_receipt_id,reply_receipt_id FROM assistant_owner_intakes').get();
+   assert.deepEqual({...row},{state:'uncertain',reply_abandon_receipt_id:intake.receiptId,reply_receipt_id:null});
+  }else{
+   if(scenario==='lost_settlement'){
+    await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});assert.ok(active);
+    await coordinator.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...options,database});
+   }
+   await coordinator.workOnce();assert.equal(settlements,1);assert.equal(active,null);assert.equal(intake.state,'reply_abandoned');
+   const row=database.prepare('SELECT state,settled,outcome_state,reply_receipt_id,reply_message_id,reply_abandon_receipt_id FROM assistant_owner_intakes').get();
+   assert.deepEqual({...row},{state:'complete',settled:1,outcome_state:'reply_abandoned',reply_receipt_id:null,reply_message_id:null,reply_abandon_receipt_id:intake.receiptId});
+   await coordinator.workOnce();assert.equal(settlements,1);assert.equal(turns,1);
+  }
+  assert.equal(business,0,'negative settlement cannot clear the independent business health latch');
+  assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+  assert.equal(database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+ }finally{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});}
+});
+
 for(const firstState of ['policy_blocked','waiting_owner','unknown_provision','unknown_provision_no_thread',
   'created_revoked','created_changed','created_denied','created_network'])test(`${firstState} owner intake retains its event while another company intake and ordinary task proceed`,async t=>{
   const f=fixture(t);await f.coordinator.close();

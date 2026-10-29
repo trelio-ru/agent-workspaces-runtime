@@ -134,7 +134,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -219,7 +219,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -432,8 +432,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     const deliveryColumns=all('PRAGMA table_info(assistant_inbox_deliveries)').map(column=>column.name);
     if(versions[0]?.version>=19&&!deliveryColumns.includes('model_capacity_json'))fail('ASSISTANT_INBOX_CONFLICT');
     if(!deliveryColumns.includes('model_capacity_json'))db.exec('ALTER TABLE assistant_inbox_deliveries ADD COLUMN model_capacity_json TEXT');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=19');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (19)');
+    const abandonColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version>=20&&!abandonColumns.includes('reply_abandon_receipt_id'))fail('ASSISTANT_INBOX_CONFLICT');
+    // Technical no-send settlement has its own one-attempt UUID fence. Never
+    // reuse/clear the provider attempt, invent a message ID or rewrite history.
+    if(!abandonColumns.includes('reply_abandon_receipt_id'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN reply_abandon_receipt_id TEXT');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=20');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (20)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -621,7 +626,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
           AND i.outcome_state='cancelled' AND i.outcome_receipt IS NOT NULL AND i.source_revision<?
           AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes n WHERE n.account_key=i.account_key
             AND n.native_event_id=i.native_event_id AND n.native_revision=i.native_revision
-            AND (n.outcome_state IN('created','routed','replied','ignored','redirected') OR n.source_key=i.source_key
+            AND (n.outcome_state IN('created','routed','replied','reply_abandoned','ignored','redirected') OR n.source_key=i.source_key
               AND (n.source_revision>i.source_revision OR n.source_revision=i.source_revision AND n.retry_ordinal>i.retry_ordinal)))`,scope.key,nativeRevision);
         for(const old of cancelled){
           const originals=all('SELECT * FROM assistant_source_intake_events WHERE intake_id=? ORDER BY ordinal',old.id);
@@ -954,6 +959,18 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const row=this.ownerIntake(id);if(!['started','uncertain'].includes(row.state))fail('ASSISTANT_INBOX_CONFLICT');
       run("UPDATE assistant_owner_intakes SET state='uncertain' WHERE id=?",row.id);
     });},
+    startOwnerReplyAbandonment(id,receiptId){return transaction(()=>{
+      const row=this.ownerIntake(id);receiptId=uuid(receiptId);
+      if(row.kind!=='owner_command'||!['started','uncertain'].includes(row.state)||row.native_started!==1||!row.thread_id
+        ||row.source_state!=='active'||row.source_revision!==row.configuration_revision
+        ||row.outcome_task_id!==null||row.outcome_receipt!==null
+        ||row.reply_receipt_id!==null||row.reply_message_id!==null||row.reply_abandon_receipt_id!==null)
+        fail('ASSISTANT_INBOX_CONFLICT');
+      // Serialize against startOwnerReply in this SAME database. The final
+      // provider spawn requires STARTED; this quiescent receipt never enables
+      // that boundary again, including after restart or a lost HTTP response.
+      run("UPDATE assistant_owner_intakes SET state='uncertain',reply_abandon_receipt_id=? WHERE id=?",receiptId,row.id);
+    });},
     /** Candidates come only from signed monitor refs in this exact private
      * source/account/conversation. No provider ID is guessed and no neighboring
      * body is stored. The native reader still verifies direction/header/text. */
@@ -968,7 +985,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     startOwnerReply(id,receiptId){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
       if(row.kind!=='owner_command'||row.state!=='started'||row.source_state!=='active'
-        ||row.source_revision!==row.configuration_revision||row.reply_receipt_id!==null)
+        ||row.source_revision!==row.configuration_revision||row.reply_receipt_id!==null||row.reply_abandon_receipt_id!==null)
         fail('ASSISTANT_INBOX_CONFLICT');
       // The SAME process engine calls this once at its final spawn boundary.
       // Persist before any bytes reach Telegram. There is no retry/clear edge.
@@ -982,8 +999,10 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     });},
     finishOwnerIntake(id,{receiptId,state,route=null,taskId=null,routes=null,ignoredEventIds=[]}){return transaction(()=>{
       const row=this.ownerIntake(id);receiptId=uuid(receiptId);
-      if(!(row.kind==='route_existing'?['pending','ready','started','uncertain','waiting_owner']:['ready','started','uncertain','waiting_owner']).includes(row.state)||!['created','routed','ignored','waiting_owner','redirected','cancelled','replied'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
+      if(!(row.kind==='route_existing'?['pending','ready','started','uncertain','waiting_owner']:['ready','started','uncertain','waiting_owner']).includes(row.state)||!['created','routed','ignored','waiting_owner','redirected','cancelled','replied','reply_abandoned'].includes(state))fail('ASSISTANT_INBOX_CONFLICT');
       if(state==='replied'&&(row.kind!=='owner_command'||row.reply_receipt_id!==receiptId||row.reply_message_id===null))fail('ASSISTANT_INBOX_CONFLICT');
+      if(state==='reply_abandoned'&&(row.kind!=='owner_command'||row.state!=='uncertain'||row.reply_abandon_receipt_id!==receiptId
+        ||row.reply_receipt_id!==null||row.reply_message_id!==null))fail('ASSISTANT_INBOX_CONFLICT');
       if(state==='routed'){
         const selected=routes??(route?[{...route,taskId,eventIds:row.eventIds}]:[]);
         const ids=[...selected.flatMap(item=>item.eventIds??[]),...ignoredEventIds];
@@ -994,7 +1013,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
         run('UPDATE assistant_owner_intakes SET outcome_route_id=?,outcome_task_id=? WHERE id=?',selected.length===1?selected[0].id:null,selected.length===1?selected[0].taskId:null,row.id);
       }
       run('UPDATE assistant_owner_intakes SET state=?,outcome_receipt=?,outcome_state=?,settled=?,next_check_at=? WHERE id=?',
-        state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled','replied'].includes(state)),['waiting_owner','cancelled'].includes(state)?time()+300000:0,row.id);
+        state==='waiting_owner'?'waiting_owner':'complete',receiptId,state,Number(['ignored','cancelled','replied','reply_abandoned'].includes(state)),['waiting_owner','cancelled'].includes(state)?time()+300000:0,row.id);
     });},
     redirectOwnerIntake(id,{scope:targetScope,sourceRevision,receiptId}){return transaction(()=>{
       const row=this.ownerIntake(id),target=scopeOf(targetScope);receiptId=uuid(receiptId);
@@ -1065,7 +1084,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
       const scope=scopeOf(scopeInput);activeSource(scope);
       return all(`SELECT DISTINCT i.id FROM assistant_owner_intakes i JOIN assistant_source_intake_events b ON b.intake_id=i.id
         JOIN assistant_inbox_events e ON e.event_key=b.event_key WHERE i.source_key=? AND i.native_started=1
-        AND e.acked=0 AND e.model_read_intake_id IS NULL AND i.outcome_state IN ('created','routed','replied','waiting_owner')
+        AND e.acked=0 AND e.model_read_intake_id IS NULL AND i.outcome_state IN ('created','routed','replied','reply_abandoned','waiting_owner')
         ORDER BY i.created_at LIMIT 100`,scope.key).map(row=>this.ownerIntake(row.id));
     },
     settleOwnerIntake(id){return transaction(()=>{
