@@ -1,9 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createVisualOriginPolicy } from '../host-runtime/scripts/trelio-visual-browser.mjs';
-import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence, waitVisualBrowserStopped } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
+import { ExtensionVisualBrowser, visualExtensionManifest, visualNativeLogEvidence, visualNativeStartupEvidence, waitVisualBrowserStopped, spawnVisualBrowserProcess } from '../host-runtime/scripts/trelio-visual-extension-browser.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+
+test('native diagnostic logging cannot add a descendant-held pipe to browser shutdown', { timeout: 5000 }, async () => {
+  // Chromium helpers may inherit stderr after the main browser has exited.
+  // Exercise the same launch boundary with a real native descendant, rather
+  // than changing the stop guard or granting that guard more time. File-based
+  // fixture diagnostics must not add a pipe which production never opens.
+  const source = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setTimeout(()=>{},1200)'],{stdio:['ignore','ignore','inherit'],windowsHide:true}).unref();setTimeout(()=>process.exit(0),20);`;
+  const child = spawnVisualBrowserProcess(process.execPath, ['-e', source], process.env);
+  let closed = false; child.once('close', () => { closed = true; });
+  try {
+    assert.equal(child.stderr === null, true, 'logging must retain ordinary ignored browser stdio');
+    const [code] = await once(child, 'exit'); assert.equal(code, 0);
+    await waitVisualBrowserStopped(child, () => closed, Date.now() + 700);
+    assert.equal(closed, true);
+  } finally {
+    child.stderr?.destroy(); if (child.exitCode === null) child.kill();
+    // Allow the synthetic descendant's finite timer to settle; never inspect
+    // or terminate an arbitrary PID while cleaning up this test.
+    await new Promise(resolve => setTimeout(resolve, 1300));
+  }
+});
 
 test('stopped browser joins native stdio closure after main exit without extending its stop deadline', { timeout: 5000 }, async () => {
   // Exercise the actual native pipe on every OS. Windows can deliver 'close'
@@ -38,6 +59,9 @@ test('extension transport has an exact loopback CSP without expanding page navig
   const counts = visualNativeLogEvidence('[1:ERROR:os_crypt_win.cc:3] PRIVATE_COOKIE\n[2:ERROR:sqlite.cc:5] PRIVATE_PATH\n[3:INFO:cookie.cc:1] PRIVATE_TOKEN');
   assert.deepEqual(counts, { osCryptErrors: 1, cookieErrors: 0, sqliteErrors: 1, networkSandboxErrors: 0 });
   assert.equal(JSON.stringify(counts).includes('PRIVATE'), false);
+  const startup = visualNativeStartupEvidence('PRIVATE_COOKIE No usable sandbox\nPRIVATE_PATH cannot open display\nPRIVATE_TOKEN Failed to load extension');
+  assert.deepEqual(startup, { sandboxUnavailable: true, displayUnavailable: true, extensionUnavailable: true });
+  assert.doesNotMatch(JSON.stringify(startup), /PRIVATE/);
 });
 
 test('origin policy rejects source resources, credentials, schemes and sibling origins', () => {

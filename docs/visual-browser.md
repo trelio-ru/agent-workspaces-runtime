@@ -625,6 +625,16 @@ timeout/errno. Используется общий diagnostic parser; Error mess
 descriptor в этот файл не попадают. Это свидетельство причины, не разрешение
 повторить действие, продлить lease или убрать обязательный native gate.
 
+Fixture logging сохраняет production stdio `ignore`: отдельный диагностический
+stderr pipe не создаётся. Chromium helper может унаследовать такой pipe после
+exit основного процесса и искусственно задержать `ChildProcess.close`.
+Счётчики и закрытые startup-категории читаются из уже существующего private
+`native.log`, только bounded tail и без native текста в отчёте. Реальная native
+регрессия запускает конечный дочерний процесс с наследующим stderr потомком.
+Прежний stop deadline, ожидание exit/close, snapshot/disposal и все headed
+authentication assertions остаются обязательными; отсутствие pipe само по себе
+не доказывает остановку произвольных процессов или сохранение профиля.
+
 В maintainer live smoke 2026-10-19 через extension механизм открыты Avito и
 первое объявление, прочитано описание, выполнены scroll, русский поисковый
 input и Enter. Foreground совпал до/после каждого действия, challenge не показан.

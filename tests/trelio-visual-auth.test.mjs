@@ -344,6 +344,7 @@ test('native browser performs login and TOTP privately, gates images and reuses 
       extensionUnavailable:value.extensionUnavailable===true};
     if(value?.stage==='native_log')nativeLog=Object.fromEntries(['osCryptErrors','cookieErrors','sqliteErrors','networkSandboxErrors']
       .map(key=>[key,Number.isSafeInteger(value[key])&&value[key]>=0?value[key]:null]));
+    if(value?.stage==='native_log'&&nativeExit)for(const key of ['sandboxUnavailable','displayUnavailable','extensionUnavailable'])nativeExit[key]=value[key]===true;
     if(['auth','window_inventory','window','close_queue','close_manual','close_browser','close_snapshot',
     'browser_exit','browser_quit','browser_stop_timeout','extension_not_ready','extension_not_connected',
     'stopped_profile_snapshot_failed','stopped_profile_persist_failed','stopped_profile_cleanup_failed'].includes(value?.stage)){

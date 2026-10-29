@@ -27,11 +27,19 @@ const PUBLIC_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwKPrbp7ylW5XVUNt
 const EXTENSION_ID = [...crypto.createHash('sha256').update(Buffer.from(PUBLIC_KEY, 'base64')).digest('hex').slice(0, 32)].map(c => String.fromCharCode(97 + parseInt(c, 16))).join('');
 const fault = code => Object.assign(new Error(code), { code });
 
-/** ChildProcess 'exit' precedes closure of its inherited stdio handles. Keep
- * the original stop budget across both boundaries: a Chromium helper can still
- * hold those handles after the main process exited. Neither snapshot nor
- * disposal may race that remaining native lifetime. This observes only the
- * child created by this session; it never discovers or terminates another PID.
+/** Fixture logging already has its private --log-file. Keep the SAME ignored
+ * stdio as an ordinary browser: a diagnostic-only stderr pipe can be inherited
+ * by Chromium helpers after the browser exits and manufacture a stop timeout.
+ * The original exit/close deadline and profile save/disposal checks stay strict.
+ */
+export function spawnVisualBrowserProcess(executable, args, env) {
+  return spawn(executable, args, { env, stdio: ['ignore', 'ignore', 'ignore'], windowsHide: true });
+}
+
+/** ChildProcess 'exit' can precede its 'close'. Keep the original stop budget
+ * across both owned-child boundaries before profile I/O. This is not a census
+ * of Chromium descendants: snapshot/persistence/disposal keep their independent
+ * guards. Observe only our ChildProcess, never discover/terminate another PID.
  */
 export async function waitVisualBrowserStopped(child, closed, deadlineAt) {
   while (((child.exitCode === null && child.signalCode === null) || !closed()) && Date.now() < deadlineAt) await sleep(Math.min(100, Math.max(1, deadlineAt - Date.now())));
@@ -62,6 +70,15 @@ export function visualNativeLogEvidence(text) {
     if (/network.*sandbox|sandbox.*network/iu.test(header)) counts.networkSandboxErrors++;
   }
   return counts;
+}
+
+export function visualNativeStartupEvidence(text) {
+  const tail = String(text).slice(-65536);
+  return {
+    sandboxUnavailable: /No usable sandbox|Failed to move to new namespace|Running as root without --no-sandbox|sandbox.*Operation not permitted/iu.test(tail),
+    displayUnavailable: /Missing X server|cannot open display|failed to initialize.*platform/iu.test(tail),
+    extensionUnavailable: /Failed to load extension|Could not load.*manifest|Service worker registration failed/iu.test(tail),
+  };
 }
 
 /** Private bounded delivery, independent of auth snapshots and browser close.
@@ -218,6 +235,7 @@ export class ExtensionVisualBrowser {
   #credentialSetup; #setupReason;
   #authenticationTask; #mailAttempt;
   #uploadBytes = 0; #uploadFiles = 0;
+  #nativeStartup = visualNativeStartupEvidence('');
   constructor({ dependencies, store, policy, origins, domains = [], lease, observationMode = 'image', attachmentDownloads = false, fileUploads = false, authentication = null, mailIdentity = null, testHeadless = false, testWindowController, testDiagnostics, testNativeLogging = true }) {
     if (!['image', 'text'].includes(observationMode) || typeof attachmentDownloads !== 'boolean' || typeof fileUploads !== 'boolean') throw fault('invalid_input');
     if ((testHeadless || testWindowController || testDiagnostics) && !policy.fixtureOnly) throw fault('invalid_input');
@@ -341,21 +359,15 @@ export class ExtensionVisualBrowser {
     // The extension privately navigates the internal new-tab surface after
     // policy. Private auth overlay separately preserves session-only cookies
     // on platforms where closing the last window ends the browser session.
-    this.#child = spawn(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], { env: visualChildEnvironment(), stdio: ['ignore', 'ignore', this.testNativeLogging ? 'pipe' : 'ignore'], windowsHide: true });
+    this.#child = spawnVisualBrowserProcess(executable, [`--user-data-dir=${this.#profile}`, `--load-extension=${extension}`, `--disable-extensions-except=${extension}`, '--silent-debugger-extension-api', '--no-first-run', '--no-default-browser-check', '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', '--restore-last-session', '--window-size=1440,1000', ...(process.platform === 'darwin' ? ['--no-startup-window'] : []), ...(this.testHeadless ? ['--headless=new'] : []), ...(this.testNativeLogging ? ['--enable-logging', `--log-file=${path.join(this.#directory, 'native.log')}`] : [])], visualChildEnvironment());
     this.#childClosed = false;
     this.#child.once('close', () => { this.#childClosed = true; });
-    // Fixture-only classification deliberately discards raw stderr. Even CI
-    // must never print a worker resource, private path or loopback credential.
-    let diagnosticTail = '', sandboxUnavailable = false, displayUnavailable = false, extensionUnavailable = false;
-    this.#child.stderr?.on('data', chunk => {
-      diagnosticTail = (diagnosticTail + chunk.toString()).slice(-8192);
-      sandboxUnavailable ||= /No usable sandbox|Failed to move to new namespace|Running as root without --no-sandbox|sandbox.*Operation not permitted/iu.test(diagnosticTail);
-      displayUnavailable ||= /Missing X server|cannot open display|failed to initialize.*platform/iu.test(diagnosticTail);
-      extensionUnavailable ||= /Failed to load extension|Could not load.*manifest|Service worker registration failed/iu.test(diagnosticTail);
-    });
+    // Reduce only the existing bounded private log, without adding a native
+    // pipe or copying its raw text into test evidence.
+    this.#nativeStartup = visualNativeStartupEvidence('');
     this.#child.once('error', () => { this.#terminal = 'bootstrap_failed'; this.#state = 'error'; });
     this.#child.once('exit', (code, signal) => {
-      this.testDiagnostics?.({ stage: 'browser_exit', exitCode: code, signal, sandboxUnavailable, displayUnavailable, extensionUnavailable });
+      this.testDiagnostics?.({ stage: 'browser_exit', exitCode: code, signal });
       if (this.#state === 'preparing') { this.#terminal = 'bootstrap_failed'; this.#state = 'error'; return; }
       // A normal human window close may finish auth; a crash/kill must retain
       // the previous durable snapshot and report loss instead of claiming save.
@@ -365,7 +377,7 @@ export class ExtensionVisualBrowser {
     const until = Math.min(Date.now() + 25_000, this.lease.deadlineAt);
     while (!this.#extensionReady && !this.#terminal && !this.#closed && Date.now() < until) await sleep(100);
     if (this.#closed || Date.now() >= this.lease.deadlineAt) throw fault('lease_expired');
-    if (!this.#extensionReady || this.#terminal) { await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', sandboxUnavailable, displayUnavailable, extensionUnavailable }); throw fault('bootstrap_failed'); }
+    if (!this.#extensionReady || this.#terminal) { await this.#nativeDiagnostics(); this.testDiagnostics?.({ stage: this.#socket ? 'extension_not_ready' : 'extension_not_connected', ...this.#nativeStartup }); throw fault('bootstrap_failed'); }
     this.testWindowController?.({ tabs: () => this.#send('fixture-tab-budget'), running: () => Boolean(this.#child && this.#child.exitCode === null && this.#child.signalCode === null), close: () => this.#send('fixture-close-windows'), crash: () => this.#child?.kill('SIGKILL') });
     this.#heartbeat = setInterval(() => { void this.#send('heartbeat').catch(() => {}); }, 15_000); this.#heartbeat.unref();
     this.#state = manual ? 'manual_input_required' : 'saved_unverified';
@@ -388,7 +400,11 @@ export class ExtensionVisualBrowser {
       // closed counters and discard every native message/path/token byte.
       file = await fs.open(path.join(this.#directory, 'native.log'), 'r');
       const size = (await file.stat()).size, bytes = Buffer.alloc(Math.min(size, 65536));
-      try { await file.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length)); this.testDiagnostics({ stage: 'native_log', ...visualNativeLogEvidence(bytes.toString()) }); }
+      try {
+        await file.read(bytes, 0, bytes.length, Math.max(0, size - bytes.length));
+        const text = bytes.toString(); this.#nativeStartup = visualNativeStartupEvidence(text);
+        this.testDiagnostics({ stage: 'native_log', ...visualNativeLogEvidence(text), ...this.#nativeStartup });
+      }
       finally { bytes.fill(0); }
     } catch { this.testDiagnostics({ stage: 'native_log_unavailable' }); }
     finally { await file?.close().catch(() => {}); }
