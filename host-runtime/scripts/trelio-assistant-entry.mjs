@@ -2366,7 +2366,7 @@ export const createAssistantWorkspaceExecutor = async ({runPlan=runAssistantWork
         try{
           const value=await pending;
           if(value?.schemaVersion!==1||value.prepared!==true||Object.keys(value).sort().join(',')!=='prepared,schemaVersion')
-            fail('ASSISTANT_MCP_INVALID_RESPONSE');
+            fail('ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID');
           return {prepared:true};
         }finally{preparationRequests.delete(pending);preparationControllers.delete(controller);}
       }});}catch(error){

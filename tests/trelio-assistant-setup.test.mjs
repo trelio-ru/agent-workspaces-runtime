@@ -2325,7 +2325,9 @@ test('company preparation resumes one expired readonly child only after fresh ad
 
 test('company preparation never retries other failures and caps repeated owned deadline exhaustion',async t=>{
  for(const code of ['ASSISTANT_PASS_REVIEW_REQUIRED','ASSISTANT_WORKSPACE_BINDING_CHANGED','ASSISTANT_RUNTIME_REQUEST_UNAVAILABLE','ASSISTANT_SETUP_UNAVAILABLE',
-  'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT']){
+  'ASSISTANT_COMPANY_CONTEXT_PREPARATION_TIMED_OUT','ASSISTANT_ENCRYPTED_SNAPSHOT_FORMAT_INVALID',
+  'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID','ASSISTANT_ENCRYPTED_SNAPSHOT_REFERENCES_MISSING',
+  'ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT','ASSISTANT_COMPANY_CONTEXT_PREPARATION_RESULT_INVALID']){
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-company-refusal-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const descriptor={nativeTool:'search',companySlug:'synthetic'},binding={scopeId:randomUUID(),scopeEpoch:1,deviceId:randomUUID(),envelopeId:randomUUID()};
   let prepares=0;const request=async()=>{prepares++;throw Object.assign(Error(),{code});};

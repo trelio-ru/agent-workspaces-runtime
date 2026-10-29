@@ -2143,6 +2143,35 @@ test('encrypted company source search uses the SAME HPKE mirror with isolated de
     assert.doesNotMatch(JSON.stringify(requests),new RegExp(canary));
     assert.doesNotMatch(JSON.stringify(requests),/SOURCE_PRIVATE_FILENAME_CANARY|ORIGINAL_PRIVATE_BYTES_CANARY/);
     assert.deepEqual(await f.host.readActivePass(),active,'source discovery never rebinds the original read origin');
+    // Validate the production decoder/profile, not a parallel fixture parser.
+    // Refusals reveal only their fixed stage; the native snapshot, current
+    // recipient and complete-reference guards remain identical. Each case
+    // has an isolated in-memory profile, so another failure cannot mask it.
+    const checkSnapshots=async(action)=>{
+      const current=await createAssistantWorkspaceProfile({identity:f.identity,store:f.store,host:f.host,client:f.client,
+        encryptedCompanyContext:descriptor,lockDirectory:path.join(os.tmpdir(),'synthetic-company-locks'),lock:(_path,invoke)=>invoke()});
+      return common.withWorkspaceExecutionProfile(current,async()=>{
+        await current.prepareCompanyContextRead();
+        const decode=value=>current.readWorkspaceJsonResponse(new Response(typeof value==='string'?value:JSON.stringify(value)));
+        await action(decode);
+      });
+    };
+    const snapshot=(context,payloads=[payload])=>({schemaVersion:1,context,encryptedPayloads:payloads});
+    for(const [invalid,code] of [
+      ['{','ASSISTANT_ENCRYPTED_SNAPSHOT_JSON_INVALID'],
+      [{schemaVersion:2,context:{},encryptedPayloads:[]},'ASSISTANT_ENCRYPTED_SNAPSHOT_FORMAT_INVALID'],
+      [snapshot({},[payload,payload]),'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID'],
+      [snapshot({},[{...payload,scopeEpoch:2}]),'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID'],
+      [snapshot({},[{...payload,aad:{...payload.aad,companyId:randomUUID()}}]),'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID'],
+      [snapshot({title:marker('title')},[]),'ASSISTANT_ENCRYPTED_SNAPSHOT_REFERENCES_MISSING'],
+    ])await checkSnapshots(decode=>assert.rejects(decode(invalid),{code}));
+    await checkSnapshots(async decode=>{
+      // A native envelope limit and the total company map limit are different
+      // guards. Exercise the latter across two individually valid responses.
+      const batch=Array.from({length:4096},()=>{const id=randomUUID();return {...payload,entityId:id,aad:{...payload.aad,entityId:id}};});
+      await decode(snapshot({},batch));
+      await assert.rejects(decode(snapshot({},[payload])),{code:'ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT'});
+    });
     for(const failure of ['aad','missing','recipient']){mode=failure;await assert.rejects(run());}
     mode='valid';await assert.rejects(common.withWorkspaceExecutionProfile(profile,()=>materializeAssistantEncryptedCompanyContext({origin:f.identity.origin,
       descriptor,name:'search',arguments:{queries:[canary],companySlugs:['foreign']},assertCurrent:profile.prepareCompanyContextRead})),{code:'ASSISTANT_WORKSPACE_BINDING_CHANGED'});
@@ -3615,7 +3644,7 @@ test('same selected skill hydrator opens only native Remote MCP config/title wit
   const result=await hydrateAssistantEncryptedSkill(input);assert.deepEqual(result.rawResolution.remoteMcp.config,fields.remote_mcp_config_json);
   assert.equal(result.rawResolution.skill.title,fields.title);assert.equal(result.rawResolution.assistantEncryption,undefined);assert.equal(current,2);
   await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,recipientDeviceId:randomUUID()}}),{code:'ASSISTANT_SOURCE_BINDING_CHANGED'});
-  await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,encryptedPayloads:[payload,{...payload,entityId:randomUUID()}]}}),{code:'ASSISTANT_MCP_INVALID_RESPONSE'});
+  await assert.rejects(hydrateAssistantEncryptedSkill({...input,bundle:{...bundle,encryptedPayloads:[payload,{...payload,entityId:randomUUID()}]}}),{code:'ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID'});
 });
 
 test('native skill consent is a closed structural receipt with owned encrypted identity before HTTP',async()=>{

@@ -1512,13 +1512,13 @@ export const createAssistantWorkspaceProfile = async ({identity,client,store,hos
           fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
         const common=await import('./trelio-workspace.mjs');
         if([...common.collectAgentEncryptedReferences(opened.context).keys()].some(id=>!opened.payloads.has(id)))
-          fail('ASSISTANT_MCP_INVALID_RESPONSE');
+          fail('ASSISTANT_ENCRYPTED_SNAPSHOT_REFERENCES_MISSING');
         for(const [id,payload] of opened.payloads){
           const previous=companyReadPayloads.get(id);
           if(previous&&JSON.stringify(previous)!==JSON.stringify(payload))fail('ASSISTANT_WORKSPACE_BINDING_CHANGED');
           companyReadPayloads.set(id,payload);
         }
-        if(companyReadPayloads.size>4096)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+        if(companyReadPayloads.size>4096)fail('ASSISTANT_COMPANY_CONTEXT_PAYLOAD_LIMIT');
         return opened.context;
       }
       const snapshot=opened.context;
@@ -3573,17 +3573,21 @@ export const openAssistantWorkspaceArguments = async ({binding:rawBinding,sealed
 // Field authority is the SAME bounded native envelope for exact task and
 // accepted-Workspace reads. A bundle never becomes a generic payload cache:
 // only the selected snapshot's references can be opened by the common codec.
+// Each refusal carries a fixed validation stage, never IDs, payload counts,
+// field values, paths or native exceptions. This distinguishes a malformed
+// native snapshot from missing reference coverage or the separate company RAM
+// bound without weakening validation or allowing another HTTP attempt.
 const readAssistantEncryptedSnapshotResponse=async(response,common)=>{
   // Apply the existing native snapshot bound while reading, BEFORE JSON
   // allocation. The same decoder serves task and accepted-Workspace snapshots;
   // a declared length is never trusted instead of the actual streamed bytes.
   const bytes=await common.readBoundedResponseBuffer(response,32*1024*1024,'Assistant encrypted snapshot');
   try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes));}
-  catch{fail('ASSISTANT_MCP_INVALID_RESPONSE');}finally{bytes.fill(0);}
+  catch{fail('ASSISTANT_ENCRYPTED_SNAPSHOT_JSON_INVALID');}finally{bytes.fill(0);}
 };
 const readAssistantEncryptedSnapshotBundle=(bundle,companyEncryption,companyId)=>{
   if(!object(bundle) || bundle.schemaVersion!==1 || !object(bundle.context) || !Array.isArray(bundle.encryptedPayloads)
-    || bundle.encryptedPayloads.length>4096 || Buffer.byteLength(JSON.stringify(bundle))>32*1024*1024)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+    || bundle.encryptedPayloads.length>4096 || Buffer.byteLength(JSON.stringify(bundle))>32*1024*1024)fail('ASSISTANT_ENCRYPTED_SNAPSHOT_FORMAT_INVALID');
   const payloads=new Map();
   for(const payload of bundle.encryptedPayloads){
     if(!object(payload) || !UUID.test(payload.entityId??'') || payloads.has(payload.entityId)
@@ -3591,7 +3595,7 @@ const readAssistantEncryptedSnapshotBundle=(bundle,companyEncryption,companyId)=
       || payload.scopeEpoch!==companyEncryption.runtime.scope.epoch
       || payload.aad?.scopeId!==payload.scopeId || payload.aad?.scopeEpoch!==payload.scopeEpoch
       || payload.aad?.entityId!==payload.entityId || payload.aad?.entityType!==payload.entityType
-      || payload.aad?.entityRevision!==payload.entityRevision)fail('ASSISTANT_MCP_INVALID_RESPONSE');
+      || payload.aad?.entityRevision!==payload.entityRevision)fail('ASSISTANT_ENCRYPTED_SNAPSHOT_PAYLOAD_INVALID');
     payloads.set(payload.entityId,payload);
   }
   return {context:bundle.context,payloads};

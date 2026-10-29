@@ -2652,7 +2652,10 @@ Simple verified-owner private Telegram questions use the SAME visible source
 intake chat and `reply_owner`; they never become tasks/Workspace Runs. A question
 about company facts first selects the company read view, searches independent
 anchored formulations and reads the selected exact source. A failed, unavailable
-or incomplete read is a limitation, never an absence claim. Source rules remain
+or incomplete read is a limitation, never an absence claim. Encrypted snapshot
+refusals distinguish fixed JSON, envelope format, payload binding, reference
+coverage and company RAM-bound stages. These codes expose no field values,
+identifiers, counts, paths or native exceptions, and never permit a read retry. Source rules remain
 context and the answer cites the verified native source in the original chat.
 Self-contained greetings/arithmetic need no company search. Clear direct
 work commands alone select `create_task`. The native one-attempt receipt, exact
