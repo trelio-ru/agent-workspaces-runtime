@@ -387,6 +387,8 @@ test('request worker and parent share closed refusal codes without borrowing set
   t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const loader=path.join(root,'loader.mjs'),entry=new URL('../host-runtime/scripts/trelio-assistant-entry.mjs',import.meta.url).href;
   const {spawn}=await import('node:child_process');
+  const environment={...process.env,HOME:root,USERPROFILE:root,CODEX_HOME:path.join(root,'.codex'),APPDATA:root,LOCALAPPDATA:root};
+  delete environment.NODE_TEST_CONTEXT;
   const {ASSISTANT_SOURCE_ACCOUNT_ERROR_CODES,ASSISTANT_SOURCE_MONITOR_ERROR_CODES}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
   const {PROCESS_DIAGNOSTIC_CODES}=await import('../host-runtime/scripts/trelio-process-diagnostics.mjs');
   // Both ends are the actual entry implementation. Only business execution is
@@ -403,7 +405,7 @@ test('request worker and parent share closed refusal codes without borrowing set
         {code:${JSON.stringify(code)},status:401,privatePath:'PRIVATE_FRAME_CANARY'});}});`);
     let launches=0,closed;
     try{
-      await assert.rejects(requestCurrentAssistantRuntime({operation:'list'},{resolveLoader:async()=>loader,timeoutMs:5000,
+      await assert.rejects(requestCurrentAssistantRuntime({operation:'list'},{environment,resolveLoader:async()=>loader,timeoutMs:5000,
         spawnProcess:(...args)=>{launches++;const child=spawn(...args);closed=new Promise(r=>child.once('close',r));return child;}}),error=>{
         assert.equal(error.code,expected);assert.equal(error.status,undefined);assert.equal(error.setupRecovery,undefined);
         assert.deepEqual(Object.keys(error),['code']);assert.ok(!JSON.stringify(error).includes('PRIVATE_FRAME_CANARY'));return true;
