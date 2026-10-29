@@ -817,6 +817,9 @@ publication tooling также остаются вне этого публичн
 - Production loader передаёт exact `TRELIO_PLUGIN_ROOT`,
   `TRELIO_PLUGIN_VERSION`, `TRELIO_HOST_RUNTIME_VERSION` и immutable runtime
   source directory. Runtime не предполагает совместное source tree.
+- Caller browser continuation stays lazy inside `trelio-browser-session.mjs`;
+  preserve the signed package's 100-file ceiling and verify the actual packaged
+  loader chain, not only source imports.
 - `host-runtime/scripts/report-context-budget.mjs` – maintainer-only report и не
   входит в package. Он принимает exact plugin checkout через `--plugin-root` либо
   `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; plugin source не vendored.

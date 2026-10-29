@@ -15,14 +15,14 @@ const suiteHome = await fs.realpath(await fs.mkdtemp(path.join(fixtureTemp, 'bc-
 const originalHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, LOCALAPPDATA: process.env.LOCALAPPDATA };
 Object.assign(process.env, { HOME: suiteHome, USERPROFILE: suiteHome, LOCALAPPDATA: suiteHome });
 const { browserControllerEnabled, parseBrowserControllerArguments, prepareBrowserController,
-  openBrowserController, runBrowserControllerCommand } = await import('../host-runtime/scripts/trelio-browser-controller.mjs');
+  openBrowserController, runBrowserControllerCommand } = await import('../host-runtime/scripts/trelio-browser-session.mjs');
 const { buildAgentSkillRuntimeEnvironment, writePrivateJsonFile } = await import('../host-runtime/scripts/trelio-workspace.mjs');
 test.after(async () => {
   for (const [name, value] of Object.entries(originalHome)) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
   await fs.rm(suiteHome, { recursive: true, force: true });
 });
 
-const moduleUrl = new URL('../host-runtime/scripts/trelio-browser-controller.mjs', import.meta.url).href;
+const moduleUrl = new URL('../host-runtime/scripts/trelio-browser-session.mjs', import.meta.url).href;
 const policy = { apiVersion: 1, sessionClass: 'protected-snapshot', leaseMs: 60_000, manualAssist: false };
 const marker = { path: 'trelio-browser-controller.json', bytes: Buffer.from('{"schemaVersion":1}') };
 const artifact = { skillId: 'synthetic-browser', runtimeVersion: '1.0.0',

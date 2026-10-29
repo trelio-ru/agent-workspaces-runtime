@@ -784,6 +784,10 @@ Generic исправление совместимо с прежним browser-se
 
 ## Продолжение caller-owned браузера между ходами
 
+Продолжение лениво загружается внутри существующего API-модуля
+`trelio-browser-session.mjs`. Подписанный host package сохраняет прежний предел
+в 100 файлов; новый канал не расширяет ограничения защищённого parser.
+
 Host >=3.24.0 добавляет `browser-controller` в SAME admitted `skill_run`, без
 изменения stable plugin/MCP envelope. Opt-in – exact файл
 `trelio-browser-controller.json` с `{"schemaVersion":1}` в verified inventory,

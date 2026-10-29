@@ -25,7 +25,7 @@ const reportFinishProgress = (stage, counts = {}) => {
 };
 
 import { readSkillSecretSetupCommand, readSkillSecretSetupCommands, readSkillHumanInputSetupCommand, readSkillHumanInputSetupCommands, deliverSkillSetupEnvironment, assertAssistantTaskSkillCommand } from "./trelio-skill-secret-setup.mjs";
-import { browserControllerEnabled, parseBrowserControllerArguments } from './trelio-browser-controller-policy.mjs';
+import { browserControllerEnabled, parseBrowserControllerArguments } from './trelio-browser-session.mjs';
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
@@ -9761,7 +9761,7 @@ const skillCommand = async (
     runtimeArguments = accountResult.runtimeArguments;
   }
   if (controllerCommand) {
-    const { runBrowserControllerCommand } = await import('./trelio-browser-controller.mjs');
+    const { runBrowserControllerCommand } = await import('./trelio-browser-session.mjs');
     const result = await runBrowserControllerCommand({ command: controllerCommand,
       environment: buildAgentSkillRuntimeEnvironment({ artifact: artifactForCache, runtimeDirectory, executionContext }) });
     process.stdout.write(`${JSON.stringify(result)}\n`);
