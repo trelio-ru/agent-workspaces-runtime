@@ -112,6 +112,11 @@ repeat recovery opens. Path-parser tests alone do not cover native deletion.
 
 ## Exact tag verification
 
+Cross-repository shell checks accept either the historical remote startup-timeout
+omission or the current exact `startup_timeout_sec: 60`; routing/OAuth fields stay
+strict. The isolated dead-mirror-writer fixture reports only a closed stage and
+numeric child exit on failure, preserving the original assertion and deadlines.
+
 Planning uploads `runtime-ci-plan/ci-plan.json`, binding schema/policy version,
 base/head, complete diff digest, changed paths, selected profile/required jobs
 and native PR event/number plus run ID/attempt. A rerun replaces that report with its current attempt.

@@ -5523,7 +5523,12 @@ test("plugin manifests stay internally synchronized without coupling runtime rel
   // Since shell 3.2.4 both Codex servers also publish schemas directly: hiding
   // them behind deferred/Code Mode calls would bypass client PreToolUse. This
   // is a shell contract, independent of this signed runtime's release version.
-  assert.deepEqual(codexManifest.mcpServers.trelio, {
+  // The independently published shell may add its bounded remote handshake
+  // timeout without requiring a signed-runtime release. Accept both historical
+  // omission and the current exact value; keep every routing/OAuth field strict.
+  const { startup_timeout_sec: remoteStartupTimeout, ...remoteMcp } = codexManifest.mcpServers.trelio;
+  if (remoteStartupTimeout !== undefined) assert.equal(remoteStartupTimeout, 60);
+  assert.deepEqual(remoteMcp, {
     url: "https://trelio.ru/mcp",
     omit_tools_from: ["deferred", "code_mode"],
     oauth: {
