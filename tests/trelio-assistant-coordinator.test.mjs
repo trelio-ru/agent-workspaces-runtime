@@ -2172,6 +2172,67 @@ test('a terminal cancelled PRE-BODY owner intake recovers automatically under fr
  assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
 });
 
+test('owner capacity cancels the unread lease promptly, persists pacing across restart and replies once in the SAME chat',async t=>{
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'owner-capacity-'));
+ const file=path.join(directory,'inbox.sqlite');let database=new DatabaseSync(file),coordinator;
+ const f=fixture(t,{database,ownsDatabase:false});await f.coordinator.close();f.authority.state='done';
+ const sourceId=randomUUID(),accountId=randomUUID(),ownerIdentityId=randomUUID();
+ const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,projectId:null,
+  skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true,executionVerified:false};
+ let clock=Date.now(),poll=0,active=null,runs=0,provisions=0,cancels=0,sends=0;
+ const intakes=new Map(),markers=new Map(),threads=[];
+ const client={...f.options.client,tasks:async()=>({bindings:[],nextCursor:null}),sourceAccounts:async()=>[source],sourceRoutes:async()=>[],
+  ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerIdentityId,externalUserId:'123'}]}),
+  beginSourceIntake:async input=>{assert.equal(input.ownerIdentityId,ownerIdentityId);
+   if(!intakes.has(input.intakeId))intakes.set(input.intakeId,{schemaVersion:1,id:input.intakeId,companyId:f.companyId,
+    sourceId,sourceRevision:0,eventId:input.eventId,threadId:input.threadId,state:'leased',readConfirmed:false,
+    taskId:null,receiptId:null,leaseExpiresAt:new Date(clock+1800000).toISOString(),execution:f.execution.configuration});
+   return structuredClone(intakes.get(input.intakeId));},
+  readSourceIntake:async input=>structuredClone(intakes.get(input.intakeId)),
+  cancelSourceIntake:async input=>{cancels++;const current=intakes.get(input.intakeId);assert.equal(current.readConfirmed,false);
+   assert.ok(Date.parse(current.leaseExpiresAt)>clock,'capacity recovery must not wait thirty minutes');
+   const live=createAssistantInbox({database,now:()=>clock}).ownerIntake(input.intakeId);
+   assert.equal(live.state,'uncertain');assert.equal(JSON.parse(live.model_capacity_json).waiting,false,'durable cancellation fence precedes HTTP');
+   assert.throws(()=>createAssistantInbox({database}).startOwnerReply(input.intakeId,randomUUID()),{code:'ASSISTANT_INBOX_CONFLICT'});
+   Object.assign(current,{state:'cancelled',receiptId:randomUUID()});return structuredClone(current);},
+  confirmOwnerReply:async input=>{const current=intakes.get(input.intakePass.intakeId);assert.equal(current.receiptId,input.receiptId);
+   current.state='replied';return structuredClone(current);}};
+ const native={...f.options.native,readPrerequisites:async()=>({fingerprint:'c'.repeat(64)}),
+  readDelivery:async(_thread,id)=>markers.get(id)??{state:'uncertain'},
+  provision:async(input,options)=>{provisions++;options.startInvocation();const threadId=randomUUID();options.onThreadStarted(threadId);
+   const result={state:'completed',threadId,turnId:randomUUID()};markers.set(input.deliveryId,result);return result;},
+  run:async(input,options)=>{runs++;threads.push(input.threadId);options.startInvocation();const current=intakes.get(input.intakeContext.intakeId);
+   if(runs===3){current.readConfirmed=true;current.state='reply_pending';current.receiptId=randomUUID();
+    const inbox=createAssistantInbox({database,now:()=>clock});inbox.startOwnerReply(current.id,current.receiptId);sends++;
+    inbox.confirmOwnerReply(current.id,{receiptId:current.receiptId,messageId:92});}
+   const result={state:runs<3?'failed':'completed',turnId:randomUUID(),...(runs<3?{failure:'model_capacity'}:{})};
+   markers.set(input.deliveryId,result);return result;}};
+ const options={...f.options,client,native,now:()=>clock,passHost:{readActivePass:async()=>active,
+  activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}},
+  workspaceForIntake:async()=>process.cwd(),readSourceMonitor:async()=>({schemaVersion:1,baselineOnly:poll===0,nextCursor:String(poll++),hasMore:false,
+   events:poll===1?[]:[{id:'message:123:9',revision:'b'.repeat(64),conversationKey:`telegram-conversation/v1.${'f'.repeat(64)}`,
+    kind:'new',outgoing:false,attention:'direct',forwarded:false,viaBot:false,senderNamespace:'telegram_user_id',senderUserId:'123'}]})};
+ const reopen=async()=>{await coordinator?.close();database.close();database=new DatabaseSync(file);coordinator=createAssistantCoordinator({...options,database});};
+ coordinator=createAssistantCoordinator({...options,database});t.after(async()=>{await coordinator.close();database.close();await fs.rm(directory,{recursive:true,force:true});});
+ await coordinator.pollOnce();clock+=300001;await coordinator.pollOnce();
+ await coordinator.workOnce();assert.equal(runs,1);assert.equal(cancels,0);
+ const original={...database.prepare('SELECT * FROM assistant_owner_intakes').get()},first=JSON.parse(original.model_capacity_json);
+ assert.equal(first.nextAt,clock+60000);assert.equal(coordinator.modelCapacityRetryDelay(),60000);
+ assert.equal((await coordinator.dispatchStatus()).failure?.code,'ASSISTANT_CODEX_MODEL_CAPACITY');
+ await reopen();clock+=59999;await coordinator.workOnce();assert.equal(cancels,0);assert.equal(runs,1);
+ assert.equal(JSON.parse(database.prepare('SELECT model_capacity_json FROM assistant_owner_intakes WHERE id=?').get(original.id).model_capacity_json).nextAt,first.nextAt);
+ clock++;await coordinator.workOnce();assert.equal(cancels,1);
+ await reopen();await coordinator.workOnce();assert.equal(runs,2);assert.equal(provisions,1,'reuse the permanent owner chat');
+ const second=database.prepare('SELECT * FROM assistant_owner_intakes WHERE retry_of_id=?').get(original.id);
+ assert.equal(second.original_event_id,original.original_event_id);assert.notEqual(second.delivery_id,original.delivery_id);
+ const wait=JSON.parse(second.model_capacity_json);assert.equal(wait.firstAt,first.firstAt);assert.equal(wait.step,1);assert.equal(wait.nextAt,clock+300000);
+ clock+=299999;await coordinator.workOnce();assert.equal(cancels,1);clock++;await coordinator.workOnce();assert.equal(cancels,2);
+ await reopen();await coordinator.workOnce();assert.equal(runs,3);assert.equal(sends,1);assert.equal(active,null);
+ assert.equal(new Set(threads).size,1);assert.equal(database.prepare('SELECT count(*) n FROM assistant_inbox_deliveries').get().n,0);
+ clock+=3600000;await coordinator.workOnce();assert.equal(sends,1);assert.equal(runs,3);
+ assert.equal(database.prepare('SELECT sum(processed)+sum(acked) n FROM assistant_inbox_events').get().n,0);
+});
+
 test('capacity backoff survives SQLite restart, continues beyond twenty attempts and never replays an original turn',async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-capacity-')),file=path.join(directory,'inbox.sqlite');
   let database=new DatabaseSync(file),coordinator;

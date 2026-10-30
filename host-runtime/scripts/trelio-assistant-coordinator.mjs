@@ -775,6 +775,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
   };
   const deferredIntake=row=>Object.freeze({state:'deferred',kind:'source_intake',intakeId:row.id});
   const blockedIntake=()=>{emit('ASSISTANT_INTAKE_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};};
+  const ownerCapacityCancellationAttempted=row=>{
+    const episode=row.model_capacity_json?JSON.parse(row.model_capacity_json):null;
+    return episode?.markerId===row.delivery_id&&episode.waiting===false;
+  };
   const nativeIntakeStopped=async(row,signal)=>{
     // Native domain cancellation revokes mutation authority, but cannot prove
     // that an orphaned Codex invocation stopped after a host crash. Only this
@@ -802,16 +806,48 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
         if(!['completed','failed'].includes(terminal.state)||!uuid.test(terminal.turnId??''))continue;
         const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
         const prerequisite=await native.readPrerequisites(cwd,{signal});lease();
-        if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||row.retry_prerequisite===prerequisite.fingerprint)continue;
+        const capacity=row.model_capacity_json?JSON.parse(row.model_capacity_json):null;
+        // A cancelled capacity attempt has its own durable paced episode. It
+        // does not borrow changed-hook authority or replay its turn. The existing
+        // total owner-chain bound remains unchanged.
+        // Reread the exact native terminal after cancellation and before cloning.
+        const retryCapacity=capacity?.markerId===row.delivery_id&&capacity.turnId===terminal.turnId
+          &&capacity.waiting===false&&terminal.state==='failed'&&terminal.failure==='model_capacity';
+        if(capacity?.markerId===row.delivery_id&&!retryCapacity)continue;
+        if(retryCapacity&&capacity.nextAt>now())continue;
+        if(!/^[0-9a-f]{64}$/u.test(prerequisite?.fingerprint??'')||!retryCapacity&&row.retry_prerequisite===prerequisite.fingerprint)continue;
         await intakeSource(row,signal);
         inbox.retryUnreadOwnerIntake(row.id,{receiptId:outcome.receiptId,terminalTurnId:terminal.turnId,
-          prerequisiteKey:prerequisite.fingerprint});
+          prerequisiteKey:prerequisite.fingerprint,...(retryCapacity?{capacity:true}:{})});
         return;
       }catch{
         // No mutation/provider is retried by a failed observation. Back off
         // this exact closed row so another company's work remains eligible.
       }finally{inbox.deferOwnerIntake(row.id);}
     }
+  };
+  const recoverOwnerCapacity=async(row,outcome,terminal,signal)=>{
+    if(terminal.state!=='failed'||terminal.failure!=='model_capacity'||!uuid.test(terminal.turnId??''))return false;
+    // Native capacity alone never proves no business action. Only an original
+    // private owner intake whose native body is STILL unread and whose local
+    // provider fences are absent may retire its leased authority early.
+    if(row.kind!=='owner_command'||outcome.state!=='leased'||outcome.readConfirmed!==false
+      ||outcome.id!==row.id||outcome.companyId!==row.scope.companyId||outcome.sourceId!==row.scope.bindingId
+      ||outcome.sourceRevision!==row.source_revision||outcome.eventId!==row.original_event_id||outcome.threadId!==row.thread_id
+      ||outcome.taskId!==null||outcome.receiptId!==null||row.reply_receipt_id!==null||row.reply_message_id!==null
+      ||row.reply_abandon_receipt_id!==null||row.outcome_task_id!==null||row.outcome_receipt!==null)return false;
+    if(row.retry_ordinal>=20)fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    const episode=inbox.observeOwnerModelCapacity(row.id,{turnId:terminal.turnId,markerId:row.delivery_id});
+    if(now()<episode.nextAt||!episode.waiting)return true;
+    await intakeSource(row,signal);lease();
+    inbox.startOwnerCapacityCancellation(row.id,terminal.turnId);
+    const cancelled=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+    if(cancelled.id!==row.id||cancelled.companyId!==row.scope.companyId||cancelled.sourceId!==row.scope.bindingId||cancelled.sourceRevision!==row.source_revision
+      ||cancelled.eventId!==row.original_event_id||cancelled.threadId!==row.thread_id||cancelled.readConfirmed!==false
+      ||cancelled.state!=='cancelled'||cancelled.taskId!==null||!uuid.test(cancelled.receiptId??''))
+      fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
+    await settleIntake(inbox.ownerIntake(row.id),cancelled,signal);
+    return true;
   };
   const workIntake=async(signal,visited)=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
@@ -876,7 +912,9 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     try{source=await intakeSource(row,signal);}
     catch(error){
       if(saved?.passId===row.id||['started','uncertain'].includes(row.state)){
-        const outcome=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
+        // A source change does not erase a lost capacity-cancel response. Its
+        // durable attempt permits only exact GET, even under revoked admission.
+        const outcome=await client[ownerCapacityCancellationAttempted(row)?'readSourceIntake':'cancelSourceIntake'](intakeLocator(row),signal);lease();
         if(!['created','routed','ignored','redirected','cancelled','replied'].includes(outcome.state)||!uuid.test(outcome.receiptId??''))throw error;
         if(row.native_started===1&&!await nativeIntakeStopped(row,signal))return blockedIntake();
         inbox.finishOwnerIntake(row.id,outcome);if(saved)await passHost.releasePass(outcome);
@@ -896,6 +934,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     if(['started','uncertain'].includes(row.state)){
       let outcome=await client.readSourceIntake(intakeLocator(row),signal);lease();
       const nativeResult=await native.readDelivery(row.thread_id,row.delivery_id,{signal});lease();
+      if(await recoverOwnerCapacity(row,outcome,nativeResult,signal))return await passHost.readActivePass()?{state:'blocked',kind:'source_intake'}:deferredIntake(row);
       // Existing native cancellation may fence an expired LEASED intake even
       // while its original turn is still running; release still waits for the
       // marker below. Only reply reconciliation itself needs terminal proof.
@@ -904,6 +943,10 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       if(['completed','failed'].includes(nativeResult.state)&&outcome.state!=='leased'){
         await settleIntake(row,outcome,signal);return deferredIntake(row);
       }
+      // Native history may later be incomplete/running instead of repeating
+      // the capacity marker. That cannot revive an already consumed POST or
+      // turn its expired lease into automatic cancellation/replay authority.
+      if(ownerCapacityCancellationAttempted(row))return blockedIntake();
       if(Date.parse(outcome.leaseExpiresAt)<=now()){
         const closed=await client.cancelSourceIntake(intakeLocator(row),signal);lease();
         if(closed.state!=='cancelled')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
@@ -992,6 +1035,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           intakeId:row.id,eventId:row.original_event_id,...(row.kind==='route_existing'?{intakeKind:'route_existing',eventIds:row.eventIds}:{})}}, {signal:combined,startInvocation:()=>{lease();inbox.startOwnerIntake(row.id);started=true;}});
       if(cancelledOutcome)return settleOwnedCancellation();
       let outcome=await client.readSourceIntake(intakeLocator(row),combined);lease();
+      if(await recoverOwnerCapacity(inbox.ownerIntake(row.id),outcome,result,combined))return await passHost.readActivePass()?{state:'blocked',kind:'source_intake'}:deferredIntake(row);
       outcome=await reconcileIntakeReply(inbox.ownerIntake(row.id),outcome,combined);
       if(result.state!=='completed'||outcome.state==='leased')fail('ASSISTANT_INTAKE_REVIEW_REQUIRED');
       await settleIntake(inbox.ownerIntake(row.id),outcome,combined);return {state:'completed',kind:'source_intake'};
@@ -1488,6 +1532,17 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     },
     modelCapacityRetryDelay() {
       const rows=database.prepare("SELECT model_capacity_json FROM assistant_inbox_deliveries WHERE state IN ('started','uncertain') AND model_capacity_json IS NOT NULL LIMIT 2").all();
+      // The current owner wait and its positively cancelled parent share the
+      // SAME clock. Wake promptly for a due child without a timer in SQLite or
+      // an extra model writer; unknown cancellation has waiting=false and no
+      // positive native receipt, so it cannot create a retry loop here.
+      const owners=database.prepare(`SELECT i.delivery_id,i.state,i.model_capacity_json FROM assistant_owner_intakes i
+        WHERE i.model_capacity_json IS NOT NULL AND (i.state IN ('started','uncertain')
+          OR i.state='complete' AND i.outcome_state='cancelled' AND i.settled=1 AND i.retry_ordinal<20
+            AND NOT EXISTS(SELECT 1 FROM assistant_owner_intakes child WHERE child.retry_of_id=i.id)) LIMIT 2`).all();
+      for(const row of owners){const value=JSON.parse(row.model_capacity_json);
+        if(value.markerId===row.delivery_id&&(value.waiting||row.state==='complete')&&Number.isSafeInteger(value.nextAt))
+          return Math.max(1000,Math.min(300_000,value.nextAt-now()));}
       if(rows.length!==1)return null;
       const value=JSON.parse(rows[0].model_capacity_json);
       if(!value.waiting||!Number.isSafeInteger(value.nextAt))return null;

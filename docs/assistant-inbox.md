@@ -941,6 +941,28 @@ retains the original chat/claim. No native prose, new task, body, ACK, outcome,
 process-liveness claim or reset of any original start bit is introduced.
 
 
+## Schema v21: unread owner question model capacity
+
+The SAME owner-intake table adds nullable `model_capacity_json`, using the
+existing six-field capacity clock. Migration changes no previous attempt,
+receipt, source position or body/processing/ACK witness. Only an exact failed
+native capacity marker with independent native unread/no-task/no-outcome and
+local absent-send checks can populate it. Re-observation never postpones a due
+time. UNCERTAIN excludes late provider spawn before native cancellation.
+
+For the current marker, `waiting=false` is persisted before the one existing
+cancel POST. A lost result remains fenced; only exact native read-back can
+establish CANCELLED. The old row is never reopened. Its positively cancelled,
+terminal unread attempt can append one child for the SAME original event in
+the SAME permanent chat with a new native admission/lease/start marker. The
+clock/first failure carry over; old UUIDs and receipts stay intact. Parent
+uniqueness and the original twenty-attempt owner-chain bound remain enforced.
+An inherited clock for an older marker is not a current capacity diagnosis.
+Unknown next starts restore ordinary uncertainty; no metadata success or
+negative cancellation clears independent business health or marks an event
+processed/read/ACKed. The coordinator's existing bounded nextPollMs exposes
+only the due clock, never model or cancellation authority.
+
 ## Schema v20: expired owner reply without a send attempt
 
 A native `reply_pending` intent is not proof that the provider started. The SAME

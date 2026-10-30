@@ -2832,6 +2832,112 @@ test('quota pause keeps model-free polling and resumes only after a fresh positi
   blocked=false;await runAssistantBackgroundTick(options);assert.equal(works,1);assert.equal(closed,2);
 });
 
+// Native/server data is synthetic; the production worker, host forwarding,
+// device HTTP codec and reopened SQLite journal below are real. In particular,
+// the cancellation must not wait for a thirty-minute lease or replay a lost POST.
+for(const mode of ['recover','lost','unknown','body_read','attempted','running','lookalike','bounded'])
+test(`production owner capacity recovery preserves original peer/event and no-send fences: ${mode}`,async t=>{
+ const {createAssistantInbox,readAssistantInboxDispatchSummary}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+ const {createAssistantHttp}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'owner-capacity-host-')),file=path.join(directory,'inbox.sqlite');
+ t.after(()=>fs.rm(directory,{recursive:true,force:true}));let clock=Date.now();
+ const identity={origin:'https://synthetic.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ const companyId=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),memberId=randomUUID(),ownerId=randomUUID();
+ const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+ const source={id:sourceId,companyId,localAccountId:accountId,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ const scope={...identity,companyId,provider:'telegram',accountId,bindingId:sourceId};delete scope.deviceId;
+ const seed=new DatabaseSync(file),inbox=createAssistantInbox({database:seed,now:()=>clock});
+ inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);const poll=inbox.claimPoll(scope);
+ inbox.commitPage(scope,{...poll,nextCursor:'synthetic',hasMore:false,events:[{id:'message:123:4',revision:'a'.repeat(64),taskId:null,
+  wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'c'.repeat(64)}`}]});
+ const original=inbox.ownerIntakes()[0],threadId=randomUUID(),turnId=randomUUID();
+ inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);inbox.bindOwnerIntakeThread(original.id,threadId);
+ inbox.readyOwnerIntake(original.id);inbox.startOwnerIntake(original.id);if(mode==='attempted')inbox.startOwnerReply(original.id,randomUUID());
+ inbox.uncertainOwnerIntake(original.id);
+ if(mode==='bounded')seed.prepare('UPDATE assistant_owner_intakes SET retry_ordinal=20 WHERE id=?').run(original.id);
+ seed.close();
+ let active={schemaVersion:1,kind:'source_intake',...identity,companyId,sourceId,sourceRevision:0,passId:original.id,
+  deliveryId:original.delivery_id,eventId:original.original_event_id,threadId};delete active.origin;
+ const rows=new Map([[original.id,{schemaVersion:1,id:original.id,companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,
+  threadId,state:'leased',readConfirmed:mode==='body_read',taskId:null,receiptId:null,
+  leaseExpiresAt:new Date(clock+1800000).toISOString(),execution}]]);
+ let cancels=0,begins=0,runs=0,sends=0,observedState=mode==='running'?'running':'failed';const credential=`tda_${'s'.repeat(43)}`;
+ const readLocal=id=>{const db=new DatabaseSync(file);try{return {...db.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(id)};}finally{db.close();}};
+ const client=createAssistantDeviceClient({...identity,store:{get:async()=>({...identity,credential,expiresAt:1})},
+  http:createAssistantHttp({origin:identity.origin,fetchImpl:async(url,options)=>{
+   assert.equal(options.method,'POST');assert.equal(options.headers.authorization,`Bearer ${credential}`);const body=JSON.parse(options.body);
+   if(url.endsWith('/intake/begin')){begins++;assert.equal(body.threadId,threadId);assert.equal(body.eventId,original.original_event_id);
+    assert.equal(body.ownerIdentityId,ownerId);assert.equal(body.senderExternalUserId,'123');
+    rows.set(body.intakeId,{...rows.get(original.id),id:body.intakeId,state:'leased',receiptId:null,readConfirmed:false,
+     leaseExpiresAt:new Date(clock+1800000).toISOString()});
+   }else if(url.endsWith('/intake/cancel')){
+    cancels++;assert.equal(body.intakeId,original.id);assert.equal(rows.get(original.id).readConfirmed,false);
+    const local=readLocal(original.id);assert.equal(local.state,'uncertain');assert.equal(JSON.parse(local.model_capacity_json).waiting,false);
+    assert.equal(local.reply_receipt_id,null);assert.ok(Date.parse(rows.get(original.id).leaseExpiresAt)>clock);
+    if(mode==='unknown')throw Error('synthetic uncommitted transport failure');
+    Object.assign(rows.get(original.id),{state:'cancelled',receiptId:randomUUID()});
+    if(mode==='lost')throw Error('synthetic committed response loss');
+   }else if(url.endsWith('/intake/reply-confirm')){
+    const row=rows.get(body.intakePass.intakeId);assert.equal(body.receiptId,row.receiptId);row.state='replied';
+    return new Response(JSON.stringify(row),{headers:{'content-type':'application/json'}});
+   }else assert.ok(url.endsWith('/intake/read'),url);
+   return new Response(JSON.stringify(rows.get(body.intakeId)),{headers:{'content-type':'application/json'}});
+  }})});
+ const create=()=>createAssistantRuntimeHost({context:async action=>action({...client,identity,
+  heartbeat:async()=>({}),tasks:async()=>({bindings:[],nextCursor:null}),sourceRoutes:async()=>[],companies:async()=>[{companyId,memberId,execution:{state:'ready',configuration:execution}}],sourceAccounts:async()=>[source],
+  ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]})},{
+   readIdentity:async()=>identity,readActivation:async()=>null,readActivePass:async()=>active,
+   activatePass:async pass=>{assert.equal(active,null);active=pass;},withSetupLock:action=>action(),
+   releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}
+  }),dependencies:{directory,ensureDirectory:async()=>{},now:()=>clock,timeZone:'UTC',
+   readHookReadiness:async()=>({fingerprint:'b'.repeat(64)}),
+   readSourceMonitor:async()=>({schemaVersion:1,nextCursor:'synthetic-current',hasMore:false,events:[]}),
+   openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
+   readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,
+    authorizedByUserId:memberId,businessReady:true,
+    availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
+   native:{readPrerequisites:async()=>({fingerprint:'b'.repeat(64)}),provision:async()=>assert.fail('reuse the SAME permanent owner chat'),
+    readDelivery:async(thread,delivery)=>{assert.equal(thread,threadId);assert.equal(delivery,original.delivery_id);
+     return {state:observedState,turnId,...(mode==='lookalike'?{}:{failure:'model_capacity'})};},
+    run:async(input,options)=>{runs++;assert.equal(input.threadId,threadId);assert.notEqual(input.deliveryId,original.delivery_id);options.startInvocation();
+     const row=rows.get(input.intakeContext.intakeId);row.readConfirmed=true;row.state='reply_pending';row.receiptId=randomUUID();
+     const db=new DatabaseSync(file);try{const store=createAssistantInbox({database:db,now:()=>clock});store.startOwnerReply(row.id,row.receiptId);
+      sends++;store.confirmOwnerReply(row.id,{receiptId:row.receiptId,messageId:92});}finally{db.close();}
+     return {state:'completed',turnId:randomUUID()};}}
+  }});
+ // The real background tick owns/closes one fresh host. Reopen every tick so
+ // assertions cannot accidentally inspect/reuse a disposed coordinator.
+ const tick=()=>executeAssistantRuntimeRequest({operation:'background_tick'},{context:async action=>action({identity},{readActivation:async()=>null}),
+  backgroundTick:()=>runAssistantBackgroundTick({createHost:async()=>({...await create(),codexUsage:async()=>({blocked:false})}),
+   pluginMaintenance:async()=>({state:'ready'}),codexMaintenance:async()=>({state:'ready'})})});
+ if(mode==='bounded'){
+  await assert.rejects(tick(),{code:'ASSISTANT_INTAKE_REVIEW_REQUIRED'});
+  assert.equal(cancels,0);assert.equal(begins,0);assert.equal(runs,0);assert.ok(active);return;
+ }
+ await tick();assert.equal(cancels,0);assert.equal(runs,0);
+ clock+=60000;
+  if(['lost','unknown'].includes(mode))await assert.rejects(tick(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});else await tick();
+  if(['body_read','attempted','running','lookalike'].includes(mode)){
+   assert.equal(cancels,0);assert.equal(begins,0);assert.equal(runs,0);assert.ok(active);
+  }else if(mode==='unknown'){
+   assert.equal(cancels,1);clock+=3600000;await tick();
+   assert.equal(cancels,1,'unknown cancellation never repeats POST, even after expiry');assert.equal(runs,0);assert.ok(active);
+   const statusDb=new DatabaseSync(file);
+   try{const summary=readAssistantInboxDispatchSummary({database:statusDb,identity,companies:[{companyId,memberId}]});
+    assert.equal(summary.uncertainDeliveries,1);assert.equal(summary.failure,null,'unknown cancellation cannot hide behind capacity wait');
+   }finally{statusDb.close();}
+   // Loss of the old terminal projection and a later native source revocation
+   // are independent refusals, never permission to retry the consumed cancel.
+   observedState='running';await tick();assert.equal(cancels,1);assert.equal(runs,0);assert.ok(active);
+   source.state='paused';await assert.rejects(tick(),{code:'ASSISTANT_INTAKE_CHANGED'});assert.equal(cancels,1);assert.equal(runs,0);assert.ok(active);
+  }else{
+   if(mode==='lost'){assert.equal(cancels,1);await tick();}
+   assert.equal(cancels,1);assert.equal(begins,1);assert.equal(runs,1);assert.equal(sends,1);assert.equal(active,null);
+   assert.equal(readLocal(original.id).outcome_state,'cancelled');
+   clock+=300000;await tick();assert.equal(cancels,1);assert.equal(sends,1);
+  }
+});
+
 // Compose the production host's closed method forwarding, coordinator, durable
 // inbox and real device-client HTTP codec. Supplying a method directly to the
 // coordinator would miss a host adapter omission, even when both components

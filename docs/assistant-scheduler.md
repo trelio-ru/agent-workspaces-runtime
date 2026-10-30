@@ -149,6 +149,30 @@ supervisors honour the first one-minute retry. An already-running old supervisor
 keeps its existing five-minute granularity until its normal lifecycle ends; its
 unknown-work reporter cannot turn the new paced wait into dispatch review.
 
+An owner-private source question uses that same pacing clock (schema21 on the
+original owner-intake table), not the thirty-minute lease as an error timer.
+Only the exact native FAILED/model_capacity turn, still-unread native body,
+no task or outcome receipt and absent local send/positive/abandon fences admit
+early retirement through the existing device cancellation. The coordinator
+first freezes the local row to UNCERTAIN, then durably consumes its one cancel
+attempt before HTTP. Unknown cancellation permits exact GET only, including
+after expiry; a still-LEASED result never permits another POST or model launch.
+
+Positive CANCELLED read-back plus the original terminal marker permits one new
+native intake for the SAME signed event, source, account and owner. It reuses
+the SAME permanent chat, fresh owner/source/model/hook admission and a fresh
+native lease/marker; the old receipt, deadline, start bit and history remain
+immutable. No root resend, new task/Run, ACK, provider replay or model fallback
+is involved. The inherited first observation/step/due time survives SQLite
+restart and subsequent failures (1/5/15/30 minutes). The existing total owner
+retry-chain bound of twenty remains; reaching it retains review rather than
+starting another invocation. Generic changed-hook recovery remains independent.
+Body-read, attempted/unknown send, created task, running/unknown turn or a
+capacity-looking error does not admit this path. Native empty READY recovery
+retains its separate provision contract above. Tests compose the worker tick,
+production host factory, real device HTTP codec and SQLite reopen, including
+lost committed/noncommitted cancellations and exactly one reply.
+
 ## Cycles
 
 Cadences: 30 minutes; 1, 3, 6, 12 hours; daily, weekly, fortnightly, monthly.

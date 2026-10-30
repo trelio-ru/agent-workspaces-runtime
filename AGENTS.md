@@ -726,6 +726,12 @@ publication tooling также остаются вне этого публичн
   owner decision and project ACL; no inherited pass/chat/route or sender proof.
 
 - Terminal continuation: SAME pass/ledger, native trusted-hook preflight and indexed history. Twenty attempts per actual hook/signed-worker fingerprint still bound generic completion repair. Native failed model-capacity turns use separate unlimited paced continuations (1/5/15/30 minutes), SAME chat/pass and schema19 episode clock; no quota/network/prose inference or uncertain-action replay. Empty READY retries keep their original provision/thread. Health v3 notifies after fifteen minutes and preserves independent latches. See scheduler contract.
+  Unread owner questions use the SAME clock and original event/chat in schema21;
+  exact native capacity plus absent body/task/send gates one durable cancel
+  attempt before HTTP. Lost outcomes are GET-only; positive native cancellation
+  precedes fresh admission. Preserve the existing twenty-owner-chain bound,
+  original receipts/start bits and independent health/ACK. Test the real
+  worker/factory/device-codec/SQLite-reopen path, not only injected coordinator methods.
   Done permits only its existing canonical Run settlement, never new work; original binding/source receipts remain exact.
   Taskless reply schema20: terminal exact native marker + expired intent + atomic absent-send fence only; original receipt settles as reply_abandoned, never delivery/ACK/health/replay. Attempted/unknown sends stay fenced; backend first.
   Its fixed host-only device method must also cross the production runtime
