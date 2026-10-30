@@ -70,3 +70,20 @@ test("an exact contact channel survives a duplicate title hit for the same formu
   assert.equal(rank.exactReferenceMatches, 1);
   assert.equal(rank.matchedQueryCount, 1);
 });
+
+test("local rank scores long evidence once before assembling its vector", () => {
+  const text = `договор ${"нейтральный фон ".repeat(300)}`;
+  const original = String.prototype.toLocaleLowerCase;
+  let normalizations = 0;
+  String.prototype.toLocaleLowerCase = function(...args) {
+    if (this.length > 1000) normalizations++;
+    return Reflect.apply(original, this, args);
+  };
+  let rank;
+  try { rank = buildContextSearchRank({ type: "contact", title: "Contact", stableKey: "synthetic/contact",
+    matches: [{ query: "договор", source: "contact-description", previewText: text }] }); }
+  finally { String.prototype.toLocaleLowerCase = original; }
+  assert.equal(normalizations, 1);
+  assert.equal(rank.strongestEvidence, 2200);
+  assert.equal(rank.lexicalQuality, 200);
+});

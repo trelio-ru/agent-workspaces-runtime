@@ -1,6 +1,6 @@
+// Generated portable context-search ranking. Do not edit by hand.
 import { compileContextSearchQuery, normalizeContextSearchReference, normalizeContextSearchText } from "./trelio-context-search-matching.mjs";
 export { normalizeContextSearchText } from "./trelio-context-search-matching.mjs";
-// Shipped by the independently versioned host runtime, not by the stable plugin shell.
 // This module deliberately has no MCP or domain-service dependencies: task,
 // contact and registry retrieval can select evidence with the same policy that
 // the final mixed-result merge uses.
@@ -63,9 +63,11 @@ const REGISTRY_ROW_SOURCES = new Set([
 ]);
 const compareStableText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 const buildComparableValues = (value) => {
-    const values = [
-        normalizeContextSearchText(value),
-        ...String(value).split(/[·:()]/u).map(normalizeContextSearchText),
+    const segments = String(value).split(/[·:()]/u);
+    // Without a separator the sole segment IS the whole value. Do not normalize
+    // that potentially large body a second time merely to deduplicate it later.
+    const values = [normalizeContextSearchText(value),
+        ...(segments.length > 1 ? segments.map(normalizeContextSearchText) : []),
     ].filter(Boolean);
     return [...new Set(values)];
 };
@@ -164,39 +166,35 @@ export const buildContextSearchRank = (candidate) => {
         const normalizedQuery = compileContextSearchQuery(match.query).key;
         if (!normalizeContextSearchText(match.query))
             continue;
+        const next = { match, reference: isExactReferenceMatch(candidate, match),
+            direct: DIRECT_VALUE_SOURCES.has(match.source), field: calculateFieldQuality(candidate, match),
+            lexical: calculateLexicalQuality(match) };
         const previous = bestMatchByQuery.get(normalizedQuery);
         if (!previous) {
-            bestMatchByQuery.set(normalizedQuery, match);
+            bestMatchByQuery.set(normalizedQuery, next);
             continue;
         }
         // A provider may discover one formulation in several fields. Ranking must
         // count it once, but an exact channel/identifier/reference is stronger
         // than a coincidental title hit before ordinary field quality is compared.
-        const previousReference = isExactReferenceMatch(candidate, previous);
-        const nextReference = isExactReferenceMatch(candidate, match);
-        const previousDirectSource = DIRECT_VALUE_SOURCES.has(previous.source);
-        const nextDirectSource = DIRECT_VALUE_SOURCES.has(match.source);
-        const previousField = calculateFieldQuality(candidate, previous);
-        const nextField = calculateFieldQuality(candidate, match);
-        const previousLexical = calculateLexicalQuality(previous);
-        const nextLexical = calculateLexicalQuality(match);
-        if ((nextReference && !previousReference)
-            || (nextReference === previousReference
-                && ((nextDirectSource && !previousDirectSource)
-                    || (nextDirectSource === previousDirectSource
-                        && (nextField > previousField || (nextField === previousField && nextLexical > previousLexical)))))) {
-            bestMatchByQuery.set(normalizedQuery, match);
+        if ((next.reference && !previous.reference)
+            || (next.reference === previous.reference
+                && ((next.direct && !previous.direct)
+                    || (next.direct === previous.direct
+                        && (next.field > previous.field || (next.field === previous.field && next.lexical > previous.lexical)))))) {
+            bestMatchByQuery.set(normalizedQuery, next);
         }
     }
-    const matches = [...bestMatchByQuery.values()];
+    const scored = [...bestMatchByQuery.values()];
+    const matches = scored.map(({ match }) => match);
     return {
-        exactReferenceMatches: matches.filter((match) => isExactReferenceMatch(candidate, match)).length,
+        exactReferenceMatches: scored.filter((score) => score.reference).length,
         // One strong title hit beats any number of weak derived mentions. Extra
         // formulations only break ties within the strongest evidence class.
-        strongestEvidence: Math.max(0, ...matches.map((match) => calculateFieldQuality(candidate, match) * 1000 + calculateLexicalQuality(match))),
+        strongestEvidence: Math.max(0, ...scored.map((score) => score.field * 1000 + score.lexical)),
         matchedQueryCount: matches.length,
-        fieldQuality: matches.reduce((sum, match) => sum + calculateFieldQuality(candidate, match), 0),
-        lexicalQuality: matches.reduce((sum, match) => sum + calculateLexicalQuality(match), 0),
+        fieldQuality: scored.reduce((sum, score) => sum + score.field, 0),
+        lexicalQuality: scored.reduce((sum, score) => sum + score.lexical, 0),
         authority: calculateAuthority({ ...candidate, matches }),
         stableKey: candidate.stableKey,
     };

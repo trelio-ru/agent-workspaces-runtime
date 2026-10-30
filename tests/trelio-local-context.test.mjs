@@ -4901,3 +4901,33 @@ test('external signup owner preview and native admission share exact protected o
   for(const value of [plan.value,admitted.value])assert.doesNotMatch(JSON.stringify(value),/private-signup|PRIVATE_SIGNUP/);
   assert.deepEqual(Object.values(admitted.expectedPayloadValues).map(row=>Object.keys(row).sort()),[['external_origin','external_purpose','external_signup_plan']]);
 });
+
+test("local file formulations share bounded normalization and skip negative Unicode regex scans", () => {
+  const text = "нейтральный фоновый материал ".repeat(1100);
+  const chunks = Array.from({ length: 20 }, (_, index) => ({ index, text, isLast: index === 19 }));
+  const snapshot = { company: { id: "synthetic", slug: "synthetic", name: "Synthetic" },
+    generation: "0".repeat(64), serverGeneration: "0".repeat(64), createdAt: "2026-10-30T00:00:00Z",
+    searchDocuments: [], workspaceEntries: [], projects: [], tasks: [],
+    workspaces: [{ id: "synthetic-workspace", acceptedHead: "a".repeat(40), scopeType: "project", scopeKey: "synthetic",
+      documents: [{ name: "synthetic.txt", path: "synthetic.txt", text: "", chunks,
+        sizeBytes: Buffer.byteLength(text) * chunks.length, contentType: "text/plain" }] }],
+  };
+  const queries = ["согласование договора аренды", "проект поставки условия", "проверка счета заказчика"];
+  const originalLower = String.prototype.toLocaleLowerCase;
+  const originalTest = RegExp.prototype.test;
+  let normalizations = 0, scans = 0;
+  String.prototype.toLocaleLowerCase = function(...args) {
+    if (this.length > 1000) normalizations++;
+    return Reflect.apply(originalLower, this, args);
+  };
+  RegExp.prototype.test = function(value) {
+    if (typeof value === "string" && value.length > 1000) scans++;
+    return Reflect.apply(originalTest, this, [value]);
+  };
+  let result;
+  try { result = searchCompanyContextMirror(snapshot, queries, 5); }
+  finally { String.prototype.toLocaleLowerCase = originalLower; RegExp.prototype.test = originalTest; }
+  assert.deepEqual(result.results, []);
+  assert.equal(normalizations, chunks.length, "Normalize file parts once across formulations");
+  assert.equal(scans, 0, "Absent necessary literals must not trigger Unicode boundary scans");
+});

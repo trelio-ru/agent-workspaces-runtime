@@ -555,7 +555,10 @@ publication tooling также остаются вне этого публичн
   до выбора inline/batch и не запускает rename из runtime. Границы и роль модели –
   [контракт exact read](docs/agent-workspace-runtime.md#выбор-scope).
 - Файловый поиск использует generated `trelio-workspace-text-chunks.mjs` из backend
-  pure module. Проверяй native/local parity, большие файлы, границы UTF-8/слов,
+  pure module. Все formulations документа делят bounded file-local matcher;
+  rank metrics вычисляются один раз, comparators не нормализуют prose. Shared
+  ranking генерируется backend `build-context-search-ranking.mjs`; проверяй `--check`.
+  Проверяй native/local parity, большие файлы, границы UTF-8/слов,
   crypto binding и очистку staging по [контракту](docs/agent-workspace-runtime.md).
   Modern projection reads use at most four <=1-MiB files; large streams remain
   exclusive/serial, and all started workers settle before mirror lock release.

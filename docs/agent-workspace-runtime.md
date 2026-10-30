@@ -2230,7 +2230,11 @@ local provider: регистр, ё/е, границы слов, полное п�
 русских окончаний. Filename/path/hash сохраняют пунктуацию. Сначала сравниваются
 точные references и сильнейшее совпадение поля, затем независимые формулировки.
 Повторные формы одного набора слов не увеличивают вес. Rank строится один раз,
-preview – только для top-N.
+preview – только для top-N. Reference/field/lexical metrics каждого match живут
+только в текущем candidate evaluation; sort comparators не нормализуют prose.
+Shared ranking генерируется из backend `shared/context-search-ranking.ts` через
+`scripts/build-context-search-ranking.mjs --runtime-root <checkout>`; `--check`
+проверяет exact bytes и не допускает ручного semantic/performance fork.
 
 Encrypted regular-work mirror получает отдельную bounded search projection со
 всеми доступными активными пунктами, ручными комментариями и закреплёнными
@@ -2260,6 +2264,11 @@ AAD binding, размера и digest staging удаляется, включая
 поколение содержит `searchCoverage` каждого файла и chunks; бинарные/NUL/невалидные
 UTF-8 файлы имеют `unsupported` и остаются доступны по имени без binary download.
 Термины в разных частях дают один file hit; искусственные границы слова исключены.
+Все формулировки текущего документа используют один batch matcher, который
+проверяет необходимые literals до Unicode regex и делит normalization/segments.
+File-local retained normalization ограничен 8 Mi code units с резервом segments;
+при переполнении весь source evidence обрабатывается без retention. Этот cache
+не сохраняется между документами, query invocations или mirror generations.
 Если свежий ACL-filtered overview явно сообщает `browserProjectionRequired=true`,
 подтверждает exact accepted head, но не содержит проекции, search и выдача одного
 оригинала читают canonical encrypted bundle через общий accepted-inspection

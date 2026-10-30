@@ -3,7 +3,7 @@ import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
 import { pruneMirrorSchema, withMirrorRetentionLock } from "./trelio-mirror-retention.mjs";
 import { appendAutomaticWorkStartCards, assembleTaskReviewCompletion, TASK_REVIEW_COMPLETION_REF_PATTERN, TaskReviewCompletionError } from "./trelio-task-review-completion.mjs";
-import { matchWorkspaceTextChunks } from "./trelio-workspace-text-chunks.mjs";
+import { createWorkspaceTextChunkMatcher } from "./trelio-workspace-text-chunks.mjs";
 import { fitsMcpTaskReadResult, buildLocalTaskReadToolResult } from "./trelio-task-read-budget.mjs";
 import { parseHostRuntimeRecoveryError } from "./trelio-host-runtime-recovery.mjs";
 import diagnosticContract from "./trelio-agent-diagnostics-contract.json" with { type: "json" };
@@ -93,7 +93,6 @@ import {
 } from "./trelio-company-encryption.mjs";
 import {
   CONTEXT_SEARCH_RANKING_POLICY_VERSION,
-  compareContextSearchCandidates,
   rankContextSearchCandidates,
   normalizeContextSearchText,
 } from "./trelio-context-search-ranking.mjs";
@@ -4685,11 +4684,19 @@ const buildLocalRankingCandidate = (document, matches) => ({
   matches,
 });
 
-const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery) => {
-  let strongestMatch = null;
+const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery, chunkMatchers) => {
+  const matches = [];
 
   for (const field of document.fields) {
-    const chunkMatch = field.chunks ? matchWorkspaceTextChunks(field.text, field.chunks, originalQuery) : null;
+    // Reuse normalized file parts across formulations of this document only.
+    // The shared matcher bounds retained normalization independently of source
+    // length; overflowing evidence is still searched without retaining copies.
+    let chunkMatcher = field.chunks ? chunkMatchers.get(field) : null;
+    if (field.chunks && !chunkMatcher) {
+      chunkMatcher = createWorkspaceTextChunkMatcher(field.text, field.chunks);
+      chunkMatchers.set(field, chunkMatcher);
+    }
+    const chunkMatch = chunkMatcher ? chunkMatcher(originalQuery) : null;
     if (field.chunks ? !chunkMatch : !matchLocalSearchField(field, normalizedQuery)) continue;
     const match = {
       query: originalQuery,
@@ -4698,24 +4705,22 @@ const findStrongestLocalSearchMatch = (document, normalizedQuery, originalQuery)
       ...(chunkMatch ? { lexicalQuality: chunkMatch.lexicalQuality } : {}),
       ...(field.publicPath ? { publicPath: field.publicPath } : {}),
     };
-    if (
-      !strongestMatch
-      || compareContextSearchCandidates(
-        buildLocalRankingCandidate(document, [match]),
-        buildLocalRankingCandidate(document, [strongestMatch]),
-      ) < 0
-    ) {
-      strongestMatch = match;
-    }
+    matches.push(match);
   }
 
-  return strongestMatch;
+  // Each field gets one rank; comparisons reuse it instead of repeatedly
+  // normalizing the best-so-far field. Stable ties keep the first field.
+  return rankContextSearchCandidates(matches,
+    (match) => buildLocalRankingCandidate(document, [match]))[0] ?? null;
 };
 
-const findLocalSearchMatches = (document, queries) => queries.flatMap(([normalized, original]) => {
-  const match = findStrongestLocalSearchMatch(document, normalized, original);
-  return match ? [match] : [];
-});
+const findLocalSearchMatches = (document, queries) => {
+  const chunkMatchers = new Map();
+  return queries.flatMap(([normalized, original]) => {
+    const match = findStrongestLocalSearchMatch(document, normalized, original, chunkMatchers);
+    return match ? [match] : [];
+  });
+};
 
 const compactLocalSearchResult = (result) => Object.fromEntries(
   Object.entries(result).filter(([key, value]) => (
