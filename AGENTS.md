@@ -932,19 +932,22 @@ publication tooling также остаются вне этого публичн
   продолжай в сохранённом worktree через напечатанный `worktree:bootstrap`, не
   создавая вторую ветку. `--skip-bootstrap` допустим только без локальных
   отчётов, сборок и тестов.
-- Завершённая правка получает commit на русском. Сначала опубликуй только task
-  branch, открой PR и дождись SUCCESS exact head во всех обязательных hosted
-  jobs выбранного по полному diff [CI-профиля](docs/runtime-ci.md). Unknown,
-  shared/native/crypto/hook/transport/CI изменения требуют full с четырьмя visual
-  OS jobs; narrow никогда не пропускает Windows/ARM64, proof/signature/package.
-  Только затем `npm run git:push-main`:
-  это transport интеграции, он не создаёт PR и сам не запускает/не проверяет CI.
-  Push workflow на `main` не заменяет PR gate. Raw push в `main` запрещён.
+- Завершённая правка получает commit на русском, затем `npm run git:integrate`.
+  Общая FIFO linked worktree удерживает место до fresh fetch/rebase, публикации
+  task branch/PR, exact hosted CI и guarded main push/read-back. Не менять HEAD
+  или files ожидающей/работающей ветки. Старые wrappers и boolean-флаги не
+  заменяют live owner ancestry и verified exact SHA в canonical pre-push.
+  Правила версии, восстановления и общего maintainer dependency –
+  [контракт координации](docs/git-coordination.md).
+  GitHub-hosted профиль сохраняется: unknown/shared/native/crypto/hook/transport/
+  CI требует full с четырьмя visual OS jobs; узкий профиль сохраняет Windows,
+  ARM64, proof/signature/package и проверяется существующим native plan verifier.
 - После интеграции выполни из canonical checkout
   `npm run git:finish-worktree -- <absolute-task-worktree>`.
   Git paths и complete-read guards – [контракт](docs/agent-workspace-runtime.md#git-output).
 - Stable runtime tag создаётся только по явной команде на runtime release и
-  пушится атомарно через `npm run git:push-main -- --tag vX.Y.Z`.
+  резервируется до CI через `npm run git:integrate -- --tag vX.Y.Z`.
+  Низкоуровневый `git:push-main` доступен только verified владельцу очереди.
 
 ## Проверки
 

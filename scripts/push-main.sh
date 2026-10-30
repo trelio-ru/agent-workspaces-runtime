@@ -69,6 +69,14 @@ if [[ -n "${RELEASE_TAG}" ]] \
   exit 2
 fi
 
+# Admission is checked before transport and again by the canonical pre-push
+# hook. A legacy wrapper or an exported boolean cannot borrow another CI slot.
+(
+  cd "${REPOSITORY_ROOT}"
+  node "${SCRIPT_DIR}/assert-coordination.mjs" \
+    "$(git rev-parse --verify "${SOURCE_REF}^{commit}")" "${RELEASE_TAG}"
+)
+
 agent_workspaces_validate_retry_settings
 CANONICAL_ROOT="$(
   agent_workspaces_canonical_main_worktree "${REPOSITORY_ROOT}"

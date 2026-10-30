@@ -624,3 +624,5 @@ These components do not install or activate an autonomous assistant by themselve
 Explicit [Windows autostart](docs/assistant-scheduler.md#per-user-windows-autostart)
 setup registers the paired user's supervisor and reads its actual OS state;
 it does not provide automatic logon or establish business readiness.
+
+Maintainer integration and release reservation use the [shared FIFO coordinator](docs/git-coordination.md).

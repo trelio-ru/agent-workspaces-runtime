@@ -15,9 +15,20 @@
     "test:context-budget": "node tests/context-budget.test.mjs",
     "test:runtime-entry": "node tests/trelio-host-runtime-entry.test.mjs",
     "test:worktree-bootstrap": "bash scripts/bootstrap-worktree-dependencies.test.sh",
-    "test:git-guard": "node --test scripts/git-finish-worktree.test.mjs && bash scripts/git-main-guard.test.sh"
+    "test:git-guard": "node --test scripts/git-finish-worktree.test.mjs && bash scripts/git-main-guard.test.sh && npm run test:git-coordination",
+    "git:integrate": "node scripts/git-coordinator.mjs",
+    "test:git-coordination": "node --test scripts/git-coordinator.test.mjs"
   },
   "devDependencies": {
     "tiktoken": "1.0.22"
-  }
+  },
+  "files": [
+    "scripts/git-coordinator.mjs",
+    "scripts/git-hosted-ci.mjs"
+  ],
+  "exports": {
+    "./coordinator": "./scripts/git-coordinator.mjs",
+    "./hosted-ci": "./scripts/git-hosted-ci.mjs"
+  },
+  "version": "0.0.0"
 }

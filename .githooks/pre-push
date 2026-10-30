@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-guarded_push="${TRELIO_AGENT_WORKSPACES_GUARDED_MAIN_PUSH:-0}"
-protected_ref_seen=0
-
-# Git передаёт по stdin фактические refspec-ы. Проверяем remote ref, поэтому
-# guard одинаково блокирует main, HEAD:main и push raw commit SHA в main.
-while read -r _local_ref _local_oid remote_ref _remote_oid; do
-  if [[ "${remote_ref}" == "refs/heads/main" ]] \
-    || [[ "${remote_ref}" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    protected_ref_seen=1
+source_sha=""
+release_tag=""
+protected=0
+while read -r local_ref local_oid remote_ref remote_oid; do
+  if [[ "${remote_ref}" == "refs/heads/main" ]]; then
+    protected=1
+    source_sha="${local_oid}"
+  elif [[ "${remote_ref}" =~ ^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+|codex-hooks-source-v[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    if [[ -n "${release_tag}" ]]; then echo 'One release tag per queued operation is required' >&2; exit 1; fi
+    protected=1
+    release_tag="${BASH_REMATCH[1]}"
+    # Annotated tags carry a tag-object OID in stdin, not the source commit.
+    tag_sha="$(git rev-parse --verify "${local_oid}^{commit}")"
+    if [[ -n "${source_sha}" && "${source_sha}" != "${tag_sha}" ]]; then exit 1; fi
+    source_sha="${tag_sha}"
   fi
 done
-
-if [[ "${protected_ref_seen}" -eq 1 ]] && [[ "${guarded_push}" != "1" ]]; then
-  cat >&2 <<'EOF'
-ERROR: direct push to origin/main or a stable runtime tag is disabled.
-Use the guarded entrypoint so remote read-back and canonical-main sync cannot be skipped:
-  npm run git:push-main
-
-For a runtime release use:
-  npm run git:push-main -- --tag vX.Y.Z
-EOF
-  exit 1
+if [[ "${protected}" == 1 ]]; then
+  hook_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  node "${hook_directory}/../scripts/assert-coordination.mjs" "${source_sha}" "${release_tag}"
 fi

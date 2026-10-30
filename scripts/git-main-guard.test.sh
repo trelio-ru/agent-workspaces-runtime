@@ -62,6 +62,12 @@ cp "${PROJECT_ROOT}/scripts/git-finish-worktree.mjs" \
   "${CANONICAL_REPOSITORY}/scripts/git-finish-worktree.mjs"
 cp "${PROJECT_ROOT}/scripts/push-main.sh" \
   "${CANONICAL_REPOSITORY}/scripts/push-main.sh"
+cp "${PROJECT_ROOT}/scripts/git-coordinator.mjs" "${CANONICAL_REPOSITORY}/scripts/git-coordinator.mjs"
+cp "${PROJECT_ROOT}/scripts/assert-coordination.mjs" "${CANONICAL_REPOSITORY}/scripts/assert-coordination.mjs"
+cat > "${CANONICAL_REPOSITORY}/git-coordination.json" <<'EOF'
+{"schemaVersion":1,"repository":"test/runtime","canonicalKey":"trelioAgentWorkspaces.canonicalMainWorktree","mainMutex":"trelio-agent-workspaces-runtime-main-update.lock","verify":["node","scripts/fixture-ci.mjs"],"transport":["bash","scripts/push-main.sh"]}
+EOF
+printf 'if (!/^[a-f0-9]{40}$/.test(process.argv[3])) process.exit(1);\n' > "${CANONICAL_REPOSITORY}/scripts/fixture-ci.mjs"
 chmod +x \
   "${CANONICAL_REPOSITORY}/.githooks/pre-commit" \
   "${CANONICAL_REPOSITORY}/.githooks/pre-push"
@@ -173,7 +179,7 @@ fi
 
 AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_ONE_WORKTREE}" \
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash "${TASK_ONE_WORKTREE}/scripts/push-main.sh" >/dev/null
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture >/dev/null
 
 task_one_sha="$(git -C "${TASK_ONE_WORKTREE}" rev-parse HEAD)"
 canonical_sha="$(git -C "${CANONICAL_REPOSITORY}" rev-parse HEAD)"
@@ -251,7 +257,7 @@ remote_before_blocked_push="$(
 
 if AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_TWO_WORKTREE}" \
   AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash "${TASK_TWO_WORKTREE}/scripts/push-main.sh" >/dev/null 2>&1; then
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture >/dev/null 2>&1; then
   printf 'Guarded push ignored a dirty canonical main worktree.\n' >&2
   exit 1
 fi
@@ -267,7 +273,7 @@ fi
 git -C "${CANONICAL_REPOSITORY}" restore README.md
 AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_TWO_WORKTREE}" \
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash "${TASK_TWO_WORKTREE}/scripts/push-main.sh" >/dev/null
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture >/dev/null
 
 (
   cd "${CANONICAL_REPOSITORY}"
@@ -311,7 +317,7 @@ fi
 
 AGENT_WORKSPACES_REPOSITORY_ROOT="${TASK_THREE_WORKTREE}" \
 AGENT_WORKSPACES_GIT_RETRY_DELAY_SECONDS=0 \
-  bash "${TASK_THREE_WORKTREE}/scripts/push-main.sh" \
+  bash -c 'cd "$AGENT_WORKSPACES_REPOSITORY_ROOT"; exec node scripts/git-coordinator.mjs "$@"' fixture \
     --tag v9.9.9 >/dev/null
 
 release_sha="$(git -C "${TASK_THREE_WORKTREE}" rev-parse HEAD)"
