@@ -311,6 +311,17 @@ never another submission, timeout extension, queue removal or local state reset.
 This is a new technical verification, not a replay of an uncertain business or
 provider operation. A completed verification alone clears no business/ACK health.
 
+### Exact independent READY prompt reconciliation
+
+A completed independent owner readiness review is compared with the SAME
+`assistantNativePrompt` output used by the queue producer, including its final
+newline. No trimming or prefix acceptance is permitted. The regression captures
+the real submitted queue input and feeds it through native terminal polling,
+strict receipt verification and later read-only reconciliation. A successful
+existing review therefore resumes the original row without another READY or
+owner-message submission. No native deadline, source/pass guard or business
+completion/ACK authority changes.
+
 The independent reader observes **stored** history, not the GUI writer's live
 event stream ([native read semantics](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming)).
 With the actual Windows 0.164 client, that history projected the exact ongoing

@@ -483,8 +483,13 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
     const turn = matches[0];
     // The independent verification earns readiness only from its own exact
     // tool-free GUI response, never arbitrary model completion/tool output.
+    // Compare the exact bytes produced by the SAME queue-prompt generator,
+    // including its final LF. A handwritten copy silently rejected a genuine
+    // completed READY after submission; trimming would instead weaken exact
+    // history binding. This is read-only reconciliation of the saved marker,
+    // never permission to submit another verification or owner question.
     if(options.readinessOnly===true&&turn.status==='completed'&&!toolFreeReady(turn,
-      `${marker}\nThis is an isolated native dispatcher readiness check. Reply exactly READY. Do not use tools or access files, sites, accounts or integrations.`))
+      assistantNativePrompt(deliveryId,undefined,{readinessProbe:true})))
       return {state:'uncertain'};
     if (turn.status === 'completed') return { state: 'completed', turnId: turn.id, receipt: `codex:${id(threadId)}:${id(turn.id)}` };
     if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}`,

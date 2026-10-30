@@ -33,14 +33,49 @@ test('completed PREPARE permits only a separate bounded readiness witness, never
 
 test('independent readiness completion requires its exact tool-free GUI turn',async()=>{
   const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
-  const prompt=`TRELIO_ASSISTANT_DELIVERY ${deliveryId}\nThis is an isolated native dispatcher readiness check. Reply exactly READY. Do not use tools or access files, sites, accounts or integrations.`;
+  const prompt=`TRELIO_ASSISTANT_DELIVERY ${deliveryId}\nThis is an isolated native dispatcher readiness check. Reply exactly READY. Do not use tools or access files, sites, accounts or integrations.\n`;
   const turn={id:turnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:prompt}]},{type:'agentMessage',text:'READY'}]};
   const read=t=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},readinessOnly:true,
     spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[t],nextCursor:null}}))});
   assert.equal((await read(turn)).state,'completed');
   for(const items of [[...turn.items,{type:'mcpToolCall'}],[turn.items[0],{type:'agentMessage',text:'other response'}],
+    [{type:'userMessage',content:[{type:'text',text:prompt.trimEnd()}]},turn.items[1]],
     [{type:'userMessage',content:[{type:'text',text:prompt+'\nprivate body'}]},turn.items[1]]])
     assert.deepEqual(await read({...turn,items}),{state:'uncertain'});
+});
+
+test('independent READY uses the exact production queued prompt through real native readback',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID(),cwd=await fs.realpath(process.cwd());
+  let submitted=null,starts=0,queues=0;
+  // Reuse the actual queue payload as native history. A separately handwritten
+  // fixture prompt would hide a producer/reader byte mismatch (including LF).
+  // Only the native process is synthetic; prompt generation, queue submission,
+  // marker polling and strict readiness receipt are the production adapter.
+  const spawnProcess=nativeRpc(request=>{
+    if(request.method==='thread/read')return {result:{thread:{id:threadId,cwd,model:execution.modelId,reasoningEffort:execution.effortLevel}}};
+    if(request.method==='thread/queue/list')return {result:{data:[],nextCursor:null}};
+    if(request.method==='thread/queue/add'){
+      queues++;submitted=request.params.input;
+      return {result:{queuedSubmission:{id:randomUUID(),clientUserMessageId:deliveryId,input:submitted}}};
+    }
+    if(request.method==='thread/name/set')return {result:{}};
+    assert.equal(request.method,'thread/turns/list');
+    return {result:{data:submitted?[{id:turnId,status:'completed',error:null,
+      items:[{type:'userMessage',content:submitted},{type:'agentMessage',text:'READY'}]}]:[],nextCursor:null}};
+  });
+  const result=await provisionAssistantCodexChat({threadId,deliveryId,cwd,execution},{
+    executable:process.execPath,environment:{},spawnProcess,readinessOnly:true,
+    readExecutionAvailability:async()=>true,openDesktop:async()=>{},
+    onThreadStarted:()=>assert.fail('an existing review must never create another thread'),
+    startInvocation:()=>{starts++;},
+  });
+  assert.equal(result.state,'completed');assert.equal(result.threadId,threadId);
+  assert.equal(starts,1);assert.equal(queues,1);
+  assert.ok(submitted[0].text.endsWith('\n'),'fixture must retain the actual canonical final LF');
+  // Restart/reconciliation observes that SAME positive receipt without any
+  // second queue submission; it must not require replay to accept success.
+  const receipt=await readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},spawnProcess,readinessOnly:true});
+  assert.equal(receipt.state,'completed');assert.equal(receipt.turnId,turnId);assert.equal(queues,1);
 });
 
 test('work-state locators use immutable assistant identity and refuse paths or source text', async()=>{

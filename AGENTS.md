@@ -758,6 +758,10 @@ publication tooling также остаются вне этого публичн
   Stored history may project an active GUI turn as interrupted; keep its reader
   until actual completion/failure or the original deadline. This snapshot never
   certifies cancellation, pass release, a new invocation or recovery authority.
+  Independent READY read-back reuses the SAME production prompt generator,
+  byte-for-byte including its final LF; no trim or handwritten prompt copy.
+  Test the actual queue payload through native polling and final reconciliation,
+  not only an independently constructed completed-history fixture.
 - Native account preflight diagnoses login only from explicit missing auth, not
   prose or a cached catalogue. Only a fresh completed turn with exact read-back
   clears its current login latch; unrelated health incidents and delivery fences
