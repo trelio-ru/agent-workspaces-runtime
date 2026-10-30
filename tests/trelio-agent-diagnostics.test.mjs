@@ -1,11 +1,65 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {randomUUID} from 'node:crypto';
 import { buildAgentDiagnosticEvent, createAgentDiagnosticReporter, sendAgentDiagnosticBatch } from "../host-runtime/scripts/trelio-agent-diagnostics.mjs";
 import { handleLocalMcpMessage } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { TrelioLocalContextError } from "../host-runtime/scripts/trelio-local-context.mjs";
-import { ProcessDiagnosticError, PROCESS_DIAGNOSTIC_CODES, parseProcessDiagnostic, skillRuntimeExitError } from "../host-runtime/scripts/trelio-process-diagnostics.mjs";
-import { formatBridgeCommandError } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { ProcessDiagnosticError, PROCESS_DIAGNOSTIC_CODES, parseProcessDiagnostic, skillRuntimeExitError, skillSetupExitError } from "../host-runtime/scripts/trelio-process-diagnostics.mjs";
+import { formatBridgeCommandError, runMaterializedAgentSkill, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { formatRuntimeHookFailure } from "../host-runtime/scripts/trelio-runtime-session.mjs";
+
+test('protected Telegram setup retains only a reviewed code and bounded wait across the actual bridge frame', () => {
+  const payload = {ok:false,code:'TELEGRAM_PASSWORD_INVALID',error:'PRIVATE_FACTOR',
+    details:{diagnostic:{retryAfterSeconds:17,category:'PRIVATE_CATEGORY'},path:'PRIVATE_PATH'},nextAction:{url:'PRIVATE_URL'}};
+  const project = (value, options={}) => skillSetupExitError(2,{skillId:'telegram-mtproto',stderr:JSON.stringify(value),...options});
+  const error = project(payload);
+  const parsed = parseProcessDiagnostic('Ошибка: '+formatBridgeCommandError(error));
+  assert.deepEqual(parsed,{failureCode:'TRELIO_SKILL_RUNTIME_EXIT_2',operation:'skill_run',exitCode:2,
+    providerCode:'TELEGRAM_PASSWORD_INVALID'});
+  assert.equal(project({...payload,code:'TELEGRAM_RATE_LIMITED'}).details.retryAfterSeconds,17);
+  assert.doesNotMatch(formatBridgeCommandError(error),/PRIVATE/);
+  assert.equal(buildAgentDiagnosticEvent('continue_trelio_workspace_action',{operation:'skill_run'},error.diagnosticCode).code,'TRELIO_SKILL_RUNTIME_EXIT_2');
+  for(const code of ['TELEGRAM_CODE_INVALID','TELEGRAM_CODE_EXPIRED','TELEGRAM_PHONE_BANNED',
+    'TELEGRAM_PHONE_INVALID','TELEGRAM_QR_EXPIRED','TELEGRAM_RATE_LIMITED','TELEGRAM_PASSWORD_CHECK_EXPIRED',
+    'TELEGRAM_APP_INVALID','TELEGRAM_SERVICE_UNAVAILABLE','TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_LOGIN_CANCELLED']){
+    assert.equal(project({...payload,code}).details.providerCode,code);
+  }
+  for(const value of [{...payload,code:['TELEGRAM_PASSWORD_INVALID']},{...payload,code:'TELEGRAM_PASSWORD_INVALID_PRIVATE'},
+    {...payload,ok:true},null,[],{error:'PASSWORD_HASH_INVALID'}])assert.equal(project(value).details.providerCode,undefined);
+  for(const stderr of ['PRIVATE_TRACEBACK',Buffer.from([0xff]),'x'.repeat(65537)]){
+    assert.equal(project(payload,{stderr}).details.providerCode,undefined);
+  }
+  assert.equal(project(payload,{skillId:'email-imap-smtp'}).details.providerCode,undefined);
+  for(const seconds of [-1,true,'17',Number.MAX_SAFE_INTEGER]){
+    assert.equal(project({...payload,code:'TELEGRAM_RATE_LIMITED',details:{diagnostic:{retryAfterSeconds:seconds}}}).details.retryAfterSeconds,undefined);
+  }
+});
+
+test('the actual protected setup child preserves the safe refusal, never its stdout or stderr fields', async t => {
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'trelio-setup-diagnostic-'));
+  t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+  await fs.writeFile(path.join(directory,'main.mjs'),`process.stdout.write('PRIVATE_STDOUT');
+    process.stderr.write(JSON.stringify({ok:false,code:'TELEGRAM_PASSWORD_INVALID',error:'PRIVATE_PASSWORD',details:{path:'PRIVATE_PATH'}}));process.exit(2);`);
+  let admissions=0,lateChecks=0;
+  const profile={kind:'digital_assistant',requireToken:()=>assert.fail('no native HTTP in this executor fixture'),
+    prepareRequest:()=>assert.fail('no native HTTP in this executor fixture'),
+    authorizeHumanInputSkillSetup:async()=>{admissions++;return 10000;},assertHumanInputSkillSetupCurrent:async()=>{lateChecks++;}};
+  const artifact={skillId:'telegram-mtproto',runtimeVersion:'0.0.0',parsedPackage:{entrypoint:{path:'main.mjs',interpreter:'node'},capabilities:[]}};
+  const call=()=>withWorkspaceExecutionProfile(profile,()=>runMaterializedAgentSkill({artifact,runtimeDirectory:directory,
+    runtimeArguments:['login','--qr'],executionContext:{skillId:artifact.skillId,companyId:randomUUID(),releaseId:randomUUID()},
+    captureOutput:true,captureMode:'assistant_skill_setup',timeoutMs:10000}));
+  await assert.rejects(call(),error=>{
+    assert.equal(error.code,'TRELIO_SKILL_RUNTIME_EXIT_2');
+    assert.equal(error.details.providerCode,'TELEGRAM_PASSWORD_INVALID');
+    assert.doesNotMatch(formatBridgeCommandError(error),/PRIVATE/);return true;
+  });
+  assert.equal(admissions,1);assert.equal(lateChecks,1);
+  // Complete foreign provider output and an aborted child never acquire a
+  // Telegram password diagnosis, even when their text uses a reviewed code.
+  artifact.skillId='foreign-provider';
+  await assert.rejects(call(),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_2'&&error.details.providerCode===undefined);
+  assert.equal(admissions,2);assert.equal(lateChecks,2);
+});
 
 test("every process category and local recovery code is admitted by the closed telemetry catalog", () => {
   for (const code of [...PROCESS_DIAGNOSTIC_CODES, "TRELIO_WORKSPACE_LOCAL_RECOVERY_REQUIRED"]) {

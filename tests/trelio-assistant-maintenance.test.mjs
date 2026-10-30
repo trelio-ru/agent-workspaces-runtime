@@ -328,6 +328,8 @@ test('worker preserves one response and never exposes raw exceptions or copies c
 
 test('source setup failures survive the worker and facade without private diagnostics or replay',async()=>{
   for(const code of ['ASSISTANT_SOURCE_SETUP_TELEGRAM_NETWORK_UNAVAILABLE','TRELIO_SKILL_RUNTIME_EXIT_2',
+    'ASSISTANT_SOURCE_SETUP_TELEGRAM_PASSWORD_INVALID','ASSISTANT_SOURCE_SETUP_TELEGRAM_CODE_EXPIRED',
+    'ASSISTANT_SOURCE_SETUP_TELEGRAM_PHONE_BANNED',
     'TRELIO_SKILL_RUNTIME_OUTPUT_INVALID','TRELIO_SKILL_PYTHON_REQUIRED']){
     const output=new PassThrough();let raw='',executions=0,spawns=0;
     output.on('data',chunk=>raw+=chunk);

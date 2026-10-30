@@ -7,7 +7,7 @@ import { buildRuntimeSessionProof, withRuntimeStateLock } from './trelio-runtime
 import { createHash, randomBytes } from 'node:crypto';
 import { ASSISTANT_CADENCES, assistantPassContinuation } from './trelio-assistant-scheduler.mjs';
 import { assistantExecutionConfiguration } from './trelio-assistant-codex.mjs';
-import { PROCESS_DIAGNOSTIC_CODES, skillRuntimeExitError } from './trelio-process-diagnostics.mjs';
+import { PROCESS_DIAGNOSTIC_CODES, skillRuntimeExitError, skillSetupExitError } from './trelio-process-diagnostics.mjs';
 import { assistantSourceProcessingReferences, assistantConversationKeyMatches } from './trelio-assistant-inbox.mjs';
 import { splitAccountArguments } from './trelio-skill-accounts.mjs';
 import { canonicalJson } from './trelio-company-encryption.mjs';
@@ -4151,10 +4151,8 @@ export const projectAssistantSourceSetupResult=(result,{skillId})=>{
   if(result.exitCode!==0){
     // This is the reviewed source adapter's protocol, not a generic prefix
     // allowlist: a foreign provider or invented code cannot supply a diagnosis.
-    const allowed=skillId==='telegram-mtproto'?['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_RATE_LIMITED',
-      'TELEGRAM_SESSION_UNAVAILABLE','TELEGRAM_ACCESS_DENIED','TELEGRAM_PERMISSION_REQUIRED','TELEGRAM_REQUEST_FAILED',
-      'TELEGRAM_WINDOWS_NATIVE_FAILURE']:[];
-    if(object(raw)&&raw.ok===false&&allowed.includes(raw.code))fail(`ASSISTANT_SOURCE_SETUP_${raw.code}`);
+    const projected=skillSetupExitError(result.exitCode,{skillId,stderr:result.stdout});
+    if(projected.details.providerCode)fail(`ASSISTANT_SOURCE_SETUP_${projected.details.providerCode}`);
     throw skillRuntimeExitError(result.exitCode);
   }
   if(!object(raw))fail('ASSISTANT_SOURCE_INVALID_RESPONSE');

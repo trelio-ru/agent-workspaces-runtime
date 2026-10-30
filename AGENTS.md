@@ -1,5 +1,10 @@
 # AGENTS.md
 
+Protected Telegram setup failures preserve only the reviewed provider code and
+bounded wait alongside the original process-exit bucket; see the
+[setup diagnostic contract](docs/assistant-scheduler.md#telegram-login-diagnostics).
+Raw factors/prose never cross the pipe, and classification never grants replay.
+
 ## Назначение репозитория
 
 Этот публичный репозиторий – канонический источник generic Trelio host runtime.

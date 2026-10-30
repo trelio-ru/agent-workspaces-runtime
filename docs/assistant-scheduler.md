@@ -721,6 +721,25 @@ remains an invalid response. Both worker and facade preserve the closed process
 codes, including numeric exit buckets. Raw provider errors, mailbox addresses,
 paths, field values, details and next-action prose stay out of MCP/logs/SQLite.
 No failure projection launches or repeats a form.
+
+<a id="telegram-login-diagnostics"></a>
+
+Protected Telegram login handles human-correctable phone/code/password refusals
+inside its original local page and lease. The host does not resubmit factors,
+open a replacement page or treat a finished handoff as authorization proof.
+The SAME complete setup pipe admits fixed provider codes for password/code,
+expired/invalid/used QR, phone/account restrictions, application/SRP errors,
+rate limits, session, network, service, cancellation and expiry. Provider text,
+factor values and arbitrary details remain private. Foreign codes, non-JSON,
+partial/invalid UTF-8, signals, timeout and output-limit retain the original
+process failure. Source setup returns its closed `ASSISTANT_SOURCE_SETUP_` code;
+task human-input setup preserves the actual exit bucket plus fixed
+`details.providerCode` and optional bounded numeric `retryAfterSeconds` through
+the ordinary bridge frame. Telemetry keeps its existing content-free exit bucket.
+`loginVerified:false` on account preparation/handoff means verification has not
+been performed by that step, never a checked password rejection. None of these
+fields proves polling/owner identity, clears latches or grants retry.
+
 A closed window is not successful configuration, and saved credentials are not
 network readiness, sending authority, processed messages or a passed Windows
 business pilot. Setup metadata does not clear hook/login health latches.

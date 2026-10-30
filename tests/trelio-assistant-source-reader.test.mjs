@@ -505,21 +505,24 @@ for(const encrypted of [false,true])test(`Telegram QR setup uses the same signed
   // Run the actual signed child with empty stdout and a failed stderr DTO.
   // A pure parser fixture alone cannot prove the shared executor delivered
   // the original failure instead of silently discarding the private pipe.
-  await fs.writeFile(failure,JSON.stringify({ok:false,code:'TELEGRAM_NETWORK_UNAVAILABLE',error:'PRIVATE_FACTOR'}));
-  await assert.rejects(configure(),error=>{
-    assert.equal(error.code,'ASSISTANT_SOURCE_SETUP_TELEGRAM_NETWORK_UNAVAILABLE');
-    assert.doesNotMatch(JSON.stringify(error)+error.message,/PRIVATE/);return true;
-  });
-  assert.equal(await markerValue(),'11','one failed login does not replay its child');
+  for(const code of ['TELEGRAM_NETWORK_UNAVAILABLE','TELEGRAM_PASSWORD_INVALID','TELEGRAM_CODE_EXPIRED','TELEGRAM_PHONE_BANNED']){
+    const before=await markerValue();
+    await fs.writeFile(failure,JSON.stringify({ok:false,code,error:'PRIVATE_FACTOR',details:{path:'PRIVATE_PATH'}}));
+    await assert.rejects(configure(),error=>{
+      assert.equal(error.code,`ASSISTANT_SOURCE_SETUP_${code}`);
+      assert.doesNotMatch(JSON.stringify(error)+error.message,/PRIVATE/);return true;
+    });
+    assert.equal(await markerValue(),before+'1','one failed login does not replay its child');
+  }
   await fs.writeFile(failure,'PRIVATE_TRACEBACK');
   await assert.rejects(configure(),error=>error.code==='TRELIO_SKILL_RUNTIME_EXIT_2');
-  assert.equal(await markerValue(),'111');
+  assert.equal(await markerValue(),'111111');
   await fs.unlink(failure);
   // Native registration is reread after the successful child. A changed owner
   // intent cannot publish a successful setup receipt; the child is never replayed.
   const read=client.sourceAccounts;let late=0;
   client.sourceAccounts=async()=>{const rows=await read();if(++late===2)rows[0].revision++;return rows;};
-  await assert.rejects(configure(),/BINDING_CHANGED/);assert.equal(await markerValue(),'1111');
+  await assert.rejects(configure(),/BINDING_CHANGED/);assert.equal(await markerValue(),'1111111');
   assert.ok(inventoryCalls>=5);
   const profile=await createAssistantSourceRuntimeProfile({identity,host,store:selectedStore,scope,
     accountSetup:{sourceId,expectedRevision:0,operation:'login'}});

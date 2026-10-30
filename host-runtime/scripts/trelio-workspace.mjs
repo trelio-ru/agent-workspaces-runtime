@@ -43,7 +43,7 @@ import {
   isWorkspaceRecoveryDirectory,
 } from "./trelio-workspace-directory.mjs";
 import { execFile, spawn } from "node:child_process";
-import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError } from "./trelio-process-diagnostics.mjs";
+import { ProcessDiagnosticError, processDiagnosticCauseCode, skillRuntimeExitError, skillSetupExitError } from "./trelio-process-diagnostics.mjs";
 import { buildBridgeHttpErrorFrame } from "./trelio-bridge-http-diagnostics.mjs";
 import { isUtf8 } from "node:buffer";
 import crypto from "node:crypto";
@@ -9215,6 +9215,12 @@ export const runMaterializedAgentSkill = async ({
     } catch (error) {
       // Never copy an execFile error/cause/command or provider stdout/stderr.
       // Raw output is private host memory, not model input or diagnostics.
+      // Only a complete auth-only human-input setup refusal may add a closed
+      // provider code. Partial/signal/timeout/overflow pipes retain their exact
+      // process failure and never manufacture a password rejection or retry.
+      const setupFailure = taskSetupCapture && Number.isInteger(error.code) && error.code > 0
+        && !error.signal && !error.killed && !signal?.aborted
+        ? skillSetupExitError(error.code, {skillId: artifact.skillId, stderr: error.stderr}) : null;
       if (Buffer.isBuffer(error.stdout)) error.stdout.fill(0);
       if (Buffer.isBuffer(error.stderr)) error.stderr.fill(0);
       if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
@@ -9226,7 +9232,7 @@ export const runMaterializedAgentSkill = async ({
       if (error.killed && error.signal === 'SIGKILL') {
         throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_LEASE_EXPIRED', 'Истёк срок фонового чтения навыка.', { operation: 'skill_run' });
       }
-      if (Number.isInteger(error.code)) throw skillRuntimeExitError(error.code);
+      if (Number.isInteger(error.code)) throw setupFailure ?? skillRuntimeExitError(error.code);
       if (error.signal) {
         throw new ProcessDiagnosticError('TRELIO_SKILL_RUNTIME_TERMINATED', 'Runtime чтения завершён сигналом.', { operation: 'skill_run', signal: error.signal });
       }
