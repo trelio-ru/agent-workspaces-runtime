@@ -421,6 +421,10 @@ export const readAssistantCodexExecutionAvailabilitySet = async (configurations,
 /** Exact marker search stays in memory. Missing history is uncertainty, never
  * proof of rejection/retry. Summary pages contain user messages without reading
  * arbitrary local rollout files or loading full tool output/transcript bodies. */
+const toolFreeReady=(turn,prompt)=>turn?.status==='completed'&&turn.error==null&&Array.isArray(turn.items)&&turn.items.length===2
+  &&turn.items[0]?.type==='userMessage'&&Array.isArray(turn.items[0].content)&&turn.items[0].content.length===1
+  &&turn.items[0].content[0]?.type==='text'&&turn.items[0].content[0].text===prompt
+  &&turn.items[1]?.type==='agentMessage'&&turn.items[1].text==='READY';
 export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) => {
   threadId = id(threadId);
   const marker = assistantDeliveryMarker(deliveryId);
@@ -449,7 +453,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       }
       return {state:'uncertain',markerEvidence:'ambiguous'};
     }
-    const response = await request('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc', itemsView: 'summary' });
+    const response = await request('thread/turns/list', { threadId, limit: 20, sortDirection: 'desc',
+      itemsView:(options.provision===true&&options.allowPrepared===true||options.readinessOnly===true)?'full':'summary' });
     if (!Array.isArray(response?.data) || response.data.length > 20) fail('ASSISTANT_CODEX_READ_UNAVAILABLE');
     let matches = response.data.filter(turn => Array.isArray(turn.items) && turn.items.some(item =>
       item.type === 'userMessage' && Array.isArray(item.content) && item.content.some(input =>
@@ -460,13 +465,27 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       matches=response.data.filter(turn=>Array.isArray(turn.items)&&turn.items.some(item=>
         item.type==='userMessage'&&Array.isArray(item.content)&&item.content.some(input=>input.type==='text'
           &&typeof input.text==='string'&&input.text.startsWith(`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}\n`))));
-      // A successful PREPARE is still NOT the GUI-queued READY receipt. This
-      // fallback admits only the failed-capacity recovery witness, never
-      // successful provisioning, task completion or ordinary failure replay.
+      // A successful PREPARE is NOT GUI readiness. Only the host's separate
+      // one-use readiness-verification path may observe this narrower witness.
+      // Require complete, single-turn history, the EXACT tool-free bootstrap
+      // request and its exact READY answer. No body/business turn, pending
+      // history, tool item or prose lookalike can become recovery authority.
+      const prepareText=`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}\nReply exactly READY. Do not use tools or access files, sites, accounts or integrations.`;
+      const prepared=matches[0];
+      if(options.allowPrepared===true&&response.nextCursor===null&&response.data.length===1&&matches.length===1
+        &&UUID.test(prepared?.id??'')&&toolFreeReady(prepared,prepareText))
+        return {state:'prepared',turnId:prepared.id,markerId:id(deliveryId)};
+      // Capacity retains its previous independent failure clock. Ordinary
+      // callers never receive PREPARE as completed provision or task work.
       if(matches.length!==1||!capacityFailure(matches[0]))return {state:'uncertain'};
     }
     if (matches.length !== 1 || !UUID.test(matches[0].id ?? '')) return { state: 'uncertain' };
     const turn = matches[0];
+    // The independent verification earns readiness only from its own exact
+    // tool-free GUI response, never arbitrary model completion/tool output.
+    if(options.readinessOnly===true&&turn.status==='completed'&&!toolFreeReady(turn,
+      `${marker}\nThis is an isolated native dispatcher readiness check. Reply exactly READY. Do not use tools or access files, sites, accounts or integrations.`))
+      return {state:'uncertain'};
     if (turn.status === 'completed') return { state: 'completed', turnId: turn.id, receipt: `codex:${id(threadId)}:${id(turn.id)}` };
     if (turn.status === 'failed') return { state: 'failed', turnId: turn.id, receipt: `codex-failed:${id(threadId)}:${id(turn.id)}`,
       ...(capacityFailure(turn) ? { failure: 'model_capacity' } : {}) };

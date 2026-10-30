@@ -11,6 +11,38 @@ import { assistantDeliveryMarker, assistantWorkStateContext, assistantExecutionC
 const execution = {modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
 const taskContext = { assistantId:randomUUID(),companyId:randomUUID(),taskId:randomUUID() };
 
+test('completed PREPARE permits only a separate bounded readiness witness, never provision completion',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
+  const prepared={id:turnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',
+    text:`TRELIO_ASSISTANT_DESKTOP_PREPARE ${deliveryId}\nReply exactly READY. Do not use tools or access files, sites, accounts or integrations.`}]},
+    {type:'agentMessage',text:'READY'}]};
+  const read=(turns=[prepared],nextCursor=null,extra={})=>readAssistantCodexDelivery(threadId,deliveryId,{
+    executable:process.execPath,environment:{},provision:true,allowPrepared:true,...extra,
+    spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:turns,nextCursor}}))});
+  assert.deepEqual(await read(),{state:'prepared',turnId,markerId:deliveryId});
+  // The ordinary task/provision receipt and all incomplete or impure histories
+  // retain their refusal. A missing queue/history record is never rejection.
+  assert.deepEqual(await read([prepared],null,{allowPrepared:false}),{state:'uncertain'});
+  assert.deepEqual(await read([prepared],null,{provision:false}),{state:'uncertain'});
+  for(const turns of [[prepared,prepared],[{...prepared,status:'interrupted'}],
+    [{...prepared,items:[...prepared.items,{type:'mcpToolCall',tool:'synthetic'}]}],
+    [{...prepared,items:[prepared.items[0],{type:'agentMessage',text:'not READY'}]}]])
+    assert.deepEqual(await read(turns),{state:'uncertain'});
+  assert.deepEqual(await read([prepared],'more'),{state:'uncertain'});
+});
+
+test('independent readiness completion requires its exact tool-free GUI turn',async()=>{
+  const threadId=randomUUID(),deliveryId=randomUUID(),turnId=randomUUID();
+  const prompt=`TRELIO_ASSISTANT_DELIVERY ${deliveryId}\nThis is an isolated native dispatcher readiness check. Reply exactly READY. Do not use tools or access files, sites, accounts or integrations.`;
+  const turn={id:turnId,status:'completed',items:[{type:'userMessage',content:[{type:'text',text:prompt}]},{type:'agentMessage',text:'READY'}]};
+  const read=t=>readAssistantCodexDelivery(threadId,deliveryId,{executable:process.execPath,environment:{},readinessOnly:true,
+    spawnProcess:nativeRpc(request=>({result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[t],nextCursor:null}}))});
+  assert.equal((await read(turn)).state,'completed');
+  for(const items of [[...turn.items,{type:'mcpToolCall'}],[turn.items[0],{type:'agentMessage',text:'other response'}],
+    [{type:'userMessage',content:[{type:'text',text:prompt+'\nprivate body'}]},turn.items[1]]])
+    assert.deepEqual(await read({...turn,items}),{state:'uncertain'});
+});
+
 test('work-state locators use immutable assistant identity and refuse paths or source text', async()=>{
   const state=assistantWorkStateContext(taskContext);
   const ownerQuestionIds=[randomUUID(),randomUUID()];

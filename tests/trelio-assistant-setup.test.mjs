@@ -2938,6 +2938,77 @@ test(`production owner capacity recovery preserves original peer/event and no-se
   }
 });
 
+// Real worker/factory/HTTP/SQLite composition. Native GUI/server outcomes alone
+// are synthetic; no Telegram/model traffic is produced by this fixture.
+for(const mode of ['success','lost','unknown','revoked','impure'])test(`production owner bootstrap handoff verifies readiness once without replay: ${mode}`,async t=>{
+ const {createAssistantInbox}=await import('../host-runtime/scripts/trelio-assistant-inbox.mjs');
+ const {createAssistantHttp}=await import('../host-runtime/scripts/trelio-assistant-transport.mjs');
+ const directory=await fs.mkdtemp(path.join(os.tmpdir(),'owner-ready-host-')),file=path.join(directory,'inbox.sqlite');
+ t.after(()=>fs.rm(directory,{recursive:true,force:true}));let clock=Date.now();
+ const identity={origin:'https://synthetic.test',assistantId:randomUUID(),deviceId:randomUUID()};
+ const companyId=randomUUID(),sourceId=randomUUID(),accountId=randomUUID(),memberId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID(),turnId=randomUUID();
+ const execution={modelId:'gpt-6.1-sol',effortLevel:'high',revision:1};
+ const source={id:sourceId,companyId,localAccountId:accountId,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+ const scope={origin:identity.origin,assistantId:identity.assistantId,companyId,provider:'telegram',accountId,bindingId:sourceId};
+ const db=new DatabaseSync(file),seed=createAssistantInbox({database:db,now:()=>clock});seed.register(scope);seed.observeExternalSourceRevision(scope,0);
+ seed.commitPage(scope,{...seed.claimPoll(scope),nextCursor:'synthetic',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,
+   wake:false,providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'c'.repeat(64)}`}]});
+ const original=seed.ownerIntakes()[0];seed.prepareOwnerIntake(original.id);seed.startOwnerIntakeProvision(original.id);seed.bindOwnerIntakeThread(original.id,threadId);db.close();
+ let active=null,queued=0,bodies=0,begins=0,preparedReads=0,intake=null;const results=new Map(),credential=`tda_${'s'.repeat(43)}`;
+ const client=createAssistantDeviceClient({...identity,store:{get:async()=>({...identity,credential,expiresAt:1})},http:createAssistantHttp({origin:identity.origin,
+  fetchImpl:async(url,options)=>{
+   assert.equal(options.headers.authorization,`Bearer ${credential}`);const input=JSON.parse(options.body);
+   if(url.endsWith('/intake/begin')){begins++;assert.equal(queued,1);assert.equal(input.intakeId,original.id);assert.equal(input.threadId,threadId);
+    assert.equal(input.eventId,original.original_event_id);assert.equal(input.ownerIdentityId,ownerId);
+    intake={schemaVersion:1,id:original.id,companyId,sourceId,sourceRevision:0,eventId:original.original_event_id,threadId,state:'leased',
+     readConfirmed:false,taskId:null,receiptId:null,execution,leaseExpiresAt:new Date(clock+1800000).toISOString()};
+   }else assert.ok(url.endsWith('/intake/read'),'readiness must not cancel, reply or create a task');
+   return new Response(JSON.stringify(intake),{headers:{'content-type':'application/json'}});
+  }})});
+ const create=()=>createAssistantRuntimeHost({context:async action=>action({...client,identity,heartbeat:async()=>({}),tasks:async()=>({bindings:[],nextCursor:null}),
+  sourceRoutes:async()=>[],companies:async()=>[{companyId,memberId,execution:{state:'ready',configuration:execution}}],sourceAccounts:async()=>[source],
+  ownerIdentities:async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]})},{
+   readIdentity:async()=>identity,readActivation:async()=>null,readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},
+   withSetupLock:action=>action(),releasePass:async outcome=>{assert.equal(outcome.id,active.passId);active=null;}}),
+  dependencies:{directory,ensureDirectory:async()=>{},now:()=>clock,timeZone:'UTC',readHookReadiness:async()=>({fingerprint:'b'.repeat(64)}),
+   readSourceMonitor:async()=>({schemaVersion:1,nextCursor:'synthetic-current',hasMore:false,events:[]}),
+   openDatabase:async()=>{const database=new DatabaseSync(file);return {database,close:async()=>database.close()};},
+   readStatus:async()=>({structuredContent:{schemaVersion:1,assistantUserId:identity.assistantId,deviceId:identity.deviceId,authorizedByUserId:memberId,businessReady:true,
+    availableCapabilities:['task_context','task_mutations','task_pass_outcome','workspace_execution','owner_decisions','background_service']}}),
+   native:{readPrerequisites:async()=>({fingerprint:'b'.repeat(64)}),readDelivery:async(thread,marker)=>{
+    assert.equal(thread,threadId);if(marker!==original.provision_id)return results.get(marker)??{state:'uncertain'};
+    preparedReads++;if(mode==='revoked')source.state='paused';
+    return mode==='impure'?{state:'uncertain'}:{state:'prepared',turnId,markerId:marker};},
+    provision:async(input,options)=>{
+     assert.equal(active,null);assert.equal(input.threadId,threadId);assert.notEqual(input.deliveryId,original.provision_id);
+     await options.beforeInvocation();options.startInvocation();queued++;
+     const read=new DatabaseSync(file);try{const row=read.prepare('SELECT * FROM assistant_owner_intakes WHERE id=?').get(original.id);
+      assert.equal(row.native_started,1);assert.equal(row.provision_id,original.provision_id);
+      assert.equal(JSON.parse(row.provision_review_json).started,true);assert.equal(row.reply_receipt_id,null);
+     }finally{read.close();}
+     const result={state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};if(mode!=='unknown')results.set(input.deliveryId,result);
+     if(mode==='lost'||mode==='unknown')throw Object.assign(Error('synthetic technical response loss'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});return result;
+    },run:async(input,options)=>{
+     options.startInvocation();bodies++;assert.equal(input.intakeContext.intakeId,original.id);assert.equal(input.threadId,threadId);
+     Object.assign(intake,{state:'ignored',readConfirmed:true,receiptId:randomUUID()});
+     const result={state:'completed',turnId:randomUUID()};results.set(input.deliveryId,result);return result;
+    }}}});
+ const tick=()=>executeAssistantRuntimeRequest({operation:'background_tick'},{context:async action=>action({identity},{readActivation:async()=>null}),
+  backgroundTick:()=>runAssistantBackgroundTick({createHost:async()=>({...await create(),codexUsage:async()=>({blocked:false})}),
+   pluginMaintenance:async()=>({state:'ready'}),codexMaintenance:async()=>({state:'ready'})})});
+ if(['lost','unknown'].includes(mode))await assert.rejects(tick(),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+ else if(mode==='revoked')await assert.rejects(tick(),{code:'ASSISTANT_INTAKE_CHANGED'});else await tick();
+ clock+=3600000;if(mode==='revoked')await assert.rejects(tick(),{code:'ASSISTANT_INTAKE_CHANGED'});else await tick();
+ assert.equal(queued,['success','lost','unknown'].includes(mode)?1:0);
+ assert.equal(bodies,['success','lost'].includes(mode)?1:0);assert.equal(begins,bodies);assert.equal(active,null);assert.ok(preparedReads>0);
+ const read=new DatabaseSync(file);try{
+  const row=read.prepare('SELECT * FROM assistant_owner_intakes').get();assert.equal(row.id,original.id);assert.equal(row.thread_id,threadId);assert.equal(row.provision_id,original.provision_id);
+  assert.equal(read.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,1);
+  assert.equal(read.prepare('SELECT count(*) AS n FROM assistant_inbox_deliveries').get().n,0);
+  assert.equal(read.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+ }finally{read.close();}
+});
+
 // Compose the production host's closed method forwarding, coordinator, durable
 // inbox and real device-client HTTP codec. Supplying a method directly to the
 // coordinator would miss a host adapter omission, even when both components

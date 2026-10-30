@@ -963,6 +963,24 @@ negative cancellation clears independent business health or marks an event
 processed/read/ACKed. The coordinator's existing bounded nextPollMs exposes
 only the due clock, never model or cancellation authority.
 
+## Schema v22: one independent owner GUI readiness verification
+
+The SAME owner-intake row adds nullable `provision_review_json`: original
+tool-free PREPARE turn/marker UUIDs, one independent verification UUID and a
+monotonic started bit. Forward migration changes no original fields or grants
+readiness from legacy unknown state. A complete exact native tool-free bootstrap
+witness is required, independently of the original event's source/owner authority.
+
+Only owner-command provisioning with an original started bit, its persisted
+chat, current active source generation, no protected pass and no body/business/
+reply/abandonment outcome may prepare the verification. Its CAS commits once,
+immediately before its new tool-free queue submission; original IDs/start bit
+stay unchanged. Failed source/model/history/queue preflight never starts it.
+After that CAS all unknown results are read-back-only, including after restart,
+expiry or source revocation. Only its exact GUI READY permits the normal ready
+transition and original native intake admission. No replacement original/chat,
+task/Run/provider send/cancel, processing/ACK or health-clear shortcut is added.
+
 ## Schema v20: expired owner reply without a send attempt
 
 A native `reply_pending` intent is not proof that the provider started. The SAME

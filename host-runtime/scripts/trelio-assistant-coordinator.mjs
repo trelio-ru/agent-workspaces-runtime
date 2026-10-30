@@ -849,6 +849,39 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
     await settleIntake(inbox.ownerIntake(row.id),cancelled,signal);
     return true;
   };
+  const verifyOwnerProvision=async(row,prepared,signal)=>{
+    // The old queue outcome remains unknown. Do NOT replay its marker, reset
+    // native_started, create a chat, or admit/read an owner body here. The only
+    // new operation is ONE independent tool-free GUI readiness verification,
+    // after a native exact completed bootstrap with no other turn/tool items.
+    if(row.kind!=='owner_command'||prepared.state!=='prepared'||prepared.markerId!==row.provision_id
+      ||!uuid.test(prepared.turnId??'')||await passHost.readActivePass())return false;
+    await intakeSource(row,signal);lease();
+    const company=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
+    if(company?.execution?.state!=='ready')return false;
+    const execution=assistantExecutionConfiguration(company.execution.configuration);
+    const review=inbox.prepareOwnerProvisionReview(row.id,{turnId:prepared.turnId,markerId:row.provision_id});
+    if(review.started)return false;
+    const cwd=await workspaceForIntake({companyId:row.scope.companyId,sourceId:row.scope.bindingId});
+    const result=await native.provision({deliveryId:review.reviewId,threadId:row.thread_id,cwd,execution},{signal,chatKind:'owner_dialogue',readinessOnly:true,
+      beforeInvocation:async()=>{
+        // Reauthorise after native model/cwd/empty-queue checks, immediately
+        // before the durable CAS and the new technical queue write. If the
+        // old GUI READY arrived meanwhile, next tick adopts that positive
+        // receipt instead; this attempted verification never starts.
+        if(await passHost.readActivePass())fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
+        await intakeSource(row,signal);lease();
+        const current=(await client.companies(signal)).find(value=>value.companyId===row.scope.companyId);lease();
+        if(current?.execution?.state!=='ready'||JSON.stringify(assistantExecutionConfiguration(current.execution.configuration))!==JSON.stringify(execution))
+          fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
+        const original=await native.readDelivery(row.thread_id,row.provision_id,{signal,provision:true,allowPrepared:true});lease();
+        if(original.state!=='prepared'||original.turnId!==review.turnId||original.markerId!==review.markerId)
+          fail('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');
+      },
+      startInvocation:()=>{lease();inbox.startOwnerProvisionReview(row.id,review.reviewId);},
+      onThreadStarted:()=>fail('ASSISTANT_COORDINATOR_THREAD_CONFLICT')});lease();
+    return result.state==='completed'&&result.threadId===row.thread_id;
+  };
   const workIntake=async(signal,visited)=>{
     if(!passHost||typeof workspaceForIntake!=='function')return null;
     const saved=await passHost.readActivePass();
@@ -872,8 +905,11 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       // Recover its exact original marker BEFORE source/policy backoff; a new
       // policy cannot turn uncertainty into permission to start another chat.
       if(!row.thread_id){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
-      const result=await native.readDelivery(row.thread_id,row.provision_id,{signal});lease();
-      if(result.state!=='completed'){emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};}
+      const review=inbox.ownerProvisionReview(row.id),marker=review?.started?review.reviewId:row.provision_id;
+      const result=await native.readDelivery(row.thread_id,marker,{signal,provision:true,...(!review?.started?{allowPrepared:true}:{readinessOnly:true})});lease();
+      if(result.state!=='completed'&&!await verifyOwnerProvision(row,result,signal)){
+        emit('ASSISTANT_INTAKE_PROVISION_REVIEW_REQUIRED');return {state:'blocked',kind:'source_intake'};
+      }
       inbox.readyOwnerIntake(row.id);row=inbox.ownerIntake(row.id);
     }
     if(saved&&row.native_started===1&&['complete','waiting_owner'].includes(row.state)

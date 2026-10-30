@@ -288,6 +288,29 @@ absolute deadline. Timeout/cancellation closes only that reader, not the GUI
 turn/queue. Queue UUIDs correlate requests; they are not an idempotency guarantee,
 and an uncertain submission is never automatically requeued.
 
+Owner-private first-chat handoff has a separate bounded readiness-verification
+boundary. A completed PREPARE is not GUI readiness and does not prove why the
+handoff failed. Only complete single-turn native history with the EXACT empty
+bootstrap request, one exact `READY` answer and no tool/other items can expose a
+host-only `prepared` witness. Missing, partial, duplicate, running/interrupted,
+impure or ordinary business history remains uncertain.
+
+Under the original coordinator lease, schema22 can journal ONE independent
+tool-free verification UUID for that same owner intake/chat. It never reuses the
+old queue marker, resets its native-start bit, creates a chat, reads an owner
+body or grants task/provider authority. Fresh native source revision, company
+model/effort, cwd, absent protected pass and an empty native queue must precede
+the synchronous new start CAS. The original PREPARE witness and current native
+source/model are rechecked immediately before that CAS. A newly arrived original
+GUI receipt is adopted on a later tick instead of starting this verification.
+
+Only the new marker's exact completed tool-free GUI `READY` earns readiness;
+then ordinary native owner admission delivers the SAME original event once.
+Restart/lost/unknown verification outcomes use that SAME marker's read-back,
+never another submission, timeout extension, queue removal or local state reset.
+This is a new technical verification, not a replay of an uncertain business or
+provider operation. A completed verification alone clears no business/ACK health.
+
 The independent reader observes **stored** history, not the GUI writer's live
 event stream ([native read semantics](https://learn.chatgpt.com/docs/app-server#read-a-stored-thread-without-resuming)).
 With the actual Windows 0.164 client, that history projected the exact ongoing

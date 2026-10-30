@@ -55,6 +55,19 @@ const nextCapacityState=(previous,turnId,markerId,clock)=>{
   return capacityState({firstAt:previous?.firstAt??clock,nextAt:clock+[60_000,300_000,900_000,1_800_000][step],
     step,turnId,markerId,waiting:true});
 };
+// This is an independent, tool-free GUI readiness verification, not capacity,
+// a replay of the old queue write, or permission to read/send an owner body.
+// Keep its original bootstrap witness and one monotonic start bit in the SAME
+// intake. A lost verification outcome can only be read back by this marker.
+const provisionReview=value=>{
+  object(value,['turnId','markerId','reviewId','started']);
+  if(Object.keys(value).length!==4||typeof value.started!=='boolean')inputError();
+  return {turnId:uuid(value.turnId),markerId:uuid(value.markerId),reviewId:uuid(value.reviewId),started:value.started};
+};
+const ownerProvisionCandidate=row=>row.kind==='owner_command'&&row.state==='provisioning'&&row.native_started===1
+  &&UUID.test(row.thread_id??'')&&row.settled===0&&row.source_state==='active'&&row.source_revision===row.configuration_revision
+  &&row.reply_receipt_id===null&&row.reply_message_id===null&&row.reply_abandon_receipt_id===null
+  &&row.outcome_receipt===null&&row.outcome_state===null&&row.outcome_task_id===null;
 /** Provider-owned opaque routing hints, never sender or task authority. Email
  * uses a scoped hash of untrusted threading headers; Telegram uses its native
  * account HMAC; MAX uses its verified native/account-scope key. These remain
@@ -142,7 +155,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
   try {
     const versions=db.prepare('SELECT version FROM assistant_inbox_meta').all();
     const schedules=db.prepare('SELECT version FROM assistant_schedule_meta').all();
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22].includes(versions[0].version)||schedules.length!==1||schedules[0].version!==1)
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -232,7 +245,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -455,8 +468,13 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // Additive structural state only: preserve all original messages, receipts,
     // native-start bits and reply fences, including old uncertain attempts.
     if(!ownerCapacityColumns.includes('model_capacity_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN model_capacity_json TEXT');
-    if(versions.length)run('UPDATE assistant_inbox_meta SET version=21');
-    else run('INSERT INTO assistant_inbox_meta(version) VALUES (21)');
+    const provisionColumns=all('PRAGMA table_info(assistant_owner_intakes)').map(column=>column.name);
+    if(versions[0]?.version>=22&&!provisionColumns.includes('provision_review_json'))fail('ASSISTANT_INBOX_CONFLICT');
+    // Add a nullable witness only. No original event, start bit, chat, lease,
+    // provider fence or historical receipt is rewritten during migration.
+    if(!provisionColumns.includes('provision_review_json'))db.exec('ALTER TABLE assistant_owner_intakes ADD COLUMN provision_review_json TEXT');
+    if(versions.length)run('UPDATE assistant_inbox_meta SET version=22');
+    else run('INSERT INTO assistant_inbox_meta(version) VALUES (22)');
     if(rebuilding&&all('PRAGMA foreign_key_check').length)fail('ASSISTANT_INBOX_CONFLICT');
   });}finally{
     if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=ON');if(get('PRAGMA foreign_keys').foreign_keys!==foreignKeys)fail('ASSISTANT_INBOX_CONFLICT');}
@@ -975,6 +993,27 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     readyOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='provisioning'||!row.thread_id||!row.native_started)fail('ASSISTANT_INBOX_CONFLICT');
       run("UPDATE assistant_owner_intakes SET state='ready',native_started=0 WHERE id=?",row.id);
+    });},
+    ownerProvisionReview(id){
+      const row=this.ownerIntake(id);
+      return row.provision_review_json===null?null:Object.freeze(provisionReview(JSON.parse(row.provision_review_json)));
+    },
+    prepareOwnerProvisionReview(id,{turnId,markerId}){return transaction(()=>{
+      const row=this.ownerIntake(id);turnId=uuid(turnId);markerId=uuid(markerId);
+      if(!ownerProvisionCandidate(row)||markerId!==row.provision_id)fail('ASSISTANT_INBOX_CONFLICT');
+      const existing=this.ownerProvisionReview(id);
+      if(existing){if(existing.turnId!==turnId||existing.markerId!==markerId)fail('ASSISTANT_INBOX_CONFLICT');return existing;}
+      const review=provisionReview({turnId,markerId,reviewId:randomUUID(),started:false});
+      run('UPDATE assistant_owner_intakes SET provision_review_json=? WHERE id=?',JSON.stringify(review),row.id);
+      return Object.freeze(review);
+    });},
+    startOwnerProvisionReview(id,reviewId){return transaction(()=>{
+      const row=this.ownerIntake(id),review=this.ownerProvisionReview(id);reviewId=uuid(reviewId);
+      if(!ownerProvisionCandidate(row)||!review||review.started||review.reviewId!==reviewId||review.markerId!==row.provision_id)
+        fail('ASSISTANT_INBOX_CONFLICT');
+      // Commit directly before the ONE new technical queue submission. Preserve
+      // native_started and the old provision ID: neither is reset to allow replay.
+      run('UPDATE assistant_owner_intakes SET provision_review_json=? WHERE id=?',JSON.stringify({...review,started:true}),row.id);
     });},
     startOwnerIntake(id){return transaction(()=>{
       const row=this.ownerIntake(id);if(row.state!=='ready'||row.source_state!=='active'||row.source_revision!==row.configuration_revision)

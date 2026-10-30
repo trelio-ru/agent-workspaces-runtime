@@ -77,6 +77,64 @@ const fixture = (t,{database=new DatabaseSync(':memory:'),ownsDatabase=true}={})
     counts:()=>({starts,provisions,runs,acks}),advance:ms=>{clock+=ms;},failNative:value=>{nativeFailure=value;},failInventory:value=>{inventoryFailure=value;}};
 };
 
+for(const mode of ['success','lost','unknown','changed_boundary','policy_blocked','active_pass'])test(`owner completed bootstrap resumes SAME original through one independent readiness verification (${mode})`,async t=>{
+  const f=fixture(t);await f.coordinator.close();
+  const sourceId=randomUUID(),accountId=randomUUID(),ownerId=randomUUID(),threadId=randomUUID(),turnId=randomUUID();
+  const source={id:sourceId,companyId:f.companyId,deviceId:f.identity.deviceId,localAccountId:accountId,
+    projectId:null,skillId:'telegram-mtproto',state:'active',revision:0,ownerTaskIntakeAllowed:true};
+  f.options.client.tasks=async()=>({bindings:[],nextCursor:null});
+  f.options.client.sourceAccounts=async()=>[source];f.options.client.sourceRoutes=async()=>[];
+  f.options.client.ownerIdentities=async()=>({bindingRevision:'a'.repeat(64),identities:[{provider:'telegram',bindingId:ownerId,externalUserId:'123'}]});
+  const inbox=createAssistantInbox({database:f.database,now:f.options.now});
+  const scope={origin:f.identity.origin,assistantId:f.identity.assistantId,companyId:f.companyId,provider:'telegram',accountId,bindingId:sourceId};
+  inbox.register(scope);inbox.observeExternalSourceRevision(scope,0);
+  inbox.commitPage(scope,{...inbox.claimPoll(scope),nextCursor:'1',hasMore:false,events:[{id:'message:123:1',revision:'a'.repeat(64),taskId:null,wake:false,
+    providerWake:true,ownerIdentityId:ownerId,conversationKey:`telegram-conversation/v1.${'a'.repeat(64)}`}]});
+  const original=inbox.ownerIntakes()[0];inbox.prepareOwnerIntake(original.id);inbox.startOwnerIntakeProvision(original.id);inbox.bindOwnerIntakeThread(original.id,threadId);
+  let oldReads=0,verifications=0,queueStarts=0,bodies=0,active=mode==='active_pass'?{schemaVersion:1,kind:'source_intake',
+    assistantId:f.identity.assistantId,deviceId:f.identity.deviceId,companyId:f.companyId,sourceId,sourceRevision:0,
+    passId:original.id,deliveryId:original.delivery_id,eventId:original.original_event_id,threadId}:null,intake=null;
+  f.options.passHost={readActivePass:async()=>active,activatePass:async pass=>{assert.equal(active,null);active=pass;},releasePass:async()=>{active=null;}};
+  f.options.workspaceForIntake=async()=>process.cwd();
+  f.options.client.beginSourceIntake=async input=>{
+    assert.equal(queueStarts,1,'business admission follows its positive independent GUI verification');
+    intake={schemaVersion:1,id:input.intakeId,companyId:f.companyId,sourceId,sourceRevision:0,eventId:input.eventId,threadId,
+      state:'leased',leaseExpiresAt:'2099-01-01T00:00:00.000Z',taskId:null,receiptId:null,execution:f.execution.configuration,readConfirmed:false};return {...intake};};
+  f.options.client.readSourceIntake=async()=>({...intake});
+  f.options.native.readDelivery=async(thread,marker,options)=>{
+    assert.equal(thread,threadId);
+    if(marker===original.provision_id){oldReads++;
+      return mode==='changed_boundary'&&oldReads>1?{state:'uncertain'}:{state:'prepared',turnId,markerId:marker};}
+    return f.deliveries.get(marker)??{state:'uncertain'};
+  };
+  f.options.native.provision=async(input,options)=>{
+    verifications++;assert.equal(input.threadId,threadId);assert.notEqual(input.deliveryId,original.provision_id);assert.equal(active,null);
+    await options.beforeInvocation();options.startInvocation();queueStarts++;
+    assert.equal(inbox.ownerProvisionReview(original.id).started,true,'durable fence precedes the ONE new verification submission');
+    const completed={state:'completed',threadId,receipt:`codex:${threadId}:${randomUUID()}`};
+    if(mode!=='unknown')f.deliveries.set(input.deliveryId,completed);
+    if(mode==='lost'||mode==='unknown')throw Object.assign(new Error('synthetic lost technical outcome'),{code:'ASSISTANT_CODEX_DELIVERY_UNCERTAIN'});
+    return completed;
+  };
+  f.options.native.run=async(input,options)=>{assert.equal(input.intakeContext.intakeId,original.id);assert.equal(input.threadId,threadId);
+    options.startInvocation();bodies++;Object.assign(intake,{state:'ignored',receiptId:randomUUID(),readConfirmed:true});
+    const result={state:'completed',receipt:`codex:${threadId}:${randomUUID()}`};f.deliveries.set(input.deliveryId,result);return result;};
+  if(mode==='policy_blocked')f.execution.state='policy_blocked';
+  let coordinator=createAssistantCoordinator(f.options);try{
+    await coordinator.workOnce().catch(error=>assert.match(error.code,/UNCERTAIN|REVIEW|CONFLICT/u));
+    await coordinator.close();coordinator=createAssistantCoordinator(f.options);
+    await coordinator.workOnce().catch(error=>assert.match(error.code,/UNCERTAIN|REVIEW|CONFLICT/u));
+    assert.equal(queueStarts,['changed_boundary','policy_blocked','active_pass'].includes(mode)?0:1);
+    assert.equal(bodies,['success','lost'].includes(mode)?1:0);
+    assert.ok(verifications<=2);if(mode==='unknown')assert.equal(verifications,1,'unknown verification never requeues across restart');
+    const retained=inbox.ownerIntake(original.id);
+    assert.equal(retained.provision_id,original.provision_id);assert.equal(retained.delivery_id,original.delivery_id);assert.equal(retained.thread_id,threadId);
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_owner_intakes').get().n,1);
+    assert.equal(f.database.prepare('SELECT count(*) AS n FROM assistant_inbox_deliveries').get().n,0,'no task/pass is fabricated');
+    assert.equal(f.database.prepare('SELECT sum(processed)+sum(acked) AS n FROM assistant_inbox_events').get().n,0);
+  }finally{await coordinator.close();}
+});
+
 test('missing model is blocked before events and retains the original mention through a real SQLite reopen until owner configuration',async t=>{
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-model-dispatch-'));
   t.after(()=>fs.rm(directory,{recursive:true,force:true}));
