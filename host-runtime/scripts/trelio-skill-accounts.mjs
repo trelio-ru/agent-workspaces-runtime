@@ -28,6 +28,7 @@ const ACCOUNT_COMMANDS = {
   update: 'account update --id UUID [--name NAME] [--comment TEXT] --expected-revision N',
   bind: 'account bind --id UUID --expected-revision N',
   unbind: 'account unbind --id UUID --expected-revision N',
+  remove: 'account remove --id UUID --expected-revision N --confirm [--all-companies]',
   default: 'account default --id UUID --expected-revision N',
 };
 const isAccountOperation = operation => Object.hasOwn(ACCOUNT_COMMANDS, operation);
@@ -87,6 +88,10 @@ export function parseAccountCommand(args) {
   const allowed = ['--id', '--expected-revision', ...(['create', 'update'].includes(operation) ? ['--name', '--comment'] : [])];
   for (let index = 2; index < args.length; index += 2) {
     const key = args[index], value = args[index + 1];
+    if (operation === 'remove' && ['--confirm', '--all-companies'].includes(key)) {
+      check(!Object.hasOwn(options, key), 'ACCOUNT_ARGUMENTS_INVALID', operation);
+      options[key] = true; index--; continue;
+    }
     check(allowed.includes(key) && !Object.hasOwn(options, key) && value !== undefined,
       'ACCOUNT_ARGUMENTS_INVALID', operation);
     options[key] = value;
@@ -107,7 +112,9 @@ export function parseAccountCommand(args) {
     if (!(error instanceof SkillAccountError)) throw error;
     throw new SkillAccountCommandError(error.code, operation);
   }
-  return { operation, id, name: options['--name'], comment: options['--comment'], expectedRevision: Number(revision) };
+  check(operation !== 'remove' || options['--confirm'] === true, 'ACCOUNT_REMOVAL_CONFIRMATION_REQUIRED', operation);
+  return { operation, id, name: options['--name'], comment: options['--comment'], expectedRevision: Number(revision),
+    ...(operation === 'remove' ? { confirmed: true, allCompanies: options['--all-companies'] === true } : {}) };
 }
 
 /** Preserve the pre-login failure without reflecting provider output. A child
@@ -343,6 +350,34 @@ export function createAccountCatalogue({ directory, scope, io }) {
         id, name, comment, bound: current.accountIds.includes(id), default: current.defaultAccountId === id,
       })) };
     },
+    async remove({ id, expectedRevision, confirmed, allCompanies = false, cleanup }) {
+      requireThat(confirmed === true && typeof cleanup === 'function', 'ACCOUNT_REMOVAL_CONFIRMATION_REQUIRED');
+      return transaction(async state => {
+        requireThat(expectedRevision === state.revision, 'ACCOUNT_CATALOGUE_CONFLICT');
+        const account = find(state, id);
+        const bindingEntries = Object.entries(state.bindings).filter(([, binding]) => binding.accountIds.includes(id));
+        const bindings = bindingEntries.map(([, binding]) => binding);
+        // A local account can serve several companies. Never silently turn a
+        // request made in one company into loss of every company's login.
+        requireThat(!bindingEntries.some(([company]) => company !== scope.company) || allCompanies === true, 'ACCOUNT_USED_BY_OTHER_COMPANIES');
+        await cleanup({ id: account.id, name: account.name, comment: account.comment,
+          providerRef: account.providerRef, companyBinding: scope.company });
+        // Cleanup must return a verified provider receipt BEFORE metadata is
+        // committed. A failed/unknown cleanup retains the account for recovery.
+        state.accounts = state.accounts.filter(item => item.id !== id);
+        for (const binding of bindings) {
+          binding.accountIds = binding.accountIds.filter(value => value !== id);
+          if (binding.defaultAccountId === id) binding.defaultAccountId = null;
+        }
+        delete state.creations?.[id];
+        for (const [request, receipt] of Object.entries(state.bindingIntents ?? {}))
+          if (receipt.accountId === id) delete state.bindingIntents[request];
+        // Retain opaque import tombstones so an old on-disk locator cannot
+        // recreate the removed identity in another company's first discovery.
+        for (const [source, imported] of Object.entries(state.imports)) if (imported === id) state.imports[source] = null;
+        return { id, removed: true, localSessionRemoved: true, bindingsRemoved: bindings.length };
+      });
+    },
     async change({ operation, id, name, comment, expectedRevision, creationRequestId = null, bindingRequestId = null, bindingOriginScope = null }) {
       requireThat(['create', 'update', 'bind', 'unbind', 'default'].includes(operation), 'ACCOUNT_OPERATION_INVALID');
       requireThat(['create', 'update'].includes(operation) || name === undefined && comment === undefined, 'ACCOUNT_ARGUMENTS_INVALID');
@@ -439,6 +474,7 @@ export function createAccountCatalogue({ directory, scope, io }) {
             entry.sourceKey.length <= 1024 && validRef(entry.providerRef) && entry.providerRef !== null &&
             ['device', 'company'].includes(entry.scope), 'ACCOUNT_IMPORT_INVALID');
           const source = hash([entry.scope === 'device' ? scope.catalogue : scope.importScope, entry.sourceKey]);
+          if (Object.hasOwn(state.imports, source) && state.imports[source] === null) continue;
           let id = state.imports[source];
           const newlyImported = !id;
           if (!id) {

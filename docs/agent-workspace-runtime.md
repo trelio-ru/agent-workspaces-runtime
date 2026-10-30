@@ -2558,7 +2558,7 @@ deadline и не повторяет изменение каталога. При 
 синхронизируется. Назначения Trelio и личные правила остаются company-scoped.
 `account`, `account --help`/`-h` и `account help` возвращают статическую JSON-справку;
 `account OPERATION --help`/`-h` и `account help OPERATION` – синтаксис одной
-из операций list/create/update/bind/unbind/default. Host разбирает команды,
+из операций list/create/update/bind/unbind/default/remove. Host разбирает команды,
 аргументы и provider selector до создания каталога и legacy import: справка и
 некорректный ввод не читают аккаунты, не создают каталоги/markers и не запускают
 provider. Live admission, scope и signature перед host dispatch сохраняются.
@@ -2574,6 +2574,22 @@ Create принимает name/comment и optional UUID; update – exact UUID �
 требуют `--expected-revision`. Unbind не удаляет сессию. Между компаниями аккаунт
 включается только после выбора пользователя; общие комментарии – данные,
 не authority и не место для секретов или закрытого company context.
+
+`account remove --id UUID --expected-revision N --confirm` удаляет локальное
+подключение целиком. Чужая company/member binding требует явного
+`--all-companies`; имена других компаний не раскрываются. Это human-only операция:
+managed task/source profiles сохраняют прежний отказ setup. Provider должен
+включить в signed package `trelio-account-removal.json` с точным
+`{"schemaVersion":1}`; без marker host отказывает до account I/O.
+Тот же verified executor вызывает только фиксированный `__trelio_account_remove`
+с выбранным account environment, без stdin/grants, SDK fallback или shell.
+20 секунд, bounded private pipes и exact value-free receipt предшествуют
+удалению metadata. Provider владеет native session lock, безопасной очисткой и
+локальным tombstone против stale selected процессов. Каталог удерживает прежний
+lock и CAS, удаляет все bindings/defaults и receipts только после проверенной
+очистки. Ошибка сохраняет запись для восстановления; старые import keys остаются
+opaque tombstones и не создают аккаунт повторно. Ни Telegram account у provider,
+ни сообщения/история облачного сервиса этой локальной операцией не удаляются.
 
 Внутренний owner-authorized assistant setup использует ту же операцию create,
 lock и atomic write, добавляя optional v1-карту `creations` в корне каталога:

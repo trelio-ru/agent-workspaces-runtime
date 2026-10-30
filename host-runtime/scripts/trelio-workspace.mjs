@@ -9009,13 +9009,17 @@ export const runMaterializedAgentSkill = async ({
   const sourceAckCapture = captureMode === 'assistant_source_ack';
   const sourceIntakeCapture = captureMode === 'assistant_source_intake';
   const sourceReplyCapture = captureMode === 'assistant_source_reply';
+  const accountRemovalCapture = captureMode === 'account_removal';
   const profile = currentWorkspaceExecutionProfile();
   const privateSetup = privateSecretSetup !== null;
   if(privateSetup && (!taskCapture || profile?.kind!=='digital_assistant'
     || typeof profile.authorizePrivateSkillCheckout!=='function' || typeof prepareSetupEnvironment!=='function'
     || typeof privateSecretSetup.fieldKey!=='string' || typeof privateSecretSetup.environmentVariable!=='string'))
     throw Object.assign(new Error('Private setup requires its exact task profile.'),{code:'ASSISTANT_SECRET_SKILL_COMMAND_DENIED'});
-  if (!['monitor','assistant_task','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake','assistant_source_reply'].includes(captureMode)
+  if (accountRemovalCapture && (!captureOutput || profile || !executionContext.account
+    || JSON.stringify(runtimeArguments) !== '["__trelio_account_remove"]' || !supportsSkillAccountRemoval(artifact)))
+    throw Object.assign(new Error('ACCOUNT_REMOVAL_UNSUPPORTED'), { code: 'ACCOUNT_REMOVAL_UNSUPPORTED' });
+  if (!['monitor','assistant_task','assistant_skill_setup','assistant_source_setup','assistant_source_ack','assistant_source_intake','assistant_source_reply','account_removal'].includes(captureMode)
     || taskCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
       || typeof profile.resolveSkillRuntimeChat !== 'function')
     || taskSetupCapture && (!captureOutput || profile?.kind !== 'digital_assistant'
@@ -9034,7 +9038,7 @@ export const runMaterializedAgentSkill = async ({
       || typeof profile.readSourceReplyInput !== 'function' || runtimeArguments?.[0]!=='reply-reference')
     || typeof captureOutput !== 'boolean' || typeof captureExitCode !== 'boolean'
     || captureExitCode && !captureOutput
-    || captureOutput && (!Array.isArray(runtimeArguments) || !taskCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && !sourceReplyCapture && runtimeArguments[0] !== 'monitor'
+    || captureOutput && (!Array.isArray(runtimeArguments) || !accountRemovalCapture && !taskCapture && !taskSetupCapture && !sourceSetupCapture && !sourceAckCapture && !sourceIntakeCapture && !sourceReplyCapture && runtimeArguments[0] !== 'monitor'
     || runtimeArguments.length > (sourceAckCapture ? 211 : taskCapture ? 128 : 64) || runtimeArguments.some(value => typeof value !== 'string' || value.length > 16384)
     || Object.keys(grantedEnvironment).length || grantedStdin !== null || prepareSetupEnvironment !== null && !privateSetup
     || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > (sourceSetupCapture || taskSetupCapture ? 10 * 60_000 : 180_000)
@@ -9883,6 +9887,16 @@ const discoverSkillAccounts = async ({ artifact, runtimeDirectory, executionCont
   return value.accounts;
 };
 
+/** Only a signed package can opt into local erasure. This fixed marker has no
+ * command/path fields: a model cannot turn catalogue removal into arbitrary
+ * provider execution. The provider owns credential storage and locking. */
+const supportsSkillAccountRemoval = artifact => {
+  const marker = artifact.parsedPackage?.files?.find(file => file.path === 'trelio-account-removal.json');
+  return artifact.parsedPackage?.capabilities?.includes(ACCOUNT_CAPABILITY)
+    && Buffer.isBuffer(marker?.bytes) && marker.bytes.length <= 128
+    && marker.bytes.toString('utf8').trim() === '{"schemaVersion":1}';
+};
+
 export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, executionContext,
   runtimeArguments, catalogueDirectory = CONFIG_DIRECTORY,
   discover = discoverSkillAccounts, output = value => process.stdout.write(`${JSON.stringify(value)}\n`) }) => {
@@ -9919,6 +9933,8 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
   if (command?.help) {
     output({ ok: true, help: command.help }); return { handled: true };
   }
+  if (command?.operation === 'remove' && !supportsSkillAccountRemoval(artifact))
+    throw Object.assign(new Error('ACCOUNT_REMOVAL_UNSUPPORTED'), { code: 'ACCOUNT_REMOVAL_UNSUPPORTED' });
   const parsed = command ? null : splitAccountArguments(runtimeArguments);
   const scope = accountScope({ origin, skillId: artifact.skillId, companyId: executionContext.companyId,
     memberId: executionContext.localIdentity?.memberId,
@@ -9940,7 +9956,20 @@ export const prepareSkillAccount = async ({ origin, artifact, runtimeDirectory, 
     output({ ok: true, ...listed, ...(assistant ? {accounts:listed.accounts.filter(account=>account.bound)} : {}) }); return { handled: true };
   }
   if (command) {
-    const result = await catalogue.change({ ...command, ...(accountCreation??{}), id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });
+    const result = command.operation === 'remove'
+      ? await catalogue.remove({ ...command, cleanup: async account => {
+        const captured = await runMaterializedAgentSkill({ artifact, runtimeDirectory,
+          executionContext: { ...executionContext, account }, runtimeArguments: ['__trelio_account_remove'],
+          captureOutput: true, captureMode: 'account_removal', timeoutMs: 20_000 });
+        // Never return provider output or accept a generic process exit as
+        // proof of erasure. Keep the exact receipt bounded and value-free.
+        let receipt;
+        try { receipt = JSON.parse(captured.stdout); } catch { /* Fail closed below. */ }
+        if (captured.stdout.length > 256 || receipt?.schemaVersion !== 1 || receipt?.removed !== true
+          || receipt?.accountId !== account.id || Object.keys(receipt).sort().join(',') !== 'accountId,removed,schemaVersion')
+          throw Object.assign(new Error('ACCOUNT_REMOVAL_UNVERIFIED'), { code: 'ACCOUNT_REMOVAL_UNVERIFIED' });
+      } })
+      : await catalogue.change({ ...command, ...(accountCreation??{}), id: command.id ?? (command.operation === 'create' ? crypto.randomUUID() : null) });
     output({ ok: true, ...result, ...await catalogue.list() }); return { handled: true };
   }
   const account = await catalogue.select(parsed.accountId);

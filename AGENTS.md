@@ -603,7 +603,9 @@ publication tooling также остаются вне этого публичн
 
 - Для личных аккаунтов, их миграции и гонок блокировок читай
   [общий контракт](docs/agent-workspace-runtime.md#личные-аккаунты-навыков);
-  provider credential code остаётся вне host.
+  provider credential code остаётся вне host. `account remove` требует signed
+  erasure marker, точный provider receipt и CAS; foreign binding — explicit
+  all-companies. Provider cleanup/locks/tombstones не заменяются host rm.
   Private `monitor` capture использует тот же materialized executor: bounded
   pipes/deadline, EOF, без inherited chat, setup/grants или нового admission.
   Explicit private exit DTO не переносится в Error/log и не принимает partial pipes.

@@ -257,7 +257,7 @@ test('host dispatch lists before setup, binds explicitly and removes only its ac
 
 test('account help is static and never imports, creates a catalogue or reads an existing path', async t => {
   const { directory } = await fixture(t), outputs = [];
-  const operations = ['list', 'create', 'update', 'bind', 'unbind', 'default'];
+  const operations = ['list', 'create', 'update', 'bind', 'unbind', 'default', 'remove'];
   const commands = [['account'], ['account', '--help'], ['account', '-h'], ['account', 'help'],
     ...operations.flatMap(operation => [['account', operation, '--help'], ['account', operation, '-h'], ['account', 'help', operation]])];
   const base = { origin: identity.origin, artifact: { skillId: identity.skillId }, runtimeDirectory: directory,
@@ -614,4 +614,47 @@ test('ordinary materialized execution retains its interactive input and exit con
   assert.equal(await f.run({ captureOutput: false, runtimeArguments: ['read'], grantedStdin: 'synthetic-input' }), undefined);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.input.runtimeDirectory,'ordinary-result'),'utf8')),
     { args: ['read'], input: 'synthetic-input' });
+});
+
+test('removal checks CAS and cross-company scope before erasure, removes every binding and prevents reimport', async t => {
+  const {make}=await fixture(t),first=make(),second=make({companyId:crypto.randomUUID()});
+  await first.importOnce(async()=>[{sourceKey:'old',scope:'device',name:'Account',providerRef:'opaque'}]);
+  const id=(await first.list()).accounts[0].id;
+  await second.change({operation:'bind',id,expectedRevision:(await first.list()).revision});
+  let calls=0;
+  const cleanup=async account=>{calls++;assert.equal(account.providerRef,'opaque');};
+  const intent={id,confirmed:true,expectedRevision:(await first.list()).revision,cleanup};
+  await assert.rejects(first.remove({...intent,expectedRevision:0}),{code:'ACCOUNT_CATALOGUE_CONFLICT'});
+  await assert.rejects(first.remove(intent),{code:'ACCOUNT_USED_BY_OTHER_COMPANIES'});
+  assert.equal(calls,0);
+  const removed=await first.remove({...intent,allCompanies:true});
+  assert.equal(removed.bindingsRemoved,2);assert.equal(calls,1);
+  assert.deepEqual((await first.list()).accounts,[]);assert.deepEqual((await second.list()).accounts,[]);
+  const third=make({companyId:crypto.randomUUID()});
+  await third.importOnce(async()=>[{sourceKey:'old',scope:'device',name:'Account',providerRef:'opaque'}]);
+  assert.deepEqual((await third.list()).accounts,[],'retained import tombstone cannot resurrect the removed slot');
+});
+
+test('failed provider cleanup retains account, bindings and catalogue revision',async t=>{
+  const {make}=await fixture(t),catalogue=make(),id=crypto.randomUUID();
+  await catalogue.change({operation:'create',id,name:'Account',expectedRevision:0});
+  const before=await catalogue.list();
+  await assert.rejects(catalogue.remove({id,expectedRevision:before.revision,confirmed:true,
+    cleanup:async()=>{throw new Error('synthetic cleanup failure');}}),/synthetic cleanup failure/);
+  assert.deepEqual(await catalogue.list(),before);assert.equal((await catalogue.select()).id,id);
+});
+
+test('account remove runs the signed fixed provider through the real executor before committing metadata',async t=>{
+  const {directory}=await fixture(t),outputs=[];
+  const provider=path.join(directory,'provider.mjs');
+  await fs.writeFile(provider,`const a=JSON.parse(process.env.TRELIO_SKILL_ACCOUNT_JSON);if(process.argv[2]!=='__trelio_account_remove')process.exit(3);process.stdout.write(JSON.stringify({schemaVersion:1,removed:true,accountId:a.id}));`);
+  const artifact={skillId:identity.skillId,runtimeVersion:'1.0.0',parsedPackage:{entrypoint:{path:'provider.mjs',interpreter:'node'},
+    capabilities:['local-session','local-accounts-v1'],files:[{path:'trelio-account-removal.json',bytes:Buffer.from('{"schemaVersion":1}')} ]}};
+  const base={origin:identity.origin,artifact,runtimeDirectory:directory,catalogueDirectory:directory,
+    executionContext:{companyId:company,localIdentity:{memberId:member,connectionId:connection}},discover:async()=>[],output:value=>outputs.push(value)};
+  await prepareSkillAccount({...base,runtimeArguments:['account','list']});
+  await prepareSkillAccount({...base,runtimeArguments:['account','create','--name','Account','--expected-revision',String(outputs.at(-1).revision)]});
+  const id=outputs.at(-1).accounts[0].id,revision=outputs.at(-1).revision;
+  await prepareSkillAccount({...base,runtimeArguments:['account','remove','--id',id,'--expected-revision',String(revision),'--confirm']});
+  assert.equal(outputs.at(-1).removed,true);assert.deepEqual(outputs.at(-1).accounts,[]);
 });
