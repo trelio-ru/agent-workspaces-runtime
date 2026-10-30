@@ -809,8 +809,14 @@ publication tooling также остаются вне этого публичн
 
 - Human Codex main и его immutable hook-компонент используют тот же verifier и
   retention по [контракту](docs/agent-workspace-runtime.md#human-codex-hook-component).
-  Descriptor не разрешает установку/trust: missing, disabled и повреждение
-  остаются отдельными состояниями. Main-only update не меняет hook identity.
+  После initialize включённый native human main сам доустанавливает отсутствующий
+  exact компонент штатным менеджером из официального immutable source. Общие
+  CLI discovery, verifier/retention и PID-lock сохраняются; protected intent до
+  native add запрещает replay после unknown outcome или позднего uninstall.
+  Disabled/changed/foreign компоненты не включаются и не перезаписываются;
+  диагностика read-only, approval/trust остаётся у человека. Проверять реальный
+  переход combined main без заранее установленного companion и все клиенты.
+  Main-only update не меняет hook identity.
 
 - Долгие цели: host передаёт только проверенные UUID/path locators собственного
   `assistants/<assistantUserId>/WORK.md` по stdin; формат/continuation – task-worker

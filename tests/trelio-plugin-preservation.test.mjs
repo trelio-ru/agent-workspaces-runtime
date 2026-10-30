@@ -11,7 +11,8 @@ import { runAssistantSetupMcp, runAssistantBackground } from "../host-runtime/sc
 import { retainLoadedCodexPluginInstallation, restoreRetainedCodexPluginInstallations, startLoadedCodexPluginPreservation,
   readCodexPluginUpdateInventory, restoreAssistantCodexPluginVersion,
   validateCodexHookComponentRequirement, verifyAssistantHookComponentIntegrity,
-  inspectHumanCodexHookComponent, inspectBundledPlugin, startHumanCodexPluginPreservation } from "../host-runtime/scripts/trelio-workspace.mjs";
+  inspectHumanCodexHookComponent, inspectBundledPlugin, startHumanCodexPluginPreservation,
+  migrateHumanCodexHookComponent, readAssistantPluginPublishedRef } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createHash } from "node:crypto";
 import { buildTrelioInstallationDiagnostic } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 
@@ -36,6 +37,182 @@ const humanHookFixture = async t => {
   await fs.writeFile(path.join(f.plugin,"codex-hook-component.json"),JSON.stringify(requirement));
   return {...f,component,requirement};
 };
+
+// Model the ACTUAL initial migration: main is already updated, while the
+// companion has NEVER been installed. Native effects are isolated here; the
+// real CLI materialization/trust regression lives in codex-conversation tests.
+const humanMigrationFixture = async t => {
+  const f = await humanHookFixture(t);
+  const source = path.join(f.root, "published-hooks");
+  await fs.rename(f.component, source);
+  await fs.writeFile(path.join(f.plugin, ".codex-plugin/plugin.json"), JSON.stringify({
+    name: "trelio-agent-workspaces", version: "3.2.3", hooks: { hooks: {} },
+  }));
+  const market = path.join(f.root, "market");
+  await fs.mkdir(path.join(market, ".agents/plugins"), { recursive: true });
+  await fs.writeFile(path.join(market, ".agents/plugins/marketplace.json"), JSON.stringify({
+    name: "trelio-plugins", plugins: [{ name: "trelio-agent-workspaces-hooks", source: {
+      source: "git-subdir", url: "https://github.com/trelio-ru/agent-workspaces.git", path: "./plugin", ref: "hooks-v0.1.0",
+    } }],
+  }));
+  const config = path.join(f.environment.CODEX_HOME, "config.toml");
+  const configBytes = '[hooks.state."old-source"]\nenabled = false\ntrusted_hash = "synthetic-old-hash"\n';
+  await fs.writeFile(config, configBytes);
+  const entry = await retainLoadedCodexPluginInstallation({ loadedPluginDirectory: f.plugin,
+    loadedPluginVersion: "3.2.3", retentionDirectory: f.retentionDirectory });
+  const state = { installed: [], adds: 0, commands: [], install: true, lostReply: false, beforeAdd: async () => {} };
+  const execFileCommand = async (_executable, args, options) => {
+    state.commands.push(args);
+    assert.equal(options.shell, false);
+    assert.equal(options.env.ARBITRARY_CREDENTIAL, undefined);
+    const reply = value => ({ stdout: JSON.stringify(value), stderr: "" });
+    if (args[1] === "marketplace" && args[2] === "list") return reply({ marketplaces: [{ name: "trelio-plugins", root: market,
+      marketplaceSource: { sourceType: "git", source: "https://github.com/trelio-ru/agent-workspaces.git" } }] });
+    if (args[1] === "list") return reply({ installed: state.installed });
+    assert.deepEqual(args, ["plugin", "add", f.requirement.pluginId, "--json"]);
+    state.adds++;
+    await state.beforeAdd(options.signal);
+    if (state.install) {
+      await fs.cp(source, f.component, { recursive: true });
+      state.installed = [{ pluginId: f.requirement.pluginId, installed: true, enabled: true, version: "0.1.0" }];
+    }
+    if (state.lostReply) throw new Error("private native output must never escape");
+    return reply({ pluginId: f.requirement.pluginId, marketplaceName: "trelio-plugins", installedPath: f.component, version: "0.1.0" });
+  };
+  const options = { entry, environment: { ...f.environment, HOME: f.root, USERPROFILE: f.root, ARBITRARY_CREDENTIAL: "excluded" },
+    retentionDirectory: f.retentionDirectory, migrationDirectory: path.join(f.root, "migration"), execFileCommand,
+    resolveExecutable: async () => path.join(f.root, process.platform === "win32" ? "codex.exe" : "codex"),
+    readPublishedRef: async input => { assert.equal(input.profile, "humanHooks"); assert.equal(input.version, "0.1.0"); return true; } };
+  return { ...f, config, configBytes, market, state, options };
+};
+
+test("updated human MCP installs missing hooks after initialize without blocking tools or touching trust", async t => {
+  const f = await humanMigrationFixture(t), input = new PassThrough(), output = new PassThrough();
+  let text = "", preservation, release;
+  const installing = new Promise(resolve => { release = resolve; });
+  f.state.beforeAdd = () => installing;
+  output.on("data", chunk => { text += chunk; });
+  const host = runStdioHost({ inputStream: input, outputStream: output, environment: f.options.environment,
+    legacyMcpMigration: async () => ({ status: "not_found" }), diagnosticReporter: { record() {}, close() {} },
+    handleMessage: async message => ({ jsonrpc: "2.0", id: message.id, result: {} }),
+    preservePlugin: () => {
+      assert.ok(text.includes('"id":1'), "migration starts AFTER native initialize was written");
+      preservation = startHumanCodexPluginPreservation({ ...f.options, onError: error => assert.fail(error) });
+      return preservation;
+    } });
+  try {
+    input.write('{"jsonrpc":"2.0","id":1,"method":"initialize"}\n');
+    await waitUntil(() => f.state.adds === 1);
+    input.write('{"jsonrpc":"2.0","id":2,"method":"tools/list"}\n');
+    await waitUntil(() => text.includes('"id":2'));
+    release();
+    await preservation.ready;
+    assert.equal((await inspectHumanCodexHookComponent({ pluginDirectory: f.plugin,
+      environment: f.environment, execFileCommand: f.options.execFileCommand })).status, "ready");
+    assert.equal(await fs.readFile(f.config, "utf8"), f.configBytes);
+    assert.equal((await migrateHumanCodexHookComponent(f.options)).status, "ready");
+    assert.equal(f.state.adds, 1);
+  } finally { release(); input.end(); await host; }
+});
+
+test("parallel MCP migrations and lost native replies never install the same dependency twice", async t => {
+  const f = await humanMigrationFixture(t);
+  f.state.lostReply = true;
+  const results = await Promise.all([migrateHumanCodexHookComponent(f.options), migrateHumanCodexHookComponent(f.options)]);
+  assert.ok(results.some(row => row.status === "installed"));
+  assert.equal(f.state.adds, 1);
+  assert.equal(await fs.readFile(f.config, "utf8"), f.configBytes);
+  // An explicit later uninstall does not become an endless reinstall loop.
+  f.state.installed = [];
+  await fs.rm(f.component, { recursive: true });
+  assert.equal((await migrateHumanCodexHookComponent(f.options)).status, "installation_unconfirmed");
+  assert.equal(f.state.adds, 1);
+});
+
+test("unknown installation outcome remains read-only after process restart", async t => {
+  const f = await humanMigrationFixture(t);
+  f.state.install = false;
+  f.state.lostReply = true;
+  assert.equal((await migrateHumanCodexHookComponent(f.options)).status, "installation_unconfirmed");
+  assert.equal((await migrateHumanCodexHookComponent({ ...f.options })).status, "installation_unconfirmed");
+  assert.equal(f.state.adds, 1);
+});
+
+test("native add may prune main but the same retention engine restores its exact active files", async t => {
+  const f = await humanMigrationFixture(t);
+  const before = await fs.readFile(path.join(f.plugin, "codex-hook-component.json"));
+  f.state.beforeAdd = () => fs.rm(f.plugin, { recursive: true });
+  assert.equal((await migrateHumanCodexHookComponent(f.options)).status, "installed");
+  assert.deepEqual(await fs.readFile(path.join(f.plugin, "codex-hook-component.json")), before);
+  assert.equal(f.state.adds, 1);
+});
+
+test("Codex compatibility CLAUDE_PLUGIN_ROOT does not suppress a verified native Codex migration", async t => {
+  const f = await humanMigrationFixture(t);
+  f.options.environment.CLAUDE_PLUGIN_ROOT = f.plugin;
+  assert.equal((await migrateHumanCodexHookComponent(f.options)).status, "installed");
+  assert.equal(f.state.adds, 1);
+});
+
+test("foreign marketplace or unavailable CLI cannot create a native installation intent", async t => {
+  const f = await humanMigrationFixture(t);
+  assert.equal((await migrateHumanCodexHookComponent({ ...f.options, resolveExecutable: async () => null })).status, "cli_unavailable");
+  const execute = f.options.execFileCommand;
+  f.options.execFileCommand = async (command, args, options) => {
+    const response = await execute(command, args, options);
+    if (args[1] === "marketplace") {
+      const result = JSON.parse(response.stdout);
+      result.marketplaces[0].marketplaceSource.source = "https://example.invalid/foreign.git";
+      return { ...response, stdout: JSON.stringify(result) };
+    }
+    return response;
+  };
+  await assert.rejects(migrateHumanCodexHookComponent(f.options), /официального Git marketplace/u);
+  await assert.rejects(fs.lstat(path.join(f.options.migrationDirectory, "attempt.json")), { code: "ENOENT" });
+  assert.equal(f.state.adds, 0);
+});
+
+test("migration preserves disabled, modified, unknown and unpublished hook components", async t => {
+  for (const state of ["disabled", "version_mismatch", "invalid_component", "not_checked", "publication_pending"]) {
+    await t.test(state, async t => {
+      const f = await humanMigrationFixture(t);
+      if (["disabled", "version_mismatch", "invalid_component"].includes(state)) {
+        f.state.installed = [{ pluginId: f.requirement.pluginId, installed: true,
+          enabled: state !== "disabled", version: state === "version_mismatch" ? "0.2.0" : "0.1.0" }];
+      }
+      if (state === "not_checked") f.options.execFileCommand = async () => { throw Error("unavailable"); };
+      if (state === "publication_pending") f.options.readPublishedRef = async () => false;
+      assert.equal((await migrateHumanCodexHookComponent(f.options)).status, state);
+      assert.equal(f.state.adds, 0);
+      assert.equal(await fs.readFile(f.config, "utf8"), f.configBytes);
+    });
+  }
+});
+
+test("all other clients and legacy combined hooks stay outside Codex dependency migration", async t => {
+  for (const client of ["claude-code", "cursor", "antigravity", "foreign-root", "legacy", "opt-out"]) {
+    await t.test(client, async t => {
+      const f = await humanMigrationFixture(t);
+      if (client === "claude-code") f.options.environment.CLAUDE_CODE_ENTRYPOINT = "cli";
+      if (client === "cursor") f.options.entry = { ...f.options.entry, installedPath: path.join(f.root, "cursor/plugins/trelio") };
+      if (client === "antigravity") await fs.writeFile(path.join(f.plugin, "plugin.json"), '{"name":"trelio"}');
+      if (client === "foreign-root") f.options.environment.CODEX_HOME = path.join(f.root, "another-codex");
+      if (client === "legacy") await fs.writeFile(path.join(f.plugin, ".codex-plugin/plugin.json"), '{"hooks":"./hooks/hooks.json"}');
+      if (client === "opt-out") f.options.environment.TRELIO_WORKSPACE_DISABLE_AUTO_UPDATE = "1";
+      f.options.resolveExecutable = async () => assert.fail("foreign client must never discover/launch Codex");
+      assert.equal((await migrateHumanCodexHookComponent(f.options)).status, "not_applicable");
+      assert.equal(f.state.adds, 0);
+      assert.deepEqual(f.state.commands, []);
+    });
+  }
+});
+
+test("human hooks use the same exact immutable publication reader with the human official repository", async () => {
+  const observed = [];
+  assert.equal(await readAssistantPluginPublishedRef({ profile: "humanHooks", version: "0.1.0",
+    readGit: async args => { observed.push(args); return { stdout: `${"a".repeat(40)}\trefs/tags/hooks-v0.1.0\n`, stderr: "" }; } }), true);
+  assert.deepEqual(observed[0].slice(-2), ["https://github.com/trelio-ru/agent-workspaces.git", "refs/tags/hooks-v0.1.0"]);
+});
 
 test("human hook inventory shares the strict verifier without assistant identity or legacy .git exceptions", async t=>{
   const f=await humanHookFixture(t);

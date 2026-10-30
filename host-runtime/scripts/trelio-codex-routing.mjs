@@ -395,6 +395,37 @@ export const inspectCodexTrelioHookSettings = async ({
   }
 };
 
+/** Native plugin/list omits a configured plugin when its cache files are gone.
+ * Read its exact persisted opt-out before dependency migration can mistake that
+ * row's absence for permission to enable it. Reuse the SAME bounded UTF-8/TOML
+ * reader; never return config text, infer effective trust or rewrite settings.
+ * Unsupported inline/duplicate/typed forms refuse rather than look unset. */
+export const readCodexPluginEnablement = async ({ pluginId, environment = process.env,
+  configPath = resolveCodexConfigPath({ environment }), filesystem = fs } = {}) => {
+  if (pluginId !== "trelio-agent-workspaces-hooks@trelio-plugins")
+    throw new Error("Unsupported Codex dependency.");
+  const { source } = await readCodexConfig(configPath, filesystem);
+  const target = ["plugins", pluginId, "enabled"];
+  let table = [], enabled = null;
+  for (const statement of scanTomlStatements(source)) {
+    const code = stripTrailingTomlComment(statement.text).trim();
+    if (code.startsWith("[") && code.endsWith("]")) {
+      table = parseTablePath(statement.text);
+      if (!table && /^\[\[\s*plugins(?:\.|\])/u.test(code)) failUnsupported("Неподдерживаемая форма настроек plugin.");
+      continue;
+    }
+    const assignment = readAssignment(statement.text);
+    if (!assignment || !table) continue;
+    const key = [...table, ...assignment.keyPath];
+    if (!keyPathStartsWith(target, key)) continue;
+    if (key.length !== target.length) failUnsupported("Настройки plugin используют неподдерживаемую inline-форму.");
+    const value = stripTrailingTomlComment(statement.text).slice(assignment.equalsIndex + 1).trim();
+    if (enabled !== null || !["true", "false"].includes(value)) failUnsupported("Настройка plugin enabled должна быть единственным boolean.");
+    enabled = value === "true";
+  }
+  return enabled;
+};
+
 /**
  * Removes the exact obsolete server registration which older Trelio setup
  * commands wrote as `[mcp_servers.trelio-mcp]`. The name is a product-owned

@@ -128,15 +128,46 @@ native inventory различаются; отсутствие чтения не 
 Это read-only диагностика: нет native add, auto-enable, trust/hash copying,
 обхода approval или изменения OAuth/pairing. Ready metadata не доказывает proof.
 
+Отдельно от diagnostic/tool handlers, после записи успешного initialize,
+включённый native human main выполняет автоматическую миграцию отсутствующего
+компонента. Ручная команда установки companion обычному пользователю не нужна.
+Legacy combined main и другие клиенты пропускаются до Codex discovery: Claude
+сохраняет bundled hooks; Cursor/Antigravity и foreign roots не устанавливают
+Codex-компонент даже при inherited CODEX_*.
+
+Миграция использует общий native CLI resolver (включая Windows Desktop с narrow
+PATH), официальный Git marketplace, exact immutable `hooks-vX.Y.Z`/`./plugin`,
+descriptor version/inventory и прежние installer/verifier/retention. Перед add
+повторно читается native installed/enabled inventory; disabled, changed, другая
+версия, неизвестное чтение или неподтверждённая публикация не разрешают запись.
+Исходная main shell сохраняется вокруг native mutation. Hooks/trust, OAuth,
+pairing и другие клиентские настройки не редактируются runtime.
+
+Тот же private PID-owned mutex сериализует параллельные MCP. Protected intent
+записывается до native add; потерянный ответ, авария процесса и последующий
+uninstall допускают только read-back, без повторной установки. Успех требует
+fresh exact inventory и полной проверки bytes. Migration/snapshot не блокируют
+initialize или tools/call; EOF отменяет ещё работающий native child. Недоступный
+CLI/source и неизвестный исход сохраняют обычный fail-closed диагностический
+маршрут; ни одно состояние не выдаёт approval/proof.
+
 После initialize human MCP сохраняет main и verified component прежним
 retention engine до EOF, в раздельных namespaces. Restore касается только ранее
-проверенных exact путей и bytes. Изменённый/выключенный/отсутствующий компонент
+проверенных exact путей и bytes; первоначальная установка отсутствующего
+компонента принадлежит описанной миграции. Изменённый/выключенный компонент
 не перезаписывается и не подменяется похожей версией. Main distribution version,
 hook component version и pinned common shell version независимы; native
 fingerprint компонента не содержит меняющиеся инструкции или версию main.
 Первый переход требует native human approval нового источника. Main-only update
 сохраняет это одобрение; настоящее изменение hooks/loader требует нового review.
 Security minimum и отказ клиента reload не обходятся обещанием seamless update.
+
+Regression `trelio-plugin-preservation.test.mjs` проверяет production MCP startup
+с изначально отсутствующим компонентом, неблокирующую установку, concurrency,
+потерянный ответ, opt-out/uninstall и чужие clients. Native fixture в
+`trelio-codex-conversation.test.mjs` обновляет настоящий combined main 3.2.4 →
+3.2.5, запускает ту же миграцию без предварительного companion add, проверяет
+его установку и discovery всех трёх untrusted hooks. Native approval не пишется.
 
 <a id="codex-plugin-preservation"></a>
 

@@ -11,6 +11,7 @@ import {
   buildCodexLegacyMcpRemovalPatch,
   buildCodexRoutingConfigPatch,
   inspectCodexTrelioHookSettings,
+  readCodexPluginEnablement,
   parseCodexTrelioHookSettings,
   migrateCodexLegacyTrelioMcpForRuntime,
   planCodexTrelioHookRouting,
@@ -19,6 +20,32 @@ import {
 } from "../host-runtime/scripts/trelio-codex-routing.mjs";
 
 const hookStateKey = (event) => `trelio-agent-workspaces@trelio-plugins:hooks/hooks.json:${event}:0:0`;
+
+test("dependency opt-out survives missing native cache and focused TOML reading never guesses inline or duplicate settings", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-plugin-enabled-")), configPath = path.join(root, "config.toml");
+  const pluginId = "trelio-agent-workspaces-hooks@trelio-plugins";
+  const read = () => readCodexPluginEnablement({ pluginId, configPath });
+  try {
+    assert.equal(await read(), null);
+    for (const source of [
+      `[plugins."${pluginId}"]\nenabled = false # explicit choice\n`,
+      `plugins.'${pluginId}'.enabled = false\n`,
+      `[plugins]\n"${pluginId}".enabled = false\n`,
+    ]) {
+      await writeFile(configPath, source);
+      assert.equal(await read(), false);
+      assert.equal(await readFile(configPath, "utf8"), source);
+    }
+    for (const source of [
+      'plugins = {}', `[plugins]\n'${pluginId}' = { enabled = false }`,
+      `[plugins.'${pluginId}']\nenabled = false\nenabled = true`,
+      `[plugins.'${pluginId}']\nenabled = "false"`,
+      `[[plugins.'${pluginId}']]\nenabled = false`,
+    ]) { await writeFile(configPath, source); await assert.rejects(read(), CodexRoutingConfigError); }
+    await writeFile(configPath, `[plugins.'other-${pluginId}']\nenabled=false\n[unrelated]\nnotes="""\n[plugins.'${pluginId}']\nenabled=false\n"""`);
+    assert.equal(await read(), null);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("persisted hook inspection separates disabled PreToolUse, saved trust and unknown live state", () => {
   const source = [

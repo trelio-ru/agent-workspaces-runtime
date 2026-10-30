@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { PassThrough } from "node:stream";
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -11,10 +12,117 @@ import { pathToFileURL } from 'node:url';
 import { readCodexConversationTitle, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
-import { synchronizeRunCodexTitle } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateHumanCodexHookComponent,
+  inspectHumanCodexHookComponent, readAssistantPluginPublishedRef } from "../host-runtime/scripts/trelio-workspace.mjs";
 
 const id = "11111111-1111-4111-8111-111111111111";
 const snapshot = { conversationId: id, title: "Старое название", expectedStateHash: "a".repeat(64) };
+
+test('actual Codex migrates an existing combined main to independent hooks without a manual companion install or trust write',
+ {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:120000},async t=>{
+ const execute=promisify(execFile),executable=process.env.TRELIO_TEST_CODEX_CLI;
+ const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'trelio-hook-migration-')));
+ t.after(()=>fs.rm(root,{recursive:true,force:true,maxRetries:10,retryDelay:100}));
+ const home=path.join(root,'home'),repository=path.join(root,'repository'),main=path.join(repository,'plugins/trelio-agent-workspaces');
+ const component=path.join(repository,'plugin'),official='https://github.com/trelio-ru/agent-workspaces.git';
+ for(const dir of [home,path.join(repository,'.agents/plugins'),path.join(main,'.codex-plugin'),path.join(main,'hooks'),
+   path.join(component,'.codex-plugin'),path.join(component,'hooks'),path.join(component,'scripts')])await fs.mkdir(dir,{recursive:true});
+ const environment={...buildCodexEnvironment({...process.env,HOME:home,USERPROFILE:home,CODEX_HOME:home,
+   LOCALAPPDATA:path.join(home,'local'),APPDATA:path.join(home,'roaming')}),GIT_TERMINAL_PROMPT:'0',GIT_CONFIG_NOSYSTEM:'1'};
+ // Native Codex sees the canonical official Git identity; only this isolated
+ // HOME redirects Git transport to its disposable synthetic repository. No
+ // production account/network/config/plugin installation is touched.
+ await fs.writeFile(path.join(home,'.gitconfig'),`[url "${pathToFileURL(repository).href}"]\n\tinsteadOf = ${official}\n`);
+ await fs.writeFile(path.join(home,'config.toml'),'[features]\nplugins=true\nhooks=true\napps=false\n');
+ const git=(...args)=>execute('git',['-c',`core.hooksPath=${path.join(root,'no-hooks')}`, ...args],{cwd:repository,env:environment});
+ const native=async args=>JSON.parse((await execute(executable,args,{cwd:root,env:environment,timeout:30000})).stdout);
+ const hooks={hooks:Object.fromEntries(['SessionStart','PreToolUse','SessionEnd'].map(name=>[name,[{matcher:'*',hooks:[{
+   type:'command',command:'echo synthetic-hook-not-trusted',timeout:10}]}]]))};
+ const files=new Map([['.gitattributes','* -text\n'],['.codex-plugin/plugin.json',JSON.stringify({
+   name:'trelio-agent-workspaces-hooks',version:'0.1.0',hooks:'./hooks/hooks.json'})],['hooks/hooks.json',JSON.stringify(hooks)],
+   ...['launch-trelio-node','launch-trelio-node.cmd','resolve-node.ps1','trelio-host-runtime-download.mjs',
+    'trelio-host-runtime-loader.mjs','trelio-host-runtime-shell.mjs','trelio-mcp-startup-budget.mjs'].map(name=>[`scripts/${name}`,'synthetic immutable shell\n'])]);
+ const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
+ for(const [name,bytes]of files)await fs.writeFile(path.join(component,name),bytes);
+ const inventory=JSON.stringify({schemaVersion:1,plugin:'trelio-agent-workspaces-hooks',version:'0.1.0',sharedShell:{},
+   files:[...files].map(([name,bytes])=>({path:name,mode:0o644,size:Buffer.byteLength(bytes),sha256:digest(bytes)}))});
+ await fs.writeFile(path.join(component,'package-integrity.json'),inventory);
+ await fs.writeFile(path.join(main,'hooks/hooks.json'),JSON.stringify(hooks));
+ const manifest={name:'trelio-agent-workspaces',version:'3.2.4',hooks:'./hooks/hooks.json'};
+ const manifestPath=path.join(main,'.codex-plugin/plugin.json');await fs.writeFile(manifestPath,JSON.stringify(manifest));
+ await fs.writeFile(path.join(repository,'.gitattributes'),'* -text\n');
+ await fs.writeFile(path.join(repository,'.agents/plugins/marketplace.json'),JSON.stringify({name:'trelio-plugins',plugins:[
+   {name:'trelio-agent-workspaces',source:{source:'local',path:'./plugins/trelio-agent-workspaces'},policy:{installation:'AVAILABLE',authentication:'ON_USE'}},
+   {name:'trelio-agent-workspaces-hooks',source:{source:'git-subdir',url:official,path:'./plugin',ref:'hooks-v0.1.0'},policy:{installation:'AVAILABLE',authentication:'ON_USE'}}]}));
+ const commit=async()=>{await git('add','.');await git('-c','user.name=Synthetic','-c','user.email=fixture@example.invalid',
+   '-c','commit.gpgsign=false','commit','-qm','synthetic fixture');};
+ await git('init','-q');await commit();await git('tag','hooks-v0.1.0');
+ await native(['plugin','marketplace','add',official,'--json']);
+ const previous=await native(['plugin','add','trelio-agent-workspaces@trelio-plugins','--json']);
+ assert.equal(previous.version,'3.2.4');
+ manifest.version='3.2.5';manifest.hooks={hooks:{}};
+ await fs.writeFile(manifestPath,JSON.stringify(manifest));
+ await fs.writeFile(path.join(main,'codex-hook-component.json'),JSON.stringify({
+   pluginId:'trelio-agent-workspaces-hooks@trelio-plugins',version:'0.1.0',integritySha256:digest(inventory)}));
+ await commit();await native(['plugin','marketplace','upgrade','trelio-plugins','--json']);
+ const updated=await native(['plugin','add','trelio-agent-workspaces@trelio-plugins','--json']);
+ assert.equal(updated.version,'3.2.5');
+ const listed=await native(['plugin','list','--marketplace','trelio-plugins','--json']);
+ assert.equal(listed.installed.some(row=>row.name==='trelio-agent-workspaces-hooks'),false,
+   'fixture MUST start after a real combined-main upgrade with no companion installed');
+ const retentionDirectory=path.join(root,'retention'),entry=await retainLoadedCodexPluginInstallation({
+   loadedPluginDirectory:updated.installedPath,loadedPluginVersion:'3.2.5',retentionDirectory});
+ const options={entry,environment:{...environment,TRELIO_PLUGIN_ROOT:updated.installedPath,TRELIO_PLUGIN_VERSION:'3.2.5'},
+   retentionDirectory,migrationDirectory:path.join(root,'migration'),resolveExecutable:async()=>executable,
+   readPublishedRef:args=>readAssistantPluginPublishedRef({...args,readGit:async argv=>{
+     const value=await execute('git',argv,{cwd:root,env:environment,timeout:10000});return {stdout:value.stdout,stderr:value.stderr};}})};
+ const migrated=await migrateHumanCodexHookComponent(options);
+ assert.equal(migrated.status,'installed',JSON.stringify({profile:entry.profile,version:entry.version,
+   cacheLeaf:path.basename(entry.installedPath),files:await fs.readdir(entry.installedPath)}));
+ const inspect=()=>inspectHumanCodexHookComponent({pluginDirectory:updated.installedPath,environment:options.environment,
+   execFileCommand:(_command,args,settings)=>execute(executable,args,{...settings,cwd:root})});
+ const verified=await inspect();assert.equal(verified.status,'ready');
+ const installed=await native(['plugin','list','--marketplace','trelio-plugins','--json']);
+ assert.equal(installed.installed.filter(row=>row.name==='trelio-agent-workspaces-hooks'&&row.enabled).length,1);
+ assert.equal((await migrateHumanCodexHookComponent(options)).status,'ready');
+ const config=await fs.readFile(path.join(home,'config.toml'),'utf8');
+ assert.doesNotMatch(config,/trusted_hash|trusted_content_hash|bypass_hook_trust/u);
+ const discovered=await new Promise((resolve,reject)=>{
+   const child=spawn(executable,['app-server','--listen','stdio://'],{cwd:root,env:environment,shell:false,windowsHide:true,
+     stdio:['pipe','pipe','ignore']});
+   let pending='',bytes=0,result,failed=false;
+   const timer=setTimeout(()=>{failed=true;child.kill();},20000);
+   const send=value=>child.stdin.write(JSON.stringify(value)+'\n');
+   child.once('error',()=>{failed=true;});child.stdin.on('error',()=>{failed=true;});
+   child.stdout.setEncoding('utf8');child.stdout.on('data',chunk=>{
+     bytes+=Buffer.byteLength(chunk);if(bytes>1024*1024){failed=true;child.kill();return;}pending+=chunk;
+     let at;while((at=pending.indexOf('\n'))>=0){let message;try{message=JSON.parse(pending.slice(0,at));}
+       catch{failed=true;child.kill();return;}pending=pending.slice(at+1);
+       if(message.error){failed=true;child.stdin.end();return;}
+       if(message.id===1){send({method:'initialized'});send({id:2,method:'hooks/list',params:{cwds:[root]}});}
+       if(message.id===2){result=message.result;child.stdin.end();}
+     }
+   });
+   child.once('close',()=>{clearTimeout(timer);failed||!result?reject(Error('native hook discovery failed')):resolve(result);});
+   send({id:1,method:'initialize',params:{clientInfo:{name:'trelio_hook_migration_fixture',version:'1'},capabilities:{experimentalApi:true}}});
+ });
+ assert.equal(discovered.data.length,1);
+ assert.deepEqual(discovered.data[0].errors,[]);
+ assert.equal(discovered.data[0].hooks.length,3);
+ for(const hook of discovered.data[0].hooks){
+   assert.equal(hook.pluginId,'trelio-agent-workspaces-hooks@trelio-plugins');
+   assert.equal(hook.trustStatus,'untrusted');assert.equal(hook.enabled,true);
+ }
+ // Native manager must also retain an explicit opt-out when cache files have
+ // gone: absence in the filesystem is never authority to turn it back on.
+ const optedOut=config.replace(/(\[plugins\."trelio-agent-workspaces-hooks@trelio-plugins"\]\r?\n)enabled = true/u,'$1enabled = false');
+ assert.notEqual(optedOut,config);
+ await fs.writeFile(path.join(home,'config.toml'),optedOut);
+ const disabled=await native(['plugin','list','--marketplace','trelio-plugins','--json']);
+ assert.equal(disabled.installed.find(row=>row.name==='trelio-agent-workspaces-hooks').enabled,false);
+ await fs.rm(verified.installedPath,{recursive:true});
+ assert.equal((await migrateHumanCodexHookComponent({...options,migrationDirectory:path.join(root,'fresh-migration')})).status,'disabled');
+ });
 
 test('actual Codex initial MCP inventory includes company discovery and accepts lossless local schema definitions without a model turn',
  {skip:!process.env.TRELIO_TEST_CODEX_CLI,timeout:60000},async t=>{

@@ -29,7 +29,8 @@ import { browserControllerEnabled, parseBrowserControllerArguments } from './tre
 import { readNativeCheckpointInput, assertNativeCheckpointBinding, NativeCheckpointError } from "./trelio-native-checkpoint.mjs";
 import { ACCOUNT_CAPABILITY, accountScope, createAccountCatalogue, parseAccountCommand, splitAccountArguments, SkillAccountCommandError, SkillAccountImportError } from "./trelio-skill-accounts.mjs";
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
-import { syncRunCodexConversationTitle } from "./trelio-codex-conversation.mjs";
+import { syncRunCodexConversationTitle, resolveCodexExecutable, buildCodexEnvironment } from "./trelio-codex-conversation.mjs";
+import { readCodexPluginEnablement } from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
 import {
@@ -3975,12 +3976,12 @@ export const readCodexPluginUpdateInventory = async ({profile = "human",
  * and never mean absence. This is readiness only, not trust or install proof.
  * Native Codex still installs/verifies the official source independently. */
 export const readAssistantPluginPublishedRef = async ({profile,version,signal,readGit=runGit}) => {
-  if(!['assistant','assistantHooks'].includes(profile)||!parseStableVersion(version))
+  if(!['assistant','assistantHooks','humanHooks'].includes(profile)||!parseStableVersion(version))
     throw new Error('Invalid assistant distribution selection.');
   signal?.throwIfAborted();
-  const ref=`refs/tags/${profile==='assistantHooks'?'hooks':'plugin'}-v${version}`;
+  const ref=`refs/tags/${profile==='assistant'?'plugin':'hooks'}-v${version}`;
   const result=await readGit(['-c','credential.helper=','-c','core.askPass=','ls-remote','--refs',
-    'https://github.com/trelio-ru/digital-assistants.git',ref],{signal,timeout:10_000,maxBuffer:16*1024,
+    codexRetentionProfile(profile).repository,ref],{signal,timeout:10_000,maxBuffer:16*1024,
     env:{GIT_TERMINAL_PROMPT:'0',GIT_PAGER:'cat',GIT_ASKPASS:'',SSH_ASKPASS:''}});
   signal?.throwIfAborted();
   if(typeof result?.stdout!=='string'||typeof result.stderr!=='string'||result.stderr.length
@@ -4113,22 +4114,132 @@ export const inspectHumanCodexHookComponent = async ({ pluginDirectory = LOADED_
   return { ...result, status: "ready", installedPath };
 };
 
+/** Complete the combined-main -> independent-hooks migration in code. Only an
+ * already retained native HUMAN Codex main may install its exact dependency.
+ * This is deliberately outside doctor/tool handlers and initialize: loading an
+ * enabled plugin performs its dependency migration without model instructions
+ * or a second installation command from every existing user. Native trust is
+ * still a separate human decision; disabled/changed components stay untouched.
+ *
+ * The SAME native updater, immutable-source reader, full inventory verifier,
+ * code retention and private PID-owned mutex are reused. A durable intent is
+ * written BEFORE native add: a lost reply, process death or later uninstall can
+ * only reconcile the installed inventory, never replay that write on restart.
+ */
+export const migrateHumanCodexHookComponent = async ({
+  entry, environment = process.env, migrationDirectory, retentionDirectory,
+  execFileCommand = execFileAsync, resolveExecutable = resolveCodexExecutable,
+  readPublishedRef = readAssistantPluginPublishedRef, signal,
+} = {}) => {
+  if (entry?.profile !== "human" || environment.CLAUDE_CODE_ENTRYPOINT || environment.CLAUDE_ENV_FILE
+    || environment.TRELIO_WORKSPACE_DISABLE_AUTO_UPDATE === "1") return { status: "not_applicable" };
+  const main = entry.installedPath;
+  const codeHome = path.resolve(environment.CODEX_HOME || path.join(os.homedir(), ".codex"));
+  if (!sameLocalPath(main, path.join(codeHome, "plugins/cache/trelio-plugins/trelio-agent-workspaces", entry.version)))
+    return { status: "not_applicable" };
+  // Foreign native shells can inherit CODEX_* from a parent. Their root marker
+  // wins before any Codex discovery/config/installation, just as in legacy MCP
+  // migration. Claude's compatibility CLAUDE_PLUGIN_ROOT alone is not a veto.
+  for (const name of ["plugin.json", "gigacode-extension.json"]) {
+    try { await fs.lstat(path.join(main, name)); return { status: "not_applicable" }; }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  const manifest = await readDiagnosticJsonFile(path.join(main, ".codex-plugin/plugin.json"));
+  if (JSON.stringify(manifest.value?.hooks) !== '{"hooks":{}}') return { status: "not_applicable" };
+  const requirement = await readHumanCodexHookComponentRequirement(main);
+  if (!requirement) return { status: "invalid_requirement" };
+  const explicitlyDisabled = async () => await readCodexPluginEnablement({ pluginId: requirement.pluginId, environment }) === false;
+  if (await explicitlyDisabled()) return { status: "disabled" };
+  const deadline = AbortSignal.timeout(120_000);
+  signal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  const executable = await resolveExecutable(environment, { signal });
+  if (!executable) return { status: "cli_unavailable" };
+  // Reuse native CLI resolution on all three OSes, including Desktop's narrow
+  // PATH. Keep credential/chat/loader variables out of this model-free child.
+  const execute = (_command, args, options) => execFileCommand(executable, args, { ...options, signal,
+    env: { ...buildCodexEnvironment(environment), GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" } });
+  const inspect = () => inspectHumanCodexHookComponent({ pluginDirectory: main, environment, execFileCommand: execute });
+  const before = await inspect();
+  if (before.status !== "missing") return { status: before.status, component: before };
+  const key = crypto.createHash("sha256").update(`${codeHome}\n${JSON.stringify(requirement)}`).digest("hex");
+  const root = migrationDirectory ?? path.join(codexRetentionProfile("humanHooks").directory, "migration", key);
+  await ensurePrivateDirectory(root);
+  const { withMirrorRetentionLock } = await import("./trelio-mirror-retention.mjs");
+  return withMirrorRetentionLock(root, async () => {
+    signal.throwIfAborted();
+    // Another MCP/user may have installed or disabled it while we waited.
+    const current = await inspect();
+    if (current.status !== "missing") return { status: current.status, component: current };
+    const file = path.join(root, "attempt.json");
+    let attempt = null;
+    try {
+      await fs.lstat(file);
+      attempt = await readPrivateJsonFile(file, { maximumBytes: 4096 });
+    }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    if (attempt !== null) {
+      if (Object.keys(attempt).sort().join(",") !== "integritySha256,pluginId,schemaVersion,state,version"
+        || attempt.schemaVersion !== 1 || attempt.pluginId !== requirement.pluginId
+        || attempt.version !== requirement.version || attempt.integritySha256 !== requirement.integritySha256
+        || !["attempted", "installed"].includes(attempt.state)) throw new Error("Invalid hook migration receipt.");
+      return { status: "installation_unconfirmed" };
+    }
+    // A stale/missing/foreign marketplace is a preflight failure, never an
+    // excuse to register another source or overwrite an existing component.
+    const inventory = await readCodexPluginUpdateInventory({ profile: "humanHooks", environment, execFileCommand: execute });
+    if (inventory.state !== "absent" || inventory.desiredVersion !== requirement.version)
+      return { status: "source_unavailable" };
+    if (!await readPublishedRef({ profile: "humanHooks", version: requirement.version, signal }))
+      return { status: "publication_pending" };
+    const last = await inspect();
+    if (last.status !== "missing") return { status: last.status, component: last };
+    if (await explicitlyDisabled()) return { status: "disabled" };
+    signal.throwIfAborted();
+    attempt = { schemaVersion: 1, ...requirement, state: "attempted" };
+    await writePrivateJsonFile(file, attempt);
+    try {
+      await runCodexPluginMutationWithRetention(() => resolveInstalledCodexPluginBridge({
+        profile: "humanHooks", minimumVersion: requirement.version, environment, execFileCommand: execute,
+        preserveLoadedPlugin: false,
+      }), { loadedPluginDirectory: main, loadedPluginVersion: entry.version,
+        retentionDirectory: retentionDirectory ?? path.dirname(entry.entryDirectory), profile: "human" });
+    } catch {
+      // Native stdout/stderr can contain local config/paths. Preserve the
+      // durable attempt and determine success ONLY by a fresh exact read.
+    }
+    const after = await inspect();
+    if (after.status !== "ready") return { status: "installation_unconfirmed" };
+    await writePrivateJsonFile(file, { ...attempt, state: "installed" });
+    return { status: "installed", approvalStatus: "client_managed_unknown", component: after };
+  });
+};
+
 /** The existing MCP keeps both exact code trees alive after initialize. Native
  * plugin updates can prune versioned cache paths while this client still owns
  * their command/skill references. Preserve only the verified installed hook
  * component alongside main, with the SAME retention engine and EOF lifetime.
- * Missing/disabled/changed hooks are never installed, enabled or overwritten. */
+ * Missing hooks are migrated separately through the native manager; disabled
+ * or changed hooks are never enabled/overwritten by preservation. */
 export const startHumanCodexPluginPreservation = (options = {}) => {
   const main = startLoadedCodexPluginPreservation(options);
   let hooks = null;
   let closed = false;
+  const migrationAbort = new AbortController();
   const environment = options.environment ?? process.env;
   const inspectHookComponent = options.inspectHookComponent ?? inspectHumanCodexHookComponent;
   const ready = main.ready.then(async entry => {
     if (closed || entry?.profile !== "human") return entry;
     const requirement = await readHumanCodexHookComponentRequirement(entry.installedPath);
     if (!requirement || closed) return entry;
-    const component = await inspectHookComponent({ pluginDirectory: entry.installedPath, environment });
+    let component = await inspectHookComponent({ ...options, pluginDirectory: entry.installedPath, environment });
+    if (["missing", "not_checked"].includes(component.status)) {
+      const migrate = options.migrateHookComponent ?? migrateHumanCodexHookComponent;
+      const migration = await migrate({ ...options, entry, environment, signal: migrationAbort.signal,
+        migrationDirectory: options.migrationDirectory
+          ?? (options.retentionDirectory ? `${options.retentionDirectory}-hook-migration` : undefined) });
+      if (closed) return entry;
+      component = migration.component ?? await inspectHookComponent({ ...options, pluginDirectory: entry.installedPath, environment });
+    }
     if (component.status !== "ready" || closed) return entry;
     hooks = startLoadedCodexPluginPreservation({ ...options,
       // Component version and pinned common shell version are independent. The
@@ -4151,6 +4262,7 @@ export const startHumanCodexPluginPreservation = (options = {}) => {
   });
   return { ready, close: async () => {
     closed = true;
+    migrationAbort.abort();
     await ready.catch(() => {});
     await Promise.all([main.close(), hooks?.close()]);
   } };
